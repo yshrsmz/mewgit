@@ -53,10 +53,15 @@ CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace -
 
 ## テスト
 
+**テストなしで機能を追加しない。** 実装と同じコミットにテストを含める。`docs/plan.md` のタスクにチェックを付ける条件は、そのタスクの振る舞いを覆うテストが通っていること。
+
+- テストが書きにくい設計になっていたら、テストを省くのではなく設計を直す（`docs/design/` を先に更新する）
 - `mewgit-core` の git 系は `tempfile` に実リポジトリを作って統合テスト（`tests/` に helper あり、なければ作る）
 - `graph` は固定のコミット列に対する `cells` の期待値テストを必ず追加する
 - GitHub API は `wiremock` でモック。実 API は叩かない
 - `git_exec::to_argv` は純粋関数なのでユニットテストで全 `GitOp` をカバーする
+- `mewgit-tui` の描画は ratatui の `TestBackend` にレンダリングしてバッファを検証する
+- テストを書かない例外は、端末の raw mode 切替・復元と `main.rs` の配線だけ。実端末が必要で単体テストできないため
 
 ## Git 運用
 

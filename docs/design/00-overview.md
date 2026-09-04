@@ -61,6 +61,6 @@ crates/
 
 - エラー: `thiserror` で層ごとの Error を定義し、`app` で `AppError` に集約。UI にはメッセージ + 実行コマンド + stderr を渡す
 - ログ: `tracing` + ファイル出力（`~/.local/state/mewgit/log`）。トークンはログに出さない
-- テスト: `core` は tempdir に実リポジトリを作って統合テスト。API は `wiremock` でモック
+- テスト: `core` は tempdir に実リポジトリを作って統合テスト。API は `wiremock` でモック。`tui` は ratatui の `TestBackend` にレンダリングしてバッファを検証する
 
 各コンポーネントの詳細は 01〜08 を参照。

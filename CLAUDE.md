@@ -29,6 +29,7 @@ Rust の toolchain は `rust-toolchain.toml` が SoT。rustup がこれを読ん
 - 依存バージョンは `Cargo.lock` をコミットして固定する。`Cargo.toml` はキャレット範囲のままでよく、`=` 固定はしない。CI は `--locked` を付けて lock からの逸脱を落とす
 - GitHub Actions の `uses` はコミット SHA で固定し、行末コメントにタグを書く（Renovate が更新する）
 - ワークフローを触ったら `mise x ghalint -- ghalint run` と `mise x actionlint -- actionlint` を通す
+- 依存を新規追加するときは crates.io の公開日を確認し、14 日以上経過した版を採用する。既存依存の更新は Renovate（`yshrsmz/renovate-config` の `minimumReleaseAge: "2 weeks"`）が担保する
 
 ## コマンド
 
@@ -59,7 +60,7 @@ CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace -
 
 ## Git 運用
 
-- ブランチ: `feat/<topic>`、`fix/<topic>`。main へは PR 経由
+- ブランチ: `feat/<topic>`、`fix/<topic>`。`github:git-workflow` スキルは `<type>-<subject>` を指示するが、こちらを優先する。main へは PR 経由
 - コミットメッセージ: Conventional Commits（`feat(graph): ...`、`fix(git_exec): ...`）。scope はモジュール名
 - `docs/plan.md` のタスクを完了したらチェックを付けて同じコミットに含める
 

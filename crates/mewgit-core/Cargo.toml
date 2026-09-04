@@ -1,0 +1,27 @@
+[package]
+name = "mewgit-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core logic for mewgit (git reading, git CLI execution, GitHub integration, graph layout)"
+
+[dependencies]
+tokio.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+secrecy.workspace = true
+git2 = "0.20"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+toml = "0.8"
+directories = "6"
+globset = "0.4"
+
+[dev-dependencies]
+anyhow.workspace = true
+tempfile = "3"
+wiremock = "0.6"
+tokio = { workspace = true, features = ["test-util"] }

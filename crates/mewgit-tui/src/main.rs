@@ -13,7 +13,7 @@ mod ui;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use mewgit_core::app::{AppState, NoticeLevel, RepoInfo, TermSize};
 use mewgit_core::config::Config;
 use ratatui::crossterm::event::EventStream;
@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
 
     let mut state = AppState::new(
         RepoInfo {
-            path: repo_path(),
+            path: repo_path()?,
             ..RepoInfo::default()
         },
         config,
@@ -53,9 +53,24 @@ async fn main() -> Result<()> {
 }
 
 /// 開くリポジトリ。引数が無ければカレントディレクトリ。
-fn repo_path() -> PathBuf {
-    std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+///
+/// 絶対パスに直すのは、`.` や `..` のままだと `file_name()` が `None` になり、
+/// ヘッダに `.` と出てしまうため。
+fn repo_path() -> Result<PathBuf> {
+    let raw = match std::env::args_os().nth(1) {
+        Some(arg) => {
+            // まだオプションを解釈しないので、`--help` という名前のリポジトリを
+            // 開きにいかないよう弾く。引数解析は M5 の隠しサブコマンドと一緒に入れる。
+            if arg.to_string_lossy().starts_with('-') {
+                bail!(
+                    "オプションはまだ対応していません: {}",
+                    arg.to_string_lossy()
+                );
+            }
+            PathBuf::from(arg)
+        }
+        None => PathBuf::from("."),
+    };
+
+    Ok(std::fs::canonicalize(&raw).unwrap_or(raw))
 }

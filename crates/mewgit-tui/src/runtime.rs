@@ -35,10 +35,15 @@ where
         terminal.draw(|frame| ui::render(frame, state))?;
 
         let msg = tokio::select! {
-            Some(event) = events.next() => match event_to_msg(event?) {
-                Some(msg) => msg,
-                // 対応する Msg が無いイベントは捨てる。
-                None => continue,
+            event = events.next() => match event {
+                Some(event) => match event_to_msg(event?) {
+                    Some(msg) => msg,
+                    // 対応する Msg が無いイベントは捨てる。
+                    None => continue,
+                },
+                // 入力が尽きた（端末が閉じた、テストのストリームが終わった）。
+                // ここで抜けないと Tick だけで永久に回り続ける。
+                None => return Ok(()),
             },
             _ = tick.tick() => Msg::Tick,
         };
@@ -156,6 +161,16 @@ mod tests {
         ];
 
         run_with(events, &mut state).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exhausted_event_stream_ends_the_loop() {
+        // 終了キーが来なくても、入力が尽きたら抜ける。抜けないと Tick だけで
+        // 永久に回り、テストがハングする。
+        let mut state = state();
+        run_with(vec![Ok(Event::Resize(100, 30))], &mut state)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

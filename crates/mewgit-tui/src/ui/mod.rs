@@ -47,12 +47,20 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
 fn status_line(state: &AppState) -> Paragraph<'_> {
     let mut spans = Vec::new();
     if let Some(notice) = state.notices.back() {
-        spans.push(Span::raw(notice.message.clone()));
+        // 1 行しか無いので先頭行だけ。toml のパースエラーのように複数行の
+        // メッセージがあり、そのまま流すと改行が消えて読めなくなる。
+        // 全文は notice.message に残っている（履歴表示は M6）。
+        spans.push(Span::raw(first_line(&notice.message)));
         spans.push(Span::raw("  "));
     }
     spans.push(Span::raw(HINT));
 
     Paragraph::new(Line::from(spans))
+}
+
+/// 最初の行。改行が無ければ全体。
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or("")
 }
 
 /// ステータスバー右側の固定ヒント。M6 の `Modal::Help` までの暫定。
@@ -147,6 +155,39 @@ mod tests {
             let lines = draw(&state_at("/repo"), TermSize { width, height });
             assert_eq!(lines.len(), height as usize);
         }
+    }
+
+    #[test]
+    fn status_bar_shows_only_the_first_line_of_a_notice() {
+        // toml のパースエラーは複数行。そのまま流すと改行が消えて読めなくなる。
+        let mut state = state_at("/repo");
+        state.push_notice(
+            NoticeLevel::Warn,
+            "設定ファイルの構文エラー
+  |
+2 | ascii = 
+  | ^"
+            .to_string(),
+            None,
+        );
+
+        let size = TermSize::default();
+        let lines = draw(&state, size);
+        let last = &lines[size.height as usize - 1];
+
+        assert!(
+            last.contains("設定ファイルの構文エラー"),
+            "status: {last:?}"
+        );
+        assert!(!last.contains('|'), "status: {last:?}");
+        assert!(last.contains("q:quit"), "status: {last:?}");
+    }
+
+    #[test]
+    fn repo_label_falls_back_to_the_path_when_there_is_no_file_name() {
+        // "." や "/" は file_name() が None。空ヘッダにしない。
+        let lines = draw(&state_at("."), TermSize::default());
+        assert!(lines[0].contains('.'), "header: {:?}", lines[0]);
     }
 
     #[test]

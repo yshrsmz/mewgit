@@ -146,15 +146,9 @@ impl Config {
             .map(PathBuf::from);
         let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
 
-        let (mut config, warnings) = match home {
-            Some(home) => Self::load_from(&config_path(xdg.as_deref(), &home)),
-            // `XDG_CONFIG_HOME` だけで場所が決まるならホームは要らない。
-            None => match xdg.as_deref() {
-                Some(xdg) if xdg.is_absolute() => {
-                    Self::load_from(&xdg.join("mewgit").join("config.toml"))
-                }
-                _ => (Config::default(), vec![ConfigWarning::NoConfigDir]),
-            },
+        let (mut config, warnings) = match resolve_config_path(xdg.as_deref(), home.as_deref()) {
+            Some(path) => Self::load_from(&path),
+            None => (Config::default(), vec![ConfigWarning::NoConfigDir]),
         };
 
         config.apply_env(|key| std::env::var(key).ok());
@@ -162,6 +156,8 @@ impl Config {
     }
 
     /// 指定したパスの `config.toml` を読む。存在しなければ既定値（警告なし）。
+    ///
+    /// パスを外から渡せるようにしているのはテストのため。
     pub fn load_from(path: &Path) -> (Config, Vec<ConfigWarning>) {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
@@ -255,13 +251,13 @@ impl Config {
 /// 設定ファイルのパスを組み立てる。
 ///
 /// `XDG_CONFIG_HOME` が絶対パスならそれを使う。XDG 仕様どおり、相対パスや未設定は
-/// 無視して `$HOME/.config` にフォールバックする。
-pub fn config_path(xdg_config_home: Option<&Path>, home: &Path) -> PathBuf {
+/// 無視して `$HOME/.config` にフォールバックする。どちらも決まらなければ `None`。
+pub fn resolve_config_path(xdg_config_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
     let base = match xdg_config_home {
         Some(dir) if dir.is_absolute() => dir.to_path_buf(),
-        _ => home.join(".config"),
+        _ => home?.join(".config"),
     };
-    base.join("mewgit").join("config.toml")
+    Some(base.join("mewgit").join("config.toml"))
 }
 
 #[cfg(test)]
@@ -554,21 +550,42 @@ mod tests {
 
     #[test]
     fn config_path_prefers_absolute_xdg_config_home() {
-        let path = config_path(Some(Path::new("/xdg")), Path::new("/home/user"));
-        assert_eq!(path, Path::new("/xdg/mewgit/config.toml"));
+        let path = resolve_config_path(Some(Path::new("/xdg")), Some(Path::new("/home/user")));
+        assert_eq!(path.as_deref(), Some(Path::new("/xdg/mewgit/config.toml")));
     }
 
     #[test]
     fn config_path_falls_back_to_home_dot_config() {
-        let path = config_path(None, Path::new("/home/user"));
-        assert_eq!(path, Path::new("/home/user/.config/mewgit/config.toml"));
+        let path = resolve_config_path(None, Some(Path::new("/home/user")));
+        assert_eq!(
+            path.as_deref(),
+            Some(Path::new("/home/user/.config/mewgit/config.toml"))
+        );
     }
 
     #[test]
     fn config_path_ignores_relative_xdg_config_home() {
         // XDG 仕様では相対パスの XDG_CONFIG_HOME は無視する。
-        let path = config_path(Some(Path::new("relative/dir")), Path::new("/home/user"));
-        assert_eq!(path, Path::new("/home/user/.config/mewgit/config.toml"));
+        let path = resolve_config_path(
+            Some(Path::new("relative/dir")),
+            Some(Path::new("/home/user")),
+        );
+        assert_eq!(
+            path.as_deref(),
+            Some(Path::new("/home/user/.config/mewgit/config.toml"))
+        );
+    }
+
+    #[test]
+    fn config_path_works_without_home_when_xdg_is_absolute() {
+        let path = resolve_config_path(Some(Path::new("/xdg")), None);
+        assert_eq!(path.as_deref(), Some(Path::new("/xdg/mewgit/config.toml")));
+    }
+
+    #[test]
+    fn config_path_is_none_without_home_and_without_absolute_xdg() {
+        assert_eq!(resolve_config_path(None, None), None);
+        assert_eq!(resolve_config_path(Some(Path::new("relative")), None), None);
     }
 
     #[test]

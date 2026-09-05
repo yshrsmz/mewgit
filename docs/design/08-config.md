@@ -89,7 +89,7 @@ pub struct Config {
 impl Config {
     /// 既定のパスから読む。ファイルが無ければ既定値。
     pub fn load() -> (Config, Vec<ConfigWarning>);
-    /// 指定パスから読む。テストと `--config` 用。
+    /// 指定パスから読む。テスト用の seam。
     pub fn load_from(path: &Path) -> (Config, Vec<ConfigWarning>);
     /// TOML 文字列から読む。純粋関数。glob のコンパイルまで済ませる。
     pub fn from_toml_str(s: &str) -> (Config, Vec<ConfigWarning>);
@@ -107,8 +107,8 @@ pub struct RepoRule {
     matcher: Option<GlobMatcher>,
 }
 
-/// 環境変数から設定ファイルのパスを組み立てる純粋関数。
-pub fn config_path(xdg_config_home: Option<&Path>, home: &Path) -> PathBuf;
+/// 設定ファイルのパスを組み立てる純粋関数。どちらも決まらなければ `None`。
+pub fn resolve_config_path(xdg_config_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf>;
 ```
 
 `Default` は `General` / `Graph` / `Github` / `Theme` に手で実装する（`Config` 自体は

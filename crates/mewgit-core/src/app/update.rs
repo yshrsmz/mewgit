@@ -7,6 +7,7 @@
 //! グラフだけ。
 
 use crate::git_read::{GitReadError, LogPage};
+use crate::graph::LaneState;
 
 use super::{
     AppState, Cmd, GraphLine, JobKind, Key, KeyCode, Msg, NoticeLevel, Pane, RepoSnapshot,
@@ -132,8 +133,10 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cm
         Err(err) => {
             state.push_notice(NoticeLevel::Error, err.to_string(), None);
             // 失敗したセッションは捨てられ、次の読み込みは先頭から来る（02）。
-            // 積んだ行を残すと同じコミットが二重に並ぶ。
+            // 積んだ行を残すと同じコミットが二重に並ぶ。レーンの状態も、もう
+            // `lines` に無いコミットを指したままにしない。
             state.graph.lines.clear();
+            state.graph.lanes = LaneState::default();
             state.graph.cursor = 0;
             state.graph.scroll = 0;
             state.graph.loaded_all = false;
@@ -327,6 +330,7 @@ mod tests {
         update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
 
         assert!(state.graph.lines.is_empty());
+        assert_eq!(state.graph.lanes, LaneState::default());
         assert_eq!(state.graph.cursor, 0);
         assert!(!state.graph.loaded_all);
         assert!(!state.jobs.is_running(JobKind::LoadLog));
@@ -384,6 +388,32 @@ mod tests {
 
         assert_eq!(state.graph.cursor, 20);
         assert_eq!(state.graph.scroll, 1);
+    }
+
+    #[test]
+    fn widening_the_terminal_pulls_the_view_back_to_the_end() {
+        // 末尾に貼り付いたまま端末を大きくすると、カーソルは窓の中にいるので
+        // スクロールが動かず、上に行があるのに空白が残る。
+        let mut state = state_with_commits(30);
+        state.graph.viewport = 5;
+        state.graph.cursor = 29;
+        state.graph.scroll_into_view();
+        assert_eq!(state.graph.scroll, 25);
+
+        state.graph.viewport = 25;
+        state.graph.scroll_into_view();
+
+        assert_eq!(state.graph.scroll, 5);
+    }
+
+    #[test]
+    fn a_viewport_larger_than_the_history_scrolls_to_the_top() {
+        let mut state = state_with_commits(3);
+        state.graph.scroll = 2;
+
+        state.graph.scroll_into_view();
+
+        assert_eq!(state.graph.scroll, 0);
     }
 
     #[test]

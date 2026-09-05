@@ -3,7 +3,7 @@
 //! レーンの罫線はまだ描かない（`GraphRow.cells` が空のあいだは何も出さない）。
 //! `graph::lane` を実装したら、行の左に `cells` を写した列を足す。
 
-use mewgit_core::app::{AppState, GraphLine};
+use mewgit_core::app::{AppState, GraphLine, JobKind};
 use mewgit_core::git_read::RefLabel;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -33,12 +33,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(block, area);
 
     if state.graph.lines.is_empty() {
-        let message = if state.graph.loaded_all {
-            "コミットがありません"
-        } else {
-            "読み込み中…"
-        };
-        frame.render_widget(Paragraph::new(message), inner);
+        frame.render_widget(Paragraph::new(empty_message(state)), inner);
         return;
     }
 
@@ -54,6 +49,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         .collect();
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// 行が 1 つも無いときに出す文言。
+///
+/// 読み込みが失敗したときに「読み込み中…」のままにしない。エラーの通知は
+/// ステータスバーに出るが、次の通知で上書きされる。読み込み中かどうかは
+/// `JobTracker` が知っているので、状態を増やさずに区別できる。
+fn empty_message(state: &AppState) -> &'static str {
+    if state.jobs.is_running(JobKind::LoadLog) {
+        "読み込み中…"
+    } else if state.graph.loaded_all {
+        "コミットがありません"
+    } else {
+        "コミットを読み込めませんでした"
+    }
 }
 
 /// 1 行分。`短縮 Oid  ラベル  summary`。
@@ -123,8 +133,8 @@ fn short_oid(line: &GraphLine) -> String {
 mod tests {
     use super::*;
     use crate::test_util::{draw, state_at, state_with_commits, terminal_with};
-    use mewgit_core::app::TermSize;
-    use mewgit_core::git_read::{Oid, RefIndex, RefLabel};
+    use mewgit_core::app::{init, update, Msg, TermSize};
+    use mewgit_core::git_read::{GitReadError, Oid, RefIndex, RefLabel};
     use mewgit_core::test_util::fake_commit;
 
     #[test]
@@ -281,11 +291,25 @@ mod tests {
 
     #[test]
     fn before_the_first_page_arrives_it_says_loading() {
-        let state = state_at("/repo");
+        let mut state = state_at("/repo");
+        init(&mut state);
 
         let lines = draw(&state, TermSize::default());
 
         assert!(lines[2].contains("読み込み中"), "{:?}", lines[2]);
+    }
+
+    #[test]
+    fn a_failed_load_does_not_keep_saying_loading() {
+        // 失敗の通知はステータスバーに出るが、次の通知で上書きされる。
+        // ペインが「読み込み中…」のままだと、何も起きていないように見える。
+        let mut state = state_at("/repo");
+        init(&mut state);
+        update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+
+        let lines = draw(&state, TermSize::default());
+
+        assert!(lines[2].contains("読み込めませんでした"), "{:?}", lines[2]);
     }
 
     #[test]

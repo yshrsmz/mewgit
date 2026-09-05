@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::{Stream, StreamExt};
 use mewgit_core::app::{
-    init, update, AppState, Cmd, Msg, NoticeLevel, RepoInfo, RepoSnapshot, TermSize,
+    init, update, AppState, Cmd, JobKind, Msg, NoticeLevel, RepoInfo, RepoSnapshot, TermSize,
 };
 use mewgit_core::config::Config;
 use mewgit_core::git_read::{GitReadError, ReaderHandle};
@@ -152,13 +152,15 @@ impl Runtime {
             }
 
             // M2 以降で実装する。
-            Cmd::LoadStatus => not_implemented(state, "LoadStatus"),
-            Cmd::LoadDiff(_) => not_implemented(state, "LoadDiff"),
-            Cmd::Exec(_) => not_implemented(state, "Exec"),
-            Cmd::ResolveAccount => not_implemented(state, "ResolveAccount"),
-            Cmd::FetchPr => not_implemented(state, "FetchPr"),
-            Cmd::FetchChecks => not_implemented(state, "FetchChecks"),
-            Cmd::FetchPrList => not_implemented(state, "FetchPrList"),
+            Cmd::LoadStatus => not_implemented(state, JobKind::LoadStatus, "LoadStatus"),
+            Cmd::LoadDiff(_) => not_implemented(state, JobKind::LoadDiff, "LoadDiff"),
+            Cmd::Exec(_) => not_implemented(state, JobKind::Exec, "Exec"),
+            Cmd::ResolveAccount => {
+                not_implemented(state, JobKind::ResolveAccount, "ResolveAccount")
+            }
+            Cmd::FetchPr => not_implemented(state, JobKind::FetchPr, "FetchPr"),
+            Cmd::FetchChecks => not_implemented(state, JobKind::FetchChecks, "FetchChecks"),
+            Cmd::FetchPrList => not_implemented(state, JobKind::FetchPrList, "FetchPrList"),
         }
     }
 }
@@ -175,7 +177,13 @@ async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> 
 }
 
 /// 未実装の `Cmd` を通知に積む。黙って捨てると開発中に気付けない。
-fn not_implemented(state: &mut AppState, name: &str) -> ControlFlow<()> {
+///
+/// 登録済みのジョブもここで畳む。`update` の出口（`AppState::issue`）が登録したまま
+/// 誰も完了させないと、2 回目以降の同じ `Cmd` が通知も出さずに捨てられ、
+/// 「1 回だけ警告が出てあとは無反応」になる。`dispatch` が `notices` 以外に書く
+/// 唯一の場所で、`Cmd` を実装するたびに 1 行ずつ消えていく。
+fn not_implemented(state: &mut AppState, kind: JobKind, name: &str) -> ControlFlow<()> {
+    state.jobs.finish(kind);
     state.push_notice(
         NoticeLevel::Warn,
         format!("未実装のコマンドです: {name}"),
@@ -408,6 +416,23 @@ mod tests {
         let notice = &state.notices[0];
         assert_eq!(notice.level, NoticeLevel::Warn);
         assert!(notice.message.contains("LoadStatus"));
+    }
+
+    #[test]
+    fn an_unimplemented_cmd_does_not_hold_on_to_its_job() {
+        // 掴んだままだと、2 回目以降の同じ `Cmd` が `issue` に落とされて
+        // 通知も出ない（「1 回だけ警告が出てあとは無反応」になる）。
+        let repo = TestRepo::init();
+        let (mut state, reader) = opened(&repo);
+        let (runtime, _msgs) = Runtime::new(reader);
+
+        let cmd = state.issue(Cmd::LoadStatus);
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        assert!(!state.jobs.is_running(JobKind::LoadStatus));
+
+        let again = state.issue(Cmd::LoadStatus);
+        assert!(runtime.dispatch(&mut state, again).is_continue());
+        assert_eq!(state.notices.len(), 2);
     }
 
     #[tokio::test]

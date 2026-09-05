@@ -289,7 +289,7 @@ pub fn init(state: &mut AppState) -> Cmd;
 `From` は生やせない（孤児ルール、かつ不変ルール 6）。変換は tui の自由関数で行う。
 
 ```rust
-pub async fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle), GitReadError>;
+pub fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle), GitReadError>;
 
 pub struct Runtime { reader: ReaderHandle, tx: mpsc::UnboundedSender<Msg> }
 

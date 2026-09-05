@@ -203,6 +203,11 @@ impl GraphState {
         if self.viewport == 0 {
             return;
         }
+        // 窓が広がったときに先に詰める。末尾に貼り付いたまま端末を大きくすると、
+        // カーソルは窓の中にいるので下の分岐が動かず、上に行があるのに空白が残る。
+        self.scroll = self
+            .scroll
+            .min(self.lines.len().saturating_sub(self.viewport));
         if self.cursor < self.scroll {
             self.scroll = self.cursor;
         } else if self.cursor >= self.scroll + self.viewport {

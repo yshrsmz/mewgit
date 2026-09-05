@@ -51,7 +51,7 @@ impl TestRepo {
         repo
     }
 
-    /// ワークツリー（bare なら `.git`）のルート。
+    /// リポジトリのルート。bare なら `.git` は無く、ここが bare リポジトリそのもの。
     pub fn path(&self) -> &Path {
         &self.root
     }
@@ -96,6 +96,12 @@ impl TestRepo {
 
     /// 現在の HEAD の Oid。
     pub fn head_oid(&self) -> Oid {
-        Oid::from_str(&self.git(&["rev-parse", "HEAD"])).expect("HEAD の Oid を読めませんでした")
+        self.rev_parse("HEAD")
+    }
+
+    /// リビジョン指定を Oid に解決する。
+    pub fn rev_parse(&self, rev: &str) -> Oid {
+        let out = self.git(&["rev-parse", rev]);
+        Oid::from_str(&out).unwrap_or_else(|err| panic!("{rev} の Oid を読めませんでした: {err}"))
     }
 }

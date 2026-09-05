@@ -184,10 +184,44 @@ fn refs_ignores_the_stash() {
 
     // stash コミットは first を親に持つ別コミットなので、first の行にも自分の行にも
     // ラベルは付かない（stash は stash ペインの担当）。
-    let stash = Oid::from_str(&repo.git(&["rev-parse", "refs/stash"])).unwrap();
+    let stash = repo.rev_parse("refs/stash");
     assert_eq!(index.labels(stash), []);
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
     assert_eq!(names, ["main"]);
+}
+
+#[test]
+fn refs_skips_a_tag_that_cannot_be_peeled_to_a_commit() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    // tree を直接指すタグ。commit まで辿れないのでグラフのどの行にも乗らない。
+    repo.git(&["tag", "treetag", "HEAD^{tree}"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let index = reader.refs().unwrap();
+
+    let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
+    assert_eq!(names, ["main"]);
+    assert_eq!(index.labels(repo.rev_parse("HEAD^{tree}")), []);
+}
+
+#[test]
+fn refs_marks_no_branch_as_head_when_detached() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    repo.git(&["checkout", "--detach", &first.to_string()]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let index = reader.refs().unwrap();
+
+    // HEAD が symbolic でないので、どのブランチも HEAD ではない。
+    assert_eq!(
+        index.labels(first),
+        [RefLabel::Local {
+            name: "main".to_string(),
+            is_head: false,
+        }]
+    );
 }
 
 #[test]

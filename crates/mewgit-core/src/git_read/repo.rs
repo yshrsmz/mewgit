@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use git2::{BranchType, ErrorCode, Reference, ReferenceType, Repository};
+use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{GitReadError, HeadInfo, Oid, RefIndex, RefLabel, Remote};
 
@@ -16,8 +16,9 @@ pub struct RepoReader {
     workdir: PathBuf,
 }
 
-/// `git2::Repository` が `Debug` を実装していないので手で書く。`AppState` の一部が
-/// `Debug` を要求するため、実装自体は落とせない。
+/// `git2::Repository` が `Debug` を実装していないので手で書く。`Result<RepoReader, _>` を
+/// `unwrap_err` するテストとログ出力のために `Debug` 自体は要る。`AppState` は
+/// `RepoReader` を持たない（02 の「スレッド」節のとおり `app` には handle を渡す）。
 impl std::fmt::Debug for RepoReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RepoReader")
@@ -36,10 +37,12 @@ impl RepoReader {
             path: path.to_path_buf(),
             source,
         })?;
+        // 見つかったリポジトリのパスを添える。引数のサブディレクトリを返すと
+        // 「そのディレクトリが bare だ」と読めてしまう。
         let workdir = repo
             .workdir()
             .ok_or_else(|| GitReadError::BareRepository {
-                path: path.to_path_buf(),
+                path: repo.path().to_path_buf(),
             })?
             .to_path_buf();
 
@@ -76,35 +79,28 @@ impl RepoReader {
 
     /// Oid → ラベルの索引。グラフの各行の右に出す ref を引くのに使う（06）。
     pub fn refs(&self) -> Result<RefIndex, GitReadError> {
+        // HEAD は 1 回だけ解決する。`Branch::is_head()` は呼ぶたびに `.git/HEAD` と
+        // その参照先を読み直すので、ブランチの本数だけファイル読みが増える。
+        // unborn なら symbolic target の指す ref が存在せず、detached なら HEAD が
+        // symbolic ではないので、どちらも「どのブランチも HEAD ではない」に落ちる。
+        let head = self.repo.find_reference("HEAD")?;
+        let head_target = head.symbolic_target();
+
+        // `refs/*` を 1 パスで走査して種別に振り分ける。`branches()` も内部では全 ref を
+        // 列挙してから接頭辞で捨てるので、種別ごとに呼ぶと同じ走査を繰り返すことになる。
         let mut labels: HashMap<Oid, Vec<RefLabel>> = HashMap::new();
-
-        for branch in self.repo.branches(Some(BranchType::Local))? {
-            let (branch, _) = branch?;
-            // `repo.head()` との名前比較にしないのは、unborn のとき head() が失敗するため。
-            let is_head = branch.is_head();
-            push_label(&mut labels, branch.get(), |name| RefLabel::Local {
-                name,
-                is_head,
-            });
-        }
-
-        for branch in self.repo.branches(Some(BranchType::Remote))? {
-            let (branch, _) = branch?;
-            push_label(&mut labels, branch.get(), |name| RefLabel::Remote { name });
-        }
-
-        // タグ以外の `refs/*`（`refs/stash`、`refs/notes/*` など）はグラフのラベルにしない。
         for reference in self.repo.references()? {
             let reference = reference?;
-            if !reference.is_tag() {
+            let Some(label) = ref_label(&reference, head_target) else {
                 continue;
-            }
-            push_label(&mut labels, &reference, |name| RefLabel::Tag { name });
-        }
-
-        for labels in labels.values_mut() {
-            // git2 の列挙順は安定していないので、ここで揃える。
-            labels.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+            };
+            // annotated tag は tag オブジェクトを指すので、commit まで peel してから引く。
+            // peel できない ref（tree や blob を指すタグ）はグラフのどの行にも乗らないので
+            // 落とす。ラベルが 1 つ減るだけなので `refs()` 全体は失敗させない。
+            let Ok(commit) = reference.peel_to_commit() else {
+                continue;
+            };
+            labels.entry(commit.id()).or_default().push(label);
         }
 
         Ok(RefIndex::new(labels))
@@ -134,6 +130,10 @@ impl RepoReader {
     }
 
     /// unborn な HEAD が指しているブランチ名。
+    ///
+    /// unborn は「HEAD が symbolic で、指す先の ref がまだ無い」状態なので
+    /// `symbolic_target()` は必ず `Some`。それでも `expect` にしないのは、core が
+    /// ライブラリで、壊れたリポジトリを開いたときに panic させたくないため。
     fn unborn_branch_name(&self) -> Result<String, GitReadError> {
         let head = self.repo.find_reference("HEAD")?;
         let target = head.symbolic_target().unwrap_or("HEAD");
@@ -141,29 +141,29 @@ impl RepoReader {
     }
 }
 
-/// ref をラベルとして索引に積む。積めないものは黙って飛ばす。
+/// グラフのラベルにする ref を選び、種別を決める。載せないものは `None`。
 ///
-/// 飛ばす対象は 3 つ。symbolic ref（`refs/remotes/origin/HEAD`）は解決すると指す先の
-/// ラベルと重複する。非 UTF-8 の ref 名は描画できない。commit まで peel できない ref
-/// （tree や blob を指すタグ）はグラフのどの行にも乗らない。いずれもラベルが 1 つ
-/// 減るだけなので、`refs()` 全体を失敗させない。
-fn push_label<F>(labels: &mut HashMap<Oid, Vec<RefLabel>>, reference: &Reference<'_>, make: F)
-where
-    F: FnOnce(String) -> RefLabel,
-{
+/// `head_target` は `HEAD` の symbolic target（`refs/heads/main`）。
+fn ref_label(reference: &Reference<'_>, head_target: Option<&str>) -> Option<RefLabel> {
+    // symbolic ref（`refs/remotes/origin/HEAD`）は解決すると指す先のラベルと重複する。
     if reference.kind() != Some(ReferenceType::Direct) {
-        return;
+        return None;
     }
-    let Some(name) = reference.shorthand() else {
-        return;
-    };
-    // annotated tag は tag オブジェクトを指すので、commit まで peel してから引く。
-    let Ok(commit) = reference.peel_to_commit() else {
-        return;
-    };
+    // 非 UTF-8 の ref 名は識別子として扱えないので落とす（02 の「非 UTF-8 の扱い」）。
+    let name = reference.shorthand()?.to_string();
 
-    labels
-        .entry(commit.id())
-        .or_default()
-        .push(make(name.to_string()));
+    // 載せるのはローカル / リモート追跡ブランチとタグだけ。`refs/stash` や
+    // `refs/notes/*` はそれぞれ別のペインの担当で、グラフのラベルにはしない。
+    if reference.is_branch() {
+        let is_head = reference
+            .name()
+            .is_some_and(|full| head_target == Some(full));
+        Some(RefLabel::Local { name, is_head })
+    } else if reference.is_remote() {
+        Some(RefLabel::Remote { name })
+    } else if reference.is_tag() {
+        Some(RefLabel::Tag { name })
+    } else {
+        None
+    }
 }

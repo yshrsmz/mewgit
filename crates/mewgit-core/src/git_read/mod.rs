@@ -64,7 +64,12 @@ pub struct RefIndex {
 }
 
 impl RefIndex {
-    pub(crate) fn new(labels: HashMap<Oid, Vec<RefLabel>>) -> Self {
+    /// 並び順の確定はここでやる。索引を組む経路が増えても並べ替えを忘れられないように
+    /// するため（git2 の ref の列挙順は安定していない）。
+    pub(crate) fn new(mut labels: HashMap<Oid, Vec<RefLabel>>) -> Self {
+        for labels in labels.values_mut() {
+            labels.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        }
         Self { labels }
     }
 

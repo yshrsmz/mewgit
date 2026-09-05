@@ -14,7 +14,12 @@
 ## API
 
 ```rust
-pub struct RepoReader { repo: git2::Repository }
+pub struct RepoReader {
+    repo: git2::Repository,
+    /// `open` で bare を弾いたあとのワークツリーのルート。`workdir()` が
+    /// `Option` を返さずに済むよう、不変条件を open で 1 回だけ確立する。
+    workdir: PathBuf,
+}
 
 impl RepoReader {
     pub fn open(path: &Path) -> Result<Self, GitReadError>;
@@ -67,12 +72,29 @@ pub enum RefLabel {
   `{origin/main}` と一続りで描くだけなので、分けても描画側で連結し直すだけになる
 - annotated tag は `target()` が tag オブジェクトの Oid なので、commit まで peel してから引く。
   peel しないとラベルがどのグラフ行にも乗らない
-- `refs/stash` と symbolic な `refs/remotes/*/HEAD` は除外する。前者は stash ペインの担当で、
-  後者を解決すると `origin/main` のラベルが 2 重になる
-- `is_head` は `git2::Branch::is_head()` で見る。`repo.head()` との名前比較にしないのは、
-  unborn のとき `head()` がエラーになるため
-- ラベルは種別（Local → Remote → Tag）、同種内は名前順に並べる。git2 の `references()` の
-  列挙順は安定していないので、ここで揃えないと描画もテストも揺れる
+- 載せるのはローカルブランチ・リモート追跡ブランチ・タグだけ（ホワイトリスト）。
+  `refs/stash` や `refs/notes/*` は他のペインの担当なのでグラフのラベルにしない。
+  加えて symbolic ref（`refs/remotes/*/HEAD`）は種別を問わず落とす。解決すると
+  指す先の ref とラベルが 2 重になる
+- 列挙は `references()` の 1 パスで、種別は `is_branch()` / `is_remote()` / `is_tag()`
+  （どれも ref 名の接頭辞判定）で振り分ける。`branches()` も内部では全 ref を列挙して
+  から接頭辞で捨てるので、種別ごとに呼ぶと同じ走査を繰り返すことになる
+- `is_head` は `HEAD` の symbolic target と ref 名の比較で決める。`Branch::is_head()` は
+  呼ぶたびに HEAD を解決し直すのでブランチの本数だけファイル読みが増える。unborn は
+  symbolic target の指す ref がまだ無く、detached は HEAD が symbolic ではないので、
+  どちらも「どのブランチも HEAD ではない」に落ちる
+- ラベルの並べ替え（種別 Local → Remote → Tag、同種内は名前順）は `RefIndex` を作る
+  ところに置く。git2 の列挙順は安定しておらず、索引を組む経路が増えたときに
+  並べ替えを忘れると描画順とテストの期待値だけが静かにずれる
+
+### 非 UTF-8 の扱い
+
+git は ref 名・パス・メッセージにどんなバイト列も許すので、層の入口で方針を 1 つに決める。
+
+- **識別子**（ref 名、リモート名、パス）が非 UTF-8 なら、その ref / リモート / ファイルを
+  一覧から落とす。`git_exec` の argv に載せられず、UI で選べても操作できないため
+- **表示にしか使わない文字列**（リモート URL、コミットの summary や署名）は lossy 変換して
+  残す。読めない文字が混ざるほうが、その項目ごと消えるより情報が多い
 
 ### head
 
@@ -119,8 +141,9 @@ pub enum GitReadError {
 }
 ```
 
-`open` の失敗だけは渡されたパスを添える。「どこを開こうとして失敗したか」が分からないと、
-`discover` が上位ディレクトリまで探しにいく仕様と合わせてユーザーが原因を追えないため。
+`Open` は渡されたパスを添える（まだ何も見つかっていないので、それしか手掛かりが無い）。
+`BareRepository` は `discover` が見つけたリポジトリのパスを添える。引数のサブディレクトリを
+返すと「そのディレクトリが bare だ」と読めてしまうため。
 
 ## スレッド
 

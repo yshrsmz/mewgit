@@ -27,6 +27,22 @@ pub struct GraphRow {
     pub color: ColorId,
 }
 
+impl GraphRow {
+    /// レーン計算をまだ通していない行。
+    ///
+    /// `cells` が空なので `ui` は罫線を描かない。`graph::lane` を実装するまでの
+    /// 暫定で、**レーン割り当ての PR でこの関数と呼び出し側を消す**。ここに置いて
+    /// あるのは、消す場所を 1 つにするため。
+    pub fn unlaned(oid: Oid) -> Self {
+        Self {
+            oid,
+            lane: 0,
+            cells: Vec::new(),
+            color: ColorId(0),
+        }
+    }
+}
+
 /// 罫線 1 マス。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cell {

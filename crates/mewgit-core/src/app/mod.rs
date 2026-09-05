@@ -20,4 +20,4 @@ pub use state::{
     JobTracker, Modal, Notice, NoticeLevel, Pane, PrState, RepoInfo, TermSize, TextBuffer,
     WorktreeState,
 };
-pub use update::update;
+pub use update::{init, update};

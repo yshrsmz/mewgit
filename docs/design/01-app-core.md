@@ -120,14 +120,28 @@ pub struct TextBuffer { pub lines: Vec<String>, pub cursor: (usize, usize) }  //
 pub struct GraphState {
     pub lines: Vec<GraphLine>,
     pub lanes: LaneState,       // 末尾行の直後の状態。追加ページはここから再開（06）
+    pub refs: RefIndex,         // 行の右に並べるラベル（02）
     pub cursor: usize,
-    pub scroll: usize,
+    pub scroll: usize,          // 画面最上部に出す行
     pub expanded: bool,
     pub loaded_all: bool,
 }
 
 pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 ```
+
+`RefIndex` はここに置く。引くのはグラフペインだけで、`RepoInfo` に入れると
+「パスとリモートの入れ物」に描画専用の索引が混ざる。起動時に `head` / `remotes` と
+一緒に読む。fetch 後の読み直しは M3 で決める。
+
+`scroll` は状態として持つ。`cursor` と描画領域の高さから毎回導くと、下端から上へ
+戻るときにカーソルが最下行に貼り付いたまま中身だけが流れる。更新は
+`GraphState::move_cursor(delta, height)` / `scroll_into_view(height)`。
+
+`height` は `app` が `TermSize` から出す（ヘッダ 1 行・ステータスバー 1 行・枠の
+上下 2 行を引く）。`ui` は `AppState` を書けないので、スクロール位置を決める値は
+`app` 側に置くしかない。**07 のレイアウトを変えたらここも直す。** ずれると
+`ui::panes::graph` の「見えている行しか描かない」テストが落ちる。
 
 ## 実行中ジョブ
 
@@ -138,9 +152,18 @@ impl Cmd {
     /// この `Cmd` が生む非同期ジョブの種別。`None` / `Batch` / `Quit` は `None`。
     pub fn job_kind(&self) -> Option<JobKind>;
 }
+
+impl AppState {
+    /// `update` が返す `Cmd` を発行してよい形にする。同種が走っていれば `Cmd::None`。
+    pub fn issue(&mut self, cmd: Cmd) -> Cmd;
+}
 ```
 
 網羅 `match` で書くので、`Cmd` に変種を足したら実装漏れがコンパイルエラーになる。
+
+登録は `update` の出口（`issue`）で行う。ランタイムの `dispatch` が `AppState` に
+書いてよいのは `notices` だけなので、そちらでは登録できない。`Batch` は中身を 1 つずつ
+判定する。まとめて弾くと、同種が走っている `Cmd` 1 つのために他の `Cmd` まで落ちる。
 
 ## キー入力
 
@@ -186,7 +209,7 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 pub enum Msg {
     Key(Key), Resize(TermSize), Tick,
     // git_read
-    LogLoaded { commits: Vec<Commit>, done: bool },
+    LogLoaded(Result<LogPage, GitReadError>),
     StatusLoaded(WorktreeSnapshot),
     DiffLoaded { target: DiffTarget, files: Vec<FileDiff> },
     // git_exec
@@ -201,6 +224,12 @@ pub enum Msg {
 ```
 
 `Msg` は `Clone` を要求しない。`Account` がトークン（`SecretString`）を持つため。
+
+`LogLoaded` は `Result` を運ぶ。失敗の通り道が無いと `JobKind::LoadLog` が走ったまま
+残り、以後の `Cmd::LoadLog` が `JobTracker` に黙って落とされて二度と読めなくなる。
+受けたら成功・失敗を問わず `jobs.finish(LoadLog)` する。失敗のときは積んだ行も捨てる。
+失敗したセッションは捨てられ、次の読み込みは履歴の先頭から来る（02）ので、残すと
+同じコミットが二重に並ぶ。
 
 `AccountResolved` は 04 の `resolve` の戻り値をそのまま運ぶ（`AccountState`）。
 `Result<Account, AuthError>` にすると `AuthError` と `DegradedReason` が同じ失敗を
@@ -225,9 +254,20 @@ pub enum Cmd {
 }
 ```
 
+## 起動時の読み込み
+
+```rust
+pub fn init(state: &mut AppState) -> Cmd;
+```
+
+`runtime::run` がループに入る前に 1 回呼ぶ。`main.rs` から呼ぶと、テストを書かない
+配線の側に処理が出てしまう。いまは `LoadLog { count: config.graph.page_size }` だけで、
+`LoadStatus` / `ResolveAccount` はそれぞれのタスクでここに足す。
+
 ## update の原則
 
-- `update` は `AppState` を直接変更し、`Cmd` を返す。I/O を呼ばない
+- `update` は `AppState` を直接変更し、`Cmd` を返す。I/O を呼ばない。返す `Cmd` は
+  出口で `AppState::issue` を通し、同種のジョブが走っていれば発行しない
 - キー入力は `focus` と `modal` を見て、対応する pane / modal の handler に委譲する。
   ペインが `Cmd` を組み立てるのは `update` の中だけで、`ui` からは呼ばない
 - `ExecFinished` は進行中操作を一緒に運ぶ。`Runner` が実行直後に再検出するため（03）、
@@ -241,25 +281,33 @@ pub enum Cmd {
 `From` は生やせない（孤児ルール、かつ不変ルール 6）。変換は tui の自由関数で行う。
 
 ```rust
+pub async fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle), GitReadError>;
+
+pub struct Runtime { reader: ReaderHandle, tx: mpsc::UnboundedSender<Msg> }
+
+let (runtime, mut msgs) = Runtime::new(reader);
+runtime.dispatch(&mut state, app::init(&mut state));
 loop {
     terminal.draw(|f| ui::render(f, &state))?;
     let msg = tokio::select! {
         Some(ev) = events.next() => match event_to_msg(ev?) { Some(m) => m, None => continue },
+        Some(msg) = msgs.recv() => msg,
         _ = tick.tick() => Msg::Tick,
     };
     let cmd = app::update(&mut state, msg);
-    if dispatch(&mut state, cmd).is_break() {
+    if runtime.dispatch(&mut state, cmd).is_break() {
         return Ok(());
     }
 }
 ```
 
+`open` はリポジトリを開いて初期状態を作る。開けなければ起動できないので `Err`、
+リモートや HEAD や ref の読み取りだけが失敗したときは通知に積んで続ける（ref が
+無くてもグラフは出せる）。`main.rs` を配線だけに保つため、分岐はここに置く。
+
 `run` は `Backend` とイベントストリームをジェネリックに取る。`TestBackend` と
 `futures::stream::iter` を渡してループ全体をテストできるようにするため。テストを
 書かない例外は端末の raw mode 切替・復元と `main.rs` の配線だけ（CLAUDE.md）。
-
-非同期タスクが `Msg` を返す mpsc チャネルは、最初の非同期 `Cmd` を実装する M1 で
-`select!` に足す。今は送り手がいないので置かない。
 
 - `event_to_msg` は `Option<Msg>`。マウス・フォーカス・ペーストは対応する `Msg` が無いので落とす。
   実装は `mewgit-tui/src/input.rs`（`keymap` の名前は 08 のキーバインド設定に取っておく）
@@ -267,12 +315,16 @@ loop {
 - キー変換は押下（`KeyEventKind::Press`）だけを通す。kitty プロトコルが有効な端末では
   離鍵も飛んでくるため、1 回の打鍵が 2 つの `Msg::Key` になる
 - `dispatch` は `ControlFlow` を返す。`Cmd::Quit` で `Break`、`Cmd::Batch` は再帰する
+- 非同期 `Cmd` は tokio タスクにし、結果を `Msg` にして mpsc に流す。**ログ読み込みの
+  タスクは abort しない。** `ReaderHandle::log_page` の future を途中で捨てると、
+  リーダースレッドは walk を進めたあとで返り先を失い、そのページのコミットがどの
+  ページにも現れなくなる（02 の「スレッド」）。M3 のキャンセルは `Cmd::Exec` に効かせる
 - `dispatch` の `match` でも `_` を使わず全 `Cmd` 変種を列挙する。`update` / `Cmd::job_kind`
   と同じ理由で、変種を足したときに実装漏れをコンパイルエラーにするため
 - 未実装の `Cmd` は黙って捨てず `Notice::Warn` に積む。開発中に落ちているのが見えるように
 - **`dispatch` が `AppState` に書いてよいのは `notices` だけ。** それ以外の状態変化は
   `Msg` にして `update` に戻す。状態遷移の入口を `update` 1 つに保つため
-- 初期の端末サイズは `crossterm::terminal::size()` で取る。起動時に `Resize` は飛んでこない
+- 初期の端末サイズは `Terminal::size()` で取る。起動時に `Resize` は飛んでこない
 - Git CLI 実行中も入力を受け付けるが、書き込み系 `GitOp` は同時に 1 つのみ（キュー）
 - `Tick` は 250ms。進行中ジョブのスピナー更新と、外部変更検知（`.git/HEAD` の mtime 監視）に使う
 

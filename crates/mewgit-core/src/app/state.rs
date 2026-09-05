@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::auth::{AccountState, GhLogin, RepoTarget};
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
-    Branch, Commit, DiffTarget, FileDiff, HeadInfo, InProgressOp, Remote, StashEntry,
+    Branch, Commit, DiffTarget, FileDiff, HeadInfo, InProgressOp, RefIndex, Remote, StashEntry,
     WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{Check, PullRequest};
@@ -66,6 +66,36 @@ impl AppState {
             notices: VecDeque::new(),
             term: TermSize::default(),
             config,
+        }
+    }
+
+    /// `update` が返す [`Cmd`] を発行してよい形にする。
+    ///
+    /// 非同期ジョブを生む `Cmd` は [`JobTracker`] に登録し、同種が既に走っていれば
+    /// [`Cmd::None`] に落とす。判定をここ（`update` の出口）に置くのは、ランタイムの
+    /// `dispatch` が `AppState` に書いてよいのが `notices` だけだから（01 のランタイム）。
+    pub fn issue(&mut self, cmd: Cmd) -> Cmd {
+        match cmd {
+            // `Batch` の中身は 1 つずつ判定する。まとめて弾くと、同種が走っている
+            // `Cmd` 1 つのために他の `Cmd` まで落ちる。
+            Cmd::Batch(cmds) => {
+                let issued: Vec<Cmd> = cmds.into_iter().map(|cmd| self.issue(cmd)).collect();
+                Cmd::batch(issued)
+            }
+            cmd => match cmd.job_kind() {
+                None => cmd,
+                Some(kind) => {
+                    let job = Job {
+                        kind,
+                        label: kind.label().to_string(),
+                    };
+                    if self.jobs.start(job) {
+                        cmd
+                    } else {
+                        Cmd::None
+                    }
+                }
+            },
         }
     }
 
@@ -135,12 +165,47 @@ pub struct GraphState {
     /// 末尾行を処理した直後のレーン状態。追加ページはここから計算を再開する（06 参照）。
     /// 行ごとに持たないのは、途中の行の `LaneState` を読む場面が無いため。
     pub lanes: LaneState,
+    /// 行の右に並べる ref ラベル（02）。引くのはグラフペインだけなのでここに置く。
+    /// fetch 後の読み直しは M3 で決める。
+    pub refs: RefIndex,
     pub cursor: usize,
+    /// 画面最上部に出す行の添字。カーソルだけからは決まらない（カーソルを上に
+    /// 動かしたとき、見えているうちは view を動かさない）ので状態として持つ。
     pub scroll: usize,
     /// 選択コミットの詳細を展開しているか。
     pub expanded: bool,
     /// これ以上読むコミットが無い。
     pub loaded_all: bool,
+}
+
+impl GraphState {
+    /// カーソルを `delta` 行動かす。端では止まる。
+    pub fn move_cursor(&mut self, delta: isize, height: usize) {
+        if self.lines.is_empty() {
+            self.cursor = 0;
+            self.scroll = 0;
+            return;
+        }
+
+        let last = self.lines.len() - 1;
+        self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+        self.scroll_into_view(height);
+    }
+
+    /// カーソルが見える位置までスクロールを寄せる。`height` は描画に使える行数。
+    ///
+    /// カーソルが窓の中にいる限り動かさない。カーソルだけから毎回導くと、下端から
+    /// 上へ戻るときにカーソルが最下行に貼り付いたまま中身だけが流れる。
+    pub fn scroll_into_view(&mut self, height: usize) {
+        if height == 0 {
+            return;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + height {
+            self.scroll = self.cursor - height + 1;
+        }
+    }
 }
 
 /// グラフの 1 行。
@@ -253,6 +318,25 @@ pub enum JobKind {
     FetchPr,
     FetchChecks,
     FetchPrList,
+}
+
+impl JobKind {
+    /// ステータスバーに出す既定の説明。
+    ///
+    /// `Exec` だけは `GitOp` によって `fetch` / `push` と変わるので、[`Job::label`] は
+    /// `String` のまま。実行時に差し替えるのは M3 の `Cmd::Exec` のタスク。
+    pub fn label(self) -> &'static str {
+        match self {
+            JobKind::LoadLog => "log",
+            JobKind::LoadStatus => "status",
+            JobKind::LoadDiff => "diff",
+            JobKind::Exec => "git",
+            JobKind::ResolveAccount => "account",
+            JobKind::FetchPr => "pr",
+            JobKind::FetchChecks => "checks",
+            JobKind::FetchPrList => "pr list",
+        }
+    }
 }
 
 /// トースト通知 1 件。

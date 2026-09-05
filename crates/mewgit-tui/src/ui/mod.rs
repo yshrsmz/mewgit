@@ -3,14 +3,15 @@
 //! `render` は [`AppState`] のみを参照する（不変ルール 2）。git2 / CLI / HTTP を
 //! ここから呼ばない。
 //!
-//! M0 の時点ではヘッダ・本文プレースホルダ・ステータスバーだけ。07 のレイアウト
-//! （グラフ / ブランチ / ワーキングツリー）は M1 以降で各ペインのタスクと一緒に足す。
+//! いまはヘッダ・グラフ・ステータスバーだけ。右ペイン（ブランチ / ワーキングツリー）は
+//! 07 のレイアウトどおりに、それぞれのタスクで足す。
 
+use crate::panes;
 use mewgit_core::app::AppState;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 /// 1 フレーム描く。
@@ -23,7 +24,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     .areas(frame.area());
 
     frame.render_widget(header_line(state), header);
-    frame.render_widget(Block::default().borders(Borders::ALL).title("Graph"), body);
+    panes::graph::render(frame, body, state);
     frame.render_widget(status_line(state), status);
 }
 

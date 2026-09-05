@@ -2,7 +2,9 @@
 
 use crate::auth::AccountState;
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
-use crate::git_read::{Commit, DiffTarget, FileDiff, InProgressOp, WorktreeSnapshot};
+use crate::git_read::{
+    DiffTarget, FileDiff, GitReadError, InProgressOp, LogPage, WorktreeSnapshot,
+};
 use crate::github::{Check, GithubError, PullRequest};
 
 use super::{Key, TermSize};
@@ -23,11 +25,10 @@ pub enum Msg {
     Tick,
 
     // git_read
-    LogLoaded {
-        commits: Vec<Commit>,
-        /// これ以上読むコミットが無い。
-        done: bool,
-    },
+    /// ログの 1 ページ。`Result` にしているのは、失敗しても必ずここに来るようにするため。
+    /// 失敗の通り道が無いと `JobKind::LoadLog` が走ったまま残り、以後の `Cmd::LoadLog` が
+    /// 黙って捨てられる。
+    LogLoaded(Result<LogPage, GitReadError>),
     StatusLoaded(WorktreeSnapshot),
     DiffLoaded {
         target: DiffTarget,

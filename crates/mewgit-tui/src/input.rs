@@ -2,9 +2,17 @@
 //!
 //! `Msg` は `mewgit-core` の型なので `From<crossterm::event::Event>` は生やせない
 //! （孤児ルール、かつ不変ルール 6）。変換はこちら側の自由関数で行う。
+//!
+//! ファイル名を `keymap` にしないのは、`config.keymap`（キーとアクションの対応表、
+//! 08 と M6）と紛らわしいため。ここが扱うのは端末イベントの変換だけ。
+//!
+//! crossterm は ratatui の再エクスポート経由で使う。ratatui との間で `Event` や
+//! `KeyEvent` が別クレートの型に割れないようにするため。
 
-use crossterm::event::{Event, KeyCode as CtKeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use mewgit_core::app::{Key, KeyCode, Modifiers, Msg, TermSize};
+use ratatui::crossterm::event::{
+    Event, KeyCode as CtKeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 
 /// 端末イベントを [`Msg`] にする。対応する `Msg` が無いイベントは `None`。
 ///
@@ -21,7 +29,7 @@ pub fn event_to_msg(event: Event) -> Option<Msg> {
 ///
 /// 押下だけを通す。kitty プロトコルが有効な端末では離鍵も飛んでくるので、
 /// フィルタしないと 1 回の打鍵が 2 つの [`Msg::Key`] になる。
-pub fn key_event_to_key(event: KeyEvent) -> Option<Key> {
+fn key_event_to_key(event: KeyEvent) -> Option<Key> {
     if event.kind != KeyEventKind::Press {
         return None;
     }
@@ -61,15 +69,9 @@ pub fn key_event_to_key(event: KeyEvent) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyEventState;
 
     fn press(code: CtKeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent {
-            code,
-            modifiers,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        }
+        KeyEvent::new(code, modifiers)
     }
 
     #[test]
@@ -114,10 +116,11 @@ mod tests {
     #[test]
     fn key_release_is_dropped() {
         // kitty プロトコルが有効な端末では離鍵も飛ぶ。通すと 1 打鍵が 2 回になる。
-        let release = KeyEvent {
-            kind: KeyEventKind::Release,
-            ..press(CtKeyCode::Char('q'), KeyModifiers::NONE)
-        };
+        let release = KeyEvent::new_with_kind(
+            CtKeyCode::Char('q'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
         assert_eq!(key_event_to_key(release), None);
     }
 

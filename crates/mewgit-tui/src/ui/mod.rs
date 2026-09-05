@@ -41,13 +41,22 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
     Paragraph::new(Line::from(spans))
 }
 
-/// ステータスバー。直近の通知があればそれ、無ければキーヒント。
+/// ステータスバー。直近の通知とキーヒントの両方を出す。
+///
+/// 通知で置き換えないのは、起動時の設定警告が 1 件出るとヒントが二度と戻らなくなるため。
 fn status_line(state: &AppState) -> Paragraph<'_> {
-    match state.notices.back() {
-        Some(notice) => Paragraph::new(Line::from(notice.message.clone())),
-        None => Paragraph::new(Line::from("q:quit")),
+    let mut spans = Vec::new();
+    if let Some(notice) = state.notices.back() {
+        spans.push(Span::raw(notice.message.clone()));
+        spans.push(Span::raw("  "));
     }
+    spans.push(Span::raw(HINT));
+
+    Paragraph::new(Line::from(spans))
 }
+
+/// ステータスバー右側の固定ヒント。M6 の `Modal::Help` までの暫定。
+const HINT: &str = "q:quit";
 
 /// リポジトリの表示名。パスの末尾を使い、取れなければパスそのもの。
 fn repo_label(state: &AppState) -> String {
@@ -60,43 +69,38 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mewgit_core::app::{Notice, NoticeLevel, RepoInfo, TermSize};
+    use mewgit_core::app::{NoticeLevel, RepoInfo, TermSize};
+    use mewgit_core::config::Config;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::PathBuf;
 
     /// 描画結果を行ごとの文字列にする。
     ///
-    /// 端末のセル格子をそのまま読むので、全角文字は 2 セル目が空白として残る
-    /// （「新しい通知」→「新 し い 通 知」）。非 ASCII を含む期待値と突き合わせる
-    /// ときは [`without_spaces`] を通すこと。
+    /// `TestBackend` の `Display` を使う。自前でセルを走査すると全角文字の 2 セル目が
+    /// 空白として混ざる（「新しい通知」→「新 し い 通 知」）が、`Display` は
+    /// 幅を見て正しく詰めてくれる。
     fn draw(state: &AppState, size: TermSize) -> Vec<String> {
         let backend = TestBackend::new(size.width, size.height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, state)).unwrap();
 
-        let buffer = terminal.backend().buffer();
-        (0..size.height)
-            .map(|y| {
-                (0..size.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
+        terminal
+            .backend()
+            .to_string()
+            .lines()
+            .map(str::to_string)
             .collect()
     }
 
-    /// 全角文字のセル分割を吸収する。
-    fn without_spaces(s: &str) -> String {
-        s.chars().filter(|c| !c.is_whitespace()).collect()
-    }
-
     fn state_at(path: &str) -> AppState {
-        AppState::new(RepoInfo {
-            path: PathBuf::from(path),
-            ..RepoInfo::default()
-        })
+        AppState::new(
+            RepoInfo {
+                path: PathBuf::from(path),
+                ..RepoInfo::default()
+            },
+            Config::default(),
+        )
     }
 
     #[test]
@@ -114,47 +118,25 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_shows_the_latest_notice() {
+    fn status_bar_shows_the_latest_notice_alongside_the_hint() {
         let mut state = state_at("/repo");
-        state.notices.push_back(Notice {
-            level: NoticeLevel::Warn,
-            message: "古い通知".to_string(),
-            detail: None,
-        });
-        state.notices.push_back(Notice {
-            level: NoticeLevel::Error,
-            message: "新しい通知".to_string(),
-            detail: None,
-        });
+        state.push_notice(NoticeLevel::Warn, "古い通知".to_string(), None);
+        state.push_notice(NoticeLevel::Error, "新しい通知".to_string(), None);
 
         let size = TermSize::default();
         let lines = draw(&state, size);
         let last = &lines[size.height as usize - 1];
-        assert!(
-            without_spaces(last).contains(&without_spaces("新しい通知")),
-            "status: {last:?}"
-        );
-        assert!(!without_spaces(last).contains(&without_spaces("古い通知")));
+
+        assert!(last.contains("新しい通知"), "status: {last:?}");
+        assert!(!last.contains("古い通知"), "status: {last:?}");
+        // 通知が出てもヒントは消えない。消すと二度と戻らない。
+        assert!(last.contains("q:quit"), "status: {last:?}");
     }
 
     #[test]
     fn body_is_drawn_between_header_and_status() {
         let lines = draw(&state_at("/repo"), TermSize::default());
         assert!(lines[1].contains("Graph"), "body: {:?}", lines[1]);
-    }
-
-    #[test]
-    fn renders_at_a_wide_terminal() {
-        // リサイズ後のサイズでも落ちないこと。
-        let lines = draw(
-            &state_at("/repo"),
-            TermSize {
-                width: 120,
-                height: 40,
-            },
-        );
-        assert_eq!(lines.len(), 40);
-        assert!(lines[39].contains("q:quit"));
     }
 
     #[test]
@@ -168,15 +150,15 @@ mod tests {
     }
 
     #[test]
-    fn renders_at_a_narrow_terminal() {
-        let lines = draw(
-            &state_at("/repo"),
-            TermSize {
-                width: 40,
-                height: 10,
-            },
-        );
-        assert_eq!(lines.len(), 10);
-        assert!(lines[0].contains("repo"));
+    fn renders_at_other_terminal_sizes() {
+        // リサイズ後のサイズでも落ちないこと。
+        for (width, height) in [(120, 40), (40, 10)] {
+            let lines = draw(&state_at("/repo"), TermSize { width, height });
+            assert_eq!(lines.len(), height as usize);
+            assert!(lines[0].contains("repo"), "header: {:?}", lines[0]);
+
+            let last = &lines[height as usize - 1];
+            assert!(last.contains("q:quit"), "status: {last:?}");
+        }
     }
 }

@@ -34,6 +34,13 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 
 /// キー入力を `modal` → `focus` の順に振り分ける。
 fn update_key(state: &mut AppState, key: Key) -> Cmd {
+    // Ctrl-C はモーダルより先に見る。raw mode では SIGINT が届かず、モーダル表示中は
+    // `q` が入力文字になる（M2 の CommitMessage）ので、常に効く脱出口が要る。
+    // M3 で実行中ジョブのキャンセルを入れたら、ジョブがあるときはそちらを優先する。
+    if key == Key::ctrl('c') {
+        return Cmd::Quit;
+    }
+
     // モーダル表示中はすべてモーダルが受ける。個々のモーダルの処理は各マイルストーンで。
     if state.modal.is_some() {
         if key == Key::new(KeyCode::Esc) {
@@ -53,9 +60,10 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
 mod tests {
     use super::*;
     use crate::app::{Modal, Pane, RepoInfo, TermSize};
+    use crate::config::Config;
 
     fn state() -> AppState {
-        AppState::new(RepoInfo::default())
+        AppState::new(RepoInfo::default(), Config::default())
     }
 
     #[test]
@@ -69,6 +77,23 @@ mod tests {
         let mut state = state();
         // 終了は修飾なしの `q` だけ。Ctrl-q で落ちると事故になる。
         assert_eq!(update(&mut state, Msg::Key(Key::ctrl('q'))), Cmd::None);
+    }
+
+    #[test]
+    fn ctrl_c_quits() {
+        let mut state = state();
+        assert_eq!(update(&mut state, Msg::Key(Key::ctrl('c'))), Cmd::Quit);
+    }
+
+    #[test]
+    fn ctrl_c_quits_even_with_a_modal_open() {
+        // raw mode では SIGINT が届かず、モーダル中は `q` が入力文字になる。
+        // 常に効く脱出口でないと閉じ込められる。
+        let mut state = AppState {
+            modal: Some(Modal::Help),
+            ..state()
+        };
+        assert_eq!(update(&mut state, Msg::Key(Key::ctrl('c'))), Cmd::Quit);
     }
 
     #[test]

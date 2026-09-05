@@ -51,7 +51,7 @@
 
 ```
 crates/
-  core/src/
+  mewgit-core/src/
     app/        state.rs  msg.rs  update.rs  cmd.rs
     graph/      lane.rs   render.rs
     git_read/   repo.rs   log.rs  diff.rs  status.rs
@@ -59,8 +59,8 @@ crates/
     github/     client.rs pr.rs   checks.rs
     auth/       gh.rs     resolve.rs ssh.rs
     config/     mod.rs
-  tui/src/
-    main.rs   terminal.rs  runtime.rs  keymap.rs
+  mewgit-tui/src/
+    main.rs   runtime.rs  input.rs
     ui/  panes/  modals/
 ```
 

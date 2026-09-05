@@ -5,47 +5,50 @@
 //!
 //! ここは配線だけで、実端末が必要なためテストを書かない（CLAUDE.md の例外）。
 
-mod keymap;
+mod input;
 mod modals;
 mod panes;
 mod runtime;
-mod terminal;
 mod ui;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
-use mewgit_core::app::{AppState, Notice, NoticeLevel, RepoInfo, TermSize};
+use mewgit_core::app::{AppState, NoticeLevel, RepoInfo, TermSize};
 use mewgit_core::config::Config;
+use ratatui::crossterm::event::EventStream;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let (config, warnings) = Config::load();
-    let _ = config; // M1 以降で使う。
 
-    let mut state = AppState::new(RepoInfo {
-        path: repo_path(),
-        ..RepoInfo::default()
-    });
+    let mut state = AppState::new(
+        RepoInfo {
+            path: repo_path(),
+            ..RepoInfo::default()
+        },
+        config,
+    );
 
     // 設定の警告は起動時に見せる。読み込み自体は失敗しない（08 参照）。
     for warning in warnings {
-        state.notices.push_back(Notice {
-            level: NoticeLevel::Warn,
-            message: warning.to_string(),
-            detail: None,
-        });
+        state.push_notice(NoticeLevel::Warn, warning.to_string(), None);
     }
+
+    // raw mode / 代替画面 / パニックフックは ratatui が持っている。
+    let mut terminal = ratatui::try_init()?;
 
     // 起動時に Resize は飛んでこないので、初期サイズは自分で取る。
-    if let Ok((width, height)) = crossterm::terminal::size() {
-        state.term = TermSize { width, height };
+    if let Ok(size) = terminal.size() {
+        state.term = TermSize {
+            width: size.width,
+            height: size.height,
+        };
     }
 
-    let mut term = terminal::init()?;
-    let result = runtime::run(&mut term, &mut state).await;
-    // ループが Err で抜けても端末は必ず戻す。
-    terminal::restore()?;
+    let result = runtime::run(&mut terminal, EventStream::new(), &mut state).await;
+    // restore は () を返すので、ループのエラーを後始末のエラーで踏み潰さない。
+    ratatui::restore();
     result
 }
 

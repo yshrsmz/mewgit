@@ -21,6 +21,7 @@ pub struct AppState {
     pub jobs: JobTracker,             // 実行中の非同期タスク（表示用）
     pub notices: VecDeque<Notice>,    // エラー・情報のトースト
     pub term: TermSize,               // 端末サイズ。レイアウト分岐に使う
+    pub config: Config,               // 起動時に確定。実行中は再読込しない（08）
 }
 ```
 
@@ -31,7 +32,12 @@ host / owner / repo は `RepoInfo.target: Option<RepoTarget>` に入れる。下
 `host` / `owner` / `repo` の 3 つを受ける）。
 
 `AppState` に `Default` は付けない。リポジトリの無い `AppState` を表現可能にしないため。
-入口は `AppState::new(repo: RepoInfo)` の 1 つ。サブ状態の `Default` は残す。
+入口は `AppState::new(repo: RepoInfo, config: Config)` の 1 つ。サブ状態の `Default` は残す。
+
+`Config` は `AppState` が持つ。`ui` は `theme` を、`update` は `keymap` と
+`graph.page_size` を、ランタイムは `general.git_bin` を読む。`ui` が触れるのは
+`AppState` 経由だけ（不変ルール 2）なので、ランタイム側の依存として別に持つと
+`theme` を渡す経路が無くなる。
 
 `diff` は `worktree` の下ではなく最上位に置く。`Pane::Diff` は独立したペインで、
 グラフで選んだコミットの diff もここに入る。何の diff かは `DiffView.target` が示す。
@@ -47,6 +53,21 @@ pub struct DiffView {
 `Vec<Hunk>` に平坦化しない。`GitOp::StageHunk { path, patch }` に渡す `path` を
 復元できなくなるうえ、`DiffTarget` の `path` は全変種で `Option` なので複数ファイルに
 またがる diff（コミット詳細）が普通に起きる。
+
+## 通知
+
+```rust
+impl AppState {
+    /// 通知を積む。上限を超えた分は古いものから捨てる。
+    pub fn push_notice(&mut self, level: NoticeLevel, message: String, detail: Option<String>);
+}
+```
+
+- 生産者は `update` とランタイムの両方。組み立てを 1 箇所に寄せ、上限もそこで効かせる
+- 上限は 100 件。`ui` は最新の 1 件しか読まないが、履歴表示（M6）まで残しておく
+- ステータスバーは**最新の通知とキーヒントの両方**を出す（07）。通知で置き換えると、
+  起動時の設定警告 1 件でヒントが二度と戻らなくなる
+- 明示的な dismiss と期限切れは M6 のステータスバーのタスクで決める
 
 ## Pane と Modal
 
@@ -223,28 +244,52 @@ pub enum Cmd {
 loop {
     terminal.draw(|f| ui::render(f, &state))?;
     let msg = tokio::select! {
-        Some(Ok(ev)) = term_events.next() => match event_to_msg(ev) { Some(m) => m, None => continue },
-        Some(m) = rx.recv() => m,
+        Some(ev) = events.next() => match event_to_msg(ev?) { Some(m) => m, None => continue },
         _ = tick.tick() => Msg::Tick,
     };
     let cmd = app::update(&mut state, msg);
-    if runtime.dispatch(&mut state, cmd, tx.clone()).is_break() {
-        break;
+    if dispatch(&mut state, cmd).is_break() {
+        return Ok(());
     }
 }
 ```
 
-- `event_to_msg` は `Option<Msg>`。マウス・フォーカス・ペーストは対応する `Msg` が無いので落とす
+`run` は `Backend` とイベントストリームをジェネリックに取る。`TestBackend` と
+`futures::stream::iter` を渡してループ全体をテストできるようにするため。テストを
+書かない例外は端末の raw mode 切替・復元と `main.rs` の配線だけ（CLAUDE.md）。
+
+非同期タスクが `Msg` を返す mpsc チャネルは、最初の非同期 `Cmd` を実装する M1 で
+`select!` に足す。今は送り手がいないので置かない。
+
+- `event_to_msg` は `Option<Msg>`。マウス・フォーカス・ペーストは対応する `Msg` が無いので落とす。
+  実装は `mewgit-tui/src/input.rs`（`keymap` の名前は 08 のキーバインド設定に取っておく）
+- ストリームのエラーは握りつぶさず `?` で上げる（不変ルール 4）
 - キー変換は押下（`KeyEventKind::Press`）だけを通す。kitty プロトコルが有効な端末では
   離鍵も飛んでくるため、1 回の打鍵が 2 つの `Msg::Key` になる
 - `dispatch` は `ControlFlow` を返す。`Cmd::Quit` で `Break`、`Cmd::Batch` は再帰する
+- `dispatch` の `match` でも `_` を使わず全 `Cmd` 変種を列挙する。`update` / `Cmd::job_kind`
+  と同じ理由で、変種を足したときに実装漏れをコンパイルエラーにするため
 - 未実装の `Cmd` は黙って捨てず `Notice::Warn` に積む。開発中に落ちているのが見えるように
+- **`dispatch` が `AppState` に書いてよいのは `notices` だけ。** それ以外の状態変化は
+  `Msg` にして `update` に戻す。状態遷移の入口を `update` 1 つに保つため
 - 初期の端末サイズは `crossterm::terminal::size()` で取る。起動時に `Resize` は飛んでこない
 - Git CLI 実行中も入力を受け付けるが、書き込み系 `GitOp` は同時に 1 つのみ（キュー）
 - `Tick` は 250ms。進行中ジョブのスピナー更新と、外部変更検知（`.git/HEAD` の mtime 監視）に使う
 
 ## 端末の初期化と復元
 
-raw mode と代替画面の切替は `mewgit-tui` の担当。パニックフックで復元してから既定の
-フックに渡す。順序を逆にすると、パニックメッセージが raw mode の代替画面に出て読めない。
-イベントループが `Err` で抜けた場合も復元する。
+`ratatui::try_init()` / `ratatui::restore()` に委譲する。raw mode の有効化、代替画面への
+切替、復元してから既定のフックに渡すパニックフックの設置まで含めて ratatui が持っている
+（自前で書くと復元順を間違えやすい。raw mode を先に落とすのが正しい）。
+
+イベントループが `Err` で抜けた場合も復元する。`restore()` は `()` を返すので、
+ループのエラーを後始末のエラーで踏み潰すことがない。
+
+## 終了経路
+
+- `q`（修飾なし）で終了。モーダル表示中は入力文字なので終了しない
+- `Ctrl-C` でも終了する。raw mode では SIGINT が届かず、モーダルで `q` が入力文字に
+  なる（M2 の `CommitMessage`）ため、常に効く脱出口が要る。モーダルより先に判定する
+- M3 で実行中ジョブのキャンセルを入れるときは、ジョブがあれば `Ctrl-C` はキャンセルを
+  優先し、無いときだけ終了する
+- 編集中のモーダルを `Ctrl-C` で捨てる際の確認は M2 の commit タスクで判断する

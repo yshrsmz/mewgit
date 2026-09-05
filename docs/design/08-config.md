@@ -6,6 +6,11 @@
 - 状態・ログ: `$XDG_STATE_HOME/mewgit/`
 - リポジトリ固有: `.git/config` の `[mewgit]` セクション
 
+macOS でも XDG のパスを使う。`directories` の `config_dir()` は macOS で
+`~/Library/Application Support` を返すため、パス決定にはこのクレートを使わず、
+`XDG_CONFIG_HOME` → `$HOME/.config` の順で自前に組み立てる。ホームディレクトリの
+取得にだけ `directories::BaseDirs` を使う。
+
 ## config.toml
 
 ```toml
@@ -62,10 +67,15 @@ git config mewgit.user taro_acme
 
 `Config` は起動時に確定し、実行中の再読込は MVP では行わない。
 
+1・2 は `config` モジュールの責務。3 はリポジトリのパスを必要とし、値としても
+`mewgit.user` しか読まないため `auth::resolve`（04）が `Config` とは別に読む。
+4 は `Config::load()` が 2 の直後に適用する。`Config` 自身は `.git/config` を見ない。
+MVP で見る環境変数は `MEWGIT_GIT_BIN` と `MEWGIT_GH_BIN` の 2 つ。
+
 ## 構造体
 
 ```rust
-#[derive(Deserialize, Default)]
+#[derive(Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub general: General,
@@ -77,13 +87,62 @@ pub struct Config {
 }
 
 impl Config {
+    /// 既定のパスから読む。ファイルが無ければ既定値。
     pub fn load() -> (Config, Vec<ConfigWarning>);
+    /// 指定パスから読む。テストと `--config` 用。
+    pub fn load_from(path: &Path) -> (Config, Vec<ConfigWarning>);
+    /// TOML 文字列から読む。純粋関数。glob のコンパイルまで済ませる。
+    pub fn from_toml_str(s: &str) -> (Config, Vec<ConfigWarning>);
+
     pub fn account_for(&self, host: &str, owner: &str, repo: &str) -> Option<&str>;
 }
+
+#[derive(Deserialize)]
+pub struct RepoRule {
+    #[serde(rename = "match")]
+    pub pattern: String,
+    pub user: String,
+    /// `load` 時にコンパイルする。不正な glob なら `None`。
+    #[serde(skip)]
+    matcher: Option<GlobMatcher>,
+}
+
+/// 環境変数から設定ファイルのパスを組み立てる純粋関数。
+pub fn config_path(xdg_config_home: Option<&Path>, home: &Path) -> PathBuf;
 ```
+
+`Default` は `General` / `Graph` / `Github` / `Theme` に手で実装する（`Config` 自体は
+サブ構造体の `Default` を呼ぶだけなので derive でよい）。`derive(Default)` ではゼロ値になり、
+上記の既定値（`git_bin = "git"`、`page_size = 300`、`github.enabled = true` など）と
+食い違うため。各フィールドに `#[serde(default)]` を付け、部分的な TOML でも
+書かれていない項目が既定値のまま残るようにする。
+
+## エラーとしない扱い
+
+`Config` の読み込みは失敗しない。問題は `ConfigWarning` として返し、起動時に
+notice として表示したうえで既定値で継続する。
+
+| 状況 | 挙動 |
+|---|---|
+| ファイルが無い | 既定値。警告なし |
+| 読み取り失敗（権限など） | 既定値 + `Io` |
+| TOML パースエラー | 既定値 + `Parse`（他の項目も採用しない） |
+| `[[repos]]` の glob 不正 | そのルールだけ捨てて `InvalidGlob` |
+| ホームディレクトリ不明 | 既定値 + `NoConfigDir` |
+
+## アカウント解決（`[[repos]]`）
+
+- マッチ対象の文字列は `"{host}/{owner}/{repo}"`
+- glob は `globset`。`*` は `/` を跨がない（`literal_separator = true`）
+- **先に書いたルールが勝つ**。複数マッチしても最初の 1 件を返す
+- glob は読み込み時に 1 度だけコンパイルして `RepoRule` に保持する（`account_for` では再コンパイルしない）
+- 知らないキーはエラーにせず無視する。`deny_unknown_fields` は使わない（設定ファイルの
+  1 行のタイポで全項目が既定値に落ちるのを避ける）
 
 ## キーマップの解決
 
+- `config` は `keymap` を `HashMap<String, String>` のまま保持する。`KeyEvent` への
+  変換は crossterm に依存するため `mewgit-tui` 側の `keymap.rs` で行う（core は UI 非依存）
 - `keymap` の値は `crossterm` の `KeyEvent` に変換（`"ctrl-d"`, `"shift-tab"`, `"P"` などを解析）
 - 同一ペイン内で衝突があれば起動時に警告し、後勝ちにする
 - 未定義のアクション名も警告のみ

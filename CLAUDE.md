@@ -69,6 +69,17 @@ CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace -
 - コミットメッセージ: Conventional Commits（`feat(graph): ...`、`fix(git_exec): ...`）。scope はモジュール名
 - `docs/plan.md` のタスクを完了したらチェックを付けて同じコミットに含める
 
+### PR を作る前に
+
+`gh pr create` の前に、CI 相当のチェックに加えて必ずこの順で実行する。
+
+1. `/simplify` — 重複・冗長・不要な抽象を削る。指摘の適用まで含む
+2. `/code-review medium` — バグを探す。指摘があれば直してから次へ
+3. 修正が出たら CI 相当のチェックを流し直し、別コミットとして積む（amend しない）
+
+どちらも指摘ゼロなら何もコミットせずに PR へ進む。レビュー指摘に「直さない」判断をした
+場合は、その理由を PR 本文に書く。
+
 ## やらないこと
 
 - Windows 対応（MVP 外）

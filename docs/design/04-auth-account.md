@@ -33,7 +33,7 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String>   // ssh -G alias �
 
 - リモート URL を `RemoteUrl { scheme, host_raw, owner, repo }` に解析（`git@alias:owner/repo.git`、`ssh://git@alias/owner/repo`、`https://host/owner/repo` に対応）
 - scheme が ssh のときのみ `ssh -G` を実行し、`hostname` 行を実ホストとする
-- 結果は `app` が `RepoInfo.host` として保持する（例: `github.com`、`acme.ghe.com`）
+- 結果は `app` が `RepoInfo.target.host` として保持する（例: `github.com`、`acme.ghe.com`）
 - `ssh` が無い、または解決失敗なら `host_raw` をそのまま使い、通知に出す
 
 ## アカウント解決

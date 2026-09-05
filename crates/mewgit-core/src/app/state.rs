@@ -8,20 +8,26 @@ use std::path::PathBuf;
 use crate::auth::{AccountState, GhLogin, RepoTarget};
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
-    Branch, Commit, DiffTarget, HeadInfo, Hunk, InProgressOp, Remote, StashEntry, WorktreeSnapshot,
+    Branch, Commit, DiffTarget, FileDiff, HeadInfo, InProgressOp, Remote, StashEntry,
+    WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{Check, PullRequest};
 use crate::graph::{GraphRow, LaneState};
 
-use super::Msg;
+use super::Cmd;
 
 /// アプリ全体の状態。
-#[derive(Debug, Default)]
+///
+/// `Default` は付けない。リポジトリの無い `AppState` を表現可能にしないため。
+#[derive(Debug)]
 pub struct AppState {
     pub repo: RepoInfo,
     pub account: AccountState,
     pub graph: GraphState,
     pub worktree: WorktreeState,
+    /// 表示中の diff。`worktree` の下ではなく最上位に置く。`Pane::Diff` は独立した
+    /// ペインで、グラフで選んだコミットの diff もここに入るため。
+    pub diff: Option<DiffView>,
     pub branches: BranchState,
     pub stashes: Vec<StashEntry>,
     pub prs: PrState,
@@ -33,11 +39,33 @@ pub struct AppState {
     pub term: TermSize,
 }
 
+impl AppState {
+    /// 開いたリポジトリから初期状態を作る。
+    pub fn new(repo: RepoInfo) -> Self {
+        Self {
+            repo,
+            account: AccountState::default(),
+            graph: GraphState::default(),
+            worktree: WorktreeState::default(),
+            diff: None,
+            branches: BranchState::default(),
+            stashes: Vec::new(),
+            prs: PrState::default(),
+            progress: None,
+            focus: Pane::default(),
+            modal: None,
+            jobs: JobTracker::default(),
+            notices: VecDeque::new(),
+            term: TermSize::default(),
+        }
+    }
+}
+
 /// 開いているリポジトリ。
 ///
 /// `git_read`（パス・リモート）と `auth`（ホスト名の正規化）の両方から組み立てるため、
 /// どちらか一方の層ではなく `app` が持つ。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct RepoInfo {
     /// ワークツリーのルート。
     pub path: PathBuf,
@@ -78,10 +106,11 @@ pub enum Pane {
 /// グラフペインの状態。
 #[derive(Debug, Default)]
 pub struct GraphState {
-    pub commits: Vec<Commit>,
-    /// 行ごとのレーン情報と、その行を処理した直後の `LaneState`。
-    /// 追加ページは末尾の `LaneState` から計算を再開する（06 参照）。
-    pub rows: Vec<(GraphRow, LaneState)>,
+    /// 表示行。コミットとレーン情報を 1 本にまとめ、添字のずれを型で消す。
+    pub lines: Vec<GraphLine>,
+    /// 末尾行を処理した直後のレーン状態。追加ページはここから計算を再開する（06 参照）。
+    /// 行ごとに持たないのは、途中の行の `LaneState` を読む場面が無いため。
+    pub lanes: LaneState,
     pub cursor: usize,
     pub scroll: usize,
     /// 選択コミットの詳細を展開しているか。
@@ -90,33 +119,35 @@ pub struct GraphState {
     pub loaded_all: bool,
 }
 
-/// ワーキングツリーペインと diff ペインの状態。
+/// グラフの 1 行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLine {
+    pub commit: Commit,
+    pub row: GraphRow,
+}
+
+/// ワーキングツリーペインの状態。diff は [`AppState::diff`] にある。
 #[derive(Debug, Default)]
 pub struct WorktreeState {
     pub snapshot: WorktreeSnapshot,
     pub section: WorktreeSection,
     pub cursor: usize,
-    /// 選択中ファイルの diff。未取得なら `None`。
-    pub diff: Option<DiffView>,
 }
 
-/// ワーキングツリーペインのどの区画を見ているか。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum WorktreeSection {
-    Staged,
-    #[default]
-    Unstaged,
-    Untracked,
-    Conflicted,
-}
-
-/// 表示中の diff。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 表示中の diff。何の diff かは `target` が示す。
+#[derive(Debug, PartialEq, Eq)]
 pub struct DiffView {
     pub target: DiffTarget,
-    pub hunks: Vec<Hunk>,
-    /// ハンク単位のカーソル。
-    pub cursor: usize,
+    /// ファイル単位で持つ。平坦化すると `GitOp::StageHunk` に渡す `path` を失う。
+    pub files: Vec<FileDiff>,
+    pub cursor: DiffCursor,
+}
+
+/// diff ペインのカーソル。ファイルとその中のハンクを指す。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffCursor {
+    pub file: usize,
+    pub hunk: usize,
 }
 
 /// ブランチペインの状態。
@@ -131,9 +162,10 @@ pub struct BranchState {
 pub struct PrState {
     /// 現在のブランチに対応する PR。
     pub current: Option<PullRequest>,
-    /// 一覧タブの中身。
+    /// 一覧タブの中身。各行のバッジには `PullRequest.checks`（集計）を使う。
     pub list: Vec<PullRequest>,
-    /// `current` のチェック一覧。
+    /// `current` のチェック一覧。空でなければ `current.checks`（集計）より優先する。
+    /// 一覧が取れているならそちらが新しいため。
     pub checks: Vec<Check>,
     pub cursor: usize,
 }
@@ -141,18 +173,52 @@ pub struct PrState {
 /// 実行中の非同期タスク。スピナー表示と `Cmd` の重複発行防止に使う。
 #[derive(Debug, Default)]
 pub struct JobTracker {
-    pub running: Vec<Job>,
+    running: Vec<Job>,
+}
+
+impl JobTracker {
+    /// この種別のタスクが動いているか。同種の `Cmd` を二重に投げないための判定。
+    pub fn is_running(&self, kind: JobKind) -> bool {
+        self.running.iter().any(|job| job.kind == kind)
+    }
+
+    /// 開始を記録する。同種が既に動いていれば何もせず `false` を返す。
+    pub fn start(&mut self, job: Job) -> bool {
+        if self.is_running(job.kind) {
+            return false;
+        }
+        self.running.push(job);
+        true
+    }
+
+    /// 完了を記録する。
+    pub fn finish(&mut self, kind: JobKind) {
+        self.running.retain(|job| job.kind != kind);
+    }
+
+    /// 表示用。実行中のタスクを登録順に返す。
+    pub fn iter(&self) -> impl Iterator<Item = &Job> {
+        self.running.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.running.is_empty()
+    }
 }
 
 /// 実行中のタスク 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
     pub kind: JobKind,
-    /// ステータスバーに出す短い説明（例: `fetch`）。
+    /// ステータスバーに出す短い説明。`Exec` 以外は種別から決まるが、`Exec` だけは
+    /// `GitOp` によって変わる（`fetch` / `push` など）ので値として持つ。
     pub label: String,
 }
 
-/// タスクの種類。同種のものを二重に投げないための識別子。
+/// タスクの種類。`Cmd` の変種と 1 対 1 で、対応は [`Cmd::job_kind`] が持つ。
+///
+/// 粒度は種別単位なので、別ファイルの `LoadDiff` 同士は同一視される。対象まで含めた
+/// 同一性が要るかは M1 で `LoadDiff` を実装するときに判断する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
     LoadLog,
@@ -182,19 +248,24 @@ pub enum NoticeLevel {
 }
 
 /// モーダル。表示中はキー入力をすべてモーダルが受ける。
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
-    /// 破壊的操作の確認。`on_yes` は `state.modal.take()` でムーブして取り出す。
+    /// 破壊的操作の確認。
+    ///
+    /// `on_yes` が `Msg` ではなく `Cmd` なのは、破壊的操作がすべて
+    /// `Cmd::Exec(GitOp)` で表せるため。`Msg` を入力イベントと非同期完了だけの
+    /// 語彙に保つ。
     Confirm {
         title: String,
         body: String,
-        on_yes: Box<Msg>,
+        on_yes: Cmd,
     },
+    /// 1 行入力。確定後に何をするかは [`InputIntent`] がデータとして持つ。
     Input {
         title: String,
         prompt: String,
         buf: TextBuffer,
-        on_submit: fn(String) -> Msg,
+        intent: InputIntent,
     },
     CommitMessage {
         buf: TextBuffer,
@@ -217,6 +288,22 @@ pub enum Modal {
     Help,
 }
 
+/// [`Modal::Input`] の確定後に何をするか。
+///
+/// コールバック（`fn(String) -> Msg`）にしないのは、`fn` ポインタが環境を
+/// キャプチャできず、`BranchRename` の `from` のような文脈を運べないため。
+/// データで持つことで [`Modal`] が `PartialEq` を保て、遷移をテストできる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputIntent {
+    BranchCreate {
+        start: Option<String>,
+        checkout: bool,
+    },
+    BranchRename {
+        from: String,
+    },
+}
+
 /// 複数行の編集バッファ。
 ///
 /// ratatui のウィジェットや `tui-textarea` は状態に持たない（core が UI に依存するため）。
@@ -229,12 +316,9 @@ pub struct TextBuffer {
 }
 
 impl Default for TextBuffer {
+    /// 空でも 1 行はある。cursor が指す行が常に存在するようにするため。
     fn default() -> Self {
-        // 空でも 1 行はある。cursor が指す行が常に存在するようにするため。
-        Self {
-            lines: vec![String::new()],
-            cursor: (0, 0),
-        }
+        Self::from_text("")
     }
 }
 
@@ -253,5 +337,74 @@ impl TextBuffer {
     /// 改行で連結して 1 つの文字列にする。
     pub fn text(&self) -> String {
         self.lines.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_buffer_round_trips() {
+        let buf = TextBuffer::from_text("first\nsecond");
+        assert_eq!(buf.lines, ["first", "second"]);
+        assert_eq!(buf.cursor, (1, 6));
+        assert_eq!(buf.text(), "first\nsecond");
+    }
+
+    #[test]
+    fn default_text_buffer_has_one_empty_line() {
+        // cursor が指す行が必ず存在する必要がある。
+        let buf = TextBuffer::default();
+        assert_eq!(buf.lines, [""]);
+        assert_eq!(buf.cursor, (0, 0));
+        assert_eq!(buf.text(), "");
+    }
+
+    fn job(kind: JobKind) -> Job {
+        Job {
+            kind,
+            label: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn job_tracker_rejects_a_second_job_of_the_same_kind() {
+        let mut jobs = JobTracker::default();
+        assert!(jobs.is_empty());
+
+        assert!(jobs.start(job(JobKind::LoadStatus)));
+        assert!(jobs.is_running(JobKind::LoadStatus));
+        // 同種の Cmd を二重に投げないための判定。
+        assert!(!jobs.start(job(JobKind::LoadStatus)));
+        assert_eq!(jobs.iter().count(), 1);
+    }
+
+    #[test]
+    fn job_tracker_allows_different_kinds() {
+        let mut jobs = JobTracker::default();
+        assert!(jobs.start(job(JobKind::LoadStatus)));
+        assert!(jobs.start(job(JobKind::FetchPr)));
+        assert_eq!(jobs.iter().count(), 2);
+    }
+
+    #[test]
+    fn job_tracker_finish_makes_room_again() {
+        let mut jobs = JobTracker::default();
+        jobs.start(job(JobKind::LoadLog));
+
+        jobs.finish(JobKind::LoadLog);
+        assert!(!jobs.is_running(JobKind::LoadLog));
+        assert!(jobs.is_empty());
+        assert!(jobs.start(job(JobKind::LoadLog)));
+    }
+
+    #[test]
+    fn finishing_an_idle_kind_is_a_no_op() {
+        let mut jobs = JobTracker::default();
+        jobs.start(job(JobKind::LoadLog));
+
+        jobs.finish(JobKind::FetchPr);
+        assert!(jobs.is_running(JobKind::LoadLog));
     }
 }

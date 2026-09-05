@@ -23,7 +23,7 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::LogLoaded { .. } => Cmd::None,
         Msg::StatusLoaded(_) => Cmd::None,
         Msg::DiffLoaded { .. } => Cmd::None,
-        Msg::ExecFinished { .. } => Cmd::None,
+        Msg::ExecFinished(_) => Cmd::None,
         Msg::ProgressDetected(_) => Cmd::None,
         Msg::AccountResolved(_) => Cmd::None,
         Msg::PrLoaded(_) => Cmd::None,
@@ -36,13 +36,13 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 fn update_key(state: &mut AppState, key: Key) -> Cmd {
     // モーダル表示中はすべてモーダルが受ける。個々のモーダルの処理は各マイルストーンで。
     if state.modal.is_some() {
-        if key.code == KeyCode::Esc {
+        if key == Key::new(KeyCode::Esc) {
             state.modal = None;
         }
         return Cmd::None;
     }
 
-    if key.is_char('q') {
+    if key == Key::char('q') {
         return Cmd::Quit;
     }
 
@@ -52,24 +52,28 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Modal, Pane, TermSize, TextBuffer};
+    use crate::app::{Modal, Pane, RepoInfo, TermSize};
+
+    fn state() -> AppState {
+        AppState::new(RepoInfo::default())
+    }
 
     #[test]
     fn q_quits() {
-        let mut state = AppState::default();
+        let mut state = state();
         assert_eq!(update(&mut state, Msg::Key(Key::char('q'))), Cmd::Quit);
     }
 
     #[test]
     fn ctrl_q_does_not_quit() {
-        let mut state = AppState::default();
-        // `is_char` は修飾なしのみを見る。Ctrl-q で落ちると事故になる。
+        let mut state = state();
+        // 終了は修飾なしの `q` だけ。Ctrl-q で落ちると事故になる。
         assert_eq!(update(&mut state, Msg::Key(Key::ctrl('q'))), Cmd::None);
     }
 
     #[test]
     fn unhandled_key_does_nothing() {
-        let mut state = AppState::default();
+        let mut state = state();
         assert_eq!(update(&mut state, Msg::Key(Key::char('z'))), Cmd::None);
         assert_eq!(state.focus, Pane::Graph);
         assert!(state.modal.is_none());
@@ -79,7 +83,7 @@ mod tests {
     fn esc_closes_the_modal() {
         let mut state = AppState {
             modal: Some(Modal::Help),
-            ..AppState::default()
+            ..state()
         };
 
         assert_eq!(
@@ -93,17 +97,17 @@ mod tests {
     fn modal_swallows_other_keys() {
         let mut state = AppState {
             modal: Some(Modal::Help),
-            ..AppState::default()
+            ..state()
         };
 
         // モーダル表示中の `q` は終了ではない。入力中に閉じられると困る。
         assert_eq!(update(&mut state, Msg::Key(Key::char('q'))), Cmd::None);
-        assert!(state.modal.is_some());
+        assert_eq!(state.modal, Some(Modal::Help));
     }
 
     #[test]
     fn resize_updates_the_terminal_size() {
-        let mut state = AppState::default();
+        let mut state = state();
         let size = TermSize {
             width: 120,
             height: 40,
@@ -115,35 +119,7 @@ mod tests {
 
     #[test]
     fn tick_does_nothing_yet() {
-        let mut state = AppState::default();
+        let mut state = state();
         assert_eq!(update(&mut state, Msg::Tick), Cmd::None);
-    }
-
-    #[test]
-    fn text_buffer_round_trips() {
-        let buf = TextBuffer::from_text("first\nsecond");
-        assert_eq!(buf.lines, ["first", "second"]);
-        assert_eq!(buf.cursor, (1, 6));
-        assert_eq!(buf.text(), "first\nsecond");
-    }
-
-    #[test]
-    fn default_text_buffer_has_one_empty_line() {
-        // cursor が指す行が必ず存在する必要がある。
-        let buf = TextBuffer::default();
-        assert_eq!(buf.lines, [""]);
-        assert_eq!(buf.cursor, (0, 0));
-        assert_eq!(buf.text(), "");
-    }
-
-    #[test]
-    fn batch_flattens_empty_and_single() {
-        assert_eq!(Cmd::batch([]), Cmd::None);
-        assert_eq!(Cmd::batch([Cmd::None, Cmd::None]), Cmd::None);
-        assert_eq!(Cmd::batch([Cmd::LoadStatus]), Cmd::LoadStatus);
-        assert_eq!(
-            Cmd::batch([Cmd::LoadStatus, Cmd::None, Cmd::Quit]),
-            Cmd::Batch(vec![Cmd::LoadStatus, Cmd::Quit])
-        );
     }
 }

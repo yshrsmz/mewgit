@@ -10,7 +10,8 @@ pub struct AppState {
     pub repo: RepoInfo,               // パス、リモート一覧、正規化済みホスト
     pub account: AccountState,        // Resolved(login, host) | Degraded(reason) | Resolving
     pub graph: GraphState,            // 読込済みコミット、レーン、選択位置、スクロール
-    pub worktree: WorktreeState,      // staged / unstaged / untracked、選択、ハンク
+    pub worktree: WorktreeState,      // staged / unstaged / untracked と選択
+    pub diff: Option<DiffView>,       // 表示中の diff。target が何の diff かを示す
     pub branches: BranchState,
     pub stashes: Vec<StashEntry>,
     pub prs: PrState,                 // 現ブランチ PR、一覧、チェック
@@ -24,9 +25,28 @@ pub struct AppState {
 ```
 
 `RepoInfo` は `app` が組み立てる。パスとリモート一覧は `git_read`、ホスト名の正規化は
-`auth`（`ssh -G`）から来るため、どちらか一方の層には置けない。下位層に `RepoInfo` を
-渡さない（`auth::resolve` は `auth::RepoTarget`、`config::account_for` は
+`auth`（`ssh -G`）から来るため、どちらか一方の層には置けない。正規化済みの
+host / owner / repo は `RepoInfo.target: Option<RepoTarget>` に入れる。下位層に
+`RepoInfo` を渡さない（`auth::resolve` は `auth::RepoTarget`、`config::account_for` は
 `host` / `owner` / `repo` の 3 つを受ける）。
+
+`AppState` に `Default` は付けない。リポジトリの無い `AppState` を表現可能にしないため。
+入口は `AppState::new(repo: RepoInfo)` の 1 つ。サブ状態の `Default` は残す。
+
+`diff` は `worktree` の下ではなく最上位に置く。`Pane::Diff` は独立したペインで、
+グラフで選んだコミットの diff もここに入る。何の diff かは `DiffView.target` が示す。
+
+```rust
+pub struct DiffView {
+    pub target: DiffTarget,
+    pub files: Vec<FileDiff>,       // 02 の diff() の戻り値そのまま
+    pub cursor: DiffCursor,         // (ファイル, ハンク)
+}
+```
+
+`Vec<Hunk>` に平坦化しない。`GitOp::StageHunk { path, patch }` に渡す `path` を
+復元できなくなるうえ、`DiffTarget` の `path` は全変種で `Option` なので複数ファイルに
+またがる diff（コミット詳細）が普通に起きる。
 
 ## Pane と Modal
 
@@ -37,8 +57,8 @@ pub struct AppState {
 pub enum Pane { Graph, Branches, Stash, Prs, Worktree, Diff }
 
 pub enum Modal {
-    Confirm { title: String, body: String, on_yes: Box<Msg> },
-    Input { title: String, prompt: String, buf: TextBuffer, on_submit: fn(String) -> Msg },
+    Confirm { title: String, body: String, on_yes: Cmd },
+    Input { title: String, prompt: String, buf: TextBuffer, intent: InputIntent },
     CommitMessage { buf: TextBuffer, amend: bool },
     RebaseEditor { plan: RebasePlan, cursor: usize },
     PrCreate { title: TextBuffer, body: TextBuffer, base: String, draft: bool },
@@ -47,6 +67,23 @@ pub enum Modal {
 }
 ```
 
+`Confirm` の `on_yes` は `Msg` ではなく `Cmd`。破壊的操作（force push、`branch -D`、
+discard、abort 系）はすべて `Cmd::Exec(GitOp)` で表せるので、専用の `Msg` 変種を
+作る必要がない。`Msg` は入力イベントと非同期完了だけの語彙に保つ。
+
+`Input` はコールバック（`fn(String) -> Msg`）ではなく `InputIntent` というデータを持つ。
+`fn` ポインタは環境をキャプチャできず、`BranchRename` の `from` のような文脈を運べないため。
+
+```rust
+pub enum InputIntent {
+    BranchCreate { start: Option<String>, checkout: bool },
+    BranchRename { from: String },
+}
+```
+
+変種は必要になったマイルストーンで足す。データで持つことで `Modal` が
+`PartialEq` を保て、モーダル遷移のテストが書ける。
+
 `TextBuffer` は複数行の編集バッファ。ratatui のウィジェットや `tui-textarea` は
 使わない（core が UI に依存してしまうため）。編集操作の実装は M2 の commit タスクで行う。
 
@@ -54,13 +91,56 @@ pub enum Modal {
 pub struct TextBuffer { pub lines: Vec<String>, pub cursor: (usize, usize) }  // (行, 列)
 ```
 
+## グラフの行
+
+`commits` と `rows` を添字で対応させる並行配列にしない。ずれを型で消すため 1 本にする。
+
+```rust
+pub struct GraphState {
+    pub lines: Vec<GraphLine>,
+    pub lanes: LaneState,       // 末尾行の直後の状態。追加ページはここから再開（06）
+    pub cursor: usize,
+    pub scroll: usize,
+    pub expanded: bool,
+    pub loaded_all: bool,
+}
+
+pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
+```
+
+## 実行中ジョブ
+
+`JobKind` は `Cmd` の変種と 1 対 1 なので、列挙を二重に持たず `Cmd` を単一の真実にする。
+
+```rust
+impl Cmd {
+    /// この `Cmd` が生む非同期ジョブの種別。`None` / `Batch` / `Quit` は `None`。
+    pub fn job_kind(&self) -> Option<JobKind>;
+}
+```
+
+網羅 `match` で書くので、`Cmd` に変種を足したら実装漏れがコンパイルエラーになる。
+
 ## キー入力
 
 crossterm の `KeyEvent` は core に入れられないので、core 側に等価な型を持つ。
 `crossterm::event::KeyEvent → app::Key` の変換は `mewgit-tui` 側で行う。
 
+フィールドは非公開にし、コンストラクタを唯一の入口にする。`KeyCode::Char` のときに
+`mods.shift` を落として正規化するため。crossterm は `P` に `SHIFT` を立てて渡してくるので、
+正規化しないと `Key` の `Eq` / `Hash` が壊れ、`keymap`（08、M6）の引き当てが静かに外れる。
+
 ```rust
-pub struct Key { pub code: KeyCode, pub mods: Modifiers }
+pub struct Key { code: KeyCode, mods: Modifiers }
+
+impl Key {
+    pub fn with_mods(code: KeyCode, mods: Modifiers) -> Self;   // ここで正規化
+    pub fn new(code: KeyCode) -> Self;
+    pub fn char(c: char) -> Self;
+    pub fn ctrl(c: char) -> Self;
+    pub fn code(&self) -> KeyCode;
+    pub fn mods(&self) -> Modifiers;
+}
 
 pub enum KeyCode {
     Char(char), Enter, Esc, Tab, BackTab, Backspace, Delete, Insert,
@@ -72,7 +152,8 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 
 `Char` は crossterm と同様、shift 適用後の文字を入れる（`P` は
 `Char('P')` であって `Char('p') + shift` ではない）。`mods.shift` は
-`Tab` や矢印など文字を持たないキーの修飾にだけ使う。
+`Tab` や矢印など文字を持たないキーの修飾にだけ使う。正規化があるので、
+判定は `key == Key::char('q')` のような等値比較で足りる。
 
 ## Msg
 
@@ -82,20 +163,28 @@ pub enum Msg {
     // git_read
     LogLoaded { commits: Vec<Commit>, done: bool },
     StatusLoaded(WorktreeSnapshot),
-    DiffLoaded { target: DiffTarget, hunks: Vec<Hunk> },
+    DiffLoaded { target: DiffTarget, files: Vec<FileDiff> },
     // git_exec
-    ExecFinished { op: GitOp, result: Result<ExecOutput, ExecError>, progress: Option<InProgressOp> },
+    ExecFinished(Box<ExecDone>),       // { op, result, progress }
     ProgressDetected(Option<InProgressOp>),
     // auth / github
-    AccountResolved(Result<Account, AuthError>),
-    PrLoaded(Result<Option<PullRequest>, GithubError>),
+    AccountResolved(AccountState),
+    PrLoaded(Box<Result<Option<PullRequest>, GithubError>>),
     ChecksLoaded(Result<Vec<Check>, GithubError>),
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),
 }
 ```
 
-`Msg` は `Clone` を要求しない。`Account` がトークン（`SecretString`）を持つためで、
-`Modal::Confirm` は `on_yes` を `state.modal.take()` でムーブして取り出す。
+`Msg` は `Clone` を要求しない。`Account` がトークン（`SecretString`）を持つため。
+
+`AccountResolved` は 04 の `resolve` の戻り値をそのまま運ぶ（`AccountState`）。
+`Result<Account, AuthError>` にすると `AuthError` と `DegradedReason` が同じ失敗を
+二重に表現し、`update` に手書きのマッピングが生える。`AuthError` は `gh` / `ssh` 実行の
+内部エラーに留め、`resolve` の中で `DegradedReason` に畳む。
+
+`ExecFinished` と `PrLoaded` は payload を `Box` に入れる。入れないと `Msg` が 336 バイトに
+なり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。
+2 つ Box するだけで 96 バイトになる（実測）。
 
 ## Cmd
 

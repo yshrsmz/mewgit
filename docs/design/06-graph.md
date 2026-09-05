@@ -9,6 +9,8 @@
 ```rust
 pub struct LaneState { lanes: Vec<Option<Oid>> }   // 各レーンが次に待つコミット
 
+pub struct ColorId(pub u16);        // usize ではなく u16。Cell が 24 バイト → 6 バイトになる
+
 pub struct GraphRow {
     pub oid: Oid,
     pub lane: usize,                    // このコミットの列
@@ -49,7 +51,9 @@ merge commit は `Commit` を白抜きにし、`p2` への線を分岐色で描�
 
 ## ページングとの整合
 
-- `LaneState` は行ごとの結果と一緒に保存する（`Vec<(GraphRow, LaneState)>`）。追加ページ計算は最後の状態から再開できる
+- `LaneState` は末尾の 1 個だけ保存する。追加ページ計算はそこから再開する。
+  行ごとに持っても読む場面が無い（上方向は再計算不要、ref 変更時は先頭から再計算）ので、
+  行数ぶんの `Vec<Option<Oid>>` を抱えない
 - 上方向のスクロールは既に計算済みなので再計算不要
 - ref の変更（fetch 後）は先頭から再計算する。数千行までは 10ms 程度で終わる想定
 

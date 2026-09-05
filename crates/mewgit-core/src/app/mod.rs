@@ -14,9 +14,10 @@ mod update;
 
 pub use cmd::Cmd;
 pub use key::{Key, KeyCode, Modifiers};
-pub use msg::Msg;
+pub use msg::{ExecDone, Msg};
 pub use state::{
-    AppState, BranchState, DiffView, GraphState, Job, JobKind, JobTracker, Modal, Notice,
-    NoticeLevel, Pane, PrState, RepoInfo, TermSize, TextBuffer, WorktreeSection, WorktreeState,
+    AppState, BranchState, DiffCursor, DiffView, GraphLine, GraphState, InputIntent, Job, JobKind,
+    JobTracker, Modal, Notice, NoticeLevel, Pane, PrState, RepoInfo, TermSize, TextBuffer,
+    WorktreeState,
 };
 pub use update::update;

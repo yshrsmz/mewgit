@@ -9,8 +9,12 @@
 use crate::git_read::Oid;
 
 /// レーンの色。実際の色は `ui` が `ColorId % palette.len()` で写す。
+///
+/// `usize` ではなく `u16`。`Cell::Cross` が色を 2 つ持つため、`usize` だと `Cell` が
+/// 24 バイトになる（`u16` なら 6 バイト）。`cells` は行 × レーン数ぶん並び毎フレーム
+/// 読まれるので、ここのサイズがそのままキャッシュに効く。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ColorId(pub usize);
+pub struct ColorId(pub u16);
 
 /// グラフ 1 行分のレーン情報。
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -19,6 +19,12 @@
 
 依存の向きは上から下のみ。`ui` は `app` の状態を描画するだけで、Git や API を直接呼ばない。
 
+同じ段にある `graph` / `git_read` / `git_exec` / `github` の間では、**`git_read` の値型
+（`Oid`、`InProgressOp`、`Hunk` など）だけは他の 3 つから参照してよい**。git の概念を
+表す語彙を 4 回定義し直さないため。逆向き（`git_read` が他の 3 つを使う）と、
+`graph` / `git_exec` / `github` の相互参照はしない。進行中操作の**検出**は `git_read`
+の責務で、`git_exec` は実行後にそれを呼んで結果に添える（02・03 参照）。
+
 ## クレート分割（Cargo workspace）
 
 | クレート | 責務 | 主な依存 |
@@ -49,7 +55,7 @@ crates/
     app/        state.rs  msg.rs  update.rs  cmd.rs
     graph/      lane.rs   render.rs
     git_read/   repo.rs   log.rs  diff.rs  status.rs
-    git_exec/   runner.rs rebase.rs progress.rs
+    git_exec/   runner.rs rebase.rs
     github/     client.rs pr.rs   checks.rs
     auth/       gh.rs     resolve.rs ssh.rs
     config/     mod.rs

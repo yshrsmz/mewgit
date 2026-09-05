@@ -2,12 +2,39 @@
 //!
 //! git2 による読み取り専用の層。書き込みは一切行わない（不変ルール 1）。
 //!
-//! 現時点では `app` の `AppState` / `Msg` / `Cmd` が参照する型だけを定義している。
-//! `RepoReader` と実際の読み取りは M1 以降で実装する。
+//! ここには層をまたいで受け渡す値型を置き、読み取りの実装は `repo` などの
+//! サブモジュールに置く。ログ列挙・status・diff は M1 以降で実装する。
 
+mod repo;
+
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub use git2::Oid;
+pub use repo::RepoReader;
+
+/// `git_read` 層のエラー。
+///
+/// `Clone` / `PartialEq` は付かない（`git2::Error` が実装していない）。
+#[derive(Debug, thiserror::Error)]
+pub enum GitReadError {
+    /// `open` の失敗だけはパスを添える。`discover` が上位ディレクトリまで探すので、
+    /// どこを開こうとしたのかが無いと原因を追えない。
+    #[error("{} を開けませんでした: {source}", .path.display())]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: git2::Error,
+    },
+    #[error("{} は bare リポジトリです。ワークツリーのあるリポジトリを指定してください", .path.display())]
+    BareRepository { path: PathBuf },
+    /// HEAD が非 UTF-8 のブランチを指している。他の ref と違って落とすと
+    /// detached と区別が付かなくなるので、ここだけはエラーにする。
+    #[error("HEAD が指すブランチ名が UTF-8 ではありません")]
+    NonUtf8Head,
+    #[error("git の読み取りに失敗しました: {0}")]
+    Git(#[from] git2::Error),
+}
 
 /// グラフ 1 行分のコミット。本文とファイル一覧は選択時に遅延取得する。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +59,61 @@ pub struct Signature {
 pub struct Remote {
     pub name: String,
     pub url: String,
+}
+
+/// Oid からその位置にある ref を引く索引。グラフ行の右にラベルを並べるのに使う（06）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RefIndex {
+    labels: HashMap<Oid, Vec<RefLabel>>,
+}
+
+impl RefIndex {
+    /// 並び順の確定はここでやる。索引を組む経路が増えても並べ替えを忘れられないように
+    /// するため（git2 の ref の列挙順は安定していない）。
+    pub(crate) fn new(mut labels: HashMap<Oid, Vec<RefLabel>>) -> Self {
+        for labels in labels.values_mut() {
+            labels.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        }
+        Self { labels }
+    }
+
+    /// そのコミットに付いている ref。無ければ空。種別・名前順に並んでいる。
+    pub fn labels(&self, oid: Oid) -> &[RefLabel] {
+        self.labels.get(&oid).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// ref 1 件の表示用ラベル。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefLabel {
+    /// ローカルブランチ。`main`。
+    Local { name: String, is_head: bool },
+    /// リモート追跡ブランチ。`origin/main`。remote 名とブランチ名を分けないのは、
+    /// `ui` が `{origin/main}` と一続きで描くだけのため。
+    Remote { name: String },
+    /// タグ。`v1.0`。
+    Tag { name: String },
+}
+
+impl RefLabel {
+    /// 表示名。種別ごとの飾り（`[main]` / `{origin/main}` / `<v1.0>`）は `ui` が付ける。
+    pub fn name(&self) -> &str {
+        match self {
+            RefLabel::Local { name, .. } | RefLabel::Remote { name } | RefLabel::Tag { name } => {
+                name
+            }
+        }
+    }
+
+    /// 並び順。種別（ローカル → リモート → タグ）、同種内は名前順。
+    fn sort_key(&self) -> (u8, &str) {
+        let kind = match self {
+            RefLabel::Local { .. } => 0,
+            RefLabel::Remote { .. } => 1,
+            RefLabel::Tag { .. } => 2,
+        };
+        (kind, self.name())
+    }
 }
 
 /// HEAD の状態。

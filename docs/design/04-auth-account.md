@@ -33,7 +33,7 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String>   // ssh -G alias �
 
 - リモート URL を `RemoteUrl { scheme, host_raw, owner, repo }` に解析（`git@alias:owner/repo.git`、`ssh://git@alias/owner/repo`、`https://host/owner/repo` に対応）
 - scheme が ssh のときのみ `ssh -G` を実行し、`hostname` 行を実ホストとする
-- 結果は `RepoInfo.host` として保持（例: `github.com`、`acme.ghe.com`）
+- 結果は `app` が `RepoInfo.target.host` として保持する（例: `github.com`、`acme.ghe.com`）
 - `ssh` が無い、または解決失敗なら `host_raw` をそのまま使い、通知に出す
 
 ## アカウント解決
@@ -45,15 +45,26 @@ pub enum AccountState {
     Degraded(DegradedReason),          // GhMissing | NotLoggedIn(host) | NoAccess | Ambiguous(Vec<GhLogin>)
 }
 
-pub async fn resolve(repo: &RepoInfo, gh: &GhCli, cfg: &Config, api: &GithubClient) -> AccountState
+pub struct RepoTarget { pub host: String, pub owner: String, pub repo: String }
+
+pub async fn resolve(
+    target: &RepoTarget,
+    repo_path: &Path,          // .git/config の mewgit.user を読むため
+    gh: &GhCli,
+    cfg: &Config,
+    api: &GithubClient,
+) -> AccountState
 ```
+
+`RepoInfo`（01）は `app` 層の型なので受け取らない。`auth` は `app` より下にあり、
+依存の向きは上から下のみ（00 参照）。呼び出し側が `RepoInfo` から `RepoTarget` を作る。
 
 手順:
 
 1. 明示指定があれば、その login のトークンを取得して `Resolved(source: Config)`。優先順は
    1. `.git/config` の `mewgit.user`。`auth` が git2 の `Config` で読む（`config` モジュールは `.git/config` を見ない。08 参照）
-   2. 設定ファイルの `[[repos]]` マッチ。`cfg.account_for(host, owner, repo)` に `RepoInfo` から取り出した 3 つを渡す（`config` は下位層なので `RepoInfo` に依存させない）
-2. `auth_status()` を `repo.host` で絞る。0 件なら `Degraded(NotLoggedIn)`
+   2. 設定ファイルの `[[repos]]` マッチ。`cfg.account_for(&target.host, &target.owner, &target.repo)`
+2. `auth_status()` を `target.host` で絞る。0 件なら `Degraded(NotLoggedIn)`
 3. 1 件なら `Resolved(source: Single)`
 4. 複数なら各トークンで `GET /repos/{owner}/{repo}` を並列に試す
    - 成功が 1 件 → `Resolved(source: Probe)`

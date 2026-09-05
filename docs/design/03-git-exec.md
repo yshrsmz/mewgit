@@ -65,11 +65,13 @@ stderr のパターンで分類し、UI が案内文を出せるようにする�
 3. `GIT_SEQUENCE_EDITOR="cp T"` 相当のスクリプトを渡して `git rebase -i <onto>` を実行
    - 実際には `sh -c 'cat "$1" > "$2"'` 形式のヘルパーではなく、自バイナリを `--sequence-editor <T>` サブコマンド付きで指定する（外部依存ゼロ）
 4. `reword` は `GIT_EDITOR` にも自バイナリを指定し、あらかじめ集めたメッセージを書き込む
-5. 停止したら `ProgressDetected` で `Rebase` モードに入り、continue / skip / abort を提供
+5. 停止したら `ExecFinished` に添えた `progress` で `Rebase` モードに入り、continue / skip / abort を提供
 
 自バイナリをエディタとして使う場合、`mewgit --sequence-editor <path>` / `mewgit --commit-editor <path>` の隠しサブコマンドを用意する。
 
 ## 進行中操作との整合
 
-- `Runner` は `GitOp` 実行後に必ず `InProgressOp` を再検出して `ExecFinished` と一緒に返す
+- `Runner` は `GitOp` 実行後に必ず `InProgressOp`（`git_read::in_progress`）を再検出し、
+  `ExecFinished` の `progress` として一緒に返す。実行結果と進行中操作を別々の `Msg` に
+  割ると `update` が受け取る順序に依存してしまうため、1 通にまとめる
 - 進行中操作があるときは、continue / skip / abort 以外の書き込み `GitOp` を拒否する（UI 側でも無効化）

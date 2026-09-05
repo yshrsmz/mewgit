@@ -6,7 +6,7 @@
 
 - [x] workspace がビルドできる状態にする（依存追加、`lib.rs` のモジュール宣言、空の `main.rs`）
 - [x] `mewgit-core::config` — `Config::load()`、既定値、`[[repos]]` の glob マッチ、テスト
-- [ ] `mewgit-core::app` — `AppState` / `Msg` / `Cmd` の型定義と、何もしない `update`
+- [x] `mewgit-core::app` — `AppState` / `Msg` / `Cmd` の型定義と、何もしない `update`
 - [ ] `mewgit-tui` — ターミナル初期化・復元、イベントループ、`q` で終了、リサイズ対応
 - [x] CI（GitHub Actions）: fmt / clippy / test を Linux + macOS で
 

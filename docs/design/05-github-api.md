@@ -44,7 +44,8 @@ GraphQL は MVP では使わない（1 画面に必要な情報は REST 数本�
 ## モデル
 
 ```rust
-pub struct PullRequest { number, title, state: Open|Closed|Merged, draft, head: RefSpec, base: RefSpec, url, author, review: ReviewSummary, checks: Option<CheckSummary> }
+pub struct PullRequest { number, title, state: PrStatus, draft, head: RefSpec, base: RefSpec, url, author, review: ReviewSummary, checks: Option<CheckSummary> }
+pub enum PrStatus { Open, Closed, Merged }   // app::PrState（画面の状態）と紛らわしいので Status
 pub struct RefSpec { owner: String, repo: String, branch: String, sha: String }
 pub enum CheckState { Success, Failure, Pending, Skipped, Neutral }
 pub struct Check { name, state: CheckState, url: Option<String> }

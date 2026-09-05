@@ -53,6 +53,9 @@ CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace -
 - 非同期は tokio。git2 呼び出しは `spawn_blocking` またはリーダースレッド経由
 - 公開 API にはドキュメントコメント。内部は必要なところだけ
 - 一つの PR / コミットは一つの関心事。設計書の変更とコード変更は同じコミットで
+- **`AppState` にコールバック（関数ポインタ・クロージャ）を持たせない。** 確定後に何を
+  するかは `Cmd` かデータの enum で表す。関数ポインタは環境をキャプチャできず文脈を
+  運べないうえ、状態が `PartialEq` を失って遷移をテストできなくなる
 
 ## テスト
 
@@ -64,6 +67,8 @@ CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace -
 - GitHub API は `wiremock` でモック。実 API は叩かない
 - `git_exec::to_argv` は純粋関数なのでユニットテストで全 `GitOp` をカバーする
 - `mewgit-tui` の描画は ratatui の `TestBackend` にレンダリングしてバッファを検証する
+- 型だけを定義するタスクでも、その型で実際の操作を 1 つ組み立てるテストを書く。
+  組み立てられないなら型が間違っている（「この確認モーダルに入れる値を作れるか」など）
 - テストを書かない例外は、端末の raw mode 切替・復元と `main.rs` の配線だけ。実端末が必要で単体テストできないため
 
 ## Git 運用

@@ -6,7 +6,7 @@
 //! 現時点では `app` の `AppState` が参照する型だけを定義している。レーン割り当ての
 //! アルゴリズムは M1 で実装する。
 
-use crate::git_read::Oid;
+use crate::git_read::{Commit, Oid};
 
 /// レーンの色。実際の色は `ui` が `ColorId % palette.len()` で写す。
 ///
@@ -28,12 +28,8 @@ pub struct GraphRow {
 }
 
 impl GraphRow {
-    /// レーン計算をまだ通していない行。
-    ///
-    /// `cells` が空なので `ui` は罫線を描かない。`graph::lane` を実装するまでの
-    /// 暫定で、**レーン割り当ての PR でこの関数と呼び出し側を消す**。ここに置いて
-    /// あるのは、消す場所を 1 つにするため。
-    pub fn unlaned(oid: Oid) -> Self {
+    /// レーン計算をまだ通していない行。`cells` が空なので `ui` は罫線を描かない。
+    fn unlaned(oid: Oid) -> Self {
         Self {
             oid,
             lane: 0,
@@ -65,4 +61,18 @@ pub enum Cell {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaneState {
     pub lanes: Vec<Option<Oid>>,
+}
+
+impl LaneState {
+    /// 続きのコミット列にレーンを割り当て、行を返す。状態は末尾行の直後まで進む。
+    ///
+    /// **中身はまだ実装していない。** レーン割り当てを入れるまでは、罫線の無い行を
+    /// コミットと同じ数だけ返す。`app` は結果を並べるだけなので、アルゴリズムを
+    /// 入れるときに触るのは `graph` だけで済む。
+    pub fn extend(&mut self, commits: &[Commit]) -> Vec<GraphRow> {
+        commits
+            .iter()
+            .map(|commit| GraphRow::unlaned(commit.oid))
+            .collect()
+    }
 }

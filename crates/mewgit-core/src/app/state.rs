@@ -172,6 +172,9 @@ pub struct GraphState {
     /// 画面最上部に出す行の添字。カーソルだけからは決まらない（カーソルを上に
     /// 動かしたとき、見えているうちは view を動かさない）ので状態として持つ。
     pub scroll: usize,
+    /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Resize`] で運んでくる
+    /// （`crate::app::Msg::Resize`）。core はヘッダや枠の高さを知らない。
+    pub viewport: usize,
     /// 選択コミットの詳細を展開しているか。
     pub expanded: bool,
     /// これ以上読むコミットが無い。
@@ -180,7 +183,7 @@ pub struct GraphState {
 
 impl GraphState {
     /// カーソルを `delta` 行動かす。端では止まる。
-    pub fn move_cursor(&mut self, delta: isize, height: usize) {
+    pub fn move_cursor(&mut self, delta: isize) {
         if self.lines.is_empty() {
             self.cursor = 0;
             self.scroll = 0;
@@ -189,21 +192,21 @@ impl GraphState {
 
         let last = self.lines.len() - 1;
         self.cursor = self.cursor.saturating_add_signed(delta).min(last);
-        self.scroll_into_view(height);
+        self.scroll_into_view();
     }
 
-    /// カーソルが見える位置までスクロールを寄せる。`height` は描画に使える行数。
+    /// カーソルが見える位置までスクロールを寄せる。
     ///
-    /// カーソルが窓の中にいる限り動かさない。カーソルだけから毎回導くと、下端から
-    /// 上へ戻るときにカーソルが最下行に貼り付いたまま中身だけが流れる。
-    pub fn scroll_into_view(&mut self, height: usize) {
-        if height == 0 {
+    /// カーソルが窓の中にいる限り動かさない。カーソルと `viewport` から毎回導くと、
+    /// 下端から上へ戻るときにカーソルが最下行に貼り付いたまま中身だけが流れる。
+    pub fn scroll_into_view(&mut self) {
+        if self.viewport == 0 {
             return;
         }
         if self.cursor < self.scroll {
             self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + height {
-            self.scroll = self.cursor - height + 1;
+        } else if self.cursor >= self.scroll + self.viewport {
+            self.scroll = self.cursor - self.viewport + 1;
         }
     }
 }
@@ -311,6 +314,7 @@ pub struct Job {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
     LoadLog,
+    LoadRepoInfo,
     LoadStatus,
     LoadDiff,
     Exec,
@@ -328,6 +332,7 @@ impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
             JobKind::LoadLog => "log",
+            JobKind::LoadRepoInfo => "repo",
             JobKind::LoadStatus => "status",
             JobKind::LoadDiff => "diff",
             JobKind::Exec => "git",

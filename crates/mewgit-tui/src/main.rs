@@ -10,6 +10,8 @@ mod input;
 mod modals;
 mod panes;
 mod runtime;
+#[cfg(test)]
+mod test_util;
 mod ui;
 
 use std::path::PathBuf;
@@ -22,7 +24,7 @@ use ratatui::crossterm::event::EventStream;
 #[tokio::main]
 async fn main() -> Result<()> {
     let (config, warnings) = Config::load();
-    let (mut state, reader) = runtime::open(&repo_path()?, config).await?;
+    let (mut state, reader) = runtime::open(&repo_path()?, config)?;
 
     // 設定の警告は起動時に見せる。読み込み自体は失敗しない（08 参照）。
     for warning in warnings {
@@ -31,10 +33,6 @@ async fn main() -> Result<()> {
 
     // raw mode / 代替画面 / パニックフックは ratatui が持っている。
     let mut terminal = ratatui::try_init()?;
-
-    if let Some(size) = runtime::term_size(&terminal) {
-        state.term = size;
-    }
 
     let result = runtime::run(&mut terminal, EventStream::new(), &mut state, reader).await;
     // restore は () を返すので、ループのエラーを後始末のエラーで踏み潰さない。

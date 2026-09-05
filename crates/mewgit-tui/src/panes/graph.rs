@@ -3,21 +3,32 @@
 //! レーンの罫線はまだ描かない（`GraphRow.cells` が空のあいだは何も出さない）。
 //! `graph::lane` を実装したら、行の左に `cells` を写した列を足す。
 
-use mewgit_core::app::AppState;
-use mewgit_core::config::Theme;
+use mewgit_core::app::{AppState, GraphLine};
 use mewgit_core::git_read::RefLabel;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
+use crate::ui::theme;
+
 /// 短縮 Oid の桁数。`git log --oneline` と同じ。
 const SHORT_OID: usize = 7;
 
+/// ペインの枠。
+fn block() -> Block<'static> {
+    Block::default().borders(Borders::ALL).title("Graph")
+}
+
+/// 枠の内側。`ui::graph_rows` が行数を出すのに使う。
+pub fn inner(area: Rect) -> Rect {
+    block().inner(area)
+}
+
 /// グラフペインを描く。
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let block = Block::default().borders(Borders::ALL).title("Graph");
+    let block = block();
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -31,15 +42,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let height = inner.height as usize;
+    let head_style = theme::style(&state.config.theme.graph_head);
     let lines: Vec<Line> = state
         .graph
         .lines
         .iter()
         .enumerate()
         .skip(state.graph.scroll)
-        .take(height)
-        .map(|(index, line)| commit_line(state, index, line))
+        .take(inner.height as usize)
+        .map(|(index, line)| commit_line(state, index, line, head_style))
         .collect();
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -49,21 +60,27 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 fn commit_line<'a>(
     state: &'a AppState,
     index: usize,
-    line: &'a mewgit_core::app::GraphLine,
+    line: &'a GraphLine,
+    head_style: Style,
 ) -> Line<'a> {
-    let mut spans = vec![
-        Span::styled(
-            short_oid(&line.commit.oid),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::raw(" "),
-    ];
+    let labels = state.graph.refs.labels(line.commit.oid);
+    // Oid・空白・ラベル 1 件あたり 4 つ・summary。詰め直しを起こさない大きさで取る。
+    let mut spans = Vec::with_capacity(3 + labels.len() * 4);
 
-    for label in state.graph.refs.labels(line.commit.oid) {
-        spans.push(Span::styled(
-            decorate(label),
-            label_style(&state.config.theme, label),
-        ));
+    spans.push(Span::styled(
+        short_oid(line),
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    spans.push(Span::raw(" "));
+
+    for label in labels {
+        // 飾りは組み立てずに 3 つのスパンに分ける。毎フレーム全行ぶん `format!` する
+        // 必要が無く、HEAD の強調も括弧まで掛かる。
+        let style = label_style(label, head_style);
+        let (open, close) = brackets(label);
+        spans.push(Span::styled(open, style));
+        spans.push(Span::styled(label.name(), style));
+        spans.push(Span::styled(close, style));
         spans.push(Span::raw(" "));
     }
 
@@ -79,34 +96,25 @@ fn commit_line<'a>(
 }
 
 /// 種別ごとの飾り（06 の「ラベル」）。
-fn decorate(label: &RefLabel) -> String {
+fn brackets(label: &RefLabel) -> (&'static str, &'static str) {
     match label {
-        RefLabel::Local { name, .. } => format!("[{name}]"),
-        RefLabel::Remote { name } => format!("{{{name}}}"),
-        RefLabel::Tag { name } => format!("<{name}>"),
+        RefLabel::Local { .. } => ("[", "]"),
+        RefLabel::Remote { .. } => ("{", "}"),
+        RefLabel::Tag { .. } => ("<", ">"),
     }
 }
 
 /// ラベルの見た目。HEAD のブランチだけ強調する。
-fn label_style(theme: &Theme, label: &RefLabel) -> Style {
+fn label_style(label: &RefLabel, head_style: Style) -> Style {
     match label {
-        RefLabel::Local { is_head: true, .. } => Style::default()
-            .fg(color(&theme.graph_head))
-            .add_modifier(Modifier::BOLD),
+        RefLabel::Local { is_head: true, .. } => head_style,
         _ => Style::default(),
     }
 }
 
-/// 設定の色名を ratatui の色にする。読めない名前は端末の既定色に落とす。
-///
-/// 設定は起動を止めない（08）ので、ここでもエラーにしない。
-fn color(name: &str) -> Color {
-    name.parse().unwrap_or(Color::Reset)
-}
-
 /// 先頭 [`SHORT_OID`] 桁。
-fn short_oid(oid: &mewgit_core::git_read::Oid) -> String {
-    let mut text = oid.to_string();
+fn short_oid(line: &GraphLine) -> String {
+    let mut text = line.commit.oid.to_string();
     text.truncate(SHORT_OID);
     text
 }
@@ -114,71 +122,58 @@ fn short_oid(oid: &mewgit_core::git_read::Oid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime;
-    use mewgit_core::app::{update, Msg, TermSize};
-    use mewgit_core::config::Config;
-    use mewgit_core::test_util::TestRepo;
-    use ratatui::backend::TestBackend;
-    use ratatui::style::Modifier;
-    use ratatui::Terminal;
+    use crate::test_util::{draw, state_at, state_with_commits, terminal_with};
+    use mewgit_core::app::TermSize;
+    use mewgit_core::git_read::{Oid, RefIndex, RefLabel};
+    use mewgit_core::test_util::fake_commit;
 
-    /// リポジトリを開いてログを 1 ページ積んだ状態。
-    async fn state_with_log(repo: &TestRepo) -> AppState {
-        let (mut state, reader) = runtime::open(repo.path(), Config::default())
-            .await
-            .expect("リポジトリを開けませんでした");
-        let page = reader.log_page(100).await.expect("ログを読めませんでした");
-        update(&mut state, Msg::LogLoaded(Ok(page)));
-        state
-    }
-
-    /// 描画結果を行ごとの文字列にする。
-    ///
-    /// `TestBackend` の `Display` を使う。自前でセルを走査すると全角文字の 2 セル目が
-    /// 空白として混ざる。
-    fn draw(state: &AppState, size: TermSize) -> Vec<String> {
-        terminal_with(state, size)
-            .backend()
-            .to_string()
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-
-    fn terminal_with(state: &AppState, size: TermSize) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(size.width, size.height)).unwrap();
-        terminal
-            .draw(|frame| crate::ui::render(frame, state))
-            .unwrap();
-        terminal
-    }
-
-    #[tokio::test]
-    async fn each_commit_gets_a_line_with_its_short_oid_and_summary() {
-        let repo = TestRepo::init();
-        repo.commit("first commit");
-        let oid = repo.commit("second commit");
-        let state = state_with_log(&repo).await;
+    #[test]
+    fn each_commit_gets_a_line_with_its_short_oid_and_summary() {
+        let state = state_with_commits(&["newest", "oldest"]);
 
         let lines = draw(&state, TermSize::default());
 
-        // 枠の中の 1 行目が最新のコミット。
-        assert!(lines[2].contains("second commit"), "{:?}", lines[2]);
-        assert!(lines[3].contains("first commit"), "{:?}", lines[3]);
+        // 枠の中の 1 行目が 1 件目。行の並びは `git_read` が決めた順のまま。
+        assert!(lines[2].contains("newest"), "{:?}", lines[2]);
+        assert!(lines[3].contains("oldest"), "{:?}", lines[3]);
+        let oid = state.graph.lines[0].commit.oid.to_string();
         assert!(
-            lines[2].contains(&oid.to_string()[..SHORT_OID]),
-            "短縮 Oid が出ていません: {:?}",
+            lines[2].contains(&format!("{} newest", &oid[..SHORT_OID])),
+            "短縮 Oid が summary の前にありません: {:?}",
+            lines[2]
+        );
+        assert!(
+            !lines[2].contains(&oid[..SHORT_OID + 1]),
+            "Oid を切り詰めていません: {:?}",
             lines[2]
         );
     }
 
-    #[tokio::test]
-    async fn ref_labels_are_decorated_by_kind() {
-        let repo = TestRepo::init();
-        repo.commit("first");
-        repo.git(&["tag", "v1.0"]);
-        repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        let state = state_with_log(&repo).await;
+    #[test]
+    fn ref_labels_are_decorated_by_kind() {
+        let mut state = state_with_commits(&["first"]);
+        let oid = state.graph.lines[0].commit.oid;
+        state.graph.refs = RefIndex::from_iter([
+            (
+                oid,
+                RefLabel::Local {
+                    name: "main".to_string(),
+                    is_head: true,
+                },
+            ),
+            (
+                oid,
+                RefLabel::Remote {
+                    name: "origin/main".to_string(),
+                },
+            ),
+            (
+                oid,
+                RefLabel::Tag {
+                    name: "v1.0".to_string(),
+                },
+            ),
+        ]);
 
         let lines = draw(
             &state,
@@ -196,12 +191,48 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn the_cursor_line_is_highlighted() {
-        let repo = TestRepo::init();
-        repo.commit("first");
-        repo.commit("second");
-        let mut state = state_with_log(&repo).await;
+    #[test]
+    fn the_head_branch_label_is_emphasised() {
+        // 既定の `theme.graph_head` は "bold"。色として読むと強調がまるごと消える。
+        let mut state = state_with_commits(&["first"]);
+        let oid = state.graph.lines[0].commit.oid;
+        state.graph.refs = RefIndex::from_iter([(
+            oid,
+            RefLabel::Local {
+                name: "main".to_string(),
+                is_head: true,
+            },
+        )]);
+
+        let terminal = terminal_with(&state, TermSize::default());
+        let buffer = terminal.backend().buffer();
+
+        // `1234567 [main] …` の `[` の位置。
+        assert_eq!(buffer[(9, 2)].symbol(), "[");
+        assert!(buffer[(9, 2)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn a_label_that_is_not_head_is_not_emphasised() {
+        let mut state = state_with_commits(&["first"]);
+        let oid = state.graph.lines[0].commit.oid;
+        state.graph.refs = RefIndex::from_iter([(
+            oid,
+            RefLabel::Remote {
+                name: "origin/main".to_string(),
+            },
+        )]);
+
+        let terminal = terminal_with(&state, TermSize::default());
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer[(9, 2)].symbol(), "{");
+        assert!(!buffer[(9, 2)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn the_cursor_line_is_highlighted() {
+        let mut state = state_with_commits(&["first", "second"]);
         state.graph.cursor = 1;
 
         let terminal = terminal_with(&state, TermSize::default());
@@ -212,43 +243,36 @@ mod tests {
         assert!(buffer[(1, 3)].modifier.contains(Modifier::REVERSED));
     }
 
-    #[tokio::test]
-    async fn scrolling_moves_the_first_visible_line() {
-        let repo = TestRepo::init();
-        for i in 0..5 {
-            repo.commit(&format!("commit {i}"));
-        }
-        let mut state = state_with_log(&repo).await;
+    #[test]
+    fn scrolling_moves_the_first_visible_line() {
+        let summaries: Vec<String> = (0..5).map(|i| format!("commit {i}")).collect();
+        let refs: Vec<&str> = summaries.iter().map(String::as_str).collect();
+        let mut state = state_with_commits(&refs);
         state.graph.scroll = 2;
 
         let lines = draw(&state, TermSize::default());
 
-        // 新しい順に commit 4, 3, 2… なので 2 行飛ばすと commit 2 が先頭。
         assert!(lines[2].contains("commit 2"), "{:?}", lines[2]);
-        assert!(!lines.iter().any(|l| l.contains("commit 4")));
+        assert!(!lines.iter().any(|line| line.contains("commit 0 ")));
     }
 
-    #[tokio::test]
-    async fn only_the_visible_rows_are_drawn() {
-        // 端末 24 行 = ヘッダ 1 + 枠 2 + ステータス 1 を除いて 20 行。
-        // `app` 側がスクロール位置を決めるのに使う値と一致していないと、
-        // カーソルが画面の外に出る。
-        let repo = TestRepo::init();
-        for i in 0..30 {
-            repo.commit(&format!("commit {i}"));
-        }
-        let state = state_with_log(&repo).await;
+    #[test]
+    fn only_the_visible_rows_are_drawn() {
+        let summaries: Vec<String> = (0..30).map(|i| format!("commit {i:02}")).collect();
+        let refs: Vec<&str> = summaries.iter().map(String::as_str).collect();
+        let state = state_with_commits(&refs);
 
         let lines = draw(&state, TermSize::default());
 
         let drawn = lines.iter().filter(|line| line.contains("commit ")).count();
-        assert_eq!(drawn, 20, "描いた行数が違います");
+        // `ui::graph_rows` が `app` に渡す行数と、実際に描く行数は同じでなければならない。
+        // ずれるとカーソルが画面の外に出る。
+        assert_eq!(drawn, crate::ui::graph_rows(TermSize::default()));
     }
 
-    #[tokio::test]
-    async fn an_empty_repository_says_so_instead_of_showing_nothing() {
-        let repo = TestRepo::init();
-        let state = state_with_log(&repo).await;
+    #[test]
+    fn an_empty_repository_says_so_instead_of_showing_nothing() {
+        let state = state_with_commits(&[]);
 
         let lines = draw(&state, TermSize::default());
 
@@ -257,18 +281,16 @@ mod tests {
 
     #[test]
     fn before_the_first_page_arrives_it_says_loading() {
-        let state = AppState::new(Default::default(), Config::default());
+        let state = state_at("/repo");
 
         let lines = draw(&state, TermSize::default());
 
         assert!(lines[2].contains("読み込み中"), "{:?}", lines[2]);
     }
 
-    #[tokio::test]
-    async fn a_wide_character_summary_is_not_split() {
-        let repo = TestRepo::init();
-        repo.commit("日本語のコミットメッセージ");
-        let state = state_with_log(&repo).await;
+    #[test]
+    fn a_wide_character_summary_is_not_split() {
+        let state = state_with_commits(&["日本語のコミットメッセージ"]);
 
         let lines = draw(&state, TermSize::default());
 
@@ -277,5 +299,27 @@ mod tests {
             "{:?}",
             lines[2]
         );
+    }
+
+    #[test]
+    fn a_row_without_lanes_draws_no_graph_column() {
+        // `graph::lane` を入れるまで `cells` は空。罫線が出ないことを固定しておく。
+        let state = state_with_commits(&["first"]);
+        assert!(state.graph.lines[0].row.cells.is_empty());
+
+        let lines = draw(&state, TermSize::default());
+
+        // 両端は枠なので、内側だけを見る。
+        let inside: String = lines[2].chars().skip(1).take_while(|c| *c != '│').collect();
+        assert!(!inside.contains('│'), "{inside:?}");
+    }
+
+    #[test]
+    fn an_unknown_oid_has_no_labels() {
+        let state = state_with_commits(&["first"]);
+        let other = fake_commit(99, "other").oid;
+        assert_ne!(other, Oid::zero());
+
+        assert!(state.graph.refs.labels(other).is_empty());
     }
 }

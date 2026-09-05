@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::{Stream, StreamExt};
-use mewgit_core::app::{init, update, AppState, Cmd, Msg, NoticeLevel, RepoInfo, TermSize};
+use mewgit_core::app::{
+    init, update, AppState, Cmd, Msg, NoticeLevel, RepoInfo, RepoSnapshot, TermSize,
+};
 use mewgit_core::config::Config;
 use mewgit_core::git_read::{GitReadError, ReaderHandle};
 use ratatui::backend::Backend;
@@ -29,38 +31,20 @@ pub struct Runtime {
     tx: mpsc::UnboundedSender<Msg>,
 }
 
-/// リポジトリを開き、起動時に読めるものを読んで初期状態を作る。
+/// リポジトリを開いて初期状態を作る。
 ///
-/// 開けなければ起動できないので `Err` を返す。リモートや HEAD の読み取りだけが
-/// 失敗したときは通知に積んで続ける。ref が無くてもグラフは出せる。
-pub async fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle), GitReadError> {
+/// ここでやるのは `open` だけ。bare や存在しないパスは起動できないので `Err` を返す
+/// （端末を初期化する前に出す）。リモート・HEAD・ref は `Cmd::LoadRepoInfo` として
+/// ループの中で読む。ref の列挙は本数ぶんの object 読み出しになるので、待つと
+/// 最初の 1 フレームが出るまで画面が真っ黒になる。
+pub fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle), GitReadError> {
     let reader = ReaderHandle::spawn(path)?;
-
-    let mut repo = RepoInfo {
+    let repo = RepoInfo {
         path: reader.workdir().to_path_buf(),
         ..RepoInfo::default()
     };
-    let mut warnings = Vec::new();
 
-    match reader.remotes().await {
-        Ok(remotes) => repo.remotes = remotes,
-        Err(err) => warnings.push(err),
-    }
-    match reader.head().await {
-        Ok(head) => repo.head = Some(head),
-        Err(err) => warnings.push(err),
-    }
-
-    let mut state = AppState::new(repo, config);
-    match reader.refs().await {
-        Ok(refs) => state.graph.refs = refs,
-        Err(err) => warnings.push(err),
-    }
-    for warning in warnings {
-        state.push_notice(NoticeLevel::Warn, warning.to_string(), None);
-    }
-
-    Ok((state, reader))
+    Ok((AppState::new(repo, config), reader))
 }
 
 /// 描画 → 入力待ち → `update` → `dispatch` を回す。
@@ -69,7 +53,7 @@ pub async fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle
 /// `futures::stream::iter` を渡してループ全体をテストできるようにするため。
 pub async fn run<B, S>(
     terminal: &mut Terminal<B>,
-    events: S,
+    mut events: S,
     state: &mut AppState,
     reader: ReaderHandle,
 ) -> Result<()>
@@ -77,9 +61,17 @@ where
     B: Backend,
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    let mut events = events;
     let mut tick = tokio::time::interval(TICK);
     let (runtime, mut msgs) = Runtime::new(reader);
+
+    // 起動時に `Resize` は飛んでこないので、最初のサイズは自分で入れる。
+    if let Ok(size) = terminal.size() {
+        let msg = crate::input::resized(TermSize {
+            width: size.width,
+            height: size.height,
+        });
+        update(state, msg);
+    }
 
     // 起動時の読み込み。ループの前に 1 回だけ。
     let cmd = init(state);
@@ -150,6 +142,15 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
+            Cmd::LoadRepoInfo => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::RepoInfoLoaded(Box::new(repo_info(&reader).await)));
+                });
+                ControlFlow::Continue(())
+            }
+
             // M2 以降で実装する。
             Cmd::LoadStatus => not_implemented(state, "LoadStatus"),
             Cmd::LoadDiff(_) => not_implemented(state, "LoadDiff"),
@@ -162,6 +163,17 @@ impl Runtime {
     }
 }
 
+/// リモート・HEAD・ref をまとめて読む。
+///
+/// リーダースレッドは 1 本なので、並行にしても待ち時間は変わらない。
+async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> {
+    Ok(RepoSnapshot {
+        remotes: reader.remotes().await?,
+        head: reader.head().await?,
+        refs: reader.refs().await?,
+    })
+}
+
 /// 未実装の `Cmd` を通知に積む。黙って捨てると開発中に気付けない。
 fn not_implemented(state: &mut AppState, name: &str) -> ControlFlow<()> {
     state.push_notice(
@@ -170,14 +182,6 @@ fn not_implemented(state: &mut AppState, name: &str) -> ControlFlow<()> {
         None,
     );
     ControlFlow::Continue(())
-}
-
-/// 端末サイズを [`TermSize`] にする。起動時に `Resize` は飛んでこないので自分で取る。
-pub fn term_size<B: Backend>(terminal: &Terminal<B>) -> Option<TermSize> {
-    terminal.size().ok().map(|size| TermSize {
-        width: size.width,
-        height: size.height,
-    })
 }
 
 #[cfg(test)]
@@ -190,11 +194,9 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    /// コミットを 1 つ持つリポジトリと、それを開いた状態・ハンドル。
-    async fn opened(repo: &TestRepo) -> (AppState, ReaderHandle) {
-        open(repo.path(), Config::default())
-            .await
-            .expect("リポジトリを開けませんでした")
+    /// リポジトリを開いた状態とハンドル。
+    fn opened(repo: &TestRepo) -> (AppState, ReaderHandle) {
+        open(repo.path(), Config::default()).expect("リポジトリを開けませんでした")
     }
 
     fn key(code: KeyCode) -> std::io::Result<Event> {
@@ -211,15 +213,35 @@ mod tests {
         run(&mut terminal, stream::iter(events), state, reader).await
     }
 
+    #[test]
+    fn open_finds_the_worktree_without_reading_anything_else() {
+        // ref の列挙は本数ぶんの object 読み出しになる。ここで待つと最初の 1 フレームが
+        // 出るまで画面が真っ黒になるので、`Cmd::LoadRepoInfo` に回している。
+        let repo = TestRepo::init();
+        repo.commit("first");
+
+        let (state, _reader) = opened(&repo);
+
+        assert_eq!(state.repo.path, repo.path());
+        assert!(state.repo.remotes.is_empty());
+        assert!(state.repo.head.is_none());
+        assert!(state.notices.is_empty());
+    }
+
     #[tokio::test]
-    async fn open_fills_in_the_repository_and_the_ref_labels() {
+    async fn load_repo_info_fills_in_the_remotes_head_and_ref_labels() {
         let repo = TestRepo::init();
         let oid = repo.commit("first");
         repo.git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
+        let (mut state, reader) = opened(&repo);
+        let (runtime, mut msgs) = Runtime::new(reader);
 
-        let (state, _reader) = opened(&repo).await;
+        assert!(runtime
+            .dispatch(&mut state, Cmd::LoadRepoInfo)
+            .is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        update(&mut state, msg);
 
-        assert_eq!(state.repo.path, repo.path());
         assert_eq!(state.repo.remotes.len(), 1);
         assert_eq!(
             state.repo.head,
@@ -233,17 +255,16 @@ mod tests {
             .refs
             .labels(oid)
             .iter()
-            .map(|l| l.name())
+            .map(|label| label.name())
             .collect();
         assert_eq!(labels, ["main"]);
-        assert!(state.notices.is_empty());
     }
 
-    #[tokio::test]
-    async fn open_fails_on_a_repository_that_cannot_be_used() {
+    #[test]
+    fn open_fails_on_a_repository_that_cannot_be_used() {
         let repo = BareRepo::init();
 
-        let err = open(repo.path(), Config::default()).await.unwrap_err();
+        let err = open(repo.path(), Config::default()).unwrap_err();
 
         assert!(
             matches!(err, GitReadError::BareRepository { .. }),
@@ -256,7 +277,7 @@ mod tests {
         let repo = TestRepo::init();
         repo.commit("first");
         repo.commit("second");
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         let (runtime, mut msgs) = Runtime::new(reader);
 
         let cmd = init(&mut state);
@@ -279,7 +300,7 @@ mod tests {
     #[tokio::test]
     async fn q_ends_the_loop() {
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         run_with(vec![key(KeyCode::Char('q'))], &mut state, reader)
             .await
             .unwrap();
@@ -288,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn ctrl_c_ends_the_loop() {
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         let ctrl_c = Ok(Event::Key(KeyEvent::new(
             KeyCode::Char('c'),
             KeyModifiers::CONTROL,
@@ -299,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn resize_reaches_the_state_before_quitting() {
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         let events = vec![Ok(Event::Resize(120, 40)), key(KeyCode::Char('q'))];
 
         run_with(events, &mut state, reader).await.unwrap();
@@ -315,7 +336,7 @@ mod tests {
     #[tokio::test]
     async fn unmapped_events_are_skipped_without_ending_the_loop() {
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         let events = vec![
             Ok(Event::FocusGained),
             key(KeyCode::CapsLock),
@@ -330,7 +351,7 @@ mod tests {
         // 終了キーが来なくても、入力が尽きたら抜ける。抜けないと Tick だけで
         // 永久に回り、テストがハングする。
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         run_with(vec![Ok(Event::Resize(100, 30))], &mut state, reader)
             .await
             .unwrap();
@@ -339,7 +360,7 @@ mod tests {
     #[tokio::test]
     async fn stream_errors_are_not_swallowed() {
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         let err = Err(std::io::Error::other("端末の読み取りに失敗"));
 
         let result = run_with(vec![err], &mut state, reader).await;
@@ -349,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn quit_breaks_the_loop() {
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         let (runtime, _msgs) = Runtime::new(reader);
         assert!(runtime.dispatch(&mut state, Cmd::Quit).is_break());
     }
@@ -357,7 +378,7 @@ mod tests {
     #[tokio::test]
     async fn none_continues() {
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         let (runtime, _msgs) = Runtime::new(reader);
         assert!(runtime.dispatch(&mut state, Cmd::None).is_continue());
         assert!(state.notices.is_empty());
@@ -366,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn batch_stops_at_quit() {
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         let (runtime, _msgs) = Runtime::new(reader);
 
         // Quit の後ろは実行しない。未実装 notice が 1 件だけであることで確かめる。
@@ -378,7 +399,7 @@ mod tests {
     #[tokio::test]
     async fn unimplemented_cmd_warns_instead_of_disappearing() {
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         let (runtime, _msgs) = Runtime::new(reader);
 
         assert!(runtime.dispatch(&mut state, Cmd::LoadStatus).is_continue());
@@ -392,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn nested_batch_is_dispatched() {
         let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo).await;
+        let (mut state, reader) = opened(&repo);
         let (runtime, _msgs) = Runtime::new(reader);
 
         let nested = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::LoadStatus]), Cmd::FetchPr]);
@@ -403,7 +424,7 @@ mod tests {
     #[tokio::test]
     async fn the_graph_pane_has_focus_at_startup() {
         let repo = TestRepo::init();
-        let (state, _reader) = opened(&repo).await;
+        let (state, _reader) = opened(&repo);
         assert_eq!(state.focus, Pane::Graph);
     }
 }

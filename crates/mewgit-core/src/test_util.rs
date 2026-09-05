@@ -26,7 +26,7 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
-use crate::git_read::Oid;
+use crate::git_read::{Commit, Oid, Signature};
 use tempfile::TempDir;
 
 /// 一時ディレクトリと、実行環境の設定を持ち込まない `git` の実行。
@@ -217,5 +217,23 @@ impl BareRepo {
     /// bare リポジトリのルート。`.git` サブディレクトリは無く、ここが直接その中身。
     pub fn path(&self) -> &Path {
         &self.sandbox.root
+    }
+}
+
+/// 中身を作り込んだ [`Commit`]。実リポジトリを作らずに一覧の描画を試すのに使う。
+///
+/// `index` が Oid の最下位バイトになるので、同じ `index` なら常に同じ Oid。
+pub fn fake_commit(index: u8, summary: &str) -> Commit {
+    let mut bytes = [0u8; 20];
+    bytes[19] = index;
+    Commit {
+        oid: Oid::from_bytes(&bytes).expect("20 バイトなので Oid になる"),
+        parents: Vec::new(),
+        summary: summary.to_string(),
+        author: Signature {
+            name: "mewgit test".to_string(),
+            email: "test@example.invalid".to_string(),
+        },
+        time: 0,
     }
 }

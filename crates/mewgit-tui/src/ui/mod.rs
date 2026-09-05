@@ -6,9 +6,11 @@
 //! いまはヘッダ・グラフ・ステータスバーだけ。右ペイン（ブランチ / ワーキングツリー）は
 //! 07 のレイアウトどおりに、それぞれのタスクで足す。
 
+pub mod theme;
+
 use crate::panes;
-use mewgit_core::app::AppState;
-use ratatui::layout::{Constraint, Layout};
+use mewgit_core::app::{AppState, TermSize};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -16,16 +18,30 @@ use ratatui::Frame;
 
 /// 1 フレーム描く。
 pub fn render(frame: &mut Frame, state: &AppState) {
-    let [header, body, status] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
+    let [header, body, status] = split(frame.area());
 
     frame.render_widget(header_line(state), header);
     panes::graph::render(frame, body, state);
     frame.render_widget(status_line(state), status);
+}
+
+/// 画面をヘッダ / 本文 / ステータスバーに割る。
+fn split(area: Rect) -> [Rect; 3] {
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area)
+}
+
+/// グラフに使える行数。
+///
+/// `app` がスクロール位置を決めるのに要る（01 の「グラフの行」）。core にレイアウトを
+/// 知らせないよう、実際に描くのと同じ `split` と枠から出して `Msg::Resize` で渡す。
+pub fn graph_rows(term: TermSize) -> usize {
+    let [_, body, _] = split(Rect::new(0, 0, term.width, term.height));
+    panes::graph::inner(body).height as usize
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
@@ -78,39 +94,8 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mewgit_core::app::{NoticeLevel, RepoInfo, TermSize};
-    use mewgit_core::config::Config;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
-    use std::path::PathBuf;
-
-    /// 描画結果を行ごとの文字列にする。
-    ///
-    /// `TestBackend` の `Display` を使う。自前でセルを走査すると全角文字の 2 セル目が
-    /// 空白として混ざる（「新しい通知」→「新 し い 通 知」）が、`Display` は
-    /// 幅を見て正しく詰めてくれる。
-    fn draw(state: &AppState, size: TermSize) -> Vec<String> {
-        let backend = TestBackend::new(size.width, size.height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, state)).unwrap();
-
-        terminal
-            .backend()
-            .to_string()
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-
-    fn state_at(path: &str) -> AppState {
-        AppState::new(
-            RepoInfo {
-                path: PathBuf::from(path),
-                ..RepoInfo::default()
-            },
-            Config::default(),
-        )
-    }
+    use crate::test_util::{draw, state_at};
+    use mewgit_core::app::NoticeLevel;
 
     #[test]
     fn header_shows_the_repository_name() {

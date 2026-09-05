@@ -6,19 +6,23 @@
 //! ペインごとのキー処理は、対応するペインのタスクと一緒に足す。いまあるのは
 //! グラフだけ。
 
-use crate::git_read::LogPage;
-use crate::graph::GraphRow;
+use crate::git_read::{GitReadError, LogPage};
 
-use super::{AppState, Cmd, GraphLine, JobKind, Key, KeyCode, Msg, NoticeLevel, Pane, TermSize};
+use super::{
+    AppState, Cmd, GraphLine, JobKind, Key, KeyCode, Msg, NoticeLevel, Pane, RepoSnapshot,
+};
 
 /// 起動直後に実行してほしい副作用。
 ///
 /// `runtime::run` がループに入る前に呼ぶ。`main.rs` から呼ぶとテストの外に出てしまう。
 /// status / アカウント解決は、それぞれのタスクでここに足す。
 pub fn init(state: &mut AppState) -> Cmd {
-    let cmd = Cmd::LoadLog {
-        count: state.config.graph.page_size,
-    };
+    let cmd = Cmd::batch([
+        Cmd::LoadRepoInfo,
+        Cmd::LoadLog {
+            count: state.config.graph.page_size,
+        },
+    ]);
     state.issue(cmd)
 }
 
@@ -34,13 +38,17 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
     match msg {
         Msg::Key(key) => update_key(state, key),
-        Msg::Resize(size) => {
-            state.term = size;
+        Msg::Resize { term, graph_rows } => {
+            state.term = term;
+            state.graph.viewport = graph_rows;
+            // 縮んだ端末でカーソルが窓の外に出たままにならないようにする。
+            state.graph.scroll_into_view();
             Cmd::None
         }
         Msg::Tick => Cmd::None,
 
         Msg::LogLoaded(result) => log_loaded(state, result),
+        Msg::RepoInfoLoaded(result) => repo_info_loaded(state, *result),
 
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
         // `Msg` に変種を足したときに実装漏れをコンパイルエラーにするため。
@@ -88,26 +96,35 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
 /// いまは上下移動だけ。`Enter` の詳細展開・`g` / `G`・スクロール追随の追加読み込みは
 /// それぞれ別のタスクで足す。
 fn graph_key(state: &mut AppState, key: Key) -> Cmd {
-    let height = graph_height(state.term);
     match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => state.graph.move_cursor(1, height),
-        KeyCode::Char('k') | KeyCode::Up => state.graph.move_cursor(-1, height),
+        KeyCode::Char('j') | KeyCode::Down => state.graph.move_cursor(1),
+        KeyCode::Char('k') | KeyCode::Up => state.graph.move_cursor(-1),
         _ => {}
     }
     Cmd::None
 }
 
-/// グラフペインに使える行数。
+/// リポジトリの概要を反映する。
 ///
-/// 07 のレイアウト（ヘッダ 1 行・ステータスバー 1 行・枠の上下 2 行）から導く。
-/// `ui` は `AppState` を書けないので、スクロール位置を決めるこの値は `app` が持つ。
-/// **レイアウトを変えたらここも直す。** ずれると `ui::panes::graph` のテストが落ちる。
-fn graph_height(term: TermSize) -> usize {
-    (term.height as usize).saturating_sub(4)
+/// 一部だけ成功という形にしていないのは、3 つとも同じ ref から導かれる値で、
+/// 途中まで新しい状態を持っても意味が無いため。失敗しても通知だけで続ける
+/// （ラベルもリモートも無いままグラフは出せる）。
+fn repo_info_loaded(state: &mut AppState, result: Result<RepoSnapshot, GitReadError>) -> Cmd {
+    state.jobs.finish(JobKind::LoadRepoInfo);
+
+    match result {
+        Ok(info) => {
+            state.repo.remotes = info.remotes;
+            state.repo.head = Some(info.head);
+            state.graph.refs = info.refs;
+        }
+        Err(err) => state.push_notice(NoticeLevel::Warn, err.to_string(), None),
+    }
+    Cmd::None
 }
 
 /// ログのページを積む。
-fn log_loaded(state: &mut AppState, result: Result<LogPage, crate::git_read::GitReadError>) -> Cmd {
+fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cmd {
     state.jobs.finish(JobKind::LoadLog);
 
     let page = match result {
@@ -124,13 +141,14 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, crate::git_read::Git
         }
     };
 
-    state
-        .graph
-        .lines
-        .extend(page.commits.into_iter().map(|commit| GraphLine {
-            row: GraphRow::unlaned(commit.oid),
-            commit,
-        }));
+    // レーンの割り当ては `graph` の担当。`app` は返ってきた行を並べるだけ。
+    let rows = state.graph.lanes.extend(&page.commits);
+    state.graph.lines.extend(
+        page.commits
+            .into_iter()
+            .zip(rows)
+            .map(|(commit, row)| GraphLine { commit, row }),
+    );
     state.graph.loaded_all = page.done;
     Cmd::None
 }
@@ -138,31 +156,25 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, crate::git_read::Git
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Modal, RepoInfo};
+    use crate::app::{Modal, RepoInfo, TermSize};
     use crate::config::Config;
-    use crate::git_read::{Commit, GitReadError, Oid, Signature};
+    use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
+    use crate::test_util::fake_commit;
+
+    /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
+    const ROWS: usize = 20;
 
     fn state() -> AppState {
-        AppState::new(RepoInfo::default(), Config::default())
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        state.graph.viewport = ROWS;
+        state
     }
 
-    /// `summary` だけが違うコミット。Oid は連番から作る。
     fn commit(n: u8) -> Commit {
-        let mut bytes = [0u8; 20];
-        bytes[19] = n;
-        Commit {
-            oid: Oid::from_bytes(&bytes).unwrap(),
-            parents: Vec::new(),
-            summary: format!("commit {n}"),
-            author: Signature {
-                name: "test".to_string(),
-                email: "test@example.invalid".to_string(),
-            },
-            time: 0,
-        }
+        fake_commit(n, &format!("commit {n}"))
     }
 
-    /// `n` 件のコミットを積んだ状態。端末は既定（24 行 = グラフ 20 行）。
+    /// `n` 件のコミットを積んだ状態。
     fn state_with_commits(n: u8) -> AppState {
         let mut state = state();
         let page = LogPage {
@@ -174,18 +186,68 @@ mod tests {
     }
 
     #[test]
-    fn init_asks_for_the_first_page_and_registers_the_job() {
+    fn init_asks_for_the_repository_and_the_first_page() {
         let mut state = state();
 
         let cmd = init(&mut state);
 
         assert_eq!(
             cmd,
-            Cmd::LoadLog {
-                count: state.config.graph.page_size
-            }
+            Cmd::Batch(vec![
+                Cmd::LoadRepoInfo,
+                Cmd::LoadLog {
+                    count: state.config.graph.page_size
+                }
+            ])
         );
         assert!(state.jobs.is_running(JobKind::LoadLog));
+        assert!(state.jobs.is_running(JobKind::LoadRepoInfo));
+    }
+
+    #[test]
+    fn repo_info_fills_in_the_remotes_head_and_ref_labels() {
+        let mut state = state();
+        init(&mut state);
+        let oid = commit(1).oid;
+        let info = RepoSnapshot {
+            remotes: vec![Remote {
+                name: "origin".to_string(),
+                url: "git@github.com:owner/repo.git".to_string(),
+            }],
+            head: HeadInfo::Branch {
+                name: "main".to_string(),
+                oid,
+            },
+            refs: RefIndex::from_iter([(
+                oid,
+                RefLabel::Local {
+                    name: "main".to_string(),
+                    is_head: true,
+                },
+            )]),
+        };
+
+        update(&mut state, Msg::RepoInfoLoaded(Box::new(Ok(info))));
+
+        assert_eq!(state.repo.remotes.len(), 1);
+        assert!(state.repo.head.is_some());
+        assert_eq!(state.graph.refs.labels(oid).len(), 1);
+        assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
+    }
+
+    #[test]
+    fn a_failed_repo_info_notices_and_keeps_going() {
+        // ラベルもリモートも無いままグラフは出せる。起動は止めない。
+        let mut state = state();
+        init(&mut state);
+
+        update(
+            &mut state,
+            Msg::RepoInfoLoaded(Box::new(Err(GitReadError::NonUtf8Head))),
+        );
+
+        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Warn);
+        assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
     }
 
     #[test]
@@ -404,15 +466,41 @@ mod tests {
     }
 
     #[test]
-    fn resize_updates_the_terminal_size() {
+    fn resize_updates_the_terminal_size_and_the_viewport() {
         let mut state = state();
-        let size = TermSize {
+        let term = TermSize {
             width: 120,
             height: 40,
         };
 
-        assert_eq!(update(&mut state, Msg::Resize(size)), Cmd::None);
-        assert_eq!(state.term, size);
+        let msg = Msg::Resize {
+            term,
+            graph_rows: 36,
+        };
+        assert_eq!(update(&mut state, msg), Cmd::None);
+        assert_eq!(state.term, term);
+        assert_eq!(state.graph.viewport, 36);
+    }
+
+    #[test]
+    fn shrinking_the_terminal_pulls_the_cursor_back_into_view() {
+        // 縮んだ端末でカーソルが窓の外に残ると、選択行が見えないまま操作することになる。
+        let mut state = state_with_commits(30);
+        for _ in 0..25 {
+            update(&mut state, Msg::Key(Key::char('j')));
+        }
+        assert_eq!(state.graph.cursor, 25);
+
+        let msg = Msg::Resize {
+            term: TermSize {
+                width: 80,
+                height: 9,
+            },
+            graph_rows: 5,
+        };
+        update(&mut state, msg);
+
+        assert_eq!(state.graph.scroll, 21);
     }
 
     #[test]

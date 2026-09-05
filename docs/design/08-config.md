@@ -50,6 +50,13 @@ pr_merged = "magenta"
 pr_closed = "red"
 ```
 
+### スタイル指定
+
+`[theme]` の値は空白区切りのトークン。色名（`green`、`#ff00aa` など ratatui が読める
+表記）と修飾（`bold` `dim` `italic` `underlined` `reversed`）を混ぜられる。既定の
+`graph_head` が `"bold"` であるとおり、値は色とは限らない。読めないトークンは黙って
+無視する（設定の 1 語のミスで起動を止めない）。解釈は `ui::theme::style`（07）。
+
 ## リポジトリ固有設定
 
 ```

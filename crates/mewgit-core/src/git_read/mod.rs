@@ -109,6 +109,21 @@ impl RefIndex {
     }
 }
 
+/// `(Oid, RefLabel)` の並びから索引を組む。同じ Oid のラベルはまとめられる。
+///
+/// `refs()` を通さずに索引を作れるようにしてあるのは、`ui` のテストがラベルの
+/// 描画を実リポジトリ無しで表現できるようにするため。並べ替えは [`RefIndex::new`]
+/// を通るので、どちらの経路でも順序は同じになる。
+impl FromIterator<(Oid, RefLabel)> for RefIndex {
+    fn from_iter<I: IntoIterator<Item = (Oid, RefLabel)>>(iter: I) -> Self {
+        let mut labels: HashMap<Oid, Vec<RefLabel>> = HashMap::new();
+        for (oid, label) in iter {
+            labels.entry(oid).or_default().push(label);
+        }
+        RefIndex::new(labels)
+    }
+}
+
 /// ref 1 件の表示用ラベル。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefLabel {

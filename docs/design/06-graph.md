@@ -9,6 +9,11 @@
 ```rust
 pub struct LaneState { lanes: Vec<Option<Oid>> }   // 各レーンが次に待つコミット
 
+impl LaneState {
+    /// 続きのコミット列に割り当て、行を返す。状態は末尾行の直後まで進む。
+    pub fn extend(&mut self, commits: &[Commit]) -> Vec<GraphRow>;
+}
+
 pub struct ColorId(pub u16);        // usize ではなく u16。Cell が 24 バイト → 6 バイトになる
 
 pub struct GraphRow {
@@ -28,6 +33,9 @@ pub enum Cell {
     Cross(ColorId, ColorId),            // ┼ 縦と横が別色
 }
 ```
+
+`app` が呼ぶのは `extend` だけ。行の作り方を `graph` の中に閉じておくことで、
+アルゴリズムを入れ替えるときに `app` を触らずに済む。
 
 ## アルゴリズム（1 行ずつ、状態を引き継ぐ）
 

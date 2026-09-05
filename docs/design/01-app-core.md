@@ -134,14 +134,14 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 「パスとリモートの入れ物」に描画専用の索引が混ざる。起動時に `head` / `remotes` と
 一緒に読む。fetch 後の読み直しは M3 で決める。
 
-`scroll` は状態として持つ。`cursor` と描画領域の高さから毎回導くと、下端から上へ
-戻るときにカーソルが最下行に貼り付いたまま中身だけが流れる。更新は
-`GraphState::move_cursor(delta, height)` / `scroll_into_view(height)`。
+`scroll` は状態として持つ。`cursor` と `viewport` から毎回導くと、下端から上へ戻る
+ときにカーソルが最下行に貼り付いたまま中身だけが流れる。更新は
+`GraphState::move_cursor(delta)` / `scroll_into_view()`。
 
-`height` は `app` が `TermSize` から出す（ヘッダ 1 行・ステータスバー 1 行・枠の
-上下 2 行を引く）。`ui` は `AppState` を書けないので、スクロール位置を決める値は
-`app` 側に置くしかない。**07 のレイアウトを変えたらここも直す。** ずれると
-`ui::panes::graph` の「見えている行しか描かない」テストが落ちる。
+`viewport` は `ui` がレイアウトから出して `Msg::Resize` で運んでくる（07 の
+`ui::graph_rows`）。core にヘッダや枠の高さを持たせない。持たせると 07 の
+レイアウトを変えたときに黙ってずれるうえ、`ui` の描画と `app` の計算のどちらが
+正しいかを決める場所が無くなる。
 
 ## 実行中ジョブ
 
@@ -207,9 +207,10 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 
 ```rust
 pub enum Msg {
-    Key(Key), Resize(TermSize), Tick,
+    Key(Key), Resize { term: TermSize, graph_rows: usize }, Tick,
     // git_read
     LogLoaded(Result<LogPage, GitReadError>),
+    RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(WorktreeSnapshot),
     DiffLoaded { target: DiffTarget, files: Vec<FileDiff> },
     // git_exec
@@ -224,6 +225,11 @@ pub enum Msg {
 ```
 
 `Msg` は `Clone` を要求しない。`Account` がトークン（`SecretString`）を持つため。
+
+`RepoInfoLoaded` はリモート・HEAD・ref の索引を 1 通で運ぶ。どれもリポジトリの ref から
+導かれる値で、fetch の後には揃って古くなる。一部だけ成功という形にしないのは、途中まで
+新しい状態を持っても意味が無いため。失敗しても通知だけで続ける（ラベルもリモートも
+無いままグラフは出せる）。
 
 `LogLoaded` は `Result` を運ぶ。失敗の通り道が無いと `JobKind::LoadLog` が走ったまま
 残り、以後の `Cmd::LoadLog` が `JobTracker` に黙って落とされて二度と読めなくなる。
@@ -247,6 +253,7 @@ pub enum Cmd {
     None, Batch(Vec<Cmd>),
     LoadLog { count: usize },           // 読む位置は git_read の LogSession が持つ（02）
     LoadStatus, LoadDiff(DiffTarget),
+    LoadRepoInfo,                      // remotes / head / refs。起動時と ref 変更後（M3）
     Exec(GitOp),                       // git CLI 実行（03 参照）
     ResolveAccount,
     FetchPr, FetchChecks, FetchPrList,
@@ -261,8 +268,9 @@ pub fn init(state: &mut AppState) -> Cmd;
 ```
 
 `runtime::run` がループに入る前に 1 回呼ぶ。`main.rs` から呼ぶと、テストを書かない
-配線の側に処理が出てしまう。いまは `LoadLog { count: config.graph.page_size }` だけで、
-`LoadStatus` / `ResolveAccount` はそれぞれのタスクでここに足す。
+配線の側に処理が出てしまう。いまは `LoadRepoInfo` と
+`LoadLog { count: config.graph.page_size }` の 2 つで、`LoadStatus` / `ResolveAccount` は
+それぞれのタスクでここに足す。
 
 ## update の原則
 
@@ -301,9 +309,13 @@ loop {
 }
 ```
 
-`open` はリポジトリを開いて初期状態を作る。開けなければ起動できないので `Err`、
-リモートや HEAD や ref の読み取りだけが失敗したときは通知に積んで続ける（ref が
-無くてもグラフは出せる）。`main.rs` を配線だけに保つため、分岐はここに置く。
+`open` がやるのは `RepoReader::open` だけ。bare や存在しないパスは起動できないので
+`Err` を返す（端末を初期化する前に出す）。リモート・HEAD・ref は `LoadRepoInfo` として
+ループの中で読む。ref の列挙は本数ぶんの object 読み出しになるので、ここで待つと
+最初の 1 フレームが出るまで画面が真っ黒になる。
+
+初期の端末サイズも `run` がループの前に `Msg::Resize` として `update` に流す。
+`AppState` を直接書かないことで、`viewport` の計算経路を 1 本に保つ。
 
 `run` は `Backend` とイベントストリームをジェネリックに取る。`TestBackend` と
 `futures::stream::iter` を渡してループ全体をテストできるようにするため。テストを
@@ -324,7 +336,8 @@ loop {
 - 未実装の `Cmd` は黙って捨てず `Notice::Warn` に積む。開発中に落ちているのが見えるように
 - **`dispatch` が `AppState` に書いてよいのは `notices` だけ。** それ以外の状態変化は
   `Msg` にして `update` に戻す。状態遷移の入口を `update` 1 つに保つため
-- 初期の端末サイズは `Terminal::size()` で取る。起動時に `Resize` は飛んでこない
+- 初期の端末サイズは `Terminal::size()` で取り、`Msg::Resize` にして `update` に流す。
+  起動時に `Resize` イベントは飛んでこない
 - Git CLI 実行中も入力を受け付けるが、書き込み系 `GitOp` は同時に 1 つのみ（キュー）
 - `Tick` は 250ms。進行中ジョブのスピナー更新と、外部変更検知（`.git/HEAD` の mtime 監視）に使う
 

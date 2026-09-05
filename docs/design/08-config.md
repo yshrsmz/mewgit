@@ -169,8 +169,9 @@ notice として表示したうえで既定値で継続する。
 
 ## キーマップの解決
 
-- `config` は `keymap` を `HashMap<String, String>` のまま保持する。`KeyEvent` への
-  変換は crossterm に依存するため `mewgit-tui` 側の `keymap.rs` で行う（core は UI 非依存）
-- `keymap` の値は `crossterm` の `KeyEvent` に変換（`"ctrl-d"`, `"shift-tab"`, `"P"` などを解析）
+- `config` は `keymap` を `HashMap<String, String>` のまま保持する。解析結果の型は
+  crossterm の `KeyEvent` ではなく core の `app::Key`（01）。パーサをどこに置くかは
+  M6 のキーマップタスクで決める
+- `keymap` の値は `app::Key` に変換（`"ctrl-d"`, `"shift-tab"`, `"P"` などを解析）
 - 同一ペイン内で衝突があれば起動時に警告し、後勝ちにする
 - 未定義のアクション名も警告のみ

@@ -1,5 +1,8 @@
 # 01. app: 状態管理とイベントループ
 
+`app` は状態と遷移だけを持つ。ここで定義する型はすべて `mewgit-core` 側にあり、
+ratatui / crossterm には依存しない（不変ルール 6）。`ui` は下位の型をここ経由で見る。
+
 ## AppState
 
 ```rust
@@ -16,20 +19,72 @@ pub struct AppState {
     pub modal: Option<Modal>,
     pub jobs: JobTracker,             // 実行中の非同期タスク（表示用）
     pub notices: VecDeque<Notice>,    // エラー・情報のトースト
+    pub term: TermSize,               // 端末サイズ。レイアウト分岐に使う
 }
 ```
+
+`RepoInfo` は `app` が組み立てる。パスとリモート一覧は `git_read`、ホスト名の正規化は
+`auth`（`ssh -G`）から来るため、どちらか一方の層には置けない。下位層に `RepoInfo` を
+渡さない（`auth::resolve` は `auth::RepoTarget`、`config::account_for` は
+`host` / `owner` / `repo` の 3 つを受ける）。
+
+## Pane と Modal
+
+`focus` と `modal` は状態なので `app` で定義する。`ui`（07）はこれを描画するだけで、
+自分では定義しない。
+
+```rust
+pub enum Pane { Graph, Branches, Stash, Prs, Worktree, Diff }
+
+pub enum Modal {
+    Confirm { title: String, body: String, on_yes: Box<Msg> },
+    Input { title: String, prompt: String, buf: TextBuffer, on_submit: fn(String) -> Msg },
+    CommitMessage { buf: TextBuffer, amend: bool },
+    RebaseEditor { plan: RebasePlan, cursor: usize },
+    PrCreate { title: TextBuffer, body: TextBuffer, base: String, draft: bool },
+    AccountPicker { candidates: Vec<GhLogin>, cursor: usize },
+    Help,
+}
+```
+
+`TextBuffer` は複数行の編集バッファ。ratatui のウィジェットや `tui-textarea` は
+使わない（core が UI に依存してしまうため）。編集操作の実装は M2 の commit タスクで行う。
+
+```rust
+pub struct TextBuffer { pub lines: Vec<String>, pub cursor: (usize, usize) }  // (行, 列)
+```
+
+## キー入力
+
+crossterm の `KeyEvent` は core に入れられないので、core 側に等価な型を持つ。
+`crossterm::event::KeyEvent → app::Key` の変換は `mewgit-tui` 側で行う。
+
+```rust
+pub struct Key { pub code: KeyCode, pub mods: Modifiers }
+
+pub enum KeyCode {
+    Char(char), Enter, Esc, Tab, BackTab, Backspace, Delete, Insert,
+    Left, Right, Up, Down, Home, End, PageUp, PageDown, F(u8),
+}
+
+pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
+```
+
+`Char` は crossterm と同様、shift 適用後の文字を入れる（`P` は
+`Char('P')` であって `Char('p') + shift` ではない）。`mods.shift` は
+`Tab` や矢印など文字を持たないキーの修飾にだけ使う。
 
 ## Msg
 
 ```rust
 pub enum Msg {
-    Key(KeyEvent), Resize(u16, u16), Tick,
+    Key(Key), Resize(TermSize), Tick,
     // git_read
     LogLoaded { commits: Vec<Commit>, done: bool },
     StatusLoaded(WorktreeSnapshot),
     DiffLoaded { target: DiffTarget, hunks: Vec<Hunk> },
     // git_exec
-    ExecFinished { op: GitOp, result: Result<ExecOutput, ExecError> },
+    ExecFinished { op: GitOp, result: Result<ExecOutput, ExecError>, progress: Option<InProgressOp> },
     ProgressDetected(Option<InProgressOp>),
     // auth / github
     AccountResolved(Result<Account, AuthError>),
@@ -38,6 +93,9 @@ pub enum Msg {
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),
 }
 ```
+
+`Msg` は `Clone` を要求しない。`Account` がトークン（`SecretString`）を持つためで、
+`Modal::Confirm` は `on_yes` を `state.modal.take()` でムーブして取り出す。
 
 ## Cmd
 
@@ -56,8 +114,11 @@ pub enum Cmd {
 ## update の原則
 
 - `update` は `AppState` を直接変更し、`Cmd` を返す。I/O を呼ばない
-- キー入力は `focus` と `modal` を見て、対応する pane / modal の handler に委譲する
-- `ExecFinished` を受けたら必ず `LoadStatus` + `ProgressDetected` を発行し、状態を再読込する（成功・失敗問わず）
+- キー入力は `focus` と `modal` を見て、対応する pane / modal の handler に委譲する。
+  ペインが `Cmd` を組み立てるのは `update` の中だけで、`ui` からは呼ばない
+- `ExecFinished` は進行中操作を一緒に運ぶ。`Runner` が実行直後に再検出するため（03）、
+  `update` から検出を頼み直さない。受けたら成功・失敗を問わず `progress` を反映し
+  `LoadStatus` を発行する。`ProgressDetected` は `.git/HEAD` 監視による外部変更検知用（M6）
 - 同種の `Cmd` が実行中なら重複発行しない（`JobTracker` で管理）
 
 ## ランタイム

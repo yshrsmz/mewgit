@@ -30,6 +30,11 @@ fn open_rejects_a_bare_repository() {
         matches!(err, GitReadError::BareRepository { .. }),
         "bare を拒否していません: {err:?}"
     );
+    // libgit2 の末尾区切りを残さない。
+    assert!(
+        !err.to_string().contains("/ は"),
+        "パスの末尾に区切りが残っています: {err}"
+    );
 }
 
 #[test]

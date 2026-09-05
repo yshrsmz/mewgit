@@ -42,7 +42,7 @@ impl RepoReader {
         let workdir = repo
             .workdir()
             .ok_or_else(|| GitReadError::BareRepository {
-                path: repo.path().to_path_buf(),
+                path: repo.path().components().collect(),
             })?
             // libgit2 は末尾に区切りを付けた `/…/repo/` を返す。そのまま持つと
             // 表示が `mewgit/` になり、設定や引数のパスとの文字列比較も外れる。

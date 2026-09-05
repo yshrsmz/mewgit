@@ -195,7 +195,7 @@ fn refs_are_sorted_by_kind_then_name() {
 fn refs_ignores_the_stash() {
     let repo = TestRepo::init();
     let first = repo.commit("first");
-    fs::write(repo.path().join("file.txt"), "dirty\n").unwrap();
+    repo.write_worktree_file("file.txt", b"dirty\n");
     repo.git(&["stash", "push", "-m", "wip"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
@@ -493,18 +493,17 @@ fn log_reports_parents_of_a_merge_commit() {
 
     let page = reader.log().unwrap().next_page(10).unwrap();
 
-    assert_eq!(page.commits[0].oid, merge);
+    // 祖先関係の無い main / side の順序は日時で決まる（`TestRepo` の固定クロック）。
+    assert_eq!(oids(&page), [merge, main, side, base]);
     // 第 1 親が現在のブランチ側。`graph` のレーン継承がこの順に依存する（06）。
     assert_eq!(page.commits[0].parents, [main, side]);
-    assert_eq!(page.commits.len(), 4);
-    assert!(page.commits.iter().any(|c| c.oid == base));
 }
 
 #[test]
 fn log_keeps_a_non_utf8_summary_instead_of_dropping_the_commit() {
     let repo = TestRepo::init();
     // 0xff は UTF-8 として不正。表示にしか使わない文字列は lossy で残す。
-    let oid = repo.commit_raw_message("file.txt", b"broken \xff summary\n");
+    let oid = repo.commit_raw_message(b"broken \xff summary\n");
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let page = reader.log().unwrap().next_page(10).unwrap();

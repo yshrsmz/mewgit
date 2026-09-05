@@ -2,18 +2,9 @@
 
 use std::iter::Peekable;
 
-use git2::{ErrorCode, Repository, Revwalk, Sort};
+use git2::{Repository, Revwalk, Sort};
 
-use super::{Commit, GitReadError, LogPage, Oid, RepoReader, Signature};
-
-/// `Revwalk` に push する ref。
-///
-/// リモート追跡ブランチも入れる。ローカルより進んでいる `origin/main` の行が出ないと、
-/// `RefIndex` が作った `{origin/main}` のラベルを載せる行が無くなる。
-///
-/// `push_ref` ではなく `push_glob` を使う。glob は commit まで peel できない ref
-/// （blob を指すタグなど）を黙って飛ばすので、その 1 本のために列挙全体が失敗しない。
-const PUSH_GLOBS: [&str; 3] = ["refs/heads/*", "refs/remotes/*", "refs/tags/*"];
+use super::{lossy, Commit, GitReadError, LogPage, Oid, RepoReader, Signature};
 
 impl RepoReader {
     /// ログ列挙のセッションを開く。
@@ -22,7 +13,7 @@ impl RepoReader {
     /// やり直せない（他のブランチとの交互配置が失われる）ので、続きを読むには同じ
     /// セッションを使い回す。
     pub fn log(&self) -> Result<LogSession<'_>, GitReadError> {
-        LogSession::new(self.repo())
+        LogSession::new(&self.repo)
     }
 }
 
@@ -41,20 +32,24 @@ impl<'repo> LogSession<'repo> {
     fn new(repo: &'repo Repository) -> Result<Self, GitReadError> {
         let mut walk = repo.revwalk()?;
         walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
-        for glob in PUSH_GLOBS {
+        // リモート追跡ブランチも入れる。ローカルより進んでいる `origin/main` の行が
+        // 出ないと、`RefIndex` が作った `{origin/main}` のラベルを載せる行が無くなる。
+        //
+        // `push_ref` ではなく `push_glob` を使う。glob は commit まで peel できない ref
+        // （tree を指すタグなど）を黙って飛ばすので、その 1 本のために列挙全体が失敗しない。
+        for glob in ["refs/heads/*", "refs/remotes/*", "refs/tags/*"] {
             walk.push_glob(glob)?;
         }
-        // detached HEAD の行を落とさないために HEAD も push する。ブランチに乗っている
-        // ときは `refs/heads/*` で既に入っている。
+        // detached HEAD だけはどの ref 名前空間にも無いので個別に push する。ブランチに
+        // 乗っているときは `refs/heads/*` で既に入っている。
         //
-        // `push_head` を直に呼ばないのは、unborn なリポジトリで返るエラーが
-        // `GenericError`（"reference 'refs/heads/main' not found"）で、握りつぶす対象を
-        // 絞り込めないため。`head()` は unborn を `UnbornBranch` で返す。
-        match repo.head() {
-            Ok(head) => walk.push(head.peel_to_commit()?.id())?,
-            // コミットが 1 つも無いリポジトリ。押すものが無いだけなので空のページを返す。
-            Err(err) if err.code() == ErrorCode::UnbornBranch => {}
-            Err(err) => return Err(err.into()),
+        // `push_head` を無条件に呼ばないのは、コミットが 1 つも無いリポジトリで返る
+        // エラーが `GenericError`（"reference 'refs/heads/main' not found"）で、握りつぶす
+        // 対象を絞り込めないため。`head_detached` は HEAD が symbolic なら解決しないので、
+        // unborn はそもそもこの分岐に入らない。代わりに `refs/heads/*` の外を指す symbolic
+        // HEAD が押されなくなるが、git が作らない状態なので許容する。
+        if repo.head_detached()? {
+            walk.push(repo.head()?.peel_to_commit()?.id())?;
         }
 
         Ok(Self {
@@ -96,14 +91,4 @@ impl<'repo> LogSession<'repo> {
             time: author.when().seconds(),
         })
     }
-}
-
-impl std::fmt::Debug for LogSession<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LogSession").finish_non_exhaustive()
-    }
-}
-
-fn lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
 }

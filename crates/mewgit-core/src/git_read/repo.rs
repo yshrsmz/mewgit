@@ -5,14 +5,16 @@ use std::path::{Path, PathBuf};
 
 use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
-use super::{GitReadError, HeadInfo, Oid, RefIndex, RefLabel, Remote};
+use super::{lossy, GitReadError, HeadInfo, Oid, RefIndex, RefLabel, Remote};
 
 /// git2 による読み取り専用のリポジトリハンドル。
 ///
 /// `git2::Repository` は `Send` だが `Sync` ではないので、`app` からは専用スレッド越しに
 /// 使う（02 の「スレッド」節）。ここはその内側の同期 API。
 pub struct RepoReader {
-    repo: Repository,
+    /// `git_read` の他のサブモジュール（log / diff / status）も読む。守る不変条件が
+    /// 無いのでアクセサは挟まない。
+    pub(super) repo: Repository,
     workdir: PathBuf,
 }
 
@@ -52,12 +54,6 @@ impl RepoReader {
         Ok(Self { repo, workdir })
     }
 
-    /// 内側の `git2::Repository`。`git_read` の他のサブモジュール（log / diff / status）が
-    /// 読み取りに使う。`git_read` の外には出さない。
-    pub(super) fn repo(&self) -> &Repository {
-        &self.repo
-    }
-
     /// ワークツリーのルート。`open` に渡したパスではなく、実際に見つかった方を返す。
     pub fn workdir(&self) -> &Path {
         &self.workdir
@@ -75,7 +71,7 @@ impl RepoReader {
             let remote = self.repo.find_remote(name)?;
             // URL は表示と `auth` の解析にしか使わないので、非 UTF-8 でもリモート自体は
             // 消さずに lossy で残す。
-            let url = String::from_utf8_lossy(remote.url_bytes()).into_owned();
+            let url = lossy(remote.url_bytes());
             remotes.push(Remote {
                 name: name.to_string(),
                 url,

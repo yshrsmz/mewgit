@@ -15,6 +15,15 @@ pub use git2::Oid;
 pub use log::LogSession;
 pub use repo::RepoReader;
 
+/// 表示にしか使わない文字列を UTF-8 に寄せる。
+///
+/// 識別子（ref 名・リモート名・パス）は非 UTF-8 なら項目ごと落とすが、表示専用の
+/// 文字列は読めない文字が混ざるほうが情報が多い（「非 UTF-8 の扱い」）。方針を
+/// 宣言している場所と実装を同じところに置く。
+pub(super) fn lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// `git_read` 層のエラー。
 ///
 /// `Clone` / `PartialEq` は付かない（`git2::Error` が実装していない）。

@@ -150,11 +150,11 @@ impl TestRepo {
     /// - `i18n.commitEncoding` を UTF-8 以外にしないと、git が「UTF-8 ではない」と
     ///   判断したメッセージを latin-1 とみなして UTF-8 に変換してしまい、
     ///   生バイト列がオブジェクトに残らない（git 2.55 で確認）
-    pub fn commit_raw_message(&self, path: &str, message: &[u8]) -> Oid {
+    pub fn commit_raw_message(&self, message: &[u8]) -> Oid {
         let message_file = self.sandbox.home.join("commit-msg");
         fs::write(&message_file, message).expect("コミットメッセージを書けませんでした");
-        self.write_worktree_file(path, b"raw\n");
-        self.git(&["add", path]);
+        self.write_worktree_file("file.txt", b"raw\n");
+        self.git(&["add", "file.txt"]);
         self.git(&[
             "-c",
             "i18n.commitEncoding=ISO-8859-1",
@@ -169,7 +169,7 @@ impl TestRepo {
     }
 
     /// ワークツリーのファイルを書く。親ディレクトリは作らない。
-    fn write_worktree_file(&self, path: &str, content: &[u8]) {
+    pub fn write_worktree_file(&self, path: &str, content: &[u8]) {
         fs::write(self.path().join(path), content)
             .unwrap_or_else(|err| panic!("{path} を書けませんでした: {err}"));
     }

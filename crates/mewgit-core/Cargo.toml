@@ -17,7 +17,6 @@ secrecy.workspace = true
 git2 = "0.20"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 toml = "0.8"
-directories = "6"
 globset = "0.4"
 
 [dev-dependencies]

@@ -50,7 +50,9 @@ pub async fn resolve(repo: &RepoInfo, gh: &GhCli, cfg: &Config, api: &GithubClie
 
 手順:
 
-1. `cfg.account_for(&repo)`（`.git/config` の `mewgit.user` または設定ファイルの `[[repos]]` マッチ）があれば、その login のトークンを取得して `Resolved(source: Config)`
+1. 明示指定があれば、その login のトークンを取得して `Resolved(source: Config)`。優先順は
+   1. `.git/config` の `mewgit.user`。`auth` が git2 の `Config` で読む（`config` モジュールは `.git/config` を見ない。08 参照）
+   2. 設定ファイルの `[[repos]]` マッチ。`cfg.account_for(host, owner, repo)` に `RepoInfo` から取り出した 3 つを渡す（`config` は下位層なので `RepoInfo` に依存させない）
 2. `auth_status()` を `repo.host` で絞る。0 件なら `Degraded(NotLoggedIn)`
 3. 1 件なら `Resolved(source: Single)`
 4. 複数なら各トークンで `GET /repos/{owner}/{repo}` を並列に試す

@@ -52,7 +52,7 @@ crates/
     git_exec/   runner.rs rebase.rs progress.rs
     github/     client.rs pr.rs   checks.rs
     auth/       gh.rs     resolve.rs ssh.rs
-    config/     mod.rs    keymap.rs
+    config/     mod.rs
   tui/src/
     main.rs   ui/  panes/  modals/  keymap.rs
 ```

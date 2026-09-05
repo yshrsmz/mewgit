@@ -77,6 +77,14 @@ TUI を非対話で動かして確認するには pty が要る。パイプ渡�
 - `mewgit-core` の git 系は `tempfile` に実リポジトリを作って統合テスト。helper は
   `crates/mewgit-core/tests/common/mod.rs` の `TestRepo`。リポジトリは `git` CLI で作り、
   `GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL` / `HOME` で実行環境の設定を持ち込まない
+- `TestRepo` はコミット日時を実時間ではなく固定カウンタから与える（`git` を 1 回叩くごとに
+  60 秒進む）。実時間だと連続したコミットが同じ秒に落ち、`Sort::TIME` での並びが揺れる。
+  author 日時と committer 日時には同じ値が入るので、両者が食い違うケースを踏みたいときは
+  `git commit --amend --date` で author 側だけずらす
+- 非 UTF-8 のコミットメッセージは `-c i18n.commitEncoding=ISO-8859-1` を付けて `-F` で
+  渡さないと作れない。git は「UTF-8 ではない」と判断したメッセージを latin-1 とみなして
+  UTF-8 に変換するので、素直に作ると生バイト列がオブジェクトに残らない（git 2.55 で確認）。
+  `-q` も要る。summary の echo が `TestRepo` の UTF-8 検証に当たる
 - `Path` 同士の `assert_eq!` は末尾の区切りを無視するので、パスの正規化はテストできない。
   git2 の `workdir()` / `path()` は `/…/repo/` と末尾を付けて返すため、正規化を確かめる
   ときは `to_string_lossy()` で文字列に直して見る

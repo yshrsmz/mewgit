@@ -155,8 +155,8 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 ```
 
 `Char` は crossterm と同様、shift 適用後の文字を入れる（`P` は
-`Char('P')` であって `Char('p') + shift` ではない）。`mods.shift` は
-`Tab` や矢印など文字を持たないキーの修飾にだけ使う。正規化があるので、
+`Char('P')` であって `Char('p') + shift` ではない）。`mods.shift` が残るのは、
+矢印や `Home` など文字を持たず専用のキーコードも無いキーだけ。正規化があるので、
 判定は `key == Key::char('q')` のような等値比較で足りる。
 
 ## Msg
@@ -216,18 +216,35 @@ pub enum Cmd {
 
 ## ランタイム
 
+ランタイムは `mewgit-tui` 側にある。`Msg` は core の型なので crossterm の `Event` から
+`From` は生やせない（孤児ルール、かつ不変ルール 6）。変換は tui の自由関数で行う。
+
 ```rust
 loop {
     terminal.draw(|f| ui::render(f, &state))?;
     let msg = tokio::select! {
-        Some(ev) = term_events.next() => Msg::from(ev),
+        Some(Ok(ev)) = term_events.next() => match event_to_msg(ev) { Some(m) => m, None => continue },
         Some(m) = rx.recv() => m,
         _ = tick.tick() => Msg::Tick,
     };
     let cmd = app::update(&mut state, msg);
-    runtime.dispatch(cmd, tx.clone());   // Cmd → tokio::spawn
+    if runtime.dispatch(&mut state, cmd, tx.clone()).is_break() {
+        break;
+    }
 }
 ```
 
+- `event_to_msg` は `Option<Msg>`。マウス・フォーカス・ペーストは対応する `Msg` が無いので落とす
+- キー変換は押下（`KeyEventKind::Press`）だけを通す。kitty プロトコルが有効な端末では
+  離鍵も飛んでくるため、1 回の打鍵が 2 つの `Msg::Key` になる
+- `dispatch` は `ControlFlow` を返す。`Cmd::Quit` で `Break`、`Cmd::Batch` は再帰する
+- 未実装の `Cmd` は黙って捨てず `Notice::Warn` に積む。開発中に落ちているのが見えるように
+- 初期の端末サイズは `crossterm::terminal::size()` で取る。起動時に `Resize` は飛んでこない
 - Git CLI 実行中も入力を受け付けるが、書き込み系 `GitOp` は同時に 1 つのみ（キュー）
 - `Tick` は 250ms。進行中ジョブのスピナー更新と、外部変更検知（`.git/HEAD` の mtime 監視）に使う
+
+## 端末の初期化と復元
+
+raw mode と代替画面の切替は `mewgit-tui` の担当。パニックフックで復元してから既定の
+フックに渡す。順序を逆にすると、パニックメッセージが raw mode の代替画面に出て読めない。
+イベントループが `Err` で抜けた場合も復元する。

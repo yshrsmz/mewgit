@@ -4,7 +4,7 @@
 
 ```
 ┌──────────────────────────────────────────────┐
-│ ui        ratatui ウィジェット・レイアウト・キー処理 │
+│ ui        ratatui ウィジェット・レイアウト・入力の変換 │
 ├──────────────────────────────────────────────┤
 │ app       状態（AppState）・Msg・update ループ      │
 ├────────────┬────────────┬────────────┬───────┤
@@ -60,7 +60,8 @@ crates/
     auth/       gh.rs     resolve.rs ssh.rs
     config/     mod.rs
   tui/src/
-    main.rs   ui/  panes/  modals/  keymap.rs
+    main.rs   terminal.rs  runtime.rs  keymap.rs
+    ui/  panes/  modals/
 ```
 
 ## 横断的関心事

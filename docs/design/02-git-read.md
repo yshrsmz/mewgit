@@ -27,7 +27,7 @@ impl RepoReader {
     pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;     // name, url（生の値）
     pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>
     pub fn head(&self) -> Result<HeadInfo, GitReadError>;           // branch name or detached Oid
-    pub fn walk(&self, from: Option<Oid>, n: usize) -> Result<LogPage, GitReadError>;
+    pub fn log(&self) -> Result<LogSession<'_>, GitReadError>;   // ページングは LogSession が持つ
     pub fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
     pub fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
     pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;
@@ -106,9 +106,55 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 
 ## ログ列挙
 
-- `Revwalk` に全ブランチ・タグ・HEAD を push、`Sort::TOPOLOGICAL | Sort::TIME`
-- ページング: `from` を `hide` ではなく「walk を継続する」形で実装するため、`Revwalk` を `LogSession` として保持し、`next_page(n)` で続きを取る
+```rust
+pub struct LogSession<'repo> { /* Revwalk<'repo> */ }
+
+impl LogSession<'_> {
+    pub fn next_page(&mut self, n: usize) -> Result<LogPage, GitReadError>;
+}
+
+pub struct LogPage {
+    pub commits: Vec<Commit>,
+    /// これ以上読むコミットが無い。
+    pub done: bool,
+}
+```
+
+- `Revwalk` に `refs/heads/*` `refs/remotes/*` `refs/tags/*` と HEAD を push、
+  `Sort::TOPOLOGICAL | Sort::TIME`。リモート追跡ブランチも push するのは、
+  ローカルより進んでいる `origin/main` の行が出ないと `{origin/main}` のラベルを
+  載せる行が無くなるため
+- push は `push_glob` を使う。単体の `push_ref` と違い、commit まで peel できない ref
+  （tree を指すタグなど）を黙って飛ばすので、その 1 本のために列挙全体が失敗しない。
+  `refs()` が peel できない ref を落とすのと同じ扱いになる
+- HEAD の push は `head_detached()` が真のときだけにする。ブランチに乗っていれば
+  `refs/heads/*` で既に入っているので、個別に要るのは detached だけ。
+  `Revwalk::push_head` を無条件に呼ぶと、コミットが 1 つも無いリポジトリで返る
+  エラーが `GenericError`（"reference 'refs/heads/main' not found"）になり、握りつぶす
+  対象を絞り込めない。`head_detached` は HEAD が symbolic なら解決しないので unborn を
+  踏まない。代わりに `refs/heads/*` の外を指す symbolic HEAD は押されないが、git が
+  作らない状態なので許容する
+- ページングの位置は API に持たせない。トポロジカル順の walk は途中の Oid からやり直せない
+  （他のブランチとの交互配置が失われる）ため、`Revwalk` を `LogSession` として保持し、
+  `next_page(n)` で続きを取る
+- **セッションは作り直さず使い回す。** `Sort` を指定した `Revwalk` は libgit2 側で
+  `limited` になり、最初の `next_page` で push した ref から到達可能なコミットを全部
+  読んでから整列する。つまりセッション生成 + 1 ページ目は履歴全体のコストで、2 ページ目
+  以降はほぼタダ。スクロールのたびに `log()` を呼び直すと毎回それを払い直すことになる。
+  1 ページ目は必ずリーダースレッド側で読む
+- `done` は `Revwalk` を `Peekable` にして 1 つ先読みして決める。「ちょうど n 件で終わった」
+  ときに `done: false` を返して空のページをもう 1 回読ませないため
+- `LogSession<'repo>` は `RepoReader` を借りる。`Repository` と同じ構造体には入れられない
+  （自己参照になる）ので、リーダースレッドではループのローカル変数として
+  `Option<LogSession<'_>>` を `RepoReader` の隣に置く
+- `next_page` が `Err` を返したらセッションを捨てる。そのページのために walk から取り出した
+  Oid は失われており、同じセッションで読み直すとその分がどのページにも現れない。グラフには
+  親の見つからない行が残り、2 回目は成功するので UI にも異常が出ない
 - 1 コミットあたり `Commit { oid, parents, summary, author, time }` のみ抽出。本文とファイル一覧は選択時に遅延取得
+- `Commit::time` は author 日時だが、行の並びは `Sort::TIME`（= committer 日時）で決まる。
+  rebase / cherry-pick された履歴では表示日時が並び順と逆転しうる。`git log` と同じ挙動なので
+  そのままにする
+- summary と署名は表示にしか使わないので、非 UTF-8 でも lossy 変換して残す（「非 UTF-8 の扱い」）
 
 ## diff とハンク
 

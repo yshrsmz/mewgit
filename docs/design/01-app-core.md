@@ -216,7 +216,7 @@ pub enum Msg {
 ```rust
 pub enum Cmd {
     None, Batch(Vec<Cmd>),
-    LoadLog { from: Option<Oid>, count: usize },
+    LoadLog { count: usize },           // 読む位置は git_read の LogSession が持つ（02）
     LoadStatus, LoadDiff(DiffTarget),
     Exec(GitOp),                       // git CLI 実行（03 参照）
     ResolveAccount,

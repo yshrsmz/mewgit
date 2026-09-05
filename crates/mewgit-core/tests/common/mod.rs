@@ -7,9 +7,19 @@
 //! `.git` ディレクトリも無いので、`commit` や `write_git_file` を呼べてしまうと実行時に
 //! `git` の stderr で落ちるだけになる。分けておけばコンパイルエラーで気付く。
 
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// コミット日時の起点（2023-11-14T22:13:20Z）。`git` を 1 回叩くごとに [`TICK`] 秒進める。
+///
+/// 実時間を使うと、続けて作ったコミットが同じ秒に落ちて `Sort::TIME` での並びが
+/// 揺れる。テストごとに固定の値を与えて順序を決める。
+const CLOCK_START: i64 = 1_700_000_000;
+
+/// `git` 1 回あたりに進める秒数。
+const TICK: i64 = 60;
 
 use mewgit_core::git_read::Oid;
 use tempfile::TempDir;
@@ -22,6 +32,8 @@ struct Sandbox {
     _dir: TempDir,
     root: PathBuf,
     home: PathBuf,
+    /// 次の `git` 実行に渡すコミット日時。
+    clock: Cell<i64>,
 }
 
 impl Sandbox {
@@ -43,6 +55,7 @@ impl Sandbox {
             _dir: dir,
             root,
             home,
+            clock: Cell::new(CLOCK_START),
         };
         sandbox.git(init_args);
         sandbox
@@ -50,6 +63,9 @@ impl Sandbox {
 
     /// `git` を実行し、標準出力を末尾の改行を落として返す。失敗したら panic する。
     fn git(&self, args: &[&str]) -> String {
+        // 日時は実時間ではなく固定のカウンタから与える。同じ秒に落ちたコミットは
+        // `Sort::TIME` での並びが揺れてテストが不安定になる。
+        let date = format!("{} +0000", self.tick());
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.root)
             .args(args)
@@ -62,6 +78,8 @@ impl Sandbox {
             .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
             .env("GIT_COMMITTER_NAME", "mewgit test")
             .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
             .env("GIT_TERMINAL_PROMPT", "0");
 
         let out = cmd.output().expect("git を実行できませんでした");
@@ -75,6 +93,13 @@ impl Sandbox {
             .expect("git の出力が UTF-8 ではありません")
             .trim_end()
             .to_string()
+    }
+
+    /// 現在の日時を返し、カウンタを [`TICK`] 秒進める。
+    fn tick(&self) -> i64 {
+        let now = self.clock.get();
+        self.clock.set(now + TICK);
+        now
     }
 }
 
@@ -101,13 +126,52 @@ impl TestRepo {
         self.sandbox.git(args)
     }
 
-    /// ファイルを 1 つ書き換えてコミットし、その Oid を返す。
+    /// `file.txt` を書き換えてコミットし、その Oid を返す。
     pub fn commit(&self, message: &str) -> Oid {
-        fs::write(self.path().join("file.txt"), format!("{message}\n"))
-            .expect("ファイルを書けませんでした");
-        self.git(&["add", "file.txt"]);
+        self.commit_file("file.txt", message)
+    }
+
+    /// 指定したファイルを書き換えてコミットし、その Oid を返す。
+    ///
+    /// ブランチを分けて後でマージするテストは、同じファイルを触るとマージが
+    /// コンフリクトするのでこちらを使う。
+    pub fn commit_file(&self, path: &str, message: &str) -> Oid {
+        self.write_worktree_file(path, format!("{message}\n").as_bytes());
+        self.git(&["add", path]);
         self.git(&["commit", "-m", message]);
         self.head_oid()
+    }
+
+    /// 非 UTF-8 のコミットメッセージでコミットする。
+    ///
+    /// - `-m` では argv に載せられないので `-F` でファイルから渡す
+    /// - `-q` を付けないと git が summary を stdout に echo し、[`Sandbox::git`] の
+    ///   UTF-8 検証に引っかかる（落ちるのはテスト側で、読む側の実装ではない）
+    /// - `i18n.commitEncoding` を UTF-8 以外にしないと、git が「UTF-8 ではない」と
+    ///   判断したメッセージを latin-1 とみなして UTF-8 に変換してしまい、
+    ///   生バイト列がオブジェクトに残らない（git 2.55 で確認）
+    pub fn commit_raw_message(&self, message: &[u8]) -> Oid {
+        let message_file = self.sandbox.home.join("commit-msg");
+        fs::write(&message_file, message).expect("コミットメッセージを書けませんでした");
+        self.write_worktree_file("file.txt", b"raw\n");
+        self.git(&["add", "file.txt"]);
+        self.git(&[
+            "-c",
+            "i18n.commitEncoding=ISO-8859-1",
+            "commit",
+            "-q",
+            "-F",
+            message_file
+                .to_str()
+                .expect("一時パスが UTF-8 ではありません"),
+        ]);
+        self.head_oid()
+    }
+
+    /// ワークツリーのファイルを書く。親ディレクトリは作らない。
+    pub fn write_worktree_file(&self, path: &str, content: &[u8]) {
+        fs::write(self.path().join(path), content)
+            .unwrap_or_else(|err| panic!("{path} を書けませんでした: {err}"));
     }
 
     /// 現在の HEAD の Oid。

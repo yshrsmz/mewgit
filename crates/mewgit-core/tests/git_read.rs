@@ -5,7 +5,7 @@ mod common;
 use std::fs;
 
 use common::{BareRepo, TestRepo};
-use mewgit_core::git_read::{GitReadError, HeadInfo, Oid, RefLabel, RepoReader};
+use mewgit_core::git_read::{GitReadError, HeadInfo, LogPage, Oid, RefLabel, RepoReader};
 
 #[test]
 fn open_finds_the_repository_from_a_subdirectory() {
@@ -322,4 +322,212 @@ fn head_reports_an_unborn_branch() {
             name: "main".to_string(),
         }
     );
+}
+
+// ---- ログ列挙 ----
+
+/// ページの Oid だけを取り出す。
+fn oids(page: &LogPage) -> Vec<Oid> {
+    page.commits.iter().map(|c| c.oid).collect()
+}
+
+#[test]
+fn log_lists_commits_newest_first() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    let second = repo.commit("second");
+    let third = repo.commit("third");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    assert_eq!(oids(&page), [third, second, first]);
+    assert!(page.done, "全部読んだのに done が立っていません");
+}
+
+#[test]
+fn log_pages_through_a_linear_history() {
+    let repo = TestRepo::init();
+    let commits: Vec<Oid> = (0..5).map(|i| repo.commit(&format!("c{i}"))).collect();
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let mut session = reader.log().unwrap();
+
+    let first = session.next_page(2).unwrap();
+    let second = session.next_page(2).unwrap();
+    let third = session.next_page(2).unwrap();
+
+    assert_eq!(oids(&first), [commits[4], commits[3]]);
+    assert!(!first.done);
+    assert_eq!(oids(&second), [commits[2], commits[1]]);
+    assert!(!second.done);
+    assert_eq!(oids(&third), [commits[0]]);
+    assert!(third.done);
+}
+
+#[test]
+fn log_is_done_when_the_page_ends_exactly_at_the_last_commit() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.commit("second");
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let mut session = reader.log().unwrap();
+
+    let page = session.next_page(2).unwrap();
+
+    // 先読みしないとここが `false` になり、空のページをもう 1 回読むことになる。
+    assert_eq!(page.commits.len(), 2);
+    assert!(
+        page.done,
+        "ちょうど n 件で終わったのに done が立っていません"
+    );
+    // それでも続きを求められたら空を返す。
+    let after = session.next_page(2).unwrap();
+    assert!(after.commits.is_empty());
+    assert!(after.done);
+}
+
+#[test]
+fn log_on_an_unborn_repository_is_empty() {
+    // コミットが 1 つも無いと `push_head` が UnbornBranch になる。握りつぶさないと
+    // 起動直後の空リポジトリでログの読み込みが失敗する。
+    let repo = TestRepo::init();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    assert!(page.commits.is_empty());
+    assert!(page.done);
+}
+
+#[test]
+fn log_includes_commits_on_other_branches() {
+    let repo = TestRepo::init();
+    let base = repo.commit("base");
+    repo.git(&["checkout", "-b", "feature"]);
+    let feature = repo.commit("feature");
+    repo.git(&["checkout", "main"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    // HEAD から辿れない行もグラフに出す。
+    assert_eq!(oids(&page), [feature, base]);
+}
+
+#[test]
+fn log_includes_remote_tracking_branches() {
+    let repo = TestRepo::init();
+    let base = repo.commit("base");
+    repo.git(&["checkout", "-b", "ahead"]);
+    let remote_only = repo.commit("remote only");
+    repo.git(&["checkout", "main"]);
+    // ローカルブランチは消し、リモート追跡 ref だけが指す状態にする。
+    repo.git(&[
+        "update-ref",
+        "refs/remotes/origin/main",
+        &remote_only.to_string(),
+    ]);
+    repo.git(&["branch", "-D", "ahead"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    // `{origin/main}` のラベルを載せる行が無くならないよう refs/remotes/* も push する。
+    assert_eq!(oids(&page), [remote_only, base]);
+}
+
+#[test]
+fn log_includes_tagged_commits() {
+    let repo = TestRepo::init();
+    let base = repo.commit("base");
+    repo.git(&["checkout", "-b", "tagged"]);
+    let tagged = repo.commit("tagged");
+    repo.git(&["tag", "-a", "v1", "-m", "annotated"]);
+    repo.git(&["checkout", "main"]);
+    repo.git(&["branch", "-D", "tagged"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    assert_eq!(oids(&page), [tagged, base]);
+}
+
+#[test]
+fn log_survives_a_tag_that_cannot_be_peeled_to_a_commit() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    // tree を指すタグ。単体の `push_ref` だと列挙全体が失敗する。
+    repo.git(&["tag", "treetag", "HEAD^{tree}"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    assert_eq!(oids(&page), [first]);
+}
+
+#[test]
+fn log_includes_a_detached_head() {
+    let repo = TestRepo::init();
+    let base = repo.commit("base");
+    repo.git(&["checkout", "--detach"]);
+    let detached = repo.commit("detached");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    // どのブランチからも辿れないので、`push_head` が無いと消える。
+    assert_eq!(oids(&page), [detached, base]);
+}
+
+#[test]
+fn log_reports_parents_of_a_merge_commit() {
+    let repo = TestRepo::init();
+    let base = repo.commit("base");
+    repo.git(&["checkout", "-b", "side"]);
+    let side = repo.commit_file("side.txt", "side");
+    repo.git(&["checkout", "main"]);
+    let main = repo.commit_file("main.txt", "main");
+    repo.git(&["merge", "--no-ff", "-m", "merge", "side"]);
+    let merge = repo.head_oid();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    assert_eq!(page.commits[0].oid, merge);
+    // 第 1 親が現在のブランチ側。`graph` のレーン継承がこの順に依存する（06）。
+    assert_eq!(page.commits[0].parents, [main, side]);
+    assert_eq!(page.commits.len(), 4);
+    assert!(page.commits.iter().any(|c| c.oid == base));
+}
+
+#[test]
+fn log_keeps_a_non_utf8_summary_instead_of_dropping_the_commit() {
+    let repo = TestRepo::init();
+    // 0xff は UTF-8 として不正。表示にしか使わない文字列は lossy で残す。
+    let oid = repo.commit_raw_message("file.txt", b"broken \xff summary\n");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    assert_eq!(oids(&page), [oid]);
+    assert_eq!(page.commits[0].summary, "broken \u{fffd} summary");
+}
+
+#[test]
+fn log_reports_the_author_and_time() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let expected_time: i64 = repo
+        .git(&["show", "-s", "--format=%at", "HEAD"])
+        .parse()
+        .unwrap();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    let commit = &page.commits[0];
+    assert_eq!(commit.summary, "first");
+    assert_eq!(commit.author.name, "mewgit test");
+    assert_eq!(commit.author.email, "test@example.invalid");
+    assert_eq!(commit.time, expected_time);
 }

@@ -4,7 +4,7 @@
 //! 結果を [`Msg`](crate::app::Msg) として返す。
 
 use crate::git_exec::GitOp;
-use crate::git_read::{DiffTarget, Oid};
+use crate::git_read::DiffTarget;
 
 use super::JobKind;
 
@@ -13,8 +13,9 @@ use super::JobKind;
 pub enum Cmd {
     None,
     Batch(Vec<Cmd>),
+    /// ログを `count` 件読む。どこから読むかは持たない。トポロジカル順の walk は
+    /// 途中の Oid からやり直せないので、位置はランタイム側の `LogSession` が持つ（02）。
     LoadLog {
-        from: Option<Oid>,
         count: usize,
     },
     LoadStatus,

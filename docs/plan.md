@@ -13,7 +13,7 @@
 ## M1: 読み取り専用でグラフを出す
 
 - [x] `git_read::RepoReader::open` / `remotes` / `refs` / `head`
-- [ ] `git_read` のログ列挙（`LogSession`、ページング）+ tempfile リポジトリでのテスト
+- [x] `git_read` のログ列挙（`LogSession`、ページング）+ tempfile リポジトリでのテスト
 - [ ] `graph::lane` — レーン割り当てアルゴリズム + 固定ケースのテスト（直線 / 分岐 / マージ / オクトパス / 複数ルート）
 - [ ] `ui::panes::graph` — `GraphRow` の描画、罫線 / ASCII フォールバック、ラベル、色
 - [ ] コミット詳細の遅延取得と展開表示

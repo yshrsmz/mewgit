@@ -27,7 +27,7 @@ impl RepoReader {
     pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;     // name, url（生の値）
     pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>
     pub fn head(&self) -> Result<HeadInfo, GitReadError>;           // branch name or detached Oid
-    pub fn walk(&self, from: Option<Oid>, n: usize) -> Result<LogPage, GitReadError>;
+    pub fn log(&self) -> Result<LogSession<'_>, GitReadError>;   // ページングは LogSession が持つ
     pub fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
     pub fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
     pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;
@@ -106,9 +106,42 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 
 ## ログ列挙
 
-- `Revwalk` に全ブランチ・タグ・HEAD を push、`Sort::TOPOLOGICAL | Sort::TIME`
-- ページング: `from` を `hide` ではなく「walk を継続する」形で実装するため、`Revwalk` を `LogSession` として保持し、`next_page(n)` で続きを取る
+```rust
+pub struct LogSession<'repo> { /* Revwalk<'repo> */ }
+
+impl LogSession<'_> {
+    pub fn next_page(&mut self, n: usize) -> Result<LogPage, GitReadError>;
+}
+
+pub struct LogPage {
+    pub commits: Vec<Commit>,
+    /// これ以上読むコミットが無い。
+    pub done: bool,
+}
+```
+
+- `Revwalk` に `refs/heads/*` `refs/remotes/*` `refs/tags/*` と HEAD を push、
+  `Sort::TOPOLOGICAL | Sort::TIME`。リモート追跡ブランチも push するのは、
+  ローカルより進んでいる `origin/main` の行が出ないと `{origin/main}` のラベルを
+  載せる行が無くなるため
+- push は `push_glob` を使う。単体の `push_ref` と違い、commit まで peel できない ref
+  （blob を指すタグなど）を黙って飛ばすので、その 1 本のために列挙全体が失敗しない。
+  `refs()` が peel できない ref を落とすのと同じ扱いになる
+- HEAD も push する。効くのは detached のときだけ（ブランチに乗っていれば
+  `refs/heads/*` で既に入っている）。ただし `Revwalk::push_head` は使わず、
+  `head()` で Oid を解決してから push する。unborn なリポジトリで `push_head` が返す
+  エラーは `GenericError`（"reference 'refs/heads/main' not found"）で握りつぶす対象を
+  絞り込めないのに対し、`Repository::head` は `UnbornBranch` を返すため
+- ページング: `from` を `hide` ではなく「walk を継続する」形で実装するため、`Revwalk` を
+  `LogSession` として保持し、`next_page(n)` で続きを取る。トポロジカル順は途中の Oid から
+  やり直せない（他のブランチとの交互配置が失われる）ので、位置は walk 自身に持たせる
+- `done` は `Revwalk` を `Peekable` にして 1 つ先読みして決める。「ちょうど n 件で終わった」
+  ときに `done: false` を返して空のページをもう 1 回読ませないため
+- `LogSession<'repo>` は `RepoReader` を借りる。`Repository` と同じ構造体には入れられない
+  （自己参照になる）ので、リーダースレッドではループのローカル変数として
+  `Option<LogSession<'_>>` を `RepoReader` の隣に置く
 - 1 コミットあたり `Commit { oid, parents, summary, author, time }` のみ抽出。本文とファイル一覧は選択時に遅延取得
+- summary と署名は表示にしか使わないので、非 UTF-8 でも lossy 変換して残す（「非 UTF-8 の扱い」）
 
 ## diff とハンク
 

@@ -3,14 +3,16 @@
 //! git2 による読み取り専用の層。書き込みは一切行わない（不変ルール 1）。
 //!
 //! ここには層をまたいで受け渡す値型を置き、読み取りの実装は `repo` などの
-//! サブモジュールに置く。ログ列挙・status・diff は M1 以降で実装する。
+//! サブモジュールに置く。status・diff は M2 で実装する。
 
+mod log;
 mod repo;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub use git2::Oid;
+pub use log::LogSession;
 pub use repo::RepoReader;
 
 /// `git_read` 層のエラー。
@@ -45,6 +47,15 @@ pub struct Commit {
     pub author: Signature,
     /// author time。Unix epoch からの秒数。
     pub time: i64,
+}
+
+/// [`LogSession::next_page`] が返す 1 ページ分。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogPage {
+    pub commits: Vec<Commit>,
+    /// これ以上読むコミットが無い。walk を 1 つ先読みして決めるので、ちょうど
+    /// ページ幅ぴったりで終わったときも立つ。
+    pub done: bool,
 }
 
 /// コミットの author / committer。

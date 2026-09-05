@@ -52,6 +52,12 @@ impl RepoReader {
         Ok(Self { repo, workdir })
     }
 
+    /// 内側の `git2::Repository`。`git_read` の他のサブモジュール（log / diff / status）が
+    /// 読み取りに使う。`git_read` の外には出さない。
+    pub(super) fn repo(&self) -> &Repository {
+        &self.repo
+    }
+
     /// ワークツリーのルート。`open` に渡したパスではなく、実際に見つかった方を返す。
     pub fn workdir(&self) -> &Path {
         &self.workdir

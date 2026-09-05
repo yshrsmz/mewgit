@@ -46,11 +46,23 @@ cargo run -p mewgit -- <repo-path>
 
 CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
 
+TUI を非対話で動かして確認するには pty が要る。パイプ渡しだと `enable_raw_mode` が
+`Device not configured (os error 6)` で落ちる。`script` は pty のサイズを設定しないので、
+`stty` で与えないと 0x0 になって何も描画されない。
+
+```
+(sleep 1; printf 'q'; sleep 1) | script -q /dev/null \
+  sh -c 'stty rows 24 cols 80; exec ./target/debug/mewgit <repo-path>' > out.txt 2>&1
+```
+
 ## コーディング規約
 
 - Rust 2021、`rustfmt` 既定設定。`clippy` の警告ゼロを維持
 - エラーは各モジュールで `thiserror`、`app` 層で `AppError` に集約。`anyhow` は `main.rs` とテストのみ
 - 非同期は tokio。git2 呼び出しは `spawn_blocking` またはリーダースレッド経由
+- crossterm は `use ratatui::crossterm::` 経由で使う。直接 `use crossterm::` にすると、
+  Renovate が片方だけ上げたときに `Event` / `KeyEvent` が別クレートの型に割れる。
+  `Cargo.toml` の直接依存は `event-stream` feature のために残す
 - 公開 API にはドキュメントコメント。内部は必要なところだけ
 - 一つの PR / コミットは一つの関心事。設計書の変更とコード変更は同じコミットで
 - **`AppState` にコールバック（関数ポインタ・クロージャ）を持たせない。** 確定後に何を
@@ -66,7 +78,9 @@ CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace -
 - `graph` は固定のコミット列に対する `cells` の期待値テストを必ず追加する
 - GitHub API は `wiremock` でモック。実 API は叩かない
 - `git_exec::to_argv` は純粋関数なのでユニットテストで全 `GitOp` をカバーする
-- `mewgit-tui` の描画は ratatui の `TestBackend` にレンダリングしてバッファを検証する
+- `mewgit-tui` の描画は ratatui の `TestBackend` にレンダリングしてバッファを検証する。
+  取り出しは `terminal.backend().to_string()` を使う。セルを自前で走査すると全角文字の
+  2 セル目が空白として混ざる（「新しい通知」→「新 し い 通 知」）
 - 型だけを定義するタスクでも、その型で実際の操作を 1 つ組み立てるテストを書く。
   組み立てられないなら型が間違っている（「この確認モーダルに入れる値を作れるか」など）
 - テストを書かない例外は、端末の raw mode 切替・復元と `main.rs` の配線だけ。実端末が必要で単体テストできないため

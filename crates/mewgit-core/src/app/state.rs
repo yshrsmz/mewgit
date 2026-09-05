@@ -14,6 +14,8 @@ use crate::git_read::{
 use crate::github::{Check, PullRequest};
 use crate::graph::{GraphRow, LaneState};
 
+use crate::config::Config;
+
 use super::Cmd;
 
 /// アプリ全体の状態。
@@ -35,13 +37,19 @@ pub struct AppState {
     pub focus: Pane,
     pub modal: Option<Modal>,
     pub jobs: JobTracker,
+    /// エラー・情報のトースト。積むのは [`AppState::push_notice`]。
     pub notices: VecDeque<Notice>,
     pub term: TermSize,
+    /// 起動時に確定した設定。実行中は再読込しない（08）。
+    pub config: Config,
 }
 
+/// 保持する通知の上限。超えた分は古いものから捨てる。
+const MAX_NOTICES: usize = 100;
+
 impl AppState {
-    /// 開いたリポジトリから初期状態を作る。
-    pub fn new(repo: RepoInfo) -> Self {
+    /// 開いたリポジトリと設定から初期状態を作る。
+    pub fn new(repo: RepoInfo, config: Config) -> Self {
         Self {
             repo,
             account: AccountState::default(),
@@ -57,6 +65,22 @@ impl AppState {
             jobs: JobTracker::default(),
             notices: VecDeque::new(),
             term: TermSize::default(),
+            config,
+        }
+    }
+
+    /// 通知を積む。[`MAX_NOTICES`] を超えた分は古いものから捨てる。
+    ///
+    /// 組み立てをここに寄せているのは、上限を 1 箇所で効かせるため。生産者は
+    /// `update` とランタイムの両方にいる。
+    pub fn push_notice(&mut self, level: NoticeLevel, message: String, detail: Option<String>) {
+        self.notices.push_back(Notice {
+            level,
+            message,
+            detail,
+        });
+        while self.notices.len() > MAX_NOTICES {
+            self.notices.pop_front();
         }
     }
 }
@@ -343,6 +367,39 @@ impl TextBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_notice_drops_the_oldest_beyond_the_cap() {
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        for i in 0..MAX_NOTICES + 5 {
+            state.push_notice(NoticeLevel::Info, format!("notice {i}"), None);
+        }
+
+        assert_eq!(state.notices.len(), MAX_NOTICES);
+        // 最新は残り、最古から捨てられる。
+        assert_eq!(
+            state.notices.back().map(|n| n.message.as_str()),
+            Some(format!("notice {}", MAX_NOTICES + 4).as_str())
+        );
+        assert_eq!(
+            state.notices.front().map(|n| n.message.as_str()),
+            Some("notice 5")
+        );
+    }
+
+    #[test]
+    fn push_notice_keeps_level_and_detail() {
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        state.push_notice(
+            NoticeLevel::Error,
+            "失敗".to_string(),
+            Some("git push origin main".to_string()),
+        );
+
+        let notice = state.notices.back().unwrap();
+        assert_eq!(notice.level, NoticeLevel::Error);
+        assert_eq!(notice.detail.as_deref(), Some("git push origin main"));
+    }
 
     #[test]
     fn text_buffer_round_trips() {

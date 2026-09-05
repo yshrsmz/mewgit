@@ -4,7 +4,7 @@
 
 ```
 ┌──────────────────────────────────────────────┐
-│ ui        ratatui ウィジェット・レイアウト・キー処理 │
+│ ui        ratatui ウィジェット・レイアウト・入力の変換 │
 ├──────────────────────────────────────────────┤
 │ app       状態（AppState）・Msg・update ループ      │
 ├────────────┬────────────┬────────────┬───────┤
@@ -51,7 +51,7 @@
 
 ```
 crates/
-  core/src/
+  mewgit-core/src/
     app/        state.rs  msg.rs  update.rs  cmd.rs
     graph/      lane.rs   render.rs
     git_read/   repo.rs   log.rs  diff.rs  status.rs
@@ -59,8 +59,9 @@ crates/
     github/     client.rs pr.rs   checks.rs
     auth/       gh.rs     resolve.rs ssh.rs
     config/     mod.rs
-  tui/src/
-    main.rs   ui/  panes/  modals/  keymap.rs
+  mewgit-tui/src/
+    main.rs   runtime.rs  input.rs
+    ui/  panes/  modals/
 ```
 
 ## 横断的関心事

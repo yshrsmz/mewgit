@@ -66,7 +66,9 @@ git config mewgit.user taro_acme
 3. `.git/config` の `[mewgit]`
 4. 環境変数 `MEWGIT_*`（`_GIT_BIN` など、デバッグ用）
 
-`Config` は起動時に確定し、実行中の再読込は MVP では行わない。
+`Config` は起動時に確定し、実行中の再読込は MVP では行わない。読み込んだ `Config` は
+`AppState` が持つ（01）。`ui` は `AppState` 経由でしか値を読めないため（不変ルール 2）、
+`theme` を届けるにはここに置くしかない。
 
 1・2 は `config` モジュールの責務。3 はリポジトリのパスを必要とし、値としても
 `mewgit.user` しか読まないため `auth::resolve`（04）が `Config` とは別に読む。

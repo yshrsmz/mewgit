@@ -16,7 +16,7 @@ pub enum ConfigWarning {
     #[error("設定ファイルを読めませんでした: {path}: {message}")]
     Io { path: PathBuf, message: String },
     /// TOML として解釈できなかった。ファイル全体を捨てて既定値を使う。
-    #[error("設定ファイルの構文エラー: {message}")]
+    #[error("設定ファイルの構文エラー{}: {message}", DisplaySource(.path))]
     Parse {
         /// 文字列から直接読んだ場合は `None`。
         path: Option<PathBuf>,
@@ -30,9 +30,24 @@ pub enum ConfigWarning {
     NoConfigDir,
 }
 
-/// `mewgit` の設定。起動時に確定し、実行中は再読込しない。
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+/// `Option<PathBuf>` を `#[error]` に埋め込むためのアダプタ。パスが無ければ何も出さない。
+struct DisplaySource<'a>(&'a Option<PathBuf>);
+
+impl std::fmt::Display for DisplaySource<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(path) => write!(f, "（{}）", path.display()),
+            None => Ok(()),
+        }
+    }
+}
+
+/// 検証済みの設定。起動時に確定し、実行中は再読込しない。
+///
+/// `Deserialize` は持たない。生成経路は [`Config::load`] / [`Config::load_from`] /
+/// [`Config::from_toml_str`] / [`Config::default`] だけで、いずれも `[[repos]]` の
+/// glob をコンパイル済みにする。
+#[derive(Debug, Clone, Default)]
 pub struct Config {
     pub general: General,
     pub graph: Graph,
@@ -43,8 +58,28 @@ pub struct Config {
     pub theme: Theme,
 }
 
+/// TOML 上の形。glob は未コンパイルで、未知のキーは無視する。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ConfigFile {
+    general: General,
+    graph: Graph,
+    github: Github,
+    repos: Vec<RepoRuleSpec>,
+    keymap: HashMap<String, String>,
+    theme: Theme,
+}
+
+/// `[[repos]]` の 1 エントリ（未検証）。
+#[derive(Debug, Deserialize)]
+struct RepoRuleSpec {
+    #[serde(rename = "match")]
+    pattern: String,
+    user: String,
+}
+
 /// `[general]`
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct General {
     pub git_bin: String,
@@ -53,7 +88,7 @@ pub struct General {
 }
 
 /// `[graph]`
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Graph {
     pub ascii: bool,
@@ -62,7 +97,7 @@ pub struct Graph {
 }
 
 /// `[github]`
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Github {
     pub enabled: bool,
@@ -70,7 +105,7 @@ pub struct Github {
 }
 
 /// `[theme]`
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Theme {
     pub graph_head: String,
@@ -79,18 +114,14 @@ pub struct Theme {
     pub pr_closed: String,
 }
 
-/// `[[repos]]` の 1 エントリ。リポジトリごとの GitHub アカウント指定。
-#[derive(Debug, Clone, Deserialize)]
+/// glob をコンパイル済みの `[[repos]]` エントリ。不正な glob のものは存在しない。
+#[derive(Debug, Clone)]
 pub struct RepoRule {
     /// `"{host}/{owner}/{repo}"` にマッチさせる glob。
-    #[serde(rename = "match")]
     pub pattern: String,
     /// 使用する GitHub のログイン名。
     pub user: String,
-    /// 読み込み時に一度だけコンパイルする。不正な glob のルールは破棄されるので
-    /// 生き残ったルールでは必ず `Some`。
-    #[serde(skip)]
-    matcher: Option<GlobMatcher>,
+    matcher: GlobMatcher,
 }
 
 impl Default for General {
@@ -109,9 +140,8 @@ impl Default for Graph {
             ascii: false,
             page_size: 300,
             colors: ["blue", "magenta", "cyan", "green", "yellow", "red"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+                .map(String::from)
+                .to_vec(),
         }
     }
 }
@@ -141,10 +171,8 @@ impl Config {
     ///
     /// ファイルが無い場合は既定値を返し、警告も出さない。
     pub fn load() -> (Config, Vec<ConfigWarning>) {
-        let xdg = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from);
-        let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
+        let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+        let home = std::env::home_dir();
 
         let (mut config, warnings) = match resolve_config_path(xdg.as_deref(), home.as_deref()) {
             Some(path) => Self::load_from(&path),
@@ -159,69 +187,39 @@ impl Config {
     ///
     /// パスを外から渡せるようにしているのはテストのため。
     pub fn load_from(path: &Path) -> (Config, Vec<ConfigWarning>) {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::parse(&text, Some(path)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return (Config::default(), Vec::new())
-            }
-            Err(err) => {
-                return (
-                    Config::default(),
-                    vec![ConfigWarning::Io {
-                        path: path.to_path_buf(),
-                        message: err.to_string(),
-                    }],
-                )
-            }
-        };
-
-        let (config, mut warnings) = Self::from_toml_str(&text);
-        for warning in &mut warnings {
-            if let ConfigWarning::Parse { path: slot, .. } = warning {
-                *slot = Some(path.to_path_buf());
-            }
-        }
-        (config, warnings)
-    }
-
-    /// TOML 文字列から読む。パースに失敗したら既定値と [`ConfigWarning::Parse`]。
-    pub fn from_toml_str(text: &str) -> (Config, Vec<ConfigWarning>) {
-        match toml::from_str::<Config>(text) {
-            Ok(mut config) => {
-                let warnings = config.compile_globs();
-                (config, warnings)
+                (Config::default(), Vec::new())
             }
             Err(err) => (
                 Config::default(),
-                vec![ConfigWarning::Parse {
-                    path: None,
-                    message: err.message().to_string(),
+                vec![ConfigWarning::Io {
+                    path: path.to_path_buf(),
+                    message: err.to_string(),
                 }],
             ),
         }
     }
 
-    /// `[[repos]]` の glob をコンパイルする。不正なルールは破棄して警告を返す。
-    fn compile_globs(&mut self) -> Vec<ConfigWarning> {
-        let mut warnings = Vec::new();
-        let rules = std::mem::take(&mut self.repos);
-        for mut rule in rules {
-            // `*` が `/` を跨がないようにする。`acme-*/*` が `a/b/c` に当たらないため。
-            match GlobBuilder::new(&rule.pattern)
-                .literal_separator(true)
-                .build()
-            {
-                Ok(glob) => {
-                    rule.matcher = Some(glob.compile_matcher());
-                    self.repos.push(rule);
-                }
-                Err(err) => warnings.push(ConfigWarning::InvalidGlob {
-                    pattern: rule.pattern,
+    /// TOML 文字列から読む。パースに失敗したら既定値と [`ConfigWarning::Parse`]。
+    pub fn from_toml_str(text: &str) -> (Config, Vec<ConfigWarning>) {
+        Self::parse(text, None)
+    }
+
+    /// `source` はエラーメッセージに出すファイルパス。文字列から直接読んだなら `None`。
+    fn parse(text: &str, source: Option<&Path>) -> (Config, Vec<ConfigWarning>) {
+        match toml::from_str::<ConfigFile>(text) {
+            Ok(file) => file.into_config(),
+            Err(err) => (
+                Config::default(),
+                vec![ConfigWarning::Parse {
+                    path: source.map(Path::to_path_buf),
+                    // `to_string` は行・列を含む。`message()` だとそれが落ちる。
                     message: err.to_string(),
-                }),
-            }
+                }],
+            ),
         }
-        warnings
     }
 
     /// `MEWGIT_*` による上書きを適用する。`lookup` は環境変数の取得。
@@ -239,13 +237,55 @@ impl Config {
         let target = format!("{host}/{owner}/{repo}");
         self.repos
             .iter()
-            .find(|rule| {
-                rule.matcher
-                    .as_ref()
-                    .is_some_and(|matcher| matcher.is_match(&target))
-            })
+            .find(|rule| rule.matcher.is_match(&target))
             .map(|rule| rule.user.as_str())
     }
+}
+
+impl ConfigFile {
+    /// glob をコンパイルして [`Config`] にする。不正なルールは捨てて警告に載せる。
+    fn into_config(self) -> (Config, Vec<ConfigWarning>) {
+        let mut warnings = Vec::new();
+        let repos = self
+            .repos
+            .into_iter()
+            .filter_map(|spec| match compile_pattern(&spec.pattern) {
+                Ok(matcher) => Some(RepoRule {
+                    pattern: spec.pattern,
+                    user: spec.user,
+                    matcher,
+                }),
+                Err(err) => {
+                    warnings.push(ConfigWarning::InvalidGlob {
+                        pattern: spec.pattern,
+                        message: err.to_string(),
+                    });
+                    None
+                }
+            })
+            .collect();
+
+        let config = Config {
+            general: self.general,
+            graph: self.graph,
+            github: self.github,
+            repos,
+            keymap: self.keymap,
+            theme: self.theme,
+        };
+        (config, warnings)
+    }
+}
+
+/// `[[repos]]` の `match` をコンパイルする。
+///
+/// `*` が `/` を跨がないようにしている。跨ぐと `github.com/*` が
+/// `github.com/owner/repo` にも当たってしまう。
+fn compile_pattern(pattern: &str) -> Result<GlobMatcher, globset::Error> {
+    Ok(GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()?
+        .compile_matcher())
 }
 
 /// 設定ファイルのパスを組み立てる。
@@ -263,6 +303,15 @@ pub fn resolve_config_path(xdg_config_home: Option<&Path>, home: Option<&Path>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 一時ディレクトリに `config.toml` を書く。`TempDir` は drop されると消えるので
+    /// 呼び出し側で束縛し続けること。
+    fn write_config(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        (dir, path)
+    }
 
     #[test]
     fn empty_input_gives_documented_defaults() {
@@ -293,17 +342,6 @@ mod tests {
     }
 
     #[test]
-    fn default_impl_matches_empty_toml() {
-        let (parsed, _) = Config::from_toml_str("");
-        let default = Config::default();
-        assert_eq!(parsed.general.git_bin, default.general.git_bin);
-        assert_eq!(parsed.graph.page_size, default.graph.page_size);
-        assert_eq!(parsed.graph.colors, default.graph.colors);
-        assert_eq!(parsed.github.enabled, default.github.enabled);
-        assert_eq!(parsed.theme.pr_merged, default.theme.pr_merged);
-    }
-
-    #[test]
     fn partial_override_keeps_other_defaults() {
         let (config, warnings) = Config::from_toml_str(
             r#"
@@ -314,11 +352,12 @@ mod tests {
         assert!(warnings.is_empty());
         assert!(config.graph.ascii);
         // 同じテーブル内の書かれなかった項目も既定値のまま残る。
-        assert_eq!(config.graph.page_size, 300);
-        assert_eq!(config.graph.colors.len(), 6);
-        // 触れていないテーブルも既定値。
-        assert_eq!(config.general.git_bin, "git");
-        assert!(config.github.enabled);
+        assert_eq!(config.graph.page_size, Graph::default().page_size);
+        assert_eq!(config.graph.colors, Graph::default().colors);
+        // 触れていないテーブルはまるごと既定値。
+        assert_eq!(config.general, General::default());
+        assert_eq!(config.github, Github::default());
+        assert_eq!(config.theme, Theme::default());
     }
 
     #[test]
@@ -368,10 +407,10 @@ mod tests {
         assert_eq!(config.keymap.get("push").map(String::as_str), Some("P"));
         assert_eq!(config.theme.graph_head, "underline");
         assert_eq!(config.theme.pr_closed, "gray");
-        assert_eq!(
-            config.account_for("github.com", "acme-tools", "cli"),
-            Some("taro_acme")
-        );
+        // マッチの挙動は account_for のテストが見る。ここは読めていることだけ。
+        assert_eq!(config.repos.len(), 1);
+        assert_eq!(config.repos[0].pattern, "github.com/acme-*/*");
+        assert_eq!(config.repos[0].user, "taro_acme");
     }
 
     #[test]
@@ -391,28 +430,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_error_falls_back_to_defaults_with_one_warning() {
-        let (config, warnings) = Config::from_toml_str("[graph\nascii = true");
-        assert_eq!(warnings.len(), 1);
-        assert!(matches!(
-            warnings[0],
-            ConfigWarning::Parse { path: None, .. }
-        ));
-        assert_eq!(config.graph.page_size, 300);
-        assert!(!config.graph.ascii);
-    }
-
-    #[test]
-    fn wrong_type_is_a_parse_warning() {
-        let (config, warnings) = Config::from_toml_str(
-            r#"
-            [graph]
-            page_size = "many"
-            "#,
-        );
-        assert_eq!(warnings.len(), 1);
-        assert!(matches!(warnings[0], ConfigWarning::Parse { .. }));
-        assert_eq!(config.graph.page_size, 300);
+    fn broken_toml_falls_back_to_defaults_with_one_warning() {
+        // 構文エラーと型不一致。どちらもファイル全体を捨てる。
+        for text in ["[graph\nascii = true", "[graph]\npage_size = \"many\""] {
+            let (config, warnings) = Config::from_toml_str(text);
+            assert_eq!(warnings.len(), 1, "input: {text:?}");
+            assert!(
+                matches!(warnings[0], ConfigWarning::Parse { path: None, .. }),
+                "input: {text:?}, got: {:?}",
+                warnings[0]
+            );
+            assert_eq!(config.graph, Graph::default(), "input: {text:?}");
+        }
     }
 
     #[test]
@@ -420,32 +449,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (config, warnings) = Config::load_from(&dir.path().join("does-not-exist.toml"));
         assert!(warnings.is_empty());
-        assert_eq!(config.graph.page_size, 300);
+        assert_eq!(config.graph, Graph::default());
     }
 
     #[test]
     fn load_from_reads_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[graph]\npage_size = 42\n").unwrap();
-
+        let (_dir, path) = write_config("[graph]\npage_size = 42\n");
         let (config, warnings) = Config::load_from(&path);
         assert!(warnings.is_empty());
         assert_eq!(config.graph.page_size, 42);
     }
 
     #[test]
-    fn load_from_attaches_the_path_to_parse_warnings() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[graph\n").unwrap();
-
+    fn parse_warning_carries_the_file_path() {
+        let (_dir, path) = write_config("[graph\n");
         let (_, warnings) = Config::load_from(&path);
+
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
             ConfigWarning::Parse { path: slot, .. } => assert_eq!(slot.as_deref(), Some(&*path)),
             other => panic!("expected Parse, got {other:?}"),
         }
+        // パスは表示にも出る。どのファイルを直せばいいか分かる必要がある。
+        assert!(warnings[0]
+            .to_string()
+            .contains(&path.display().to_string()));
     }
 
     #[test]
@@ -454,7 +482,7 @@ mod tests {
         let (config, warnings) = Config::load_from(dir.path());
         assert_eq!(warnings.len(), 1);
         assert!(matches!(warnings[0], ConfigWarning::Io { .. }));
-        assert_eq!(config.graph.page_size, 300);
+        assert_eq!(config.graph, Graph::default());
     }
 
     #[test]
@@ -549,62 +577,47 @@ mod tests {
     }
 
     #[test]
-    fn config_path_prefers_absolute_xdg_config_home() {
-        let path = resolve_config_path(Some(Path::new("/xdg")), Some(Path::new("/home/user")));
-        assert_eq!(path.as_deref(), Some(Path::new("/xdg/mewgit/config.toml")));
+    fn config_path_resolution() {
+        let home = Some("/home/user");
+        let default = Some("/home/user/.config/mewgit/config.toml");
+        let cases: [(Option<&str>, Option<&str>, Option<&str>); 7] = [
+            (Some("/xdg"), home, Some("/xdg/mewgit/config.toml")),
+            (None, home, default),
+            // XDG 仕様では相対パス・空文字の XDG_CONFIG_HOME は無視する。
+            (Some("relative/dir"), home, default),
+            (Some(""), home, default),
+            // ホームが無くても XDG が絶対パスなら決まる。
+            (Some("/xdg"), None, Some("/xdg/mewgit/config.toml")),
+            (None, None, None),
+            (Some("relative"), None, None),
+        ];
+
+        for (xdg, home, want) in cases {
+            let got = resolve_config_path(xdg.map(Path::new), home.map(Path::new));
+            assert_eq!(
+                got.as_deref(),
+                want.map(Path::new),
+                "xdg={xdg:?} home={home:?}"
+            );
+        }
     }
 
     #[test]
-    fn config_path_falls_back_to_home_dot_config() {
-        let path = resolve_config_path(None, Some(Path::new("/home/user")));
-        assert_eq!(
-            path.as_deref(),
-            Some(Path::new("/home/user/.config/mewgit/config.toml"))
+    fn env_overrides_the_file() {
+        let (mut config, _) = Config::from_toml_str(
+            r#"
+            [general]
+            git_bin = "/from/file"
+            gh_bin = "/from/file"
+            "#,
         );
-    }
-
-    #[test]
-    fn config_path_ignores_relative_xdg_config_home() {
-        // XDG 仕様では相対パスの XDG_CONFIG_HOME は無視する。
-        let path = resolve_config_path(
-            Some(Path::new("relative/dir")),
-            Some(Path::new("/home/user")),
-        );
-        assert_eq!(
-            path.as_deref(),
-            Some(Path::new("/home/user/.config/mewgit/config.toml"))
-        );
-    }
-
-    #[test]
-    fn config_path_works_without_home_when_xdg_is_absolute() {
-        let path = resolve_config_path(Some(Path::new("/xdg")), None);
-        assert_eq!(path.as_deref(), Some(Path::new("/xdg/mewgit/config.toml")));
-    }
-
-    #[test]
-    fn config_path_is_none_without_home_and_without_absolute_xdg() {
-        assert_eq!(resolve_config_path(None, None), None);
-        assert_eq!(resolve_config_path(Some(Path::new("relative")), None), None);
-    }
-
-    #[test]
-    fn env_overrides_the_binaries() {
-        let mut config = Config::default();
         config.apply_env(|key| match key {
-            "MEWGIT_GIT_BIN" => Some("/opt/git".to_string()),
-            "MEWGIT_GH_BIN" => Some("/opt/gh".to_string()),
+            "MEWGIT_GIT_BIN" => Some("/from/env".to_string()),
+            "MEWGIT_GH_BIN" => Some("/from/env".to_string()),
             _ => None,
         });
-        assert_eq!(config.general.git_bin, "/opt/git");
-        assert_eq!(config.general.gh_bin, "/opt/gh");
-    }
-
-    #[test]
-    fn env_override_beats_the_file() {
-        let (mut config, _) = Config::from_toml_str("[general]\ngit_bin = \"/from/file\"\n");
-        config.apply_env(|key| (key == "MEWGIT_GIT_BIN").then(|| "/from/env".to_string()));
         assert_eq!(config.general.git_bin, "/from/env");
+        assert_eq!(config.general.gh_bin, "/from/env");
     }
 
     #[test]

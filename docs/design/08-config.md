@@ -6,10 +6,9 @@
 - 状態・ログ: `$XDG_STATE_HOME/mewgit/`
 - リポジトリ固有: `.git/config` の `[mewgit]` セクション
 
-macOS でも XDG のパスを使う。`directories` の `config_dir()` は macOS で
-`~/Library/Application Support` を返すため、パス決定にはこのクレートを使わず、
-`XDG_CONFIG_HOME` → `$HOME/.config` の順で自前に組み立てる。ホームディレクトリの
-取得にだけ `directories::BaseDirs` を使う。
+macOS でも XDG のパスを使う。`directories` クレートの `config_dir()` は macOS で
+`~/Library/Application Support` を返すため使わない。`XDG_CONFIG_HOME` → `$HOME/.config` の
+順で自前に組み立て、ホームディレクトリは `std::env::home_dir()` で取る。
 
 ## config.toml
 
@@ -74,9 +73,32 @@ MVP で見る環境変数は `MEWGIT_GIT_BIN` と `MEWGIT_GH_BIN` の 2 つ。
 
 ## 構造体
 
+ファイル上の形（TOML そのまま）と、アプリが使う形（glob コンパイル済み）を型で分ける。
+`Deserialize` を持つのは private な `ConfigFile` 側だけで、公開する `Config` は
+`from_toml_str` / `load_from` / `load` / `default` からしか作れない。
+
 ```rust
+/// TOML の生の形。private。
 #[derive(Default, Deserialize)]
 #[serde(default)]
+struct ConfigFile {
+    general: General,
+    graph: Graph,
+    github: Github,
+    repos: Vec<RepoRuleSpec>,
+    keymap: HashMap<String, String>,
+    theme: Theme,
+}
+
+#[derive(Deserialize)]
+struct RepoRuleSpec {
+    #[serde(rename = "match")]
+    pattern: String,
+    user: String,
+}
+
+/// 検証済みの設定。`Deserialize` は持たない。
+#[derive(Default)]
 pub struct Config {
     pub general: General,
     pub graph: Graph,
@@ -84,6 +106,13 @@ pub struct Config {
     pub repos: Vec<RepoRule>,
     pub keymap: HashMap<String, String>,
     pub theme: Theme,
+}
+
+/// glob をコンパイル済みの `[[repos]]` エントリ。不正な glob のものは存在しない。
+pub struct RepoRule {
+    pub pattern: String,
+    pub user: String,
+    matcher: GlobMatcher,
 }
 
 impl Config {
@@ -97,25 +126,19 @@ impl Config {
     pub fn account_for(&self, host: &str, owner: &str, repo: &str) -> Option<&str>;
 }
 
-#[derive(Deserialize)]
-pub struct RepoRule {
-    #[serde(rename = "match")]
-    pub pattern: String,
-    pub user: String,
-    /// `load` 時にコンパイルする。不正な glob なら `None`。
-    #[serde(skip)]
-    matcher: Option<GlobMatcher>,
-}
-
 /// 設定ファイルのパスを組み立てる純粋関数。どちらも決まらなければ `None`。
 pub fn resolve_config_path(xdg_config_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf>;
 ```
 
-`Default` は `General` / `Graph` / `Github` / `Theme` に手で実装する（`Config` 自体は
-サブ構造体の `Default` を呼ぶだけなので derive でよい）。`derive(Default)` ではゼロ値になり、
-上記の既定値（`git_bin = "git"`、`page_size = 300`、`github.enabled = true` など）と
-食い違うため。各フィールドに `#[serde(default)]` を付け、部分的な TOML でも
-書かれていない項目が既定値のまま残るようにする。
+`matcher` を `Option` にせず必須にすることで、「コンパイルし忘れた `Config` では
+`account_for` が黙って `None` を返す」という状態を型で排除する。`ConfigFile` から
+`Config` への変換のときに glob をコンパイルし、失敗したルールはそこで捨てる。
+
+`Default` は `General` / `Graph` / `Github` / `Theme` に手で実装する（`Config` と
+`ConfigFile` はサブ構造体の `Default` を呼ぶだけなので derive でよい）。`derive(Default)`
+ではゼロ値になり、上記の既定値（`git_bin = "git"`、`page_size = 300`、
+`github.enabled = true` など）と食い違うため。各フィールドに `#[serde(default)]` を付け、
+部分的な TOML でも書かれていない項目が既定値のまま残るようにする。
 
 ## エラーとしない扱い
 
@@ -135,7 +158,8 @@ notice として表示したうえで既定値で継続する。
 - マッチ対象の文字列は `"{host}/{owner}/{repo}"`
 - glob は `globset`。`*` は `/` を跨がない（`literal_separator = true`）
 - **先に書いたルールが勝つ**。複数マッチしても最初の 1 件を返す
-- glob は読み込み時に 1 度だけコンパイルして `RepoRule` に保持する（`account_for` では再コンパイルしない）
+- glob は `ConfigFile` → `Config` の変換時に 1 度だけコンパイルして `RepoRule` に保持する
+  （`account_for` では再コンパイルしない）
 - 知らないキーはエラーにせず無視する。`deny_unknown_fields` は使わない（設定ファイルの
   1 行のタイポで全項目が既定値に落ちるのを避ける）
 

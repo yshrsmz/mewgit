@@ -68,6 +68,16 @@ impl ReaderHandle {
     ///
     /// セッションはスレッド側が持ち回る。呼ぶたびに続きが返り、先頭からは読み直さない。
     /// 読み切ったあとは空のページを `done` 付きで返す。
+    ///
+    /// **`Err` を返したあとの次の呼び出しは先頭から読み直す。** 失敗したセッションは
+    /// 捨てるしかない（02 の「ログ列挙」）ので、エラーを通知として出しつつスクロールを
+    /// 続けさせると 1 ページ目が二重に積まれる。呼び出し側は積んだ行を捨ててから
+    /// 読み直すこと。
+    ///
+    /// **この future は cancel-safe ではない。** 完了前に drop すると、スレッド側は
+    /// walk を進めたあとで返り先を失い、そのページのコミットはどのページにも現れなく
+    /// なる（グラフに親の見つからない行が残る）。ランタイムはログ読み込みのタスクを
+    /// abort しないこと。M3 で入れるキャンセルは `Cmd::Exec`（git CLI の実行）に効かせる。
     pub async fn log_page(&self, count: usize) -> Result<LogPage, GitReadError> {
         self.request(|reply| Request::LogPage { count, reply })
             .await
@@ -104,12 +114,14 @@ impl ReaderHandle {
     }
 }
 
-/// ログ列挙の状態。`RepoReader` の隣にローカル変数として置く。
+/// 進行中の walk。`RepoReader` の隣にローカル変数として置く。
 ///
 /// `LogSession<'repo>` は `RepoReader` を借りるので、同じ構造体には入れられない
 /// （自己参照になる）。
+#[derive(Default)]
 enum Log<'repo> {
     /// まだ開いていない。最初の要求で開く。
+    #[default]
     Idle,
     Live(LogSession<'repo>),
     /// 読み切った。`Live` のまま持ち続けると、libgit2 が walk のために読んだコミットの
@@ -125,7 +137,8 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
     // 送信側（すべての `ReaderHandle`）が落ちたらループを抜けてスレッドを終える。
     while let Some(request) = rx.blocking_recv() {
         // 返り先が落ちていても続ける。要求元のタスクが先に消えただけで、
-        // 他のハンドルはまだ生きている。
+        // 他のハンドルはまだ生きている。`LogPage` だけは読み進めたページが失われるが、
+        // それは要求元を捨てないことで防ぐ（[`ReaderHandle::log_page`] の注記）。
         match request {
             Request::LogPage { count, reply } => {
                 let _ = reply.send(next_page(&reader, &mut log, count));
@@ -154,7 +167,7 @@ fn next_page<'repo>(
     count: usize,
 ) -> Result<LogPage, GitReadError> {
     // 取り出した時点で `Idle` に落としておく。`?` で戻るときはセッションが捨てられる。
-    let mut session = match std::mem::replace(log, Log::Idle) {
+    let mut session = match std::mem::take(log) {
         Log::Live(session) => session,
         Log::Idle => reader.log()?,
         Log::Exhausted => {

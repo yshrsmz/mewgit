@@ -1,11 +1,9 @@
 //! `git_read::RepoReader` の統合テスト。実リポジトリを一時ディレクトリに作って読む。
 
-mod common;
-
 use std::fs;
 
-use common::{BareRepo, TestRepo};
 use mewgit_core::git_read::{GitReadError, HeadInfo, LogPage, Oid, RefLabel, RepoReader};
+use mewgit_core::test_util::{BareRepo, TestRepo};
 
 #[test]
 fn open_finds_the_repository_from_a_subdirectory() {

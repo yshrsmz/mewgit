@@ -7,6 +7,7 @@
 
 mod log;
 mod repo;
+mod thread;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ use std::path::PathBuf;
 pub use git2::Oid;
 pub use log::LogSession;
 pub use repo::RepoReader;
+pub use thread::ReaderHandle;
 
 /// 表示にしか使わない文字列を UTF-8 に寄せる。
 ///
@@ -43,6 +45,10 @@ pub enum GitReadError {
     /// detached と区別が付かなくなるので、ここだけはエラーにする。
     #[error("HEAD が指すブランチ名が UTF-8 ではありません")]
     NonUtf8Head,
+    /// リーダースレッドが応答しない。スレッドが落ちたときに待ち続けると、
+    /// `JobTracker` に登録されたジョブが永久に残る。
+    #[error("リポジトリの読み取りスレッドが停止しています")]
+    ReaderGone,
     #[error("git の読み取りに失敗しました: {0}")]
     Git(#[from] git2::Error),
 }

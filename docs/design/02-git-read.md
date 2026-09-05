@@ -186,6 +186,7 @@ pub enum GitReadError {
     Open { path: PathBuf, source: git2::Error },
     BareRepository { path: PathBuf },
     NonUtf8Head,
+    ReaderGone,
     Git(git2::Error),
 }
 ```
@@ -194,6 +195,38 @@ pub enum GitReadError {
 `BareRepository` は `discover` が見つけたリポジトリのパスを添える。引数のサブディレクトリを
 返すと「そのディレクトリが bare だ」と読めてしまうため。
 
+`ReaderGone` はリーダースレッド（下記）が落ちているときに返る。待ち続けると `JobTracker` に
+登録されたジョブが永久に残り、同種の `Cmd` が二度と発行されなくなる。
+
 ## スレッド
 
-`git2::Repository` は `Send` だが `Sync` ではない。`RepoReader` は `spawn_blocking` 内で毎回 open するか、専用スレッドに所有させてチャネル経由で使う。後者を採用し、`ReaderHandle` を `app` に渡す。
+`git2::Repository` は `Send` だが `Sync` ではない。`RepoReader` は `spawn_blocking` 内で毎回 open するか、専用スレッドに所有させてチャネル経由で使う。後者を採用し、`ReaderHandle` をランタイムに渡す。
+
+```rust
+pub struct ReaderHandle { /* mpsc::UnboundedSender<Request>, workdir: PathBuf */ }
+
+impl ReaderHandle {
+    pub async fn spawn(path: PathBuf) -> Result<Self, GitReadError>;
+    pub fn workdir(&self) -> &Path;
+    pub async fn log_page(&self, count: usize) -> Result<LogPage, GitReadError>;
+    pub async fn refs(&self) -> Result<RefIndex, GitReadError>;
+    pub async fn head(&self) -> Result<HeadInfo, GitReadError>;
+    pub async fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;
+}
+```
+
+- `spawn_blocking` を毎回呼ぶ形にできないのは `LogSession` があるため。セッションはスレッドの
+  ローカル変数として生き続ける必要がある（「ログ列挙」の「セッションは作り直さず使い回す」）
+- スレッドの本体は `RepoReader` をローカル変数に置き、その隣に `Option<LogSession<'_>>` を持つ。
+  `LogSession<'repo>` が `RepoReader` を借りるので、同じ構造体には入れられない（自己参照になる）
+- 要求は変種ごとに `oneshot::Sender<Result<T, GitReadError>>` を持つ非公開の enum で送る。
+  `ReaderHandle` は型付きの async メソッドだけを見せる。公開の要求 / 応答 enum を作ると、
+  `Cmd`（01）と `Msg`（01）に並ぶ 3 本目の語彙になり、変種を足すたびに 3 箇所直すことになる
+- `open` はスレッドの中で行い、結果（ワークツリーのルート）を `oneshot` で返す。bare や
+  存在しないパスは `spawn` の `Err` として起動時に出る。`workdir()` はその値を持つので同期で読める
+- **`next_page` の `Err` でセッションを捨てる契約は、ここで実装として守る。** スレッドは
+  セッションを一度取り出し、成功したときだけ戻す。契約を書ける場所が他に無い
+- `ReaderHandle` は `Clone`。ランタイムは `Cmd` ごとに tokio タスクを起こし、その中から呼ぶ。
+  スレッドは 1 本なので要求は直列に処理される
+- 送信側・受信側のどちらのチャネルが切れても `ReaderGone` にする。ハンドルが全部 drop されたら
+  スレッドはループを抜けて終わる

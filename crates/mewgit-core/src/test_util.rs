@@ -1,4 +1,8 @@
-//! 統合テスト用の一時リポジトリ。
+//! テスト用の一時リポジトリ。`test-util` feature でのみコンパイルされる。
+//!
+//! `mewgit-core` の統合テストと `mewgit-tui` のランタイムのテストの両方から使う。
+//! `tests/` の下に置くとテストバイナリごとにコピーが要り、`GIT_CONFIG_NOSYSTEM` や
+//! `commit.gpgsign` の対策を複数箇所で持つことになるので、ライブラリ側に置く。
 //!
 //! リポジトリは `git` CLI で作る。git2 で作ると「git が作ったものを git2 で読めるか」
 //! ではなく「git2 が書いたものを git2 で読めるか」のテストになるため。
@@ -21,7 +25,7 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
-use mewgit_core::git_read::Oid;
+use crate::git_read::Oid;
 use tempfile::TempDir;
 
 /// 一時ディレクトリと、実行環境の設定を持ち込まない `git` の実行。

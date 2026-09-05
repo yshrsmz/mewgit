@@ -11,3 +11,9 @@ pub mod git_exec;
 pub mod git_read;
 pub mod github;
 pub mod graph;
+
+/// テスト用の一時リポジトリ。`test-util` feature でのみコンパイルされる。
+///
+/// `mewgit-tui` のテストからも使うので `tests/` ではなくここに置く。
+#[cfg(feature = "test-util")]
+pub mod test_util;

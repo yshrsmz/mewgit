@@ -18,9 +18,16 @@ git2 = "0.20"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 toml = "0.8"
 globset = "0.4"
+tempfile = { version = "3", optional = true }
+
+[features]
+# 統合テスト用のリポジトリ生成ヘルパ（`test_util`）を有効にする。
+test-util = ["dep:tempfile"]
 
 [dev-dependencies]
 anyhow.workspace = true
+mewgit-core = { path = ".", features = ["test-util"] }
+# 統合テストが `tempfile::tempdir()` を直に使う（リポジトリの外を開くケース）。
 tempfile = "3"
 wiremock = "0.6"
 tokio = { workspace = true, features = ["test-util"] }

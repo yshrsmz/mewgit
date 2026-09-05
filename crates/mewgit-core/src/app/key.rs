@@ -5,10 +5,9 @@
 
 /// 1 打鍵。
 ///
-/// フィールドは非公開。コンストラクタが唯一の入口で、そこで [`KeyCode::Char`] の
-/// `shift` を落として正規化する。crossterm は `P` に `SHIFT` を立てて渡してくるので、
-/// 正規化しないと同じ打鍵が 2 通りの `Key` になり、`Eq` / `Hash` が壊れる
-/// （`keymap` の引き当てが静かに外れる。08 参照）。
+/// フィールドは非公開。コンストラクタが唯一の入口で、そこで正規化する
+/// （[`Key::with_mods`] 参照）。正規化しないと同じ打鍵が複数の `Key` になり、
+/// `Eq` / `Hash` が壊れて `keymap` の引き当てが静かに外れる（08 参照）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Key {
     code: KeyCode,
@@ -25,7 +24,7 @@ pub enum KeyCode {
     Enter,
     Esc,
     Tab,
-    /// Shift+Tab。
+    /// Shift+Tab。端末は SHIFT 付きで送ってくるが、`Key` では修飾なしに正規化する。
     BackTab,
     Backspace,
     Delete,
@@ -43,7 +42,8 @@ pub enum KeyCode {
 
 /// 修飾キー。
 ///
-/// `shift` は `Tab` や矢印など、文字を持たないキーの修飾にだけ使う。
+/// `shift` は矢印や `Home` など、文字を持たず専用のキーコードも無いキーの修飾にだけ
+/// 残る。`Char` と `Tab` は [`Key::with_mods`] が正規化するので `shift` は立たない。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Modifiers {
     pub ctrl: bool,
@@ -52,17 +52,24 @@ pub struct Modifiers {
 }
 
 impl Key {
-    /// 修飾付きのキー。`Char` なら `shift` を落として正規化する。
+    /// 修飾付きのキー。同じ打鍵が 1 通りの表現になるよう正規化する。
     ///
-    /// crossterm からの変換はここを通す。
+    /// crossterm からの変換はここを通す。正規化するのは 2 か所。
+    ///
+    /// - `Char` は shift 適用後の値が入っているので `shift` を落とす
+    /// - Shift+Tab は端末が `BackTab` + SHIFT として送ってくる。`Tab` + shift と
+    ///   `BackTab` + shift と `BackTab` の 3 通りができてしまうので、`BackTab`
+    ///   （修飾なし）に寄せる
     pub fn with_mods(code: KeyCode, mods: Modifiers) -> Self {
-        let mods = match code {
-            // 文字は shift 適用後の値が入っているので、shift は情報を持たない。
-            KeyCode::Char(_) => Modifiers {
-                shift: false,
-                ..mods
-            },
-            _ => mods,
+        let without_shift = Modifiers {
+            shift: false,
+            ..mods
+        };
+        let (code, mods) = match code {
+            KeyCode::Char(_) => (code, without_shift),
+            KeyCode::Tab if mods.shift => (KeyCode::BackTab, without_shift),
+            KeyCode::BackTab => (code, without_shift),
+            _ => (code, mods),
         };
         Self { code, mods }
     }
@@ -117,8 +124,37 @@ mod tests {
     }
 
     #[test]
+    fn shift_tab_normalizes_to_back_tab() {
+        // 端末は Shift+Tab を BackTab + SHIFT として送ってくる。正規化しないと
+        // Key::new(KeyCode::BackTab) と一致せず、ペインの逆順巡回が動かない。
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        let expected = Key::new(KeyCode::BackTab);
+
+        assert_eq!(Key::with_mods(KeyCode::BackTab, shift), expected);
+        assert_eq!(Key::with_mods(KeyCode::Tab, shift), expected);
+        assert_ne!(Key::new(KeyCode::Tab), expected);
+    }
+
+    #[test]
+    fn back_tab_keeps_other_modifiers() {
+        let key = Key::with_mods(
+            KeyCode::BackTab,
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                alt: false,
+            },
+        );
+        assert!(key.mods().ctrl);
+        assert!(!key.mods().shift);
+    }
+
+    #[test]
     fn shift_is_kept_for_non_char_keys() {
-        // 矢印や Tab の shift は情報を持つので落とさない。
+        // 矢印の shift は情報を持つので落とさない。
         let mods = Modifiers {
             shift: true,
             ..Modifiers::default()

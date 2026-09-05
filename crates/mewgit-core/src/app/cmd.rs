@@ -35,15 +35,10 @@ impl Cmd {
     /// `None`、1 個ならそれ自身を返す。`Batch(vec![])` や `Batch(vec![Batch(..)])` を
     /// ランタイムに流さないため。
     pub fn batch(cmds: impl IntoIterator<Item = Cmd>) -> Cmd {
-        let mut flat: Vec<Cmd> = cmds
-            .into_iter()
-            .flat_map(|cmd| match cmd {
-                Cmd::None => Vec::new(),
-                // batch を通って作られた Batch は既に平坦なので 1 段で足りる。
-                Cmd::Batch(inner) => inner,
-                cmd => vec![cmd],
-            })
-            .collect();
+        let mut flat = Vec::new();
+        for cmd in cmds {
+            flatten_into(cmd, &mut flat);
+        }
 
         match flat.len() {
             0 => Cmd::None,
@@ -68,6 +63,22 @@ impl Cmd {
             Cmd::FetchChecks => Some(JobKind::FetchChecks),
             Cmd::FetchPrList => Some(JobKind::FetchPrList),
         }
+    }
+}
+
+/// `Cmd::None` を捨て、`Batch` を再帰的に展開して `out` に積む。
+///
+/// `Cmd::Batch` は公開変種なので、`batch` を通らずに手で組まれた入れ子も来る。
+/// 1 段だけの展開だと `Batch(vec![None, Batch(..)])` がそのまま残る。
+fn flatten_into(cmd: Cmd, out: &mut Vec<Cmd>) {
+    match cmd {
+        Cmd::None => {}
+        Cmd::Batch(inner) => {
+            for cmd in inner {
+                flatten_into(cmd, out);
+            }
+        }
+        cmd => out.push(cmd),
     }
 }
 
@@ -101,6 +112,25 @@ mod tests {
             Cmd::batch([nested, Cmd::Quit]),
             Cmd::Batch(vec![Cmd::LoadStatus, Cmd::FetchPr, Cmd::Quit])
         );
+    }
+
+    #[test]
+    fn batch_flattens_hand_built_nesting() {
+        // Cmd::Batch は公開変種なので、batch を通らずに組まれた入れ子も来る。
+        let hand_built = Cmd::Batch(vec![
+            Cmd::None,
+            Cmd::Batch(vec![Cmd::LoadStatus, Cmd::None]),
+        ]);
+        assert_eq!(
+            Cmd::batch([hand_built, Cmd::Quit]),
+            Cmd::Batch(vec![Cmd::LoadStatus, Cmd::Quit])
+        );
+    }
+
+    #[test]
+    fn batch_of_only_empty_nesting_is_none() {
+        let empty = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::None]), Cmd::None]);
+        assert_eq!(Cmd::batch([empty]), Cmd::None);
     }
 
     #[test]

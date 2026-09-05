@@ -85,9 +85,10 @@ pub enum GithubError {
     },
     #[error("GitHub API: 404 Not Found")]
     NotFound,
-    #[error("GitHub API: レート制限（{reset_at} に回復）")]
+    #[error("GitHub API: レート制限に達しました")]
     RateLimited {
-        /// Unix epoch からの秒数。
+        /// 回復時刻。Unix epoch からの秒数。生の epoch を出しても読めないので
+        /// `Display` には含めない。表示用の整形は `ui` が行う。
         reset_at: i64,
     },
     #[error("GitHub API: 通信に失敗しました: {message}")]

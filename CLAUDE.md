@@ -10,6 +10,8 @@ TUI 版 GitKraken。Rust + ratatui。認証はローカルの `~/.ssh` と `gh` 
 - `docs/plan.md` — マイルストーンとタスク。着手中のタスクはここで確認する
 
 設計と実装がずれる判断をしたときは、コードではなく設計書を先に直してから実装する。
+設計書を 1 本直したら、同じ話題に触れている他の設計書も同じコミットで揃える。
+`0N-*.md` は互いを参照しているので、片方だけ直すと設計書同士が矛盾したまま残る。
 
 ## 不変のルール
 
@@ -27,6 +29,7 @@ Rust の toolchain は `rust-toolchain.toml` が SoT。rustup がこれを読ん
 
 - **mise で rust を管理しない。** mise の `rust` は rustup のラッパーで `RUSTUP_TOOLCHAIN` を環境変数として注入するため、`rust-toolchain.toml` が読まれなくなる。SoT が二重化するので使わない
 - 依存バージョンは `Cargo.lock` をコミットして固定する。`Cargo.toml` はキャレット範囲のままでよく、`=` 固定はしない。CI は `--locked` を付けて lock からの逸脱を落とす
+- 依存を追加・削除したら、`--locked` 付きのコマンドを叩く前に `cargo update --offline --workspace` で lock を更新する。`--locked` は lock の書き換えを拒否するので、先に流さないと `cannot update the lock file` で落ちる
 - GitHub Actions の `uses` はコミット SHA で固定し、行末コメントにタグを書く（Renovate が更新する）
 - ワークフローを触ったら `mise x ghalint -- ghalint run` と `mise x actionlint -- actionlint` を通す
 - 依存を新規追加するときは crates.io の公開日を確認し、14 日以上経過した版を採用する。既存依存の更新は Renovate（`yshrsmz/renovate-config` の `minimumReleaseAge: "2 weeks"`）が担保する

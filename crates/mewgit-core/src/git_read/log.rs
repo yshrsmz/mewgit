@@ -59,6 +59,12 @@ impl<'repo> LogSession<'repo> {
     }
 
     /// 続きを最大 `n` 件読む。
+    ///
+    /// **`Err` を返したらこのセッションは捨てる。** そのページのために walk から取り出した
+    /// Oid は失われており、同じセッションで読み直すとその分のコミットがどのページにも
+    /// 現れない。グラフには親が見つからない行が残り、しかも 2 回目は成功してしまうので
+    /// UI にも異常が出ない。作り直しのコストは（下の `LogSession` の説明のとおり）
+    /// 履歴全体だが、エラーは稀なのでそれでよい。
     pub fn next_page(&mut self, n: usize) -> Result<LogPage, GitReadError> {
         let mut commits = Vec::with_capacity(n);
         while commits.len() < n {
@@ -74,6 +80,10 @@ impl<'repo> LogSession<'repo> {
     }
 
     /// グラフ 1 行分だけを取り出す。本文とファイル一覧は選択時に遅延取得する。
+    ///
+    /// `time` は author 日時。行の並びは `Sort::TIME`（= committer 日時）で決まるので、
+    /// rebase / cherry-pick された履歴では表示される日時が並び順と逆転しうる。
+    /// `git log` と同じ挙動。
     fn read_commit(&self, oid: Oid) -> Result<Commit, GitReadError> {
         let commit = self.repo.find_commit(oid)?;
         let author = commit.author();

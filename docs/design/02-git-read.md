@@ -125,7 +125,7 @@ pub struct LogPage {
   ローカルより進んでいる `origin/main` の行が出ないと `{origin/main}` のラベルを
   載せる行が無くなるため
 - push は `push_glob` を使う。単体の `push_ref` と違い、commit まで peel できない ref
-  （blob を指すタグなど）を黙って飛ばすので、その 1 本のために列挙全体が失敗しない。
+  （tree を指すタグなど）を黙って飛ばすので、その 1 本のために列挙全体が失敗しない。
   `refs()` が peel できない ref を落とすのと同じ扱いになる
 - HEAD の push は `head_detached()` が真のときだけにする。ブランチに乗っていれば
   `refs/heads/*` で既に入っているので、個別に要るのは detached だけ。
@@ -147,7 +147,13 @@ pub struct LogPage {
 - `LogSession<'repo>` は `RepoReader` を借りる。`Repository` と同じ構造体には入れられない
   （自己参照になる）ので、リーダースレッドではループのローカル変数として
   `Option<LogSession<'_>>` を `RepoReader` の隣に置く
+- `next_page` が `Err` を返したらセッションを捨てる。そのページのために walk から取り出した
+  Oid は失われており、同じセッションで読み直すとその分がどのページにも現れない。グラフには
+  親の見つからない行が残り、2 回目は成功するので UI にも異常が出ない
 - 1 コミットあたり `Commit { oid, parents, summary, author, time }` のみ抽出。本文とファイル一覧は選択時に遅延取得
+- `Commit::time` は author 日時だが、行の並びは `Sort::TIME`（= committer 日時）で決まる。
+  rebase / cherry-pick された履歴では表示日時が並び順と逆転しうる。`git log` と同じ挙動なので
+  そのままにする
 - summary と署名は表示にしか使わないので、非 UTF-8 でも lossy 変換して残す（「非 UTF-8 の扱い」）
 
 ## diff とハンク

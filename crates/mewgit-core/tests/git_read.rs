@@ -388,8 +388,8 @@ fn log_is_done_when_the_page_ends_exactly_at_the_last_commit() {
 
 #[test]
 fn log_on_an_unborn_repository_is_empty() {
-    // コミットが 1 つも無いと `push_head` が UnbornBranch になる。握りつぶさないと
-    // 起動直後の空リポジトリでログの読み込みが失敗する。
+    // HEAD は `head_detached()` が真のときだけ push する。無条件に `push_head` を
+    // 呼ぶと、ここで解決できずに起動直後の空リポジトリでログの読み込みが失敗する。
     let repo = TestRepo::init();
     let reader = RepoReader::open(repo.path()).unwrap();
 
@@ -475,7 +475,7 @@ fn log_includes_a_detached_head() {
 
     let page = reader.log().unwrap().next_page(10).unwrap();
 
-    // どのブランチからも辿れないので、`push_head` が無いと消える。
+    // どのブランチからも辿れないので、`head_detached()` の分岐が無いと消える。
     assert_eq!(oids(&page), [detached, base]);
 }
 
@@ -529,4 +529,35 @@ fn log_reports_the_author_and_time() {
     assert_eq!(commit.author.name, "mewgit test");
     assert_eq!(commit.author.email, "test@example.invalid");
     assert_eq!(commit.time, expected_time);
+}
+
+#[test]
+fn log_orders_by_committer_time_while_reporting_author_time() {
+    let repo = TestRepo::init();
+    let base = repo.commit("base");
+    repo.git(&["checkout", "-b", "side"]);
+    repo.commit_file("side.txt", "side");
+    // author 日時だけを未来にずらす。committer 日時は `TestRepo` の固定クロックのまま。
+    repo.git(&[
+        "commit",
+        "--amend",
+        "--no-edit",
+        "--date",
+        "1800000000 +0000",
+    ]);
+    let side = repo.head_oid();
+    repo.git(&["checkout", "main"]);
+    let main = repo.commit_file("main.txt", "main");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let page = reader.log().unwrap().next_page(10).unwrap();
+
+    // 並びは `Sort::TIME` = committer 日時で決まる。
+    assert_eq!(oids(&page), [main, side, base]);
+    // 一方 `Commit::time` は author 日時なので、行の並びとは逆転しうる（`git log` と同じ）。
+    assert_eq!(page.commits[1].time, 1_800_000_000);
+    assert!(
+        page.commits[0].time < page.commits[1].time,
+        "author 日時が並び順どおりになっており、逆転のケースを踏めていません"
+    );
 }

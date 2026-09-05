@@ -44,7 +44,10 @@ impl RepoReader {
             .ok_or_else(|| GitReadError::BareRepository {
                 path: repo.path().to_path_buf(),
             })?
-            .to_path_buf();
+            // libgit2 は末尾に区切りを付けた `/…/repo/` を返す。そのまま持つと
+            // 表示が `mewgit/` になり、設定や引数のパスとの文字列比較も外れる。
+            .components()
+            .collect();
 
         Ok(Self { repo, workdir })
     }
@@ -120,23 +123,25 @@ impl RepoReader {
         };
 
         let oid = head.peel_to_commit()?.id();
-        match head.shorthand() {
-            Some(name) if head.is_branch() => Ok(HeadInfo::Branch {
-                name: name.to_string(),
-                oid,
-            }),
-            _ => Ok(HeadInfo::Detached(oid)),
+        if !head.is_branch() {
+            return Ok(HeadInfo::Detached(oid));
         }
+        // ブランチに乗っているのに名前を落とすと detached と区別が付かなくなるので、
+        // ここだけは非 UTF-8 を握りつぶさずエラーにする（02 の「非 UTF-8 の扱い」）。
+        let name = head.shorthand().ok_or(GitReadError::NonUtf8Head)?;
+        Ok(HeadInfo::Branch {
+            name: name.to_string(),
+            oid,
+        })
     }
 
     /// unborn な HEAD が指しているブランチ名。
     ///
-    /// unborn は「HEAD が symbolic で、指す先の ref がまだ無い」状態なので
-    /// `symbolic_target()` は必ず `Some`。それでも `expect` にしないのは、core が
-    /// ライブラリで、壊れたリポジトリを開いたときに panic させたくないため。
+    /// unborn は「HEAD が symbolic で、指す先の ref がまだ無い」状態なので、
+    /// `symbolic_target()` が `None` を返すのは target が非 UTF-8 のときだけ。
     fn unborn_branch_name(&self) -> Result<String, GitReadError> {
         let head = self.repo.find_reference("HEAD")?;
-        let target = head.symbolic_target().unwrap_or("HEAD");
+        let target = head.symbolic_target().ok_or(GitReadError::NonUtf8Head)?;
         Ok(target.strip_prefix("refs/heads/").unwrap_or(target).into())
     }
 }

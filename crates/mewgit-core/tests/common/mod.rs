@@ -99,6 +99,13 @@ impl TestRepo {
         self.rev_parse("HEAD")
     }
 
+    /// `.git/` の下のファイルを生バイト列で書く。git CLI では作れない ref 名
+    /// （非 UTF-8）を仕込むのに使う。
+    pub fn write_git_file(&self, name: &str, content: &[u8]) {
+        fs::write(self.root.join(".git").join(name), content)
+            .unwrap_or_else(|err| panic!(".git/{name} を書けませんでした: {err}"));
+    }
+
     /// リビジョン指定を Oid に解決する。
     pub fn rev_parse(&self, rev: &str) -> Oid {
         let out = self.git(&["rev-parse", rev]);

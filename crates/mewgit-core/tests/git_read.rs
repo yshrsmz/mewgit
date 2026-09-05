@@ -48,6 +48,20 @@ fn open_fails_outside_a_repository() {
 }
 
 #[test]
+fn open_normalizes_the_workdir_path() {
+    let repo = TestRepo::init();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    // libgit2 は末尾に区切りを付けた `/…/repo/` を返す。`Path` の比較は区切りを
+    // 無視するので、文字列で見る。
+    let workdir = reader.workdir().to_string_lossy().into_owned();
+    assert!(
+        !workdir.ends_with('/'),
+        "末尾に区切りが残っています: {workdir}"
+    );
+}
+
+#[test]
 fn remotes_returns_every_remote_sorted_by_name() {
     let repo = TestRepo::init();
     repo.git(&[
@@ -258,6 +272,37 @@ fn head_reports_a_detached_head() {
     let reader = RepoReader::open(repo.path()).unwrap();
 
     assert_eq!(reader.head().unwrap(), HeadInfo::Detached(first));
+}
+
+#[test]
+fn head_errors_when_the_branch_name_is_not_utf8() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    // git CLI では作れないので、packed-refs と HEAD を直接書く。ブランチに乗って
+    // いるのに名前を落とすと detached と区別が付かないため、ここはエラーになる。
+    repo.write_git_file(
+        "packed-refs",
+        &[
+            b"# pack-refs with: peeled fully-peeled sorted \n".to_vec(),
+            first.to_string().into_bytes(),
+            b" refs/heads/".to_vec(),
+            vec![0xff],
+            b"\n".to_vec(),
+        ]
+        .concat(),
+    );
+    repo.write_git_file(
+        "HEAD",
+        &[b"ref: refs/heads/".to_vec(), vec![0xff], b"\n".to_vec()].concat(),
+    );
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let err = reader.head().unwrap_err();
+
+    assert!(
+        matches!(err, GitReadError::NonUtf8Head),
+        "非 UTF-8 のブランチ名を検出していません: {err:?}"
+    );
 }
 
 #[test]

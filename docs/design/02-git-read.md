@@ -95,6 +95,8 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
   一覧から落とす。`git_exec` の argv に載せられず、UI で選べても操作できないため
 - **表示にしか使わない文字列**（リモート URL、コミットの summary や署名）は lossy 変換して
   残す。読めない文字が混ざるほうが、その項目ごと消えるより情報が多い
+- 例外は HEAD が指すブランチ名で、これだけは落とさず `GitReadError::NonUtf8Head` にする。
+  落とすと detached と区別が付かなくなり、上位が別の状態として扱ってしまう
 
 ### head
 
@@ -137,6 +139,7 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 pub enum GitReadError {
     Open { path: PathBuf, source: git2::Error },
     BareRepository { path: PathBuf },
+    NonUtf8Head,
     Git(git2::Error),
 }
 ```

@@ -28,6 +28,10 @@ pub enum GitReadError {
     },
     #[error("{} は bare リポジトリです。ワークツリーのあるリポジトリを指定してください", .path.display())]
     BareRepository { path: PathBuf },
+    /// HEAD が非 UTF-8 のブランチを指している。他の ref と違って落とすと
+    /// detached と区別が付かなくなるので、ここだけはエラーにする。
+    #[error("HEAD が指すブランチ名が UTF-8 ではありません")]
+    NonUtf8Head,
     #[error("git の読み取りに失敗しました: {0}")]
     Git(#[from] git2::Error),
 }

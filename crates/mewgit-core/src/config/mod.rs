@@ -279,11 +279,15 @@ impl ConfigFile {
 
 /// `[[repos]]` の `match` をコンパイルする。
 ///
-/// `*` が `/` を跨がないようにしている。跨ぐと `github.com/*` が
-/// `github.com/owner/repo` にも当たってしまう。
+/// - `*` が `/` を跨がないようにしている。跨ぐと `github.com/*` が
+///   `github.com/owner/repo` にも当たってしまう
+/// - 大文字小文字を区別しない。GitHub の host / owner / repo は case-insensitive だが、
+///   リモート URL はユーザーが打った綴りをそのまま保持するため、区別すると
+///   `git@github.com:ACME/cli.git` が `github.com/acme/*` に当たらなくなる
 fn compile_pattern(pattern: &str) -> Result<GlobMatcher, globset::Error> {
     Ok(GlobBuilder::new(pattern)
         .literal_separator(true)
+        .case_insensitive(true)
         .build()?
         .compile_matcher())
 }
@@ -292,10 +296,14 @@ fn compile_pattern(pattern: &str) -> Result<GlobMatcher, globset::Error> {
 ///
 /// `XDG_CONFIG_HOME` が絶対パスならそれを使う。XDG 仕様どおり、相対パスや未設定は
 /// 無視して `$HOME/.config` にフォールバックする。どちらも決まらなければ `None`。
+///
+/// `home` にも絶対パスを要求する。相対パスを許すとプロセスの cwd 基準で解決され、
+/// 開いているリポジトリに置かれた `.config/mewgit/config.toml` を読んでしまう。
+/// 設定は `git_bin` の実行パスを持つので、これは任意コード実行になる。
 pub fn resolve_config_path(xdg_config_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
     let base = match xdg_config_home {
         Some(dir) if dir.is_absolute() => dir.to_path_buf(),
-        _ => home?.join(".config"),
+        _ => home.filter(|home| home.is_absolute())?.join(".config"),
     };
     Some(base.join("mewgit").join("config.toml"))
 }
@@ -539,6 +547,22 @@ mod tests {
     }
 
     #[test]
+    fn account_for_ignores_case() {
+        let (config, _) = Config::from_toml_str(
+            r#"
+            [[repos]]
+            match = "github.com/acme/*"
+            user = "taro_acme"
+            "#,
+        );
+        // リモート URL の綴りはユーザー次第だが、GitHub 側は case-insensitive。
+        assert_eq!(
+            config.account_for("GitHub.com", "ACME", "CLI"),
+            Some("taro_acme")
+        );
+    }
+
+    #[test]
     fn star_does_not_cross_slash() {
         let (config, _) = Config::from_toml_str(
             r#"
@@ -580,7 +604,7 @@ mod tests {
     fn config_path_resolution() {
         let home = Some("/home/user");
         let default = Some("/home/user/.config/mewgit/config.toml");
-        let cases: [(Option<&str>, Option<&str>, Option<&str>); 7] = [
+        let cases: [(Option<&str>, Option<&str>, Option<&str>); 9] = [
             (Some("/xdg"), home, Some("/xdg/mewgit/config.toml")),
             (None, home, default),
             // XDG 仕様では相対パス・空文字の XDG_CONFIG_HOME は無視する。
@@ -590,6 +614,9 @@ mod tests {
             (Some("/xdg"), None, Some("/xdg/mewgit/config.toml")),
             (None, None, None),
             (Some("relative"), None, None),
+            // 相対パスの HOME も無視する。cwd 基準で解決されてしまうため。
+            (None, Some("relative"), None),
+            (Some("relative"), Some("relative"), None),
         ];
 
         for (xdg, home, want) in cases {

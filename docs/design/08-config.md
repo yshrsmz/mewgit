@@ -8,7 +8,9 @@
 
 macOS でも XDG のパスを使う。`directories` クレートの `config_dir()` は macOS で
 `~/Library/Application Support` を返すため使わない。`XDG_CONFIG_HOME` → `$HOME/.config` の
-順で自前に組み立て、ホームディレクトリは `std::env::home_dir()` で取る。
+順で自前に組み立て、ホームディレクトリは `std::env::home_dir()` で取る。どちらも
+絶対パスのときだけ採用する。相対パスを許すと cwd 基準で解決され、開いているリポジトリが
+置いた `.config/mewgit/config.toml` を読んでしまう（`general.git_bin` があるので任意コード実行になる）。
 
 ## config.toml
 
@@ -157,6 +159,8 @@ notice として表示したうえで既定値で継続する。
 
 - マッチ対象の文字列は `"{host}/{owner}/{repo}"`
 - glob は `globset`。`*` は `/` を跨がない（`literal_separator = true`）
+- 大文字小文字は区別しない（`case_insensitive = true`）。GitHub の host / owner / repo は
+  case-insensitive だが、リモート URL はユーザーが打った綴りを保持するため
 - **先に書いたルールが勝つ**。複数マッチしても最初の 1 件を返す
 - glob は `ConfigFile` → `Config` の変換時に 1 度だけコンパイルして `RepoRule` に保持する
   （`account_for` では再コンパイルしない）

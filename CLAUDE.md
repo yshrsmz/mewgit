@@ -74,7 +74,12 @@ TUI を非対話で動かして確認するには pty が要る。パイプ渡�
 **テストなしで機能を追加しない。** 実装と同じコミットにテストを含める。`docs/plan.md` のタスクにチェックを付ける条件は、そのタスクの振る舞いを覆うテストが通っていること。
 
 - テストが書きにくい設計になっていたら、テストを省くのではなく設計を直す（`docs/design/` を先に更新する）
-- `mewgit-core` の git 系は `tempfile` に実リポジトリを作って統合テスト（`tests/` に helper あり、なければ作る）
+- `mewgit-core` の git 系は `tempfile` に実リポジトリを作って統合テスト。helper は
+  `crates/mewgit-core/tests/common/mod.rs` の `TestRepo`。リポジトリは `git` CLI で作り、
+  `GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL` / `HOME` で実行環境の設定を持ち込まない
+- `Path` 同士の `assert_eq!` は末尾の区切りを無視するので、パスの正規化はテストできない。
+  git2 の `workdir()` / `path()` は `/…/repo/` と末尾を付けて返すため、正規化を確かめる
+  ときは `to_string_lossy()` で文字列に直して見る
 - `graph` は固定のコミット列に対する `cells` の期待値テストを必ず追加する
 - GitHub API は `wiremock` でモック。実 API は叩かない
 - `git_exec::to_argv` は純粋関数なのでユニットテストで全 `GitOp` をカバーする
@@ -101,6 +106,9 @@ TUI を非対話で動かして確認するには pty が要る。パイプ渡�
 
 どちらも指摘ゼロなら何もコミットせずに PR へ進む。レビュー指摘に「直さない」判断をした
 場合は、その理由を PR 本文に書く。
+
+どちらもバックグラウンドのエージェントとして走り、完了はハーネスが通知する。待機のために
+no-op のコマンドを回さない（`echo waiting` の空回しなど）。ターンを終えて通知を待つ。
 
 ## やらないこと
 

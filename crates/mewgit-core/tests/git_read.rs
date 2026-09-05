@@ -4,7 +4,7 @@ mod common;
 
 use std::fs;
 
-use common::TestRepo;
+use common::{BareRepo, TestRepo};
 use mewgit_core::git_read::{GitReadError, HeadInfo, Oid, RefLabel, RepoReader};
 
 #[test]
@@ -22,7 +22,7 @@ fn open_finds_the_repository_from_a_subdirectory() {
 
 #[test]
 fn open_rejects_a_bare_repository() {
-    let repo = TestRepo::init_bare();
+    let repo = BareRepo::init();
 
     let err = RepoReader::open(repo.path()).unwrap_err();
 

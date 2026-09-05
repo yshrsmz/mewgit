@@ -2,6 +2,10 @@
 //!
 //! リポジトリは `git` CLI で作る。git2 で作ると「git が作ったものを git2 で読めるか」
 //! ではなく「git2 が書いたものを git2 で読めるか」のテストになるため。
+//!
+//! ワークツリーのある [`TestRepo`] と [`BareRepo`] は型を分ける。bare にはワークツリーも
+//! `.git` ディレクトリも無いので、`commit` や `write_git_file` を呼べてしまうと実行時に
+//! `git` の stderr で落ちるだけになる。分けておけばコンパイルエラーで気付く。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,26 +14,19 @@ use std::process::Command;
 use mewgit_core::git_read::Oid;
 use tempfile::TempDir;
 
-/// テスト用の一時リポジトリ。`TempDir` が drop されると消える。
-pub struct TestRepo {
+/// 一時ディレクトリと、実行環境の設定を持ち込まない `git` の実行。
+///
+/// [`TestRepo`] と [`BareRepo`] で共通する部分だけを持つ。
+struct Sandbox {
     /// drop で削除するために持つ。
     _dir: TempDir,
     root: PathBuf,
     home: PathBuf,
 }
 
-impl TestRepo {
-    /// ワークツリーのある空のリポジトリを作る。デフォルトブランチは `main`。
-    pub fn init() -> Self {
-        Self::new(&["init", "-b", "main"])
-    }
-
-    /// bare リポジトリを作る。
-    pub fn init_bare() -> Self {
-        Self::new(&["init", "--bare", "-b", "main"])
-    }
-
-    fn new(init_args: &[&str]) -> Self {
+impl Sandbox {
+    /// 空のディレクトリを用意し、その中で `git` を実行する。
+    fn init(init_args: &[&str]) -> Self {
         let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
         // macOS の `/var` は `/private/var` への symlink なので、git2 が返すパスと
         // 比較できるようにここで正規化しておく。
@@ -42,22 +39,17 @@ impl TestRepo {
         fs::create_dir(&root).expect("repo ディレクトリを作れませんでした");
         fs::create_dir(&home).expect("home ディレクトリを作れませんでした");
 
-        let repo = Self {
+        let sandbox = Self {
             _dir: dir,
             root,
             home,
         };
-        repo.git(init_args);
-        repo
-    }
-
-    /// リポジトリのルート。bare なら `.git` は無く、ここが bare リポジトリそのもの。
-    pub fn path(&self) -> &Path {
-        &self.root
+        sandbox.git(init_args);
+        sandbox
     }
 
     /// `git` を実行し、標準出力を末尾の改行を落として返す。失敗したら panic する。
-    pub fn git(&self, args: &[&str]) -> String {
+    fn git(&self, args: &[&str]) -> String {
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.root)
             .args(args)
@@ -84,10 +76,34 @@ impl TestRepo {
             .trim_end()
             .to_string()
     }
+}
+
+/// ワークツリーのある一時リポジトリ。`TempDir` が drop されると消える。
+pub struct TestRepo {
+    sandbox: Sandbox,
+}
+
+impl TestRepo {
+    /// 空のリポジトリを作る。デフォルトブランチは `main`。
+    pub fn init() -> Self {
+        Self {
+            sandbox: Sandbox::init(&["init", "-b", "main"]),
+        }
+    }
+
+    /// ワークツリーのルート。
+    pub fn path(&self) -> &Path {
+        &self.sandbox.root
+    }
+
+    /// `git` を実行し、標準出力を末尾の改行を落として返す。失敗したら panic する。
+    pub fn git(&self, args: &[&str]) -> String {
+        self.sandbox.git(args)
+    }
 
     /// ファイルを 1 つ書き換えてコミットし、その Oid を返す。
     pub fn commit(&self, message: &str) -> Oid {
-        fs::write(self.root.join("file.txt"), format!("{message}\n"))
+        fs::write(self.path().join("file.txt"), format!("{message}\n"))
             .expect("ファイルを書けませんでした");
         self.git(&["add", "file.txt"]);
         self.git(&["commit", "-m", message]);
@@ -102,7 +118,7 @@ impl TestRepo {
     /// `.git/` の下のファイルを生バイト列で書く。git CLI では作れない ref 名
     /// （非 UTF-8）を仕込むのに使う。
     pub fn write_git_file(&self, name: &str, content: &[u8]) {
-        fs::write(self.root.join(".git").join(name), content)
+        fs::write(self.path().join(".git").join(name), content)
             .unwrap_or_else(|err| panic!(".git/{name} を書けませんでした: {err}"));
     }
 
@@ -110,5 +126,27 @@ impl TestRepo {
     pub fn rev_parse(&self, rev: &str) -> Oid {
         let out = self.git(&["rev-parse", rev]);
         Oid::from_str(&out).unwrap_or_else(|err| panic!("{rev} の Oid を読めませんでした: {err}"))
+    }
+}
+
+/// bare な一時リポジトリ。
+///
+/// ワークツリーが無いので `path()` しか生やさない。コミットや `.git/` への書き込みを
+/// 足したくなったら、それが bare で意味のある操作かを先に確かめる。
+pub struct BareRepo {
+    sandbox: Sandbox,
+}
+
+impl BareRepo {
+    /// bare リポジトリを作る。デフォルトブランチは `main`。
+    pub fn init() -> Self {
+        Self {
+            sandbox: Sandbox::init(&["init", "--bare", "-b", "main"]),
+        }
+    }
+
+    /// bare リポジトリのルート。`.git` サブディレクトリは無く、ここが直接その中身。
+    pub fn path(&self) -> &Path {
+        &self.sandbox.root
     }
 }

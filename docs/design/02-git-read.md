@@ -206,7 +206,7 @@ pub enum GitReadError {
 pub struct ReaderHandle { /* mpsc::UnboundedSender<Request>, workdir: PathBuf */ }
 
 impl ReaderHandle {
-    pub async fn spawn(path: PathBuf) -> Result<Self, GitReadError>;
+    pub fn spawn(path: &Path) -> Result<Self, GitReadError>;
     pub fn workdir(&self) -> &Path;
     pub async fn log_page(&self, count: usize) -> Result<LogPage, GitReadError>;
     pub async fn refs(&self) -> Result<RefIndex, GitReadError>;
@@ -222,8 +222,15 @@ impl ReaderHandle {
 - 要求は変種ごとに `oneshot::Sender<Result<T, GitReadError>>` を持つ非公開の enum で送る。
   `ReaderHandle` は型付きの async メソッドだけを見せる。公開の要求 / 応答 enum を作ると、
   `Cmd`（01）と `Msg`（01）に並ぶ 3 本目の語彙になり、変種を足すたびに 3 箇所直すことになる
-- `open` はスレッドの中で行い、結果（ワークツリーのルート）を `oneshot` で返す。bare や
-  存在しないパスは `spawn` の `Err` として起動時に出る。`workdir()` はその値を持つので同期で読める
+- `open` は呼び出し側で行い、開いた `RepoReader` をスレッドへムーブする（`Repository` は
+  `Send`）。bare や存在しないパスは `spawn` の `Err` として起動時に出る。`workdir()` は
+  その値を持つので同期で読める。スレッドの中で open して結果を `oneshot` で返す形にすると、
+  `?` で足りるところにチャネルが 1 本増える
+- ログ列挙の状態は `Option<LogSession>` ではなく `Idle` / `Live` / `Exhausted` の 3 状態で持つ。
+  読み切ったセッションを `Live` のまま抱えると、libgit2 が walk のために読んだコミットの
+  プールがプロセスの寿命だけ残る（`git_revwalk_free` まで解放されない）。かといって `Idle` に
+  戻すと、末尾までスクロールしたあとの 1 回で履歴全体を読み直す。`Exhausted` は空のページを
+  `done` 付きで返す
 - **`next_page` の `Err` でセッションを捨てる契約は、ここで実装として守る。** スレッドは
   セッションを一度取り出し、成功したときだけ戻す。契約を書ける場所が他に無い
 - `ReaderHandle` は `Clone`。ランタイムは `Cmd` ごとに tokio タスクを起こし、その中から呼ぶ。

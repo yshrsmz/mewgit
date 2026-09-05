@@ -1,8 +1,9 @@
 //! テスト用の一時リポジトリ。`test-util` feature でのみコンパイルされる。
 //!
-//! `mewgit-core` の統合テストと `mewgit-tui` のランタイムのテストの両方から使う。
-//! `tests/` の下に置くとテストバイナリごとにコピーが要り、`GIT_CONFIG_NOSYSTEM` や
-//! `commit.gpgsign` の対策を複数箇所で持つことになるので、ライブラリ側に置く。
+//! `tests/common/mod.rs` から移してきた。`mod common;` はテストバイナリごとに別々に
+//! コンパイルされるので、テストファイルが 2 つ以上になると、そのバイナリで使わない
+//! ヘルパが `dead_code` になる（`clippy --all-targets -D warnings` で落ちる）。
+//! ライブラリの `pub` な項目にすればその問題が消え、`mewgit-tui` のテストからも使える。
 //!
 //! リポジトリは `git` CLI で作る。git2 で作ると「git が作ったものを git2 で読めるか」
 //! ではなく「git2 が書いたものを git2 で読めるか」のテストになるため。

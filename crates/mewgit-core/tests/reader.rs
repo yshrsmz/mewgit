@@ -7,57 +7,37 @@
 //! `GitReadError::ReaderGone` はテストしていない。スレッドを外から落とす手段が無く
 //! （ハンドルが送信側を持つ限りループは終わらない）、公開 API から到達できないため。
 
-use std::fs;
-
 use mewgit_core::git_read::{GitReadError, HeadInfo, ReaderHandle};
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
 /// テストリポジトリに対してリーダースレッドを起こす。
-async fn spawn(repo: &TestRepo) -> ReaderHandle {
-    ReaderHandle::spawn(repo.path().to_path_buf())
-        .await
-        .expect("リーダースレッドを起こせませんでした")
+fn spawn(repo: &TestRepo) -> ReaderHandle {
+    ReaderHandle::spawn(repo.path()).expect("リーダースレッドを起こせませんでした")
 }
 
-#[tokio::test]
-async fn spawn_reports_the_workdir_found_by_open() {
+#[test]
+fn spawn_reports_the_workdir_found_by_open() {
     let repo = TestRepo::init();
     repo.commit("first");
     let nested = repo.path().join("a/b");
-    fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
 
-    let reader = ReaderHandle::spawn(nested).await.unwrap();
+    let reader = ReaderHandle::spawn(&nested).unwrap();
 
     // 渡したパスではなく、`open` が見つけたワークツリーのルート。
     assert_eq!(reader.workdir(), repo.path());
 }
 
-#[tokio::test]
-async fn spawn_fails_on_a_bare_repository() {
-    // open の失敗はスレッドの中で起きる。呼び出し側が起動時に気付けること。
+#[test]
+fn spawn_fails_without_starting_the_thread() {
+    // open の失敗はスレッドを起こす前に出る。呼び出し側が起動時に気付けること。
     let repo = BareRepo::init();
 
-    let err = ReaderHandle::spawn(repo.path().to_path_buf())
-        .await
-        .unwrap_err();
+    let err = ReaderHandle::spawn(repo.path()).unwrap_err();
 
     assert!(
         matches!(err, GitReadError::BareRepository { .. }),
         "bare を拒否していません: {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn spawn_fails_outside_a_repository() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let err = ReaderHandle::spawn(dir.path().to_path_buf())
-        .await
-        .unwrap_err();
-
-    assert!(
-        matches!(err, GitReadError::Open { .. }),
-        "open のエラーになっていません: {err:?}"
     );
 }
 
@@ -67,7 +47,7 @@ async fn log_page_continues_where_the_previous_page_ended() {
     for i in 0..5 {
         repo.commit(&format!("commit {i}"));
     }
-    let reader = spawn(&repo).await;
+    let reader = spawn(&repo);
 
     let first = reader.log_page(2).await.unwrap();
     let second = reader.log_page(2).await.unwrap();
@@ -91,9 +71,25 @@ async fn log_page_continues_where_the_previous_page_ended() {
 }
 
 #[tokio::test]
+async fn log_page_after_the_last_page_stays_done() {
+    // 読み切ったらセッションを手放すが、次の要求で履歴全体を読み直したりはしない。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let reader = spawn(&repo);
+
+    let first = reader.log_page(10).await.unwrap();
+    let second = reader.log_page(10).await.unwrap();
+
+    assert_eq!(first.commits.len(), 1);
+    assert!(first.done);
+    assert!(second.commits.is_empty());
+    assert!(second.done);
+}
+
+#[tokio::test]
 async fn log_page_on_an_empty_repository_is_done_immediately() {
     let repo = TestRepo::init();
-    let reader = spawn(&repo).await;
+    let reader = spawn(&repo);
 
     let page = reader.log_page(10).await.unwrap();
 
@@ -107,7 +103,7 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
     let oid = repo.commit("first");
     repo.git(&["tag", "v1.0"]);
     repo.git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
-    let reader = spawn(&repo).await;
+    let reader = spawn(&repo);
 
     let head = reader.head().await.unwrap();
     let refs = reader.refs().await.unwrap();
@@ -127,14 +123,15 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
 }
 
 #[tokio::test]
-async fn requests_are_served_in_order_from_clones_of_the_handle() {
+async fn concurrent_requests_from_clones_lose_nothing() {
     // ランタイムは `Cmd` ごとに tokio タスクを起こし、その中からクローンを使う。
     // スレッドは 1 本なので、同時に投げても直列に処理されて取りこぼしが出ない。
+    // 到着順はタスクの起動順に依存するので、順序ではなく集合で見る。
     let repo = TestRepo::init();
     for i in 0..4 {
         repo.commit(&format!("commit {i}"));
     }
-    let reader = spawn(&repo).await;
+    let reader = spawn(&repo);
 
     let mut pages = Vec::new();
     for _ in 0..4 {
@@ -147,7 +144,6 @@ async fn requests_are_served_in_order_from_clones_of_the_handle() {
         let page = page.await.unwrap().unwrap();
         summaries.extend(page.commits.into_iter().map(|c| c.summary));
     }
-    // 送った順に 1 件ずつ、重複も欠落も無く返る。
     summaries.sort();
     assert_eq!(summaries, ["commit 0", "commit 1", "commit 2", "commit 3"]);
 }

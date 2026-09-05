@@ -76,8 +76,10 @@ TUI を非対話で動かして確認するには pty が要る。パイプ渡�
 - テストが書きにくい設計になっていたら、テストを省くのではなく設計を直す（`docs/design/` を先に更新する）
 - `mewgit-core` の git 系は `tempfile` に実リポジトリを作って統合テスト。helper は
   `crates/mewgit-core/src/test_util.rs` の `TestRepo`。`test-util` feature でのみコンパイル
-  され、`mewgit-core` と `mewgit-tui` の dev-dependency から有効にしている（`mewgit-core` は
-  自分自身を dev-dependency に書く）。リポジトリは `git` CLI で作り、
+  され、`mewgit-core` は自分自身を dev-dependency に書いて有効にしている。ここを使う
+  クレートは dev-dependency 側で `features = ["test-util"]` を付ける（付けないと
+  `cargo test -p <crate>` 単体で「feature の後ろに隠れている」と言われる）。
+  リポジトリは `git` CLI で作り、
   `GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL` / `HOME` で実行環境の設定を持ち込まない
 - `TestRepo` はコミット日時を実時間ではなく固定カウンタから与える（`git` を 1 回叩くごとに
   60 秒進む）。実時間だと連続したコミットが同じ秒に落ち、`Sort::TIME` での並びが揺れる。

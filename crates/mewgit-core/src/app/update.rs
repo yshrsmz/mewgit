@@ -1290,6 +1290,25 @@ mod tests {
     }
 
     #[test]
+    fn a_file_level_fallback_is_not_refused_by_the_freshness_guard() {
+        // **断るのはハンク単位のときだけ**（07）。ハンクにできないファイルへの `s` は
+        // 古いパッチを一切使わないので、読み直しを待たせる理由が無い。ペイン名で
+        // ガードを書くとここまで塞ぐ。
+        let binary = FileDiff {
+            binary: true,
+            ..fake_file_diff("a.png", vec![real_hunk(1)])
+        };
+        let mut state = diff_pane(WorktreeSection::Unstaged, &["a.png"], vec![binary]);
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+        assert_eq!(state.diff.freshness, Freshness::Stale);
+
+        assert_eq!(
+            press(&mut state, 's'),
+            Cmd::Exec(GitOp::Stage(vec!["a.png".into()]))
+        );
+    }
+
+    #[test]
     fn a_path_that_cannot_go_into_a_patch_is_refused_instead_of_falling_back() {
         // tab を含むパスは `git apply` が名前の終わりと読む（03）。ファイル単位に
         // 落とすと、ハンク 1 つのつもりでファイル全体を stage することになる。

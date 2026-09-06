@@ -3,8 +3,8 @@
 use crate::auth::AccountState;
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
-    DiffTarget, FileDiff, GitReadError, HeadInfo, InProgressOp, LogPage, RefIndex, Remote,
-    WorktreeSnapshot,
+    CommitDetail, DiffTarget, FileDiff, GitReadError, HeadInfo, InProgressOp, LogPage, RefIndex,
+    Remote, WorktreeSnapshot,
 };
 use crate::github::{Check, GithubError, PullRequest};
 
@@ -20,12 +20,19 @@ use super::{Key, TermSize};
 #[derive(Debug)]
 pub enum Msg {
     Key(Key),
-    /// 端末のサイズが変わった。グラフに使える行数を一緒に運ぶ。
+    /// 端末のサイズが変わった。
+    Resize {
+        term: TermSize,
+    },
+    /// グラフペインに使える行数が変わった。
     ///
     /// 行数は `ui` がレイアウトから出す。core がヘッダやステータスバーの高さを
     /// 知っていると、07 のレイアウトを変えたときに黙ってずれる（01 の「グラフの行」）。
-    Resize {
-        term: TermSize,
+    ///
+    /// [`Msg::Resize`] と分けているのは、行数が変わる原因が端末サイズだけでは
+    /// ないため。詳細の展開（`Enter`）でもグラフは縮む。1 つにまとめると、
+    /// `Enter` を押しただけなのに「端末サイズが変わった」という嘘の `Msg` になる。
+    Layout {
         graph_rows: usize,
     },
     /// 250ms 周期。スピナー更新と外部変更検知に使う。
@@ -36,6 +43,9 @@ pub enum Msg {
     /// 失敗の通り道が無いと `JobKind::LoadLog` が走ったまま残り、以後の `Cmd::LoadLog` が
     /// 黙って捨てられる。
     LogLoaded(Result<LogPage, GitReadError>),
+    /// 選択コミットの詳細。`LogLoaded` と同じ理由で `Result` を運ぶ。失敗の通り道が
+    /// 無いと `JobKind::LoadCommitDetail` が走ったまま残り、以後の要求が黙って落ちる。
+    CommitDetailLoaded(Box<Result<CommitDetail, GitReadError>>),
     /// リポジトリの概要。起動時と、ref が変わったあと（M3）に読む。
     ///
     /// 3 つを 1 通にまとめるのは、どれもリポジトリの ref から導かれる値で、

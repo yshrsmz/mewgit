@@ -4,7 +4,7 @@ use std::iter::Peekable;
 
 use git2::{Repository, Revwalk, Sort};
 
-use super::{lossy, Commit, GitReadError, LogPage, Oid, RepoReader, Signature};
+use super::{lossy, signature, Commit, GitReadError, LogPage, Oid, RepoReader};
 
 impl RepoReader {
     /// ログ列挙のセッションを開く。
@@ -94,10 +94,7 @@ impl<'repo> LogSession<'repo> {
             // lossy で残す（02 の「非 UTF-8 の扱い」）。`summary_bytes` はメッセージが
             // 空のときに `None` を返す。
             summary: lossy(commit.summary_bytes().unwrap_or_default()),
-            author: Signature {
-                name: lossy(author.name_bytes()),
-                email: lossy(author.email_bytes()),
-            },
+            author: signature(&author),
             time: author.when().seconds(),
         })
     }

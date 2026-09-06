@@ -8,9 +8,10 @@
 
 pub mod lanes;
 pub mod theme;
+pub mod time;
 
 use crate::panes;
-use mewgit_core::app::{AppState, TermSize};
+use mewgit_core::app::AppState;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -36,13 +37,16 @@ fn split(area: Rect) -> [Rect; 3] {
     .areas(area)
 }
 
-/// グラフに使える行数。
+/// グラフの行に使える行数。
 ///
 /// `app` がスクロール位置を決めるのに要る（01 の「グラフの行」）。core にレイアウトを
-/// 知らせないよう、実際に描くのと同じ `split` と枠から出して `Msg::Resize` で渡す。
-pub fn graph_rows(term: TermSize) -> usize {
-    let [_, body, _] = split(Rect::new(0, 0, term.width, term.height));
-    panes::graph::inner(body).height as usize
+/// 知らせないよう、実際に描くのと同じ `split` と枠から出して `Msg::Layout` で渡す。
+///
+/// `term` と `graph.expanded` だけから決まる。詳細の中身（メッセージの行数など）に
+/// 依存させると、詳細が届いた瞬間に行数が変わってグラフが跳ねる（07）。
+pub fn graph_rows(state: &AppState) -> usize {
+    let [_, body, _] = split(Rect::new(0, 0, state.term.width, state.term.height));
+    panes::graph::rows_area(body, state.graph.expanded).height as usize
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
@@ -94,9 +98,8 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::test_util::{draw, state_at};
-    use mewgit_core::app::NoticeLevel;
+    use mewgit_core::app::{NoticeLevel, TermSize};
 
     #[test]
     fn header_shows_the_repository_name() {

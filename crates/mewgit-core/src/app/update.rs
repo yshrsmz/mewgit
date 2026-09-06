@@ -6,7 +6,7 @@
 //! ペインごとのキー処理は、対応するペインのタスクと一緒に足す。いまあるのは
 //! グラフだけ。
 
-use crate::git_read::{GitReadError, LogPage};
+use crate::git_read::{CommitDetail, GitReadError, LogPage, Oid};
 use crate::graph::LaneState;
 
 use super::{
@@ -39,10 +39,15 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
     match msg {
         Msg::Key(key) => update_key(state, key),
-        Msg::Resize { term, graph_rows } => {
+        // 端末サイズはレイアウトの分岐にしか使わない。グラフの行数はこのあと
+        // ランタイムが `Msg::Layout` で入れる（01 の「ランタイム」）。
+        Msg::Resize { term } => {
             state.term = term;
+            Cmd::None
+        }
+        Msg::Layout { graph_rows } => {
             state.graph.viewport = graph_rows;
-            // 縮んだ端末でカーソルが窓の外に出たままにならないようにする。
+            // 縮んだ窓でカーソルが外に出たままにならないようにする。
             state.graph.scroll_into_view();
             // 窓が広がって残りが 1 画面を切ることがある。
             load_more(state)
@@ -50,6 +55,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::Tick => Cmd::None,
 
         Msg::LogLoaded(result) => log_loaded(state, result),
+        Msg::CommitDetailLoaded(result) => commit_detail_loaded(state, *result),
         Msg::RepoInfoLoaded(result) => repo_info_loaded(state, *result),
 
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
@@ -95,12 +101,13 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
 
 /// グラフペインのキー処理。
 ///
-/// いまは上下移動と、下端に近づいたときの追加読み込みだけ。`Enter` の詳細展開と
+/// いまは上下移動、下端に近づいたときの追加読み込み、`Enter` の詳細展開。
 /// `g` / `G` は別のタスクで足す。
 fn graph_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         KeyCode::Char('j') | KeyCode::Down => scrolled(state, 1),
         KeyCode::Char('k') | KeyCode::Up => scrolled(state, -1),
+        KeyCode::Enter => toggle_detail(state),
         _ => Cmd::None,
     }
 }
@@ -112,7 +119,66 @@ fn graph_key(state: &mut AppState, key: Key) -> Cmd {
 /// カーソルが動かないので、「動いたかどうか」では判定できない。
 fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
     state.graph.move_cursor(delta);
-    load_more(state)
+    Cmd::batch([load_more(state), load_detail(state)])
+}
+
+/// 詳細の開閉。開くときは、まだ持っていない詳細を頼む。
+///
+/// 閉じるときに `detail` は捨てない。同じコミットをもう一度開いたときに読み直さない
+/// ようにするため（01 の「コミット詳細の遅延取得」）。
+fn toggle_detail(state: &mut AppState) -> Cmd {
+    state.graph.expanded = !state.graph.expanded;
+    load_detail(state)
+}
+
+/// カーソルの指すコミットの詳細が要るなら頼む。
+///
+/// 畳んでいるあいだは読まない（見えないものを読んでもリーダーを塞ぐだけ）。既に
+/// 同じ oid の詳細を持っていれば出さない。
+fn load_detail(state: &AppState) -> Cmd {
+    match cursor_oid(state) {
+        Some(oid) if state.graph.expanded && detail_oid(state) != Some(oid) => {
+            Cmd::LoadCommitDetail(oid)
+        }
+        _ => Cmd::None,
+    }
+}
+
+/// カーソルが指しているコミットの Oid。行が無ければ `None`。
+fn cursor_oid(state: &AppState) -> Option<Oid> {
+    state
+        .graph
+        .lines
+        .get(state.graph.cursor)
+        .map(|line| line.commit.oid)
+}
+
+/// いま持っている詳細の Oid。
+fn detail_oid(state: &AppState) -> Option<Oid> {
+    state.graph.detail.as_ref().map(|detail| detail.oid)
+}
+
+/// 届いた詳細を積む。
+///
+/// 届いたものがカーソルの指すコミットと違えば、そこでもう 1 回頼む。`JobTracker` の
+/// 粒度は種別単位なので、要求が飛んでいるあいだのカーソル移動は落とされる。ここで
+/// 追いつくことで、素早くスクロールしても最後に止まったコミットに収束する。
+///
+/// **`Err` からは頼み直さない。** 出すと、リポジトリが壊れているあいだ
+/// 「失敗 → 再読込 → 失敗」を回し続ける（`log_loaded` と同じ）。
+fn commit_detail_loaded(state: &mut AppState, result: Result<CommitDetail, GitReadError>) -> Cmd {
+    state.jobs.finish(JobKind::LoadCommitDetail);
+
+    match result {
+        Ok(detail) => {
+            state.graph.detail = Some(detail);
+            load_detail(state)
+        }
+        Err(err) => {
+            state.push_notice(NoticeLevel::Error, err.to_string(), None);
+            Cmd::None
+        }
+    }
 }
 
 /// 下端に近づいたら次のページを頼む。
@@ -163,6 +229,8 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cm
             // `lines` に無いコミットを指したままにしない。
             state.graph.lines.clear();
             state.graph.lanes = LaneState::default();
+            // `lines` に無いコミットの詳細を残さない。
+            state.graph.detail = None;
             state.graph.cursor = 0;
             state.graph.scroll = 0;
             state.graph.loaded_all = false;
@@ -179,8 +247,9 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cm
             .map(|(commit, row)| GraphLine { commit, row }),
     );
     state.graph.loaded_all = page.done;
-    // 1 ページが窓より短いことがある。埋まるまで続けて読む。
-    load_more(state)
+    // 1 ページが窓より短いことがある。埋まるまで続けて読む。1 ページ目が届くまでは
+    // カーソルの指すコミットが無いので、展開したままの詳細もここで頼み直す。
+    Cmd::batch([load_more(state), load_detail(state)])
 }
 
 #[cfg(test)]
@@ -189,7 +258,7 @@ mod tests {
     use crate::app::{Modal, RepoInfo, TermSize};
     use crate::config::Config;
     use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
-    use crate::test_util::{fake_commit, fake_commit_with_parents};
+    use crate::test_util::{fake_commit, fake_commit_with_parents, fake_detail};
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
     const ROWS: usize = 20;
@@ -566,25 +635,32 @@ mod tests {
     }
 
     #[test]
-    fn resize_updates_the_terminal_size_and_the_viewport() {
+    fn resize_updates_the_terminal_size_only() {
+        // グラフの行数は端末サイズだけからは決まらない（詳細の展開でも変わる）。
+        // 入れるのはこのあと来る `Msg::Layout`。
         let mut state = state();
         let term = TermSize {
             width: 120,
             height: 40,
         };
 
-        let msg = Msg::Resize {
-            term,
-            graph_rows: 36,
-        };
+        assert_eq!(update(&mut state, Msg::Resize { term }), Cmd::None);
+        assert_eq!(state.term, term);
+        assert_eq!(state.graph.viewport, ROWS);
+    }
+
+    #[test]
+    fn layout_sets_the_viewport_and_asks_for_a_page_when_there_is_room() {
+        let mut state = state();
+        state.graph.viewport = 0;
+
         // 1 行も積んでいないので、窓を知った時点で次のページを頼む。
         assert_eq!(
-            update(&mut state, msg),
+            update(&mut state, Msg::Layout { graph_rows: 36 }),
             Cmd::LoadLog {
                 count: state.config.graph.page_size
             }
         );
-        assert_eq!(state.term, term);
         assert_eq!(state.graph.viewport, 36);
     }
 
@@ -593,18 +669,13 @@ mod tests {
         // 30 行あって窓は 20 行。35 行に広がると残りが 1 画面を切る。
         let mut state = state_with_page(30, false);
 
-        let narrow = Msg::Resize {
-            term: TermSize::default(),
-            graph_rows: ROWS,
-        };
-        assert_eq!(update(&mut state, narrow), Cmd::None);
-
-        let wide = Msg::Resize {
-            term: TermSize::default(),
-            graph_rows: 35,
-        };
         assert_eq!(
-            update(&mut state, wide),
+            update(&mut state, Msg::Layout { graph_rows: ROWS }),
+            Cmd::None
+        );
+
+        assert_eq!(
+            update(&mut state, Msg::Layout { graph_rows: 35 }),
             Cmd::LoadLog {
                 count: state.config.graph.page_size
             }
@@ -648,22 +719,16 @@ mod tests {
     }
 
     #[test]
-    fn shrinking_the_terminal_pulls_the_cursor_back_into_view() {
-        // 縮んだ端末でカーソルが窓の外に残ると、選択行が見えないまま操作することになる。
+    fn a_smaller_viewport_pulls_the_cursor_back_into_view() {
+        // 縮んだ窓でカーソルが外に残ると、選択行が見えないまま操作することになる。
+        // 端末を縮めたときと、詳細を展開してグラフが縮んだときの両方で起きる。
         let mut state = state_with_commits(30);
         for _ in 0..25 {
             let _ = update(&mut state, Msg::Key(Key::char('j')));
         }
         assert_eq!(state.graph.cursor, 25);
 
-        let msg = Msg::Resize {
-            term: TermSize {
-                width: 80,
-                height: 9,
-            },
-            graph_rows: 5,
-        };
-        let _ = update(&mut state, msg);
+        let _ = update(&mut state, Msg::Layout { graph_rows: 5 });
 
         assert_eq!(state.graph.scroll, 21);
     }
@@ -672,5 +737,160 @@ mod tests {
     fn tick_does_nothing_yet() {
         let mut state = state();
         assert_eq!(update(&mut state, Msg::Tick), Cmd::None);
+    }
+
+    /// カーソルの指すコミットの Oid。
+    fn cursor(state: &AppState) -> Oid {
+        cursor_oid(state).expect("カーソルの指す行がありません")
+    }
+
+    #[test]
+    fn enter_expands_and_asks_for_the_detail() {
+        let mut state = state_with_commits(3);
+
+        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        assert!(state.graph.expanded);
+        assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
+        assert!(state.jobs.is_running(JobKind::LoadCommitDetail));
+    }
+
+    #[test]
+    fn enter_again_collapses_without_asking_for_anything() {
+        let mut state = state_with_commits(3);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let detail = fake_detail(0, "commit 0");
+        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+
+        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        assert!(!state.graph.expanded);
+        assert_eq!(cmd, Cmd::None);
+        // 畳んでも捨てない。同じコミットを開き直したときに読み直さないため。
+        assert!(state.graph.detail.is_some());
+    }
+
+    #[test]
+    fn reopening_the_same_commit_does_not_ask_again() {
+        let mut state = state_with_commits(3);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let detail = fake_detail(0, "commit 0");
+        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        assert!(state.graph.expanded);
+        assert_eq!(cmd, Cmd::None);
+    }
+
+    #[test]
+    fn the_detail_follows_the_cursor_while_expanded() {
+        let mut state = state_with_commits(3);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let detail = fake_detail(0, "commit 0");
+        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+
+        let cmd = update(&mut state, Msg::Key(Key::char('j')));
+
+        assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
+    }
+
+    #[test]
+    fn moving_the_cursor_while_collapsed_asks_for_nothing() {
+        // 見えないものを読んでもリーダーを塞ぐだけ。
+        let mut state = state_with_commits(3);
+
+        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+        assert!(state.graph.detail.is_none());
+    }
+
+    #[test]
+    fn a_detail_that_arrives_for_the_wrong_commit_is_asked_for_again() {
+        // 要求が飛んでいるあいだのカーソル移動は `JobTracker` に落とされる。
+        // 追いつきはここで行う（01 の「コミット詳細の遅延取得」）。
+        let mut state = state_with_commits(5);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        // 読み込み中に 2 行動く。この 2 回は落とされる。
+        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+
+        let stale = fake_detail(0, "commit 0");
+        let cmd = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(stale))));
+
+        assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
+    }
+
+    #[test]
+    fn a_detail_for_the_current_commit_settles() {
+        let mut state = state_with_commits(3);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        let detail = fake_detail(0, "commit 0");
+        let cmd = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.graph.detail.as_ref().unwrap().oid, cursor(&state));
+        assert!(!state.jobs.is_running(JobKind::LoadCommitDetail));
+    }
+
+    #[test]
+    fn a_failed_detail_notices_without_asking_again() {
+        // 出すと、リポジトリが壊れているあいだ「失敗 → 再読込 → 失敗」を回し続ける。
+        let mut state = state_with_commits(3);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        let cmd = update(
+            &mut state,
+            Msg::CommitDetailLoaded(Box::new(Err(GitReadError::NonUtf8Head))),
+        );
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
+        // 畳まないと、以後の `LoadCommitDetail` が黙って捨てられる。
+        assert!(!state.jobs.is_running(JobKind::LoadCommitDetail));
+    }
+
+    #[test]
+    fn expanding_an_empty_graph_asks_for_nothing() {
+        let mut state = state();
+
+        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        assert!(state.graph.expanded);
+        assert_eq!(cmd, Cmd::None);
+    }
+
+    #[test]
+    fn the_first_page_brings_the_detail_for_an_already_expanded_graph() {
+        // 起動直後に展開すると、まだ 1 行も無いのでカーソルの指すコミットが無い。
+        // ページが届いたところで頼み直す。
+        let mut state = state();
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::new(KeyCode::Enter))),
+            Cmd::None
+        );
+
+        let page = LogPage {
+            commits: vec![commit(1)],
+            done: true,
+        };
+        let cmd = update(&mut state, Msg::LogLoaded(Ok(page)));
+
+        assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
+    }
+
+    #[test]
+    fn a_failed_page_drops_the_detail_with_the_lines() {
+        // `lines` に無いコミットの詳細を残さない。
+        let mut state = state_with_commits(3);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let detail = fake_detail(0, "commit 0");
+        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+        let _ = init(&mut state);
+
+        let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+
+        assert!(state.graph.detail.is_none());
     }
 }

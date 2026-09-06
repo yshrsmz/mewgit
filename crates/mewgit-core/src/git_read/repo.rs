@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 
 use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
-use super::{lossy, GitReadError, HeadInfo, Oid, RefIndex, RefLabel, Remote};
+use super::{
+    lossy, signature, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex, RefLabel, Remote,
+    Timestamp,
+};
 
 /// git2 による読み取り専用のリポジトリハンドル。
 ///
@@ -111,6 +114,29 @@ impl RepoReader {
         Ok(RefIndex::new(labels))
     }
 
+    /// コミット 1 件の詳細。グラフの行が持たない値（メッセージ全文・committer・
+    /// タイムゾーン付きの日時）を読む。
+    ///
+    /// ログの列挙で全コミットぶん読むと重いので、選択されたときに 1 件ずつ取る
+    /// （02 の「コミットの詳細」）。ファイル一覧は含めない（`diff` の担当）。
+    pub fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError> {
+        let commit = self.repo.find_commit(oid)?;
+        let author = commit.author();
+        let committer = commit.committer();
+
+        Ok(CommitDetail {
+            oid: commit.id(),
+            parents: commit.parent_ids().collect(),
+            // メッセージは表示にしか使わないので非 UTF-8 でも lossy で残す。
+            // 末尾の改行は git が付けたもので、そのまま出すと空行になる。
+            message: lossy(commit.message_bytes()).trim_end().to_string(),
+            author: signature(&author),
+            author_time: timestamp(author.when()),
+            committer: signature(&committer),
+            committer_time: timestamp(committer.when()),
+        })
+    }
+
     /// HEAD の状態。
     pub fn head(&self) -> Result<HeadInfo, GitReadError> {
         let head = match self.repo.head() {
@@ -145,6 +171,14 @@ impl RepoReader {
         let head = self.repo.find_reference("HEAD")?;
         let target = head.symbolic_target().ok_or(GitReadError::NonUtf8Head)?;
         Ok(target.strip_prefix("refs/heads/").unwrap_or(target).into())
+    }
+}
+
+/// git2 の日時を層の値型にする。オフセットはコミットに刻まれたもの（02）。
+fn timestamp(time: git2::Time) -> Timestamp {
+    Timestamp {
+        seconds: time.seconds(),
+        offset_minutes: time.offset_minutes(),
     }
 }
 

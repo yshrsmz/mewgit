@@ -559,3 +559,95 @@ fn log_orders_by_committer_time_while_reporting_author_time() {
         "author 日時が並び順どおりになっており、逆転のケースを踏めていません"
     );
 }
+
+#[test]
+fn commit_detail_reports_the_whole_message() {
+    let repo = TestRepo::init();
+    repo.commit("subject");
+    // 本文付きのメッセージに書き換える。グラフの行が持つのは summary だけなので、
+    // 詳細ではここが読めることが要る。
+    repo.git(&["commit", "--amend", "-q", "-m", "subject\n\nbody 1\nbody 2"]);
+    let oid = repo.head_oid();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let detail = reader.commit_detail(oid).unwrap();
+
+    assert_eq!(detail.oid, oid);
+    // 末尾に git が付ける改行は落とす。残すと詳細の最後に空行が出る。
+    assert_eq!(detail.message, "subject\n\nbody 1\nbody 2");
+}
+
+#[test]
+fn commit_detail_reports_the_author_and_committer_separately() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    // author 日時だけを別のタイムゾーンにずらす。committer は `TestRepo` の
+    // 固定クロック（+0000）のまま。
+    repo.git(&[
+        "commit",
+        "--amend",
+        "--no-edit",
+        "-q",
+        "--date",
+        "1700000000 +0900",
+    ]);
+    let oid = repo.head_oid();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let detail = reader.commit_detail(oid).unwrap();
+
+    assert_eq!(detail.author.name, "mewgit test");
+    assert_eq!(detail.author.email, "test@example.invalid");
+    assert_eq!(detail.author_time.seconds, 1_700_000_000);
+    // コミットに刻まれたオフセットをそのまま出す（`git show` と同じ）。
+    assert_eq!(detail.author_time.offset_minutes, 540);
+    assert_eq!(detail.committer.name, "mewgit test");
+    assert_eq!(detail.committer_time.offset_minutes, 0);
+    assert_ne!(detail.author_time.seconds, detail.committer_time.seconds);
+}
+
+#[test]
+fn commit_detail_reports_the_parents_of_a_merge() {
+    let repo = TestRepo::init();
+    let base = repo.commit("base");
+    repo.git(&["checkout", "-b", "side"]);
+    let side = repo.commit_file("side.txt", "side");
+    repo.git(&["checkout", "main"]);
+    let main = repo.commit_file("main.txt", "main");
+    repo.git(&["merge", "--no-ff", "-m", "merge side", "side"]);
+    let merge = repo.head_oid();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let detail = reader.commit_detail(merge).unwrap();
+
+    assert_eq!(detail.parents, [main, side]);
+    assert!(reader.commit_detail(base).unwrap().parents.is_empty());
+}
+
+#[test]
+fn commit_detail_keeps_a_non_utf8_message() {
+    let repo = TestRepo::init();
+    // 表示にしか使わない文字列は lossy で残す（02 の「非 UTF-8 の扱い」）。
+    let oid = repo.commit_raw_message(b"broken \xff message\n");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let detail = reader.commit_detail(oid).unwrap();
+
+    assert_eq!(detail.message, "broken \u{fffd} message");
+}
+
+#[test]
+fn commit_detail_fails_for_an_oid_that_is_not_in_the_repository() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let err = reader
+        .commit_detail(Oid::from_str("0000000000000000000000000000000000000001").unwrap())
+        .unwrap_err();
+
+    assert!(
+        matches!(err, GitReadError::Git(_)),
+        "予期しないエラーです: {err:?}"
+    );
+}

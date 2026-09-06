@@ -123,6 +123,37 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
 }
 
 #[tokio::test]
+async fn commit_detail_comes_back_through_the_thread() {
+    let repo = TestRepo::init();
+    repo.commit("subject");
+    repo.git(&["commit", "--amend", "-q", "-m", "subject\n\nbody"]);
+    let oid = repo.head_oid();
+    let reader = spawn(&repo);
+
+    let detail = reader.commit_detail(oid).await.unwrap();
+
+    assert_eq!(detail.oid, oid);
+    assert_eq!(detail.message, "subject\n\nbody");
+}
+
+#[tokio::test]
+async fn commit_detail_does_not_disturb_the_log_session() {
+    // ログのセッションはスレッドのローカル変数。他の要求が挟まっても続きから読める。
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    let second = repo.commit("second");
+    let reader = spawn(&repo);
+
+    let page = reader.log_page(1).await.unwrap();
+    assert_eq!(page.commits[0].oid, second);
+
+    let _ = reader.commit_detail(second).await.unwrap();
+
+    let page = reader.log_page(1).await.unwrap();
+    assert_eq!(page.commits[0].oid, first);
+}
+
+#[tokio::test]
 async fn concurrent_requests_from_clones_lose_nothing() {
     // ランタイムは `Cmd` ごとに tokio タスクを起こし、その中からクローンを使う。
     // スレッドは 1 本なので、同時に投げても直列に処理されて取りこぼしが出ない。

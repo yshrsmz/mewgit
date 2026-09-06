@@ -76,11 +76,15 @@ where
 
     // 起動時に `Resize` は飛んでこないので、最初のサイズは自分で入れる。
     // 戻ってきた `Cmd` も流す（`init` が読んでいる最中なら `issue` が落とす）。
+    // グラフの行数はこのあとループ先頭の `Msg::Layout` が入れるので、
+    // `terminal.size()` が失敗しても既定のサイズぶんは入る。
     if let Ok(size) = terminal.size() {
-        let msg = crate::input::resized(TermSize {
-            width: size.width,
-            height: size.height,
-        });
+        let msg = Msg::Resize {
+            term: TermSize {
+                width: size.width,
+                height: size.height,
+            },
+        };
         let cmd = update(state, msg);
         if runtime.dispatch(state, cmd).is_break() {
             return Ok(());
@@ -88,6 +92,13 @@ where
     }
 
     loop {
+        // レイアウトの変化を core に伝える唯一の経路。端末のリサイズも `Enter` の
+        // 展開も同じところを通るので、片方だけ更新を忘れることがない（01）。
+        let cmd = layout(state);
+        if runtime.dispatch(state, cmd).is_break() {
+            return Ok(());
+        }
+
         terminal.draw(|frame| ui::render(frame, state))?;
 
         let msg = tokio::select! {
@@ -111,6 +122,18 @@ where
             return Ok(());
         }
     }
+}
+
+/// グラフに使える行数が変わっていたら [`Msg::Layout`] を流す。
+///
+/// 行数を決めるのは `ui` だけ（不変ルール 2 と 07）。`AppState` に直接書かず `update`
+/// を通すのは、`viewport` の計算経路を 1 本に保つため。
+fn layout(state: &mut AppState) -> Cmd {
+    let graph_rows = ui::graph_rows(state);
+    if graph_rows == state.graph.viewport {
+        return Cmd::None;
+    }
+    update(state, Msg::Layout { graph_rows })
 }
 
 impl Runtime {
@@ -146,6 +169,19 @@ impl Runtime {
                 // コミットがどのページにも現れなくなる（02 の「スレッド」）。
                 tokio::spawn(async move {
                     let _ = tx.send(Msg::LogLoaded(reader.log_page(count).await));
+                });
+                ControlFlow::Continue(())
+            }
+
+            Cmd::LoadCommitDetail(oid) => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                // `log_page` と違って状態を持たない要求なので、このタスクは
+                // 途中で捨てても失うものが無い（02 の「スレッド」）。
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::CommitDetailLoaded(Box::new(
+                        reader.commit_detail(oid).await,
+                    )));
                 });
                 ControlFlow::Continue(())
             }
@@ -452,6 +488,64 @@ mod tests {
         let nested = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::LoadStatus]), Cmd::FetchPr]);
         assert!(runtime.dispatch(&mut state, nested).is_continue());
         assert_eq!(state.notices.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn load_commit_detail_reaches_the_state_through_the_reader() {
+        let repo = TestRepo::init();
+        repo.commit("subject");
+        repo.git(&["commit", "--amend", "-q", "-m", "subject\n\nbody"]);
+        let oid = repo.head_oid();
+        let (mut state, reader) = opened(&repo);
+        let (runtime, mut msgs) = Runtime::new(reader);
+
+        let cmd = state.issue(Cmd::LoadCommitDetail(oid));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        let detail = state.graph.detail.as_ref().expect("詳細が入っていません");
+        assert_eq!(detail.oid, oid);
+        assert_eq!(detail.message, "subject\n\nbody");
+        assert!(!state.jobs.is_running(JobKind::LoadCommitDetail));
+    }
+
+    #[tokio::test]
+    async fn enter_expands_the_detail_and_shrinks_the_graph() {
+        // レイアウトの変化が `Msg::Layout` として core に届く経路。ループを 1 本
+        // 走らせて、`Enter` のあとに `viewport` が縮んでいることを見る。
+        let repo = TestRepo::init();
+        repo.commit("first");
+        let (mut state, reader) = opened(&repo);
+        let events = vec![key(KeyCode::Enter), key(KeyCode::Char('q'))];
+
+        run_with(events, &mut state, reader).await.unwrap();
+
+        assert!(state.graph.expanded);
+        assert_eq!(state.graph.viewport, ui::graph_rows(&state));
+        let mut collapsed = AppState::new(RepoInfo::default(), Config::default());
+        collapsed.term = state.term;
+        assert!(
+            state.graph.viewport < ui::graph_rows(&collapsed),
+            "展開しても viewport が縮んでいません: {}",
+            state.graph.viewport
+        );
+    }
+
+    #[tokio::test]
+    async fn the_viewport_is_filled_in_before_the_first_frame() {
+        // `Msg::Resize` は端末サイズしか運ばない。行数を入れるのはループ先頭の
+        // `Msg::Layout` で、そこが抜けると `viewport` が 0 のままスクロールが壊れる。
+        let repo = TestRepo::init();
+        repo.commit("first");
+        let (mut state, reader) = opened(&repo);
+
+        run_with(vec![key(KeyCode::Char('q'))], &mut state, reader)
+            .await
+            .unwrap();
+
+        assert_eq!(state.graph.viewport, ui::graph_rows(&state));
+        assert!(state.graph.viewport > 0);
     }
 
     #[tokio::test]

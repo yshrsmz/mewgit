@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::{mpsc, oneshot};
 
-use super::{GitReadError, HeadInfo, LogPage, LogSession, RefIndex, Remote, RepoReader};
+use super::{
+    CommitDetail, GitReadError, HeadInfo, LogPage, LogSession, Oid, RefIndex, Remote, RepoReader,
+};
 
 /// リーダースレッドへの窓口。
 ///
@@ -27,7 +29,16 @@ pub struct ReaderHandle {
 /// `Cmd` / `Msg` と並ぶ 3 本目の公開語彙にしないため非公開にし、外からは
 /// [`ReaderHandle`] の型付きメソッドだけを見せる。
 enum Request {
-    LogPage { count: usize, reply: Reply<LogPage> },
+    LogPage {
+        count: usize,
+        reply: Reply<LogPage>,
+    },
+    /// 状態を持たないので、返り先が消えても失うものは無い（M3 のキャンセルで
+    /// abort してよい側。`LogPage` だけが例外）。
+    CommitDetail {
+        oid: Oid,
+        reply: Reply<CommitDetail>,
+    },
     Refs(Reply<RefIndex>),
     Head(Reply<HeadInfo>),
     Remotes(Reply<Vec<Remote>>),
@@ -80,6 +91,14 @@ impl ReaderHandle {
     /// abort しないこと。M3 で入れるキャンセルは `Cmd::Exec`（git CLI の実行）に効かせる。
     pub async fn log_page(&self, count: usize) -> Result<LogPage, GitReadError> {
         self.request(|reply| Request::LogPage { count, reply })
+            .await
+    }
+
+    /// コミット 1 件の詳細。グラフで選択されたときに読む（02 の「コミットの詳細」）。
+    ///
+    /// `log_page` と違って状態を持たないので、この future は drop してよい。
+    pub async fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError> {
+        self.request(|reply| Request::CommitDetail { oid, reply })
             .await
     }
 
@@ -142,6 +161,9 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
         match request {
             Request::LogPage { count, reply } => {
                 let _ = reply.send(next_page(&reader, &mut log, count));
+            }
+            Request::CommitDetail { oid, reply } => {
+                let _ = reply.send(reader.commit_detail(oid));
             }
             Request::Refs(reply) => {
                 let _ = reply.send(reader.refs());

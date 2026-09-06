@@ -22,7 +22,7 @@ editor_fallback = false  # true なら reword 等で $EDITOR を使う
 
 [graph]
 ascii = false
-page_size = 300                                                  # 0 は既定値に戻す
+page_size = 300                                                  # 0 なら既定値に戻す
 colors = ["blue", "magenta", "cyan", "green", "yellow", "red"]   # 読めない色名は端末既定色
 
 [github]
@@ -154,7 +154,7 @@ pub fn resolve_config_path(xdg_config_home: Option<&Path>, home: Option<&Path>) 
 
 `Default` は `General` / `Graph` / `Github` / `Theme` に手で実装する（`Config` と
 `ConfigFile` はサブ構造体の `Default` を呼ぶだけなので derive でよい）。`derive(Default)`
-ではゼロ値になり、上記の既定値（`git_bin = "git"`、`page_size = 300                                                  # 0 は既定値に戻す`、
+ではゼロ値になり、上記の既定値（`git_bin = "git"`、`page_size = 300`、
 `github.enabled = true` など）と食い違うため。各フィールドに `#[serde(default)]` を付け、
 部分的な TOML でも書かれていない項目が既定値のまま残るようにする。
 

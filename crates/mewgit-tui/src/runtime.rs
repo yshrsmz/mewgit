@@ -66,9 +66,9 @@ where
 
     // 起動時の読み込み。ループの前に 1 回だけ。**サイズを入れるより先に出す。**
     // 逆にすると、サイズを知った時点で `load_more` が 1 ページ目を頼み、`init` の
-    // `Cmd::LoadLog` が `issue` に落とされる。リーダースレッドは要求を 1 件ずつ
-    // 捌くので、ref と HEAD が 1 ページ目の walk の後ろに回って最初のフレームに
-    // ラベルが乗らなくなる。
+    // `Cmd::LoadLog` が `issue` に落とされる。最初のページを頼むのが `init` でなく
+    // なり、テストと設計書（01）が主張する経路とバイナリの経路が食い違う。
+    // `terminal.size()` が失敗しても読める、という保険もこの順序で効く。
     let cmd = init(state);
     if runtime.dispatch(state, cmd).is_break() {
         return Ok(());

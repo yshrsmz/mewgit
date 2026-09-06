@@ -6,7 +6,6 @@
 mod argv;
 mod runner;
 
-use std::fmt;
 use std::path::PathBuf;
 
 use crate::git_read::Oid;
@@ -140,32 +139,44 @@ pub struct ExecOutput {
 
 /// 失敗した `git` 実行。argv と stderr を握りつぶさない（不変ルール 4）。
 ///
-/// `thiserror` を使わず `Display` を手で書いているのは、[`ExecErrorKind::NotAttempted`]
-/// のときだけ文面を変えるため。「失敗しました: <argv>」は、そもそも起動していない
-/// ときには嘘になる。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecError {
-    /// 実行した（あるいは実行しようとした）argv。`git` 自身は含まない。
-    /// argv を組めずに失敗したときだけ空になる。
-    pub argv: Vec<String>,
-    pub code: Option<i32>,
-    pub stderr: String,
-    pub kind: ExecErrorKind,
+/// **「git が走って非 0 で終わった」と「終了状態を得られなかった」を型で分ける。**
+/// 1 つの struct にまとめると、後者では `code` が常に `None`、`stderr` に git では
+/// なく mewgit の文言が入る、`kind` に分類表へ載らない値が入る、という約束を
+/// 読む側が毎回思い出すことになる。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExecError {
+    /// `git` の終了状態を得られなかった。argv を組めなかった、[`Runner`] が実行を
+    /// 拒否した、起動できなかった、終了を待てなかった、のいずれか。
+    #[error("git を実行できませんでした: {reason}")]
+    NoResult {
+        /// 実行しようとした argv。`git` 自身は含まない。組めなかったときだけ空。
+        argv: Vec<String>,
+        /// mewgit 側の説明文。git の stderr ではない。
+        reason: String,
+    },
+    /// `git` が非 0 で終わった。
+    #[error("git の実行に失敗しました: git {}", .argv.join(" "))]
+    Failed {
+        /// 実行した argv。`git` 自身は含まない。
+        argv: Vec<String>,
+        code: Option<i32>,
+        stderr: String,
+        kind: ExecErrorKind,
+    },
 }
 
-impl fmt::Display for ExecError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.kind == ExecErrorKind::NotAttempted {
-            write!(f, "git を実行しませんでした: {}", self.stderr)
-        } else {
-            write!(f, "git の実行に失敗しました: git {}", self.argv.join(" "))
+impl ExecError {
+    /// 実行した（しようとした）argv。UI はどちらの失敗でもこれを見せる。
+    pub fn argv(&self) -> &[String] {
+        match self {
+            ExecError::NoResult { argv, .. } | ExecError::Failed { argv, .. } => argv,
         }
     }
 }
 
-impl std::error::Error for ExecError {}
-
-/// 出力のパターンから分類したエラー種別。UI の案内文を切り替えるのに使う。
+/// git の出力のパターンから分類したエラー種別。UI の案内文を切り替えるのに使う。
+///
+/// 出力があるとき、つまり [`ExecError::Failed`] にしか付かない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecErrorKind {
     SamlSsoRequired,
@@ -174,9 +185,6 @@ pub enum ExecErrorKind {
     Conflict,
     NonFastForward,
     Other,
-    /// `git` を起動していない。argv を組めなかったか、`Runner` が実行を拒否した。
-    /// プロセスが無いので `code` は `None`、`stderr` には mewgit の説明文が入る。
-    NotAttempted,
 }
 
 #[cfg(test)]
@@ -184,8 +192,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_of_exec_error_shows_the_argv() {
-        let err = ExecError {
+    fn display_of_a_failed_run_shows_the_argv() {
+        let err = ExecError::Failed {
             argv: vec!["add".to_string(), "--".to_string(), "a.txt".to_string()],
             code: Some(128),
             stderr: "fatal: pathspec".to_string(),
@@ -195,20 +203,20 @@ mod tests {
             err.to_string(),
             "git の実行に失敗しました: git add -- a.txt"
         );
+        assert_eq!(err.argv(), ["add", "--", "a.txt"]);
     }
 
     #[test]
-    fn display_of_not_attempted_shows_the_reason() {
+    fn display_of_a_run_without_a_result_shows_the_reason() {
         // 起動していないので argv を並べても意味が無い。理由を出す。
-        let err = ExecError {
+        let err = ExecError::NoResult {
             argv: Vec::new(),
-            code: None,
-            stderr: "パスが UTF-8 ではありません".to_string(),
-            kind: ExecErrorKind::NotAttempted,
+            reason: "パスが UTF-8 ではありません".to_string(),
         };
         assert_eq!(
             err.to_string(),
-            "git を実行しませんでした: パスが UTF-8 ではありません"
+            "git を実行できませんでした: パスが UTF-8 ではありません"
         );
+        assert!(err.argv().is_empty());
     }
 }

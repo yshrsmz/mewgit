@@ -95,21 +95,32 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 ## Runner
 
 ```rust
-pub struct Runner { repo_root: PathBuf, env: Vec<(OsString, OsString)> }
+pub struct Runner { repo_root: PathBuf, git_bin: PathBuf, env: Vec<(OsString, OsString)> }
 
 impl Runner {
-    pub fn new(repo_root: impl Into<PathBuf>) -> Self;
-    /// 実行時に追加する環境変数。テストが実行環境の設定を持ち込まないために使う。
+    pub fn new(repo_root: impl Into<PathBuf>, git_bin: impl Into<PathBuf>) -> Self;
+    /// 実行時に重ねる環境変数。テストの隔離と、M5 のエディタ差し替えに使う。
     pub fn with_env(self, vars: ...) -> Self;
     pub async fn run(&self, op: &GitOp) -> Result<ExecOutput, ExecError>;
 }
 
 pub struct ExecOutput { pub argv: Vec<String>, pub stdout: String, pub stderr: String }
-pub struct ExecError { pub argv: Vec<String>, pub code: Option<i32>, pub stderr: String, pub kind: ExecErrorKind }
+
+pub enum ExecError {
+    /// git の終了状態を得られなかった。argv を組めなかった / Runner が拒否した /
+    /// 起動できなかった / 終了を待てなかった。
+    NoResult { argv: Vec<String>, reason: String },
+    /// git が非 0 で終わった。
+    Failed { argv: Vec<String>, code: Option<i32>, stderr: String, kind: ExecErrorKind },
+}
 ```
 
 - argv と stdin の組み立ては純粋関数 `to_command()`（「argv への変換」）
-- `git` は PATH から引く。実行するバイナリを設定で差し替える要求が無いので、パスは持たない
+- `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
+  引数にしているのは、設定を読んだのに渡し忘れる経路を作らないため
+- **`ExecError` を 2 つに割るのは、失敗の種類で埋まるフィールドが違うため。** 1 つの
+  struct にすると「起動していないときは `code` が `None`、`stderr` に git ではない文言、
+  `kind` は分類表に載らない値」という約束を、読む側が毎回思い出すことになる
 - 環境変数: `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`（エラー文の検出を安定させる）、`GIT_EDITOR=true`（意図しないエディタ起動を防ぐ）。`with_env` の指定はこの後に重ねるので、テストは上書きできる
 - stdin は閉じる。ハンク適用は `git apply --cached -` に patch を stdin で渡す例外
 - stdout / stderr は表示専用なので lossy で `String` にする
@@ -117,10 +128,9 @@ pub struct ExecError { pub argv: Vec<String>, pub code: Option<i32>, pub stderr:
 - **`RebaseInteractive` は `Runner` が実行せずに拒否する**（M5 まで）。todo を差し替えずに `git rebase -i` を走らせると、`GIT_EDITOR=true` により全 `pick` の rebase が実行され、`plan` を黙って捨てた破壊的操作になる。M5 で `--sequence-editor` を配線したら外す
 - **進行中操作（`InProgressOp`）の再検出は M5。** `git_read::in_progress` がまだ無いので、`ExecDone.progress` はランタイムが `None` を入れる
 
-`git` を起動しないまま失敗する経路が 2 つある（上の `RebaseInteractive` と、非 UTF-8 の
-パスで `to_command` が失敗する場合）。どちらも `ExecErrorKind::NotAttempted` で返す。
-プロセスを起動していないので `code` は `None`、`stderr` には git ではなく mewgit の
-説明文が入る。
+終了状態を得られない経路は 4 つ（`to_command` の失敗、`RebaseInteractive` の拒否、
+起動の失敗、終了待ちの失敗）。どれも `ExecError::NoResult` で返し、`reason` には git の
+stderr ではなく mewgit の説明文を入れる。
 
 ## エラー分類（ExecErrorKind）
 
@@ -142,8 +152,8 @@ pub struct ExecError { pub argv: Vec<String>, pub code: Option<i32>, pub stderr:
 | `non-fast-forward` / `rejected` | `NonFastForward` | pull または force push の選択 |
 | その他 | `Other` | stderr をそのまま表示 |
 
-`NotAttempted` はこの表に載らない。stderr のパターンではなく、git を起動しなかった
-ことを表すため（分類関数は通らない）。
+分類するのは git の出力があるとき、つまり `ExecError::Failed` だけ。`NoResult` には
+`kind` が無い（分類関数を通らない）。
 
 ## Interactive rebase の実装
 

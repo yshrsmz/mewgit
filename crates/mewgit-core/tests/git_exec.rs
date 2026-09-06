@@ -7,32 +7,47 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use mewgit_core::git_exec::{ExecErrorKind, GitOp, Runner};
+use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, Runner};
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
 /// 実行環境の設定を持ち込まない `Runner`。
 fn runner(repo: &TestRepo) -> Runner {
-    Runner::new(repo.path()).with_env(repo.runner_env())
-}
-
-fn path(name: &str) -> PathBuf {
-    PathBuf::from(name)
-}
-
-/// bare リポジトリの `refs/heads/main` が指す Oid。
-///
-/// bare 側で `git` を叩く口が無いので、隔離した環境を持っている側から引く。
-fn remote_head(remote_path: &str, from: &TestRepo) -> String {
-    let line = from.git(&["ls-remote", remote_path, "refs/heads/main"]);
-    line.split_whitespace()
-        .next()
-        .expect("ls-remote の出力が空です")
-        .to_string()
+    Runner::new(repo.path(), "git").with_env(repo.runner_env())
 }
 
 /// `git status --porcelain` の出力。
 fn porcelain(repo: &TestRepo) -> String {
     repo.git(&["status", "--porcelain"])
+}
+
+/// `origin` に bare リポジトリを登録したワークツリー付きリポジトリ。
+fn clone_of(remote: &BareRepo) -> TestRepo {
+    let repo = TestRepo::init();
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        remote.path().to_str().expect("パスが UTF-8 ではありません"),
+    ]);
+    repo
+}
+
+/// `origin main` への push。`set_upstream` は初回だけ立てる。
+fn push(force: bool, set_upstream: bool) -> GitOp {
+    GitOp::Push {
+        remote: "origin".into(),
+        branch: "main".into(),
+        set_upstream,
+        force,
+    }
+}
+
+/// `git` が非 0 で終わったときの分類。それ以外の失敗なら panic する。
+fn failure_kind(err: &ExecError) -> ExecErrorKind {
+    match err {
+        ExecError::Failed { kind, .. } => *kind,
+        ExecError::NoResult { reason, .. } => panic!("git が走っていません: {reason}"),
+    }
 }
 
 #[tokio::test]
@@ -43,13 +58,13 @@ async fn stage_and_unstage_a_tracked_file() {
 
     let runner = runner(&repo);
     runner
-        .run(&GitOp::Stage(vec![path("file.txt")]))
+        .run(&GitOp::Stage(vec!["file.txt".into()]))
         .await
         .expect("stage できませんでした");
     assert_eq!(porcelain(&repo), "M  file.txt");
 
     runner
-        .run(&GitOp::Unstage(vec![path("file.txt")]))
+        .run(&GitOp::Unstage(vec!["file.txt".into()]))
         .await
         .expect("unstage できませんでした");
     assert_eq!(porcelain(&repo), " M file.txt");
@@ -65,7 +80,7 @@ async fn unstage_works_before_the_first_commit() {
     assert_eq!(porcelain(&repo), "A  file.txt");
 
     runner(&repo)
-        .run(&GitOp::Unstage(vec![path("file.txt")]))
+        .run(&GitOp::Unstage(vec!["file.txt".into()]))
         .await
         .expect("unstage できませんでした");
     assert_eq!(porcelain(&repo), "?? file.txt");
@@ -78,7 +93,7 @@ async fn a_dashed_file_name_is_not_read_as_an_option() {
     repo.write_worktree_file("-n", b"dashed\n");
 
     runner(&repo)
-        .run(&GitOp::Stage(vec![path("-n")]))
+        .run(&GitOp::Stage(vec!["-n".into()]))
         .await
         .expect("stage できませんでした");
     assert_eq!(porcelain(&repo), "A  -n");
@@ -97,7 +112,7 @@ async fn commit_runs_hooks() {
     repo.write_worktree_file("file.txt", b"second\n");
     let runner = runner(&repo);
     runner
-        .run(&GitOp::Stage(vec![path("file.txt")]))
+        .run(&GitOp::Stage(vec!["file.txt".into()]))
         .await
         .expect("stage できませんでした");
     let output = runner
@@ -151,7 +166,7 @@ async fn stage_hunk_sends_the_patch_on_stdin() {
     let runner = runner(&repo);
     runner
         .run(&GitOp::StageHunk {
-            path: path("file.txt"),
+            path: "file.txt".into(),
             patch: patch.clone(),
         })
         .await
@@ -161,7 +176,7 @@ async fn stage_hunk_sends_the_patch_on_stdin() {
     // 同じパッチを逆に当てると index が元に戻る。
     runner
         .run(&GitOp::UnstageHunk {
-            path: path("file.txt"),
+            path: "file.txt".into(),
             patch,
         })
         .await
@@ -177,7 +192,7 @@ async fn discard_returns_a_tracked_file_to_head() {
     repo.git(&["add", "file.txt"]);
 
     runner(&repo)
-        .run(&GitOp::Discard(vec![path("file.txt")]))
+        .run(&GitOp::Discard(vec!["file.txt".into()]))
         .await
         .expect("discard できませんでした");
 
@@ -196,14 +211,14 @@ async fn discard_untracked_deletes_the_file() {
 
     // tracked 用の discard では untracked を消せない。変種を分けている理由。
     let err = runner(&repo)
-        .run(&GitOp::Discard(vec![path("new.txt")]))
+        .run(&GitOp::Discard(vec!["new.txt".into()]))
         .await
         .expect_err("untracked を restore できてはいけません");
-    assert_eq!(err.kind, ExecErrorKind::Other);
+    assert_eq!(failure_kind(&err), ExecErrorKind::Other);
     assert!(repo.path().join("new.txt").exists());
 
     runner(&repo)
-        .run(&GitOp::DiscardUntracked(vec![path("new.txt")]))
+        .run(&GitOp::DiscardUntracked(vec!["new.txt".into()]))
         .await
         .expect("clean できませんでした");
     assert!(!repo.path().join("new.txt").exists());
@@ -224,7 +239,7 @@ async fn checkout_reads_the_target_as_a_revision() {
         .await
         .expect_err("ブランチではないので失敗するはずです");
 
-    assert_eq!(err.kind, ExecErrorKind::Other);
+    assert_eq!(failure_kind(&err), ExecErrorKind::Other);
     assert_eq!(
         fs::read(repo.path().join("topic")).expect("読めませんでした"),
         b"work in progress\n",
@@ -324,9 +339,15 @@ async fn a_conflicting_cherry_pick_is_classified_as_conflict() {
         .await
         .expect_err("コンフリクトするはずです");
 
-    assert_eq!(err.kind, ExecErrorKind::Conflict);
-    assert_eq!(err.code, Some(1));
-    assert_eq!(err.argv[0], "cherry-pick");
+    let ExecError::Failed {
+        code, argv, kind, ..
+    } = &err
+    else {
+        panic!("git が走っていません: {err:?}");
+    };
+    assert_eq!(*kind, ExecErrorKind::Conflict);
+    assert_eq!(*code, Some(1));
+    assert_eq!(argv[0], "cherry-pick");
 
     runner(&repo)
         .run(&GitOp::CherryPickAbort)
@@ -338,52 +359,31 @@ async fn a_conflicting_cherry_pick_is_classified_as_conflict() {
 #[tokio::test]
 async fn a_rejected_push_is_classified_as_non_fast_forward() {
     let remote = BareRepo::init();
-    let repo = TestRepo::init();
+    let repo = clone_of(&remote);
     repo.commit("first");
-    repo.git(&[
-        "remote",
-        "add",
-        "origin",
-        remote.path().to_str().expect("パスが UTF-8 ではありません"),
-    ]);
     let runner = runner(&repo);
 
     runner
-        .run(&GitOp::Push {
-            remote: "origin".into(),
-            branch: "main".into(),
-            set_upstream: true,
-            force: false,
-        })
+        .run(&push(false, true))
         .await
         .expect("push できませんでした");
 
     // リモートが知らない履歴に書き換えてから push すると弾かれる。
     repo.git(&["commit", "-q", "--amend", "-m", "rewritten"]);
     let err = runner
-        .run(&GitOp::Push {
-            remote: "origin".into(),
-            branch: "main".into(),
-            set_upstream: false,
-            force: false,
-        })
+        .run(&push(false, false))
         .await
         .expect_err("弾かれるはずです");
-    assert_eq!(err.kind, ExecErrorKind::NonFastForward);
+    assert_eq!(failure_kind(&err), ExecErrorKind::NonFastForward);
 
     // force は `--force-with-lease`。リモートは自分が push した位置のままなので通る。
     runner
-        .run(&GitOp::Push {
-            remote: "origin".into(),
-            branch: "main".into(),
-            set_upstream: false,
-            force: true,
-        })
+        .run(&push(true, false))
         .await
         .expect("force push できませんでした");
     assert_eq!(
-        repo.git(&["rev-parse", "HEAD"]),
-        repo.git(&["rev-parse", "origin/main"])
+        remote.git(&["rev-parse", "refs/heads/main"]),
+        repo.git(&["rev-parse", "HEAD"])
     );
 }
 
@@ -391,29 +391,16 @@ async fn a_rejected_push_is_classified_as_non_fast_forward() {
 async fn force_with_lease_refuses_when_someone_else_moved_the_remote() {
     // `--force` ならここで他人のコミットを消せてしまう。lease を選んでいる理由。
     let remote = BareRepo::init();
-    let remote_path = remote
-        .path()
-        .to_str()
-        .expect("パスが UTF-8 ではありません")
-        .to_string();
-
-    let mine = TestRepo::init();
+    let mine = clone_of(&remote);
     mine.commit("first");
-    mine.git(&["remote", "add", "origin", &remote_path]);
     let runner = runner(&mine);
     runner
-        .run(&GitOp::Push {
-            remote: "origin".into(),
-            branch: "main".into(),
-            set_upstream: true,
-            force: false,
-        })
+        .run(&push(false, true))
         .await
         .expect("push できませんでした");
 
     // 別のクローンがリモートを進める。こちらの `origin/main` は古いままになる。
-    let theirs = TestRepo::init();
-    theirs.git(&["remote", "add", "origin", &remote_path]);
+    let theirs = clone_of(&remote);
     theirs.git(&["fetch", "-q", "origin"]);
     theirs.git(&["checkout", "-qB", "main", "origin/main"]);
     theirs.commit_file("theirs.txt", "theirs");
@@ -422,18 +409,13 @@ async fn force_with_lease_refuses_when_someone_else_moved_the_remote() {
 
     mine.git(&["commit", "-q", "--amend", "-m", "rewritten"]);
     let err = runner
-        .run(&GitOp::Push {
-            remote: "origin".into(),
-            branch: "main".into(),
-            set_upstream: false,
-            force: true,
-        })
+        .run(&push(true, false))
         .await
         .expect_err("lease が古いので弾かれるはずです");
 
-    assert_eq!(err.kind, ExecErrorKind::NonFastForward);
+    assert_eq!(failure_kind(&err), ExecErrorKind::NonFastForward);
     assert_eq!(
-        remote_head(&remote_path, &mine),
+        remote.git(&["rev-parse", "refs/heads/main"]),
         theirs_head.to_string(),
         "他人のコミットを消してしまった"
     );
@@ -455,14 +437,35 @@ async fn interactive_rebase_is_refused_without_running_git() {
         .await
         .expect_err("実行してはいけません");
 
-    assert_eq!(err.kind, ExecErrorKind::NotAttempted);
-    assert_eq!(err.code, None);
-    assert_eq!(err.argv, ["rebase", "--interactive", "main"]);
+    assert!(
+        matches!(err, ExecError::NoResult { .. }),
+        "git が走ってしまった: {err:?}"
+    );
+    assert_eq!(err.argv(), ["rebase", "--interactive", "main"]);
     assert_eq!(repo.head_oid(), before);
     assert!(
         !repo.path().join(".git/rebase-merge").exists(),
         "rebase が始まってしまっている"
     );
+}
+
+#[tokio::test]
+async fn the_configured_git_binary_is_the_one_that_runs() {
+    // `config` の `general.git_bin` を渡し忘れていないことの見張り。直書きに
+    // 戻すと、ここで本物の git が走って成功してしまう。
+    let repo = TestRepo::init();
+    repo.commit("first");
+
+    let err = Runner::new(repo.path(), repo.path().join("no-such-git"))
+        .with_env(repo.runner_env())
+        .run(&GitOp::Checkout("main".into()))
+        .await
+        .expect_err("起動できないはずです");
+
+    let ExecError::NoResult { reason, .. } = &err else {
+        panic!("git が走ってしまった: {err:?}");
+    };
+    assert!(reason.contains("no-such-git"), "reason: {reason}");
 }
 
 #[tokio::test]
@@ -479,8 +482,11 @@ async fn a_non_utf8_path_never_reaches_git() {
         .await
         .expect_err("実行してはいけません");
 
-    assert_eq!(err.kind, ExecErrorKind::NotAttempted);
-    assert!(err.argv.is_empty(), "argv を組めていない");
+    assert!(
+        matches!(err, ExecError::NoResult { .. }),
+        "git が走ってしまった: {err:?}"
+    );
+    assert!(err.argv().is_empty(), "argv を組めていない");
     assert_eq!(porcelain(&repo), "");
 }
 
@@ -495,11 +501,13 @@ async fn a_failing_command_carries_argv_and_stderr() {
         .await
         .expect_err("失敗するはずです");
 
-    assert_eq!(err.argv, ["checkout", "no-such-branch", "--"]);
-    assert_eq!(err.code, Some(128));
-    assert!(
-        err.stderr.contains("no-such-branch"),
-        "stderr: {}",
-        err.stderr
-    );
+    let ExecError::Failed {
+        argv, code, stderr, ..
+    } = &err
+    else {
+        panic!("git が走っていません: {err:?}");
+    };
+    assert_eq!(argv, &["checkout", "no-such-branch", "--"]);
+    assert_eq!(*code, Some(128));
+    assert!(stderr.contains("no-such-branch"), "stderr: {stderr}");
 }

@@ -19,19 +19,23 @@ const REBASE_INTERACTIVE_UNSUPPORTED: &str =
      指定した todo を無視した rebase になります";
 
 /// `GitOp` を `git` サブプロセスとして実行する。
-///
-/// `git` は PATH から引く。パスを設定で差し替える要求は今のところ無い。
 #[derive(Debug, Clone)]
 pub struct Runner {
     repo_root: PathBuf,
-    /// 実行時に重ねる環境変数。テストが実行環境の設定を持ち込まないために使う。
+    /// 実行する `git`。`config` の `general.git_bin`（既定は `"git"` で PATH から
+    /// 引く。絶対パスも書ける）から渡す。引数にしているのは、設定を読んだのに
+    /// 渡し忘れる経路を作らないため。
+    git_bin: PathBuf,
+    /// 実行時に重ねる環境変数。テストの隔離と、M5 の `GIT_SEQUENCE_EDITOR` /
+    /// `GIT_EDITOR` の差し替えに使う。
     env: Vec<(OsString, OsString)>,
 }
 
 impl Runner {
-    pub fn new(repo_root: impl Into<PathBuf>) -> Self {
+    pub fn new(repo_root: impl Into<PathBuf>, git_bin: impl Into<PathBuf>) -> Self {
         Self {
             repo_root: repo_root.into(),
+            git_bin: git_bin.into(),
             env: Vec::new(),
         }
     }
@@ -55,19 +59,15 @@ impl Runner {
     /// `git` を起動しないまま失敗する経路が 2 つある（argv を組めなかったときと、
     /// `RebaseInteractive`）。どちらも [`ExecErrorKind::NotAttempted`] で返す。
     pub async fn run(&self, op: &GitOp) -> Result<ExecOutput, ExecError> {
-        let command = to_command(op).map_err(|err| ExecError {
+        let command = to_command(op).map_err(|err| ExecError::NoResult {
             argv: Vec::new(),
-            code: None,
-            stderr: err.to_string(),
-            kind: ExecErrorKind::NotAttempted,
+            reason: err.to_string(),
         })?;
 
         if matches!(op, GitOp::RebaseInteractive { .. }) {
-            return Err(ExecError {
+            return Err(ExecError::NoResult {
                 argv: command.argv,
-                code: None,
-                stderr: REBASE_INTERACTIVE_UNSUPPORTED.to_string(),
-                kind: ExecErrorKind::NotAttempted,
+                reason: REBASE_INTERACTIVE_UNSUPPORTED.to_string(),
             });
         }
 
@@ -86,15 +86,13 @@ impl Runner {
         };
         let (_, waited) = tokio::join!(write, child.wait_with_output());
 
-        let output = waited.map_err(|err| ExecError {
+        let output = waited.map_err(|err| ExecError::NoResult {
             argv: command.argv.clone(),
-            code: None,
-            stderr: format!("git の終了を待てませんでした: {err}"),
-            kind: ExecErrorKind::Other,
+            reason: format!("git の終了を待てませんでした: {err}"),
         })?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let stdout = lossy(output.stdout);
+        let stderr = lossy(output.stderr);
 
         if output.status.success() {
             Ok(ExecOutput {
@@ -103,7 +101,7 @@ impl Runner {
                 stderr,
             })
         } else {
-            Err(ExecError {
+            Err(ExecError::Failed {
                 argv: command.argv,
                 code: output.status.code(),
                 kind: classify(&stdout, &stderr),
@@ -113,7 +111,7 @@ impl Runner {
     }
 
     fn spawn(&self, command: &GitCommand) -> Result<Child, ExecError> {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(&self.git_bin);
         cmd.current_dir(&self.repo_root)
             .args(&command.argv)
             // 認証を求めて端末を掴まないようにする。
@@ -133,13 +131,21 @@ impl Runner {
             .kill_on_drop(true);
         cmd.envs(self.env.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())));
 
-        cmd.spawn().map_err(|err| ExecError {
+        cmd.spawn().map_err(|err| ExecError::NoResult {
             argv: command.argv.clone(),
-            code: None,
-            stderr: format!("git を起動できませんでした: {err}"),
-            kind: ExecErrorKind::NotAttempted,
+            reason: format!("{} を起動できませんでした: {err}", self.git_bin.display()),
         })
     }
+}
+
+/// git の出力を表示用の `String` にする。
+///
+/// `String::from_utf8_lossy(..).into_owned()` は、妥当な UTF-8（ふつうの場合）でも
+/// バッファを丸ごと複製する。`from_utf8` なら `Vec<u8>` をそのまま `String` に
+/// 転用でき、不正なバイトを含むときだけ複製が要る。
+fn lossy(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
 }
 
 /// 出力のパターンからエラー種別を決める。**上から順に見て、先に当たったものを採る。**
@@ -209,6 +215,48 @@ mod tests {
         let stdout = "Auto-merging f\nCONFLICT (content): Merge conflict in f\n\
                       Automatic merge failed; fix conflicts and then commit the result.\n";
         assert_eq!(classify(stdout, ""), ExecErrorKind::Conflict);
+    }
+
+    #[test]
+    fn each_alternative_of_a_pattern_pair_is_enough() {
+        // 実際の git / GitHub の文面は両方の語を含むことが多い。片方だけを含む
+        // 入力（一部は作り物）を通して、選択肢の両側が生きていることを見る。
+        assert_eq!(
+            classify(
+                "",
+                "remote: The `acme' organization has enabled or enforced SAML."
+            ),
+            ExecErrorKind::SamlSsoRequired
+        );
+        assert_eq!(
+            classify("", "remote: SAML SSO の承認が要ります"),
+            ExecErrorKind::SamlSsoRequired
+        );
+        assert_eq!(
+            classify("", " ! [rejected]        main -> main (fetch first)"),
+            ExecErrorKind::NonFastForward
+        );
+        assert_eq!(
+            classify("", "error: the update is a non-fast-forward"),
+            ExecErrorKind::NonFastForward
+        );
+        assert_eq!(
+            classify(
+                "Auto-merging f\nCONFLICT (content): Merge conflict in f\n",
+                ""
+            ),
+            ExecErrorKind::Conflict
+        );
+        assert_eq!(
+            classify("", "error: could not apply d0f6d2f... side"),
+            ExecErrorKind::Conflict
+        );
+    }
+
+    #[test]
+    fn non_utf8_output_is_shown_lossily() {
+        assert_eq!(lossy(b"ok\n".to_vec()), "ok\n");
+        assert_eq!(lossy(vec![0x61, 0xff, 0x62]), "a\u{fffd}b");
     }
 
     #[test]

@@ -87,19 +87,25 @@ impl Sandbox {
     ///
     /// コンフリクトする `git merge` のように、失敗が期待どおりのコマンドに使う。
     fn try_git<S: AsRef<OsStr>>(&self, args: &[S]) -> Output {
+        // 日時は実時間ではなく固定のカウンタから与える。同じ秒に落ちたコミットは
+        // `Sort::TIME` での並びが揺れてテストが不安定になる。
+        let date = format!("{} +0000", self.tick());
         let mut cmd = Command::new("git");
-        cmd.current_dir(&self.root).args(args).envs(self.env());
+        cmd.current_dir(&self.root)
+            .args(args)
+            .envs(self.env())
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date);
 
         cmd.output().expect("git を実行できませんでした")
     }
 
-    /// `git` に渡す環境変数。実行環境のユーザー設定を持ち込まないためのもの。
+    /// `git` に渡す環境変数のうち、実行環境の設定を持ち込まないためのもの。
     ///
-    /// 呼ぶたびに時計が [`TICK`] 秒進む。日時を実時間から取ると、同じ秒に落ちた
-    /// コミットの `Sort::TIME` での並びが揺れてテストが不安定になる。
-    fn env(&self) -> Vec<(OsString, OsString)> {
-        let date = format!("{} +0000", self.tick());
-        [
+    /// 日時はここに含めない。含めると「呼ぶと時計が進む getter」になり、
+    /// スナップショットを取る使い方（[`TestRepo::runner_env`]）と両立しない。
+    fn env(&self) -> Vec<(&'static str, OsString)> {
+        vec![
             // 特に `commit.gpgsign` が有効だと署名を待ってテストが固まる。
             ("GIT_CONFIG_NOSYSTEM", OsString::from("1")),
             (
@@ -114,13 +120,8 @@ impl Sandbox {
                 "GIT_COMMITTER_EMAIL",
                 OsString::from("test@example.invalid"),
             ),
-            ("GIT_AUTHOR_DATE", OsString::from(&date)),
-            ("GIT_COMMITTER_DATE", OsString::from(&date)),
             ("GIT_TERMINAL_PROMPT", OsString::from("0")),
         ]
-        .into_iter()
-        .map(|(key, value)| (OsString::from(key), value))
-        .collect()
     }
 
     /// 現在の日時を返し、カウンタを [`TICK`] 秒進める。
@@ -255,9 +256,9 @@ impl TestRepo {
     /// 同じ隔離（system / global config を読まない、author と committer を固定）を
     /// 与える。付けないと実行環境の `commit.gpgsign` を拾って固まる。
     ///
-    /// **日時は呼んだ時点で固定される。** 同じ `Runner` で作ったコミットは全部
-    /// 同じ日時になるので、並び順を見るテストではここを通さない。
-    pub fn runner_env(&self) -> Vec<(OsString, OsString)> {
+    /// 日時は含めない。`Runner` 経由のコミットは実時間になるので、[`TestRepo`] が
+    /// 作った固定日時（2023 年）のコミットより必ず後ろに並ぶ。
+    pub fn runner_env(&self) -> Vec<(&'static str, OsString)> {
         self.sandbox.env()
     }
 
@@ -299,6 +300,14 @@ impl BareRepo {
     /// bare リポジトリのルート。`.git` サブディレクトリは無く、ここが直接その中身。
     pub fn path(&self) -> &Path {
         &self.sandbox.root
+    }
+
+    /// bare リポジトリの中で `git` を実行し、標準出力を返す。失敗したら panic する。
+    ///
+    /// push された結果を bare 側で確かめるのに使う。ワークツリーを触るコマンドは
+    /// bare では動かないので渡さない。
+    pub fn git(&self, args: &[&str]) -> String {
+        self.sandbox.git(args)
     }
 }
 

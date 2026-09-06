@@ -223,6 +223,7 @@ mod tests {
 
     use super::*;
     use crate::git_exec::{RebaseAction, RebaseEntry, RebasePlan};
+    use crate::test_util::fake_oid;
 
     /// 変種の名前。**網羅 `match` なので、`GitOp` に変種を足すとここが
     /// コンパイルエラーになる。** そのとき [`VARIANTS`] と [`cases`] にも足す
@@ -260,73 +261,38 @@ mod tests {
         }
     }
 
-    /// [`variant`] が返しうる名前の全部。
-    const VARIANTS: &[&str] = &[
-        "Stage",
-        "Unstage",
-        "StageHunk",
-        "UnstageHunk",
-        "Discard",
-        "DiscardUntracked",
-        "Commit",
-        "BranchCreate",
-        "Checkout",
-        "BranchDelete",
-        "BranchRename",
-        "Fetch",
-        "Pull",
-        "Push",
-        "RebaseInteractive",
-        "RebaseContinue",
-        "RebaseSkip",
-        "RebaseAbort",
-        "CherryPick",
-        "CherryPickContinue",
-        "CherryPickAbort",
-        "Revert",
-        "RevertContinue",
-        "RevertAbort",
-        "StashPush",
-        "StashApply",
-        "StashPop",
-        "StashDrop",
-    ];
-
-    fn oid(tag: char) -> Oid {
-        Oid::from_str(&tag.to_string().repeat(40)).expect("Oid を作れませんでした")
-    }
-
-    fn path(name: &str) -> PathBuf {
-        PathBuf::from(name)
-    }
+    /// [`variant`] のアームの数。`GitOp` に変種を足すと `variant` の網羅 `match` が
+    /// コンパイルエラーになり、ここに来る。アームと一緒にこの数と [`cases`] も足す
+    /// （足し忘れは `covers_every_variant` が落とす）。
+    const VARIANT_COUNT: usize = 28;
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
     fn cases() -> Vec<(GitOp, Vec<&'static str>)> {
         vec![
             (
-                GitOp::Stage(vec![path("a.txt"), path("dir/b.txt")]),
+                GitOp::Stage(vec!["a.txt".into(), "dir/b.txt".into()]),
                 vec!["add", "--", "a.txt", "dir/b.txt"],
             ),
             (
-                GitOp::Unstage(vec![path("a.txt")]),
+                GitOp::Unstage(vec!["a.txt".into()]),
                 vec!["reset", "--quiet", "--", "a.txt"],
             ),
             (
                 GitOp::StageHunk {
-                    path: path("a.txt"),
+                    path: "a.txt".into(),
                     patch: b"@@ -1 +1 @@\n".to_vec(),
                 },
                 vec!["apply", "--cached", "-"],
             ),
             (
                 GitOp::UnstageHunk {
-                    path: path("a.txt"),
+                    path: "a.txt".into(),
                     patch: b"@@ -1 +1 @@\n".to_vec(),
                 },
                 vec!["apply", "--cached", "--reverse", "-"],
             ),
             (
-                GitOp::Discard(vec![path("a.txt")]),
+                GitOp::Discard(vec!["a.txt".into()]),
                 vec![
                     "restore",
                     "--source=HEAD",
@@ -337,7 +303,7 @@ mod tests {
                 ],
             ),
             (
-                GitOp::DiscardUntracked(vec![path("new.txt")]),
+                GitOp::DiscardUntracked(vec!["new.txt".into()]),
                 vec!["clean", "--force", "--", "new.txt"],
             ),
             (
@@ -457,7 +423,7 @@ mod tests {
                     plan: RebasePlan {
                         entries: vec![RebaseEntry {
                             action: RebaseAction::Pick,
-                            oid: oid('1'),
+                            oid: fake_oid(1),
                             summary: "c1".into(),
                             message: None,
                         }],
@@ -469,33 +435,33 @@ mod tests {
             (GitOp::RebaseSkip, vec!["rebase", "--skip"]),
             (GitOp::RebaseAbort, vec!["rebase", "--abort"]),
             (
-                GitOp::CherryPick(vec![oid('1'), oid('2')]),
+                GitOp::CherryPick(vec![fake_oid(1), fake_oid(2)]),
                 vec![
                     "cherry-pick",
-                    "1111111111111111111111111111111111111111",
-                    "2222222222222222222222222222222222222222",
+                    "0000000000000000000000000000000000000001",
+                    "0000000000000000000000000000000000000002",
                 ],
             ),
             (GitOp::CherryPickContinue, vec!["cherry-pick", "--continue"]),
             (GitOp::CherryPickAbort, vec!["cherry-pick", "--abort"]),
             (
                 GitOp::Revert {
-                    oids: vec![oid('3')],
+                    oids: vec![fake_oid(3)],
                     mainline: Some(1),
                 },
                 vec![
                     "revert",
                     "--mainline",
                     "1",
-                    "3333333333333333333333333333333333333333",
+                    "0000000000000000000000000000000000000003",
                 ],
             ),
             (
                 GitOp::Revert {
-                    oids: vec![oid('3')],
+                    oids: vec![fake_oid(3)],
                     mainline: None,
                 },
-                vec!["revert", "3333333333333333333333333333333333333333"],
+                vec!["revert", "0000000000000000000000000000000000000003"],
             ),
             (GitOp::RevertContinue, vec!["revert", "--continue"]),
             (GitOp::RevertAbort, vec!["revert", "--abort"]),
@@ -503,7 +469,7 @@ mod tests {
                 GitOp::StashPush {
                     message: Some("wip".into()),
                     include_untracked: true,
-                    paths: Some(vec![path("a.txt")]),
+                    paths: Some(vec!["a.txt".into()]),
                 },
                 vec![
                     "stash",
@@ -540,8 +506,11 @@ mod tests {
     #[test]
     fn covers_every_variant() {
         let covered: BTreeSet<_> = cases().iter().map(|(op, _)| variant(op)).collect();
-        let all: BTreeSet<_> = VARIANTS.iter().copied().collect();
-        assert_eq!(covered, all, "argv の表に無い変種がある");
+        assert_eq!(
+            covered.len(),
+            VARIANT_COUNT,
+            "argv の表に無い変種がある。覆えているのは {covered:?}"
+        );
     }
 
     #[test]
@@ -559,7 +528,7 @@ mod tests {
         // した結果が元のファイルと変わる。
         let patch = b"@@ -1 +1 @@\n-\xff\xfe\n+\xff\xfd\n".to_vec();
         let command = to_command(&GitOp::StageHunk {
-            path: path("a.bin"),
+            path: "a.bin".into(),
             patch: patch.clone(),
         })
         .expect("argv を組めませんでした");
@@ -569,7 +538,7 @@ mod tests {
     #[test]
     fn pathspec_is_separated_so_dashed_names_are_not_options() {
         // `-n` という名前のファイルがオプションとして読まれないこと。
-        let command = to_command(&GitOp::Stage(vec![path("-n"), path("--all")]))
+        let command = to_command(&GitOp::Stage(vec!["-n".into(), "--all".into()]))
             .expect("argv を組めませんでした");
         assert_eq!(command.argv, ["add", "--", "-n", "--all"]);
     }

@@ -87,26 +87,40 @@ impl Sandbox {
     ///
     /// コンフリクトする `git merge` のように、失敗が期待どおりのコマンドに使う。
     fn try_git<S: AsRef<OsStr>>(&self, args: &[S]) -> Output {
-        // 日時は実時間ではなく固定のカウンタから与える。同じ秒に落ちたコミットは
-        // `Sort::TIME` での並びが揺れてテストが不安定になる。
-        let date = format!("{} +0000", self.tick());
         let mut cmd = Command::new("git");
-        cmd.current_dir(&self.root)
-            .args(args)
-            // 実行環境のユーザー設定を持ち込まない。特に `commit.gpgsign` が有効だと
-            // 署名を待ってテストが固まる。
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", self.home.join("no-such-gitconfig"))
-            .env("HOME", &self.home)
-            .env("GIT_AUTHOR_NAME", "mewgit test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-            .env("GIT_COMMITTER_NAME", "mewgit test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-            .env("GIT_AUTHOR_DATE", &date)
-            .env("GIT_COMMITTER_DATE", &date)
-            .env("GIT_TERMINAL_PROMPT", "0");
+        cmd.current_dir(&self.root).args(args).envs(self.env());
 
         cmd.output().expect("git を実行できませんでした")
+    }
+
+    /// `git` に渡す環境変数。実行環境のユーザー設定を持ち込まないためのもの。
+    ///
+    /// 呼ぶたびに時計が [`TICK`] 秒進む。日時を実時間から取ると、同じ秒に落ちた
+    /// コミットの `Sort::TIME` での並びが揺れてテストが不安定になる。
+    fn env(&self) -> Vec<(OsString, OsString)> {
+        let date = format!("{} +0000", self.tick());
+        [
+            // 特に `commit.gpgsign` が有効だと署名を待ってテストが固まる。
+            ("GIT_CONFIG_NOSYSTEM", OsString::from("1")),
+            (
+                "GIT_CONFIG_GLOBAL",
+                self.home.join("no-such-gitconfig").into_os_string(),
+            ),
+            ("HOME", self.home.clone().into_os_string()),
+            ("GIT_AUTHOR_NAME", OsString::from("mewgit test")),
+            ("GIT_AUTHOR_EMAIL", OsString::from("test@example.invalid")),
+            ("GIT_COMMITTER_NAME", OsString::from("mewgit test")),
+            (
+                "GIT_COMMITTER_EMAIL",
+                OsString::from("test@example.invalid"),
+            ),
+            ("GIT_AUTHOR_DATE", OsString::from(&date)),
+            ("GIT_COMMITTER_DATE", OsString::from(&date)),
+            ("GIT_TERMINAL_PROMPT", OsString::from("0")),
+        ]
+        .into_iter()
+        .map(|(key, value)| (OsString::from(key), value))
+        .collect()
     }
 
     /// 現在の日時を返し、カウンタを [`TICK`] 秒進める。
@@ -235,6 +249,16 @@ impl TestRepo {
     pub fn write_worktree_file(&self, path: &str, content: &[u8]) {
         fs::write(self.path().join(path), content)
             .unwrap_or_else(|err| panic!("{path} を書けませんでした: {err}"));
+    }
+
+    /// `git_exec::Runner` に渡す環境変数。`TestRepo` 自身が `git` を叩くときと
+    /// 同じ隔離（system / global config を読まない、author と committer を固定）を
+    /// 与える。付けないと実行環境の `commit.gpgsign` を拾って固まる。
+    ///
+    /// **日時は呼んだ時点で固定される。** 同じ `Runner` で作ったコミットは全部
+    /// 同じ日時になるので、並び順を見るテストではここを通さない。
+    pub fn runner_env(&self) -> Vec<(OsString, OsString)> {
+        self.sandbox.env()
     }
 
     /// 現在の HEAD の Oid。

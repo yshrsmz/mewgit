@@ -10,7 +10,8 @@ repository = "https://github.com/codingfeline/mewgit"
 authors = ["CODINGFELINE"]
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
+# io-util は `git apply --cached -` の標準入力に書くため（`AsyncWriteExt`）。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "io-util"] }
 thiserror = "2"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

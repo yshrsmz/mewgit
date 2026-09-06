@@ -99,10 +99,19 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
 /// `g` / `G` は別のタスクで足す。
 fn graph_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => state.graph.move_cursor(1),
-        KeyCode::Char('k') | KeyCode::Up => state.graph.move_cursor(-1),
-        _ => return Cmd::None,
+        KeyCode::Char('j') | KeyCode::Down => scrolled(state, 1),
+        KeyCode::Char('k') | KeyCode::Up => scrolled(state, -1),
+        _ => Cmd::None,
     }
+}
+
+/// カーソルを動かし、続きが要るなら頼む。
+///
+/// **カーソルを動かすキーはすべてここを通す**（`g` / `G` や `PageDown` を足すときも）。
+/// 腕ごとに `load_more` を書くと、足したキーが素通りする。下端で `j` を押したときは
+/// カーソルが動かないので、「動いたかどうか」では判定できない。
+fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
+    state.graph.move_cursor(delta);
     load_more(state)
 }
 
@@ -112,11 +121,8 @@ fn graph_key(state: &mut AppState, key: Key) -> Cmd {
 /// [`AppState::issue`] が落とすので、ここでは走っているかを見ない
 /// （見ると 2 箇所で同じことを判断することになる）。
 fn load_more(state: &AppState) -> Cmd {
-    if state.graph.loaded_all {
-        return Cmd::None;
-    }
     let remaining = state.graph.lines.len().saturating_sub(state.graph.cursor);
-    if remaining > state.graph.viewport {
+    if state.graph.loaded_all || remaining > state.graph.viewport {
         return Cmd::None;
     }
 
@@ -194,8 +200,9 @@ mod tests {
         state
     }
 
-    fn commit(n: u8) -> Commit {
-        fake_commit(n, &format!("commit {n}"))
+    /// `n` 番目のコミット。oid は `n` から作るので、256 件以上は重なる。
+    fn commit(n: usize) -> Commit {
+        fake_commit(n as u8, &format!("commit {n}"))
     }
 
     /// `n` 件のコミットを積んだ状態。ログは読み切っている。
@@ -204,16 +211,13 @@ mod tests {
     }
 
     /// `n` 件を 1 ページとして積んだ状態。`done` は「これ以上無い」。
-    ///
-    /// 積んだ時点で追加読み込みが走ることがあるので、続きを試すテストは
-    /// `jobs.finish(JobKind::LoadLog)` を呼んでから見る。
     fn state_with_page(n: usize, done: bool) -> AppState {
         let mut state = state();
         let page = LogPage {
-            commits: (0..n).map(|index| commit(index as u8)).collect(),
+            commits: (0..n).map(commit).collect(),
             done,
         };
-        update(&mut state, Msg::LogLoaded(Ok(page)));
+        let _ = update(&mut state, Msg::LogLoaded(Ok(page)));
         state
     }
 
@@ -239,7 +243,7 @@ mod tests {
     #[test]
     fn repo_info_fills_in_the_remotes_head_and_ref_labels() {
         let mut state = state();
-        init(&mut state);
+        let _ = init(&mut state);
         let oid = commit(1).oid;
         let info = RepoSnapshot {
             remotes: vec![Remote {
@@ -259,7 +263,7 @@ mod tests {
             )]),
         };
 
-        update(&mut state, Msg::RepoInfoLoaded(Box::new(Ok(info))));
+        let _ = update(&mut state, Msg::RepoInfoLoaded(Box::new(Ok(info))));
 
         assert_eq!(state.repo.remotes.len(), 1);
         assert!(state.repo.head.is_some());
@@ -271,9 +275,9 @@ mod tests {
     fn a_failed_repo_info_notices_and_keeps_going() {
         // ラベルもリモートも無いままグラフは出せる。起動は止めない。
         let mut state = state();
-        init(&mut state);
+        let _ = init(&mut state);
 
-        update(
+        let _ = update(
             &mut state,
             Msg::RepoInfoLoaded(Box::new(Err(GitReadError::NonUtf8Head))),
         );
@@ -286,7 +290,7 @@ mod tests {
     fn a_second_load_while_one_is_running_is_dropped() {
         // 二重に投げると同じページを 2 回積む。
         let mut state = state();
-        init(&mut state);
+        let _ = init(&mut state);
 
         let again = state.issue(Cmd::LoadLog { count: 10 });
 
@@ -296,7 +300,7 @@ mod tests {
     #[test]
     fn batch_only_drops_the_duplicated_cmd() {
         let mut state = state();
-        init(&mut state);
+        let _ = init(&mut state);
 
         let cmd = state.issue(Cmd::Batch(vec![
             Cmd::LoadLog { count: 10 },
@@ -310,17 +314,13 @@ mod tests {
     #[test]
     fn log_loaded_appends_lines_and_finishes_the_job() {
         let mut state = state();
-        init(&mut state);
+        let _ = init(&mut state);
 
         let page = LogPage {
             commits: vec![commit(1), commit(2)],
-            done: false,
+            done: true,
         };
-        // 2 件では窓が埋まらず、まだ続きがあるので次のページを頼む。
-        assert_eq!(
-            update(&mut state, Msg::LogLoaded(Ok(page))),
-            Cmd::LoadLog { count: 300 }
-        );
+        assert_eq!(update(&mut state, Msg::LogLoaded(Ok(page))), Cmd::None);
 
         let summaries: Vec<&str> = state
             .graph
@@ -329,10 +329,27 @@ mod tests {
             .map(|line| line.commit.summary.as_str())
             .collect();
         assert_eq!(summaries, ["commit 1", "commit 2"]);
-        assert!(!state.graph.loaded_all);
-        // ここで走っているのは、いま頼んだ続きのぶん。受けた時点のジョブは
-        // 片付いている（片付けないと、以後の LoadLog が黙って捨てられる）。
-        assert!(state.jobs.is_running(JobKind::LoadLog));
+        assert!(state.graph.loaded_all);
+        // ジョブを片付けないと、以後の LoadLog が黙って捨てられる。
+        assert!(!state.jobs.is_running(JobKind::LoadLog));
+    }
+
+    #[test]
+    fn a_page_that_does_not_fill_the_window_asks_for_the_next_one() {
+        let mut state = state();
+        let _ = init(&mut state);
+
+        let page = LogPage {
+            commits: vec![commit(1), commit(2)],
+            done: false,
+        };
+
+        assert_eq!(
+            update(&mut state, Msg::LogLoaded(Ok(page))),
+            Cmd::LoadLog {
+                count: state.config.graph.page_size
+            }
+        );
     }
 
     #[test]
@@ -345,18 +362,26 @@ mod tests {
 
     #[test]
     fn a_second_page_is_appended_after_the_first() {
+        // 2 件目は 1 件目の親。ページをまたいでレーンが続くことは `graph::lane` が
+        // 保証しているので、ここで見るのは `update` がその状態を持ち回っていること。
         let mut state = state();
         let first = LogPage {
-            commits: vec![commit(1)],
+            commits: vec![fake_commit_with_parents(1, &[2], "commit 1")],
             done: false,
         };
-        update(&mut state, Msg::LogLoaded(Ok(first)));
+        let _ = update(&mut state, Msg::LogLoaded(Ok(first)));
 
         let second = LogPage {
-            commits: vec![commit(2)],
+            commits: vec![fake_commit_with_parents(2, &[], "commit 2")],
             done: true,
         };
-        update(&mut state, Msg::LogLoaded(Ok(second)));
+        let _ = update(&mut state, Msg::LogLoaded(Ok(second)));
+
+        assert_eq!(state.graph.lines[1].row.lane, state.graph.lines[0].row.lane);
+        assert_eq!(
+            state.graph.lines[1].row.color,
+            state.graph.lines[0].row.color
+        );
 
         assert_eq!(state.graph.lines.len(), 2);
         assert!(state.graph.loaded_all);
@@ -367,10 +392,13 @@ mod tests {
         // 失敗したセッションは捨てられ、次の読み込みは先頭から来る（02）。
         // 積んだ行を残すと同じコミットが二重に並ぶ。
         let mut state = state_with_commits(3);
-        init(&mut state);
+        let _ = init(&mut state);
 
-        update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+        let cmd = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
 
+        // ここから読み直しを頼まない。行を捨てて `cursor` を 0 に戻した直後なので、
+        // 出すとリーダーが壊れているあいだ「失敗 → 再読込 → 失敗」を回し続ける。
+        assert_eq!(cmd, Cmd::None);
         assert!(state.graph.lines.is_empty());
         assert_eq!(state.graph.lanes, LaneState::default());
         assert_eq!(state.graph.cursor, 0);
@@ -383,16 +411,16 @@ mod tests {
     fn j_and_k_move_the_graph_cursor() {
         let mut state = state_with_commits(3);
 
-        update(&mut state, Msg::Key(Key::char('j')));
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
         assert_eq!(state.graph.cursor, 1);
 
-        update(&mut state, Msg::Key(Key::new(KeyCode::Down)));
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Down)));
         assert_eq!(state.graph.cursor, 2);
 
-        update(&mut state, Msg::Key(Key::char('k')));
+        let _ = update(&mut state, Msg::Key(Key::char('k')));
         assert_eq!(state.graph.cursor, 1);
 
-        update(&mut state, Msg::Key(Key::new(KeyCode::Up)));
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Up)));
         assert_eq!(state.graph.cursor, 0);
     }
 
@@ -400,11 +428,11 @@ mod tests {
     fn the_cursor_stops_at_both_ends() {
         let mut state = state_with_commits(2);
 
-        update(&mut state, Msg::Key(Key::char('k')));
+        let _ = update(&mut state, Msg::Key(Key::char('k')));
         assert_eq!(state.graph.cursor, 0);
 
         for _ in 0..5 {
-            update(&mut state, Msg::Key(Key::char('j')));
+            let _ = update(&mut state, Msg::Key(Key::char('j')));
         }
         assert_eq!(state.graph.cursor, 1);
     }
@@ -413,7 +441,7 @@ mod tests {
     fn moving_the_cursor_on_an_empty_graph_does_nothing() {
         let mut state = state();
 
-        update(&mut state, Msg::Key(Key::char('j')));
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
 
         assert_eq!(state.graph.cursor, 0);
         assert_eq!(state.graph.scroll, 0);
@@ -425,7 +453,7 @@ mod tests {
         let mut state = state_with_commits(30);
 
         for _ in 0..20 {
-            update(&mut state, Msg::Key(Key::char('j')));
+            let _ = update(&mut state, Msg::Key(Key::char('j')));
         }
 
         assert_eq!(state.graph.cursor, 20);
@@ -464,10 +492,10 @@ mod tests {
         // 貼り付いたまま中身だけが流れる。
         let mut state = state_with_commits(30);
         for _ in 0..20 {
-            update(&mut state, Msg::Key(Key::char('j')));
+            let _ = update(&mut state, Msg::Key(Key::char('j')));
         }
 
-        update(&mut state, Msg::Key(Key::char('k')));
+        let _ = update(&mut state, Msg::Key(Key::char('k')));
 
         assert_eq!(state.graph.cursor, 19);
         assert_eq!(state.graph.scroll, 1);
@@ -561,16 +589,26 @@ mod tests {
     }
 
     #[test]
-    fn a_resize_that_leaves_more_than_a_screenful_asks_for_nothing() {
+    fn widening_the_window_asks_for_the_next_page() {
+        // 30 行あって窓は 20 行。35 行に広がると残りが 1 画面を切る。
         let mut state = state_with_page(30, false);
-        state.jobs.finish(JobKind::LoadLog);
 
-        let msg = Msg::Resize {
+        let narrow = Msg::Resize {
             term: TermSize::default(),
             graph_rows: ROWS,
         };
+        assert_eq!(update(&mut state, narrow), Cmd::None);
 
-        assert_eq!(update(&mut state, msg), Cmd::None);
+        let wide = Msg::Resize {
+            term: TermSize::default(),
+            graph_rows: 35,
+        };
+        assert_eq!(
+            update(&mut state, wide),
+            Cmd::LoadLog {
+                count: state.config.graph.page_size
+            }
+        );
     }
 
     #[test]
@@ -579,7 +617,6 @@ mod tests {
         // 読み込みのあいだ動けなくなる。
         // 22 行あって窓は 20 行。カーソルが 2 行目に来た時点で残りが 20 になる。
         let mut state = state_with_page(ROWS + 2, false);
-        state.jobs.finish(JobKind::LoadLog);
 
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
         assert_eq!(
@@ -591,16 +628,13 @@ mod tests {
     }
 
     #[test]
-    fn the_next_page_is_asked_for_only_once_while_it_is_loading() {
+    fn the_next_page_is_not_asked_for_twice_while_it_is_loading() {
         let mut state = state_with_page(ROWS + 2, false);
-        state.jobs.finish(JobKind::LoadLog);
         state.graph.cursor = ROWS;
+        // 1 ページ目の続きを頼んだ直後の状態を作る。
+        let _ = state.issue(Cmd::LoadLog { count: 1 });
 
-        assert!(matches!(
-            update(&mut state, Msg::Key(Key::char('j'))),
-            Cmd::LoadLog { .. }
-        ));
-        // 2 打鍵目は `JobTracker` が落とす。`update` を通さないとここは見えない。
+        // 下端に着いても `JobTracker` が落とす。`update` を通さないと見えない。
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
     }
 
@@ -614,51 +648,11 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_page_does_not_ask_for_another_one() {
-        // 読み直しをここから出すと、リーダーが壊れているあいだ
-        // 「失敗 → 再読込 → 失敗」を回し続ける。次の読み込みはユーザーの操作から。
-        let mut state = state();
-        init(&mut state);
-
-        let cmd = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
-
-        assert_eq!(cmd, Cmd::None);
-    }
-
-    #[test]
-    fn the_second_page_continues_the_lanes_of_the_first() {
-        // ページをまたいでレーンが続くことは `graph::lane` が保証している。
-        // ここで見るのは `update` がその状態を持ち回していること。
-        let mut state = state();
-        init(&mut state);
-        let first = LogPage {
-            commits: vec![fake_commit_with_parents(1, &[2], "first")],
-            done: false,
-        };
-        update(&mut state, Msg::LogLoaded(Ok(first)));
-        state.jobs.finish(JobKind::LoadLog);
-
-        let second = LogPage {
-            commits: vec![fake_commit_with_parents(2, &[], "second")],
-            done: true,
-        };
-        update(&mut state, Msg::LogLoaded(Ok(second)));
-
-        assert_eq!(state.graph.lines.len(), 2);
-        // 2 行目は 1 行目の親。同じレーンに乗る。
-        assert_eq!(state.graph.lines[1].row.lane, state.graph.lines[0].row.lane);
-        assert_eq!(
-            state.graph.lines[1].row.color,
-            state.graph.lines[0].row.color
-        );
-    }
-
-    #[test]
     fn shrinking_the_terminal_pulls_the_cursor_back_into_view() {
         // 縮んだ端末でカーソルが窓の外に残ると、選択行が見えないまま操作することになる。
         let mut state = state_with_commits(30);
         for _ in 0..25 {
-            update(&mut state, Msg::Key(Key::char('j')));
+            let _ = update(&mut state, Msg::Key(Key::char('j')));
         }
         assert_eq!(state.graph.cursor, 25);
 
@@ -669,7 +663,7 @@ mod tests {
             },
             graph_rows: 5,
         };
-        update(&mut state, msg);
+        let _ = update(&mut state, msg);
 
         assert_eq!(state.graph.scroll, 21);
     }

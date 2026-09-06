@@ -64,9 +64,18 @@ where
     let mut tick = tokio::time::interval(TICK);
     let (runtime, mut msgs) = Runtime::new(reader);
 
+    // 起動時の読み込み。ループの前に 1 回だけ。**サイズを入れるより先に出す。**
+    // 逆にすると、サイズを知った時点で `load_more` が 1 ページ目を頼み、`init` の
+    // `Cmd::LoadLog` が `issue` に落とされる。リーダースレッドは要求を 1 件ずつ
+    // 捌くので、ref と HEAD が 1 ページ目の walk の後ろに回って最初のフレームに
+    // ラベルが乗らなくなる。
+    let cmd = init(state);
+    if runtime.dispatch(state, cmd).is_break() {
+        return Ok(());
+    }
+
     // 起動時に `Resize` は飛んでこないので、最初のサイズは自分で入れる。
-    // 戻ってきた `Cmd` は捨てずに流す。捨てると `AppState::issue` がジョブを
-    // 登録したまま実行されず、以後その種類の `Cmd` が黙って落ち続ける。
+    // 戻ってきた `Cmd` も流す（`init` が読んでいる最中なら `issue` が落とす）。
     if let Ok(size) = terminal.size() {
         let msg = crate::input::resized(TermSize {
             width: size.width,
@@ -76,12 +85,6 @@ where
         if runtime.dispatch(state, cmd).is_break() {
             return Ok(());
         }
-    }
-
-    // 起動時の読み込み。ループの前に 1 回だけ。
-    let cmd = init(state);
-    if runtime.dispatch(state, cmd).is_break() {
-        return Ok(());
     }
 
     loop {
@@ -253,7 +256,7 @@ mod tests {
             .dispatch(&mut state, Cmd::LoadRepoInfo)
             .is_continue());
         let msg = msgs.recv().await.expect("Msg が返りませんでした");
-        update(&mut state, msg);
+        let _ = update(&mut state, msg);
 
         assert_eq!(state.repo.remotes.len(), 1);
         assert_eq!(
@@ -298,7 +301,7 @@ mod tests {
 
         // 非同期タスクが返した Msg をループの代わりに受け取る。
         let msg = msgs.recv().await.expect("Msg が返りませんでした");
-        update(&mut state, msg);
+        let _ = update(&mut state, msg);
 
         let summaries: Vec<&str> = state
             .graph

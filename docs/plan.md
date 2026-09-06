@@ -30,7 +30,7 @@
       `path` で絞った diff の rename（02）
 - [x] ハンク単位の stage / unstage / discard — `GitOp::DiscardHunk`、ハンク → パッチの
       組み立て（`git apply` への round-trip テスト）、`view` のキャッシュと
-      `DiffState.stale`（01）
+      `Freshness`（01）
 - [ ] `Modal::CommitMessage` と commit / amend。グラフ先頭の WIP 行と、そこを選んだ
       ときの右ペイン（staging）も一緒に入れる（07 の「どこまで実装したか」）
 - [ ] コミット詳細を右ペインへ移す。グラフ下の展開を廃止し、`shows_detail` /

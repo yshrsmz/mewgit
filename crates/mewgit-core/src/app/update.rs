@@ -16,8 +16,8 @@ use crate::git_read::{
 use crate::graph::LaneState;
 
 use super::{
-    AppState, Cmd, DiffCursor, DiffView, ExecDone, GraphLine, JobKind, Key, KeyCode, Modal, Msg,
-    NoticeLevel, Pane, RepoSnapshot,
+    AppState, Cmd, DiffCursor, DiffView, ExecDone, Freshness, GraphLine, JobKind, Key, KeyCode,
+    Modal, Msg, NoticeLevel, Pane, RepoSnapshot,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -54,7 +54,7 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 ///
 /// diff（01 の「diff の遅延取得」）: `focus`（フォーカスの移動。`Tab` も `Enter` も
 /// `Esc` もここを通る）、`status_loaded` の `clamp` のあと、`diff_loaded` の出口
-/// （対象が違ったときの追いつきと、`DiffState.stale` が残っているときの読み直し）。
+/// （対象が違ったときの追いつきと、書き込みより前の diff しか無いときの読み直し）。
 fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
     match msg {
         Msg::Key(key) => update_key(state, key),
@@ -144,7 +144,7 @@ fn focus(state: &mut AppState, pane: Pane) -> Cmd {
 /// 対象が違えば一度も試していないので頼む（01）。
 ///
 /// **同じ対象を既に持っていて、それが直前の書き込みより後のものなら出さない**
-/// （01 の「diff のキャッシュと `DiffState.stale`」）。ワーキングツリーの diff は
+/// （01 の「diff のキャッシュと鮮度」）。ワーキングツリーの diff は
 /// 1 ファイルぶんでもワークツリー全体を走査してから絞るので、`Esc` / `Enter` の
 /// たびに走らせるとリーダースレッドが `LoadLog` を待たせる。
 fn load_diff(state: &mut AppState) -> Cmd {
@@ -154,15 +154,16 @@ fn load_diff(state: &mut AppState) -> Cmd {
     if state.diff.failed.as_ref() == Some(&wanted) {
         return Cmd::None;
     }
-    if !state.diff.stale && state.diff.fresh_view(Some(&wanted)).is_some() {
+    // 書き込みより後の diff を既に持っているなら読み直さない。
+    if state.diff.freshness == Freshness::Fresh && state.diff.fresh_view(Some(&wanted)).is_some() {
         return Cmd::None;
     }
 
     // **`LoadDiff` が走っていれば `issue` に落とされる。** いま飛んでいる要求は
-    // 書き込みより前のものなので、印は残したままにする。`diff_loaded` の出口が
-    // 同じここを通るので、届いた時点で頼み直せる（01。`WorktreeState.stale` と同じ形）。
-    if !state.jobs.is_running(JobKind::LoadDiff) {
-        state.diff.stale = false;
+    // 書き込みより前のものなので `Stale` のままにする。`diff_loaded` の出口が同じ
+    // ここを通るので、届いた時点で頼み直せる（01。`WorktreeState.stale` と同じ形）。
+    if state.diff.freshness == Freshness::Stale && !state.jobs.is_running(JobKind::LoadDiff) {
+        state.diff.freshness = Freshness::Asked;
     }
     Cmd::LoadDiff(wanted)
 }
@@ -207,12 +208,21 @@ fn diff_loaded(
 ) -> Cmd {
     state.jobs.finish(JobKind::LoadDiff);
 
+    // **この返信が書き込みより後に頼んだものか。** `Freshness::Asked` はいま届いた
+    // 1 通を指している（`Asked` のあいだ `LoadDiff` はちょうど 1 つしか飛ばない）。
+    let asked = state.diff.freshness == Freshness::Asked;
+    let mut stored = false;
+
     match result {
         Ok(files) => {
             state.diff.failed = None;
-            // **届いたのがいま選んでいるファイルのものなら採る。** 無条件に上書きすると、
-            // 正しく出ている画面が別のファイルの diff に化ける。
-            if state.wanted_diff().as_ref() == Some(&target) {
+            // **採るのは「いま選んでいるファイルのもの」かつ「書き込みより後のもの」
+            // だけ。** 対象を見ないと正しく出ている画面が別のファイルの diff に化け、
+            // 鮮度を見ないと書き込み前の中身に戻る（`Stale` = この返信は書き込みより
+            // 前に頼まれたもの）。
+            if state.diff.freshness != Freshness::Stale
+                && state.wanted_diff().as_ref() == Some(&target)
+            {
                 // **同じ対象を読み直したときはカーソルを持ち越す。** 書き込みのあとは
                 // 同じファイルの diff がもう一度届く。既定に戻すと、選んでいたハンクが
                 // 先頭へ飛んでから操作が効くことになる。
@@ -230,6 +240,7 @@ fn diff_loaded(
                 // 読み直しでハンクが減っていることがある。選べる位置へ寄せ直す。
                 view.move_cursor(0);
                 state.diff.view = Some(view);
+                stored = true;
             }
         }
         Err(err) => {
@@ -238,9 +249,21 @@ fn diff_loaded(
         }
     }
 
+    // **`Asked` はここで必ず倒す。** 倒さないと、`Esc` で対象が消えたり読み取りが
+    // 失敗したりしたときに「頼んである」まま取り残され、以後の書き込みが
+    // `Stale` を立て直すまで古い diff を新しいものとして扱う。新しくなったと
+    // 言えるのは、実際に採れたときだけ。
+    if asked {
+        state.diff.freshness = if stored {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        };
+    }
+
     // **採ったときもここを通る。** 対象が違っていた（選択が動いた / 別の対象が
-    // 失敗した）ときは追いつきの再発行、対象が合っていても印（`DiffState.stale`）が
-    // 残っていれば読み直し。経路を 1 本にするため出口は 1 つ（01）。
+    // 失敗した）ときは追いつきの再発行、まだ書き込みより前の diff しか無ければ
+    // 読み直し。経路を 1 本にするため出口は 1 つ（01）。
     load_diff(state)
 }
 
@@ -532,7 +555,8 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
     //
     // 見るのは単位であってペインではない。`focus == Pane::Diff` で書くと、ハンクを
     // 出す場所が増えたときにガードだけが外れる。
-    let planned = if matches!(scope, Scope::Hunk { .. }) && state.diff.stale {
+    let planned = if matches!(scope, Scope::Hunk { .. }) && state.diff.freshness != Freshness::Fresh
+    {
         Err(NOT_LATEST.to_string())
     } else {
         plan(action, section, scope)
@@ -756,7 +780,7 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     // **持っている diff は対象が同じでも中身が古い。** ハンク単位で stage すると
     // `IndexVsWorktree(a.txt)` のまま中身が減る。対象は見ない（この時点では `clamp`
     // がまだで、いま選ばれているファイルが読み直しの対象になるとは限らない。01）。
-    state.diff.stale = true;
+    state.diff.freshness = Freshness::Stale;
     // 成否は問わない。失敗しても index が途中まで動いていることがある。
     Cmd::LoadStatus
 }
@@ -1276,7 +1300,7 @@ mod tests {
         );
         // 書き込みが終わった直後。読み直しはまだ届いていない。
         let _ = update(&mut state, exec_done(Ok(fake_output())));
-        assert!(state.diff.stale);
+        assert_eq!(state.diff.freshness, Freshness::Stale);
 
         // 古いハンクから組んだパッチは、同じ内容のハンクが 2 つあると別の場所に当たる。
         for key in ['s', 'u', 'x'] {
@@ -1287,6 +1311,52 @@ mod tests {
             state.notices.back().map(|notice| notice.level),
             Some(NoticeLevel::Warn)
         );
+    }
+
+    #[test]
+    fn keys_are_refused_while_the_reload_has_been_asked_for_but_has_not_arrived() {
+        // **`Cmd::LoadDiff` を出しただけでは新しくならない。** 返信が届くまで、
+        // 出している view は書き込みより前のものそのもの。
+        let mut state = diff_pane(
+            WorktreeSection::Unstaged,
+            &["a.txt"],
+            vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
+        );
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+        let asked = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+        );
+        assert_eq!(asked, Cmd::LoadDiff(unstaged_diff("a.txt")), "頼んではいる");
+
+        assert_eq!(press(&mut state, 's'), Cmd::None);
+        assert_eq!(
+            state.notices.back().map(|notice| notice.level),
+            Some(NoticeLevel::Warn)
+        );
+    }
+
+    #[test]
+    fn a_reload_that_fails_leaves_the_shown_diff_marked_as_old() {
+        // 頼んだ読み直しが失敗したら、出しているのは書き込み前の diff のまま。
+        // **`Asked` を倒さないと、来ない返信を待つあいだ古い diff を新しい扱いにする。**
+        let mut state = diff_pane(
+            WorktreeSection::Unstaged,
+            &["a.txt"],
+            vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
+        );
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+        let _ = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+        );
+
+        let cmd = update(&mut state, diff_err(unstaged_diff("a.txt")));
+
+        // 同じ対象には出し直さない（「失敗 → 再読込 → 失敗」を回さない）。
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.diff.freshness, Freshness::Stale);
+        assert_eq!(press(&mut state, 's'), Cmd::None);
     }
 
     #[test]
@@ -1304,7 +1374,7 @@ mod tests {
     #[test]
     fn a_write_makes_the_same_target_be_read_again() {
         // ハンク 1 つを stage しても残りが unstaged なら区画は変わらない。**対象が
-        // 同じままなのでキャッシュが効いてしまう**のを `DiffState.stale` が止める。
+        // 同じままなのでキャッシュが効いてしまう**のを `Freshness` が止める。
         let mut state = diff_state(&["a.txt"], 2);
         let _ = update(&mut state, exec_done(Ok(fake_output())));
 
@@ -1314,7 +1384,8 @@ mod tests {
         );
 
         assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
-        assert!(!state.diff.stale, "出せたら印は落とす");
+        // **まだ `Fresh` ではない。** 頼んだだけで、出している diff は書き込みより前。
+        assert_eq!(state.diff.freshness, Freshness::Asked);
     }
 
     #[test]
@@ -1334,16 +1405,23 @@ mod tests {
             Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
         );
         assert_eq!(dropped, Cmd::None, "走っているので落とされる");
-        assert!(state.diff.stale, "落とされたぶんの印が残る");
+        assert_eq!(
+            state.diff.freshness,
+            Freshness::Stale,
+            "落とされたので、まだ頼めていない"
+        );
 
-        // 書き込みより前に頼まれていた返信が届く。
+        // 書き込みより前に頼まれていた返信が届く（中身が違うと判るように 5 ハンク）。
         let cmd = update(
             &mut state,
-            diff_ok(unstaged_diff("a.txt"), fake_diff("a.txt", 2)),
+            diff_ok(unstaged_diff("a.txt"), fake_diff("a.txt", 5)),
         );
 
         assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
-        assert!(!state.diff.stale);
+        assert_eq!(state.diff.freshness, Freshness::Asked);
+        // **書き込みより前の返信は採らない。** 採ると、頼み直しが届くまでのあいだ
+        // 書き込み前の中身を新しいものとして出すことになる。
+        assert_eq!(state.diff.view.as_ref().unwrap().files[0].hunks.len(), 2);
     }
 
     #[test]

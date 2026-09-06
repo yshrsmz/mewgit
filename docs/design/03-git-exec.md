@@ -29,6 +29,14 @@ pub enum GitOp {
 - **`patch` は `Vec<u8>`。** `git apply --cached` に戻す入力なので、lossy 変換すると
   非 UTF-8 のファイルをステージした結果が元のファイルと変わる（02 の「ハンクの持ち方」と
   同じ理由）
+- **ハンクの 3 操作は `--whitespace=nowarn` を必ず付ける。** 既定はユーザーの
+  `apply.whitespace` を読む。`fix`（よく勧められる設定）だと git が行末の空白を
+  落としてから index に入れるので、**画面に出したハンクと index の中身が静かに
+  食い違い**、`git status` は `MM` のまま残る。`error` だと逆に操作ごと落ちる。
+  どちらも「見えているハンクをそのまま index へ」を壊す（git 2.55 で確認）。
+  argv の組み立ては 3 変種で 1 本の関数に通し、変種を足したときに付け忘れない
+  ようにする。`apply.ignoreWhitespace` も同じ性質を持つが、**結果が変わるケースを
+  作れなかったので旗は足していない**（作れたら足す）
 - **ハンクの discard だけ `--cached` が付かない。** `StageHunk` / `UnstageHunk` は
   index を書き換えるが、`DiscardHunk` はワークツリーのファイルを書き換える。
   **index とワークツリーの両方に適用する変種は作らない。** `git apply` は 1 回で
@@ -64,9 +72,9 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 |---|---|
 | `Stage(paths)` | `add -- <paths>` |
 | `Unstage(paths)` | `reset --quiet -- <paths>` |
-| `StageHunk { patch }` | `apply --cached -`（patch を stdin） |
-| `UnstageHunk { patch }` | `apply --cached --reverse -`（patch を stdin） |
-| `DiscardHunk { patch }` | `apply --reverse -`（patch を stdin。`--cached` は付けない） |
+| `StageHunk { patch }` | `apply --cached --whitespace=nowarn -`（patch を stdin） |
+| `UnstageHunk { patch }` | `apply --cached --reverse --whitespace=nowarn -` |
+| `DiscardHunk { patch }` | `apply --reverse --whitespace=nowarn -`（`--cached` は付けない） |
 | `Discard(paths)` | `restore --source=HEAD --staged --worktree -- <paths>` |
 | `DiscardUntracked(paths)` | `clean --force -- <paths>` |
 | `DiscardAdded(paths)` | `rm --force --quiet -- <paths>` |

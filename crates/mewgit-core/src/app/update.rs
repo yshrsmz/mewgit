@@ -510,8 +510,9 @@ enum Plan {
 /// コンフリクトした行を断る文言。`plan` と `discard` の両方に出る。
 const CONFLICTED: &str = "コンフリクトしたファイルは操作できません";
 
-/// 出しているハンクが書き込みより前のものだったときに断る文言。
+/// 出している diff が最新でないときに断る文言。
 ///
+/// 「まだ届いていない」「読み込めなかった」「書き込みより前のもの」の 3 つに使う。
 /// **「待っています」とだけ書かない。** 読み直しに失敗して二度と来ないこともある。
 const NOT_LATEST: &str = "最新の差分をまだ読めていません";
 
@@ -546,6 +547,17 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
     else {
         return Cmd::None;
     };
+
+    // **Diff ペインが出していない diff では何もしない。** 「読み込み中…」や
+    // 「差分を読み込めませんでした」を出しているあいだ、`hunk_scope` は `None` を
+    // 返す。そのままファイル単位へ落とすと、ハンク 1 つのつもりで押した `s` が
+    // **ファイル全体**を stage する。07 の fallback は「ハンクで表せないファイル」の
+    // ためのもので、届いていないファイルのためではない。
+    let wanted = state.wanted_diff();
+    if wanted.is_some() && state.diff.fresh_view(wanted.as_ref()).is_none() {
+        state.push_notice(NoticeLevel::Warn, NOT_LATEST.to_string(), None);
+        return Cmd::None;
+    }
 
     let scope = hunk_scope(state).unwrap_or(Scope::File { status, paths });
 
@@ -689,6 +701,9 @@ fn discard(section: WorktreeSection, scope: Scope<'_>) -> Result<Plan, String> {
 }
 
 /// カーソルの指すハンクを [`Scope::Hunk`] にする。
+///
+/// **`view` が出ていないときも `None` を返す。** その区別は呼び出し側（[`act`]）が
+/// 先に断って付ける。ここで返す `None` は「表せない」と「まだ無い」の両方を含む。
 ///
 /// **ハンクで表せないものは `None`。** 何が表せるかは
 /// [`supports_hunk_patch`](crate::git_exec::supports_hunk_patch) が持つ（パッチを組む
@@ -1293,24 +1308,31 @@ mod tests {
 
     #[test]
     fn keys_are_refused_while_the_shown_diff_is_older_than_the_last_write() {
-        let mut state = diff_pane(
-            WorktreeSection::Unstaged,
-            &["a.txt"],
-            vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
-        );
-        // 書き込みが終わった直後。読み直しはまだ届いていない。
-        let _ = update(&mut state, exec_done(Ok(fake_output())));
-        assert_eq!(state.diff.freshness, Freshness::Stale);
+        // **区画で断られる組み合わせを混ぜない。** Unstaged で `u` は鮮度に関わらず
+        // 「stage されていません」で断られるので、その腕は見張りを踏まない。
+        for (section, key) in [
+            (WorktreeSection::Unstaged, 's'),
+            (WorktreeSection::Unstaged, 'x'),
+            (WorktreeSection::Staged, 'u'),
+        ] {
+            let mut state = diff_pane(
+                section,
+                &["a.txt"],
+                vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
+            );
+            // 書き込みが終わった直後。読み直しはまだ届いていない。
+            let _ = update(&mut state, exec_done(Ok(fake_output())));
+            assert_eq!(state.diff.freshness, Freshness::Stale);
 
-        // 古いハンクから組んだパッチは、同じ内容のハンクが 2 つあると別の場所に当たる。
-        for key in ['s', 'u', 'x'] {
+            // 古いハンクから組んだパッチは、同じ内容のハンクが 2 つあると別の場所に当たる。
             assert_eq!(press(&mut state, key), Cmd::None, "{key}");
             assert!(state.modal.is_none(), "{key}");
+            assert_eq!(
+                state.notices.back().map(|notice| notice.message.as_str()),
+                Some(NOT_LATEST),
+                "{key}"
+            );
         }
-        assert_eq!(
-            state.notices.back().map(|notice| notice.level),
-            Some(NoticeLevel::Warn)
-        );
     }
 
     #[test]
@@ -1333,6 +1355,36 @@ mod tests {
         assert_eq!(
             state.notices.back().map(|notice| notice.level),
             Some(NoticeLevel::Warn)
+        );
+    }
+
+    #[test]
+    fn keys_do_nothing_while_the_diff_pane_has_nothing_to_show() {
+        // 「読み込み中…」や「差分を読み込めませんでした」を出しているあいだ、
+        // **ファイル単位に落とすとハンク 1 つのつもりの `s` がファイル全体を stage する。**
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press_code(&mut state, KeyCode::Enter);
+        assert!(state.diff.view.is_none(), "まだ届いていない");
+
+        for key in ['s', 'u', 'x'] {
+            assert_eq!(press(&mut state, key), Cmd::None, "{key}");
+            assert!(state.modal.is_none(), "{key}");
+            assert_eq!(
+                state.notices.back().map(|notice| notice.message.as_str()),
+                Some(NOT_LATEST),
+                "{key}"
+            );
+        }
+
+        // 読み込めなかったあとも同じ。
+        let _ = update(&mut state, diff_err(unstaged_diff("a.txt")));
+        assert_eq!(press(&mut state, 's'), Cmd::None);
+        assert_eq!(
+            state.notices.back().map(|notice| notice.message.as_str()),
+            Some(NOT_LATEST)
         );
     }
 

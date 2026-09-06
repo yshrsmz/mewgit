@@ -58,21 +58,16 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
         }
         // `path` は argv に載せない。対象はパッチのファイルヘッダが持つ。
         GitOp::StageHunk { path: _, patch } => {
-            argv.extend(["apply".into(), "--cached".into(), "-".into()]);
+            argv.extend(apply_hunk(&["--cached"]));
             stdin = Some(patch.clone());
         }
         GitOp::UnstageHunk { path: _, patch } => {
-            argv.extend([
-                "apply".into(),
-                "--cached".into(),
-                "--reverse".into(),
-                "-".into(),
-            ]);
+            argv.extend(apply_hunk(&["--cached", "--reverse"]));
             stdin = Some(patch.clone());
         }
         // **`--cached` を付けない。** 当たるのはワークツリーだけ（03）。
         GitOp::DiscardHunk { path: _, patch } => {
-            argv.extend(["apply".into(), "--reverse".into(), "-".into()]);
+            argv.extend(apply_hunk(&["--reverse"]));
             stdin = Some(patch.clone());
         }
         GitOp::Discard(paths) => {
@@ -242,6 +237,24 @@ fn push_paths(argv: &mut Vec<String>, paths: &[PathBuf]) -> Result<(), ArgvError
     Ok(())
 }
 
+/// ハンクのパッチを標準入力から流す `git apply` の argv。`extra` は `--cached` /
+/// `--reverse`。
+///
+/// **`--whitespace=nowarn` をここで必ず付ける。** 既定はユーザーの
+/// `apply.whitespace` を読むので、`fix`（よく勧められる設定）だと git が行末の空白を
+/// 落としてから index に入れる。画面に出したハンクと index の中身が静かに食い違い、
+/// `git status` は `MM` のまま残る。`error` だと逆に操作ごと落ちる。**どちらも
+/// 「見えているハンクをそのまま index へ」を壊す**ので、設定に関わらず素通しにする
+/// （git 2.55 で確認）。
+///
+/// 3 変種で 1 本にしているのは、変種を足したときに付け忘れないため。
+fn apply_hunk(extra: &[&str]) -> Vec<String> {
+    let mut argv = vec!["apply".to_string()];
+    argv.extend(extra.iter().map(|flag| (*flag).to_string()));
+    argv.extend(["--whitespace=nowarn".to_string(), "-".to_string()]);
+    argv
+}
+
 /// argv やパッチのヘッダに載せるパス。非 UTF-8 は載せられないので拒否する。
 pub(super) fn path_arg(path: &Path) -> Result<String, ArgvError> {
     path.to_str()
@@ -323,14 +336,14 @@ mod tests {
                     path: "a.txt".into(),
                     patch: b"@@ -1 +1 @@\n".to_vec(),
                 },
-                vec!["apply", "--cached", "-"],
+                vec!["apply", "--cached", "--whitespace=nowarn", "-"],
             ),
             (
                 GitOp::UnstageHunk {
                     path: "a.txt".into(),
                     patch: b"@@ -1 +1 @@\n".to_vec(),
                 },
-                vec!["apply", "--cached", "--reverse", "-"],
+                vec!["apply", "--cached", "--reverse", "--whitespace=nowarn", "-"],
             ),
             (
                 GitOp::DiscardHunk {
@@ -338,7 +351,7 @@ mod tests {
                     patch: b"@@ -1 +1 @@\n".to_vec(),
                 },
                 // `--cached` が無い。付くと index を戻してワークツリーが残る。
-                vec!["apply", "--reverse", "-"],
+                vec!["apply", "--reverse", "--whitespace=nowarn", "-"],
             ),
             (
                 GitOp::Discard(vec!["a.txt".into()]),

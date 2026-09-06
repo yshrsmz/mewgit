@@ -215,6 +215,29 @@ async fn non_utf8_lines_survive_the_round_trip() {
 }
 
 #[tokio::test]
+async fn the_users_apply_whitespace_setting_does_not_change_what_gets_staged() {
+    // `apply.whitespace = fix` は git に「行末の空白を落としてから当てる」と言う設定で、
+    // よく勧められる。**それが効くと、画面に出したハンクと index の中身が食い違う。**
+    let repo = TestRepo::init();
+    repo.commit_bytes("f.txt", b"one\ntwo\n", "first");
+    repo.write_worktree_file("f.txt", b"one\nTWO   \n");
+    repo.git(&["config", "apply.whitespace", "fix"]);
+
+    let file = one_file(&repo, DiffTarget::IndexVsWorktree(Some("f.txt".into())));
+    repo.runner()
+        .run(&GitOp::StageHunk {
+            path: "f.txt".into(),
+            patch: patch_of(&file, 0),
+        })
+        .await
+        .expect("stage できませんでした");
+
+    // 空白が落ちると staged は `TWO\n` になり、ワークツリーとの差が残って `MM`。
+    assert_eq!(staged(&repo, "f.txt"), b"one\nTWO   \n");
+    assert_eq!(repo.porcelain(), "M  f.txt");
+}
+
+#[tokio::test]
 async fn paths_with_a_space_or_non_ascii_apply_to_the_right_file() {
     // `git diff` は非 ASCII を quote して出すが、`hunk_patch` は quote しない。
     // 受け側がそれを読めるか、しかも**別のファイルに当たらないか**を見る。

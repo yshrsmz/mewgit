@@ -93,20 +93,35 @@ impl Sandbox {
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.root)
             .args(args)
-            // 実行環境のユーザー設定を持ち込まない。特に `commit.gpgsign` が有効だと
-            // 署名を待ってテストが固まる。
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", self.home.join("no-such-gitconfig"))
-            .env("HOME", &self.home)
-            .env("GIT_AUTHOR_NAME", "mewgit test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-            .env("GIT_COMMITTER_NAME", "mewgit test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .envs(self.env())
             .env("GIT_AUTHOR_DATE", &date)
-            .env("GIT_COMMITTER_DATE", &date)
-            .env("GIT_TERMINAL_PROMPT", "0");
+            .env("GIT_COMMITTER_DATE", &date);
 
         cmd.output().expect("git を実行できませんでした")
+    }
+
+    /// `git` に渡す環境変数のうち、実行環境の設定を持ち込まないためのもの。
+    ///
+    /// 日時はここに含めない。含めると「呼ぶと時計が進む getter」になり、
+    /// スナップショットを取る使い方（[`TestRepo::runner_env`]）と両立しない。
+    fn env(&self) -> Vec<(&'static str, OsString)> {
+        vec![
+            // 特に `commit.gpgsign` が有効だと署名を待ってテストが固まる。
+            ("GIT_CONFIG_NOSYSTEM", OsString::from("1")),
+            (
+                "GIT_CONFIG_GLOBAL",
+                self.home.join("no-such-gitconfig").into_os_string(),
+            ),
+            ("HOME", self.home.clone().into_os_string()),
+            ("GIT_AUTHOR_NAME", OsString::from("mewgit test")),
+            ("GIT_AUTHOR_EMAIL", OsString::from("test@example.invalid")),
+            ("GIT_COMMITTER_NAME", OsString::from("mewgit test")),
+            (
+                "GIT_COMMITTER_EMAIL",
+                OsString::from("test@example.invalid"),
+            ),
+            ("GIT_TERMINAL_PROMPT", OsString::from("0")),
+        ]
     }
 
     /// 現在の日時を返し、カウンタを [`TICK`] 秒進める。
@@ -237,6 +252,16 @@ impl TestRepo {
             .unwrap_or_else(|err| panic!("{path} を書けませんでした: {err}"));
     }
 
+    /// `git_exec::Runner` に渡す環境変数。`TestRepo` 自身が `git` を叩くときと
+    /// 同じ隔離（system / global config を読まない、author と committer を固定）を
+    /// 与える。付けないと実行環境の `commit.gpgsign` を拾って固まる。
+    ///
+    /// 日時は含めない。`Runner` 経由のコミットは実時間になるので、[`TestRepo`] が
+    /// 作った固定日時（2023 年）のコミットより必ず後ろに並ぶ。
+    pub fn runner_env(&self) -> Vec<(&'static str, OsString)> {
+        self.sandbox.env()
+    }
+
     /// 現在の HEAD の Oid。
     pub fn head_oid(&self) -> Oid {
         self.rev_parse("HEAD")
@@ -275,6 +300,14 @@ impl BareRepo {
     /// bare リポジトリのルート。`.git` サブディレクトリは無く、ここが直接その中身。
     pub fn path(&self) -> &Path {
         &self.sandbox.root
+    }
+
+    /// bare リポジトリの中で `git` を実行し、標準出力を返す。失敗したら panic する。
+    ///
+    /// push された結果を bare 側で確かめるのに使う。ワークツリーを触るコマンドは
+    /// bare では動かないので渡さない。
+    pub fn git(&self, args: &[&str]) -> String {
+        self.sandbox.git(args)
     }
 }
 

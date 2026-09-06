@@ -22,7 +22,7 @@
 ## M2: ワーキングツリーとブランチ
 
 - [x] `git_read::status` / `diff`（ハンク分割）
-- [ ] `git_exec::Runner` と `to_argv` の全 `GitOp` テスト、`ExecErrorKind` の分類テスト
+- [x] `git_exec::Runner` と `to_command` の全 `GitOp` テスト、`ExecErrorKind` の分類テスト
 - [ ] `ui::panes::worktree` / `diff` — ファイル・ハンク単位の stage / unstage / discard
 - [ ] `Modal::CommitMessage` と commit / amend
 - [ ] `ui::panes::branches` — 一覧、作成 / 切替 / 削除 / リネーム、`Modal::Confirm`
@@ -30,7 +30,8 @@
 ## M3: リモート
 
 - [ ] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト
-- [ ] fetch / pull / push の `GitOp`、`-u` 提案、force push 確認
+- [ ] fetch / pull / push の `GitOp`、`-u` 提案、force push 確認（`expected` の受け渡し）、
+      ssh のパスフレーズで固まる件の扱い（`BatchMode` と `core.sshCommand`。03 参照）
 - [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文
 - [ ] 実行中ジョブのスピナーとキャンセル
 

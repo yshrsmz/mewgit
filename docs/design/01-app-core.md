@@ -92,6 +92,11 @@ pub enum Modal {
 discard、abort 系）はすべて `Cmd::Exec(GitOp)` で表せるので、専用の `Msg` 変種を
 作る必要がない。`Msg` は入力イベントと非同期完了だけの語彙に保つ。
 
+**確認モーダルを組む時点の値を `GitOp` に閉じ込める。** force push の
+`GitOp::Push { expected }` がその例で、ユーザーに見せたリモートの位置をそのまま持たせる
+（03 の「argv への変換」）。実行時に読み直すと、確認してから実行するまでの間に
+リモートが動いても気付けない。
+
 `Input` はコールバック（`fn(String) -> Msg`）ではなく `InputIntent` というデータを持つ。
 `fn` ポインタは環境をキャプチャできず、`BranchRename` の `from` のような文脈を運べないため。
 

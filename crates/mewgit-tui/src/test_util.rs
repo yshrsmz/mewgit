@@ -43,6 +43,17 @@ fn unquote(line: &str) -> &str {
 /// `TestBackend` が隠れたセルを報告するときの区切り。閉じ `"` を含む。
 const HIDDEN_CELLS: &str = "\" Hidden by multi-width symbols:";
 
+/// `needle` を含む行が何行目か。無ければ panic する。
+///
+/// 桁や行を直に書かない。レイアウトを変えたときにテストだけ古い座標を持つのを避ける
+/// （[`graph_rows`] と同じ理由）。
+pub fn row_of(lines: &[String], needle: &str) -> u16 {
+    lines
+        .iter()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("{needle} を含む行がありません: {lines:?}")) as u16
+}
+
 /// 1 フレーム描いた `TestBackend` を返す。バッファのスタイルを見るとき用。
 pub fn terminal_with(state: &AppState, size: TermSize) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(size.width, size.height)).unwrap();

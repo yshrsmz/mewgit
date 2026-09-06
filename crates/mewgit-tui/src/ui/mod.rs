@@ -130,8 +130,40 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, state_at};
-    use mewgit_core::app::{NoticeLevel, TermSize};
+    use super::{split, split_body};
+    use crate::test_util::{draw, state_at, terminal_with};
+    use mewgit_core::app::{NoticeLevel, Pane, TermSize};
+    use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
+
+    /// ペインの枠の左上。座標は実際のレイアウトから出す。手で書くと、割り方を
+    /// 変えたときにテストだけが古い桁を見て緑のまま無意味になる。
+    fn corner(pane: Pane, size: TermSize) -> (u16, u16) {
+        let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
+        let [left, right] = split_body(body);
+        let area = match pane {
+            Pane::Worktree => right,
+            _ => left,
+        };
+        (area.x, area.y)
+    }
+
+    #[test]
+    fn the_focused_pane_is_the_only_one_with_a_bold_border() {
+        // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
+        let size = TermSize::default();
+        for focus in [Pane::Graph, Pane::Worktree] {
+            let mut state = state_at("/repo");
+            state.focus = focus;
+            let terminal = terminal_with(&state, size);
+            let buffer = terminal.backend().buffer();
+
+            for pane in [Pane::Graph, Pane::Worktree] {
+                let bold = buffer[corner(pane, size)].modifier.contains(Modifier::BOLD);
+                assert_eq!(bold, pane == focus, "focus={focus:?} pane={pane:?}");
+            }
+        }
+    }
 
     #[test]
     fn header_shows_the_repository_name() {
@@ -222,42 +254,6 @@ mod tests {
 
             let last = &lines[height as usize - 1];
             assert!(last.contains("q:quit"), "status: {last:?}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod focus_tests {
-    use crate::test_util::{state_at, terminal_with};
-    use mewgit_core::app::{Pane, TermSize};
-    use ratatui::style::Modifier;
-
-    const SIZE: TermSize = TermSize {
-        width: 80,
-        height: 24,
-    };
-
-    /// ペインの枠の左上。ヘッダの 1 行ぶん下。
-    fn corner(pane: Pane) -> (u16, u16) {
-        match pane {
-            Pane::Worktree => (48, 1),
-            _ => (0, 1),
-        }
-    }
-
-    #[test]
-    fn the_focused_pane_is_the_only_one_with_a_bold_border() {
-        // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
-        for focus in [Pane::Graph, Pane::Worktree] {
-            let mut state = state_at("/repo");
-            state.focus = focus;
-            let terminal = terminal_with(&state, SIZE);
-            let buffer = terminal.backend().buffer();
-
-            for pane in [Pane::Graph, Pane::Worktree] {
-                let bold = buffer[corner(pane)].modifier.contains(Modifier::BOLD);
-                assert_eq!(bold, pane == focus, "focus={focus:?} pane={pane:?}");
-            }
         }
     }
 }

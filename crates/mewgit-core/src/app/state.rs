@@ -102,16 +102,10 @@ impl AppState {
 
     /// 同種のジョブが走っていて発行できなかった `Cmd` を伝える。
     ///
-    /// 読み取りは黙って落としてよい（同じものをもう一度読むだけで、結果は変わらない）。
-    /// 書き込みだけは「押したのに何も起きない」に見えるので通知を出す。キューに積んで
-    /// 順に流すのは M3（01 の「ランタイム」）。
+    /// 何を伝えるかは [`JobKind::drop_notice`] が種別ごとに持つ。
     fn dropped(&mut self, kind: JobKind) {
-        if kind == JobKind::Exec {
-            self.push_notice(
-                NoticeLevel::Warn,
-                "ほかの git 実行が終わるまで待ってください".to_string(),
-                None,
-            );
+        if let Some(message) = kind.drop_notice() {
+            self.push_notice(NoticeLevel::Warn, message.to_string(), None);
         }
     }
 
@@ -364,59 +358,52 @@ impl WorktreeState {
         self.len() == 0
     }
 
+    /// [`SECTIONS`](Self::SECTIONS) の何番目の区画か。
+    fn rank(section: WorktreeSection) -> usize {
+        Self::SECTIONS
+            .iter()
+            .position(|&candidate| candidate == section)
+            .unwrap_or(Self::SECTIONS.len())
+    }
+
+    /// `positions` の `index` 番目へカーソルを据える。
+    ///
+    /// 行が足りなければ最後の行、1 行も無ければ何も選べない位置に戻す。**端の扱いは
+    /// ここ 1 箇所。** 移動と詰め直しで別に書くと、片方だけ端から落ちる。
+    fn seat(&mut self, positions: &[(WorktreeSection, usize)], index: usize) {
+        let Some(&(section, cursor)) = positions.get(index).or(positions.last()) else {
+            self.section = WorktreeSection::default();
+            self.cursor = 0;
+            return;
+        };
+        self.section = section;
+        self.cursor = cursor;
+    }
+
     /// カーソルを `delta` 行動かす。区画をまたぎ、端では止まる。
     ///
     /// 区画の移動を別のキーに割り当てないのは、空の区画に入って何も選べない状態を
     /// 作らないため（01）。
     pub fn move_cursor(&mut self, delta: isize) {
         let positions = self.positions();
-        let Some(&last) = positions.last() else {
-            self.reset();
-            return;
-        };
         let current = self.index_in(&positions).unwrap_or(0);
-        let (section, index) = positions
-            .get(current.saturating_add_signed(delta))
-            .copied()
-            .unwrap_or(last);
-        self.section = section;
-        self.cursor = index;
+        self.seat(&positions, current.saturating_add_signed(delta));
     }
 
     /// `snapshot` を入れ替えたあとに、選べる行へ寄せ直す。
     ///
     /// 選んでいたファイルが別の区画へ移る（stage / unstage）か消える（discard）ので、
     /// 元の位置がそのまま残るとは限らない。寄せ先は**元の位置以降で最初に選べる行**、
-    /// 無ければ最後の行。
+    /// 無ければ最後の行。`positions` は区画の順に並んでいるので、カーソルがまだ
+    /// 有効なら「最初の位置以降」はその行自身に当たり、この呼び出しは何も変えない。
     pub fn clamp(&mut self) {
         let positions = self.positions();
-        if positions.is_empty() {
-            self.reset();
-            return;
-        }
-        if self.index_in(&positions).is_some() {
-            return;
-        }
-        let rank = |section: WorktreeSection| {
-            Self::SECTIONS
-                .iter()
-                .position(|&candidate| candidate == section)
-                .unwrap_or(Self::SECTIONS.len())
-        };
-        let here = (rank(self.section), self.cursor);
-        let (section, index) = positions
+        let here = (Self::rank(self.section), self.cursor);
+        let next = positions
             .iter()
-            .copied()
-            .find(|&(section, index)| (rank(section), index) >= here)
-            .unwrap_or_else(|| positions[positions.len() - 1]);
-        self.section = section;
-        self.cursor = index;
-    }
-
-    /// 選べる行が 1 つも無いときの位置。
-    fn reset(&mut self) {
-        self.section = WorktreeSection::default();
-        self.cursor = 0;
+            .position(|&(section, index)| (Self::rank(section), index) >= here)
+            .unwrap_or(positions.len());
+        self.seat(&positions, next);
     }
 }
 
@@ -522,6 +509,27 @@ pub enum JobKind {
 }
 
 impl JobKind {
+    /// 同種が走っていて発行できなかったときに出す通知。黙って落としてよければ `None`。
+    ///
+    /// 読み取りは黙って落とす（同じものをもう一度読むだけで、結果は変わらない）。
+    /// 書き込みだけは「押したのに何も起きない」に見えるので伝える。キューに積んで
+    /// 順に流すのは M3（01 の「ランタイム」）。網羅 `match` にしているのは、
+    /// 種別を足したときにどちらなのかを選ばせるため。
+    pub fn drop_notice(self) -> Option<&'static str> {
+        match self {
+            JobKind::Exec => Some("ほかの git 実行が終わるまで待ってください"),
+            JobKind::LoadLog
+            | JobKind::LoadCommitDetail
+            | JobKind::LoadRepoInfo
+            | JobKind::LoadStatus
+            | JobKind::LoadDiff
+            | JobKind::ResolveAccount
+            | JobKind::FetchPr
+            | JobKind::FetchChecks
+            | JobKind::FetchPrList => None,
+        }
+    }
+
     /// ステータスバーに出す既定の説明。
     ///
     /// `Exec` だけは `GitOp` によって `fetch` / `push` と変わるので、[`Job::label`] は
@@ -655,30 +663,14 @@ impl TextBuffer {
 mod tests {
     use super::*;
 
-    use crate::git_read::FileStatus;
+    use crate::test_util::fake_snapshot;
 
-    /// 指定した区画にファイルを並べた状態。中身は `path` だけが違う `Modified`。
+    /// 指定した区画にファイルを並べ、staged の先頭を選んだ状態。
     fn worktree(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> WorktreeState {
-        let files = |paths: &[&str]| {
-            paths
-                .iter()
-                .map(|path| FileEntry {
-                    path: path.into(),
-                    old_path: None,
-                    status: FileStatus::Modified,
-                })
-                .collect()
-        };
         WorktreeState {
-            snapshot: WorktreeSnapshot {
-                staged: files(staged),
-                unstaged: files(unstaged),
-                untracked: files(untracked),
-                conflicted: Vec::new(),
-            },
+            snapshot: fake_snapshot(staged, unstaged, untracked),
             section: WorktreeSection::Staged,
-            cursor: 0,
-            stale: false,
+            ..WorktreeState::default()
         }
     }
 

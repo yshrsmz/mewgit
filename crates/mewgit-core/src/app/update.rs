@@ -333,34 +333,113 @@ fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
             state.worktree.move_cursor(-1);
             Cmd::None
         }
-        KeyCode::Char('s') => stage(state),
-        KeyCode::Char('u') => unstage(state),
-        KeyCode::Char('x') => discard(state),
+        KeyCode::Char('s') => act(state, Action::Stage),
+        KeyCode::Char('u') => act(state, Action::Unstage),
+        KeyCode::Char('x') => act(state, Action::Discard),
         _ => Cmd::None,
     }
 }
 
-/// 操作できる行を選んでいるか。選んでいなければ `None`。
-///
-/// conflicted の行をここで弾く。解消ビューは MVP 外で、`git add` だけ通すと
-/// 「解消した」と誤解させる（01 の「ワーキングツリー」）。弾いた理由は通知に出す。
-/// 黙って何も起きないと、キーが効いていないのか対象が悪いのかが判らない。
-fn operable(state: &mut AppState) -> Option<(WorktreeSection, Vec<PathBuf>)> {
-    let selected = state
+/// ワーキングツリーで押せる操作。`(操作, 区画)` の表を 1 本にするための語彙。
+#[derive(Debug, Clone, Copy)]
+enum Action {
+    Stage,
+    Unstage,
+    Discard,
+}
+
+/// 操作の結果としてすること。
+enum Plan {
+    /// そのまま実行する。
+    Exec(GitOp),
+    /// 確認を取ってから実行する（不変ルール 5）。
+    Confirm {
+        title: &'static str,
+        body: String,
+        op: GitOp,
+    },
+}
+
+/// 選択行に `action` を適用する。
+fn act(state: &mut AppState, action: Action) -> Cmd {
+    let Some((section, paths)) = state
         .worktree
         .selected()
-        .map(|(section, entry)| (section, paths_of(entry)));
+        .map(|(section, entry)| (section, paths_of(entry)))
+    else {
+        return Cmd::None;
+    };
+    // `head` がまだ読めていない（起動直後）ときは `Discard` になる。unborn は稀で、
+    // 外した場合も `git` の stderr が通知に出る。
+    let unborn = matches!(state.repo.head, Some(HeadInfo::Unborn { .. }));
 
-    match selected {
-        Some((WorktreeSection::Conflicted, _)) => {
-            state.push_notice(
-                NoticeLevel::Warn,
-                "コンフリクトしたファイルは操作できません".to_string(),
-                None,
-            );
-            None
+    match plan(action, section, paths, unborn) {
+        Ok(Plan::Exec(op)) => Cmd::Exec(op),
+        Ok(Plan::Confirm { title, body, op }) => {
+            state.modal = Some(Modal::Confirm {
+                title: title.to_string(),
+                body,
+                on_yes: Cmd::Exec(op),
+            });
+            Cmd::None
         }
-        selected => selected,
+        // 黙って何も起きないと、キーが効いていないのか対象が悪いのかが判らない。
+        Err(reason) => {
+            state.push_notice(NoticeLevel::Warn, reason.to_string(), None);
+            Cmd::None
+        }
+    }
+}
+
+/// `(操作, 区画)` から出す `GitOp` を決める。できないときはその理由。
+///
+/// **判定表はここ 1 つ。** 操作ごとに散らすと、`Pane::Diff` でハンク単位の同じ操作を
+/// 足すときに同じ表をもう一度書くことになる。網羅 `match` なので、`WorktreeSection` に
+/// 区画を足すと実装漏れがコンパイルエラーになる。
+///
+/// discard がどの `GitOp` になるかは区画と HEAD の状態で変わる（03 の
+/// 「discard は 3 変種」）。**この判断はここにしか無い。**`to_command` は純粋関数で
+/// どちらも見られない。
+fn plan(
+    action: Action,
+    section: WorktreeSection,
+    paths: Vec<PathBuf>,
+    unborn: bool,
+) -> Result<Plan, &'static str> {
+    let names = names(&paths);
+    match (action, section) {
+        // 解消ビューは MVP 外。`git add` だけ通すと「解消した」と誤解させる。
+        (_, WorktreeSection::Conflicted) => Err("コンフリクトしたファイルは操作できません"),
+
+        (Action::Stage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
+            Ok(Plan::Exec(GitOp::Stage(paths)))
+        }
+        (Action::Stage, WorktreeSection::Staged) => Err("すでに stage されています"),
+
+        (Action::Unstage, WorktreeSection::Staged) => Ok(Plan::Exec(GitOp::Unstage(paths))),
+        (Action::Unstage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
+            Err("stage されていません")
+        }
+
+        (Action::Discard, WorktreeSection::Untracked) => Ok(Plan::Confirm {
+            title: "untracked なファイルを削除",
+            body: format!("{names} を削除します。元に戻せません。"),
+            op: GitOp::DiscardUntracked(paths),
+        }),
+        (Action::Discard, WorktreeSection::Staged | WorktreeSection::Unstaged) if unborn => {
+            Ok(Plan::Confirm {
+                title: "変更を破棄",
+                body: format!("{names} を index からもワークツリーからも削除します。\nコミットがまだ無いので、戻す先がありません。元に戻せません。"),
+                op: GitOp::DiscardUnborn(paths),
+            })
+        }
+        (Action::Discard, WorktreeSection::Staged | WorktreeSection::Unstaged) => {
+            Ok(Plan::Confirm {
+                title: "変更を破棄",
+                body: format!("{names} を HEAD の状態に戻します。\nstaged の内容も一緒に戻ります。元に戻せません。"),
+                op: GitOp::Discard(paths),
+            })
+        }
     }
 }
 
@@ -372,67 +451,6 @@ fn paths_of(entry: &FileEntry) -> Vec<PathBuf> {
     let mut paths = vec![entry.path.clone()];
     paths.extend(entry.old_path.clone());
     paths
-}
-
-/// 選択行を stage する。既に staged な行では何もしない。
-fn stage(state: &mut AppState) -> Cmd {
-    match operable(state) {
-        Some((WorktreeSection::Unstaged | WorktreeSection::Untracked, paths)) => {
-            Cmd::Exec(GitOp::Stage(paths))
-        }
-        _ => Cmd::None,
-    }
-}
-
-/// 選択行を unstage する。staged 以外の行では何もしない。
-fn unstage(state: &mut AppState) -> Cmd {
-    match operable(state) {
-        Some((WorktreeSection::Staged, paths)) => Cmd::Exec(GitOp::Unstage(paths)),
-        _ => Cmd::None,
-    }
-}
-
-/// 選択行の変更を捨てる。破壊的なので必ず [`Modal::Confirm`] を通す（不変ルール 5）。
-///
-/// どの `GitOp` になるかは区画と HEAD の状態で変わる（03 の「discard は 3 変種」）。
-/// **この判断はここにしか無い。**`to_command` は純粋関数でどちらも見られない。
-/// `head` がまだ読めていない（起動直後）ときは `Discard` にする。unborn は稀で、
-/// 外した場合も `git` の stderr が通知に出る。
-fn discard(state: &mut AppState) -> Cmd {
-    let Some((section, paths)) = operable(state) else {
-        return Cmd::None;
-    };
-    let unborn = matches!(state.repo.head, Some(HeadInfo::Unborn { .. }));
-    let names = names(&paths);
-
-    let (op, title, body) = match (section, unborn) {
-        (WorktreeSection::Untracked, _) => (
-            GitOp::DiscardUntracked(paths),
-            "untracked なファイルを削除",
-            format!("{names} を削除します。元に戻せません。"),
-        ),
-        (_, true) => (
-            GitOp::DiscardUnborn(paths),
-            "変更を破棄",
-            format!(
-                "{names} を index からもワークツリーからも削除します。\nコミットがまだ無いので、戻す先がありません。元に戻せません。"
-            ),
-        ),
-        (_, false) => (
-            GitOp::Discard(paths),
-            "変更を破棄",
-            format!(
-                "{names} を HEAD の状態に戻します。\nstaged の内容も一緒に戻ります。元に戻せません。"
-            ),
-        ),
-    };
-
-    state.modal = Some(Modal::Confirm {
-        title: title.to_string(),
-        body,
-        on_yes: Cmd::Exec(op),
-    });
-    Cmd::None
 }
 
 /// 確認モーダルに出すパス。**対象をそのまま並べる**（07）。「選択中のファイル」と
@@ -483,7 +501,9 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
 
     // **走っている読み取りは、この書き込みより前に頼まれたものなので届いても古い。**
     // その場合 `issue` は下の `LoadStatus` を落とすので、届いた時点で頼み直せるよう
-    // 印を付ける（`CommitDetailLoaded` の追いつきと同じ形。01）。
+    // 印を付ける（01 の「書き込みのあとの status」）。`CommitDetailLoaded` の
+    // 追いつきとは形が違う。あちらは届いた値の oid から鮮度を導けるが、
+    // `WorktreeSnapshot` には「いつの状態か」を示す鍵が無く、到着時には判定できない。
     state.worktree.stale = state.jobs.is_running(JobKind::LoadStatus);
     // 成否は問わない。失敗しても index が途中まで動いていることがある。
     Cmd::LoadStatus
@@ -491,7 +511,7 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
 
 /// 通知に添える詳細。実行した argv と stderr を握りつぶさない（不変ルール 4）。
 fn exec_detail(err: &ExecError) -> String {
-    let mut detail = format!("git {}", err.argv().join(" "));
+    let mut detail = err.command_line();
     if let ExecError::Failed { stderr, .. } = err {
         let stderr = stderr.trim_end();
         if !stderr.is_empty() {
@@ -509,7 +529,9 @@ mod tests {
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
     use crate::git_read::{Commit, FileStatus, RefIndex, RefLabel, Remote};
-    use crate::test_util::{fake_commit, fake_commit_with_parents, fake_detail, fake_oid};
+    use crate::test_util::{
+        fake_commit, fake_commit_with_parents, fake_detail, fake_entry, fake_oid, fake_snapshot,
+    };
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
     const ROWS: usize = 20;
@@ -541,27 +563,6 @@ mod tests {
         state
     }
 
-    /// 指定した区画にファイルを並べたスナップショット。
-    fn snapshot(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> WorktreeSnapshot {
-        WorktreeSnapshot {
-            staged: entries(staged),
-            unstaged: entries(unstaged),
-            untracked: entries(untracked),
-            conflicted: Vec::new(),
-        }
-    }
-
-    fn entries(paths: &[&str]) -> Vec<FileEntry> {
-        paths
-            .iter()
-            .map(|path| FileEntry {
-                path: path.into(),
-                old_path: None,
-                status: FileStatus::Modified,
-            })
-            .collect()
-    }
-
     /// worktree ペインにフォーカスし、その区画の先頭を選んだ状態。
     fn worktree_state(snapshot: WorktreeSnapshot, section: WorktreeSection) -> AppState {
         let mut state = state();
@@ -580,7 +581,7 @@ mod tests {
     fn tab_moves_the_focus_and_the_worktree_keys_follow_it() {
         // グラフに居るあいだは `j` がコミットのカーソルを動かす。
         let mut state = state_with_commits(3);
-        state.worktree.snapshot = snapshot(&[], &["a.txt", "b.txt"], &[]);
+        state.worktree.snapshot = fake_snapshot(&[], &["a.txt", "b.txt"], &[]);
         let _ = press(&mut state, 'j');
         assert_eq!(state.graph.cursor, 1);
 
@@ -599,7 +600,7 @@ mod tests {
     #[test]
     fn status_loaded_replaces_the_snapshot_and_reseats_the_cursor() {
         let mut state = worktree_state(
-            snapshot(&[], &["a.txt", "b.txt"], &[]),
+            fake_snapshot(&[], &["a.txt", "b.txt"], &[]),
             WorktreeSection::Unstaged,
         );
         state.worktree.cursor = 1;
@@ -607,7 +608,7 @@ mod tests {
         // b.txt を stage した後の状態が届く。
         let _ = update(
             &mut state,
-            Msg::StatusLoaded(Box::new(Ok(snapshot(&["b.txt"], &["a.txt"], &[])))),
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&["b.txt"], &["a.txt"], &[])))),
         );
 
         assert!(!state.jobs.is_running(JobKind::LoadStatus));
@@ -618,7 +619,8 @@ mod tests {
 
     #[test]
     fn status_loaded_keeps_the_previous_list_when_it_fails() {
-        let mut state = worktree_state(snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
+        let mut state =
+            worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
         let _ = state.issue(Cmd::LoadStatus);
 
         let cmd = update(
@@ -639,7 +641,7 @@ mod tests {
     #[test]
     fn s_stages_the_selected_file_and_u_unstages_it() {
         let mut state = worktree_state(
-            snapshot(&["staged.txt"], &["unstaged.txt"], &["new.txt"]),
+            fake_snapshot(&["staged.txt"], &["unstaged.txt"], &["new.txt"]),
             WorktreeSection::Unstaged,
         );
 
@@ -649,7 +651,7 @@ mod tests {
         );
 
         let mut state = worktree_state(
-            snapshot(&["staged.txt"], &["unstaged.txt"], &[]),
+            fake_snapshot(&["staged.txt"], &["unstaged.txt"], &[]),
             WorktreeSection::Staged,
         );
         assert_eq!(
@@ -659,17 +661,33 @@ mod tests {
     }
 
     #[test]
-    fn s_on_an_already_staged_file_does_nothing() {
-        let mut state = worktree_state(snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
+    fn a_key_that_does_not_apply_to_the_section_says_why() {
+        // 黙って何も起きないと、キーが効いていないのか対象が悪いのかが判らない。
+        for (section, key) in [
+            (WorktreeSection::Staged, 's'),
+            (WorktreeSection::Unstaged, 'u'),
+            (WorktreeSection::Untracked, 'u'),
+        ] {
+            let mut state =
+                worktree_state(fake_snapshot(&["a.txt"], &["a.txt"], &["a.txt"]), section);
 
-        assert_eq!(press(&mut state, 's'), Cmd::None);
-        assert!(!state.jobs.is_running(JobKind::Exec));
+            assert_eq!(press(&mut state, key), Cmd::None);
+            assert!(!state.jobs.is_running(JobKind::Exec));
+            assert_eq!(
+                state.notices.back().map(|notice| notice.level),
+                Some(NoticeLevel::Warn),
+                "{section:?} で {key} を押したときの通知がありません"
+            );
+        }
     }
 
     #[test]
     fn staging_a_rename_carries_both_names() {
         // 片方だけ渡すと「削除」と「追加」が別々に残る（02 の old_path）。
-        let mut state = worktree_state(snapshot(&[], &["new.txt"], &[]), WorktreeSection::Unstaged);
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["new.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
         state.worktree.snapshot.unstaged[0].old_path = Some("old.txt".into());
         state.worktree.snapshot.unstaged[0].status = FileStatus::Renamed;
 
@@ -681,7 +699,10 @@ mod tests {
 
     #[test]
     fn x_confirms_before_discarding_and_names_the_file() {
-        let mut state = worktree_state(snapshot(&[], &["a.txt"], &[]), WorktreeSection::Unstaged);
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
 
         // 破壊的操作は必ず確認を通す（不変ルール 5）。押しただけでは実行しない。
         assert_eq!(press(&mut state, 'x'), Cmd::None);
@@ -695,8 +716,10 @@ mod tests {
 
     #[test]
     fn x_on_an_untracked_file_deletes_it_and_says_so() {
-        let mut state =
-            worktree_state(snapshot(&[], &[], &["new.txt"]), WorktreeSection::Untracked);
+        let mut state = worktree_state(
+            fake_snapshot(&[], &[], &["new.txt"]),
+            WorktreeSection::Untracked,
+        );
 
         let _ = press(&mut state, 'x');
 
@@ -714,7 +737,8 @@ mod tests {
     #[test]
     fn x_before_the_first_commit_uses_rm_instead_of_restore() {
         // unborn HEAD では `restore --source=HEAD` が解決できずに落ちる（03）。
-        let mut state = worktree_state(snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
+        let mut state =
+            worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
         state.repo.head = Some(HeadInfo::Unborn {
             name: "main".to_string(),
         });
@@ -742,7 +766,8 @@ mod tests {
         ];
 
         for (section, unborn) in cases {
-            let mut state = worktree_state(snapshot(&["a.txt"], &["a.txt"], &["a.txt"]), section);
+            let mut state =
+                worktree_state(fake_snapshot(&["a.txt"], &["a.txt"], &["a.txt"]), section);
             if unborn {
                 state.repo.head = Some(HeadInfo::Unborn {
                     name: "main".to_string(),
@@ -762,7 +787,10 @@ mod tests {
 
     #[test]
     fn confirming_runs_the_command_and_closes_the_modal() {
-        let mut state = worktree_state(snapshot(&[], &["a.txt"], &[]), WorktreeSection::Unstaged);
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
         let _ = press(&mut state, 'x');
 
         let cmd = press(&mut state, 'y');
@@ -775,7 +803,10 @@ mod tests {
 
     #[test]
     fn declining_closes_the_modal_without_running_anything() {
-        let mut state = worktree_state(snapshot(&[], &["a.txt"], &[]), WorktreeSection::Unstaged);
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
         let _ = press(&mut state, 'x');
 
         assert_eq!(press(&mut state, 'n'), Cmd::None);
@@ -787,7 +818,7 @@ mod tests {
     #[test]
     fn keys_do_not_reach_the_pane_while_a_modal_is_open() {
         let mut state = worktree_state(
-            snapshot(&[], &["a.txt", "b.txt"], &[]),
+            fake_snapshot(&[], &["a.txt", "b.txt"], &[]),
             WorktreeSection::Unstaged,
         );
         let _ = press(&mut state, 'x');
@@ -800,8 +831,8 @@ mod tests {
 
     #[test]
     fn a_conflicted_row_is_refused_with_a_notice() {
-        let mut state = worktree_state(snapshot(&[], &[], &[]), WorktreeSection::Conflicted);
-        state.worktree.snapshot.conflicted = entries(&["both.txt"]);
+        let mut state = worktree_state(fake_snapshot(&[], &[], &[]), WorktreeSection::Conflicted);
+        state.worktree.snapshot.conflicted = vec![fake_entry("both.txt", FileStatus::Modified)];
 
         for key in ['s', 'u', 'x'] {
             assert_eq!(press(&mut state, key), Cmd::None);
@@ -890,7 +921,7 @@ mod tests {
 
         let cmd = update(
             &mut state,
-            Msg::StatusLoaded(Box::new(Ok(snapshot(&[], &[], &[])))),
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &[], &[])))),
         );
 
         assert_eq!(cmd, Cmd::LoadStatus);
@@ -900,7 +931,10 @@ mod tests {
     #[test]
     fn a_second_write_while_one_runs_is_dropped_with_a_notice() {
         // 黙って落とすと「押したのに何も起きない」になる。キューは M3。
-        let mut state = worktree_state(snapshot(&[], &["a.txt"], &[]), WorktreeSection::Unstaged);
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
         assert!(matches!(press(&mut state, 's'), Cmd::Exec(_)));
 
         assert_eq!(press(&mut state, 's'), Cmd::None);

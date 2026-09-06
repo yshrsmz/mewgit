@@ -1,6 +1,6 @@
 //! 確認モーダルの描画。設計は `docs/design/07-ui.md` の「モーダル」。
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
@@ -17,8 +17,8 @@ const WIDTH: u16 = 60;
 /// 下のペインを `Clear` で消してから描く。覆わずに重ねると下の文字が透けて読めなくなる。
 pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
     let width = WIDTH.min(area.width);
-    // 本文 + 空行 + キーの案内 + 枠の上下。
-    let height = (rows(body, width.saturating_sub(2)) + 4).min(area.height);
+    // 本文 + 空行 + キーの案内 + 枠の上下。画面に収まらない分は `centered` が削る。
+    let height = rows(body, width.saturating_sub(2)) + 4;
     let area = centered(area, width, height);
 
     let block = Block::default()
@@ -58,27 +58,41 @@ fn rows(body: &str, width: u16) -> u16 {
 }
 
 /// 画面の中央に `width` x `height` を取る。画面が小さければそのぶん縮める。
+///
+/// 中央寄せの算術は書かず ratatui の [`Flex::Center`] に任せる。`Max` にしているのは、
+/// 端末が小さいときに縮めるため（`Length` だとはみ出す）。
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
-    }
+    let [area] = Layout::horizontal([Constraint::Max(width)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [area] = Layout::vertical([Constraint::Max(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    area
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, state_with_commits};
+    use crate::test_util::{draw, row_of, state_with_commits};
     use mewgit_core::app::{Cmd, Modal, TermSize};
     use mewgit_core::git_exec::GitOp;
 
+    /// 既定の 80x24。
     const SIZE: TermSize = TermSize {
         width: 80,
         height: 24,
     };
+
+    /// 確認モーダルを出した状態。
+    fn state_with_confirm(title: &str, body: &str) -> mewgit_core::app::AppState {
+        let mut state = state_with_commits(&["first", "second"]);
+        state.modal = Some(Modal::Confirm {
+            title: title.to_string(),
+            body: body.to_string(),
+            on_yes: Cmd::None,
+        });
+        state
+    }
 
     #[test]
     fn the_confirmation_shows_the_title_body_and_keys() {
@@ -103,12 +117,10 @@ mod tests {
     fn a_wrapped_body_does_not_push_the_keys_out_of_the_box() {
         // 本文とキーの案内を 1 つの Paragraph にまとめると、折り返した分だけ
         // 案内が枠の外へ出る。押せるキーが見えないと確認にならない。
-        let mut state = state_with_commits(&["first"]);
-        state.modal = Some(Modal::Confirm {
-            title: "変更を破棄".to_string(),
-            body: "とても長いパスの一覧 aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccc.txt を HEAD の状態に戻します。\nstaged の内容も一緒に戻ります。元に戻せません。".to_string(),
-            on_yes: Cmd::None,
-        });
+        let state = state_with_confirm(
+            "変更を破棄",
+            "とても長いパスの一覧 aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccc.txt を HEAD の状態に戻します。\nstaged の内容も一緒に戻ります。元に戻せません。",
+        );
 
         let text = draw(&state, SIZE).join("\n");
 
@@ -125,43 +137,31 @@ mod tests {
     }
 
     /// 枠（`┌`）から `└` までの行数。
-    fn height_of(body: &str) -> usize {
-        let mut state = state_with_commits(&["first"]);
-        state.modal = Some(Modal::Confirm {
-            title: "確認".to_string(),
-            body: body.to_string(),
-            on_yes: Cmd::None,
-        });
+    fn height_of(body: &str) -> u16 {
+        let state = state_with_confirm("確認", body);
         let lines = draw(&state, SIZE);
-        let top = lines
-            .iter()
-            .position(|line| line.contains("┌確認"))
-            .expect("枠がありません");
-        let bottom = lines
-            .iter()
-            .skip(top)
-            .position(|line| line.contains("└"))
-            .expect("枠の下辺がありません");
-        bottom + 1
+        row_of(&lines, "└") - row_of(&lines, "┌確認") + 1
     }
 
     #[test]
     fn the_confirmation_covers_what_is_under_it() {
         // 覆わずに重ねると下の文字が透けて読めなくなる。
-        let mut state = state_with_commits(&["first", "second"]);
-        state.modal = Some(Modal::Confirm {
-            title: "確認".to_string(),
-            body: "本文".to_string(),
-            on_yes: Cmd::None,
-        });
+        let state = state_with_confirm("確認", "本文");
 
         let lines = draw(&state, SIZE);
-        let body_row = lines
-            .iter()
-            .find(|line| line.contains("本文"))
-            .expect("本文の行がありません");
+        let body_row = &lines[row_of(&lines, "本文") as usize];
 
         assert!(!body_row.contains("first"), "{body_row}");
         assert!(!body_row.contains("second"), "{body_row}");
+    }
+
+    #[test]
+    fn a_tiny_terminal_does_not_panic() {
+        // リサイズの途中では枠より小さい端末が来る。中央寄せが縮められること。
+        for (width, height) in [(1, 1), (10, 3), (20, 5)] {
+            let state = state_with_confirm("確認", "本文");
+            let lines = draw(&state, TermSize { width, height });
+            assert_eq!(lines.len(), height as usize);
+        }
     }
 }

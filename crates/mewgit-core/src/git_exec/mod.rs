@@ -188,6 +188,14 @@ impl ExecError {
             ExecError::NoResult { argv, .. } | ExecError::Failed { argv, .. } => argv,
         }
     }
+
+    /// 実行した（しようとした）コマンドの表示。`git` を頭に付けた 1 行。
+    ///
+    /// 見せ方をここ 1 つにする。呼び出し側で `argv.join(" ")` を書くと、`git` を
+    /// 付ける／付けないが箇所ごとにずれる。
+    pub fn command_line(&self) -> String {
+        format!("git {}", self.argv().join(" "))
+    }
 }
 
 /// git の出力のパターンから分類したエラー種別。UI の案内文を切り替えるのに使う。

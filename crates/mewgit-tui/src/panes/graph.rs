@@ -6,7 +6,7 @@
 use mewgit_core::app::{AppState, GraphLine, GraphState, JobKind, Pane};
 use mewgit_core::git_read::{CommitDetail, Oid, RefLabel, Signature, Timestamp};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
@@ -151,7 +151,7 @@ fn detail_lines(detail: &CommitDetail, rows: usize) -> Vec<Line<'_>> {
     let mut lines = vec![
         Line::from(Span::styled(
             format!("commit {}", detail.oid),
-            Style::default().add_modifier(Modifier::DIM),
+            theme::muted(),
         )),
         Line::raw(who("Author", &detail.author, detail.author_time)),
         Line::raw(who("Commit", &detail.committer, detail.committer_time)),
@@ -223,10 +223,7 @@ impl<'a> View<'a> {
         );
         spans.reserve(3 + labels.len() * 4);
 
-        spans.push(Span::styled(
-            short(&line.commit.oid),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
+        spans.push(Span::styled(short(&line.commit.oid), theme::muted()));
         spans.push(Span::raw(" "));
 
         for label in labels {
@@ -244,8 +241,8 @@ impl<'a> View<'a> {
 
         let line = Line::from(spans);
         if index == state.graph.cursor {
-            // 選択行は反転。フォーカスの無いペインとの描き分けは M6 のレイアウトで。
-            line.style(Style::default().add_modifier(Modifier::REVERSED))
+            // 選択行は反転（`theme::selected`。worktree ペインと同じ見た目）。
+            line.style(theme::selected())
         } else {
             line
         }
@@ -286,6 +283,7 @@ mod tests {
     use mewgit_core::git_read::{GitReadError, Oid, RefIndex, RefLabel};
     use mewgit_core::test_util::{fake_commit, fake_detail, fake_oid};
     use ratatui::buffer::Buffer;
+    use ratatui::style::Modifier;
 
     /// その行で最初に `symbol` が出る桁。
     ///

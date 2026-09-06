@@ -241,6 +241,7 @@ pub struct WorktreeState {
     pub snapshot: WorktreeSnapshot,   // staged / unstaged / untracked / conflicted（02）
     pub section: WorktreeSection,     // カーソルのいる区画
     pub cursor: usize,                // 区画の中の添字
+    pub stale: bool,                  // 届く予定の status が書き込みより前のもの
 }
 ```
 
@@ -254,6 +255,10 @@ pub struct WorktreeState {
   区画が空になっていたら次の区画へ寄せる。寄せ先も無ければ先頭に戻す。**この
   詰め直しは `WorktreeState` の 1 つの関数（`clamp`）に置く。** `j` / `k` の移動と
   同じ「次に選べる行」の定義を 2 度書かない
+- **`(操作, 区画)` から `GitOp` を決める表は 1 つ**（`update::plan`）。操作ごとに
+  `match` を分けると、`Pane::Diff` でハンク単位の同じ操作を足すときに同じ表を
+  もう一度書くことになる。**できない組み合わせは理由を返し、通知に出す。**
+  黙って落とすと、キーが効いていないのか対象が悪いのかが判らない
 - stage / unstage / discard が渡すパスは `FileEntry` から出す。**rename は旧パスと
   新パスの両方を載せる**（`git add -- <old> <new>` は旧パスの削除も index に入る。
   staged rename の unstage も両方要る。02 の `old_path`）
@@ -263,6 +268,18 @@ pub struct WorktreeState {
   どちらも見られない
 - Conflicted の行では stage / unstage / discard を出さない。解消ビューは MVP 外で、
   中途半端に `git add` だけ通すと「解消した」と誤解させる
+
+### 書き込みのあとの status
+
+`ExecFinished` は成否を問わず `Cmd::LoadStatus` を出すが、**そのとき読み取りが走って
+いれば `issue` に落とされる。落とされたぶんは `WorktreeState.stale` に印を付け、
+走っていたものが届いた時点で頼み直す。**走っている読み取りは書き込みより前に頼まれた
+ものなので、届いた中身は必ず古い。
+
+**`CommitDetailLoaded` の追いつき（上）とは形が違う。** あちらは届いた値の `oid` を
+カーソルと比べて鮮度を*導出*できるが、`WorktreeSnapshot` には「いつの状態か」を示す鍵が
+無く、到着時には判定できない。そのため書き込みの側で「あとで頼み直す」と印を付ける。
+鍵を持てるようになるか、M3 で `Exec` をキューにするときに、この印は消える。
 
 ## 実行中ジョブ
 

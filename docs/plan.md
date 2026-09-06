@@ -25,11 +25,12 @@
 - [x] `git_exec::Runner` と `to_command` の全 `GitOp` テスト、`ExecErrorKind` の分類テスト
 - [x] `ui::panes::worktree` — フォーカス巡回、`Modal::Confirm`、`Runner` の配線、
       ファイル単位の stage / unstage / discard
-- [ ] `ui::panes::diff` — 左の領域を Graph と差し替えて diff を出す経路と、その表示
+- [x] `ui::panes::diff` — 左の領域を Graph と差し替えて diff を出す経路と、その表示
       （07 の「レイアウト」）。`Cmd::LoadDiff` の配線、`Msg::DiffLoaded` の `Result` 化、
       `path` で絞った diff の rename（02）
-- [ ] ハンク単位の stage / unstage / discard — `GitOp::DiscardHunk`、ハンク → パッチの
-      組み立て（`git apply --cached` への round-trip テスト）
+- [x] ハンク単位の stage / unstage / discard — `GitOp::DiscardHunk`、ハンク → パッチの
+      組み立て（`git apply` への round-trip テスト）、`view` のキャッシュと
+      `Freshness`（01）
 - [ ] `Modal::CommitMessage` と commit / amend。グラフ先頭の WIP 行と、そこを選んだ
       ときの右ペイン（staging）も一緒に入れる（07 の「どこまで実装したか」）
 - [ ] コミット詳細を右ペインへ移す。グラフ下の展開を廃止し、`shows_detail` /
@@ -42,6 +43,10 @@
 - [ ] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト
 - [ ] fetch / pull / push の `GitOp`、`-u` 提案、force push 確認（`expected` の受け渡し）、
       ssh のパスフレーズで固まる件の扱い（`BatchMode` と `core.sshCommand`。03 参照）
+- [ ] `JobTracker` に世代を持たせ、`DiffState.freshness` と `WorktreeState.stale` を
+      畳む。fetch で ref が変わったあとのログの読み直しも同じ経路に乗せる
+      （01 の「実行中ジョブ › 世代」）。**カウンタを 1 本にするとログまで毎回
+      読み直すことになるので、領域ごとに分けるかはここで決める**
 - [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文
 - [ ] 実行中ジョブのスピナーとキャンセル
 

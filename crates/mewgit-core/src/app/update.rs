@@ -6,18 +6,18 @@
 //! ペインごとのキー処理は、対応するペインのタスクと一緒に足す。いまあるのは
 //! グラフ・ワーキングツリー・diff。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::git_exec::{ExecError, GitOp};
+use crate::git_exec::{hunk_patch, supports_hunk_patch, ExecError, GitOp};
 use crate::git_read::{
-    CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, LogPage, Oid,
+    CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, Hunk, LogPage, Oid,
     WorktreeSection, WorktreeSnapshot,
 };
 use crate::graph::LaneState;
 
 use super::{
-    AppState, Cmd, DiffCursor, DiffView, ExecDone, GraphLine, JobKind, Key, KeyCode, Modal, Msg,
-    NoticeLevel, Pane, RepoSnapshot,
+    AppState, Cmd, DiffCursor, DiffView, ExecDone, Freshness, GraphLine, JobKind, Key, KeyCode,
+    Modal, Msg, NoticeLevel, Pane, RepoSnapshot,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -53,7 +53,8 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 /// `Msg::Layout`。
 ///
 /// diff（01 の「diff の遅延取得」）: `focus`（フォーカスの移動。`Tab` も `Enter` も
-/// `Esc` もここを通る）、`status_loaded` の `clamp` のあと、`diff_loaded` の追いつき。
+/// `Esc` もここを通る）、`status_loaded` の `clamp` のあと、`diff_loaded` の出口
+/// （対象が違ったときの追いつきと、書き込みより前の diff しか無いときの読み直し）。
 fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
     match msg {
         Msg::Key(key) => update_key(state, key),
@@ -142,23 +143,42 @@ fn focus(state: &mut AppState, pane: Pane) -> Cmd {
 /// **同じ対象で一度失敗しているなら出さない。** 出すと「失敗 → 再読込 → 失敗」を回す。
 /// 対象が違えば一度も試していないので頼む（01）。
 ///
-/// **持っている diff をキャッシュに使わない。** 対象が同じまま中身だけ変わることが
-/// あり（ハンク単位の stage）、それを見分ける印はその書き込みが入るまで踏めない。
-/// いまは見せるたびに読み直す。
-fn load_diff(state: &AppState) -> Cmd {
-    match state.wanted_diff() {
-        Some(wanted) if state.diff.failed.as_ref() != Some(&wanted) => Cmd::LoadDiff(wanted),
-        _ => Cmd::None,
+/// **同じ対象を既に持っていて、それが直前の書き込みより後のものなら出さない**
+/// （01 の「diff のキャッシュと鮮度」）。ワーキングツリーの diff は
+/// 1 ファイルぶんでもワークツリー全体を走査してから絞るので、`Esc` / `Enter` の
+/// たびに走らせるとリーダースレッドが `LoadLog` を待たせる。
+fn load_diff(state: &mut AppState) -> Cmd {
+    let Some(wanted) = state.wanted_diff() else {
+        return Cmd::None;
+    };
+    if state.diff.failed.as_ref() == Some(&wanted) {
+        return Cmd::None;
     }
+    // 書き込みより後の diff を既に持っているなら読み直さない。
+    if state.diff.freshness == Freshness::Fresh && state.diff.fresh_view(Some(&wanted)).is_some() {
+        return Cmd::None;
+    }
+
+    // **`LoadDiff` が走っていれば `issue` に落とされる。** いま飛んでいる要求は
+    // 書き込みより前のものなので `Stale` のままにする。`diff_loaded` の出口が同じ
+    // ここを通るので、届いた時点で頼み直せる（01。`WorktreeState.stale` と同じ形）。
+    if state.diff.freshness == Freshness::Stale && !state.jobs.is_running(JobKind::LoadDiff) {
+        state.diff.freshness = Freshness::Asked;
+    }
+    Cmd::LoadDiff(wanted)
 }
 
 /// Diff ペインのキー処理。
 ///
-/// カーソルはハンク単位（07）。ハンク単位の stage / unstage / discard は次のタスク。
+/// カーソルはハンク単位で、`s` / `u` / `x` はカーソルの指すハンクに効く（07）。
+/// 可否の表は Worktree ペインと共通（[`plan`]）。
 fn diff_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         KeyCode::Char('j') | KeyCode::Down => move_hunk(state, 1),
         KeyCode::Char('k') | KeyCode::Up => move_hunk(state, -1),
+        KeyCode::Char('s') => act(state, Action::Stage),
+        KeyCode::Char('u') => act(state, Action::Unstage),
+        KeyCode::Char('x') => act(state, Action::Discard),
         KeyCode::Esc => focus(state, Pane::Worktree),
         _ => Cmd::None,
     }
@@ -188,15 +208,24 @@ fn diff_loaded(
 ) -> Cmd {
     state.jobs.finish(JobKind::LoadDiff);
 
+    // **この返信が書き込みより後に頼んだものか。** `Freshness::Asked` はいま届いた
+    // 1 通を指している（`Asked` のあいだ `LoadDiff` はちょうど 1 つしか飛ばない）。
+    let asked = state.diff.freshness == Freshness::Asked;
+    let mut stored = false;
+
     match result {
         Ok(files) => {
             state.diff.failed = None;
-            // **届いたのがいま選んでいるファイルのものなら採る。** 無条件に上書きすると、
-            // 正しく出ている画面が別のファイルの diff に化ける。
-            if state.wanted_diff().as_ref() == Some(&target) {
-                // **同じ対象を読み直したときはカーソルを持ち越す。** キャッシュしない
-                // ので `Esc` → `Enter` で開き直すたびに読み直しが届く。既定に戻すと、
-                // 選んでいたハンクが先頭へ飛んでから操作が効くことになる。
+            // **採るのは「いま選んでいるファイルのもの」かつ「書き込みより後のもの」
+            // だけ。** 対象を見ないと正しく出ている画面が別のファイルの diff に化け、
+            // 鮮度を見ないと書き込み前の中身に戻る（`Stale` = この返信は書き込みより
+            // 前に頼まれたもの）。
+            if state.diff.freshness != Freshness::Stale
+                && state.wanted_diff().as_ref() == Some(&target)
+            {
+                // **同じ対象を読み直したときはカーソルを持ち越す。** 書き込みのあとは
+                // 同じファイルの diff がもう一度届く。既定に戻すと、選んでいたハンクが
+                // 先頭へ飛んでから操作が効くことになる。
                 let cursor = state
                     .diff
                     .view
@@ -211,7 +240,7 @@ fn diff_loaded(
                 // 読み直しでハンクが減っていることがある。選べる位置へ寄せ直す。
                 view.move_cursor(0);
                 state.diff.view = Some(view);
-                return Cmd::None;
+                stored = true;
             }
         }
         Err(err) => {
@@ -220,7 +249,21 @@ fn diff_loaded(
         }
     }
 
-    // 対象が違っていた（選択が動いた / 別の対象が失敗した）。いま欲しいものを頼む。
+    // **`Asked` はここで必ず倒す。** 倒さないと、`Esc` で対象が消えたり読み取りが
+    // 失敗したりしたときに「頼んである」まま取り残され、以後の書き込みが
+    // `Stale` を立て直すまで古い diff を新しいものとして扱う。新しくなったと
+    // 言えるのは、実際に採れたときだけ。
+    if asked {
+        state.diff.freshness = if stored {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        };
+    }
+
+    // **採ったときもここを通る。** 対象が違っていた（選択が動いた / 別の対象が
+    // 失敗した）ときは追いつきの再発行、まだ書き込みより前の diff しか無ければ
+    // 読み直し。経路を 1 本にするため出口は 1 つ（01）。
     load_diff(state)
 }
 
@@ -464,7 +507,38 @@ enum Plan {
     },
 }
 
+/// コンフリクトした行を断る文言。`plan` と `discard` の両方に出る。
+const CONFLICTED: &str = "コンフリクトしたファイルは操作できません";
+
+/// 出している diff が最新でないときに断る文言。
+///
+/// 「まだ届いていない」「読み込めなかった」「書き込みより前のもの」の 3 つに使う。
+/// **「待っています」とだけ書かない。** 読み直しに失敗して二度と来ないこともある。
+const NOT_LATEST: &str = "最新の差分をまだ読めていません";
+
+/// 操作の単位。
+///
+/// [`plan`] は `(操作, 区画)` で可否を決め、**`GitOp` はアームごとにこれを見て組む**。
+/// 「stage されていません」のような可否の理由は単位が違っても同じ文言なので、表を
+/// 2 つに割らない（01 の「ワーキングツリー」）。
+///
+/// **ハンクは借用で持つ。** パッチを組むのは実際に `GitOp` になるアームだけなので、
+/// 断られる組み合わせ（Unstaged で `u` など）でハンクを丸ごとコピーせずに済む。
+enum Scope<'a> {
+    File {
+        status: FileStatus,
+        paths: Vec<PathBuf>,
+    },
+    Hunk {
+        path: &'a Path,
+        hunk: &'a Hunk,
+    },
+}
+
 /// 選択行に `action` を適用する。
+///
+/// Diff ペインではカーソルの指すハンクに効く。**ハンクで表せないファイルでは、同じ
+/// キーがファイル単位の操作に落ちる**（07）。
 fn act(state: &mut AppState, action: Action) -> Cmd {
     let Some((section, status, paths)) = state
         .worktree
@@ -474,7 +548,33 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
         return Cmd::None;
     };
 
-    match plan(action, section, status, paths) {
+    // **Diff ペインが出していない diff では何もしない。** 「読み込み中…」や
+    // 「差分を読み込めませんでした」を出しているあいだ、`hunk_scope` は `None` を
+    // 返す。そのままファイル単位へ落とすと、ハンク 1 つのつもりで押した `s` が
+    // **ファイル全体**を stage する。07 の fallback は「ハンクで表せないファイル」の
+    // ためのもので、届いていないファイルのためではない。
+    let wanted = state.wanted_diff();
+    if wanted.is_some() && state.diff.fresh_view(wanted.as_ref()).is_none() {
+        state.push_notice(NoticeLevel::Warn, NOT_LATEST.to_string(), None);
+        return Cmd::None;
+    }
+
+    let scope = hunk_scope(state).unwrap_or(Scope::File { status, paths });
+
+    // **出しているハンクが書き込みより前のものなら断る**（01）。そこから組んだパッチは
+    // `git apply` のオフセット追従で別のハンクに当たりうる。**ファイル単位に落とさない**
+    // （`s` がファイル全体を stage することになる）。
+    //
+    // 見るのは単位であってペインではない。`focus == Pane::Diff` で書くと、ハンクを
+    // 出す場所が増えたときにガードだけが外れる。
+    let planned = if matches!(scope, Scope::Hunk { .. }) && state.diff.freshness != Freshness::Fresh
+    {
+        Err(NOT_LATEST.to_string())
+    } else {
+        plan(action, section, scope)
+    };
+
+    match planned {
         Ok(Plan::Exec(op)) => Cmd::Exec(op),
         Ok(Plan::Confirm { title, body, op }) => {
             state.modal = Some(Modal::Confirm {
@@ -494,60 +594,135 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
 
 /// `(操作, 区画)` から出す `GitOp` を決める。できないときはその理由。
 ///
-/// **判定表はここ 1 つ。** 操作ごとに散らすと、`Pane::Diff` でハンク単位の同じ操作を
-/// 足すときに同じ表をもう一度書くことになる。網羅 `match` なので、`WorktreeSection` に
+/// **判定表はここ 1 つ。** ファイル単位もハンク単位もここを通る。可否の理由は単位が
+/// 違っても同じ文言なので、表を 2 つに割らない。単位の違いは [`Scope`] が運び、
+/// `GitOp` はアームごとにそれを見て組む。網羅 `match` なので、`WorktreeSection` に
 /// 区画を足すと実装漏れがコンパイルエラーになる。
 ///
-/// discard がどの `GitOp` になるかは区画と変更種別で変わる（03 の「discard は 3 変種」）。
+/// discard だけは変種の選び方が単位ごとに違うので [`discard`] に分ける。
+///
+/// **パッチを組むのはここ。** 断られる組み合わせでハンクを丸ごとコピーしないため。
+/// 組めなかった名前も「できない理由」の 1 つとして同じ `Err` から出る。
+fn plan(action: Action, section: WorktreeSection, scope: Scope<'_>) -> Result<Plan, String> {
+    match (action, section) {
+        // 解消ビューは MVP 外。`git add` だけ通すと「解消した」と誤解させる。
+        (_, WorktreeSection::Conflicted) => Err(CONFLICTED.to_string()),
+
+        (Action::Stage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
+            Ok(Plan::Exec(match scope {
+                Scope::File { paths, .. } => GitOp::Stage(paths),
+                Scope::Hunk { path, hunk } => GitOp::StageHunk {
+                    path: path.to_path_buf(),
+                    patch: patch_of(path, hunk)?,
+                },
+            }))
+        }
+        (Action::Stage, WorktreeSection::Staged) => Err("すでに stage されています".to_string()),
+
+        (Action::Unstage, WorktreeSection::Staged) => Ok(Plan::Exec(match scope {
+            Scope::File { paths, .. } => GitOp::Unstage(paths),
+            Scope::Hunk { path, hunk } => GitOp::UnstageHunk {
+                path: path.to_path_buf(),
+                patch: patch_of(path, hunk)?,
+            },
+        })),
+        (Action::Unstage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
+            Err("stage されていません".to_string())
+        }
+
+        (Action::Discard, section) => discard(section, scope),
+    }
+}
+
+/// ハンクを `git apply` に渡すパッチに戻す。載せられない名前はその理由。
+fn patch_of(path: &Path, hunk: &Hunk) -> Result<Vec<u8>, String> {
+    hunk_patch(path, hunk).map_err(|err| err.to_string())
+}
+
+/// discard の `GitOp` を選ぶ。**変種の選び方が単位ごとに違うのでここだけ分かれる。**
+///
+/// ファイルは 3 変種で、区画と変更種別で決まる（03 の「discard は 3 変種」）。
 /// **この判断はここにしか無い。**`to_command` は純粋関数でどちらも見られない。
 ///
 /// **HEAD に無いか（`Added`）は `RepoInfo.head` では判断しない。** `head` は起動時に
 /// 1 回読んだきりで、外部でコミットされると古くなる。古い `Unborn` を信じて
 /// `DiscardAdded` を出すと、HEAD にあるファイルを `git rm --force` で消してしまう。
 /// `FileStatus` は `LoadStatus` が毎回運んでくるので、そちらで判断する。
-fn plan(
-    action: Action,
-    section: WorktreeSection,
-    status: FileStatus,
-    paths: Vec<PathBuf>,
-) -> Result<Plan, &'static str> {
-    let names = names(&paths);
-    match (action, section) {
-        // 解消ビューは MVP 外。`git add` だけ通すと「解消した」と誤解させる。
-        (_, WorktreeSection::Conflicted) => Err("コンフリクトしたファイルは操作できません"),
-
-        (Action::Stage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
-            Ok(Plan::Exec(GitOp::Stage(paths)))
+///
+/// ハンクは Unstaged 限定の `DiscardHunk` 1 つだけ。
+fn discard(section: WorktreeSection, scope: Scope<'_>) -> Result<Plan, String> {
+    match scope {
+        // staged なハンクを捨てるには index とワークツリーの両方に当てることになり、
+        // `git apply` は 1 回で片方にしか効かない（03）。2 回に割ると片方だけ通った
+        // 中途半端な状態が残るので、先に unstage させる。
+        Scope::Hunk { .. } if section == WorktreeSection::Staged => {
+            Err("staged なハンクは破棄できません。先に unstage してください".to_string())
         }
-        (Action::Stage, WorktreeSection::Staged) => Err("すでに stage されています"),
-
-        (Action::Unstage, WorktreeSection::Staged) => Ok(Plan::Exec(GitOp::Unstage(paths))),
-        (Action::Unstage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
-            Err("stage されていません")
-        }
-
-        (Action::Discard, WorktreeSection::Untracked) => Ok(Plan::Confirm {
-            title: "untracked なファイルを削除",
-            body: format!("{names} を削除します。元に戻せません。"),
-            op: GitOp::DiscardUntracked(paths),
+        // 確認モーダルにはハンクの見出しも出す。ファイル名だけだとファイル単位の
+        // discard と同じ本文になり、どちらを押したのか画面から判らない。
+        Scope::Hunk { path, hunk } => Ok(Plan::Confirm {
+            title: "ハンクを破棄",
+            body: format!(
+                "{} の {} をワークツリーから取り消します。元に戻せません。",
+                path.display(),
+                hunk.header
+            ),
+            op: GitOp::DiscardHunk {
+                path: path.to_path_buf(),
+                patch: patch_of(path, hunk)?,
+            },
         }),
-        // HEAD に無いファイル。`restore --source=HEAD` はコミットがまだ無いと落ちるが、
-        // `rm --force` は HEAD の有無に依らず同じ結果になる（03）。
-        (Action::Discard, WorktreeSection::Staged) if status == FileStatus::Added => {
-            Ok(Plan::Confirm {
-                title: "変更を破棄",
-                body: format!("{names} を index からもワークツリーからも削除します。\nまだコミットに含まれていないので、戻す先がありません。元に戻せません。"),
-                op: GitOp::DiscardAdded(paths),
-            })
-        }
-        (Action::Discard, WorktreeSection::Staged | WorktreeSection::Unstaged) => {
-            Ok(Plan::Confirm {
-                title: "変更を破棄",
-                body: format!("{names} を HEAD の状態に戻します。\nstaged の内容も一緒に戻ります。元に戻せません。"),
-                op: GitOp::Discard(paths),
-            })
+
+        Scope::File { status, paths } => {
+            let names = names(&paths);
+            match section {
+                WorktreeSection::Untracked => Ok(Plan::Confirm {
+                    title: "untracked なファイルを削除",
+                    body: format!("{names} を削除します。元に戻せません。"),
+                    op: GitOp::DiscardUntracked(paths),
+                }),
+                // HEAD に無いファイル。`restore --source=HEAD` はコミットがまだ無いと
+                // 落ちるが、`rm --force` は HEAD の有無に依らず同じ結果になる（03）。
+                WorktreeSection::Staged if status == FileStatus::Added => Ok(Plan::Confirm {
+                    title: "変更を破棄",
+                    body: format!("{names} を index からもワークツリーからも削除します。\nまだコミットに含まれていないので、戻す先がありません。元に戻せません。"),
+                    op: GitOp::DiscardAdded(paths),
+                }),
+                WorktreeSection::Staged | WorktreeSection::Unstaged => Ok(Plan::Confirm {
+                    title: "変更を破棄",
+                    body: format!("{names} を HEAD の状態に戻します。\nstaged の内容も一緒に戻ります。元に戻せません。"),
+                    op: GitOp::Discard(paths),
+                }),
+                // `plan` が先に断っている。文言は 1 箇所に置く。
+                WorktreeSection::Conflicted => Err(CONFLICTED.to_string()),
+            }
         }
     }
+}
+
+/// カーソルの指すハンクを [`Scope::Hunk`] にする。
+///
+/// **`view` が出ていないときも `None` を返す。** その区別は呼び出し側（[`act`]）が
+/// 先に断って付ける。ここで返す `None` は「表せない」と「まだ無い」の両方を含む。
+///
+/// **ハンクで表せないものは `None`。** 何が表せるかは
+/// [`supports_hunk_patch`](crate::git_exec::supports_hunk_patch) が持つ（パッチを組む
+/// 関数の隣。述語をここに写すと、表せる範囲が広がったときに取り残される）。ハンクの
+/// 無いファイルも `None` になる。呼び出し側はファイル単位の操作に落とす（07）。
+///
+/// Diff ペインを見せていないときも `None`。`wanted_diff()` がそこで `None` を返す。
+fn hunk_scope(state: &AppState) -> Option<Scope<'_>> {
+    let wanted = state.wanted_diff();
+    let view = state.diff.fresh_view(wanted.as_ref())?;
+    let file = view.files.get(view.cursor.file)?;
+    if !supports_hunk_patch(file) {
+        return None;
+    }
+
+    Some(Scope::Hunk {
+        path: &file.path,
+        hunk: file.hunks.get(view.cursor.hunk)?,
+    })
 }
 
 /// `GitOp` に載せるパス。rename は新しい名前と元の名前の両方。
@@ -617,6 +792,10 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     // 追いつきとは形が違う。あちらは届いた値の oid から鮮度を導けるが、
     // `WorktreeSnapshot` には「いつの状態か」を示す鍵が無く、到着時には判定できない。
     state.worktree.stale = state.jobs.is_running(JobKind::LoadStatus);
+    // **持っている diff は対象が同じでも中身が古い。** ハンク単位で stage すると
+    // `IndexVsWorktree(a.txt)` のまま中身が減る。対象は見ない（この時点では `clamp`
+    // がまだで、いま選ばれているファイルが読み直しの対象になるとは限らない。01）。
+    state.diff.freshness = Freshness::Stale;
     // 成否は問わない。失敗しても index が途中まで動いていることがある。
     Cmd::LoadStatus
 }
@@ -637,10 +816,10 @@ fn exec_detail(err: &ExecError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Modal, RepoInfo, TermSize};
+    use crate::app::{Job, Modal, RepoInfo, TermSize};
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
-    use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
+    use crate::git_read::{Commit, HeadInfo, Hunk, LineOrigin, RefIndex, RefLabel, Remote};
     use crate::test_util::{
         fake_commit, fake_commit_with_parents, fake_detail, fake_entry, fake_file_diff, fake_hunk,
         fake_oid, fake_snapshot,
@@ -721,12 +900,26 @@ mod tests {
         }
     }
 
-    /// Diff ペインを開き、`path` の diff が `hunks` 個のハンクで届いた状態。
+    /// Diff ペインを開き、`paths[0]` の diff が `hunks` 個のハンクで届いた状態。
     fn diff_state(paths: &[&str], hunks: usize) -> AppState {
-        let mut state = worktree_state(fake_snapshot(&[], paths, &[]), WorktreeSection::Unstaged);
+        diff_pane(WorktreeSection::Unstaged, paths, fake_diff(paths[0], hunks))
+    }
+
+    /// Diff ペインを開き、`files` が届いた状態。
+    ///
+    /// **Diff ペインの立ち上げはここ 1 本。** 「worktree の状態を作る → `Enter` →
+    /// `diff_ok`」を 2 箇所に書くと、片方だけ直したときに差が出る。
+    fn diff_pane(section: WorktreeSection, paths: &[&str], files: Vec<FileDiff>) -> AppState {
+        let snapshot = match section {
+            WorktreeSection::Staged => fake_snapshot(paths, &[], &[]),
+            WorktreeSection::Unstaged => fake_snapshot(&[], paths, &[]),
+            WorktreeSection::Untracked => fake_snapshot(&[], &[], paths),
+            WorktreeSection::Conflicted => panic!("conflicted は diff を出さない"),
+        };
+        let mut state = worktree_state(snapshot, section);
         let _ = press_code(&mut state, KeyCode::Enter);
-        let target = unstaged_diff(paths[0]);
-        let _ = update(&mut state, diff_ok(target, fake_diff(paths[0], hunks)));
+        let target = state.wanted_diff().expect("対象が決まっていません");
+        let _ = update(&mut state, diff_ok(target, files));
         state
     }
 
@@ -888,18 +1081,23 @@ mod tests {
     }
 
     #[test]
-    fn reopening_the_same_file_keeps_the_hunk_cursor() {
-        // キャッシュしないので開き直すたびに読み直しが届く。既定に戻すと、選んで
-        // いたハンクが先頭へ飛んでから操作が効くことになる。
+    fn a_reload_of_the_same_file_keeps_the_hunk_cursor() {
+        // 同じ対象の diff がもう一度届くのは書き込みのあと。既定に戻すと、選んで
+        // いたハンクが先頭へ飛んでから次の操作が効くことになる。
         let mut state = diff_state(&["a.txt"], 3);
         let _ = press(&mut state, 'j');
         let _ = press(&mut state, 'j');
         assert_eq!(state.diff.view.as_ref().unwrap().cursor.hunk, 2);
 
-        let _ = press_code(&mut state, KeyCode::Esc);
-        let _ = press_code(&mut state, KeyCode::Enter);
-        let target = unstaged_diff("a.txt");
-        let _ = update(&mut state, diff_ok(target, fake_diff("a.txt", 3)));
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+        let _ = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+        );
+        let _ = update(
+            &mut state,
+            diff_ok(unstaged_diff("a.txt"), fake_diff("a.txt", 3)),
+        );
 
         assert_eq!(state.diff.view.as_ref().unwrap().cursor.hunk, 2);
     }
@@ -948,6 +1146,353 @@ mod tests {
         let _ = press(&mut state, 'k');
         let _ = press(&mut state, 'k');
         assert_eq!(hunk(&state), 0, "上端で止まる");
+    }
+
+    // ---- ハンク単位の stage / unstage / discard -------------------------------
+
+    /// 中身のあるハンク。パッチに戻したときに行が並ぶ。
+    fn real_hunk(start: usize) -> Hunk {
+        fake_hunk(
+            &format!("@@ -{start},2 +{start},2 @@"),
+            &[
+                (LineOrigin::Context, "ctx"),
+                (LineOrigin::Deletion, "old"),
+                (LineOrigin::Addition, "new"),
+            ],
+        )
+    }
+
+    /// ハンク 1 つから組んだパッチ。**実装と同じ関数を通す。**
+    /// 期待値を手で書くと、パッチの形を変えたときにテストの側だけが古くなる
+    /// （形そのものは `git_exec::patch` のユニットテストと `tests/hunk.rs` が見張る）。
+    fn patch_of(path: &str, hunk: &Hunk) -> Vec<u8> {
+        hunk_patch(std::path::Path::new(path), hunk).expect("パッチを組めませんでした")
+    }
+
+    #[test]
+    fn s_in_the_diff_pane_stages_only_the_hunk_under_the_cursor() {
+        let hunks = vec![real_hunk(1), real_hunk(9)];
+        let mut state = diff_pane(
+            WorktreeSection::Unstaged,
+            &["a.txt"],
+            vec![fake_file_diff("a.txt", hunks.clone())],
+        );
+        // 2 番目のハンクへ移る。1 番目のパッチが出たら、選んでいる場所を見ていない。
+        let _ = press(&mut state, 'j');
+
+        let cmd = press(&mut state, 's');
+
+        assert_eq!(
+            cmd,
+            Cmd::Exec(GitOp::StageHunk {
+                path: "a.txt".into(),
+                patch: patch_of("a.txt", &hunks[1]),
+            })
+        );
+    }
+
+    #[test]
+    fn u_in_the_diff_pane_unstages_only_the_hunk_under_the_cursor() {
+        let hunks = vec![real_hunk(1)];
+        let mut state = diff_pane(
+            WorktreeSection::Staged,
+            &["a.txt"],
+            vec![fake_file_diff("a.txt", hunks.clone())],
+        );
+
+        let cmd = press(&mut state, 'u');
+
+        assert_eq!(
+            cmd,
+            Cmd::Exec(GitOp::UnstageHunk {
+                path: "a.txt".into(),
+                patch: patch_of("a.txt", &hunks[0]),
+            })
+        );
+    }
+
+    #[test]
+    fn x_in_the_diff_pane_confirms_and_names_the_hunk() {
+        let hunks = vec![real_hunk(1)];
+        let mut state = diff_pane(
+            WorktreeSection::Unstaged,
+            &["a.txt"],
+            vec![fake_file_diff("a.txt", hunks.clone())],
+        );
+
+        assert_eq!(press(&mut state, 'x'), Cmd::None);
+
+        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
+            panic!("確認モーダルが出ていません: {:?}", state.modal);
+        };
+        // **ファイル名だけでは足りない。** ファイル単位の discard と同じ本文になり、
+        // どちらを押したのか画面から判らなくなる。
+        assert!(body.contains("a.txt"), "本文に対象が無い: {body}");
+        assert!(
+            body.contains(&hunks[0].header),
+            "本文にハンクが無い: {body}"
+        );
+        assert_eq!(
+            on_yes,
+            &Cmd::Exec(GitOp::DiscardHunk {
+                path: "a.txt".into(),
+                patch: patch_of("a.txt", &hunks[0]),
+            })
+        );
+    }
+
+    #[test]
+    fn x_on_a_staged_hunk_is_refused_with_a_reason() {
+        let mut state = diff_pane(
+            WorktreeSection::Staged,
+            &["a.txt"],
+            vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
+        );
+
+        // index とワークツリーの両方に当てることになるので断る（03）。
+        assert_eq!(press(&mut state, 'x'), Cmd::None);
+        assert!(state.modal.is_none(), "{:?}", state.modal);
+        let notice = state.notices.back().expect("通知が出ていません");
+        assert_eq!(notice.level, NoticeLevel::Warn);
+        assert!(notice.message.contains("unstage"), "{}", notice.message);
+    }
+
+    #[test]
+    fn a_file_that_hunks_cannot_describe_falls_back_to_the_whole_file() {
+        // ハンク = ファイル全体になるもの。パッチには `--- /dev/null` や
+        // `rename from` のヘッダが要るので、ハンク単位の `GitOp` は出さない（07）。
+        let untracked = FileDiff {
+            status: FileStatus::Untracked,
+            ..fake_file_diff("n.txt", vec![real_hunk(1)])
+        };
+        let mut state = diff_pane(WorktreeSection::Untracked, &["n.txt"], vec![untracked]);
+
+        assert_eq!(
+            press(&mut state, 's'),
+            Cmd::Exec(GitOp::Stage(vec!["n.txt".into()]))
+        );
+    }
+
+    #[test]
+    fn a_binary_file_falls_back_to_the_whole_file() {
+        // `binary` が立つとハンクは空になるが、`hunks` を見るだけでは
+        // 「mode だけの変更」と区別が付かない。旗のほうで落とす。
+        let binary = FileDiff {
+            binary: true,
+            ..fake_file_diff("a.png", vec![real_hunk(1)])
+        };
+        let mut state = diff_pane(WorktreeSection::Unstaged, &["a.png"], vec![binary]);
+
+        assert_eq!(
+            press(&mut state, 's'),
+            Cmd::Exec(GitOp::Stage(vec!["a.png".into()]))
+        );
+    }
+
+    #[test]
+    fn a_file_level_fallback_is_not_refused_by_the_freshness_guard() {
+        // **断るのはハンク単位のときだけ**（07）。ハンクにできないファイルへの `s` は
+        // 古いパッチを一切使わないので、読み直しを待たせる理由が無い。ペイン名で
+        // ガードを書くとここまで塞ぐ。
+        let binary = FileDiff {
+            binary: true,
+            ..fake_file_diff("a.png", vec![real_hunk(1)])
+        };
+        let mut state = diff_pane(WorktreeSection::Unstaged, &["a.png"], vec![binary]);
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+        assert_eq!(state.diff.freshness, Freshness::Stale);
+
+        assert_eq!(
+            press(&mut state, 's'),
+            Cmd::Exec(GitOp::Stage(vec!["a.png".into()]))
+        );
+    }
+
+    #[test]
+    fn a_path_that_cannot_go_into_a_patch_is_refused_instead_of_falling_back() {
+        // tab を含むパスは `git apply` が名前の終わりと読む（03）。ファイル単位に
+        // 落とすと、ハンク 1 つのつもりでファイル全体を stage することになる。
+        let mut state = diff_pane(
+            WorktreeSection::Unstaged,
+            &["a\tb.txt"],
+            vec![fake_file_diff("a\tb.txt", vec![real_hunk(1)])],
+        );
+
+        assert_eq!(press(&mut state, 's'), Cmd::None);
+        assert_eq!(
+            state.notices.back().map(|notice| notice.level),
+            Some(NoticeLevel::Warn)
+        );
+    }
+
+    #[test]
+    fn keys_are_refused_while_the_shown_diff_is_older_than_the_last_write() {
+        // **区画で断られる組み合わせを混ぜない。** Unstaged で `u` は鮮度に関わらず
+        // 「stage されていません」で断られるので、その腕は見張りを踏まない。
+        for (section, key) in [
+            (WorktreeSection::Unstaged, 's'),
+            (WorktreeSection::Unstaged, 'x'),
+            (WorktreeSection::Staged, 'u'),
+        ] {
+            let mut state = diff_pane(
+                section,
+                &["a.txt"],
+                vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
+            );
+            // 書き込みが終わった直後。読み直しはまだ届いていない。
+            let _ = update(&mut state, exec_done(Ok(fake_output())));
+            assert_eq!(state.diff.freshness, Freshness::Stale);
+
+            // 古いハンクから組んだパッチは、同じ内容のハンクが 2 つあると別の場所に当たる。
+            assert_eq!(press(&mut state, key), Cmd::None, "{key}");
+            assert!(state.modal.is_none(), "{key}");
+            assert_eq!(
+                state.notices.back().map(|notice| notice.message.as_str()),
+                Some(NOT_LATEST),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn keys_are_refused_while_the_reload_has_been_asked_for_but_has_not_arrived() {
+        // **`Cmd::LoadDiff` を出しただけでは新しくならない。** 返信が届くまで、
+        // 出している view は書き込みより前のものそのもの。
+        let mut state = diff_pane(
+            WorktreeSection::Unstaged,
+            &["a.txt"],
+            vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
+        );
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+        let asked = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+        );
+        assert_eq!(asked, Cmd::LoadDiff(unstaged_diff("a.txt")), "頼んではいる");
+
+        assert_eq!(press(&mut state, 's'), Cmd::None);
+        assert_eq!(
+            state.notices.back().map(|notice| notice.level),
+            Some(NoticeLevel::Warn)
+        );
+    }
+
+    #[test]
+    fn keys_do_nothing_while_the_diff_pane_has_nothing_to_show() {
+        // 「読み込み中…」や「差分を読み込めませんでした」を出しているあいだ、
+        // **ファイル単位に落とすとハンク 1 つのつもりの `s` がファイル全体を stage する。**
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press_code(&mut state, KeyCode::Enter);
+        assert!(state.diff.view.is_none(), "まだ届いていない");
+
+        for key in ['s', 'u', 'x'] {
+            assert_eq!(press(&mut state, key), Cmd::None, "{key}");
+            assert!(state.modal.is_none(), "{key}");
+            assert_eq!(
+                state.notices.back().map(|notice| notice.message.as_str()),
+                Some(NOT_LATEST),
+                "{key}"
+            );
+        }
+
+        // 読み込めなかったあとも同じ。
+        let _ = update(&mut state, diff_err(unstaged_diff("a.txt")));
+        assert_eq!(press(&mut state, 's'), Cmd::None);
+        assert_eq!(
+            state.notices.back().map(|notice| notice.message.as_str()),
+            Some(NOT_LATEST)
+        );
+    }
+
+    #[test]
+    fn a_reload_that_fails_leaves_the_shown_diff_marked_as_old() {
+        // 頼んだ読み直しが失敗したら、出しているのは書き込み前の diff のまま。
+        // **`Asked` を倒さないと、来ない返信を待つあいだ古い diff を新しい扱いにする。**
+        let mut state = diff_pane(
+            WorktreeSection::Unstaged,
+            &["a.txt"],
+            vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
+        );
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+        let _ = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+        );
+
+        let cmd = update(&mut state, diff_err(unstaged_diff("a.txt")));
+
+        // 同じ対象には出し直さない（「失敗 → 再読込 → 失敗」を回さない）。
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.diff.freshness, Freshness::Stale);
+        assert_eq!(press(&mut state, 's'), Cmd::None);
+    }
+
+    #[test]
+    fn reopening_the_same_file_uses_the_diff_already_in_hand() {
+        // 1 ファイルぶんの diff でもワークツリー全体を走査するので、開き直すたびに
+        // 読むとリーダーが `LoadLog` を待たせる（01）。
+        let mut state = diff_state(&["a.txt"], 1);
+
+        let _ = press_code(&mut state, KeyCode::Esc);
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::None);
+    }
+
+    #[test]
+    fn a_write_makes_the_same_target_be_read_again() {
+        // ハンク 1 つを stage しても残りが unstaged なら区画は変わらない。**対象が
+        // 同じままなのでキャッシュが効いてしまう**のを `Freshness` が止める。
+        let mut state = diff_state(&["a.txt"], 2);
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+
+        let cmd = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+        );
+
+        assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
+        // **まだ `Fresh` ではない。** 頼んだだけで、出している diff は書き込みより前。
+        assert_eq!(state.diff.freshness, Freshness::Asked);
+    }
+
+    #[test]
+    fn a_reply_that_was_asked_for_before_the_write_is_asked_for_again() {
+        // 書き込みの時点で `LoadDiff` が走っていると、`status_loaded` が出す
+        // `Cmd::LoadDiff` は `issue` に落とされる。飛んでいた返信は書き込みより前の
+        // ものなので、それを採ったまま黙って終わると古い diff が残る（01）。
+        let mut state = diff_state(&["a.txt"], 2);
+        assert!(state.jobs.start(Job {
+            kind: JobKind::LoadDiff,
+            label: JobKind::LoadDiff.label().to_string(),
+        }));
+
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+        let dropped = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+        );
+        assert_eq!(dropped, Cmd::None, "走っているので落とされる");
+        assert_eq!(
+            state.diff.freshness,
+            Freshness::Stale,
+            "落とされたので、まだ頼めていない"
+        );
+
+        // 書き込みより前に頼まれていた返信が届く（中身が違うと判るように 5 ハンク）。
+        let cmd = update(
+            &mut state,
+            diff_ok(unstaged_diff("a.txt"), fake_diff("a.txt", 5)),
+        );
+
+        assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
+        assert_eq!(state.diff.freshness, Freshness::Asked);
+        // **書き込みより前の返信は採らない。** 採ると、頼み直しが届くまでのあいだ
+        // 書き込み前の中身を新しいものとして出すことになる。
+        assert_eq!(state.diff.view.as_ref().unwrap().files[0].hunks.len(), 2);
     }
 
     #[test]
@@ -1234,6 +1779,15 @@ mod tests {
         );
     }
 
+    /// 成功した `git` の出力。中身は見ないので固定でよい。
+    fn fake_output() -> ExecOutput {
+        ExecOutput {
+            argv: vec!["add".into(), "--".into(), "a.txt".into()],
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
     /// `git` の実行結果。
     fn exec_done(result: Result<ExecOutput, ExecError>) -> Msg {
         Msg::ExecFinished(Box::new(ExecDone {
@@ -1248,14 +1802,7 @@ mod tests {
         let mut state = state();
         let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
 
-        let cmd = update(
-            &mut state,
-            exec_done(Ok(ExecOutput {
-                argv: vec!["add".into(), "--".into(), "a.txt".into()],
-                stdout: String::new(),
-                stderr: String::new(),
-            })),
-        );
+        let cmd = update(&mut state, exec_done(Ok(fake_output())));
 
         assert_eq!(cmd, Cmd::LoadStatus);
         assert!(!state.jobs.is_running(JobKind::Exec));
@@ -1296,14 +1843,7 @@ mod tests {
         let _ = state.issue(Cmd::LoadStatus);
         let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
 
-        let cmd = update(
-            &mut state,
-            exec_done(Ok(ExecOutput {
-                argv: vec!["add".into()],
-                stdout: String::new(),
-                stderr: String::new(),
-            })),
-        );
+        let cmd = update(&mut state, exec_done(Ok(fake_output())));
         // 走っているので落とされる。
         assert_eq!(cmd, Cmd::None);
         assert!(state.worktree.stale);

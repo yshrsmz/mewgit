@@ -28,6 +28,7 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
+use crate::git_exec::Runner;
 use crate::git_read::{
     Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
     Signature, Timestamp, WorktreeSnapshot,
@@ -73,6 +74,17 @@ impl Sandbox {
 
     /// `git` を実行し、標準出力を末尾の改行を落として返す。失敗したら panic する。
     fn git<S: AsRef<OsStr>>(&self, args: &[S]) -> String {
+        String::from_utf8(self.git_bytes(args))
+            .expect("git の出力が UTF-8 ではありません")
+            .trim_end()
+            .to_string()
+    }
+
+    /// `git` を実行し、標準出力を**そのまま**返す。失敗したら panic する。
+    ///
+    /// [`git`](Self::git) が末尾の改行を落とすので、CRLF や「改行で終わらない」を
+    /// 見るテストはこちらを使う（`\r\n` の `\r` まで一緒に落ちる）。
+    fn git_bytes<S: AsRef<OsStr>>(&self, args: &[S]) -> Vec<u8> {
         let out = self.try_git(args);
         assert!(
             out.status.success(),
@@ -80,10 +92,7 @@ impl Sandbox {
             shown(args),
             String::from_utf8_lossy(&out.stderr)
         );
-        String::from_utf8(out.stdout)
-            .expect("git の出力が UTF-8 ではありません")
-            .trim_end()
-            .to_string()
+        out.stdout
     }
 
     /// `git` を実行して結果をそのまま返す。失敗しても panic しない。
@@ -159,6 +168,27 @@ impl TestRepo {
     /// [`Sandbox`] を直接触らずに済むようにするため。
     pub fn git<S: AsRef<OsStr>>(&self, args: &[S]) -> String {
         self.sandbox.git(args)
+    }
+
+    /// `git` を実行し、標準出力を生バイト列で返す。
+    ///
+    /// [`git`](Self::git) は末尾の改行を落とすので、CRLF や「改行で終わらない」を
+    /// 見るテストはこちらを使う。
+    pub fn git_bytes<S: AsRef<OsStr>>(&self, args: &[S]) -> Vec<u8> {
+        self.sandbox.git_bytes(args)
+    }
+
+    /// `git status --porcelain` の出力。
+    pub fn porcelain(&self) -> String {
+        self.git(&["status", "--porcelain"])
+    }
+
+    /// このリポジトリを対象にした [`Runner`]。実行環境の設定を持ち込まない。
+    ///
+    /// **統合テストごとに書かない。** テストバイナリは別々にコンパイルされるので、
+    /// 各 `tests/*.rs` に置くとファイルを足すたびにコピーが増える。
+    pub fn runner(&self) -> Runner {
+        Runner::new(self.path(), "git").with_env(self.runner_env())
     }
 
     /// `git` を実行し、成功したかどうかだけを返す。失敗しても panic しない。

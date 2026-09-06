@@ -1,0 +1,366 @@
+//! `git_read::RepoReader::diff` の統合テスト。実リポジトリを一時ディレクトリに作って読む。
+
+use mewgit_core::git_read::{DiffTarget, FileDiff, FileStatus, Hunk, LineOrigin, RepoReader};
+use mewgit_core::test_util::TestRepo;
+
+/// ファイルの並びを `(path, old_path, status)` にする。
+fn files(diffs: &[FileDiff]) -> Vec<(&str, Option<&str>, FileStatus)> {
+    diffs
+        .iter()
+        .map(|file| {
+            (
+                file.path.to_str().expect("パスが UTF-8 ではありません"),
+                file.old_path
+                    .as_deref()
+                    .map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
+                file.status,
+            )
+        })
+        .collect()
+}
+
+/// ハンクの行を `(origin, 中身)` にする。中身は読みやすさのため lossy で見る。
+fn lines(hunk: &Hunk) -> Vec<(LineOrigin, String)> {
+    hunk.lines
+        .iter()
+        .map(|line| {
+            (
+                line.origin,
+                String::from_utf8_lossy(&line.content).into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// 20 行のファイル。離れた 2 箇所を変えてハンクを 2 つにするのに使う。
+fn twenty_lines() -> Vec<u8> {
+    (1..=20)
+        .map(|n| format!("line {n}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+#[test]
+fn index_vs_worktree_reports_unstaged_edits() {
+    let repo = TestRepo::init();
+    repo.commit_file("file.txt", "one");
+    repo.write_worktree_file("file.txt", b"two\n");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
+
+    assert_eq!(files(&diff), [("file.txt", None, FileStatus::Modified)]);
+    assert_eq!(diff[0].hunks[0].header, "@@ -1 +1 @@");
+    assert_eq!(
+        lines(&diff[0].hunks[0]),
+        [
+            (LineOrigin::Deletion, "one".to_string()),
+            (LineOrigin::Addition, "two".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn index_vs_worktree_shows_the_content_of_untracked_files() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.write_worktree_file("new.txt", b"hello\nworld\n");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
+
+    // 中身を出さないと worktree ペインで untracked を選んでも空になる。
+    assert_eq!(files(&diff), [("new.txt", None, FileStatus::Untracked)]);
+    assert_eq!(
+        lines(&diff[0].hunks[0]),
+        [
+            (LineOrigin::Addition, "hello".to_string()),
+            (LineOrigin::Addition, "world".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn head_vs_index_reports_staged_edits() {
+    let repo = TestRepo::init();
+    repo.commit_file("file.txt", "one");
+    repo.write_worktree_file("file.txt", b"two\n");
+    repo.git(&["add", "file.txt"]);
+    // ワークツリー側にさらに変更を積んでも staged の diff には出ない。
+    repo.write_worktree_file("file.txt", b"three\n");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
+
+    assert_eq!(
+        lines(&diff[0].hunks[0]),
+        [
+            (LineOrigin::Deletion, "one".to_string()),
+            (LineOrigin::Addition, "two".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn head_vs_index_works_before_the_first_commit() {
+    let repo = TestRepo::init();
+    repo.write_worktree_file("file.txt", b"first\n");
+    repo.git(&["add", "file.txt"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    // unborn HEAD は空ツリーと比べる。`repo.head()` の `Err` で落ちない。
+    let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
+
+    assert_eq!(files(&diff), [("file.txt", None, FileStatus::Added)]);
+    assert_eq!(
+        lines(&diff[0].hunks[0]),
+        [(LineOrigin::Addition, "first".to_string())]
+    );
+}
+
+#[test]
+fn head_vs_index_reports_a_rename_with_both_paths() {
+    let repo = TestRepo::init();
+    repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
+
+    // `find_similar` を `Patch` より先に呼んでいないと「削除 + 追加」の 2 行になる。
+    assert_eq!(
+        files(&diff),
+        [("new.txt", Some("old.txt"), FileStatus::Renamed)]
+    );
+}
+
+#[test]
+fn commit_diffs_against_the_first_parent() {
+    let repo = TestRepo::init();
+    repo.commit_file("base.txt", "base");
+    repo.git(&["checkout", "-q", "-b", "topic"]);
+    repo.commit_file("topic.txt", "topic");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.commit_file("main.txt", "main");
+    repo.git(&["merge", "-q", "--no-ff", "-m", "merge topic", "topic"]);
+    let merge = repo.head_oid();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader
+        .diff(DiffTarget::Commit {
+            oid: merge,
+            path: None,
+        })
+        .unwrap();
+
+    // 第一親（main）との差なので、topic 側で足したファイルだけが出る。
+    assert_eq!(files(&diff), [("topic.txt", None, FileStatus::Added)]);
+}
+
+#[test]
+fn commit_diffs_the_root_commit_against_an_empty_tree() {
+    let repo = TestRepo::init();
+    let root = repo.commit_file("file.txt", "first");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader
+        .diff(DiffTarget::Commit {
+            oid: root,
+            path: None,
+        })
+        .unwrap();
+
+    assert_eq!(files(&diff), [("file.txt", None, FileStatus::Added)]);
+}
+
+#[test]
+fn range_diffs_the_two_commits() {
+    let repo = TestRepo::init();
+    let first = repo.commit_file("a.txt", "a");
+    repo.commit_file("b.txt", "b");
+    let third = repo.commit_file("c.txt", "c");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader
+        .diff(DiffTarget::Range {
+            from: first,
+            to: third,
+            path: None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        files(&diff),
+        [
+            ("b.txt", None, FileStatus::Added),
+            ("c.txt", None, FileStatus::Added),
+        ]
+    );
+}
+
+#[test]
+fn a_path_narrows_the_diff_and_is_not_a_glob() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.write_worktree_file("x.txt", b"plain\n");
+    repo.write_worktree_file("[x].txt", b"bracketed\n");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader
+        .diff(DiffTarget::IndexVsWorktree(Some("[x].txt".into())))
+        .unwrap();
+
+    // pathspec が glob のままだと `[x]` が文字クラスになり、`x.txt` の方が出る。
+    assert_eq!(files(&diff), [("[x].txt", None, FileStatus::Untracked)]);
+}
+
+#[test]
+fn a_line_without_a_trailing_newline_is_marked_on_the_line_itself() {
+    let repo = TestRepo::init();
+    repo.write_worktree_file("noeol.txt", b"a\nb");
+    repo.git(&["add", "noeol.txt"]);
+    repo.git(&["commit", "-q", "-m", "noeol"]);
+    repo.write_worktree_file("noeol.txt", b"a\nb\nc");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
+
+    // libgit2 の `\ No newline at end of file` は独立した行として来る。マーカー行は
+    // 捨て、改行の有無は内容の行の種別に畳む。
+    assert_eq!(
+        lines(&diff[0].hunks[0]),
+        [
+            (LineOrigin::Context, "a".to_string()),
+            (LineOrigin::DeletionNoEol, "b".to_string()),
+            (LineOrigin::Addition, "b".to_string()),
+            (LineOrigin::AdditionNoEol, "c".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_context_line_without_a_trailing_newline_is_marked_too() {
+    let repo = TestRepo::init();
+    repo.write_worktree_file("ctx.txt", b"a\nb\nc");
+    repo.git(&["add", "ctx.txt"]);
+    repo.git(&["commit", "-q", "-m", "ctx"]);
+    repo.write_worktree_file("ctx.txt", b"A\nb\nc");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
+
+    assert_eq!(
+        lines(&diff[0].hunks[0]),
+        [
+            (LineOrigin::Deletion, "a".to_string()),
+            (LineOrigin::Addition, "A".to_string()),
+            (LineOrigin::Context, "b".to_string()),
+            (LineOrigin::ContextNoEol, "c".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn distant_changes_are_split_into_separate_hunks() {
+    let repo = TestRepo::init();
+    repo.write_worktree_file("long.txt", &twenty_lines());
+    repo.git(&["add", "long.txt"]);
+    repo.git(&["commit", "-q", "-m", "long"]);
+    let edited = String::from_utf8(twenty_lines())
+        .unwrap()
+        .replace("line 1\n", "LINE 1\n")
+        .replace("line 20\n", "LINE 20\n");
+    repo.write_worktree_file("long.txt", edited.as_bytes());
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
+
+    let headers: Vec<&str> = diff[0]
+        .hunks
+        .iter()
+        .map(|hunk| hunk.header.as_str())
+        .collect();
+    // 2 つ目のヘッダの末尾はハンクの直前の行（`@@` の後ろの関数コンテキスト）。
+    // `git apply` は読まないが、表示に使うので落とさない。
+    assert_eq!(headers, ["@@ -1,4 +1,4 @@", "@@ -17,4 +17,4 @@ line 16"]);
+}
+
+#[test]
+fn a_binary_file_is_flagged_and_has_no_hunks() {
+    let repo = TestRepo::init();
+    repo.write_worktree_file("bin.dat", &[0u8, 1, 2, 3, 0, 255]);
+    repo.git(&["add", "bin.dat"]);
+    repo.git(&["commit", "-q", "-m", "bin"]);
+    repo.write_worktree_file("bin.dat", &[9u8, 9, 0, 1]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
+
+    // `Diff::get_delta` を先に読むと立っていないことがある。`Patch` を作ったあとの
+    // delta から読む。
+    assert!(diff[0].binary, "バイナリと判定されていません");
+    assert_eq!(diff[0].hunks, []);
+}
+
+#[test]
+fn a_mode_only_change_has_no_hunks_and_is_not_binary() {
+    let repo = TestRepo::init();
+    repo.commit_file("run.sh", "echo hi");
+    repo.git(&["update-index", "--chmod=+x", "run.sh"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
+
+    // バイナリと同じくハンクが空になるので、区別はフラグで付ける。
+    assert_eq!(files(&diff), [("run.sh", None, FileStatus::Modified)]);
+    assert!(!diff[0].binary, "バイナリと誤判定しています");
+    assert_eq!(diff[0].hunks, []);
+}
+
+#[test]
+fn hunk_lines_keep_bytes_that_are_not_utf8() {
+    let repo = TestRepo::init();
+    repo.write_worktree_file("latin.txt", b"caf\xe9\n");
+    repo.git(&["add", "latin.txt"]);
+    repo.git(&["commit", "-q", "-m", "latin"]);
+    repo.write_worktree_file("latin.txt", b"th\xe9\n");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
+
+    // lossy にすると `git apply --cached` に戻したときに中身が変わる。
+    let contents: Vec<&[u8]> = diff[0].hunks[0]
+        .lines
+        .iter()
+        .map(|line| line.content.as_slice())
+        .collect();
+    assert_eq!(contents, [b"caf\xe9".as_slice(), b"th\xe9".as_slice()]);
+}
+
+#[test]
+fn diff_drops_a_file_whose_path_is_not_utf8() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.add_raw_path_to_index(b"bad\xff.txt");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
+
+    assert_eq!(files(&diff), []);
+}
+
+#[test]
+fn a_deleted_file_keeps_its_path() {
+    let repo = TestRepo::init();
+    repo.commit_file("gone.txt", "gone");
+    repo.git(&["rm", "-q", "gone.txt"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
+
+    assert_eq!(files(&diff), [("gone.txt", None, FileStatus::Deleted)]);
+    assert_eq!(
+        lines(&diff[0].hunks[0]),
+        [(LineOrigin::Deletion, "gone".to_string())]
+    );
+}

@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    CommitDetail, GitReadError, HeadInfo, LogPage, LogSession, Oid, RefIndex, Remote, RepoReader,
+    CommitDetail, DiffTarget, FileDiff, GitReadError, HeadInfo, LogPage, LogSession, Oid, RefIndex,
+    Remote, RepoReader, WorktreeSnapshot,
 };
 
 /// リーダースレッドへの窓口。
@@ -42,6 +43,11 @@ enum Request {
     Refs(Reply<RefIndex>),
     Head(Reply<HeadInfo>),
     Remotes(Reply<Vec<Remote>>),
+    Status(Reply<WorktreeSnapshot>),
+    Diff {
+        target: DiffTarget,
+        reply: Reply<Vec<FileDiff>>,
+    },
 }
 
 /// 要求 1 件の返り先。
@@ -117,6 +123,17 @@ impl ReaderHandle {
         self.request(Request::Remotes).await
     }
 
+    /// ワーキングツリーの状態。`commit_detail` と同じく状態を持たないので、この
+    /// future は drop してよい。
+    pub async fn status(&self) -> Result<WorktreeSnapshot, GitReadError> {
+        self.request(Request::Status).await
+    }
+
+    /// 対象の diff。`status` と同じく drop してよい。
+    pub async fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError> {
+        self.request(|reply| Request::Diff { target, reply }).await
+    }
+
     /// 要求を送って結果を待つ。
     ///
     /// 送信側・受信側のどちらのチャネルが切れても [`GitReadError::ReaderGone`] にする。
@@ -173,6 +190,12 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
             }
             Request::Remotes(reply) => {
                 let _ = reply.send(reader.remotes());
+            }
+            Request::Status(reply) => {
+                let _ = reply.send(reader.status());
+            }
+            Request::Diff { target, reply } => {
+                let _ = reply.send(reader.diff(target));
             }
         }
     }

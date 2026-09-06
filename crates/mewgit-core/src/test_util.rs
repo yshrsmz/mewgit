@@ -13,9 +13,11 @@
 //! `git` の stderr で落ちるだけになる。分けておけばコンパイルエラーで気付く。
 
 use std::cell::Cell;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 /// コミット日時の起点（2023-11-14T22:13:20Z）。`git` を 1 回叩くごとに [`TICK`] 秒進める。
 ///
@@ -67,7 +69,24 @@ impl Sandbox {
     }
 
     /// `git` を実行し、標準出力を末尾の改行を落として返す。失敗したら panic する。
-    fn git(&self, args: &[&str]) -> String {
+    fn git<S: AsRef<OsStr>>(&self, args: &[S]) -> String {
+        let out = self.try_git(args);
+        assert!(
+            out.status.success(),
+            "git {} が失敗しました: {}",
+            shown(args),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout)
+            .expect("git の出力が UTF-8 ではありません")
+            .trim_end()
+            .to_string()
+    }
+
+    /// `git` を実行して結果をそのまま返す。失敗しても panic しない。
+    ///
+    /// コンフリクトする `git merge` のように、失敗が期待どおりのコマンドに使う。
+    fn try_git<S: AsRef<OsStr>>(&self, args: &[S]) -> Output {
         // 日時は実時間ではなく固定のカウンタから与える。同じ秒に落ちたコミットは
         // `Sort::TIME` での並びが揺れてテストが不安定になる。
         let date = format!("{} +0000", self.tick());
@@ -87,17 +106,7 @@ impl Sandbox {
             .env("GIT_COMMITTER_DATE", &date)
             .env("GIT_TERMINAL_PROMPT", "0");
 
-        let out = cmd.output().expect("git を実行できませんでした");
-        assert!(
-            out.status.success(),
-            "git {} が失敗しました: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout)
-            .expect("git の出力が UTF-8 ではありません")
-            .trim_end()
-            .to_string()
+        cmd.output().expect("git を実行できませんでした")
     }
 
     /// 現在の日時を返し、カウンタを [`TICK`] 秒進める。
@@ -129,6 +138,40 @@ impl TestRepo {
     /// `git` を実行し、標準出力を末尾の改行を落として返す。失敗したら panic する。
     pub fn git(&self, args: &[&str]) -> String {
         self.sandbox.git(args)
+    }
+
+    /// `git` を実行し、成功したかどうかだけを返す。失敗しても panic しない。
+    ///
+    /// コンフリクトする `git merge` のように、失敗が期待どおりのコマンドに使う。
+    pub fn try_git(&self, args: &[&str]) -> bool {
+        self.sandbox.try_git(args).status.success()
+    }
+
+    /// 非 UTF-8 のパスを index にだけ足す。ワークツリーにはファイルを作らない。
+    ///
+    /// macOS の APFS は非 UTF-8 のファイル名を受け付けない（`Illegal byte sequence`）ので、
+    /// ワークツリーには置けない。index にだけ入れれば「staged で追加され、ワークツリー
+    /// からは消えている」状態になり、staged 側と unstaged 側の両方を 1 回で踏める。
+    pub fn add_raw_path_to_index(&self, path: &[u8]) {
+        // 中身は何でもよいので、リポジトリの外に置いたファイルから blob を作る。
+        let source = self.sandbox.home.join("raw-blob");
+        fs::write(&source, b"raw\n").expect("blob の元ファイルを書けませんでした");
+        let blob = self.git(&[
+            "hash-object",
+            "-w",
+            source.to_str().expect("一時パスが UTF-8 ではありません"),
+        ]);
+
+        // パスが非 UTF-8 なので argv は `OsStr` で組む。`--cacheinfo` はワークツリーを
+        // 見ないので、ファイルが存在しなくても index に入る。
+        let mut cacheinfo = OsString::from(format!("100644,{blob},"));
+        cacheinfo.push(OsStr::from_bytes(path));
+        self.sandbox.git(&[
+            OsStr::new("update-index"),
+            OsStr::new("--add"),
+            OsStr::new("--cacheinfo"),
+            &cacheinfo,
+        ]);
     }
 
     /// `file.txt` を書き換えてコミットし、その Oid を返す。
@@ -218,6 +261,14 @@ impl BareRepo {
     pub fn path(&self) -> &Path {
         &self.sandbox.root
     }
+}
+
+/// panic のメッセージに出す argv。非 UTF-8 の引数も渡せるので lossy で並べる。
+fn shown<S: AsRef<OsStr>>(args: &[S]) -> String {
+    args.iter()
+        .map(|arg| arg.as_ref().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 中身を作り込んだ [`Commit`]。実リポジトリを作らずに一覧の描画を試すのに使う。

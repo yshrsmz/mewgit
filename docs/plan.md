@@ -21,7 +21,7 @@
 
 ## M2: ワーキングツリーとブランチ
 
-- [ ] `git_read::status` / `diff`（ハンク分割）
+- [x] `git_read::status` / `diff`（ハンク分割）
 - [ ] `git_exec::Runner` と `to_argv` の全 `GitOp` テスト、`ExecErrorKind` の分類テスト
 - [ ] `ui::panes::worktree` / `diff` — ファイル・ハンク単位の stage / unstage / discard
 - [ ] `Modal::CommitMessage` と commit / amend

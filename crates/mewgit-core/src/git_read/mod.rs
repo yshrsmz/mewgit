@@ -3,14 +3,16 @@
 //! git2 による読み取り専用の層。書き込みは一切行わない（不変ルール 1）。
 //!
 //! ここには層をまたいで受け渡す値型を置き、読み取りの実装は `repo` などの
-//! サブモジュールに置く。status・diff は M2 で実装する。
+//! サブモジュールに置く。
 
+mod diff;
 mod log;
 mod repo;
+mod status;
 mod thread;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use git2::Oid;
 pub use log::LogSession;
@@ -24,6 +26,15 @@ pub use thread::ReaderHandle;
 /// 宣言している場所と実装を同じところに置く。
 pub(super) fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// 識別子として使うパスを `PathBuf` にする。非 UTF-8 なら `None`。
+///
+/// 呼び出し側はそのファイルを一覧ごと落とす。Unix の `PathBuf` は任意のバイト列を
+/// 持てるが、`git_exec` の argv に載せられず、UI で選べても操作できない
+/// （「非 UTF-8 の扱い」）。
+pub(super) fn utf8_path(bytes: Option<&[u8]>) -> Option<PathBuf> {
+    Some(PathBuf::from(std::str::from_utf8(bytes?).ok()?))
 }
 
 /// git2 の署名を層の値型にする。名前とメールは表示にしか使わないので lossy で残す。
@@ -255,6 +266,11 @@ impl WorktreeSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
     pub path: PathBuf,
+    /// rename のときだけ入る元のパス。
+    ///
+    /// 無いと `FileStatus::Renamed` の行が「どこから来たか」を出せず、staged rename の
+    /// unstage も組み立てられない（旧パスと新パスの両方を argv に載せる必要がある）。
+    pub old_path: Option<PathBuf>,
     pub status: FileStatus,
 }
 
@@ -292,6 +308,18 @@ pub enum DiffTarget {
     },
 }
 
+impl DiffTarget {
+    /// 絞り込みのパス。全変種が持つので、変種ごとの `match` を呼び出し側に配らない。
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            DiffTarget::IndexVsWorktree(path)
+            | DiffTarget::HeadVsIndex(path)
+            | DiffTarget::Commit { path, .. }
+            | DiffTarget::Range { path, .. } => path.as_deref(),
+        }
+    }
+}
+
 /// 1 ファイル分の diff。
 ///
 /// ハンクを `Vec<Hunk>` に平坦化せずファイル単位で持つ。`GitOp::StageHunk` に渡す
@@ -299,28 +327,46 @@ pub enum DiffTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
     pub path: PathBuf,
+    /// rename のときだけ入る元のパス。[`FileEntry::old_path`] と同じ。
+    pub old_path: Option<PathBuf>,
     pub status: FileStatus,
+    /// バイナリと判定された。このとき `hunks` は空。
+    ///
+    /// 「mode だけの変更」も `hunks` が空になるので、区別はこのフラグで付ける。
+    pub binary: bool,
     pub hunks: Vec<Hunk>,
 }
 
 /// diff のハンク 1 つ。`git_exec` がパッチとして再構成できる形で持つ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hunk {
-    /// `@@ -1,4 +1,6 @@` の行。
+    /// `@@ -1,4 +1,6 @@ fn foo() {` の行から末尾の改行を落としたもの。
+    ///
+    /// `@@` の後ろの関数コンテキストも残す。ここだけは非 UTF-8 でも lossy でよい。
+    /// `git apply` は 2 つ目の `@@` より後ろを読まないため。
     pub header: String,
     pub lines: Vec<HunkLine>,
 }
 
+/// ハンク内の 1 行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HunkLine {
     pub origin: LineOrigin,
-    pub content: String,
+    /// 行末の改行を落とした中身。
+    ///
+    /// **`String` ではなく `Vec<u8>`。** ハンクは表示専用ではなく `git apply --cached` に
+    /// 戻す入力でもあるので、非 UTF-8 のファイルを lossy で通すとステージした結果が
+    /// 元のファイルと変わる（02 の「非 UTF-8 の扱い」の例外）。描くときに `ui` が
+    /// その場で lossy にする。
+    pub content: Vec<u8>,
 }
 
 /// ハンク内の 1 行の種別。
 ///
-/// `NoEol` 系は `\ No newline at end of file` を伴う行。`git_exec` がパッチを
-/// 再構成するときにこのマーカーを落とせないので、3 種類とも表現できるようにしている。
+/// `NoEol` 系は `\ No newline at end of file` を伴う行、つまり改行で終わっていない行。
+/// libgit2 はこのマーカーを独立した行として出すが、こちらは行の種別に畳んで持つ
+/// （02 の「ハンクの持ち方」）。`git_exec` がパッチを組み直すときにマーカーを
+/// 復元できるよう、3 種類とも表現できるようにしている。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineOrigin {
     Context,

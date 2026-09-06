@@ -3,28 +3,57 @@
 //! `render` は [`AppState`] のみを参照する（不変ルール 2）。git2 / CLI / HTTP を
 //! ここから呼ばない。
 //!
-//! いまはヘッダ・グラフ・ステータスバーだけ。右ペイン（ブランチ / ワーキングツリー）は
-//! 07 のレイアウトどおりに、それぞれのタスクで足す。
+//! いまはヘッダ・グラフ・ワーキングツリー・ステータスバー。右上の
+//! `Branches | Stash | PRs` は、そのタブを実装するタスクで足す（07）。
 
 pub mod lanes;
 pub mod theme;
 pub mod time;
 
-use crate::panes;
+use crate::{modals, panes};
 use mewgit_core::app::{AppState, TermSize};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 /// 1 フレーム描く。
 pub fn render(frame: &mut Frame, state: &AppState) {
     let [header, body, status] = split(frame.area());
+    let [left, right] = split_body(body);
 
     frame.render_widget(header_line(state), header);
-    panes::graph::render(frame, body, state);
+    panes::graph::render(frame, left, state);
+    panes::worktree::render(frame, right, state);
     frame.render_widget(status_line(state), status);
+
+    // モーダルは最後。下のペインを覆って描く（07）。
+    if let Some(modal) = &state.modal {
+        modals::render(frame, frame.area(), modal);
+    }
+}
+
+/// 本文を左右に割る。
+///
+/// 幅 < 100 で右ペインを隠す分岐は M6（07）。全画面切替が同じタスクなので、
+/// 隠すほうだけ先に入れると 80 桁の端末から右ペインへ到達できなくなる。
+fn split_body(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area)
+}
+
+/// ペインの枠。
+///
+/// **フォーカスのあるペインは枠を強調する**（07）。どちらがキーを受けるか判らないと、
+/// `s` や `x` が別のペインに飛んだように見える。枠の内側の大きさは強調の有無で
+/// 変わらないので、レイアウトの計算は `focused` を偽で呼んでよい。
+pub fn pane_block(title: String, focused: bool) -> Block<'static> {
+    let block = Block::default().borders(Borders::ALL).title(title);
+    if focused {
+        block.border_style(Style::default().add_modifier(Modifier::BOLD))
+    } else {
+        block
+    }
 }
 
 /// 画面をヘッダ / 本文 / ステータスバーに割る。
@@ -48,7 +77,8 @@ fn split(area: Rect) -> [Rect; 3] {
 /// [`panes::graph::shows_detail`]。
 pub fn graph_rows(term: TermSize, shows_detail: bool) -> usize {
     let [_, body, _] = split(Rect::new(0, 0, term.width, term.height));
-    panes::graph::areas(body, shows_detail).0.height as usize
+    let [left, _] = split_body(body);
+    panes::graph::areas(left, shows_detail).0.height as usize
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
@@ -192,6 +222,42 @@ mod tests {
 
             let last = &lines[height as usize - 1];
             assert!(last.contains("q:quit"), "status: {last:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use crate::test_util::{state_at, terminal_with};
+    use mewgit_core::app::{Pane, TermSize};
+    use ratatui::style::Modifier;
+
+    const SIZE: TermSize = TermSize {
+        width: 80,
+        height: 24,
+    };
+
+    /// ペインの枠の左上。ヘッダの 1 行ぶん下。
+    fn corner(pane: Pane) -> (u16, u16) {
+        match pane {
+            Pane::Worktree => (48, 1),
+            _ => (0, 1),
+        }
+    }
+
+    #[test]
+    fn the_focused_pane_is_the_only_one_with_a_bold_border() {
+        // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
+        for focus in [Pane::Graph, Pane::Worktree] {
+            let mut state = state_at("/repo");
+            state.focus = focus;
+            let terminal = terminal_with(&state, SIZE);
+            let buffer = terminal.backend().buffer();
+
+            for pane in [Pane::Graph, Pane::Worktree] {
+                let bold = buffer[corner(pane)].modifier.contains(Modifier::BOLD);
+                assert_eq!(bold, pane == focus, "focus={focus:?} pane={pane:?}");
+            }
         }
     }
 }

@@ -10,7 +10,7 @@
 pub enum GitOp {
     Stage(Vec<PathBuf>), Unstage(Vec<PathBuf>),
     StageHunk { path, patch: Vec<u8> }, UnstageHunk { .. },
-    Discard(Vec<PathBuf>), DiscardUntracked(Vec<PathBuf>),
+    Discard(Vec<PathBuf>), DiscardUntracked(Vec<PathBuf>), DiscardUnborn(Vec<PathBuf>),
     Commit { message: String, amend: bool },
     BranchCreate { name, start: Option<String>, checkout: bool },
     Checkout(String), BranchDelete { name, force }, BranchRename { from, to },
@@ -29,10 +29,11 @@ pub enum GitOp {
 - **`patch` は `Vec<u8>`。** `git apply --cached` に戻す入力なので、lossy 変換すると
   非 UTF-8 のファイルをステージした結果が元のファイルと変わる（02 の「ハンクの持ち方」と
   同じ理由）
-- **discard は tracked と untracked で変種を分ける。** untracked なファイルは
-  `git restore` では消せず `git clean` が要る。`to_command` は純粋関数でファイルシステムを
-  見られないので、どちらを出すかは区画を知っている呼び出し側（`WorktreeSnapshot` を持つ
-  `app`）が決める
+- **discard は tracked / untracked / unborn の 3 変種に分ける。** untracked なファイルは
+  `git restore` では消せず `git clean` が要る。コミットが 1 つも無いリポジトリ（unborn HEAD）
+  では `restore --source=HEAD` 自体が落ちるので `git rm` が要る。`to_command` は純粋関数で
+  ファイルシステムも HEAD も見られないので、どれを出すかは区画と HEAD の状態を知っている
+  呼び出し側（`WorktreeSnapshot` と `RepoInfo.head` を持つ `app`）が決める
 
 ## argv への変換
 
@@ -58,6 +59,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `UnstageHunk { patch }` | `apply --cached --reverse -`（patch を stdin） |
 | `Discard(paths)` | `restore --source=HEAD --staged --worktree -- <paths>` |
 | `DiscardUntracked(paths)` | `clean --force -- <paths>` |
+| `DiscardUnborn(paths)` | `rm --force --quiet -- <paths>` |
 | `Commit { message, amend }` | `commit [--amend] --message <message>` |
 | `BranchCreate { checkout: true }` | `switch --create <name> [<start>]` |
 | `BranchCreate { checkout: false }` | `branch <name> [<start>]` |
@@ -97,6 +99,13 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   index 全体を戻し、`clean --force --` は untracked を全部消す（git 2.55 で確認）。
   「0 件を discard します」と確認して全部消えることになる。`StashPush { paths: None }` は
   「全部」を表す正当な指定なので、`Some(vec![])` とは区別する
+- **unborn HEAD の discard は `rm --force`。** `restore --source=HEAD --staged --worktree`
+  は HEAD が無いと `fatal: could not resolve 'HEAD'` で落ちる。`git rm --force -- <paths>` は
+  unborn でも通り、index からもワークツリーからも消える。これは HEAD があるときに
+  staged な `Added` へ `restore` を掛けた結果（ファイルごと消える）と同じで、
+  ワークツリー側が既に消えている staged 削除でも通る（git 2.55 で確認）。**`Discard` の
+  代わりに無条件で使ってはいけない。** HEAD にあるファイルへ掛けると、変更ではなく
+  ファイルそのものが消える
 - **untracked の discard に `-d` は付けない。** `git_read::status` が
   `recurse_untracked_dirs(true)` で列挙するので、渡すのは常にファイル。ディレクトリごと
   消す余地を残さない

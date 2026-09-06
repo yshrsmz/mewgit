@@ -23,7 +23,10 @@
 
 - [x] `git_read::status` / `diff`（ハンク分割）
 - [x] `git_exec::Runner` と `to_command` の全 `GitOp` テスト、`ExecErrorKind` の分類テスト
-- [ ] `ui::panes::worktree` / `diff` — ファイル・ハンク単位の stage / unstage / discard
+- [x] `ui::panes::worktree` — フォーカス巡回、`Modal::Confirm`、`Runner` の配線、
+      ファイル単位の stage / unstage / discard
+- [ ] `ui::panes::diff` — diff の表示とハンク単位の stage / unstage / discard。
+      `DiffTarget::Commit` をこのペインに出すかもここで決める（07 の「詳細の展開」）
 - [ ] `Modal::CommitMessage` と commit / amend
 - [ ] `ui::panes::branches` — 一覧、作成 / 切替 / 削除 / リネーム、`Modal::Confirm`
 

@@ -3,7 +3,7 @@
 //! 1 行は `罫線  短縮 Oid  ラベル  summary`。罫線のセルを文字と色に写すのは
 //! `ui::lanes`。
 
-use mewgit_core::app::{AppState, GraphLine, GraphState, JobKind};
+use mewgit_core::app::{AppState, GraphLine, GraphState, JobKind, Pane};
 use mewgit_core::git_read::{CommitDetail, Oid, RefLabel, Signature, Timestamp};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -27,9 +27,9 @@ const MIN_GRAPH_ROWS: u16 = 3;
 /// 出さない。1 行だけ取ると区切り線で埋まり、グラフの行を 1 つ失って何も出ない。
 const MIN_DETAIL_ROWS: u16 = 4;
 
-/// ペインの枠。
-fn block() -> Block<'static> {
-    Block::default().borders(Borders::ALL).title("Graph")
+/// ペインの枠。`focused` はフォーカスの強調だけに効き、内側の大きさは変えない。
+fn block(focused: bool) -> Block<'static> {
+    crate::ui::pane_block("Graph".to_string(), focused)
 }
 
 /// 詳細の領域を取るか。
@@ -45,7 +45,7 @@ pub fn shows_detail(graph: &GraphState) -> bool {
 ///
 /// `ui::graph_rows` が行数を出すのに使う。
 pub fn areas(area: Rect, shows_detail: bool) -> (Rect, Option<Rect>) {
-    split(block().inner(area), shows_detail)
+    split(block(false).inner(area), shows_detail)
 }
 
 /// 枠の内側を割る。`Layout` に任せず自分で計算するのは、レイアウトの解に幅を
@@ -74,7 +74,7 @@ fn split(inner: Rect, shows_detail: bool) -> (Rect, Option<Rect>) {
 
 /// グラフペインを描く。
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let block = block();
+    let block = block(state.focus == Pane::Graph);
     // `block()` はタイトルを確保するので 1 フレームに 1 回だけ作る。
     let (rows, detail) = split(block.inner(area), shows_detail(&state.graph));
     frame.render_widget(block, area);
@@ -644,7 +644,16 @@ mod tests {
         detail.parents = vec![fake_oid(1)];
         let state = expanded_with(&["subject"], detail);
 
-        let lines = draw(&state, TermSize::default());
+        // 80 桁だと右ペインのぶんグラフが 46 桁になり、見出しが折り返して
+        // メッセージが詳細の高さから押し出される。中身を見るテストは広い端末で描く
+        // （狭いレイアウトは M6）。
+        let lines = draw(
+            &state,
+            TermSize {
+                width: 120,
+                height: 24,
+            },
+        );
         let text = lines.join("\n");
 
         assert!(text.contains("subject"), "{text}");

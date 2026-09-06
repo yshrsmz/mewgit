@@ -35,11 +35,20 @@ pub enum GitOp {
     /// tracked なファイルの変更を HEAD の内容に戻す。
     ///
     /// untracked なファイルは `git restore` では消せないので
-    /// [`GitOp::DiscardUntracked`] に分ける。どちらを出すかは区画を知っている
-    /// 呼び出し側が決める（`to_command` は純粋関数でファイルシステムを見られない）。
+    /// [`GitOp::DiscardUntracked`] に、コミットが 1 つも無いリポジトリでは HEAD を
+    /// 解決できないので [`GitOp::DiscardUnborn`] に分ける。どれを出すかは区画と
+    /// HEAD の状態を知っている呼び出し側が決める（`to_command` は純粋関数で
+    /// ファイルシステムも HEAD も見られない）。
     Discard(Vec<PathBuf>),
     /// untracked なファイルを削除する（`git clean`）。
     DiscardUntracked(Vec<PathBuf>),
+    /// コミットが 1 つも無いリポジトリ（unborn HEAD）で staged なファイルを捨てる。
+    ///
+    /// **[`GitOp::Discard`] の代わりに無条件で使ってはいけない。** `git rm --force` は
+    /// index とワークツリーの両方からファイルを消すので、HEAD にあるファイルへ掛けると
+    /// 変更ではなくファイルそのものが消える。HEAD が無いあいだは「HEAD の内容に戻す」が
+    /// 「消す」と同じ意味になるので、そのときだけ使える（03）。
+    DiscardUnborn(Vec<PathBuf>),
     Commit {
         message: String,
         amend: bool,

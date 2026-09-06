@@ -19,7 +19,7 @@ impl LaneState {
     pub fn extend(&mut self, commits: &[Commit]) -> Vec<GraphRow>;
 }
 
-pub struct ColorId(pub u16);        // usize ではなく u16。Cell が 24 バイト → 8 バイトになる
+pub struct ColorId(pub u16);        // usize ではなく u16。Cell が 32 バイト → 8 バイトになる
 
 pub struct GraphRow {
     pub oid: Oid,

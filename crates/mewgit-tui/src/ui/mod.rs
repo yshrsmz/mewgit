@@ -14,8 +14,8 @@ use crate::{modals, panes};
 use mewgit_core::app::{AppState, TermSize};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 /// 1 フレーム描く。
@@ -56,21 +56,17 @@ pub fn pane_block(title: String, focused: bool) -> Block<'static> {
     }
 }
 
-/// `lines` を幅 `width` で折り返したときの行数。
+/// 折り返す `Paragraph` と、それを幅 `width` で描いたときの行数（07 の「モーダル」）。
 ///
-/// ratatui の折り返し行数（`Paragraph::line_count`）は unstable feature の後ろに
-/// あるので、表示幅から見積もる。単語の途中で折れないぶん実際はもう 1 行増える
-/// ことがあるので、**これを使う側は「見積もりが 1 行足りなくても壊れない」形に
-/// する**（確認モーダルはキーの案内を別の領域に、コミット詳細はメッセージの
-/// 領域を先に確保する）。
-pub fn wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
-    if width == 0 {
-        return 0;
-    }
-    lines
-        .iter()
-        .map(|line| (line.width() as u16).div_ceil(width).max(1))
-        .sum()
+/// **測る `Paragraph` はここでしか組まない。** 測るときと描くときで `Wrap` の設定が
+/// ずれないようにするためと、枠を付けたまま測らせないため。`Paragraph::line_count` は
+/// 枠の上下を行数に足す一方、枠の左右ぶんを幅からは引かないので、枠付きで測ると
+/// 外側の幅で折り返した行数が返り、本文の末尾が切れる。枠のぶんは呼び出し側が
+/// `Block::inner` から出す。
+pub fn wrapped<'a>(text: impl Into<Text<'a>>, width: u16) -> (Paragraph<'a>, u16) {
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    let rows = u16::try_from(paragraph.line_count(width)).unwrap_or(u16::MAX);
+    (paragraph, rows)
 }
 
 /// 画面をヘッダ / 本文 / ステータスバーに割る。
@@ -147,11 +143,26 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{split, split_body};
+    use super::{split, split_body, wrapped};
     use crate::test_util::{draw, state_at, terminal_with};
     use mewgit_core::app::{NoticeLevel, Pane, TermSize};
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
+
+    #[test]
+    fn wrapped_counts_the_line_that_word_wrapping_adds() {
+        // 30 桁の語 3 つで 92 桁。幅 58 で割った切り上げなら 2 行だが、語の途中では
+        // 折れないので実際は 3 行になる。ここを見積もると本文の末尾が切れる。
+        let words = format!("{} {} {}", "a".repeat(30), "b".repeat(30), "c".repeat(30));
+
+        assert_eq!(wrapped(words, 58).1, 3);
+    }
+
+    #[test]
+    fn wrapped_is_zero_rows_at_zero_width() {
+        // リサイズの途中で幅 0 が来る。`Constraint::Max(0)` に落ちるだけで済ませる。
+        assert_eq!(wrapped("何か", 0).1, 0);
+    }
 
     /// ペインの枠の左上。座標は実際のレイアウトから出す。手で書くと、割り方を
     /// 変えたときにテストだけが古い桁を見て緑のまま無意味になる。

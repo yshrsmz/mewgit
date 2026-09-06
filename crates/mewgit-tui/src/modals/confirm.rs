@@ -3,7 +3,7 @@
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::ui;
@@ -14,20 +14,34 @@ const HINT: &str = "[y] 実行   [n] やめる";
 /// モーダルの幅。狭い端末では画面の幅まで縮む。
 const WIDTH: u16 = 60;
 
+/// 本文とキーの案内のあいだに空ける行数。
+const GAP_ROWS: u16 = 1;
+
+/// キーの案内に取る行数。高さの見積もりと `Layout` で同じものを使う。
+const HINT_ROWS: u16 = 1;
+
 /// 破壊的操作の確認を描く。
 ///
 /// 下のペインを `Clear` で消してから描く。覆わずに重ねると下の文字が透けて読めなくなる。
 pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
-    let lines: Vec<Line> = body.lines().map(Line::raw).collect();
     let width = WIDTH.min(area.width);
-    // 本文 + 空行 + キーの案内 + 枠の上下。画面に収まらない分は `centered` が削る。
-    let height = ui::wrapped_rows(&lines, width.saturating_sub(2)) + 4;
-    let area = centered(area, width, height);
-
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title.to_string())
         .border_style(Style::default().add_modifier(Modifier::BOLD));
+
+    // **枠が食う幅と行数は `Block` 自身から出す。** `- 2` / `+ 2` と手で書くと、
+    // あとで `Padding` を足したときに折り返し幅だけが古いまま残り、本文の末尾が
+    // 黙って切れる（`contains` を見るテストは通ってしまう）。高さはこれから
+    // 決めるので、幅だけ本物の当て木で測る。
+    let probe = Rect::new(0, 0, width, u16::MAX);
+    let probe_inner = block.inner(probe);
+    let border_rows = probe.height - probe_inner.height;
+
+    let (text, body_rows) = ui::wrapped(body, probe_inner.width);
+    // 本文 + 空行 + キーの案内 + 枠。画面に収まらない分は `centered` が削る。
+    let height = body_rows.saturating_add(GAP_ROWS + HINT_ROWS + border_rows);
+    let area = centered(area, width, height);
     let inner = block.inner(area);
 
     frame.render_widget(Clear, area);
@@ -36,9 +50,9 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
     // **キーの案内は本文とは別に、最下行へ描く。** 1 つの `Paragraph` にまとめると、
     // 折り返しで本文が伸びたときに案内だけが枠の外へ押し出される。
     let [body_area, hint_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+        Layout::vertical([Constraint::Min(0), Constraint::Length(HINT_ROWS)]).areas(inner);
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
+    frame.render_widget(text, body_area);
     frame.render_widget(Paragraph::new(Line::from(HINT)), hint_area);
 }
 
@@ -111,6 +125,30 @@ mod tests {
 
         assert!(text.contains("[y] 実行"), "{text}");
         assert!(text.contains("[n] やめる"), "{text}");
+    }
+
+    #[test]
+    fn a_body_wrapped_at_word_boundaries_keeps_its_last_line() {
+        // 幅で割った切り上げは、単語境界で折れて増えたぶんを数え落とす。1 行ぶんは
+        // 枠に取った空行が吸うので、2 行足りない本文でないと踏めない。題材は
+        // `ui::wrapped` のテストと同じ 30 桁の語 3 つ。
+        let a = "a".repeat(30);
+        let b = "b".repeat(30);
+        let c = "c".repeat(30);
+        let tail = format!("{}MARKER", "d".repeat(24));
+        let body = format!("{a} {b} {c}\n{a} {b} {tail}");
+        let state = state_with_confirm("変更を破棄", &body);
+
+        let lines = draw(&state, SIZE);
+        let text = lines.join("\n");
+
+        // 末尾が枠の中に、キーの案内より上にあること。`contains` だけだと、
+        // 案内を押し出しただけの状態も通る。
+        assert!(text.contains("MARKER"), "{text}");
+        assert!(
+            row_of(&lines, "MARKER") < row_of(&lines, "[y] 実行"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -28,12 +28,52 @@ pub(super) fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// git2 の delta から変更のあったファイル 1 件を組み立てる。出しても操作できない
+/// ものは `None`。
+///
+/// **`status` と `diff` の両方がここを通る。** [`FileDiff`] は [`FileEntry`] と同じ
+/// 3 つを頭に持つので、別々に書くと「非 UTF-8 をどう落とすか」「`old_path` を入れる
+/// のはどの種別か」が静かにずれる。
+pub(super) fn file_entry(delta: &git2::DiffDelta<'_>) -> Option<FileEntry> {
+    let status = file_status(delta.status())?;
+    // 削除でも libgit2 は `new_file` にパスを入れる。
+    let path = utf8_path(delta.new_file().path_bytes())?;
+    let old_path = match status {
+        // 旧パスが非 UTF-8 なら、`git_exec` の argv に載せられないのでファイルごと落とす。
+        FileStatus::Renamed | FileStatus::Copied => Some(utf8_path(delta.old_file().path_bytes())?),
+        _ => None,
+    };
+    Some(FileEntry {
+        path,
+        old_path,
+        status,
+    })
+}
+
+/// git2 の delta 種別を層の値型にする。
+///
+/// `Unmodified` / `Ignored` / `Unreadable` は [`FileStatus`] に対応が無く、この UI で
+/// 出しても操作できないので `None`。
+fn file_status(delta: git2::Delta) -> Option<FileStatus> {
+    match delta {
+        git2::Delta::Added => Some(FileStatus::Added),
+        git2::Delta::Deleted => Some(FileStatus::Deleted),
+        git2::Delta::Modified => Some(FileStatus::Modified),
+        git2::Delta::Renamed => Some(FileStatus::Renamed),
+        git2::Delta::Copied => Some(FileStatus::Copied),
+        git2::Delta::Typechange => Some(FileStatus::Typechange),
+        git2::Delta::Untracked => Some(FileStatus::Untracked),
+        git2::Delta::Conflicted => Some(FileStatus::Conflicted),
+        git2::Delta::Unmodified | git2::Delta::Ignored | git2::Delta::Unreadable => None,
+    }
+}
+
 /// 識別子として使うパスを `PathBuf` にする。非 UTF-8 なら `None`。
 ///
 /// 呼び出し側はそのファイルを一覧ごと落とす。Unix の `PathBuf` は任意のバイト列を
 /// 持てるが、`git_exec` の argv に載せられず、UI で選べても操作できない
 /// （「非 UTF-8 の扱い」）。
-pub(super) fn utf8_path(bytes: Option<&[u8]>) -> Option<PathBuf> {
+fn utf8_path(bytes: Option<&[u8]>) -> Option<PathBuf> {
     Some(PathBuf::from(std::str::from_utf8(bytes?).ok()?))
 }
 
@@ -251,6 +291,23 @@ pub enum WorktreeSection {
 }
 
 impl WorktreeSnapshot {
+    /// 各区画を `path` 順に並べ替える。
+    ///
+    /// libgit2 の列挙順には依存しない（[`RefIndex::new`] と同じ理由）。区画を手で
+    /// 並べる代わりに分解束縛にしてあるのは、区画を足したときに並べ替え漏れが
+    /// コンパイルエラーになるようにするため（[`section`](Self::section) と同じ狙い）。
+    pub(crate) fn sort_sections(&mut self) {
+        let Self {
+            staged,
+            unstaged,
+            untracked,
+            conflicted,
+        } = self;
+        for section in [staged, unstaged, untracked, conflicted] {
+            section.sort_by(|a, b| a.path.cmp(&b.path));
+        }
+    }
+
     /// 区画の中身。網羅 `match` なので、区画を足したら実装漏れがコンパイルエラーになる。
     pub fn section(&self, section: WorktreeSection) -> &[FileEntry] {
         match section {
@@ -324,6 +381,7 @@ impl DiffTarget {
 ///
 /// ハンクを `Vec<Hunk>` に平坦化せずファイル単位で持つ。`GitOp::StageHunk` に渡す
 /// `path` を復元できなくなるため。
+/// 頭の 3 つは [`FileEntry`] と同じ値で、どちらも [`file_entry`] が組み立てる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
     pub path: PathBuf,

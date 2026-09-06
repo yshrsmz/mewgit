@@ -214,18 +214,30 @@ pub struct FileEntry {
   新しいディレクトリが 1 行にまとまり、中のファイルを個別に stage できない。ignored は含めない
 - rename 検出は `renames_head_to_index` / `renames_index_to_workdir` を有効にする。切ると
   `git mv` が「削除 + 追加」の 2 行になり、`git status` の見え方と食い違う
-- 分類は `Status` のビットから決める。`CONFLICTED` が立っていたら conflicted だけに入れ、
-  他のビットは見ない。`INDEX_*` は staged、`WT_NEW` は untracked、残りの `WT_*` は unstaged。
-  **同じファイルが staged と unstaged の両方に出るのは正しい**（一部だけ stage した状態）
+- 区画は delta の有無で決める。`head_to_index()` があれば staged、`index_to_workdir()` が
+  あれば unstaged（種別が `Untracked` ならそちら）。`CONFLICTED` が立っている entry だけは
+  例外で、conflicted にだけ入れて他の区画には出さない（解消するまで stage も unstage も
+  できない）。**同じファイルが staged と unstaged の両方に出るのは正しい**（一部だけ
+  stage した状態）
+- **変更種別は `Status` のビットではなく delta から決める。** ビットは同時に複数立つ
+  （`git mv` してから編集すると `RENAMED | MODIFIED`）が、どちらを採るかは libgit2 が
+  delta 側で既に解決している。ビットから決め直すと優先順の表が `diff` の写像と 2 本になり、
+  片方だけ直したときに静かにずれる
+- conflicted の delta は `index_to_workdir()` を先に見て、無ければ `head_to_index()` を使う。
+  どちらか一方しか無いことがある
 - **パスは `StatusEntry::path()` からは取らない。** rename のとき `path()` は旧パスを返すので、
-  staged の一覧に新しい名前が出なくなる。staged は `head_to_index()`、unstaged は
-  `index_to_workdir()` の delta を見て、`new_file` を `path`、rename のときだけ `old_file` を
-  `old_path` に入れる
+  staged の一覧に新しい名前が出なくなる。delta の `new_file` を `path`、rename と copy の
+  ときだけ `old_file` を `old_path` に入れる
 - `old_path` を持つのは、`FileStatus::Renamed` が旧パス無しでは表示にならず、staged rename の
   unstage が旧パスと新パスの両方を argv に載せる必要があるため（03）
-- パスが非 UTF-8 のファイルは一覧から落とす（「非 UTF-8 の扱い」）
+- パスが非 UTF-8 のファイルは一覧から落とす（「非 UTF-8 の扱い」）。旧パスだけが非 UTF-8 の
+  rename も落とす。新しい名前は出せても unstage できない
+- **delta から `FileEntry` を組み立てるのは `status` と `diff` で同じ 1 本。** `FileDiff` は
+  `FileEntry` と同じ 3 つを頭に持つ。別々に書くと、非 UTF-8 の落とし方と `old_path` を入れる
+  種別がずれる
 - 並びは区画ごとに `path` 順へ自分で並べ替える。libgit2 の列挙順に依存しない
-  （`RefIndex` のラベルと同じ理由）
+  （`RefIndex` のラベルと同じ理由）。区画を手で並べず分解束縛で回し、区画を足したときに
+  並べ替え漏れがコンパイルエラーになるようにする
 
 ## diff とハンク
 
@@ -235,6 +247,11 @@ pub enum DiffTarget {
     HeadVsIndex(Option<PathBuf>),
     Commit { oid: Oid, path: Option<PathBuf> },
     Range { from: Oid, to: Oid, path: Option<PathBuf> },
+}
+
+impl DiffTarget {
+    /// 絞り込みのパス。全変種が持つので、変種ごとの `match` を呼び出し側に配らない。
+    pub fn path(&self) -> Option<&Path>;
 }
 
 pub struct FileDiff {
@@ -263,7 +280,8 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
 - rename 検出の `find_similar()` は `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの
   delta には効かない
 - `Delta::Unmodified` / `Ignored` / `Unreadable` の delta は落とす。`FileStatus` に対応する
-  変種が無く、この UI では出しても操作できない
+  変種が無く、この UI では出しても操作できない。`Patch::from_diff` が `None` を返すのも
+  この 3 つだけなので、パッチが作れない delta はそのまま飛ばしてよい
 - **`binary` は `Patch` を作ったあとの `patch.delta()` から読む。** libgit2 はバイナリ判定を
   パッチ生成のときに行うので、`Diff::get_delta` を先に読むと立っていないことがある。
   バイナリと「mode だけの変更」はどちらも `hunks` が空になるので、区別はこのフラグで付ける

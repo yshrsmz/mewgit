@@ -136,7 +136,10 @@ impl TestRepo {
     }
 
     /// `git` を実行し、標準出力を末尾の改行を落として返す。失敗したら panic する。
-    pub fn git(&self, args: &[&str]) -> String {
+    ///
+    /// 引数は `AsRef<OsStr>` なら何でも渡せる。非 UTF-8 のパスを `git` に渡すテストが
+    /// [`Sandbox`] を直接触らずに済むようにするため。
+    pub fn git<S: AsRef<OsStr>>(&self, args: &[S]) -> String {
         self.sandbox.git(args)
     }
 
@@ -147,12 +150,15 @@ impl TestRepo {
         self.sandbox.try_git(args).status.success()
     }
 
-    /// 非 UTF-8 のパスを index にだけ足す。ワークツリーにはファイルを作らない。
+    /// 非 UTF-8 のパスを index にだけ足し、その blob の Oid を返す。
+    /// ワークツリーにはファイルを作らない。
     ///
     /// macOS の APFS は非 UTF-8 のファイル名を受け付けない（`Illegal byte sequence`）ので、
     /// ワークツリーには置けない。index にだけ入れれば「staged で追加され、ワークツリー
     /// からは消えている」状態になり、staged 側と unstaged 側の両方を 1 回で踏める。
-    pub fn add_raw_path_to_index(&self, path: &[u8]) {
+    ///
+    /// 返る Oid は、同じ blob を別の名前で index に入れて rename を作るのに使う。
+    pub fn add_raw_path_to_index(&self, path: &[u8]) -> String {
         // 中身は何でもよいので、リポジトリの外に置いたファイルから blob を作る。
         let source = self.sandbox.home.join("raw-blob");
         fs::write(&source, b"raw\n").expect("blob の元ファイルを書けませんでした");
@@ -166,12 +172,13 @@ impl TestRepo {
         // 見ないので、ファイルが存在しなくても index に入る。
         let mut cacheinfo = OsString::from(format!("100644,{blob},"));
         cacheinfo.push(OsStr::from_bytes(path));
-        self.sandbox.git(&[
+        self.git(&[
             OsStr::new("update-index"),
             OsStr::new("--add"),
             OsStr::new("--cacheinfo"),
             &cacheinfo,
         ]);
+        blob
     }
 
     /// `file.txt` を書き換えてコミットし、その Oid を返す。
@@ -179,14 +186,22 @@ impl TestRepo {
         self.commit_file("file.txt", message)
     }
 
-    /// 指定したファイルを書き換えてコミットし、その Oid を返す。
+    /// 指定したファイルを書き換えてコミットし、その Oid を返す。中身はメッセージ。
     ///
     /// ブランチを分けて後でマージするテストは、同じファイルを触るとマージが
     /// コンフリクトするのでこちらを使う。
     pub fn commit_file(&self, path: &str, message: &str) -> Oid {
-        self.write_worktree_file(path, format!("{message}\n").as_bytes());
+        self.commit_bytes(path, format!("{message}\n").as_bytes(), message)
+    }
+
+    /// 中身を指定してコミットし、その Oid を返す。
+    ///
+    /// 改行で終わらないファイルやバイナリなど、[`commit_file`](Self::commit_file) の
+    /// 「中身 = メッセージ + 改行」では作れないものに使う。
+    pub fn commit_bytes(&self, path: &str, content: &[u8], message: &str) -> Oid {
+        self.write_worktree_file(path, content);
         self.git(&["add", path]);
-        self.git(&["commit", "-m", message]);
+        self.git(&["commit", "-q", "-m", message]);
         self.head_oid()
     }
 

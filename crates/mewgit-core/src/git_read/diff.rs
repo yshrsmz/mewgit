@@ -1,9 +1,9 @@
 //! diff とハンク分割。設計は `docs/design/02-git-read.md` の「diff とハンク」。
 
-use git2::{Delta, DiffLineType, DiffOptions, ErrorCode, Patch, Tree};
+use git2::{DiffLineType, DiffOptions, ErrorCode, Patch, Tree};
 
 use super::{
-    lossy, utf8_path, DiffTarget, FileDiff, FileStatus, GitReadError, Hunk, HunkLine, LineOrigin,
+    file_entry, lossy, DiffTarget, FileDiff, FileEntry, GitReadError, Hunk, HunkLine, LineOrigin,
     RepoReader,
 };
 
@@ -74,49 +74,31 @@ fn file_diffs(diff: &git2::Diff<'_>) -> Result<Vec<FileDiff>, GitReadError> {
     let mut files = Vec::with_capacity(diff.deltas().len());
 
     for index in 0..diff.deltas().len() {
-        let patch = Patch::from_diff(diff, index)?;
+        // `from_diff` が `None` を返すのは libgit2 が「出さない」と判断した delta
+        // （`Unmodified` / `Ignored` / `Unreadable`）だけで、それは `file_entry` も落とす。
+        let Some(patch) = Patch::from_diff(diff, index)? else {
+            continue;
+        };
         // **delta はパッチ側から読む。** libgit2 はバイナリ判定をパッチ生成のときに
         // 行うので、`Diff::get_delta` を先に読むと `is_binary` が立っていないことがある。
-        // パッチにならない delta（`from_diff` が `None`）でも行自体は出したいので、
-        // そのときだけ diff から取る。
-        let delta = match &patch {
-            Some(patch) => patch.delta(),
-            None => match diff.get_delta(index) {
-                Some(delta) => delta,
-                None => continue,
-            },
-        };
+        let delta = patch.delta();
 
-        // `Unmodified` / `Ignored` / `Unreadable` は `FileStatus` に対応が無く、
-        // 出しても操作できない。
-        let Some(status) = file_status(delta.status()) else {
+        // 種別とパスの決め方は `status` と同じところを通す。
+        let Some(FileEntry {
+            path,
+            old_path,
+            status,
+        }) = file_entry(&delta)
+        else {
             continue;
         };
-        // パスが非 UTF-8 のファイルは落とす（02 の「非 UTF-8 の扱い」）。削除でも
-        // libgit2 は `new_file` にパスを入れる。
-        let Some(path) = utf8_path(delta.new_file().path_bytes()) else {
-            continue;
-        };
-        let old_path = match status {
-            FileStatus::Renamed | FileStatus::Copied => {
-                let Some(old) = utf8_path(delta.old_file().path_bytes()) else {
-                    continue;
-                };
-                Some(old)
-            }
-            _ => None,
-        };
 
-        let hunks = match &patch {
-            Some(patch) => read_hunks(patch)?,
-            None => Vec::new(),
-        };
         files.push(FileDiff {
             path,
             old_path,
             status,
             binary: delta.flags().is_binary(),
-            hunks,
+            hunks: read_hunks(&patch)?,
         });
     }
 
@@ -144,9 +126,10 @@ fn read_hunks(patch: &Patch<'_>) -> Result<Vec<Hunk>, GitReadError> {
 
         // ヘッダは非 UTF-8 でも lossy でよい。`git apply` は 2 つ目の `@@` より後ろの
         // 関数コンテキストを読まないので、置換文字が混ざってもパッチとしては壊れない。
-        let mut header = lossy(hunk.header());
-        header.truncate(header.trim_end_matches('\n').len());
-        hunks.push(Hunk { header, lines });
+        hunks.push(Hunk {
+            header: lossy(trim_eol(hunk.header())),
+            lines,
+        });
     }
 
     Ok(hunks)
@@ -176,20 +159,5 @@ fn line_origin(kind: DiffLineType, content: &[u8]) -> Option<LineOrigin> {
         DiffLineType::ContextEOFNL | DiffLineType::AddEOFNL | DiffLineType::DeleteEOFNL => None,
         // `line_in_hunk` はハンクの中の行しか返さないので来ない。
         DiffLineType::FileHeader | DiffLineType::HunkHeader | DiffLineType::Binary => None,
-    }
-}
-
-/// git2 の delta 種別を層の値型にする。この UI で出しても操作できないものは `None`。
-fn file_status(delta: Delta) -> Option<FileStatus> {
-    match delta {
-        Delta::Added => Some(FileStatus::Added),
-        Delta::Deleted => Some(FileStatus::Deleted),
-        Delta::Modified => Some(FileStatus::Modified),
-        Delta::Renamed => Some(FileStatus::Renamed),
-        Delta::Copied => Some(FileStatus::Copied),
-        Delta::Typechange => Some(FileStatus::Typechange),
-        Delta::Untracked => Some(FileStatus::Untracked),
-        Delta::Conflicted => Some(FileStatus::Conflicted),
-        Delta::Unmodified | Delta::Ignored | Delta::Unreadable => None,
     }
 }

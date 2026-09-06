@@ -115,6 +115,31 @@ fn status_reports_a_staged_rename_with_both_paths() {
 }
 
 #[test]
+fn status_reports_a_file_replaced_by_a_symlink_as_a_typechange() {
+    let repo = TestRepo::init();
+    repo.commit_file("target.txt", "target");
+    repo.commit_file("link", "link");
+    fs::remove_file(repo.path().join("link")).unwrap();
+    std::os::unix::fs::symlink("target.txt", repo.path().join("link")).unwrap();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    // 通常ファイル ↔ symlink の入れ替わり。削除 + 追加ではなく 1 行で出る。
+    let unstaged = reader.status().unwrap();
+    assert_eq!(
+        rows(&unstaged.unstaged),
+        [("link", None, FileStatus::Typechange)]
+    );
+
+    repo.git(&["add", "link"]);
+    let staged = reader.status().unwrap();
+    assert_eq!(
+        rows(&staged.staged),
+        [("link", None, FileStatus::Typechange)]
+    );
+    assert_eq!(rows(&staged.unstaged), []);
+}
+
+#[test]
 fn status_puts_a_conflicted_file_only_in_the_conflicted_section() {
     let repo = TestRepo::init();
     repo.commit_file("conflict.txt", "base");

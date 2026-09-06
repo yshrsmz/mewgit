@@ -1,5 +1,8 @@
 //! `git_read::RepoReader::diff` の統合テスト。実リポジトリを一時ディレクトリに作って読む。
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+
 use mewgit_core::git_read::{DiffTarget, FileDiff, FileStatus, Hunk, LineOrigin, RepoReader};
 use mewgit_core::test_util::TestRepo;
 
@@ -33,11 +36,8 @@ fn lines(hunk: &Hunk) -> Vec<(LineOrigin, String)> {
 }
 
 /// 20 行のファイル。離れた 2 箇所を変えてハンクを 2 つにするのに使う。
-fn twenty_lines() -> Vec<u8> {
-    (1..=20)
-        .map(|n| format!("line {n}\n"))
-        .collect::<String>()
-        .into_bytes()
+fn twenty_lines() -> String {
+    (1..=20).map(|n| format!("line {n}\n")).collect()
 }
 
 #[test]
@@ -217,9 +217,7 @@ fn a_path_narrows_the_diff_and_is_not_a_glob() {
 #[test]
 fn a_line_without_a_trailing_newline_is_marked_on_the_line_itself() {
     let repo = TestRepo::init();
-    repo.write_worktree_file("noeol.txt", b"a\nb");
-    repo.git(&["add", "noeol.txt"]);
-    repo.git(&["commit", "-q", "-m", "noeol"]);
+    repo.commit_bytes("noeol.txt", b"a\nb", "noeol");
     repo.write_worktree_file("noeol.txt", b"a\nb\nc");
     let reader = RepoReader::open(repo.path()).unwrap();
 
@@ -241,9 +239,7 @@ fn a_line_without_a_trailing_newline_is_marked_on_the_line_itself() {
 #[test]
 fn a_context_line_without_a_trailing_newline_is_marked_too() {
     let repo = TestRepo::init();
-    repo.write_worktree_file("ctx.txt", b"a\nb\nc");
-    repo.git(&["add", "ctx.txt"]);
-    repo.git(&["commit", "-q", "-m", "ctx"]);
+    repo.commit_bytes("ctx.txt", b"a\nb\nc", "ctx");
     repo.write_worktree_file("ctx.txt", b"A\nb\nc");
     let reader = RepoReader::open(repo.path()).unwrap();
 
@@ -263,11 +259,9 @@ fn a_context_line_without_a_trailing_newline_is_marked_too() {
 #[test]
 fn distant_changes_are_split_into_separate_hunks() {
     let repo = TestRepo::init();
-    repo.write_worktree_file("long.txt", &twenty_lines());
-    repo.git(&["add", "long.txt"]);
-    repo.git(&["commit", "-q", "-m", "long"]);
-    let edited = String::from_utf8(twenty_lines())
-        .unwrap()
+    let original = twenty_lines();
+    repo.commit_bytes("long.txt", original.as_bytes(), "long");
+    let edited = original
         .replace("line 1\n", "LINE 1\n")
         .replace("line 20\n", "LINE 20\n");
     repo.write_worktree_file("long.txt", edited.as_bytes());
@@ -288,9 +282,7 @@ fn distant_changes_are_split_into_separate_hunks() {
 #[test]
 fn a_binary_file_is_flagged_and_has_no_hunks() {
     let repo = TestRepo::init();
-    repo.write_worktree_file("bin.dat", &[0u8, 1, 2, 3, 0, 255]);
-    repo.git(&["add", "bin.dat"]);
-    repo.git(&["commit", "-q", "-m", "bin"]);
+    repo.commit_bytes("bin.dat", &[0u8, 1, 2, 3, 0, 255], "bin");
     repo.write_worktree_file("bin.dat", &[9u8, 9, 0, 1]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
@@ -320,9 +312,7 @@ fn a_mode_only_change_has_no_hunks_and_is_not_binary() {
 #[test]
 fn hunk_lines_keep_bytes_that_are_not_utf8() {
     let repo = TestRepo::init();
-    repo.write_worktree_file("latin.txt", b"caf\xe9\n");
-    repo.git(&["add", "latin.txt"]);
-    repo.git(&["commit", "-q", "-m", "latin"]);
+    repo.commit_bytes("latin.txt", b"caf\xe9\n", "latin");
     repo.write_worktree_file("latin.txt", b"th\xe9\n");
     let reader = RepoReader::open(repo.path()).unwrap();
 
@@ -346,6 +336,31 @@ fn diff_drops_a_file_whose_path_is_not_utf8() {
 
     let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
 
+    assert_eq!(files(&diff), []);
+}
+
+#[test]
+fn diff_drops_a_rename_whose_old_path_is_not_utf8() {
+    let repo = TestRepo::init();
+    let blob = repo.add_raw_path_to_index(b"bad\xff.txt");
+    repo.git(&["commit", "-q", "-m", "raw"]);
+    // 同じ blob を UTF-8 の名前に付け替える。Oid が同じなので rename は必ず検出される。
+    repo.git(&[
+        OsStr::new("update-index"),
+        OsStr::new("--force-remove"),
+        OsStr::from_bytes(b"bad\xff.txt"),
+    ]);
+    repo.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("100644,{blob},good.txt"),
+    ]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
+
+    // 新しいパスは UTF-8 でも、旧パスを argv に載せられないので unstage できない。
     assert_eq!(files(&diff), []);
 }
 

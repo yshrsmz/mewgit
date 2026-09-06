@@ -61,6 +61,17 @@ pub enum Vertical {
     Commit { color: ColorId, merge: bool },
 }
 
+impl Vertical {
+    /// 縦線の色。線が無ければ `None`。
+    pub fn color(self) -> Option<ColorId> {
+        match self {
+            Self::None => None,
+            Self::Through(color) | Self::Up(color) | Self::Down(color) => Some(color),
+            Self::Commit { color, .. } => Some(color),
+        }
+    }
+}
+
 /// マスの横成分。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Horizontal {

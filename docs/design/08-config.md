@@ -23,7 +23,7 @@ editor_fallback = false  # true なら reword 等で $EDITOR を使う
 [graph]
 ascii = false
 page_size = 300
-colors = ["blue", "magenta", "cyan", "green", "yellow", "red"]
+colors = ["blue", "magenta", "cyan", "green", "yellow", "red"]   # 読めない色名は端末既定色
 
 [github]
 enabled = true
@@ -57,6 +57,11 @@ pr_closed = "red"
 `graph_head` が `"bold"` であるとおり、値は色とは限らない。読めないトークンは黙って
 無視する（設定の 1 語のミスで起動を止めない）。解釈は `ui::theme::style`（07）。
 
+`[graph] colors` は色名だけの並びで、こちらは**読めない名前を飛ばさずに端末既定色として
+並びに残す**。飛ばすと `ColorId % colors.len()` の周期が設定の見た目と変わり、
+「6 色書いたのに 5 色で回る」理由をユーザーが追えない。色名の解釈は
+`ui::theme::color` を共有する。
+
 ## リポジトリ固有設定
 
 ```
@@ -80,7 +85,9 @@ git config mewgit.user taro_acme
 1・2 は `config` モジュールの責務。3 はリポジトリのパスを必要とし、値としても
 `mewgit.user` しか読まないため `auth::resolve`（04）が `Config` とは別に読む。
 4 は `Config::load()` が 2 の直後に適用する。`Config` 自身は `.git/config` を見ない。
-MVP で見る環境変数は `MEWGIT_GIT_BIN` と `MEWGIT_GH_BIN` の 2 つ。
+MVP で見る環境変数は `MEWGIT_GIT_BIN` と `MEWGIT_GH_BIN` の 2 つ。M6 で
+`LC_ALL` / `LC_CTYPE` / `LANG` を足し、UTF-8 でなければ `graph.ascii` の既定を
+真にする（06 の「ASCII フォールバック」）。設定ファイルに書いてあればそちらが勝つ。
 
 ## 構造体
 

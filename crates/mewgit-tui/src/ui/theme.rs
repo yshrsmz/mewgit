@@ -14,11 +14,18 @@ pub fn style(spec: &str) -> Style {
     for token in spec.split_whitespace() {
         if let Some(modifier) = modifier(token) {
             style = style.add_modifier(modifier);
-        } else if let Ok(color) = token.parse::<Color>() {
+        } else if let Some(color) = color(token) {
             style = style.fg(color);
         }
     }
     style
+}
+
+/// 色名 1 つ。読めなければ `None`。
+///
+/// `[graph] colors` の palette もここを通す。「文字列 → 色」の解釈を 1 箇所に置く。
+pub fn color(token: &str) -> Option<Color> {
+    token.parse().ok()
 }
 
 /// 修飾の名前。`ratatui` の `Modifier` に `FromStr` は無い。

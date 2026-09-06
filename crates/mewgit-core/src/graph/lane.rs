@@ -164,25 +164,18 @@ fn connect(cells: &mut Vec<Cell>, from: usize, to: usize, color: ColorId) {
 mod tests {
     use super::*;
     use crate::graph::Horizontal;
-    use crate::test_util::fake_commit;
+    use crate::test_util::fake_commit_with_parents;
 
-    /// `parents` を持つコミット。oid は添字から作る（`fake_commit`）。
+    /// `parents` を持つコミット。oid は添字から作る。
     fn commit(index: u8, parents: &[u8]) -> Commit {
-        Commit {
-            parents: parents.iter().map(|&index| oid(index)).collect(),
-            ..fake_commit(index, "")
-        }
-    }
-
-    fn oid(index: u8) -> Oid {
-        fake_commit(index, "").oid
+        fake_commit_with_parents(index, parents, "")
     }
 
     /// 行を文字にして並べる。期待値を読める形にするためのテスト専用レンダラ。
     ///
     /// 文字の割り当ては 06 の対応表、レーン間の埋め方は 07 の Graph ペインの規則
-    /// （左右がつながっているときだけ `─`）。**同じ表が `ui` 側にも生える**ので、
-    /// 変えるときは 06 / 07 / `ui::panes::graph` と一緒に直す。
+    /// （左右がつながっているときだけ `─`）。**同じ表が `mewgit-tui` の `ui::lanes`
+    /// にもある**ので、変えるときは 06 / `ui::lanes` と一緒に直す。
     fn render(rows: &[GraphRow]) -> String {
         rows.iter()
             .map(|row| {

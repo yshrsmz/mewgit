@@ -3,8 +3,8 @@
 
 use mewgit_core::app::{update, AppState, Msg, RepoInfo, TermSize};
 use mewgit_core::config::Config;
-use mewgit_core::git_read::LogPage;
-use mewgit_core::test_util::fake_commit;
+use mewgit_core::git_read::{Commit, LogPage};
+use mewgit_core::test_util::{fake_commit, fake_commit_with_parents};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -15,14 +15,33 @@ use crate::ui;
 /// `TestBackend` の `Display` を使う。自前でセルを走査すると全角文字の 2 セル目が
 /// 空白として混ざる（「新しい通知」→「新 し い 通 知」）が、`Display` は幅を見て
 /// 正しく詰めてくれる。スタイルを見たいときは [`terminal_with`] を使う。
+///
+/// `Display` は 1 行を `"` で囲むので外す。付いたままだと文字列上の桁が
+/// バッファの x 座標と 1 つずれ、桁を見るテストが読みにくくなる。
 pub fn draw(state: &AppState, size: TermSize) -> Vec<String> {
     terminal_with(state, size)
         .backend()
         .to_string()
         .lines()
-        .map(str::to_string)
+        .map(|line| unquote(line).to_string())
         .collect()
 }
+
+/// 囲みの `"` と、そのうしろの注記を落とす。
+///
+/// 全角文字があると `TestBackend` は隠れたセルの一覧を閉じ `"` のあとに足す
+/// （`"…" Hidden by multi-width symbols: [(1, " ")]`）。注記の中にも `"` が
+/// 入るので、末尾から探さずに注記の開始で切る。
+fn unquote(line: &str) -> &str {
+    let body = line.strip_prefix('"').unwrap_or(line);
+    match body.split_once(HIDDEN_CELLS) {
+        Some((head, _)) => head,
+        None => body.strip_suffix('"').unwrap_or(body),
+    }
+}
+
+/// `TestBackend` が隠れたセルを報告するときの区切り。閉じ `"` を含む。
+const HIDDEN_CELLS: &str = "\" Hidden by multi-width symbols:";
 
 /// 1 フレーム描いた `TestBackend` を返す。バッファのスタイルを見るとき用。
 pub fn terminal_with(state: &AppState, size: TermSize) -> Terminal<TestBackend> {
@@ -42,22 +61,57 @@ pub fn state_at(path: &str) -> AppState {
     )
 }
 
-/// 与えた summary のコミットを新しい順に積んだ状態。
+/// 与えた summary のコミットを新しい順に積んだ状態。親は持たない。
+pub fn state_with_commits(summaries: &[&str]) -> AppState {
+    let commits = summaries
+        .iter()
+        .enumerate()
+        .map(|(index, summary)| fake_commit(index as u8, summary))
+        .collect();
+    state_with_log(commits)
+}
+
+/// `(索引, 親の索引)` の並びからコミットを組んで積んだ状態。並びは新しい順。
+///
+/// レーンのある行を描くのに使う。oid は索引から作る（`fake_oid`）。
+pub fn state_with_history(history: &[(u8, &[u8])]) -> AppState {
+    let commits = history
+        .iter()
+        .map(|(index, parents)| fake_commit_with_parents(*index, parents, "summary"))
+        .collect();
+    state_with_log(commits)
+}
+
+/// コミット列を 1 ページとして積んだ状態。
 ///
 /// 実リポジトリを作らない。描画のテストが `git` の挙動で落ちないようにするため。
 /// `viewport` は 24 行の端末で描くときのグラフの行数に合わせる。
-pub fn state_with_commits(summaries: &[&str]) -> AppState {
+fn state_with_log(commits: Vec<Commit>) -> AppState {
     let mut state = state_at("/repo");
     state.graph.viewport = ui::graph_rows(TermSize::default());
 
     let page = LogPage {
-        commits: summaries
-            .iter()
-            .enumerate()
-            .map(|(index, summary)| fake_commit(index as u8, summary))
-            .collect(),
+        commits,
         done: true,
     };
     update(&mut state, Msg::LogLoaded(Ok(page)));
     state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_row_with_wide_characters_comes_back_without_the_quotes() {
+        // 全角があると `TestBackend` は閉じ `"` のうしろに隠れたセルの一覧を足す。
+        // 末尾から `"` を探すと、その注記の中の `"` に当たって外れない。
+        let state = state_with_commits(&["日本語のコミットメッセージ"]);
+
+        let lines = draw(&state, TermSize::default());
+
+        assert!(!lines[2].contains('"'), "{:?}", lines[2]);
+        assert!(!lines[2].contains("Hidden by"), "{:?}", lines[2]);
+        assert!(lines[2].contains("日本語のコミットメッセージ"));
+    }
 }

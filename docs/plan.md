@@ -15,7 +15,7 @@
 - [x] `git_read::RepoReader::open` / `remotes` / `refs` / `head`
 - [x] `git_read` のログ列挙（`LogSession`、ページング）+ tempfile リポジトリでのテスト
 - [x] `graph::lane` — レーン割り当てアルゴリズム + 固定ケースのテスト（直線 / 分岐 / マージ / オクトパス / 複数ルート）
-- [ ] `ui::panes::graph` — `GraphRow` の描画、罫線 / ASCII フォールバック、ラベル、色
+- [x] `ui::panes::graph` — `GraphRow` の描画、罫線 / ASCII フォールバック、ラベル、色
 - [ ] コミット詳細の遅延取得と展開表示
 - [ ] スクロール追随のページ追加ロード
 
@@ -61,5 +61,7 @@
 
 - [ ] `Modal::Help` とキーマップ上書き
 - [ ] 端末幅 < 100 のレイアウト
+- [ ] ロケール（`LC_ALL` / `LC_CTYPE` / `LANG`）から `graph.ascii` の既定を決める
+      （曖昧幅を全角扱いする端末は UTF-8 でもずれる。06 の「ASCII フォールバック」）
 - [ ] `.git/HEAD` mtime 監視での外部変更検知
 - [ ] README、リリースワークフロー（`cargo dist` or release-please）

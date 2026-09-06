@@ -80,6 +80,15 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
             argv.extend(["clean".into(), "--force".into()]);
             push_paths(&mut argv, paths)?;
         }
+        // HEAD に無いファイル専用。`restore --source=HEAD` はコミットが 1 つも
+        // 無いリポジトリで `could not resolve 'HEAD'` で落ちるが、`git rm --force` は
+        // 通り、しかも HEAD があるときに staged な `Added` へ `restore` を掛けた結果
+        // （index からもワークツリーからも消える）と同じになる（git 2.55 で確認）。
+        // `--quiet` は消したファイルの一覧を出させないため。
+        GitOp::DiscardAdded(paths) => {
+            argv.extend(["rm".into(), "--force".into(), "--quiet".into()]);
+            push_paths(&mut argv, paths)?;
+        }
         GitOp::Commit { message, amend } => {
             argv.push("commit".into());
             if *amend {
@@ -255,6 +264,7 @@ mod tests {
             GitOp::UnstageHunk { .. } => "UnstageHunk",
             GitOp::Discard(_) => "Discard",
             GitOp::DiscardUntracked(_) => "DiscardUntracked",
+            GitOp::DiscardAdded(_) => "DiscardAdded",
             GitOp::Commit { .. } => "Commit",
             GitOp::BranchCreate { .. } => "BranchCreate",
             GitOp::Checkout(_) => "Checkout",
@@ -283,7 +293,7 @@ mod tests {
     /// [`variant`] のアームの数。`GitOp` に変種を足すと `variant` の網羅 `match` が
     /// コンパイルエラーになり、ここに来る。アームと一緒にこの数と [`cases`] も足す
     /// （足し忘れは `covers_every_variant` が落とす）。
-    const VARIANT_COUNT: usize = 28;
+    const VARIANT_COUNT: usize = 29;
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
     fn cases() -> Vec<(GitOp, Vec<&'static str>)> {
@@ -324,6 +334,10 @@ mod tests {
             (
                 GitOp::DiscardUntracked(vec!["new.txt".into()]),
                 vec!["clean", "--force", "--", "new.txt"],
+            ),
+            (
+                GitOp::DiscardAdded(vec!["a.txt".into()]),
+                vec!["rm", "--force", "--quiet", "--", "a.txt"],
             ),
             (
                 GitOp::Commit {
@@ -573,6 +587,7 @@ mod tests {
             GitOp::Unstage(Vec::new()),
             GitOp::Discard(Vec::new()),
             GitOp::DiscardUntracked(Vec::new()),
+            GitOp::DiscardAdded(Vec::new()),
             GitOp::StashPush {
                 message: None,
                 include_untracked: false,

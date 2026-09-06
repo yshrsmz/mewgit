@@ -28,7 +28,9 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
-use crate::git_read::{Commit, CommitDetail, Oid, Signature, Timestamp};
+use crate::git_read::{
+    Commit, CommitDetail, FileEntry, FileStatus, Oid, Signature, Timestamp, WorktreeSnapshot,
+};
 use tempfile::TempDir;
 
 /// 一時ディレクトリと、実行環境の設定を持ち込まない `git` の実行。
@@ -317,6 +319,35 @@ fn shown<S: AsRef<OsStr>>(args: &[S]) -> String {
         .map(|arg| arg.as_ref().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// 変更のあったファイル 1 件。rename は `old_path` を呼び出し側で足す。
+///
+/// `fake_commit` と同じく、`app` の遷移テストと `ui` の描画テストの両方から使う。
+pub fn fake_entry(path: &str, status: FileStatus) -> FileEntry {
+    FileEntry {
+        path: path.into(),
+        old_path: None,
+        status,
+    }
+}
+
+/// 各区画にファイルを並べたスナップショット。中身は `path` だけが違う `Modified`。
+///
+/// conflicted は空。conflicted を要るテストは戻り値に足す。
+pub fn fake_snapshot(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> WorktreeSnapshot {
+    let entries = |paths: &[&str]| {
+        paths
+            .iter()
+            .map(|path| fake_entry(path, FileStatus::Modified))
+            .collect()
+    };
+    WorktreeSnapshot {
+        staged: entries(staged),
+        unstaged: entries(unstaged),
+        untracked: entries(untracked),
+        conflicted: Vec::new(),
+    }
 }
 
 /// 中身を作り込んだ [`Commit`]。実リポジトリを作らずに一覧の描画を試すのに使う。

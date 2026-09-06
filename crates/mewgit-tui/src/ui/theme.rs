@@ -21,6 +21,20 @@ pub fn style(spec: &str) -> Style {
     style
 }
 
+/// カーソル行。ペインをまたいで同じ見た目にする。
+///
+/// ここに置くのは、2 つ目のペイン（worktree）が出た時点で `graph` と同じ式を
+/// 書き写すことになったため。3 つ目（branches / stash）で 3 度目を書かない。
+/// `[theme]` にキーを足すときの受け口でもある。
+pub fn selected() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
+}
+
+/// 見出しなど、本文より弱く出すもの。
+pub fn muted() -> Style {
+    Style::default().add_modifier(Modifier::DIM)
+}
+
 /// 色名 1 つ。読めなければ `None`。
 ///
 /// `[graph] colors` の palette もここを通す。「文字列 → 色」の解釈を 1 箇所に置く。

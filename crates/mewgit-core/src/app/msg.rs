@@ -58,7 +58,11 @@ pub enum Msg {
     /// 3 つを 1 通にまとめるのは、どれもリポジトリの ref から導かれる値で、
     /// fetch の後には揃って古くなるため。`Box` は `Msg` を小さく保つため。
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),
-    StatusLoaded(WorktreeSnapshot),
+    /// ワーキングツリーの状態。`LogLoaded` と同じ理由で `Result` を運ぶ。失敗の
+    /// 通り道が無いと `JobKind::LoadStatus` が走ったまま残り、以後の
+    /// `Cmd::LoadStatus` が黙って落ちる。書き込みのたびに `ExecFinished` が
+    /// `LoadStatus` を出すので、詰まると「stage したのに一覧が変わらない」になる。
+    StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
     DiffLoaded {
         target: DiffTarget,
         /// ファイル単位。平坦化すると `GitOp::StageHunk` に渡す `path` を失う。

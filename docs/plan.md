@@ -23,7 +23,10 @@
 
 - [x] `git_read::status` / `diff`（ハンク分割）
 - [x] `git_exec::Runner` と `to_command` の全 `GitOp` テスト、`ExecErrorKind` の分類テスト
-- [ ] `ui::panes::worktree` / `diff` — ファイル・ハンク単位の stage / unstage / discard
+- [x] `ui::panes::worktree` — フォーカス巡回、`Modal::Confirm`、`Runner` の配線、
+      ファイル単位の stage / unstage / discard
+- [ ] `ui::panes::diff` — diff の表示とハンク単位の stage / unstage / discard。
+      `DiffTarget::Commit` をこのペインに出すかもここで決める（07 の「詳細の展開」）
 - [ ] `Modal::CommitMessage` と commit / amend
 - [ ] `ui::panes::branches` — 一覧、作成 / 切替 / 削除 / リネーム、`Modal::Confirm`
 
@@ -61,6 +64,9 @@
 ## M6: 仕上げ
 
 - [ ] `Modal::Help` とキーマップ上書き
+- [ ] ステータスバー — 通知の消え方（dismiss / 期限切れ）と履歴表示。
+      **いまは一度出た通知が次の通知まで消えない。** 成功した操作は通知を出さないので、
+      「stage 済みに `s`」の警告が `u` の成功後も出たままになる（01 の「通知」）
 - [ ] 端末幅 < 100 のレイアウト
 - [ ] ロケール（`LC_ALL` / `LC_CTYPE` / `LANG`）から `graph.ascii` の既定を決める
       （曖昧幅を全角扱いする端末は UTF-8 でもずれる。06 の「ASCII フォールバック」）

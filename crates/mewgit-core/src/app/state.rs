@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use crate::auth::{AccountState, GhLogin, RepoTarget};
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
-    Branch, Commit, CommitDetail, DiffTarget, FileDiff, HeadInfo, InProgressOp, RefIndex, Remote,
-    StashEntry, WorktreeSection, WorktreeSnapshot,
+    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp,
+    RefIndex, Remote, StashEntry, WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{Check, PullRequest};
 use crate::graph::{GraphRow, LaneState};
@@ -92,10 +92,20 @@ impl AppState {
                     if self.jobs.start(job) {
                         cmd
                     } else {
+                        self.dropped(kind);
                         Cmd::None
                     }
                 }
             },
+        }
+    }
+
+    /// 同種のジョブが走っていて発行できなかった `Cmd` を伝える。
+    ///
+    /// 何を伝えるかは [`JobKind::drop_notice`] が種別ごとに持つ。
+    fn dropped(&mut self, kind: JobKind) {
+        if let Some(message) = kind.drop_notice() {
+            self.push_notice(NoticeLevel::Warn, message.to_string(), None);
         }
     }
 
@@ -155,6 +165,34 @@ pub enum Pane {
     Prs,
     Worktree,
     Diff,
+}
+
+impl Pane {
+    /// `Tab` / `Shift+Tab` の巡回に入るペイン。
+    ///
+    /// **まだ実装していないペインは入れない**（07）。移れてしまうと、キーを受ける先の
+    /// 無い画面に入り込む。ペインを実装したらここに足す。並びは表示順。
+    pub const FOCUSABLE: &'static [Pane] = &[Pane::Graph, Pane::Worktree];
+
+    /// 巡回の次。末尾からは先頭に戻る。
+    pub fn next(self) -> Pane {
+        self.cycle(1)
+    }
+
+    /// 巡回の前。先頭からは末尾に戻る。
+    pub fn prev(self) -> Pane {
+        self.cycle(-1)
+    }
+
+    /// 巡回を `delta` 個進める。一覧に無いペイン（実装前のものが `focus` に
+    /// 入っている場合）は先頭から数え直す。
+    fn cycle(self, delta: isize) -> Pane {
+        let panes = Pane::FOCUSABLE;
+        let current = panes.iter().position(|&pane| pane == self).unwrap_or(0);
+        let len = panes.len() as isize;
+        let next = (current as isize + delta).rem_euclid(len) as usize;
+        panes[next]
+    }
 }
 
 /// グラフペインの状態。
@@ -251,11 +289,122 @@ pub struct GraphLine {
 }
 
 /// ワーキングツリーペインの状態。diff は [`AppState::diff`] にある。
+///
+/// カーソルは「区画 + 区画内の添字」で持つ。平坦な添字 1 つにすると、`snapshot` が
+/// 入れ替わったときにどの区画のどのファイルを指していたのかを復元できない（01 の
+/// 「ワーキングツリー」）。
 #[derive(Debug, Default)]
 pub struct WorktreeState {
     pub snapshot: WorktreeSnapshot,
     pub section: WorktreeSection,
     pub cursor: usize,
+    /// 届く予定の status が、直近の書き込みより前に頼まれたもの。
+    ///
+    /// `JobKind` の粒度は種別単位なので、読み取りが走っているあいだの
+    /// `Cmd::LoadStatus` は [`AppState::issue`] に落とされる。落ちたぶんを届いた
+    /// 時点で頼み直すための印（01 の「ワーキングツリー」）。立てるのは
+    /// `exec_finished`、落とすのは `status_loaded`。
+    pub stale: bool,
+}
+
+impl WorktreeState {
+    /// 区画を並べる順。カーソルが進む順でもあり、`ui` が描く順でもある。
+    ///
+    /// Conflicted が先頭なのは、他の操作より先に解消が要るため。**並びはここだけ。**
+    /// 描画側で別に並べると、見えている順とカーソルの動く順がずれる。
+    pub const SECTIONS: [WorktreeSection; 4] = [
+        WorktreeSection::Conflicted,
+        WorktreeSection::Staged,
+        WorktreeSection::Unstaged,
+        WorktreeSection::Untracked,
+    ];
+
+    /// 選べる行を [`SECTIONS`](Self::SECTIONS) の順に並べたもの。空の区画は入らない。
+    ///
+    /// 「次に選べる行」の定義をここ 1 つにするための土台。移動
+    /// （[`move_cursor`](Self::move_cursor)）と詰め直し（[`clamp`](Self::clamp)）が
+    /// 同じ並びを見る。
+    fn positions(&self) -> Vec<(WorktreeSection, usize)> {
+        Self::SECTIONS
+            .iter()
+            .flat_map(|&section| {
+                (0..self.snapshot.section(section).len()).map(move |index| (section, index))
+            })
+            .collect()
+    }
+
+    /// いまのカーソルが [`positions`](Self::positions) の何番目か。無ければ `None`。
+    fn index_in(&self, positions: &[(WorktreeSection, usize)]) -> Option<usize> {
+        positions
+            .iter()
+            .position(|&(section, index)| section == self.section && index == self.cursor)
+    }
+
+    /// カーソルの指すファイル。行が無ければ `None`。
+    pub fn selected(&self) -> Option<(WorktreeSection, &FileEntry)> {
+        let entry = self.snapshot.section(self.section).get(self.cursor)?;
+        Some((self.section, entry))
+    }
+
+    /// 全区画の合計件数。
+    pub fn len(&self) -> usize {
+        Self::SECTIONS
+            .iter()
+            .map(|&section| self.snapshot.section(section).len())
+            .sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// [`SECTIONS`](Self::SECTIONS) の何番目の区画か。
+    fn rank(section: WorktreeSection) -> usize {
+        Self::SECTIONS
+            .iter()
+            .position(|&candidate| candidate == section)
+            .unwrap_or(Self::SECTIONS.len())
+    }
+
+    /// `positions` の `index` 番目へカーソルを据える。
+    ///
+    /// 行が足りなければ最後の行、1 行も無ければ何も選べない位置に戻す。**端の扱いは
+    /// ここ 1 箇所。** 移動と詰め直しで別に書くと、片方だけ端から落ちる。
+    fn seat(&mut self, positions: &[(WorktreeSection, usize)], index: usize) {
+        let Some(&(section, cursor)) = positions.get(index).or(positions.last()) else {
+            self.section = WorktreeSection::default();
+            self.cursor = 0;
+            return;
+        };
+        self.section = section;
+        self.cursor = cursor;
+    }
+
+    /// カーソルを `delta` 行動かす。区画をまたぎ、端では止まる。
+    ///
+    /// 区画の移動を別のキーに割り当てないのは、空の区画に入って何も選べない状態を
+    /// 作らないため（01）。
+    pub fn move_cursor(&mut self, delta: isize) {
+        let positions = self.positions();
+        let current = self.index_in(&positions).unwrap_or(0);
+        self.seat(&positions, current.saturating_add_signed(delta));
+    }
+
+    /// `snapshot` を入れ替えたあとに、選べる行へ寄せ直す。
+    ///
+    /// 選んでいたファイルが別の区画へ移る（stage / unstage）か消える（discard）ので、
+    /// 元の位置がそのまま残るとは限らない。寄せ先は**元の位置以降で最初に選べる行**、
+    /// 無ければ最後の行。`positions` は区画の順に並んでいるので、カーソルがまだ
+    /// 有効なら「最初の位置以降」はその行自身に当たり、この呼び出しは何も変えない。
+    pub fn clamp(&mut self) {
+        let positions = self.positions();
+        let here = (Self::rank(self.section), self.cursor);
+        let next = positions
+            .iter()
+            .position(|&(section, index)| (Self::rank(section), index) >= here)
+            .unwrap_or(positions.len());
+        self.seat(&positions, next);
+    }
 }
 
 /// 表示中の diff。何の diff かは `target` が示す。
@@ -360,6 +509,27 @@ pub enum JobKind {
 }
 
 impl JobKind {
+    /// 同種が走っていて発行できなかったときに出す通知。黙って落としてよければ `None`。
+    ///
+    /// 読み取りは黙って落とす（同じものをもう一度読むだけで、結果は変わらない）。
+    /// 書き込みだけは「押したのに何も起きない」に見えるので伝える。キューに積んで
+    /// 順に流すのは M3（01 の「ランタイム」）。網羅 `match` にしているのは、
+    /// 種別を足したときにどちらなのかを選ばせるため。
+    pub fn drop_notice(self) -> Option<&'static str> {
+        match self {
+            JobKind::Exec => Some("ほかの git 実行が終わるまで待ってください"),
+            JobKind::LoadLog
+            | JobKind::LoadCommitDetail
+            | JobKind::LoadRepoInfo
+            | JobKind::LoadStatus
+            | JobKind::LoadDiff
+            | JobKind::ResolveAccount
+            | JobKind::FetchPr
+            | JobKind::FetchChecks
+            | JobKind::FetchPrList => None,
+        }
+    }
+
     /// ステータスバーに出す既定の説明。
     ///
     /// `Exec` だけは `GitOp` によって `fetch` / `push` と変わるので、[`Job::label`] は
@@ -492,6 +662,130 @@ impl TextBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::test_util::fake_snapshot;
+
+    /// 指定した区画にファイルを並べ、staged の先頭を選んだ状態。
+    fn worktree(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> WorktreeState {
+        WorktreeState {
+            snapshot: fake_snapshot(staged, unstaged, untracked),
+            section: WorktreeSection::Staged,
+            ..WorktreeState::default()
+        }
+    }
+
+    /// カーソルの指すパス。
+    fn selected(worktree: &WorktreeState) -> Option<String> {
+        worktree
+            .selected()
+            .map(|(_, entry)| entry.path.display().to_string())
+    }
+
+    #[test]
+    fn the_worktree_cursor_crosses_sections_as_one_list() {
+        let mut worktree = worktree(&["s.txt"], &["u.txt"], &["n.txt"]);
+
+        assert_eq!(selected(&worktree).as_deref(), Some("s.txt"));
+        worktree.move_cursor(1);
+        assert_eq!(worktree.section, WorktreeSection::Unstaged);
+        assert_eq!(selected(&worktree).as_deref(), Some("u.txt"));
+        worktree.move_cursor(1);
+        assert_eq!(worktree.section, WorktreeSection::Untracked);
+        // 端では止まる。
+        worktree.move_cursor(1);
+        assert_eq!(selected(&worktree).as_deref(), Some("n.txt"));
+
+        worktree.move_cursor(-1);
+        assert_eq!(selected(&worktree).as_deref(), Some("u.txt"));
+    }
+
+    #[test]
+    fn the_worktree_cursor_skips_empty_sections() {
+        // 空の区画に入ると、何も選べない位置にカーソルが座る。
+        let mut worktree = worktree(&["s.txt"], &[], &["n.txt"]);
+
+        worktree.move_cursor(1);
+
+        assert_eq!(worktree.section, WorktreeSection::Untracked);
+        assert_eq!(selected(&worktree).as_deref(), Some("n.txt"));
+    }
+
+    #[test]
+    fn a_worktree_without_files_has_nothing_selected() {
+        let mut worktree = worktree(&[], &[], &[]);
+
+        worktree.move_cursor(1);
+
+        assert!(worktree.is_empty());
+        assert_eq!(selected(&worktree), None);
+    }
+
+    #[test]
+    fn clamp_moves_to_the_next_row_when_the_selected_file_leaves_the_section() {
+        // unstaged の 2 件目を選んでいる状態で、その行が stage されて消えた。
+        let mut worktree = worktree(&[], &["a.txt", "b.txt", "c.txt"], &[]);
+        worktree.section = WorktreeSection::Unstaged;
+        worktree.cursor = 1;
+
+        worktree.snapshot.staged = vec![worktree.snapshot.unstaged.remove(1)];
+        worktree.clamp();
+
+        // 元の位置以降で最初に選べる行。添字は同じで中身が繰り上がる。
+        assert_eq!(worktree.section, WorktreeSection::Unstaged);
+        assert_eq!(selected(&worktree).as_deref(), Some("c.txt"));
+    }
+
+    #[test]
+    fn clamp_falls_back_to_the_last_row_when_the_tail_is_gone() {
+        let mut worktree = worktree(&[], &["a.txt", "b.txt"], &[]);
+        worktree.section = WorktreeSection::Untracked;
+        worktree.cursor = 3;
+
+        worktree.clamp();
+
+        assert_eq!(worktree.section, WorktreeSection::Unstaged);
+        assert_eq!(selected(&worktree).as_deref(), Some("b.txt"));
+    }
+
+    #[test]
+    fn clamp_keeps_a_still_valid_cursor() {
+        let mut worktree = worktree(&["s.txt"], &["u.txt"], &[]);
+        worktree.section = WorktreeSection::Unstaged;
+
+        worktree.clamp();
+
+        assert_eq!(selected(&worktree).as_deref(), Some("u.txt"));
+    }
+
+    #[test]
+    fn clamp_resets_when_every_section_is_empty() {
+        let mut worktree = worktree(&["s.txt"], &[], &[]);
+        worktree.snapshot.staged.clear();
+
+        worktree.clamp();
+
+        assert_eq!(worktree.cursor, 0);
+        assert_eq!(selected(&worktree), None);
+    }
+
+    #[test]
+    fn tab_cycles_only_through_the_implemented_panes() {
+        // 未実装のペインに移れると、キーを受ける先の無い画面に入り込む。
+        let mut pane = Pane::default();
+        for _ in 0..Pane::FOCUSABLE.len() {
+            assert!(Pane::FOCUSABLE.contains(&pane), "{pane:?}");
+            pane = pane.next();
+        }
+        // 一周して戻る。
+        assert_eq!(pane, Pane::default());
+        assert_eq!(Pane::Graph.prev(), *Pane::FOCUSABLE.last().unwrap());
+    }
+
+    #[test]
+    fn a_pane_outside_the_cycle_falls_back_to_the_first() {
+        // 実装前のペインが `focus` に入っていても、`Tab` で巡回に戻れる。
+        assert_eq!(Pane::Prs.next(), Pane::FOCUSABLE[1]);
+    }
 
     #[test]
     fn push_notice_drops_the_oldest_beyond_the_cap() {

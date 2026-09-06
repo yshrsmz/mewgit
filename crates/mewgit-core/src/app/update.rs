@@ -6,23 +6,31 @@
 //! ペインごとのキー処理は、対応するペインのタスクと一緒に足す。いまあるのは
 //! グラフだけ。
 
-use crate::git_read::{CommitDetail, GitReadError, LogPage, Oid};
+use std::path::PathBuf;
+
+use crate::git_exec::{ExecError, GitOp};
+use crate::git_read::{
+    CommitDetail, FileEntry, FileStatus, GitReadError, LogPage, Oid, WorktreeSection,
+    WorktreeSnapshot,
+};
 use crate::graph::LaneState;
 
 use super::{
-    AppState, Cmd, GraphLine, JobKind, Key, KeyCode, Msg, NoticeLevel, Pane, RepoSnapshot,
+    AppState, Cmd, ExecDone, GraphLine, JobKind, Key, KeyCode, Modal, Msg, NoticeLevel, Pane,
+    RepoSnapshot,
 };
 
 /// 起動直後に実行してほしい副作用。
 ///
 /// `runtime::run` がループに入る前に呼ぶ。`main.rs` から呼ぶとテストの外に出てしまう。
-/// status / アカウント解決は、それぞれのタスクでここに足す。
+/// アカウント解決は、そのタスクでここに足す。
 pub fn init(state: &mut AppState) -> Cmd {
     let cmd = Cmd::batch([
         Cmd::LoadRepoInfo,
         Cmd::LoadLog {
             count: state.config.graph.page_size,
         },
+        Cmd::LoadStatus,
     ]);
     state.issue(cmd)
 }
@@ -65,9 +73,9 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
 
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
         // `Msg` に変種を足したときに実装漏れをコンパイルエラーにするため。
-        Msg::StatusLoaded(_) => Cmd::None,
+        Msg::StatusLoaded(result) => status_loaded(state, *result),
         Msg::DiffLoaded { .. } => Cmd::None,
-        Msg::ExecFinished(_) => Cmd::None,
+        Msg::ExecFinished(done) => exec_finished(state, *done),
         Msg::ProgressDetected(_) => Cmd::None,
         Msg::AccountResolved(_) => Cmd::None,
         Msg::PrLoaded(_) => Cmd::None,
@@ -85,22 +93,69 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         return Cmd::Quit;
     }
 
-    // モーダル表示中はすべてモーダルが受ける。個々のモーダルの処理は各マイルストーンで。
+    // モーダル表示中はすべてモーダルが受ける。`q` もここでは終了にならない
+    // （`CommitMessage` では入力文字になる。脱出口は上の `Ctrl-C`）。
     if state.modal.is_some() {
-        if key == Key::new(KeyCode::Esc) {
-            state.modal = None;
-        }
-        return Cmd::None;
+        return modal_key(state, key);
     }
 
     if key == Key::char('q') {
         return Cmd::Quit;
     }
 
+    // フォーカスの巡回はペインより先に見る。ペインごとに書くと、あとから足した
+    // ペインが `Tab` を受けずに閉じ込められる。`Shift+Tab` は `BackTab`（修飾なし）に
+    // 正規化されている（01 の「キー入力」）。
+    match key.code() {
+        KeyCode::Tab => {
+            state.focus = state.focus.next();
+            return Cmd::None;
+        }
+        KeyCode::BackTab => {
+            state.focus = state.focus.prev();
+            return Cmd::None;
+        }
+        _ => {}
+    }
+
     match state.focus {
         Pane::Graph => graph_key(state, key),
-        // 各ペインのキー処理は対応するマイルストーンで足す。
-        Pane::Branches | Pane::Stash | Pane::Prs | Pane::Worktree | Pane::Diff => Cmd::None,
+        Pane::Worktree => worktree_key(state, key),
+        // 各ペインのキー処理は対応するマイルストーンで足す。`Pane::FOCUSABLE` に
+        // 入っていないので、いまここには来ない。
+        Pane::Branches | Pane::Stash | Pane::Prs | Pane::Diff => Cmd::None,
+    }
+}
+
+/// モーダルのキー処理。表示中の入力はすべてここが受ける。
+fn modal_key(state: &mut AppState, key: Key) -> Cmd {
+    match state.modal {
+        Some(Modal::Confirm { .. }) => confirm_key(state, key),
+        // 他のモーダルはそれぞれのタスクで実装する。閉じる道だけ開けておく。
+        Some(_) => {
+            if key == Key::new(KeyCode::Esc) {
+                state.modal = None;
+            }
+            Cmd::None
+        }
+        None => Cmd::None,
+    }
+}
+
+/// 確認モーダル。`y` / `Enter` で実行、`n` / `Esc` で取り消し。
+///
+/// **先にモーダルを閉じてから `on_yes` を返す。** 閉じずに返すと、`Cmd` が
+/// [`AppState::issue`] に落とされたときにモーダルだけが画面に残る。
+fn confirm_key(state: &mut AppState, key: Key) -> Cmd {
+    let confirmed = match key.code() {
+        KeyCode::Char('y') | KeyCode::Enter => true,
+        KeyCode::Char('n') | KeyCode::Esc => false,
+        _ => return Cmd::None,
+    };
+
+    match (confirmed, state.modal.take()) {
+        (true, Some(Modal::Confirm { on_yes, .. })) => on_yes,
+        _ => Cmd::None,
     }
 }
 
@@ -265,13 +320,221 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cm
     Cmd::batch([load_more(state), load_detail(state)])
 }
 
+/// ワーキングツリーペインのキー処理。
+///
+/// `j` / `k` は区画をまたいで 1 本のリストのように動く（01 の「ワーキングツリー」）。
+fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
+    match key.code() {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.worktree.move_cursor(1);
+            Cmd::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.worktree.move_cursor(-1);
+            Cmd::None
+        }
+        KeyCode::Char('s') => act(state, Action::Stage),
+        KeyCode::Char('u') => act(state, Action::Unstage),
+        KeyCode::Char('x') => act(state, Action::Discard),
+        _ => Cmd::None,
+    }
+}
+
+/// ワーキングツリーで押せる操作。`(操作, 区画)` の表を 1 本にするための語彙。
+#[derive(Debug, Clone, Copy)]
+enum Action {
+    Stage,
+    Unstage,
+    Discard,
+}
+
+/// 操作の結果としてすること。
+enum Plan {
+    /// そのまま実行する。
+    Exec(GitOp),
+    /// 確認を取ってから実行する（不変ルール 5）。
+    Confirm {
+        title: &'static str,
+        body: String,
+        op: GitOp,
+    },
+}
+
+/// 選択行に `action` を適用する。
+fn act(state: &mut AppState, action: Action) -> Cmd {
+    let Some((section, status, paths)) = state
+        .worktree
+        .selected()
+        .map(|(section, entry)| (section, entry.status, paths_of(entry)))
+    else {
+        return Cmd::None;
+    };
+
+    match plan(action, section, status, paths) {
+        Ok(Plan::Exec(op)) => Cmd::Exec(op),
+        Ok(Plan::Confirm { title, body, op }) => {
+            state.modal = Some(Modal::Confirm {
+                title: title.to_string(),
+                body,
+                on_yes: Cmd::Exec(op),
+            });
+            Cmd::None
+        }
+        // 黙って何も起きないと、キーが効いていないのか対象が悪いのかが判らない。
+        Err(reason) => {
+            state.push_notice(NoticeLevel::Warn, reason.to_string(), None);
+            Cmd::None
+        }
+    }
+}
+
+/// `(操作, 区画)` から出す `GitOp` を決める。できないときはその理由。
+///
+/// **判定表はここ 1 つ。** 操作ごとに散らすと、`Pane::Diff` でハンク単位の同じ操作を
+/// 足すときに同じ表をもう一度書くことになる。網羅 `match` なので、`WorktreeSection` に
+/// 区画を足すと実装漏れがコンパイルエラーになる。
+///
+/// discard がどの `GitOp` になるかは区画と変更種別で変わる（03 の「discard は 3 変種」）。
+/// **この判断はここにしか無い。**`to_command` は純粋関数でどちらも見られない。
+///
+/// **HEAD に無いか（`Added`）は `RepoInfo.head` では判断しない。** `head` は起動時に
+/// 1 回読んだきりで、外部でコミットされると古くなる。古い `Unborn` を信じて
+/// `DiscardAdded` を出すと、HEAD にあるファイルを `git rm --force` で消してしまう。
+/// `FileStatus` は `LoadStatus` が毎回運んでくるので、そちらで判断する。
+fn plan(
+    action: Action,
+    section: WorktreeSection,
+    status: FileStatus,
+    paths: Vec<PathBuf>,
+) -> Result<Plan, &'static str> {
+    let names = names(&paths);
+    match (action, section) {
+        // 解消ビューは MVP 外。`git add` だけ通すと「解消した」と誤解させる。
+        (_, WorktreeSection::Conflicted) => Err("コンフリクトしたファイルは操作できません"),
+
+        (Action::Stage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
+            Ok(Plan::Exec(GitOp::Stage(paths)))
+        }
+        (Action::Stage, WorktreeSection::Staged) => Err("すでに stage されています"),
+
+        (Action::Unstage, WorktreeSection::Staged) => Ok(Plan::Exec(GitOp::Unstage(paths))),
+        (Action::Unstage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
+            Err("stage されていません")
+        }
+
+        (Action::Discard, WorktreeSection::Untracked) => Ok(Plan::Confirm {
+            title: "untracked なファイルを削除",
+            body: format!("{names} を削除します。元に戻せません。"),
+            op: GitOp::DiscardUntracked(paths),
+        }),
+        // HEAD に無いファイル。`restore --source=HEAD` はコミットがまだ無いと落ちるが、
+        // `rm --force` は HEAD の有無に依らず同じ結果になる（03）。
+        (Action::Discard, WorktreeSection::Staged) if status == FileStatus::Added => {
+            Ok(Plan::Confirm {
+                title: "変更を破棄",
+                body: format!("{names} を index からもワークツリーからも削除します。\nまだコミットに含まれていないので、戻す先がありません。元に戻せません。"),
+                op: GitOp::DiscardAdded(paths),
+            })
+        }
+        (Action::Discard, WorktreeSection::Staged | WorktreeSection::Unstaged) => {
+            Ok(Plan::Confirm {
+                title: "変更を破棄",
+                body: format!("{names} を HEAD の状態に戻します。\nstaged の内容も一緒に戻ります。元に戻せません。"),
+                op: GitOp::Discard(paths),
+            })
+        }
+    }
+}
+
+/// `GitOp` に載せるパス。rename は新しい名前と元の名前の両方。
+///
+/// `git add -- <新> <旧>` は旧パスの削除も index に入る。staged rename の unstage も
+/// 両方の名前が要る（02 の `old_path`）。片方だけ渡すと「削除」と「追加」が別々に残る。
+fn paths_of(entry: &FileEntry) -> Vec<PathBuf> {
+    let mut paths = vec![entry.path.clone()];
+    paths.extend(entry.old_path.clone());
+    paths
+}
+
+/// 確認モーダルに出すパス。**対象をそのまま並べる**（07）。「選択中のファイル」と
+/// だけ書くと、カーソルがどこにあるか思い出せないまま `y` を押すことになる。
+fn names(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// ワーキングツリーの一覧を入れ替える。
+fn status_loaded(state: &mut AppState, result: Result<WorktreeSnapshot, GitReadError>) -> Cmd {
+    state.jobs.finish(JobKind::LoadStatus);
+
+    match result {
+        Ok(snapshot) => {
+            state.worktree.snapshot = snapshot;
+            // 選んでいたファイルは別の区画へ移る（stage / unstage）か消えている
+            // （discard）。選べる行へ寄せ直す。
+            state.worktree.clamp();
+        }
+        // 読めていた一覧は捨てない。次の読み込みはユーザーの操作から始まるので、
+        // 捨てると画面から消えるだけになる（01）。
+        Err(err) => state.push_notice(NoticeLevel::Error, err.to_string(), None),
+    }
+
+    // 書き込みの直後に頼んだぶんが落とされていたら、ここで頼み直す。
+    if std::mem::take(&mut state.worktree.stale) {
+        return Cmd::LoadStatus;
+    }
+    Cmd::None
+}
+
+/// `git` の実行が終わった。
+///
+/// 進行中操作は `Runner` が実行直後に再検出したものをそのまま使う（03）。ここから
+/// 検出を頼み直さない。
+fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
+    state.jobs.finish(JobKind::Exec);
+    state.progress = done.progress;
+
+    if let Err(err) = &done.result {
+        let detail = exec_detail(err);
+        state.push_notice(NoticeLevel::Error, err.to_string(), Some(detail));
+    }
+
+    // **走っている読み取りは、この書き込みより前に頼まれたものなので届いても古い。**
+    // その場合 `issue` は下の `LoadStatus` を落とすので、届いた時点で頼み直せるよう
+    // 印を付ける（01 の「書き込みのあとの status」）。`CommitDetailLoaded` の
+    // 追いつきとは形が違う。あちらは届いた値の oid から鮮度を導けるが、
+    // `WorktreeSnapshot` には「いつの状態か」を示す鍵が無く、到着時には判定できない。
+    state.worktree.stale = state.jobs.is_running(JobKind::LoadStatus);
+    // 成否は問わない。失敗しても index が途中まで動いていることがある。
+    Cmd::LoadStatus
+}
+
+/// 通知に添える詳細。実行した argv と stderr を握りつぶさない（不変ルール 4）。
+fn exec_detail(err: &ExecError) -> String {
+    let mut detail = err.command_line();
+    if let ExecError::Failed { stderr, .. } = err {
+        let stderr = stderr.trim_end();
+        if !stderr.is_empty() {
+            detail.push('\n');
+            detail.push_str(stderr);
+        }
+    }
+    detail
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::{Modal, RepoInfo, TermSize};
     use crate::config::Config;
+    use crate::git_exec::{ExecErrorKind, ExecOutput};
     use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
-    use crate::test_util::{fake_commit, fake_commit_with_parents, fake_detail, fake_oid};
+    use crate::test_util::{
+        fake_commit, fake_commit_with_parents, fake_detail, fake_entry, fake_oid, fake_snapshot,
+    };
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
     const ROWS: usize = 20;
@@ -303,8 +566,404 @@ mod tests {
         state
     }
 
+    /// worktree ペインにフォーカスし、その区画の先頭を選んだ状態。
+    fn worktree_state(snapshot: WorktreeSnapshot, section: WorktreeSection) -> AppState {
+        let mut state = state();
+        let _ = update(&mut state, Msg::StatusLoaded(Box::new(Ok(snapshot))));
+        state.focus = Pane::Worktree;
+        state.worktree.section = section;
+        state.worktree.cursor = 0;
+        state
+    }
+
+    fn press(state: &mut AppState, c: char) -> Cmd {
+        update(state, Msg::Key(Key::char(c)))
+    }
+
     #[test]
-    fn init_asks_for_the_repository_and_the_first_page() {
+    fn tab_moves_the_focus_and_the_worktree_keys_follow_it() {
+        // グラフに居るあいだは `j` がコミットのカーソルを動かす。
+        let mut state = state_with_commits(3);
+        state.worktree.snapshot = fake_snapshot(&[], &["a.txt", "b.txt"], &[]);
+        let _ = press(&mut state, 'j');
+        assert_eq!(state.graph.cursor, 1);
+
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
+        assert_eq!(state.focus, Pane::Worktree);
+
+        // 同じ `j` が worktree のカーソルに効く。グラフは動かない。
+        let _ = press(&mut state, 'j');
+        assert_eq!(state.graph.cursor, 1);
+        assert_eq!(state.worktree.cursor, 1);
+
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::BackTab)));
+        assert_eq!(state.focus, Pane::Graph);
+    }
+
+    #[test]
+    fn status_loaded_replaces_the_snapshot_and_reseats_the_cursor() {
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt", "b.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        state.worktree.cursor = 1;
+
+        // b.txt を stage した後の状態が届く。
+        let _ = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&["b.txt"], &["a.txt"], &[])))),
+        );
+
+        assert!(!state.jobs.is_running(JobKind::LoadStatus));
+        // 選んでいた行は消えているので、選べる行へ寄る。
+        let (_, entry) = state.worktree.selected().expect("選択が空になっています");
+        assert_eq!(entry.path.display().to_string(), "a.txt");
+    }
+
+    #[test]
+    fn status_loaded_keeps_the_previous_list_when_it_fails() {
+        let mut state =
+            worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
+        let _ = state.issue(Cmd::LoadStatus);
+
+        let cmd = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Err(GitReadError::ReaderGone))),
+        );
+
+        // 失敗の通り道が無いとジョブが走ったまま残り、以後の LoadStatus が黙って落ちる。
+        assert!(!state.jobs.is_running(JobKind::LoadStatus));
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.worktree.snapshot.staged.len(), 1);
+        assert_eq!(
+            state.notices.back().map(|notice| notice.level),
+            Some(NoticeLevel::Error)
+        );
+    }
+
+    #[test]
+    fn s_stages_the_selected_file_and_u_unstages_it() {
+        let mut state = worktree_state(
+            fake_snapshot(&["staged.txt"], &["unstaged.txt"], &["new.txt"]),
+            WorktreeSection::Unstaged,
+        );
+
+        assert_eq!(
+            press(&mut state, 's'),
+            Cmd::Exec(GitOp::Stage(vec!["unstaged.txt".into()]))
+        );
+
+        let mut state = worktree_state(
+            fake_snapshot(&["staged.txt"], &["unstaged.txt"], &[]),
+            WorktreeSection::Staged,
+        );
+        assert_eq!(
+            press(&mut state, 'u'),
+            Cmd::Exec(GitOp::Unstage(vec!["staged.txt".into()]))
+        );
+    }
+
+    #[test]
+    fn a_key_that_does_not_apply_to_the_section_says_why() {
+        // 黙って何も起きないと、キーが効いていないのか対象が悪いのかが判らない。
+        for (section, key) in [
+            (WorktreeSection::Staged, 's'),
+            (WorktreeSection::Unstaged, 'u'),
+            (WorktreeSection::Untracked, 'u'),
+        ] {
+            let mut state =
+                worktree_state(fake_snapshot(&["a.txt"], &["a.txt"], &["a.txt"]), section);
+
+            assert_eq!(press(&mut state, key), Cmd::None);
+            assert!(!state.jobs.is_running(JobKind::Exec));
+            assert_eq!(
+                state.notices.back().map(|notice| notice.level),
+                Some(NoticeLevel::Warn),
+                "{section:?} で {key} を押したときの通知がありません"
+            );
+        }
+    }
+
+    #[test]
+    fn staging_a_rename_carries_both_names() {
+        // 片方だけ渡すと「削除」と「追加」が別々に残る（02 の old_path）。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["new.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        state.worktree.snapshot.unstaged[0].old_path = Some("old.txt".into());
+        state.worktree.snapshot.unstaged[0].status = FileStatus::Renamed;
+
+        assert_eq!(
+            press(&mut state, 's'),
+            Cmd::Exec(GitOp::Stage(vec!["new.txt".into(), "old.txt".into()]))
+        );
+    }
+
+    #[test]
+    fn x_confirms_before_discarding_and_names_the_file() {
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+
+        // 破壊的操作は必ず確認を通す（不変ルール 5）。押しただけでは実行しない。
+        assert_eq!(press(&mut state, 'x'), Cmd::None);
+
+        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
+            panic!("確認モーダルが出ていません: {:?}", state.modal);
+        };
+        assert!(body.contains("a.txt"), "本文に対象が無い: {body}");
+        assert_eq!(on_yes, &Cmd::Exec(GitOp::Discard(vec!["a.txt".into()])));
+    }
+
+    #[test]
+    fn x_on_an_untracked_file_deletes_it_and_says_so() {
+        let mut state = worktree_state(
+            fake_snapshot(&[], &[], &["new.txt"]),
+            WorktreeSection::Untracked,
+        );
+
+        let _ = press(&mut state, 'x');
+
+        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
+            panic!("確認モーダルが出ていません");
+        };
+        // tracked の discard と同じ文面にしない。こちらはファイルが消える。
+        assert!(body.contains("削除"), "本文: {body}");
+        assert_eq!(
+            on_yes,
+            &Cmd::Exec(GitOp::DiscardUntracked(vec!["new.txt".into()]))
+        );
+    }
+
+    #[test]
+    fn x_on_a_file_that_is_not_in_head_uses_rm_instead_of_restore() {
+        // `restore --source=HEAD` はコミットが 1 つも無いと解決できずに落ちる。
+        // `Added` なら HEAD の有無に依らず `rm --force` が同じ結果になる（03）。
+        let mut state =
+            worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
+        state.worktree.snapshot.staged[0].status = FileStatus::Added;
+
+        let _ = press(&mut state, 'x');
+
+        let Some(Modal::Confirm { on_yes, .. }) = &state.modal else {
+            panic!("確認モーダルが出ていません");
+        };
+        assert_eq!(
+            on_yes,
+            &Cmd::Exec(GitOp::DiscardAdded(vec!["a.txt".into()]))
+        );
+    }
+
+    #[test]
+    fn a_stale_unborn_head_does_not_turn_discard_into_a_delete() {
+        // `repo.head` は起動時に 1 回読んだきりなので、外部でコミットされると古くなる。
+        // 古い `Unborn` を信じて `rm --force` を出すと、HEAD にあるファイルが消える。
+        // 判断は `LoadStatus` が毎回運んでくる `FileStatus` で行う。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        state.repo.head = Some(HeadInfo::Unborn {
+            name: "main".to_string(),
+        });
+
+        let _ = press(&mut state, 'x');
+
+        let Some(Modal::Confirm { on_yes, .. }) = &state.modal else {
+            panic!("確認モーダルが出ていません");
+        };
+        assert_eq!(on_yes, &Cmd::Exec(GitOp::Discard(vec!["a.txt".into()])));
+    }
+
+    #[test]
+    fn every_confirmation_body_is_free_of_folded_indentation() {
+        // 文字列の行継続（`\` + 改行）は `cargo fmt` が 1 行に畳むときに、次の行の
+        // インデントをリテラルの空白として残す。見た目は「staged」の前に空白が
+        // 20 個並んだ確認文になるが、`contains` を見るテストは素通りする。
+        let cases = [
+            (WorktreeSection::Untracked, FileStatus::Untracked),
+            (WorktreeSection::Staged, FileStatus::Added),
+            (WorktreeSection::Staged, FileStatus::Modified),
+        ];
+
+        for (section, status) in cases {
+            let mut state =
+                worktree_state(fake_snapshot(&["a.txt"], &["a.txt"], &["a.txt"]), section);
+            state.worktree.snapshot.staged[0].status = status;
+
+            let _ = press(&mut state, 'x');
+            let Some(Modal::Confirm { body, .. }) = &state.modal else {
+                panic!("確認モーダルが出ていません: {section:?} {status:?}");
+            };
+            for line in body.lines() {
+                assert_eq!(line, line.trim_start(), "行頭に空白がある: {body:?}");
+                assert!(!line.contains("  "), "空白が連なっている: {body:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn confirming_runs_the_command_and_closes_the_modal() {
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press(&mut state, 'x');
+
+        let cmd = press(&mut state, 'y');
+
+        assert_eq!(cmd, Cmd::Exec(GitOp::Discard(vec!["a.txt".into()])));
+        // 閉じずに返すと、`issue` に落とされたときモーダルだけが残る。
+        assert!(state.modal.is_none());
+        assert!(state.jobs.is_running(JobKind::Exec));
+    }
+
+    #[test]
+    fn declining_closes_the_modal_without_running_anything() {
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press(&mut state, 'x');
+
+        assert_eq!(press(&mut state, 'n'), Cmd::None);
+
+        assert!(state.modal.is_none());
+        assert!(!state.jobs.is_running(JobKind::Exec));
+    }
+
+    #[test]
+    fn keys_do_not_reach_the_pane_while_a_modal_is_open() {
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt", "b.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press(&mut state, 'x');
+
+        // モーダルが受けるので、カーソルは動かない。
+        let _ = press(&mut state, 'j');
+        assert_eq!(state.worktree.cursor, 0);
+        assert!(state.modal.is_some());
+    }
+
+    #[test]
+    fn a_conflicted_row_is_refused_with_a_notice() {
+        let mut state = worktree_state(fake_snapshot(&[], &[], &[]), WorktreeSection::Conflicted);
+        state.worktree.snapshot.conflicted = vec![fake_entry("both.txt", FileStatus::Modified)];
+
+        for key in ['s', 'u', 'x'] {
+            assert_eq!(press(&mut state, key), Cmd::None);
+            assert!(state.modal.is_none());
+        }
+        // 黙って何も起きないと、キーが効いていないのか対象が悪いのか判らない。
+        assert_eq!(
+            state.notices.back().map(|notice| notice.level),
+            Some(NoticeLevel::Warn)
+        );
+    }
+
+    /// `git` の実行結果。
+    fn exec_done(result: Result<ExecOutput, ExecError>) -> Msg {
+        Msg::ExecFinished(Box::new(ExecDone {
+            op: GitOp::Stage(vec!["a.txt".into()]),
+            result,
+            progress: None,
+        }))
+    }
+
+    #[test]
+    fn exec_finished_reloads_the_status() {
+        let mut state = state();
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+
+        let cmd = update(
+            &mut state,
+            exec_done(Ok(ExecOutput {
+                argv: vec!["add".into(), "--".into(), "a.txt".into()],
+                stdout: String::new(),
+                stderr: String::new(),
+            })),
+        );
+
+        assert_eq!(cmd, Cmd::LoadStatus);
+        assert!(!state.jobs.is_running(JobKind::Exec));
+    }
+
+    #[test]
+    fn a_failed_exec_keeps_the_argv_and_stderr() {
+        // Git CLI のエラーは握りつぶさない（不変ルール 4）。
+        let mut state = state();
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+
+        let cmd = update(
+            &mut state,
+            exec_done(Err(ExecError::Failed {
+                argv: vec!["add".into(), "--".into(), "a.txt".into()],
+                code: Some(128),
+                stderr: "fatal: pathspec 'a.txt' did not match any files".to_string(),
+                kind: ExecErrorKind::Other,
+            })),
+        );
+
+        // 失敗しても index が途中まで動いていることがあるので読み直す。
+        assert_eq!(cmd, Cmd::LoadStatus);
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        let detail = notice.detail.as_deref().expect("detail がありません");
+        assert!(detail.contains("git add -- a.txt"), "detail: {detail}");
+        assert!(
+            detail.contains("did not match any files"),
+            "detail: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_status_dropped_after_a_write_is_asked_again_when_the_older_one_arrives() {
+        // 走っている読み取りは書き込みより前に頼まれたものなので、届いても古い。
+        let mut state = state();
+        let _ = state.issue(Cmd::LoadStatus);
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+
+        let cmd = update(
+            &mut state,
+            exec_done(Ok(ExecOutput {
+                argv: vec!["add".into()],
+                stdout: String::new(),
+                stderr: String::new(),
+            })),
+        );
+        // 走っているので落とされる。
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.worktree.stale);
+
+        let cmd = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &[], &[])))),
+        );
+
+        assert_eq!(cmd, Cmd::LoadStatus);
+        assert!(!state.worktree.stale);
+    }
+
+    #[test]
+    fn a_second_write_while_one_runs_is_dropped_with_a_notice() {
+        // 黙って落とすと「押したのに何も起きない」になる。キューは M3。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        assert!(matches!(press(&mut state, 's'), Cmd::Exec(_)));
+
+        assert_eq!(press(&mut state, 's'), Cmd::None);
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Warn);
+    }
+
+    #[test]
+    fn init_asks_for_the_repository_the_first_page_and_the_status() {
         let mut state = state();
 
         let cmd = init(&mut state);
@@ -315,11 +974,13 @@ mod tests {
                 Cmd::LoadRepoInfo,
                 Cmd::LoadLog {
                     count: state.config.graph.page_size
-                }
+                },
+                Cmd::LoadStatus,
             ])
         );
         assert!(state.jobs.is_running(JobKind::LoadLog));
         assert!(state.jobs.is_running(JobKind::LoadRepoInfo));
+        assert!(state.jobs.is_running(JobKind::LoadStatus));
     }
 
     #[test]
@@ -386,11 +1047,11 @@ mod tests {
 
         let cmd = state.issue(Cmd::Batch(vec![
             Cmd::LoadLog { count: 10 },
-            Cmd::LoadStatus,
+            Cmd::ResolveAccount,
         ]));
 
-        // 走っているのは LoadLog だけなので、LoadStatus は残る。
-        assert_eq!(cmd, Cmd::LoadStatus);
+        // `init` が走らせていないので、`ResolveAccount` は残る。
+        assert_eq!(cmd, Cmd::ResolveAccount);
     }
 
     #[test]

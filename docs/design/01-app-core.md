@@ -92,6 +92,12 @@ pub enum Modal {
 discard、abort 系）はすべて `Cmd::Exec(GitOp)` で表せるので、専用の `Msg` 変種を
 作る必要がない。`Msg` は入力イベントと非同期完了だけの語彙に保つ。
 
+`Confirm` のキーは `y` / `Enter` で実行、`n` / `Esc` で取り消し。**実行の側は先にモーダルを
+閉じてから `on_yes` を返し、その `Cmd` も `update` の出口の `issue` を通す。** 閉じずに
+返すと、`Cmd` が `JobTracker` に落とされたときに確認モーダルだけが画面に残る。
+`q` はモーダル表示中は素通ししない（`CommitMessage` では入力文字になるため。脱出口は
+`Ctrl-C`）。
+
 **確認モーダルを組む時点の値を `GitOp` に閉じ込める。** force push の
 `GitOp::Push { expected }` がその例で、ユーザーに見せたリモートの位置をそのまま持たせる
 （03 の「argv への変換」）。実行時に読み直すと、確認してから実行するまでの間に
@@ -228,6 +234,56 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 - ログの読み込みが失敗して積んだ行を捨てるときは `detail` も捨てる。`lines` に無い
   コミットの詳細を残さない
 
+## ワーキングツリー
+
+```rust
+pub struct WorktreeState {
+    pub snapshot: WorktreeSnapshot,   // staged / unstaged / untracked / conflicted（02）
+    pub section: WorktreeSection,     // カーソルのいる区画
+    pub cursor: usize,                // 区画の中の添字
+    pub stale: bool,                  // 届く予定の status が書き込みより前のもの
+}
+```
+
+- **カーソルは「区画 + 区画内の添字」で持ち、`j` / `k` は区画をまたいで 1 本の
+  リストのように動く。** 平坦な添字 1 つにすると、`snapshot` が入れ替わるたびに
+  どの区画のどのファイルを指していたのかを復元できない。逆に区画の移動を別のキーに
+  割ると、空の区画に入って何も選べない状態が作れてしまう。**空の区画は飛ばす**
+- 表示順（= カーソルの進む順）は Conflicted → Staged → Unstaged → Untracked。
+  Conflicted を先頭に置くのは、他の操作より先に解消が要るため
+- `StatusLoaded` で `snapshot` を入れ替えたら、カーソルを新しい長さに合わせ直す。
+  区画が空になっていたら次の区画へ寄せる。寄せ先も無ければ先頭に戻す。**この
+  詰め直しは `WorktreeState` の 1 つの関数（`clamp`）に置く。** `j` / `k` の移動と
+  同じ「次に選べる行」の定義を 2 度書かない
+- **`(操作, 区画)` から `GitOp` を決める表は 1 つ**（`update::plan`）。操作ごとに
+  `match` を分けると、`Pane::Diff` でハンク単位の同じ操作を足すときに同じ表を
+  もう一度書くことになる。**できない組み合わせは理由を返し、通知に出す。**
+  黙って落とすと、キーが効いていないのか対象が悪いのかが判らない
+- stage / unstage / discard が渡すパスは `FileEntry` から出す。**rename は旧パスと
+  新パスの両方を載せる**（`git add -- <old> <new>` は旧パスの削除も index に入る。
+  staged rename の unstage も両方要る。02 の `old_path`）
+- discard は区画と変更種別で `GitOp` が変わる（03 の「discard は 3 変種」）。
+  Untracked なら `DiscardUntracked`、staged の `Added`（= HEAD に無い）なら
+  `DiscardAdded`、それ以外は `Discard`。**判断はここにしか無い。**`to_command` は
+  純粋関数でどちらも見られない。**`RepoInfo.head` では判断しない。** あれは起動時に
+  1 回読むきりで外部のコミットで古くなり、古い `Unborn` を信じると HEAD にある
+  ファイルを `git rm --force` で消してしまう。`FileStatus` なら `LoadStatus` が
+  毎回運んでくる
+- Conflicted の行では stage / unstage / discard を出さない。解消ビューは MVP 外で、
+  中途半端に `git add` だけ通すと「解消した」と誤解させる
+
+### 書き込みのあとの status
+
+`ExecFinished` は成否を問わず `Cmd::LoadStatus` を出すが、**そのとき読み取りが走って
+いれば `issue` に落とされる。落とされたぶんは `WorktreeState.stale` に印を付け、
+走っていたものが届いた時点で頼み直す。**走っている読み取りは書き込みより前に頼まれた
+ものなので、届いた中身は必ず古い。
+
+**`CommitDetailLoaded` の追いつき（上）とは形が違う。** あちらは届いた値の `oid` を
+カーソルと比べて鮮度を*導出*できるが、`WorktreeSnapshot` には「いつの状態か」を示す鍵が
+無く、到着時には判定できない。そのため書き込みの側で「あとで頼み直す」と印を付ける。
+鍵を持てるようになるか、M3 で `Exec` をキューにするときに、この印は消える。
+
 ## 実行中ジョブ
 
 `JobKind` は `Cmd` の変種と 1 対 1 なので、列挙を二重に持たず `Cmd` を単一の真実にする。
@@ -297,7 +353,7 @@ pub enum Msg {
     LogLoaded(Result<LogPage, GitReadError>),
     CommitDetailLoaded { oid: Oid, result: Box<Result<CommitDetail, GitReadError>> },
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
-    StatusLoaded(WorktreeSnapshot),
+    StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
     DiffLoaded { target: DiffTarget, files: Vec<FileDiff> },
     // git_exec
     ExecFinished(Box<ExecDone>),       // { op, result, progress }
@@ -328,12 +384,19 @@ pub enum Msg {
 二重に表現し、`update` に手書きのマッピングが生える。`AuthError` は `gh` / `ssh` 実行の
 内部エラーに留め、`resolve` の中で `DegradedReason` に畳む。
 
+`StatusLoaded` も `Result` を運ぶ。理由は `LogLoaded` と同じで、失敗の通り道が無いと
+`JobKind::LoadStatus` が走ったまま残り、以後の `Cmd::LoadStatus` が黙って落ちる。
+書き込みのたびに `ExecFinished` が `LoadStatus` を出すので、ここが詰まると
+「stage したのに一覧が変わらない」になる。**失敗しても `worktree.snapshot` は捨てない。**
+`LogLoaded` が行を捨てるのは、失敗したセッションを作り直すと同じコミットが二重に並ぶため
+（02）で、status にはその事情が無い。捨てると読めていた一覧が消えるだけになる。
+
 `CommitDetailLoaded` も `Result` を運ぶ。`LogLoaded` と同じで、失敗の通り道が無いと
 `JobKind::LoadCommitDetail` が走ったまま残り、以後の要求が黙って落ちる。**要求した Oid を
 一緒に運ぶ。** `Err` のときにどのコミットが失敗したのかを知る手掛かりがこれしかなく、
 無いと「別のコミットの失敗」と「いま見ているコミットの失敗」を区別できない。
 
-`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` は payload を `Box` に入れる。入れないと `Msg` が
+`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` と `StatusLoaded` は payload を `Box` に入れる。入れないと `Msg` が
 数百バイトになり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。
 これらを Box すると 96 バイトに収まる。上限は `msg.rs` のテスト（128 バイト）で見張る。
 
@@ -361,8 +424,8 @@ pub fn init(state: &mut AppState) -> Cmd;
 
 `runtime::run` がループに入る前に 1 回呼ぶ。`main.rs` から呼ぶと、テストを書かない
 配線の側に処理が出てしまう。いまは `LoadRepoInfo` と
-`LoadLog { count: config.graph.page_size }` の 2 つで、`LoadStatus` / `ResolveAccount` は
-それぞれのタスクでここに足す。
+`LoadLog { count: config.graph.page_size }` と `LoadStatus` の 3 つで、`ResolveAccount` は
+そのタスクでここに足す。
 
 ## update の原則
 
@@ -437,7 +500,11 @@ loop {
 - **描画の直前に毎回 `ui::graph_rows(state)` と `state.graph.viewport` を比べ、違えば
   `Msg::Layout` を流す。** これがレイアウトの変化を core に伝える唯一の経路になる。
   端末のリサイズも `Enter` の展開も同じところを通るので、片方だけ更新を忘れることがない
-- Git CLI 実行中も入力を受け付けるが、書き込み系 `GitOp` は同時に 1 つのみ（キュー）
+- Git CLI 実行中も入力を受け付けるが、書き込み系 `GitOp` は同時に 1 つのみ。
+  **いまはキューに積まず、`AppState::issue` が落として通知を出す。** `JobKind::Exec` の
+  粒度は種別単位なので 2 本目は必ず落ちる。黙って落とすと「押したのに何も起きない」に
+  なるので、落としたことだけは伝える。キューにするのは M3（実行中ジョブのスピナーと
+  キャンセル）
 - `Tick` は 250ms。進行中ジョブのスピナー更新と、外部変更検知（`.git/HEAD` の mtime 監視）に使う
 
 ## 端末の初期化と復元

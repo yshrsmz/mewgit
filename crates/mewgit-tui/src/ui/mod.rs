@@ -3,28 +3,74 @@
 //! `render` は [`AppState`] のみを参照する（不変ルール 2）。git2 / CLI / HTTP を
 //! ここから呼ばない。
 //!
-//! いまはヘッダ・グラフ・ステータスバーだけ。右ペイン（ブランチ / ワーキングツリー）は
-//! 07 のレイアウトどおりに、それぞれのタスクで足す。
+//! いまはヘッダ・グラフ・ワーキングツリー・ステータスバー。右上の
+//! `Branches | Stash | PRs` は、そのタブを実装するタスクで足す（07）。
 
 pub mod lanes;
 pub mod theme;
 pub mod time;
 
-use crate::panes;
+use crate::{modals, panes};
 use mewgit_core::app::{AppState, TermSize};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 /// 1 フレーム描く。
 pub fn render(frame: &mut Frame, state: &AppState) {
     let [header, body, status] = split(frame.area());
+    let [left, right] = split_body(body);
 
     frame.render_widget(header_line(state), header);
-    panes::graph::render(frame, body, state);
+    panes::graph::render(frame, left, state);
+    panes::worktree::render(frame, right, state);
     frame.render_widget(status_line(state), status);
+
+    // モーダルは最後。下のペインを覆って描く（07）。
+    if let Some(modal) = &state.modal {
+        modals::render(frame, frame.area(), modal);
+    }
+}
+
+/// 本文を左右に割る。
+///
+/// 幅 < 100 で右ペインを隠す分岐は M6（07）。全画面切替が同じタスクなので、
+/// 隠すほうだけ先に入れると 80 桁の端末から右ペインへ到達できなくなる。
+fn split_body(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area)
+}
+
+/// ペインの枠。
+///
+/// **フォーカスのあるペインは枠を強調する**（07）。どちらがキーを受けるか判らないと、
+/// `s` や `x` が別のペインに飛んだように見える。枠の内側の大きさは強調の有無で
+/// 変わらないので、レイアウトの計算は `focused` を偽で呼んでよい。
+pub fn pane_block(title: String, focused: bool) -> Block<'static> {
+    let block = Block::default().borders(Borders::ALL).title(title);
+    if focused {
+        block.border_style(Style::default().add_modifier(Modifier::BOLD))
+    } else {
+        block
+    }
+}
+
+/// `lines` を幅 `width` で折り返したときの行数。
+///
+/// ratatui の折り返し行数（`Paragraph::line_count`）は unstable feature の後ろに
+/// あるので、表示幅から見積もる。単語の途中で折れないぶん実際はもう 1 行増える
+/// ことがあるので、**これを使う側は「見積もりが 1 行足りなくても壊れない」形に
+/// する**（確認モーダルはキーの案内を別の領域に、コミット詳細はメッセージの
+/// 領域を先に確保する）。
+pub fn wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    lines
+        .iter()
+        .map(|line| (line.width() as u16).div_ceil(width).max(1))
+        .sum()
 }
 
 /// 画面をヘッダ / 本文 / ステータスバーに割る。
@@ -48,7 +94,8 @@ fn split(area: Rect) -> [Rect; 3] {
 /// [`panes::graph::shows_detail`]。
 pub fn graph_rows(term: TermSize, shows_detail: bool) -> usize {
     let [_, body, _] = split(Rect::new(0, 0, term.width, term.height));
-    panes::graph::areas(body, shows_detail).0.height as usize
+    let [left, _] = split_body(body);
+    panes::graph::areas(left, shows_detail).0.height as usize
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
@@ -100,8 +147,40 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, state_at};
-    use mewgit_core::app::{NoticeLevel, TermSize};
+    use super::{split, split_body};
+    use crate::test_util::{draw, state_at, terminal_with};
+    use mewgit_core::app::{NoticeLevel, Pane, TermSize};
+    use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
+
+    /// ペインの枠の左上。座標は実際のレイアウトから出す。手で書くと、割り方を
+    /// 変えたときにテストだけが古い桁を見て緑のまま無意味になる。
+    fn corner(pane: Pane, size: TermSize) -> (u16, u16) {
+        let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
+        let [left, right] = split_body(body);
+        let area = match pane {
+            Pane::Worktree => right,
+            _ => left,
+        };
+        (area.x, area.y)
+    }
+
+    #[test]
+    fn the_focused_pane_is_the_only_one_with_a_bold_border() {
+        // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
+        let size = TermSize::default();
+        for focus in [Pane::Graph, Pane::Worktree] {
+            let mut state = state_at("/repo");
+            state.focus = focus;
+            let terminal = terminal_with(&state, size);
+            let buffer = terminal.backend().buffer();
+
+            for pane in [Pane::Graph, Pane::Worktree] {
+                let bold = buffer[corner(pane, size)].modifier.contains(Modifier::BOLD);
+                assert_eq!(bold, pane == focus, "focus={focus:?} pane={pane:?}");
+            }
+        }
+    }
 
     #[test]
     fn header_shows_the_repository_name() {

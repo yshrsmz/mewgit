@@ -7,9 +7,11 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::{Stream, StreamExt};
 use mewgit_core::app::{
-    init, update, AppState, Cmd, JobKind, Msg, NoticeLevel, RepoInfo, RepoSnapshot, TermSize,
+    init, update, AppState, Cmd, ExecDone, JobKind, Msg, NoticeLevel, RepoInfo, RepoSnapshot,
+    TermSize,
 };
 use mewgit_core::config::Config;
+use mewgit_core::git_exec::Runner;
 use mewgit_core::git_read::{GitReadError, ReaderHandle};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
@@ -28,6 +30,8 @@ const TICK: Duration = Duration::from_millis(250);
 /// あり、結果は `tx` に流して `run` の `select!` が拾う。
 pub struct Runtime {
     reader: ReaderHandle,
+    /// `git` CLI の実行（03）。`Cmd::Exec` ごとに `clone` してタスクへ渡す。
+    runner: Runner,
     tx: mpsc::UnboundedSender<Msg>,
 }
 
@@ -62,7 +66,10 @@ where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let mut tick = tokio::time::interval(TICK);
-    let (runtime, mut msgs) = Runtime::new(reader);
+    // `git_bin` は設定から渡す（03 の「Runner」）。cwd はワークツリーのルートで、
+    // 引数に渡されたサブディレクトリではない（02 の `workdir`）。
+    let runner = Runner::new(state.repo.path.clone(), &state.config.general.git_bin);
+    let (runtime, mut msgs) = Runtime::new(reader, runner);
 
     // 起動時の読み込み。ループの前に 1 回だけ。**サイズを入れるより先に出す。**
     // 逆にすると、サイズを知った時点で `load_more` が 1 ページ目を頼み、`init` の
@@ -136,9 +143,9 @@ fn layout(state: &mut AppState) -> Cmd {
 }
 
 impl Runtime {
-    fn new(reader: ReaderHandle) -> (Self, mpsc::UnboundedReceiver<Msg>) {
+    fn new(reader: ReaderHandle, runner: Runner) -> (Self, mpsc::UnboundedReceiver<Msg>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { reader, tx }, rx)
+        (Self { reader, runner, tx }, rx)
     }
 
     /// [`Cmd`] を実行する。終了なら [`ControlFlow::Break`]。
@@ -193,10 +200,33 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
+            Cmd::LoadStatus => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::StatusLoaded(Box::new(reader.status().await)));
+                });
+                ControlFlow::Continue(())
+            }
+
+            Cmd::Exec(op) => {
+                let runner = self.runner.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = runner.run(&op).await;
+                    // 進行中操作の再検出は M5（03）。それまではここで `None` を入れる。
+                    let done = ExecDone {
+                        op,
+                        result,
+                        progress: None,
+                    };
+                    let _ = tx.send(Msg::ExecFinished(Box::new(done)));
+                });
+                ControlFlow::Continue(())
+            }
+
             // M2 以降で実装する。
-            Cmd::LoadStatus => not_implemented(state, JobKind::LoadStatus, "LoadStatus"),
             Cmd::LoadDiff(_) => not_implemented(state, JobKind::LoadDiff, "LoadDiff"),
-            Cmd::Exec(_) => not_implemented(state, JobKind::Exec, "Exec"),
             Cmd::ResolveAccount => {
                 not_implemented(state, JobKind::ResolveAccount, "ResolveAccount")
             }
@@ -239,6 +269,7 @@ mod tests {
     use super::*;
     use futures::stream;
     use mewgit_core::app::{Pane, TermSize};
+    use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::HeadInfo;
     use mewgit_core::test_util::{BareRepo, TestRepo};
     use ratatui::backend::TestBackend;
@@ -247,6 +278,16 @@ mod tests {
     /// リポジトリを開いた状態とハンドル。
     fn opened(repo: &TestRepo) -> (AppState, ReaderHandle) {
         open(repo.path(), Config::default()).expect("リポジトリを開けませんでした")
+    }
+
+    /// テスト用のランタイム。`git` は隔離した環境で走らせる
+    /// （実行環境の `~/.gitconfig` を持ち込まない）。
+    fn runtime_for(
+        repo: &TestRepo,
+        reader: ReaderHandle,
+    ) -> (Runtime, mpsc::UnboundedReceiver<Msg>) {
+        let runner = Runner::new(repo.path(), "git").with_env(repo.runner_env());
+        Runtime::new(reader, runner)
     }
 
     fn key(code: KeyCode) -> std::io::Result<Event> {
@@ -284,7 +325,7 @@ mod tests {
         let oid = repo.commit("first");
         repo.git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
         let (mut state, reader) = opened(&repo);
-        let (runtime, mut msgs) = Runtime::new(reader);
+        let (runtime, mut msgs) = runtime_for(&repo, reader);
 
         assert!(runtime
             .dispatch(&mut state, Cmd::LoadRepoInfo)
@@ -328,7 +369,7 @@ mod tests {
         repo.commit("first");
         repo.commit("second");
         let (mut state, reader) = opened(&repo);
-        let (runtime, mut msgs) = Runtime::new(reader);
+        let (runtime, mut msgs) = runtime_for(&repo, reader);
 
         let cmd = init(&mut state);
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
@@ -408,6 +449,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_status_reaches_the_state_through_the_reader() {
+        let repo = TestRepo::init();
+        repo.commit_file("a.txt", "first");
+        repo.write_worktree_file("b.txt", b"new");
+        let (mut state, reader) = opened(&repo);
+        let (runtime, mut msgs) = runtime_for(&repo, reader);
+
+        let cmd = state.issue(Cmd::LoadStatus);
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        assert_eq!(state.worktree.snapshot.untracked.len(), 1);
+        assert!(!state.jobs.is_running(JobKind::LoadStatus));
+    }
+
+    #[tokio::test]
+    async fn exec_runs_git_and_the_reload_shows_the_result() {
+        // `Cmd::Exec` から `git` を回して、そのあとの `LoadStatus` までを通す。
+        let repo = TestRepo::init();
+        repo.commit("first");
+        repo.write_worktree_file("b.txt", b"new");
+        let (mut state, reader) = opened(&repo);
+        let (runtime, mut msgs) = runtime_for(&repo, reader);
+
+        let cmd = state.issue(Cmd::Exec(GitOp::Stage(vec!["b.txt".into()])));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+
+        // 実行が終わったら status を読み直す。
+        let cmd = update(&mut state, msg);
+        assert_eq!(cmd, Cmd::LoadStatus);
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        assert_eq!(state.worktree.snapshot.staged.len(), 1);
+        assert!(state.worktree.snapshot.untracked.is_empty());
+        assert!(state.notices.is_empty(), "{:?}", state.notices);
+    }
+
+    #[tokio::test]
+    async fn a_failed_exec_reaches_the_notices_with_its_argv_and_stderr() {
+        // Git CLI のエラーは握りつぶさない（不変ルール 4）。
+        let repo = TestRepo::init();
+        repo.commit("first");
+        let (mut state, reader) = opened(&repo);
+        let (runtime, mut msgs) = runtime_for(&repo, reader);
+
+        let cmd = state.issue(Cmd::Exec(GitOp::Stage(vec!["missing.txt".into()])));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        let detail = notice.detail.as_deref().expect("detail がありません");
+        assert!(detail.contains("git add -- missing.txt"), "{detail}");
+        assert!(detail.contains("pathspec"), "{detail}");
+        assert!(!state.jobs.is_running(JobKind::Exec));
+    }
+
+    #[tokio::test]
     async fn stream_errors_are_not_swallowed() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
@@ -421,7 +525,7 @@ mod tests {
     async fn quit_breaks_the_loop() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = Runtime::new(reader);
+        let (runtime, _msgs) = runtime_for(&repo, reader);
         assert!(runtime.dispatch(&mut state, Cmd::Quit).is_break());
     }
 
@@ -429,7 +533,7 @@ mod tests {
     async fn none_continues() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = Runtime::new(reader);
+        let (runtime, _msgs) = runtime_for(&repo, reader);
         assert!(runtime.dispatch(&mut state, Cmd::None).is_continue());
         assert!(state.notices.is_empty());
     }
@@ -438,10 +542,10 @@ mod tests {
     async fn batch_stops_at_quit() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = Runtime::new(reader);
+        let (runtime, _msgs) = runtime_for(&repo, reader);
 
         // Quit の後ろは実行しない。未実装 notice が 1 件だけであることで確かめる。
-        let batch = Cmd::Batch(vec![Cmd::LoadStatus, Cmd::Quit, Cmd::FetchPr]);
+        let batch = Cmd::Batch(vec![Cmd::ResolveAccount, Cmd::Quit, Cmd::FetchPr]);
         assert!(runtime.dispatch(&mut state, batch).is_break());
         assert_eq!(state.notices.len(), 1);
     }
@@ -450,14 +554,16 @@ mod tests {
     async fn unimplemented_cmd_warns_instead_of_disappearing() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = Runtime::new(reader);
+        let (runtime, _msgs) = runtime_for(&repo, reader);
 
-        assert!(runtime.dispatch(&mut state, Cmd::LoadStatus).is_continue());
+        assert!(runtime
+            .dispatch(&mut state, Cmd::ResolveAccount)
+            .is_continue());
 
         assert_eq!(state.notices.len(), 1);
         let notice = &state.notices[0];
         assert_eq!(notice.level, NoticeLevel::Warn);
-        assert!(notice.message.contains("LoadStatus"));
+        assert!(notice.message.contains("ResolveAccount"));
     }
 
     #[test]
@@ -466,13 +572,13 @@ mod tests {
         // 通知も出ない（「1 回だけ警告が出てあとは無反応」になる）。
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = Runtime::new(reader);
+        let (runtime, _msgs) = runtime_for(&repo, reader);
 
-        let cmd = state.issue(Cmd::LoadStatus);
+        let cmd = state.issue(Cmd::ResolveAccount);
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
-        assert!(!state.jobs.is_running(JobKind::LoadStatus));
+        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
 
-        let again = state.issue(Cmd::LoadStatus);
+        let again = state.issue(Cmd::ResolveAccount);
         assert!(runtime.dispatch(&mut state, again).is_continue());
         assert_eq!(state.notices.len(), 2);
     }
@@ -481,9 +587,9 @@ mod tests {
     async fn nested_batch_is_dispatched() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = Runtime::new(reader);
+        let (runtime, _msgs) = runtime_for(&repo, reader);
 
-        let nested = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::LoadStatus]), Cmd::FetchPr]);
+        let nested = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::ResolveAccount]), Cmd::FetchPr]);
         assert!(runtime.dispatch(&mut state, nested).is_continue());
         assert_eq!(state.notices.len(), 2);
     }
@@ -495,7 +601,7 @@ mod tests {
         repo.git(&["commit", "--amend", "-q", "-m", "subject\n\nbody"]);
         let oid = repo.head_oid();
         let (mut state, reader) = opened(&repo);
-        let (runtime, mut msgs) = Runtime::new(reader);
+        let (runtime, mut msgs) = runtime_for(&repo, reader);
 
         // 行が無いとカーソルの指すコミットが決まらず、届いた詳細は捨てられる。
         // 先に 1 ページ積む。

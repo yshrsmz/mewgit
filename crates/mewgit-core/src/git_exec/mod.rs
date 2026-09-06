@@ -35,11 +35,26 @@ pub enum GitOp {
     /// tracked なファイルの変更を HEAD の内容に戻す。
     ///
     /// untracked なファイルは `git restore` では消せないので
-    /// [`GitOp::DiscardUntracked`] に分ける。どちらを出すかは区画を知っている
-    /// 呼び出し側が決める（`to_command` は純粋関数でファイルシステムを見られない）。
+    /// [`GitOp::DiscardUntracked`] に、HEAD に無いファイルは HEAD を解決できない
+    /// ことがあるので [`GitOp::DiscardAdded`] に分ける。どれを出すかは区画と
+    /// 変更種別を知っている呼び出し側が決める（`to_command` は純粋関数で
+    /// ファイルシステムも index も見られない）。
     Discard(Vec<PathBuf>),
     /// untracked なファイルを削除する（`git clean`）。
     DiscardUntracked(Vec<PathBuf>),
+    /// **HEAD に無い** staged なファイル（[`FileStatus::Added`]）を捨てる。
+    ///
+    /// [`GitOp::Discard`] は `restore --source=HEAD` なので、コミットが 1 つも無い
+    /// リポジトリでは HEAD を解決できずに落ちる。`git rm --force` は index からも
+    /// ワークツリーからも消すので、HEAD に無いファイルに対しては `Discard` と同じ結果に
+    /// なり、しかも HEAD の有無に依らない（03）。
+    ///
+    /// **HEAD にあるファイルへ掛けてはいけない。** 変更ではなくファイルそのものが消える。
+    /// 「HEAD に無いか」は `FileStatus::Added` で判る。`RepoInfo.head` は起動時に読んだ
+    /// きりで古くなりうるので、そちらでは判断しない。
+    ///
+    /// [`FileStatus::Added`]: crate::git_read::FileStatus::Added
+    DiscardAdded(Vec<PathBuf>),
     Commit {
         message: String,
         amend: bool,
@@ -178,6 +193,14 @@ impl ExecError {
         match self {
             ExecError::NoResult { argv, .. } | ExecError::Failed { argv, .. } => argv,
         }
+    }
+
+    /// 実行した（しようとした）コマンドの表示。`git` を頭に付けた 1 行。
+    ///
+    /// 見せ方をここ 1 つにする。呼び出し側で `argv.join(" ")` を書くと、`git` を
+    /// 付ける／付けないが箇所ごとにずれる。
+    pub fn command_line(&self) -> String {
+        format!("git {}", self.argv().join(" "))
     }
 }
 

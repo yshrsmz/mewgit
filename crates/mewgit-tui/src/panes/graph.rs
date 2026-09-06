@@ -1,7 +1,8 @@
 //! グラフペインの描画。設計は `docs/design/07-ui.md` と `docs/design/06-graph.md`。
 //!
-//! レーンの罫線はまだ描かない（`GraphRow.cells` が空のあいだは何も出さない）。
-//! `graph::lane` を実装したら、行の左に `cells` を写した列を足す。
+//! レーンの罫線はまだ描かない。`graph::lane` が `GraphRow.cells` を埋めるように
+//! なったが、ここではまだ読んでいない。行の左に `cells` を写した列を足すのは
+//! `docs/plan.md` M1 の `ui::panes::graph` のタスク。
 
 use mewgit_core::app::{AppState, GraphLine, JobKind};
 use mewgit_core::git_read::RefLabel;
@@ -323,19 +324,6 @@ mod tests {
             "{:?}",
             lines[2]
         );
-    }
-
-    #[test]
-    fn a_row_without_lanes_draws_no_graph_column() {
-        // `graph::lane` を入れるまで `cells` は空。罫線が出ないことを固定しておく。
-        let state = state_with_commits(&["first"]);
-        assert!(state.graph.lines[0].row.cells.is_empty());
-
-        let lines = draw(&state, TermSize::default());
-
-        // 両端は枠なので、内側だけを見る。
-        let inside: String = lines[2].chars().skip(1).take_while(|c| *c != '│').collect();
-        assert!(!inside.contains('│'), "{inside:?}");
     }
 
     #[test]

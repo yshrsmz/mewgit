@@ -9,6 +9,11 @@ use crate::git_read::DiffTarget;
 use super::JobKind;
 
 /// 実行してほしい副作用。
+///
+/// `#[must_use]` を付けている。捨てると `AppState::issue` がジョブを登録したまま
+/// 実行されず、以後その種類の `Cmd` が黙って落ち続ける（01 の「追加ページの読み込み」）。
+/// 捨ててよい場面では `let _ = ...` と書いて意図を示す。
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd {
     None,

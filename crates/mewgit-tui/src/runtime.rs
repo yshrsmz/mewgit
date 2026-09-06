@@ -64,19 +64,27 @@ where
     let mut tick = tokio::time::interval(TICK);
     let (runtime, mut msgs) = Runtime::new(reader);
 
+    // 起動時の読み込み。ループの前に 1 回だけ。**サイズを入れるより先に出す。**
+    // 逆にすると、サイズを知った時点で `load_more` が 1 ページ目を頼み、`init` の
+    // `Cmd::LoadLog` が `issue` に落とされる。最初のページを頼むのが `init` でなく
+    // なり、テストと設計書（01）が主張する経路とバイナリの経路が食い違う。
+    // `terminal.size()` が失敗しても読める、という保険もこの順序で効く。
+    let cmd = init(state);
+    if runtime.dispatch(state, cmd).is_break() {
+        return Ok(());
+    }
+
     // 起動時に `Resize` は飛んでこないので、最初のサイズは自分で入れる。
+    // 戻ってきた `Cmd` も流す（`init` が読んでいる最中なら `issue` が落とす）。
     if let Ok(size) = terminal.size() {
         let msg = crate::input::resized(TermSize {
             width: size.width,
             height: size.height,
         });
-        update(state, msg);
-    }
-
-    // 起動時の読み込み。ループの前に 1 回だけ。
-    let cmd = init(state);
-    if runtime.dispatch(state, cmd).is_break() {
-        return Ok(());
+        let cmd = update(state, msg);
+        if runtime.dispatch(state, cmd).is_break() {
+            return Ok(());
+        }
     }
 
     loop {
@@ -248,7 +256,7 @@ mod tests {
             .dispatch(&mut state, Cmd::LoadRepoInfo)
             .is_continue());
         let msg = msgs.recv().await.expect("Msg が返りませんでした");
-        update(&mut state, msg);
+        let _ = update(&mut state, msg);
 
         assert_eq!(state.repo.remotes.len(), 1);
         assert_eq!(
@@ -293,7 +301,7 @@ mod tests {
 
         // 非同期タスクが返した Msg をループの代わりに受け取る。
         let msg = msgs.recv().await.expect("Msg が返りませんでした");
-        update(&mut state, msg);
+        let _ = update(&mut state, msg);
 
         let summaries: Vec<&str> = state
             .graph

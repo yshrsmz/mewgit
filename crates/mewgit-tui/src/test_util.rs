@@ -94,7 +94,7 @@ fn state_with_log(commits: Vec<Commit>) -> AppState {
         commits,
         done: true,
     };
-    update(&mut state, Msg::LogLoaded(Ok(page)));
+    let _ = update(&mut state, Msg::LogLoaded(Ok(page)));
     state
 }
 

@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn before_the_first_page_arrives_it_says_loading() {
         let mut state = state_at("/repo");
-        init(&mut state);
+        let _ = init(&mut state);
 
         let lines = draw(&state, TermSize::default());
 
@@ -341,8 +341,8 @@ mod tests {
         // 失敗の通知はステータスバーに出るが、次の通知で上書きされる。
         // ペインが「読み込み中…」のままだと、何も起きていないように見える。
         let mut state = state_at("/repo");
-        init(&mut state);
-        update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+        let _ = init(&mut state);
+        let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
 
         let lines = draw(&state, TermSize::default());
 

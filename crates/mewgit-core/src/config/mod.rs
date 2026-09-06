@@ -25,6 +25,13 @@ pub enum ConfigWarning {
     /// `[[repos]]` の `match` が glob として不正。そのルールだけ捨てる。
     #[error("[[repos]] の match が不正な glob です: {pattern}: {message}")]
     InvalidGlob { pattern: String, message: String },
+    /// 値が使える範囲から外れている。その項目だけ既定値に戻す。
+    #[error("{key} の値 {value} は使えないので {fallback} にしました")]
+    OutOfRange {
+        key: &'static str,
+        value: String,
+        fallback: String,
+    },
     /// ホームディレクトリが特定できず、設定ファイルの場所を決められなかった。
     #[error("ホームディレクトリを特定できず、設定ファイルを読めませんでした")]
     NoConfigDir,
@@ -244,8 +251,21 @@ impl Config {
 
 impl ConfigFile {
     /// glob をコンパイルして [`Config`] にする。不正なルールは捨てて警告に載せる。
-    fn into_config(self) -> (Config, Vec<ConfigWarning>) {
+    fn into_config(mut self) -> (Config, Vec<ConfigWarning>) {
         let mut warnings = Vec::new();
+
+        // 0 件ずつ読むと 1 行も進まないまま「まだ続きがある」ページが返り、
+        // 追加読み込みが止まらない（01 の「追加ページの読み込み」）。
+        if self.graph.page_size == 0 {
+            let fallback = Graph::default().page_size;
+            warnings.push(ConfigWarning::OutOfRange {
+                key: "graph.page_size",
+                value: self.graph.page_size.to_string(),
+                fallback: fallback.to_string(),
+            });
+            self.graph.page_size = fallback;
+        }
+
         let repos = self
             .repos
             .into_iter()
@@ -653,5 +673,20 @@ mod tests {
         config.apply_env(|_| Some(String::new()));
         assert_eq!(config.general.git_bin, "/from/file");
         assert_eq!(config.general.gh_bin, "gh");
+    }
+    #[test]
+    fn a_page_size_of_zero_falls_back_to_the_default() {
+        // 0 件ずつ読むと 1 行も進まないページが返り続け、追加読み込みが止まらない。
+        let (config, warnings) = Config::from_toml_str("[graph]\npage_size = 0\n");
+
+        assert_eq!(config.graph.page_size, Graph::default().page_size);
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::OutOfRange {
+                key: "graph.page_size",
+                value: "0".to_string(),
+                fallback: Graph::default().page_size.to_string(),
+            }]
+        );
     }
 }

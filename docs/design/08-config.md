@@ -22,7 +22,7 @@ editor_fallback = false  # true なら reword 等で $EDITOR を使う
 
 [graph]
 ascii = false
-page_size = 300
+page_size = 300                                                  # 0 なら既定値に戻す
 colors = ["blue", "magenta", "cyan", "green", "yellow", "red"]   # 読めない色名は端末既定色
 
 [github]

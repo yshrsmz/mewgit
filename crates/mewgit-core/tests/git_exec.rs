@@ -8,6 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, Runner};
+use mewgit_core::git_read::Oid;
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
 /// 実行環境の設定を持ち込まない `Runner`。
@@ -33,13 +34,35 @@ fn clone_of(remote: &BareRepo) -> TestRepo {
 }
 
 /// `origin main` への push。`set_upstream` は初回だけ立てる。
-fn push(force: bool, set_upstream: bool) -> GitOp {
+fn push(set_upstream: bool) -> GitOp {
     GitOp::Push {
         remote: "origin".into(),
         branch: "main".into(),
         set_upstream,
-        force,
+        force: false,
+        expected: None,
     }
+}
+
+/// `expected` を主張する force push。
+fn force_push(expected: Option<Oid>) -> GitOp {
+    GitOp::Push {
+        remote: "origin".into(),
+        branch: "main".into(),
+        set_upstream: false,
+        force: true,
+        expected,
+    }
+}
+
+/// 別のクローンが `origin main` を 1 つ進める。返るのはその Oid。
+fn someone_else_pushes(remote: &BareRepo) -> Oid {
+    let theirs = clone_of(remote);
+    theirs.git(&["fetch", "-q", "origin"]);
+    theirs.git(&["checkout", "-qB", "main", "origin/main"]);
+    theirs.commit_file("theirs.txt", "theirs");
+    theirs.git(&["push", "-q", "origin", "main"]);
+    theirs.head_oid()
 }
 
 /// `git` が非 0 で終わったときの分類。それ以外の失敗なら panic する。
@@ -364,21 +387,22 @@ async fn a_rejected_push_is_classified_as_non_fast_forward() {
     let runner = runner(&repo);
 
     runner
-        .run(&push(false, true))
+        .run(&push(true))
         .await
         .expect("push できませんでした");
+    let pushed = repo.head_oid();
 
     // リモートが知らない履歴に書き換えてから push すると弾かれる。
     repo.git(&["commit", "-q", "--amend", "-m", "rewritten"]);
     let err = runner
-        .run(&push(false, false))
+        .run(&push(false))
         .await
         .expect_err("弾かれるはずです");
     assert_eq!(failure_kind(&err), ExecErrorKind::NonFastForward);
 
-    // force は `--force-with-lease`。リモートは自分が push した位置のままなので通る。
+    // 主張した位置にリモートが居るので force push は通る。
     runner
-        .run(&push(true, false))
+        .run(&force_push(Some(pushed)))
         .await
         .expect("force push できませんでした");
     assert_eq!(
@@ -395,23 +419,63 @@ async fn force_with_lease_refuses_when_someone_else_moved_the_remote() {
     mine.commit("first");
     let runner = runner(&mine);
     runner
-        .run(&push(false, true))
+        .run(&push(true))
         .await
         .expect("push できませんでした");
+    let pushed = mine.head_oid();
 
-    // 別のクローンがリモートを進める。こちらの `origin/main` は古いままになる。
-    let theirs = clone_of(&remote);
-    theirs.git(&["fetch", "-q", "origin"]);
-    theirs.git(&["checkout", "-qB", "main", "origin/main"]);
-    theirs.commit_file("theirs.txt", "theirs");
-    theirs.git(&["push", "-q", "origin", "main"]);
-    let theirs_head = theirs.head_oid();
+    let theirs_head = someone_else_pushes(&remote);
 
     mine.git(&["commit", "-q", "--amend", "-m", "rewritten"]);
     let err = runner
-        .run(&push(true, false))
+        .run(&force_push(Some(pushed)))
         .await
         .expect_err("lease が古いので弾かれるはずです");
+
+    assert_eq!(failure_kind(&err), ExecErrorKind::NonFastForward);
+    assert_eq!(
+        remote.git(&["rev-parse", "refs/heads/main"]),
+        theirs_head.to_string(),
+        "他人のコミットを消してしまった"
+    );
+}
+
+#[tokio::test]
+async fn the_lease_survives_a_fetch() {
+    // **値の無い `--force-with-lease` はここで素通りする。** lease は
+    // remote-tracking ref と比べるだけなので、`fetch` で `origin/main` が他人の
+    // 位置に進むと検査が意味を失う。UI は「push を弾かれた → fetch して見る →
+    // やっぱり force する」を普通にやるので、この経路が本命。
+    let remote = BareRepo::init();
+    let mine = clone_of(&remote);
+    mine.commit("first");
+    let runner = runner(&mine);
+    runner
+        .run(&push(true))
+        .await
+        .expect("push できませんでした");
+    let pushed = mine.head_oid();
+
+    let theirs_head = someone_else_pushes(&remote);
+
+    mine.git(&["commit", "-q", "--amend", "-m", "rewritten"]);
+    runner
+        .run(&GitOp::Fetch {
+            remote: Some("origin".into()),
+            prune: false,
+        })
+        .await
+        .expect("fetch できませんでした");
+    assert_eq!(
+        mine.git(&["rev-parse", "origin/main"]),
+        theirs_head.to_string(),
+        "fetch で origin/main が他人の位置に進んでいる前提"
+    );
+
+    let err = runner
+        .run(&force_push(Some(pushed)))
+        .await
+        .expect_err("主張した位置と違うので弾かれるはずです");
 
     assert_eq!(failure_kind(&err), ExecErrorKind::NonFastForward);
     assert_eq!(

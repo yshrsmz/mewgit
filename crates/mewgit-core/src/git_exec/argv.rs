@@ -27,6 +27,9 @@ pub enum ArgvError {
     /// 塞ぐのは、黙って lossy 変換すると別のファイルを操作してしまうため。
     #[error("パスが UTF-8 ではないため git に渡せません: {}", .path.display())]
     NonUtf8Path { path: PathBuf },
+    /// pathspec が空。`--` だけを置くと「指定なし」= リポジトリ全体になる。
+    #[error("パスの指定が空です: git {} -- は対象をリポジトリ全体に広げてしまいます", .argv.join(" "))]
+    EmptyPathspec { argv: Vec<String> },
 }
 
 /// [`GitOp`] を `git` の呼び出しに変換する。
@@ -128,17 +131,23 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
                 },
             ]);
         }
-        // force は `--force-with-lease`。リモートが自分の知らない位置に進んでいたら
-        // 弾かれる。`--force` は他人のコミットを消せるので使わない。
+        // force は `--force-with-lease`。`--force` は他人のコミットを消せるので
+        // 使わない。**`expected` を必ず添えたい。** 値を省くと lease は
+        // remote-tracking ref（`origin/main`）と比べるだけになり、`git fetch` の後は
+        // 他人が進めた位置がそこに入って検査を素通りする（git 2.55 で確認）。
         GitOp::Push {
             remote,
             branch,
             set_upstream,
             force,
+            expected,
         } => {
             argv.push("push".into());
             if *force {
-                argv.push("--force-with-lease".into());
+                argv.push(match expected {
+                    Some(oid) => format!("--force-with-lease={branch}:{oid}"),
+                    None => "--force-with-lease".into(),
+                });
             }
             if *set_upstream {
                 argv.push("--set-upstream".into());
@@ -196,7 +205,17 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
 ///
 /// `--` は必ず置く。`-n` や `HEAD` という名前のファイルが、オプションや revision
 /// として解釈されるのを防ぐため。
+///
+/// **空の `paths` は拒否する。** `--` だけを置くと git は「pathspec の指定なし」と
+/// 読み、対象がリポジトリ全体に広がる。`git reset --quiet --` は index 全体を戻し、
+/// `git clean --force --` は untracked を全部消す（git 2.55 で確認）。「0 件を
+/// discard します」と確認して「全部 discard」が走ることになる。
 fn push_paths(argv: &mut Vec<String>, paths: &[PathBuf]) -> Result<(), ArgvError> {
+    if paths.is_empty() {
+        return Err(ArgvError::EmptyPathspec {
+            argv: std::mem::take(argv),
+        });
+    }
     argv.push("--".into());
     for path in paths {
         argv.push(path_arg(path)?);
@@ -399,10 +418,11 @@ mod tests {
                     branch: "main".into(),
                     set_upstream: true,
                     force: true,
+                    expected: Some(fake_oid(4)),
                 },
                 vec![
                     "push",
-                    "--force-with-lease",
+                    "--force-with-lease=main:0000000000000000000000000000000000000004",
                     "--set-upstream",
                     "origin",
                     "main",
@@ -414,6 +434,7 @@ mod tests {
                     branch: "main".into(),
                     set_upstream: false,
                     force: false,
+                    expected: None,
                 },
                 vec!["push", "origin", "main"],
             ),
@@ -541,6 +562,57 @@ mod tests {
         let command = to_command(&GitOp::Stage(vec!["-n".into(), "--all".into()]))
             .expect("argv を組めませんでした");
         assert_eq!(command.argv, ["add", "--", "-n", "--all"]);
+    }
+
+    #[test]
+    fn an_empty_pathspec_is_refused() {
+        // `--` だけを置くと「指定なし」= リポジトリ全体になる。確認モーダルが
+        // 「0 件」と言いながら全体を巻き込むので、argv を組む側で止める。
+        for op in [
+            GitOp::Stage(Vec::new()),
+            GitOp::Unstage(Vec::new()),
+            GitOp::Discard(Vec::new()),
+            GitOp::DiscardUntracked(Vec::new()),
+            GitOp::StashPush {
+                message: None,
+                include_untracked: false,
+                paths: Some(Vec::new()),
+            },
+        ] {
+            let err = to_command(&op).expect_err("通ってはいけません: {op:?}");
+            assert!(
+                matches!(err, ArgvError::EmptyPathspec { .. }),
+                "{op:?} -> {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stash_without_paths_still_covers_everything() {
+        // `paths: None` は「全部」を表す正当な指定。`Some(vec![])` と区別する。
+        let command = to_command(&GitOp::StashPush {
+            message: None,
+            include_untracked: false,
+            paths: None,
+        })
+        .expect("argv を組めませんでした");
+        assert_eq!(command.argv, ["stash", "push"]);
+    }
+
+    #[test]
+    fn force_push_without_an_expected_oid_uses_the_weaker_lease() {
+        let command = to_command(&GitOp::Push {
+            remote: "origin".into(),
+            branch: "main".into(),
+            set_upstream: false,
+            force: true,
+            expected: None,
+        })
+        .expect("argv を組めませんでした");
+        assert_eq!(
+            command.argv,
+            ["push", "--force-with-lease", "origin", "main"]
+        );
     }
 
     #[test]

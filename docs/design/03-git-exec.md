@@ -15,7 +15,8 @@ pub enum GitOp {
     BranchCreate { name, start: Option<String>, checkout: bool },
     Checkout(String), BranchDelete { name, force }, BranchRename { from, to },
     Fetch { remote: Option<String>, prune: bool },
-    Pull { mode: PullMode }, Push { remote, branch, set_upstream, force },
+    Pull { mode: PullMode },
+    Push { remote, branch, set_upstream, force, expected: Option<Oid> },
     RebaseInteractive { onto: String, plan: RebasePlan },
     RebaseContinue, RebaseSkip, RebaseAbort,
     CherryPick(Vec<Oid>), CherryPickContinue, CherryPickAbort,
@@ -65,7 +66,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `BranchRename { from, to }` | `branch --move <from> <to>` |
 | `Fetch { remote, prune }` | `fetch [--prune] [<remote>]` |
 | `Pull { mode }` | `pull --no-rebase` / `--rebase` / `--ff-only` |
-| `Push { .. }` | `push [--force-with-lease] [--set-upstream] <remote> <branch>` |
+| `Push { .. }` | `push [--force-with-lease[=<branch>:<expected>]] [--set-upstream] <remote> <branch>` |
 | `RebaseInteractive { onto }` | `rebase --interactive <onto>` |
 | `RebaseContinue` / `Skip` / `Abort` | `rebase --continue` / `--skip` / `--abort` |
 | `CherryPick(oids)` | `cherry-pick <oids>` |
@@ -85,8 +86,17 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   「Unstaged changes after reset:」の一覧を出させないため
 - **`checkout <target> --` の `--` は revision として読ませるため。** 同名のファイルが
   あるときに「そのファイルを取り出す」と解釈されるのを防ぐ
-- **force push は `--force-with-lease`。** リモートが自分の知らない位置に進んでいたら
-  弾かれる。`--force` は他人のコミットを消せるので使わない
+- **force push は `--force-with-lease`。`--force` は他人のコミットを消せるので使わない。**
+  **値（`=<branch>:<expected>`）を必ず添える。** 省くと lease は remote-tracking ref
+  （`origin/main`）と比べるだけになり、`git fetch` を挟むと他人が進めた位置がそこに入って
+  検査を素通りする（git 2.55 で確認）。「push が弾かれた → fetch して中身を見る →
+  やはり force する」は UI が普通に通す道なので、素の lease は守りにならない。
+  `expected` には確認モーダルで見せた位置をそのまま渡す
+- **pathspec が空の `GitOp` は `ArgvError::EmptyPathspec` で拒否する。** `--` だけを
+  置くと git は「指定なし」と読み、対象がリポジトリ全体に広がる。`reset --quiet --` は
+  index 全体を戻し、`clean --force --` は untracked を全部消す（git 2.55 で確認）。
+  「0 件を discard します」と確認して全部消えることになる。`StashPush { paths: None }` は
+  「全部」を表す正当な指定なので、`Some(vec![])` とは区別する
 - **untracked の discard に `-d` は付けない。** `git_read::status` が
   `recurse_untracked_dirs(true)` で列挙するので、渡すのは常にファイル。ディレクトリごと
   消す余地を残さない
@@ -122,6 +132,13 @@ pub enum ExecError {
   struct にすると「起動していないときは `code` が `None`、`stderr` に git ではない文言、
   `kind` は分類表に載らない値」という約束を、読む側が毎回思い出すことになる
 - 環境変数: `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`（エラー文の検出を安定させる）、`GIT_EDITOR=true`（意図しないエディタ起動を防ぐ）。`with_env` の指定はこの後に重ねるので、テストは上書きできる
+- **`GIT_TERMINAL_PROMPT=0` では ssh のパスフレーズ入力を止められない。** `ssh` は
+  stdin ではなく `/dev/tty` を直接読むので、agent に載っていない鍵だと raw mode の画面に
+  プロンプトが出てそのまま止まる（タイムアウトは設けない方針、キャンセルは M3）。
+  `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` を既定に置けば `Permission denied (publickey)`
+  で即座に失敗して分類できるが、ユーザーの `GIT_SSH_COMMAND` や `core.sshCommand` を
+  黙って上書きする。**どう避けるかは M3（fetch / pull / push）で決める。**
+  それまでこの経路は UI から到達しない
 - stdin は閉じる。ハンク適用は `git apply --cached -` に patch を stdin で渡す例外
 - stdout / stderr は表示専用なので lossy で `String` にする
 - タイムアウトは設けない（fetch の長さは予測不能）。代わりに UI からキャンセル可能にし、子プロセスを kill する（`kill_on_drop`）

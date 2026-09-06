@@ -70,6 +70,13 @@ pub enum GitOp {
         branch: String,
         set_upstream: bool,
         force: bool,
+        /// force push で「リモートはまだここにいるはず」と主張する Oid。UI が確認
+        /// モーダルで見せた位置をそのまま渡す。
+        ///
+        /// **省くと lease が緩む。** 値の無い `--force-with-lease` は
+        /// remote-tracking ref と比べるだけなので、`git fetch` を挟むと他人が進めた
+        /// 位置がそこに入り、検査を素通りして他人のコミットを消す。
+        expected: Option<Oid>,
     },
     RebaseInteractive {
         onto: String,

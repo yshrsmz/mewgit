@@ -53,7 +53,16 @@ TUI を非対話で動かして確認するには pty が要る。パイプ渡�
 ```
 (sleep 1; printf 'q'; sleep 1) | script -q /dev/null \
   sh -c 'stty rows 24 cols 80; exec ./target/debug/mewgit <repo-path>' > out.txt 2>&1
+python3 scripts/screen.py out.txt 80 24
 ```
+
+**`out.txt` はそのままでは読めない。** TUI は毎フレーム全画面を描き直すので、録画には
+フレームが何枚も連なっている。エスケープを `sed` で落とすだけだと全部が 1 行に潰れ、
+前のフレームの残骸と最新の描画が混ざる。`scripts/screen.py` がカーソル移動と消去を
+解釈して仮想画面に描き直し、終了直前の 1 枚を出す。幅・高さは `stty` に与えた値と
+同じにする。
+
+キーは `printf` で送る。raw mode では Enter は `\r`（`\n` ではない）。
 
 ## コーディング規約
 
@@ -95,6 +104,11 @@ TUI を非対話で動かして確認するには pty が要る。パイプ渡�
 - `graph` は固定のコミット列に対する `cells` の期待値テストを必ず追加する
 - GitHub API は `wiremock` でモック。実 API は叩かない
 - `git_exec::to_argv` は純粋関数なのでユニットテストで全 `GitOp` をカバーする
+- **`runtime::run` のループテストは、非同期の返信が届く順序に依存できない。**
+  `stream::iter` で渡したキー入力は即座に ready なので、リーダースレッドの返信
+  （`Msg::LogLoaded` など）より先に処理される。「1 ページ目が積まれている前提」の
+  ループテストは書けない。状態を用意してから遷移だけを見たいときは、ループを回さずに
+  `update` / `layout` を直に呼ぶ
 - `mewgit-tui` の描画は ratatui の `TestBackend` にレンダリングしてバッファを検証する。
   取り出しは `terminal.backend().to_string()` を使う。セルを自前で走査すると全角文字の
   2 セル目が空白として混ざる（「新しい通知」→「新 し い 通 知」）

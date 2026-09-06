@@ -2,7 +2,7 @@
 
 use crate::git_read::{Commit, Oid};
 
-use super::{Cell, ColorId, GraphRow, Horizontal, Vertical};
+use super::{Cell, ColorId, GraphRow, Vertical};
 
 /// 1 レーンが次に待つコミットと、その色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,11 +31,15 @@ impl LaneState {
 
     /// コミット 1 つぶん進める。
     fn row(&mut self, commit: &Commit) -> GraphRow {
-        // 行に入る前の状態。空きレーンの判定に使う。この行で空けたレーンを
-        // 同じ行の親の置き場にすると、ずっと続いていたレーンに見えてしまう。
-        let before = self.lanes.clone();
-        let waiting = self.waiting_for(commit.oid);
+        // 続いているレーンを先に写す。この行で動かす前の状態がそのまま縦線になる。
+        let mut cells = Vec::with_capacity(self.lanes.len() + 1);
+        for (index, occupied) in self.lanes.iter().enumerate() {
+            if let Some(occupied) = occupied {
+                cell_mut(&mut cells, index).vertical = Vertical::Through(occupied.color);
+            }
+        }
 
+        let waiting: Vec<usize> = self.waiting_for(commit.oid).collect();
         let (lane, color) = match waiting.first() {
             Some(&index) => (index, self.lane_color(index)),
             // どのレーンも待っていない = ブランチの先頭。右端に新しいレーンを開く。
@@ -45,17 +49,10 @@ impl LaneState {
             }
         };
 
-        let mut cells = Vec::new();
-        for (index, occupied) in before.iter().enumerate() {
-            if let Some(occupied) = occupied {
-                set_vertical(&mut cells, index, Vertical::Through(occupied.color));
-            }
-        }
-
         // 最左以外の待ちレーンは、このコミットへ合流して空になる。
         for &index in waiting.iter().skip(1) {
             let merged = self.lanes[index].take().expect("待ちレーンは埋まっている");
-            set_vertical(&mut cells, index, Vertical::Up(merged.color));
+            cell_mut(&mut cells, index).vertical = Vertical::Up(merged.color);
             connect(&mut cells, lane, index, merged.color);
         }
 
@@ -64,17 +61,18 @@ impl LaneState {
         self.lanes[lane] = parents.next().map(|&oid| Lane { oid, color });
 
         for &oid in parents {
-            match self.waiting_for(oid).first() {
+            let waits = self.waiting_for(oid).next();
+            match waits {
                 // 既に待っているレーンがあればそこへ引くだけ。レーン自体は続く。
-                Some(&target) => {
+                Some(target) => {
                     let color = self.lane_color(target);
                     connect(&mut cells, lane, target, color);
                 }
                 None => {
                     let color = self.take_color();
-                    let target = self.open_lane(lane, &before);
+                    let target = self.open_lane(lane, &waiting);
                     self.lanes[target] = Some(Lane { oid, color });
-                    set_vertical(&mut cells, target, Vertical::Down(color));
+                    cell_mut(&mut cells, target).vertical = Vertical::Down(color);
                     connect(&mut cells, lane, target, color);
                 }
             }
@@ -82,14 +80,14 @@ impl LaneState {
 
         // コミット本体は最後に置く。第 1 親を置いたレーンには `Through` が入っている。
         let merge = commit.parents.len() > 1;
-        set_vertical(&mut cells, lane, Vertical::Commit { color, merge });
+        cell_mut(&mut cells, lane).vertical = Vertical::Commit { color, merge };
 
         while self.lanes.last().is_some_and(Option::is_none) {
             self.lanes.pop();
         }
-        while cells.last().is_some_and(|cell: &Cell| cell.is_empty()) {
-            cells.pop();
-        }
+        // セルを伸ばすのは `cell_mut` と `connect` だけで、どちらも伸ばした先を必ず
+        // 埋める。末尾が空になる経路は無い（06 の「末尾の空セルは落とす」）。
+        debug_assert!(cells.last().is_none_or(|cell: &Cell| !cell.is_empty()));
 
         GraphRow {
             oid: commit.oid,
@@ -100,13 +98,12 @@ impl LaneState {
     }
 
     /// その oid を待っているレーンの添字。左から順。
-    fn waiting_for(&self, oid: Oid) -> Vec<usize> {
+    fn waiting_for(&self, oid: Oid) -> impl Iterator<Item = usize> + '_ {
         self.lanes
             .iter()
             .enumerate()
-            .filter(|(_, lane)| lane.is_some_and(|lane| lane.oid == oid))
+            .filter(move |(_, lane)| lane.is_some_and(|lane| lane.oid == oid))
             .map(|(index, _)| index)
-            .collect()
     }
 
     fn lane_color(&self, index: usize) -> ColorId {
@@ -117,14 +114,15 @@ impl LaneState {
 
     /// `after` より右にある空きレーン。無ければ右端に開く。
     ///
-    /// `before` でも空いていたレーンだけを使う（この行で空けたレーンは避ける）。
-    fn open_lane(&mut self, after: usize, before: &[Option<Lane>]) -> usize {
+    /// この行で空けたレーン（`waiting` の合流先）は避ける。使うと、ずっと続いていた
+    /// レーンに見えてしまう（06 の「アルゴリズム」2 の 3 つ目）。
+    fn open_lane(&mut self, after: usize, waiting: &[usize]) -> usize {
         let reusable = self
             .lanes
             .iter()
             .enumerate()
             .skip(after + 1)
-            .find(|(index, lane)| lane.is_none() && matches!(before.get(*index), None | Some(None)))
+            .find(|(index, lane)| lane.is_none() && !waiting.contains(index))
             .map(|(index, _)| index);
 
         reusable.unwrap_or_else(|| {
@@ -141,12 +139,12 @@ impl LaneState {
     }
 }
 
-/// `index` のマスの縦成分を置く。足りない分は空セルで伸ばす。
-fn set_vertical(cells: &mut Vec<Cell>, index: usize, vertical: Vertical) {
+/// `index` のマス。足りない分は空セルで伸ばす。
+fn cell_mut(cells: &mut Vec<Cell>, index: usize) -> &mut Cell {
     if cells.len() <= index {
         cells.resize(index + 1, Cell::default());
     }
-    cells[index].vertical = vertical;
+    &mut cells[index]
 }
 
 /// `from` と `to` を横線でつなぐ。
@@ -155,25 +153,17 @@ fn connect(cells: &mut Vec<Cell>, from: usize, to: usize, color: ColorId) {
     if left == right {
         return;
     }
-    if cells.len() <= right {
-        cells.resize(right + 1, Cell::default());
-    }
+    cell_mut(cells, right);
 
     for (index, cell) in cells.iter_mut().enumerate().take(right + 1).skip(left) {
-        let segment = if index == left {
-            Horizontal::Right(color)
-        } else if index == right {
-            Horizontal::Left(color)
-        } else {
-            Horizontal::Both(color)
-        };
-        cell.horizontal = cell.horizontal.merged(segment);
+        cell.horizontal = cell.horizontal.add(index > left, index < right, color);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::Horizontal;
     use crate::test_util::fake_commit;
 
     /// `parents` を持つコミット。oid は添字から作る（`fake_commit`）。
@@ -190,8 +180,9 @@ mod tests {
 
     /// 行を文字にして並べる。期待値を読める形にするためのテスト専用レンダラ。
     ///
-    /// 文字の割り当ては 06 の対応表。レーンの間は、左右がつながっているときだけ
-    /// `─` で埋める（`ui` も同じ規則で 1 レーンを 2 桁に広げる）。
+    /// 文字の割り当ては 06 の対応表、レーン間の埋め方は 07 の Graph ペインの規則
+    /// （左右がつながっているときだけ `─`）。**同じ表が `ui` 側にも生える**ので、
+    /// 変えるときは 06 / 07 / `ui::panes::graph` と一緒に直す。
     fn render(rows: &[GraphRow]) -> String {
         rows.iter()
             .map(|row| {
@@ -371,7 +362,8 @@ mod tests {
     fn a_new_root_reuses_the_lane_that_was_freed() {
         let commits = [commit(1, &[2]), commit(3, &[]), commit(2, &[])];
 
-        let rows = LaneState::default().extend(&commits);
+        let mut lanes = LaneState::default();
+        let rows = lanes.extend(&commits);
 
         assert_eq!(
             render(&rows),
@@ -384,6 +376,8 @@ mod tests {
         // ルートは右端に開き、親が無いのでその行で閉じる。
         assert_eq!(rows[1].lane, 1);
         assert_eq!(rows[2].lane, 0);
+        // 最後のコミットも親を持たないので、レーンは 1 本も残らない。
+        assert!(lanes.lanes.is_empty());
     }
 
     #[test]
@@ -412,17 +406,42 @@ mod tests {
         assert_eq!(rows[3].cells.len(), 4);
         assert!(matches!(rows[3].cells[1].vertical, Vertical::Up(_)));
         assert!(matches!(rows[3].cells[3].vertical, Vertical::Down(_)));
+        // 線が重なるマスの色は先に引いたほう。レーン 1 のマスは合流線（レーン 1 の色）が
+        // 先に通り、第 2 親へ伸ばす線が後から重なる。重なっていないレーン 2 のマスは
+        // 第 2 親の線の色のまま（06 の「色」）。
+        let Vertical::Down(branch) = rows[3].cells[3].vertical else {
+            panic!("第 2 親のレーンが開いていません: {:?}", rows[3].cells[3]);
+        };
+        assert_eq!(rows[3].cells[1].horizontal, Horizontal::Both(rows[1].color));
+        assert_eq!(rows[3].cells[2].horizontal, Horizontal::Both(branch));
     }
 
     #[test]
-    fn a_root_commit_frees_its_lane() {
-        let commits = [commit(1, &[])];
+    fn a_new_parent_takes_the_hole_an_earlier_row_left_behind() {
+        // レーン 1 は 6 の行で空くが、レーン 2 が生きているので穴として残る。
+        // 5 の行の第 2 親はその穴に入る（末尾に開くのではなく）。
+        let commits = [
+            commit(1, &[5]),
+            commit(2, &[6]),
+            commit(3, &[7]),
+            commit(6, &[]),
+            commit(5, &[8, 9]),
+        ];
 
-        let mut lanes = LaneState::default();
-        let rows = lanes.extend(&commits);
+        let rows = LaneState::default().extend(&commits);
 
-        assert_eq!(rows[0].cells.len(), 1);
-        assert!(lanes.lanes.is_empty());
+        assert_eq!(
+            render(&rows),
+            "\
+●
+│ ●
+│ │ ●
+│ ● │
+○─╮ │
+"
+        );
+        assert!(matches!(rows[4].cells[1].vertical, Vertical::Down(_)));
+        assert_eq!(rows[4].cells.len(), 3, "右端に開いています");
     }
 
     #[test]

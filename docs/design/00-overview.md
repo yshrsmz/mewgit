@@ -53,7 +53,7 @@
 crates/
   mewgit-core/src/
     app/        state.rs  msg.rs  update.rs  cmd.rs
-    graph/      lane.rs   render.rs
+    graph/      lane.rs
     git_read/   repo.rs   log.rs  diff.rs  status.rs
     git_exec/   runner.rs rebase.rs
     github/     client.rs pr.rs   checks.rs

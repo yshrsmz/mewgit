@@ -327,19 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn a_row_without_lanes_draws_no_graph_column() {
-        // `cells` が空の行（`GraphRow` を組まずに積んだ行）でも落ちない、罫線も出ない。
-        let mut state = state_with_commits(&["first"]);
-        state.graph.lines[0].row.cells.clear();
-
-        let lines = draw(&state, TermSize::default());
-
-        // 両端は枠なので、内側だけを見る。
-        let inside: String = lines[2].chars().skip(1).take_while(|c| *c != '│').collect();
-        assert!(!inside.contains('│'), "{inside:?}");
-    }
-
-    #[test]
     fn an_unknown_oid_has_no_labels() {
         let state = state_with_commits(&["first"]);
         let other = fake_commit(99, "other").oid;

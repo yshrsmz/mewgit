@@ -11,7 +11,8 @@ pub use lane::LaneState;
 
 /// レーンの色。実際の色は `ui` が `ColorId % palette.len()` で写す。
 ///
-/// `usize` ではなく `u16`。`cells` は行 × レーン数ぶん並び毎フレーム読まれるので、
+/// `usize` ではなく `u16`。`Cell` は色を 2 つ持つので、`usize` にすると 32 バイト、
+/// `u16` なら 8 バイトになる。`cells` は行 × レーン数ぶん並び毎フレーム読まれるので、
 /// ここのサイズがそのままキャッシュに効く。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorId(pub u16);
@@ -41,7 +42,7 @@ pub struct Cell {
 impl Cell {
     /// 線が 1 本も通っていない。`ui` は空白を描く。
     pub fn is_empty(self) -> bool {
-        self.vertical == Vertical::None && self.horizontal == Horizontal::None
+        self == Self::default()
     }
 }
 
@@ -92,22 +93,23 @@ impl Horizontal {
         matches!(self, Self::Right(_) | Self::Both(_))
     }
 
-    fn color(self) -> Option<ColorId> {
+    /// 横線の色。線が無ければ `None`。
+    pub fn color(self) -> Option<ColorId> {
         match self {
             Self::None => None,
             Self::Left(color) | Self::Right(color) | Self::Both(color) => Some(color),
         }
     }
 
-    /// 別の線をこのマスに重ねる。
+    /// このマスに線を 1 本重ねる。
     ///
-    /// 色は先に置いたほうを残す。1 マスに出せる色は 1 つで、`graph` は近い線から
-    /// 順に置くので、残るのは `c.lane` に近いほうの色になる（06 の「色」）。
-    fn merged(self, other: Self) -> Self {
+    /// 1 マスに出せる色は 1 つなので、色は先に引いた線のものを残す。引く順は
+    /// 合流線 → `p2..` の順（06 の「色」）。
+    fn add(self, left: bool, right: bool, color: ColorId) -> Self {
         Self::new(
-            self.goes_left() || other.goes_left(),
-            self.goes_right() || other.goes_right(),
-            self.color().or_else(|| other.color()).unwrap_or(ColorId(0)),
+            self.goes_left() || left,
+            self.goes_right() || right,
+            self.color().unwrap_or(color),
         )
     }
 }

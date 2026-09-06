@@ -59,9 +59,10 @@ fn every_commit_gets_a_row_whose_cells_reach_its_lane() {
 }
 
 #[test]
-fn a_first_parent_keeps_the_lane_and_the_colour_of_its_child() {
-    // 06 の「`p1` を `c.lane` に置く（同じ色を継承）」。合流で最左に寄ることはあるが、
-    // 右にずれることは無い。
+fn a_first_parent_never_moves_to_a_lane_further_right() {
+    // 06 の「`p1` を `c.lane` に置く（同じ色を継承）」。合流で最左に寄るので
+    // 「同じレーンに出る」までは言えない。言えるのは「右にずれない」と
+    // 「同じレーンなら色を継ぐ」の 2 つ。
     let repo = merged_history();
     let commits = commits(&repo);
 

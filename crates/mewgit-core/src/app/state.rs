@@ -186,6 +186,22 @@ pub struct GraphState {
 }
 
 impl GraphState {
+    /// カーソルが指しているコミット。行が無ければ `None`。
+    pub fn cursor_commit(&self) -> Option<&Commit> {
+        self.lines.get(self.cursor).map(|line| &line.commit)
+    }
+
+    /// カーソルの指すコミットの詳細。別のコミットのものしか無ければ `None`。
+    ///
+    /// 「読み込み中」のフラグを持たず oid の一致で鮮度を見る（01 の「コミット詳細の
+    /// 遅延取得」）。その判定をここに置くのは、`update`（次に何を読むか）と
+    /// `ui`（何を描くか）が同じものを使うため。両方に書くと、片方だけ直したときに
+    /// 古い詳細を出したままになってもコンパイルは通る。
+    pub fn fresh_detail(&self) -> Option<&CommitDetail> {
+        let oid = self.cursor_commit()?.oid;
+        self.detail.as_ref().filter(|detail| detail.oid == oid)
+    }
+
     /// カーソルを `delta` 行動かす。端では止まる。
     pub fn move_cursor(&mut self, delta: isize) {
         if self.lines.is_empty() {

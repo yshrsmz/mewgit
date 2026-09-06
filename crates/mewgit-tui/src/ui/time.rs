@@ -17,11 +17,8 @@ pub fn format(time: Timestamp) -> String {
     let secs = local.rem_euclid(SECONDS_PER_DAY);
     let (year, month, day) = civil_from_days(days);
 
-    let (sign, offset) = if time.offset_minutes < 0 {
-        ('-', -i64::from(time.offset_minutes))
-    } else {
-        ('+', i64::from(time.offset_minutes))
-    };
+    let sign = if time.offset_minutes < 0 { '-' } else { '+' };
+    let offset = time.offset_minutes.unsigned_abs();
 
     format!(
         "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} {sign}{:02}{:02}",

@@ -140,7 +140,8 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 `GraphState::move_cursor(delta)` / `scroll_into_view()`。
 
 `viewport` は `ui` がレイアウトから出して `Msg::Layout` で運んでくる（07 の
-`ui::graph_rows`）。core にヘッダや枠の高さを持たせない。持たせると 07 の
+`ui::graph_rows`）。詳細を出すかの判定（`expanded` かつ行がある）は `ui` 側の
+1 つの関数にまとめ、行数を出すときと描くときで同じものを使う。core にヘッダや枠の高さを持たせない。持たせると 07 の
 レイアウトを変えたときに黙ってずれるうえ、`ui` の描画と `app` の計算のどちらが
 正しいかを決める場所が無くなる。
 
@@ -195,6 +196,9 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
   フラグを別に持たない
 - 既に `detail.oid` がカーソルのコミットと一致していれば出さない。閉じてもう一度開いた
   ときに読み直さないよう、`expanded` を偽にしても `detail` は捨てない
+- **鮮度の判定は `GraphState::fresh_detail` の 1 つ。** 次に何を読むかを決める `update` と、
+  何を描くかを決める `ui` が同じものを使う。両方に書くと、片方だけ直したときに古い詳細を
+  出したままになってもコンパイルは通る
 - `JobKind::LoadCommitDetail` は対象の Oid を持たない。`JobTracker` の粒度は種別のまま
   にして、**カーソルが動いたぶんの追いつきは `CommitDetailLoaded` の側で行う**。届いた
   詳細の oid がカーソルのコミットと違えば、そこでもう 1 回 `Cmd::LoadCommitDetail` を出す。
@@ -309,9 +313,9 @@ pub enum Msg {
 `CommitDetailLoaded` も `Result` を運ぶ。`LogLoaded` と同じで、失敗の通り道が無いと
 `JobKind::LoadCommitDetail` が走ったまま残り、以後の要求が黙って落ちる。
 
-`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` は payload を `Box` に入れる。入れないと `Msg` が 336 バイトに
-なり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。
-2 つ Box するだけで 96 バイトになる（実測）。
+`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` は payload を `Box` に入れる。入れないと `Msg` が
+数百バイトになり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。
+これらを Box すると 96 バイトに収まる。上限は `msg.rs` のテスト（128 バイト）で見張る。
 
 ## Cmd
 

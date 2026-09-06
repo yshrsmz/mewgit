@@ -74,21 +74,20 @@ where
         return Ok(());
     }
 
-    // 起動時に `Resize` は飛んでこないので、最初のサイズは自分で入れる。
-    // 戻ってきた `Cmd` も流す（`init` が読んでいる最中なら `issue` が落とす）。
-    // グラフの行数はこのあとループ先頭の `Msg::Layout` が入れるので、
-    // `terminal.size()` が失敗しても既定のサイズぶんは入る。
+    // 起動時に `Resize` は飛んでこないので、最初のサイズは自分で入れる。`Resize` が
+    // するのは `state.term` の更新だけなので `Cmd` は必ず `None`。グラフの行数は
+    // このあとループ先頭の `Msg::Layout` が入れるので、`terminal.size()` が失敗しても
+    // 既定のサイズぶんは入る。
     if let Ok(size) = terminal.size() {
-        let msg = Msg::Resize {
-            term: TermSize {
-                width: size.width,
-                height: size.height,
+        let _ = update(
+            state,
+            Msg::Resize {
+                term: TermSize {
+                    width: size.width,
+                    height: size.height,
+                },
             },
-        };
-        let cmd = update(state, msg);
-        if runtime.dispatch(state, cmd).is_break() {
-            return Ok(());
-        }
+        );
     }
 
     loop {
@@ -129,7 +128,7 @@ where
 /// 行数を決めるのは `ui` だけ（不変ルール 2 と 07）。`AppState` に直接書かず `update`
 /// を通すのは、`viewport` の計算経路を 1 本に保つため。
 fn layout(state: &mut AppState) -> Cmd {
-    let graph_rows = ui::graph_rows(state);
+    let graph_rows = ui::graph_rows(state.term, crate::panes::graph::shows_detail(&state.graph));
     if graph_rows == state.graph.viewport {
         return Cmd::None;
     }
@@ -511,9 +510,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_expands_the_detail_and_shrinks_the_graph() {
-        // レイアウトの変化が `Msg::Layout` として core に届く経路。ループを 1 本
-        // 走らせて、`Enter` のあとに `viewport` が縮んでいることを見る。
+    async fn enter_reaches_the_state_and_the_viewport_follows() {
+        // `Enter` を打ってループを 1 本走らせる。`viewport` は常に `ui` が出す値と
+        // 一致していること（一致しないとカーソルが画面の外に出る）。
         let repo = TestRepo::init();
         repo.commit("first");
         let (mut state, reader) = opened(&repo);
@@ -522,14 +521,39 @@ mod tests {
         run_with(events, &mut state, reader).await.unwrap();
 
         assert!(state.graph.expanded);
-        assert_eq!(state.graph.viewport, ui::graph_rows(&state));
-        let mut collapsed = AppState::new(RepoInfo::default(), Config::default());
-        collapsed.term = state.term;
+        assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
+    }
+
+    #[test]
+    fn opening_the_detail_shrinks_the_viewport() {
+        // 展開でグラフが縮むことを core に伝えるのは `layout` だけ。ここが抜けると
+        // `app` は広いままの `viewport` でスクロール位置を決める。
+        // ループを回さないのは、1 ページ目が届く前に `Enter` が処理されると
+        // 行が無く（＝詳細を出さず）縮まないため。
+        let mut state = crate::test_util::state_with_commits(&["first"]);
+        let collapsed = state.graph.viewport;
+
+        state.graph.expanded = true;
+        let _ = layout(&mut state);
+
         assert!(
-            state.graph.viewport < ui::graph_rows(&collapsed),
-            "展開しても viewport が縮んでいません: {}",
+            state.graph.viewport < collapsed,
+            "展開しても viewport が縮んでいません: {collapsed} -> {}",
             state.graph.viewport
         );
+        assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
+    }
+
+    #[test]
+    fn an_expanded_but_empty_graph_keeps_the_whole_pane() {
+        // 行が無ければ詳細に出すものも無い。`ui` が描く高さと食い違わせない。
+        let mut state = crate::test_util::state_with_commits(&[]);
+        let whole = state.graph.viewport;
+
+        state.graph.expanded = true;
+        let _ = layout(&mut state);
+
+        assert_eq!(state.graph.viewport, whole);
     }
 
     #[tokio::test]
@@ -544,7 +568,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(state.graph.viewport, ui::graph_rows(&state));
+        assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
         assert!(state.graph.viewport > 0);
     }
 

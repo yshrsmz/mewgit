@@ -50,6 +50,14 @@ pub fn terminal_with(state: &AppState, size: TermSize) -> Terminal<TestBackend> 
     terminal
 }
 
+/// `runtime::layout` がその状態に入れるのと同じグラフの行数。
+///
+/// ランタイムのループを回さないテストが `viewport` を用意するのに使う。判定を
+/// 手で書くと、レイアウトの決め方が変わったときにテストだけ古い値を持つ。
+pub fn graph_rows(state: &AppState) -> usize {
+    ui::graph_rows(state.term, crate::panes::graph::shows_detail(&state.graph))
+}
+
 /// パスだけ入った状態。
 pub fn state_at(path: &str) -> AppState {
     AppState::new(
@@ -88,7 +96,7 @@ pub fn state_with_history(history: &[(u8, &[u8])]) -> AppState {
 /// `viewport` は 24 行の端末で描くときのグラフの行数に合わせる。
 fn state_with_log(commits: Vec<Commit>) -> AppState {
     let mut state = state_at("/repo");
-    state.graph.viewport = ui::graph_rows(&state);
+    state.graph.viewport = graph_rows(&state);
 
     let page = LogPage {
         commits,

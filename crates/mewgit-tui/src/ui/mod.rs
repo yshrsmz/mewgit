@@ -11,7 +11,7 @@ pub mod theme;
 pub mod time;
 
 use crate::panes;
-use mewgit_core::app::AppState;
+use mewgit_core::app::{AppState, TermSize};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -42,11 +42,13 @@ fn split(area: Rect) -> [Rect; 3] {
 /// `app` がスクロール位置を決めるのに要る（01 の「グラフの行」）。core にレイアウトを
 /// 知らせないよう、実際に描くのと同じ `split` と枠から出して `Msg::Layout` で渡す。
 ///
-/// `term` と `graph.expanded` だけから決まる。詳細の中身（メッセージの行数など）に
-/// 依存させると、詳細が届いた瞬間に行数が変わってグラフが跳ねる（07）。
-pub fn graph_rows(state: &AppState) -> usize {
-    let [_, body, _] = split(Rect::new(0, 0, state.term.width, state.term.height));
-    panes::graph::rows_area(body, state.graph.expanded).height as usize
+/// 引数は端末サイズと「詳細を出すか」の 2 つだけ。`&AppState` を丸ごと受けると、
+/// あとから詳細の中身（メッセージの行数など）を見る余地が残る。そうすると詳細が
+/// 届いた瞬間に行数が変わってグラフが跳ねる（07）。判定は
+/// [`panes::graph::shows_detail`]。
+pub fn graph_rows(term: TermSize, shows_detail: bool) -> usize {
+    let [_, body, _] = split(Rect::new(0, 0, term.width, term.height));
+    panes::graph::areas(body, shows_detail).0.height as usize
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。

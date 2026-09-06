@@ -3,7 +3,7 @@
 //! 1 行は `罫線  短縮 Oid  ラベル  summary`。罫線のセルを文字と色に写すのは
 //! `ui::lanes`。
 
-use mewgit_core::app::{AppState, GraphLine, JobKind};
+use mewgit_core::app::{AppState, GraphLine, GraphState, JobKind};
 use mewgit_core::git_read::{CommitDetail, Oid, RefLabel, Signature, Timestamp};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -28,18 +28,26 @@ fn block() -> Block<'static> {
     Block::default().borders(Borders::ALL).title("Graph")
 }
 
-/// コミットの行に使える領域。`ui::graph_rows` が行数を出すのに使う。
-pub fn rows_area(area: Rect, expanded: bool) -> Rect {
-    areas(area, expanded).0
+/// 詳細の領域を取るか。
+///
+/// 展開していても行が 1 つも無ければ出すものが無いので取らない。**判定はこの 1 つ。**
+/// `ui::graph_rows` と [`render`] が別々に決めると、`app` に渡した行数と実際に描く
+/// 行数がずれ、スクロール位置の計算が静かに狂う。
+pub fn shows_detail(graph: &GraphState) -> bool {
+    graph.expanded && !graph.lines.is_empty()
 }
 
 /// 枠の内側をコミットの行と詳細に割る。詳細を出さないときは 2 つ目が `None`。
 ///
-/// `Layout` に任せず自分で割るのは、レイアウトの解に幅を持たせないため。ここが
-/// `ui::graph_rows` の返す行数と 1 行でもずれると、スクロール位置の計算が静かに狂う。
-fn areas(area: Rect, expanded: bool) -> (Rect, Option<Rect>) {
-    let inner = block().inner(area);
-    let detail = if expanded {
+/// `ui::graph_rows` が行数を出すのに使う。
+pub fn areas(area: Rect, shows_detail: bool) -> (Rect, Option<Rect>) {
+    split(block().inner(area), shows_detail)
+}
+
+/// 枠の内側を割る。`Layout` に任せず自分で計算するのは、レイアウトの解に幅を
+/// 持たせないため。
+fn split(inner: Rect, shows_detail: bool) -> (Rect, Option<Rect>) {
+    let detail = if shows_detail {
         DETAIL_ROWS.min(inner.height.saturating_sub(MIN_GRAPH_ROWS))
     } else {
         0
@@ -63,13 +71,13 @@ fn areas(area: Rect, expanded: bool) -> (Rect, Option<Rect>) {
 /// グラフペインを描く。
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let block = block();
-    let inner = block.inner(area);
-    let (rows, detail) = areas(area, state.graph.expanded);
+    // `block()` はタイトルを確保するので 1 フレームに 1 回だけ作る。
+    let (rows, detail) = split(block.inner(area), shows_detail(&state.graph));
     frame.render_widget(block, area);
 
     if state.graph.lines.is_empty() {
-        // 1 行も無いときは詳細に出すものも無い。枠の内側を全部使う。
-        frame.render_widget(Paragraph::new(empty_message(state)), inner);
+        // 行が無ければ詳細も無い（`shows_detail`）ので、`rows` が枠の内側そのまま。
+        frame.render_widget(Paragraph::new(empty_message(state)), rows);
         return;
     }
 
@@ -110,24 +118,14 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines = match fresh_detail(state) {
-        Some(detail) => detail_lines(detail),
+    let lines = match state.graph.fresh_detail() {
+        Some(detail) => detail_lines(detail, inner.height as usize),
         // カーソルの指すコミットのものが無い。届いていないのか失敗したのかは
         // `JobTracker` が知っている（07 の「詳細の展開」）。
         None => vec![Line::raw(detail_placeholder(state))],
     };
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-/// カーソルの指すコミットの詳細。別のコミットのものしか無ければ `None`。
-fn fresh_detail(state: &AppState) -> Option<&CommitDetail> {
-    let oid = state.graph.lines.get(state.graph.cursor)?.commit.oid;
-    state
-        .graph
-        .detail
-        .as_ref()
-        .filter(|detail| detail.oid == oid)
 }
 
 /// 詳細がまだ無いときの文言。空のグラフの出し分けと同じ形。
@@ -140,7 +138,12 @@ fn detail_placeholder(state: &AppState) -> &'static str {
 }
 
 /// 詳細の中身。`git show` の見出しに近い並びにする。
-fn detail_lines(detail: &CommitDetail) -> Vec<Line<'_>> {
+///
+/// `rows` は描ける行数。メッセージはそこまでで打ち切る。1 行が折り返しで 2 行以上に
+/// なることはあっても 0 行になることはないので、見える行を落とすことはない。マージや
+/// revert の本文は数百行になることがあり、全部組むと毎フレームその数だけ `Line` を
+/// 作ることになる。
+fn detail_lines(detail: &CommitDetail, rows: usize) -> Vec<Line<'_>> {
     let mut lines = vec![
         Line::from(Span::styled(
             format!("commit {}", detail.oid),
@@ -156,7 +159,13 @@ fn detail_lines(detail: &CommitDetail) -> Vec<Line<'_>> {
     }
 
     lines.push(Line::raw(""));
-    lines.extend(detail.message.lines().map(Line::raw));
+    lines.extend(
+        detail
+            .message
+            .lines()
+            .take(rows.saturating_sub(lines.len()))
+            .map(Line::raw),
+    );
     lines
 }
 
@@ -267,7 +276,9 @@ fn short(oid: &Oid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, state_at, state_with_commits, state_with_history, terminal_with};
+    use crate::test_util::{
+        draw, graph_rows, state_at, state_with_commits, state_with_history, terminal_with,
+    };
     use mewgit_core::app::{init, update, JobKind, Key, KeyCode, Msg, TermSize};
     use mewgit_core::git_read::{GitReadError, Oid, RefIndex, RefLabel};
     use mewgit_core::test_util::{fake_commit, fake_detail, fake_oid};
@@ -420,7 +431,7 @@ mod tests {
         let drawn = lines.iter().filter(|line| line.contains("commit ")).count();
         // `ui::graph_rows` が `app` に渡す行数と、実際に描く行数は同じでなければならない。
         // ずれるとカーソルが画面の外に出る。
-        assert_eq!(drawn, crate::ui::graph_rows(&state));
+        assert_eq!(drawn, graph_rows(&state));
     }
 
     #[test]
@@ -597,7 +608,8 @@ mod tests {
     fn expanded_with(summaries: &[&str], detail: mewgit_core::git_read::CommitDetail) -> AppState {
         let mut state = state_with_commits(summaries);
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-        state.graph.viewport = crate::ui::graph_rows(&state);
+        // 展開でグラフが縮む。ランタイムなら `Msg::Layout` が入れる値（01）。
+        state.graph.viewport = graph_rows(&state);
         let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
         state
     }
@@ -605,10 +617,10 @@ mod tests {
     #[test]
     fn expanding_takes_rows_away_from_the_graph() {
         let mut state = state_with_commits(&["first"]);
-        let collapsed = crate::ui::graph_rows(&state);
+        let collapsed = graph_rows(&state);
 
         state.graph.expanded = true;
-        let expanded = crate::ui::graph_rows(&state);
+        let expanded = graph_rows(&state);
 
         assert!(
             expanded < collapsed,
@@ -681,7 +693,8 @@ mod tests {
 
     #[test]
     fn an_empty_graph_uses_the_whole_pane_even_when_expanded() {
-        // 行が 1 つも無ければ詳細に出すものも無い。
+        // 行が 1 つも無ければ詳細に出すものも無い。描く高さと `graph_rows` が
+        // 返す行数は、この場合も一致していなければならない。
         let mut state = state_with_commits(&[]);
         state.graph.expanded = true;
 
@@ -689,6 +702,10 @@ mod tests {
 
         assert!(lines[2].contains("コミットがありません"), "{:?}", lines[2]);
         assert!(!lines.join("\n").contains("読み込み中"));
+        // 描く高さと `graph_rows` が返す行数は、この場合も一致していること。
+        let expanded = graph_rows(&state);
+        state.graph.expanded = false;
+        assert_eq!(expanded, graph_rows(&state));
     }
 
     #[test]
@@ -700,9 +717,9 @@ mod tests {
         for height in 3..16u16 {
             state.term = TermSize { width: 80, height };
             state.graph.expanded = false;
-            let collapsed = crate::ui::graph_rows(&state);
+            let collapsed = graph_rows(&state);
             state.graph.expanded = true;
-            let expanded = crate::ui::graph_rows(&state);
+            let expanded = graph_rows(&state);
 
             assert!(
                 expanded >= collapsed.min(MIN_GRAPH_ROWS as usize),

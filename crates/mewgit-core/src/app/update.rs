@@ -6,7 +6,7 @@
 //! ペインごとのキー処理は、対応するペインのタスクと一緒に足す。いまあるのは
 //! グラフだけ。
 
-use crate::git_read::{CommitDetail, GitReadError, LogPage, Oid};
+use crate::git_read::{CommitDetail, GitReadError, LogPage};
 use crate::graph::LaneState;
 
 use super::{
@@ -36,6 +36,11 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
     state.issue(cmd)
 }
 
+/// **続きを頼む判断は 4 箇所にある。** `scrolled`（カーソル移動）、`log_loaded` の成功、
+/// `commit_detail_loaded` の成功、`Msg::Layout`。`update` の出口にまとめて
+/// 「毎回導き直す」形にはできない。導出は「一度試して失敗した」を表せないので、
+/// 失敗のたびに再発行して「失敗 → 再読込 → 失敗」を回してしまう。M2 で `LoadDiff` を
+/// 足すときは、この 4 箇所を見て要るものを足すこと。
 fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
     match msg {
         Msg::Key(key) => update_key(state, key),
@@ -136,26 +141,13 @@ fn toggle_detail(state: &mut AppState) -> Cmd {
 /// 畳んでいるあいだは読まない（見えないものを読んでもリーダーを塞ぐだけ）。既に
 /// 同じ oid の詳細を持っていれば出さない。
 fn load_detail(state: &AppState) -> Cmd {
-    match cursor_oid(state) {
-        Some(oid) if state.graph.expanded && detail_oid(state) != Some(oid) => {
-            Cmd::LoadCommitDetail(oid)
-        }
-        _ => Cmd::None,
+    if !state.graph.expanded || state.graph.fresh_detail().is_some() {
+        return Cmd::None;
     }
-}
-
-/// カーソルが指しているコミットの Oid。行が無ければ `None`。
-fn cursor_oid(state: &AppState) -> Option<Oid> {
-    state
-        .graph
-        .lines
-        .get(state.graph.cursor)
-        .map(|line| line.commit.oid)
-}
-
-/// いま持っている詳細の Oid。
-fn detail_oid(state: &AppState) -> Option<Oid> {
-    state.graph.detail.as_ref().map(|detail| detail.oid)
+    match state.graph.cursor_commit() {
+        Some(commit) => Cmd::LoadCommitDetail(commit.oid),
+        None => Cmd::None,
+    }
 }
 
 /// 届いた詳細を積む。
@@ -257,7 +249,7 @@ mod tests {
     use super::*;
     use crate::app::{Modal, RepoInfo, TermSize};
     use crate::config::Config;
-    use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
+    use crate::git_read::{Commit, HeadInfo, Oid, RefIndex, RefLabel, Remote};
     use crate::test_util::{fake_commit, fake_commit_with_parents, fake_detail};
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
@@ -741,7 +733,20 @@ mod tests {
 
     /// カーソルの指すコミットの Oid。
     fn cursor(state: &AppState) -> Oid {
-        cursor_oid(state).expect("カーソルの指す行がありません")
+        state
+            .graph
+            .cursor_commit()
+            .expect("カーソルの指す行がありません")
+            .oid
+    }
+
+    /// `n` 件を積んで詳細を展開し、先頭コミットの詳細が届いた状態。
+    fn expanded_with_detail(n: usize) -> AppState {
+        let mut state = state_with_commits(n);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let detail = fake_detail(0, "commit 0");
+        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+        state
     }
 
     #[test]
@@ -757,10 +762,7 @@ mod tests {
 
     #[test]
     fn enter_again_collapses_without_asking_for_anything() {
-        let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-        let detail = fake_detail(0, "commit 0");
-        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+        let mut state = expanded_with_detail(3);
 
         let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
 
@@ -772,10 +774,7 @@ mod tests {
 
     #[test]
     fn reopening_the_same_commit_does_not_ask_again() {
-        let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-        let detail = fake_detail(0, "commit 0");
-        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+        let mut state = expanded_with_detail(3);
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
 
         let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
@@ -786,10 +785,7 @@ mod tests {
 
     #[test]
     fn the_detail_follows_the_cursor_while_expanded() {
-        let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-        let detail = fake_detail(0, "commit 0");
-        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+        let mut state = expanded_with_detail(3);
 
         let cmd = update(&mut state, Msg::Key(Key::char('j')));
 
@@ -883,10 +879,7 @@ mod tests {
     #[test]
     fn a_failed_page_drops_the_detail_with_the_lines() {
         // `lines` に無いコミットの詳細を残さない。
-        let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-        let detail = fake_detail(0, "commit 0");
-        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+        let mut state = expanded_with_detail(3);
         let _ = init(&mut state);
 
         let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));

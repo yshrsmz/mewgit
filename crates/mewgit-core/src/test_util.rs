@@ -228,10 +228,7 @@ pub fn fake_commit(index: u8, summary: &str) -> Commit {
         oid: fake_oid(index),
         parents: Vec::new(),
         summary: summary.to_string(),
-        author: Signature {
-            name: "mewgit test".to_string(),
-            email: "test@example.invalid".to_string(),
-        },
+        author: fake_signature(),
         time: 0,
     }
 }
@@ -252,10 +249,6 @@ pub fn fake_commit_with_parents(index: u8, parents: &[u8], summary: &str) -> Com
 /// `app` の遷移テストと `ui` の描画テストの両方で使うのでここに置く。日時は
 /// 固定（1970-01-01 00:00:00 +0000）で、author と committer は同じ値。
 pub fn fake_detail(index: u8, message: &str) -> CommitDetail {
-    let who = Signature {
-        name: "mewgit test".to_string(),
-        email: "test@example.invalid".to_string(),
-    };
     let when = Timestamp {
         seconds: 0,
         offset_minutes: 0,
@@ -264,10 +257,18 @@ pub fn fake_detail(index: u8, message: &str) -> CommitDetail {
         oid: fake_oid(index),
         parents: Vec::new(),
         message: message.to_string(),
-        author: who.clone(),
+        author: fake_signature(),
         author_time: when,
-        committer: who,
+        committer: fake_signature(),
         committer_time: when,
+    }
+}
+
+/// テストの署名。[`TestRepo`] が git config に書き込む名前と同じにしてある。
+fn fake_signature() -> Signature {
+    Signature {
+        name: "mewgit test".to_string(),
+        email: "test@example.invalid".to_string(),
     }
 }
 

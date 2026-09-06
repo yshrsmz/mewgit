@@ -124,12 +124,15 @@ impl RepoReader {
         let author = commit.author();
         let committer = commit.committer();
 
+        // メッセージは表示にしか使わないので非 UTF-8 でも lossy で残す。末尾の改行は
+        // git が付けたもので、そのまま出すと詳細の最後に空行が出る。
+        let mut message = lossy(commit.message_bytes());
+        message.truncate(message.trim_end().len());
+
         Ok(CommitDetail {
             oid: commit.id(),
             parents: commit.parent_ids().collect(),
-            // メッセージは表示にしか使わないので非 UTF-8 でも lossy で残す。
-            // 末尾の改行は git が付けたもので、そのまま出すと空行になる。
-            message: lossy(commit.message_bytes()).trim_end().to_string(),
+            message,
             author: signature(&author),
             author_time: timestamp(author.when()),
             committer: signature(&committer),

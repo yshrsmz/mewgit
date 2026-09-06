@@ -44,7 +44,8 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
             state.graph.viewport = graph_rows;
             // 縮んだ端末でカーソルが窓の外に出たままにならないようにする。
             state.graph.scroll_into_view();
-            Cmd::None
+            // 窓が広がって残りが 1 画面を切ることがある。
+            load_more(state)
         }
         Msg::Tick => Cmd::None,
 
@@ -94,15 +95,34 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
 
 /// グラフペインのキー処理。
 ///
-/// いまは上下移動だけ。`Enter` の詳細展開・`g` / `G`・スクロール追随の追加読み込みは
-/// それぞれ別のタスクで足す。
+/// いまは上下移動と、下端に近づいたときの追加読み込みだけ。`Enter` の詳細展開と
+/// `g` / `G` は別のタスクで足す。
 fn graph_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         KeyCode::Char('j') | KeyCode::Down => state.graph.move_cursor(1),
         KeyCode::Char('k') | KeyCode::Up => state.graph.move_cursor(-1),
-        _ => {}
+        _ => return Cmd::None,
     }
-    Cmd::None
+    load_more(state)
+}
+
+/// 下端に近づいたら次のページを頼む。
+///
+/// 残りが 1 画面を切ったら出す。同じ種類のジョブが走っているあいだは
+/// [`AppState::issue`] が落とすので、ここでは走っているかを見ない
+/// （見ると 2 箇所で同じことを判断することになる）。
+fn load_more(state: &AppState) -> Cmd {
+    if state.graph.loaded_all {
+        return Cmd::None;
+    }
+    let remaining = state.graph.lines.len().saturating_sub(state.graph.cursor);
+    if remaining > state.graph.viewport {
+        return Cmd::None;
+    }
+
+    Cmd::LoadLog {
+        count: state.config.graph.page_size,
+    }
 }
 
 /// リポジトリの概要を反映する。
@@ -153,7 +173,8 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cm
             .map(|(commit, row)| GraphLine { commit, row }),
     );
     state.graph.loaded_all = page.done;
-    Cmd::None
+    // 1 ページが窓より短いことがある。埋まるまで続けて読む。
+    load_more(state)
 }
 
 #[cfg(test)]
@@ -162,7 +183,7 @@ mod tests {
     use crate::app::{Modal, RepoInfo, TermSize};
     use crate::config::Config;
     use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
-    use crate::test_util::fake_commit;
+    use crate::test_util::{fake_commit, fake_commit_with_parents};
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
     const ROWS: usize = 20;
@@ -177,12 +198,20 @@ mod tests {
         fake_commit(n, &format!("commit {n}"))
     }
 
-    /// `n` 件のコミットを積んだ状態。
-    fn state_with_commits(n: u8) -> AppState {
+    /// `n` 件のコミットを積んだ状態。ログは読み切っている。
+    fn state_with_commits(n: usize) -> AppState {
+        state_with_page(n, true)
+    }
+
+    /// `n` 件を 1 ページとして積んだ状態。`done` は「これ以上無い」。
+    ///
+    /// 積んだ時点で追加読み込みが走ることがあるので、続きを試すテストは
+    /// `jobs.finish(JobKind::LoadLog)` を呼んでから見る。
+    fn state_with_page(n: usize, done: bool) -> AppState {
         let mut state = state();
         let page = LogPage {
-            commits: (0..n).map(commit).collect(),
-            done: true,
+            commits: (0..n).map(|index| commit(index as u8)).collect(),
+            done,
         };
         update(&mut state, Msg::LogLoaded(Ok(page)));
         state
@@ -287,7 +316,11 @@ mod tests {
             commits: vec![commit(1), commit(2)],
             done: false,
         };
-        assert_eq!(update(&mut state, Msg::LogLoaded(Ok(page))), Cmd::None);
+        // 2 件では窓が埋まらず、まだ続きがあるので次のページを頼む。
+        assert_eq!(
+            update(&mut state, Msg::LogLoaded(Ok(page))),
+            Cmd::LoadLog { count: 300 }
+        );
 
         let summaries: Vec<&str> = state
             .graph
@@ -297,7 +330,16 @@ mod tests {
             .collect();
         assert_eq!(summaries, ["commit 1", "commit 2"]);
         assert!(!state.graph.loaded_all);
-        // ジョブを片付けないと、以後の LoadLog が黙って捨てられる。
+        // ここで走っているのは、いま頼んだ続きのぶん。受けた時点のジョブは
+        // 片付いている（片付けないと、以後の LoadLog が黙って捨てられる）。
+        assert!(state.jobs.is_running(JobKind::LoadLog));
+    }
+
+    #[test]
+    fn a_page_that_fills_the_window_leaves_no_job_running() {
+        // 続きを頼まないので、`LogLoaded` を受けた時点でジョブは無くなる。
+        let state = state_with_page(ROWS + 5, false);
+
         assert!(!state.jobs.is_running(JobKind::LoadLog));
     }
 
@@ -507,9 +549,108 @@ mod tests {
             term,
             graph_rows: 36,
         };
-        assert_eq!(update(&mut state, msg), Cmd::None);
+        // 1 行も積んでいないので、窓を知った時点で次のページを頼む。
+        assert_eq!(
+            update(&mut state, msg),
+            Cmd::LoadLog {
+                count: state.config.graph.page_size
+            }
+        );
         assert_eq!(state.term, term);
         assert_eq!(state.graph.viewport, 36);
+    }
+
+    #[test]
+    fn a_resize_that_leaves_more_than_a_screenful_asks_for_nothing() {
+        let mut state = state_with_page(30, false);
+        state.jobs.finish(JobKind::LoadLog);
+
+        let msg = Msg::Resize {
+            term: TermSize::default(),
+            graph_rows: ROWS,
+        };
+
+        assert_eq!(update(&mut state, msg), Cmd::None);
+    }
+
+    #[test]
+    fn moving_the_cursor_towards_the_end_asks_for_the_next_page() {
+        // 残りが 1 画面を切ったら読む。カーソルが下端に着いてからだと、
+        // 読み込みのあいだ動けなくなる。
+        // 22 行あって窓は 20 行。カーソルが 2 行目に来た時点で残りが 20 になる。
+        let mut state = state_with_page(ROWS + 2, false);
+        state.jobs.finish(JobKind::LoadLog);
+
+        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::char('j'))),
+            Cmd::LoadLog {
+                count: state.config.graph.page_size
+            }
+        );
+    }
+
+    #[test]
+    fn the_next_page_is_asked_for_only_once_while_it_is_loading() {
+        let mut state = state_with_page(ROWS + 2, false);
+        state.jobs.finish(JobKind::LoadLog);
+        state.graph.cursor = ROWS;
+
+        assert!(matches!(
+            update(&mut state, Msg::Key(Key::char('j'))),
+            Cmd::LoadLog { .. }
+        ));
+        // 2 打鍵目は `JobTracker` が落とす。`update` を通さないとここは見えない。
+        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+    }
+
+    #[test]
+    fn nothing_more_is_asked_for_once_the_log_is_exhausted() {
+        let mut state = state_with_commits(3);
+        state.graph.cursor = 2;
+
+        assert!(state.graph.loaded_all);
+        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+    }
+
+    #[test]
+    fn a_failed_page_does_not_ask_for_another_one() {
+        // 読み直しをここから出すと、リーダーが壊れているあいだ
+        // 「失敗 → 再読込 → 失敗」を回し続ける。次の読み込みはユーザーの操作から。
+        let mut state = state();
+        init(&mut state);
+
+        let cmd = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+
+        assert_eq!(cmd, Cmd::None);
+    }
+
+    #[test]
+    fn the_second_page_continues_the_lanes_of_the_first() {
+        // ページをまたいでレーンが続くことは `graph::lane` が保証している。
+        // ここで見るのは `update` がその状態を持ち回していること。
+        let mut state = state();
+        init(&mut state);
+        let first = LogPage {
+            commits: vec![fake_commit_with_parents(1, &[2], "first")],
+            done: false,
+        };
+        update(&mut state, Msg::LogLoaded(Ok(first)));
+        state.jobs.finish(JobKind::LoadLog);
+
+        let second = LogPage {
+            commits: vec![fake_commit_with_parents(2, &[], "second")],
+            done: true,
+        };
+        update(&mut state, Msg::LogLoaded(Ok(second)));
+
+        assert_eq!(state.graph.lines.len(), 2);
+        // 2 行目は 1 行目の親。同じレーンに乗る。
+        assert_eq!(state.graph.lines[1].row.lane, state.graph.lines[0].row.lane);
+        assert_eq!(
+            state.graph.lines[1].row.color,
+            state.graph.lines[0].row.color
+        );
     }
 
     #[test]

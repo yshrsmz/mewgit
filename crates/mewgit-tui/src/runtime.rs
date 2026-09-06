@@ -65,12 +65,17 @@ where
     let (runtime, mut msgs) = Runtime::new(reader);
 
     // 起動時に `Resize` は飛んでこないので、最初のサイズは自分で入れる。
+    // 戻ってきた `Cmd` は捨てずに流す。捨てると `AppState::issue` がジョブを
+    // 登録したまま実行されず、以後その種類の `Cmd` が黙って落ち続ける。
     if let Ok(size) = terminal.size() {
         let msg = crate::input::resized(TermSize {
             width: size.width,
             height: size.height,
         });
-        update(state, msg);
+        let cmd = update(state, msg);
+        if runtime.dispatch(state, cmd).is_break() {
+            return Ok(());
+        }
     }
 
     // 起動時の読み込み。ループの前に 1 回だけ。

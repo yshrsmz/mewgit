@@ -3,8 +3,8 @@
 use crate::auth::AccountState;
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
-    CommitDetail, DiffTarget, FileDiff, GitReadError, HeadInfo, InProgressOp, LogPage, RefIndex,
-    Remote, WorktreeSnapshot,
+    CommitDetail, DiffTarget, FileDiff, GitReadError, HeadInfo, InProgressOp, LogPage, Oid,
+    RefIndex, Remote, WorktreeSnapshot,
 };
 use crate::github::{Check, GithubError, PullRequest};
 
@@ -45,7 +45,14 @@ pub enum Msg {
     LogLoaded(Result<LogPage, GitReadError>),
     /// 選択コミットの詳細。`LogLoaded` と同じ理由で `Result` を運ぶ。失敗の通り道が
     /// 無いと `JobKind::LoadCommitDetail` が走ったまま残り、以後の要求が黙って落ちる。
-    CommitDetailLoaded(Box<Result<CommitDetail, GitReadError>>),
+    ///
+    /// `oid` は**要求したコミット**。`Err` のときにどれが失敗したのかを知る手掛かりは
+    /// これしかない。無いと、別のコミットの失敗といま見ているコミットの区別が付かず、
+    /// 一度も試していないコミットを「読み込めませんでした」のまま放置してしまう。
+    CommitDetailLoaded {
+        oid: Oid,
+        result: Box<Result<CommitDetail, GitReadError>>,
+    },
     /// リポジトリの概要。起動時と、ref が変わったあと（M3）に読む。
     ///
     /// 3 つを 1 通にまとめるのは、どれもリポジトリの ref から導かれる値で、

@@ -23,6 +23,10 @@ const DETAIL_ROWS: u16 = 10;
 /// グラフが消えないようにする。
 const MIN_GRAPH_ROWS: u16 = 3;
 
+/// 詳細の領域を取るのに要る行数。区切り線 1 行 + 見出し 3 行。これを割るなら
+/// 出さない。1 行だけ取ると区切り線で埋まり、グラフの行を 1 つ失って何も出ない。
+const MIN_DETAIL_ROWS: u16 = 4;
+
 /// ペインの枠。
 fn block() -> Block<'static> {
     Block::default().borders(Borders::ALL).title("Graph")
@@ -52,7 +56,7 @@ fn split(inner: Rect, shows_detail: bool) -> (Rect, Option<Rect>) {
     } else {
         0
     };
-    if detail == 0 {
+    if detail < MIN_DETAIL_ROWS {
         return (inner, None);
     }
 
@@ -192,15 +196,14 @@ struct View<'a> {
 /// 行が 1 つも無いときに出す文言。
 ///
 /// 読み込みが失敗したときに「読み込み中…」のままにしない。エラーの通知は
-/// ステータスバーに出るが、次の通知で上書きされる。読み込み中かどうかは
-/// `JobTracker` が知っているので、状態を増やさずに区別できる。
+/// ステータスバーに出るが、次の通知で上書きされる。
 fn empty_message(state: &AppState) -> &'static str {
     if state.jobs.is_running(JobKind::LoadLog) {
         "読み込み中…"
-    } else if state.graph.loaded_all {
-        "コミットがありません"
-    } else {
+    } else if state.graph.load_failed {
         "コミットを読み込めませんでした"
+    } else {
+        "コミットがありません"
     }
 }
 
@@ -610,7 +613,13 @@ mod tests {
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
         // 展開でグラフが縮む。ランタイムなら `Msg::Layout` が入れる値（01）。
         state.graph.viewport = graph_rows(&state);
-        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+        let _ = update(
+            &mut state,
+            Msg::CommitDetailLoaded {
+                oid: detail.oid,
+                result: Box::new(Ok(detail)),
+            },
+        );
         state
     }
 
@@ -681,9 +690,13 @@ mod tests {
     fn a_detail_that_failed_says_so_instead_of_loading() {
         let mut state = expanded_with(&["first", "second"], fake_detail(0, "first"));
         let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let oid = state.graph.cursor_commit().unwrap().oid;
         let _ = update(
             &mut state,
-            Msg::CommitDetailLoaded(Box::new(Err(GitReadError::NonUtf8Head))),
+            Msg::CommitDetailLoaded {
+                oid,
+                result: Box::new(Err(GitReadError::NonUtf8Head)),
+            },
         );
 
         let text = draw(&state, TermSize::default()).join("\n");
@@ -706,6 +719,27 @@ mod tests {
         let expanded = graph_rows(&state);
         state.graph.expanded = false;
         assert_eq!(expanded, graph_rows(&state));
+    }
+
+    #[test]
+    fn a_detail_that_would_be_only_a_border_is_not_opened() {
+        // 1 行しか取れないと区切り線で埋まる。グラフの行を 1 つ失って何も出ない
+        // という状態を作らない。
+        let mut state = state_with_commits(&["first"]);
+
+        for height in 3..24u16 {
+            state.term = TermSize { width: 80, height };
+            state.graph.expanded = false;
+            let collapsed = graph_rows(&state);
+            state.graph.expanded = true;
+            let expanded = graph_rows(&state);
+
+            let detail = collapsed - expanded;
+            assert!(
+                detail == 0 || detail >= MIN_DETAIL_ROWS as usize,
+                "height {height}: 詳細に {detail} 行しか取れていません"
+            );
+        }
     }
 
     #[test]

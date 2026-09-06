@@ -6,7 +6,7 @@
 //! ペインごとのキー処理は、対応するペインのタスクと一緒に足す。いまあるのは
 //! グラフだけ。
 
-use crate::git_read::{CommitDetail, GitReadError, LogPage};
+use crate::git_read::{CommitDetail, GitReadError, LogPage, Oid};
 use crate::graph::LaneState;
 
 use super::{
@@ -60,7 +60,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::Tick => Cmd::None,
 
         Msg::LogLoaded(result) => log_loaded(state, result),
-        Msg::CommitDetailLoaded(result) => commit_detail_loaded(state, *result),
+        Msg::CommitDetailLoaded { oid, result } => commit_detail_loaded(state, oid, *result),
         Msg::RepoInfoLoaded(result) => repo_info_loaded(state, *result),
 
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
@@ -124,6 +124,9 @@ fn graph_key(state: &mut AppState, key: Key) -> Cmd {
 /// カーソルが動かないので、「動いたかどうか」では判定できない。
 fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
     state.graph.move_cursor(delta);
+    // カーソルを動かすのはユーザーの操作なので、失敗したログの読み直しはここから
+    // 始める。自動では出さない（`load_more`）。
+    state.graph.load_failed = false;
     Cmd::batch([load_more(state), load_detail(state)])
 }
 
@@ -152,25 +155,38 @@ fn load_detail(state: &AppState) -> Cmd {
 
 /// 届いた詳細を積む。
 ///
-/// 届いたものがカーソルの指すコミットと違えば、そこでもう 1 回頼む。`JobTracker` の
-/// 粒度は種別単位なので、要求が飛んでいるあいだのカーソル移動は落とされる。ここで
-/// 追いつくことで、素早くスクロールしても最後に止まったコミットに収束する。
-///
-/// **`Err` からは頼み直さない。** 出すと、リポジトリが壊れているあいだ
-/// 「失敗 → 再読込 → 失敗」を回し続ける（`log_loaded` と同じ）。
-fn commit_detail_loaded(state: &mut AppState, result: Result<CommitDetail, GitReadError>) -> Cmd {
+/// `JobTracker` の粒度は種別単位なので、要求が飛んでいるあいだのカーソル移動は
+/// 落とされる。ここで追いつくことで、素早くスクロールしても最後に止まったコミットに
+/// 収束する。
+fn commit_detail_loaded(
+    state: &mut AppState,
+    oid: Oid,
+    result: Result<CommitDetail, GitReadError>,
+) -> Cmd {
     state.jobs.finish(JobKind::LoadCommitDetail);
+    let cursor = state.graph.cursor_commit().map(|commit| commit.oid);
 
     match result {
-        Ok(detail) => {
+        // **いま見ているコミットのものだけを採る。** 飛んでいる要求は 1 つでも、
+        // 戻ってきたときにカーソルが別のところにいることはある（動いて戻ってきた
+        // ときなど）。無条件に上書きすると、正しいものが出ている画面が
+        // 「読み込み中」に戻り、同じものをもう 1 回読みに行く。
+        Ok(detail) if cursor == Some(detail.oid) => {
             state.graph.detail = Some(detail);
-            load_detail(state)
         }
+        Ok(_) => {}
         Err(err) => {
             state.push_notice(NoticeLevel::Error, err.to_string(), None);
-            Cmd::None
+            // **失敗したのがいま見ているコミットなら頼み直さない。** 出すと、
+            // リポジトリが壊れているあいだ「失敗 → 再読込 → 失敗」を回し続ける
+            // （`log_loaded` と同じ）。別のコミットの失敗なら、いま見ているものは
+            // まだ一度も試していないので下で頼む。
+            if cursor == Some(oid) {
+                return Cmd::None;
+            }
         }
     }
+    load_detail(state)
 }
 
 /// 下端に近づいたら次のページを頼む。
@@ -180,7 +196,10 @@ fn commit_detail_loaded(state: &mut AppState, result: Result<CommitDetail, GitRe
 /// （見ると 2 箇所で同じことを判断することになる）。
 fn load_more(state: &AppState) -> Cmd {
     let remaining = state.graph.lines.len().saturating_sub(state.graph.cursor);
-    if state.graph.loaded_all || remaining > state.graph.viewport {
+    // 失敗したあとは行が空なので「残りが 1 画面以下」が必ず真になる。見ないと、
+    // 以後のレイアウト変化のたびに読み直しを出す（失敗自体がレイアウトを変える。
+    // 行が消えると詳細の領域も消えるため）。
+    if state.graph.load_failed || state.graph.loaded_all || remaining > state.graph.viewport {
         return Cmd::None;
     }
 
@@ -226,6 +245,7 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cm
             state.graph.cursor = 0;
             state.graph.scroll = 0;
             state.graph.loaded_all = false;
+            state.graph.load_failed = true;
             return Cmd::None;
         }
     };
@@ -239,6 +259,7 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cm
             .map(|(commit, row)| GraphLine { commit, row }),
     );
     state.graph.loaded_all = page.done;
+    state.graph.load_failed = false;
     // 1 ページが窓より短いことがある。埋まるまで続けて読む。1 ページ目が届くまでは
     // カーソルの指すコミットが無いので、展開したままの詳細もここで頼み直す。
     Cmd::batch([load_more(state), load_detail(state)])
@@ -249,8 +270,8 @@ mod tests {
     use super::*;
     use crate::app::{Modal, RepoInfo, TermSize};
     use crate::config::Config;
-    use crate::git_read::{Commit, HeadInfo, Oid, RefIndex, RefLabel, Remote};
-    use crate::test_util::{fake_commit, fake_commit_with_parents, fake_detail};
+    use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
+    use crate::test_util::{fake_commit, fake_commit_with_parents, fake_detail, fake_oid};
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
     const ROWS: usize = 20;
@@ -744,9 +765,25 @@ mod tests {
     fn expanded_with_detail(n: usize) -> AppState {
         let mut state = state_with_commits(n);
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-        let detail = fake_detail(0, "commit 0");
-        let _ = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+        let _ = update(&mut state, detail_ok(0));
         state
+    }
+
+    /// 索引 `index` のコミットの詳細が届いた [`Msg`]。
+    fn detail_ok(index: u8) -> Msg {
+        let detail = fake_detail(index, &format!("commit {index}"));
+        Msg::CommitDetailLoaded {
+            oid: detail.oid,
+            result: Box::new(Ok(detail)),
+        }
+    }
+
+    /// 索引 `index` のコミットの詳細が失敗した [`Msg`]。
+    fn detail_err(index: u8) -> Msg {
+        Msg::CommitDetailLoaded {
+            oid: fake_oid(index),
+            result: Box::new(Err(GitReadError::NonUtf8Head)),
+        }
     }
 
     #[test]
@@ -811,8 +848,7 @@ mod tests {
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
 
-        let stale = fake_detail(0, "commit 0");
-        let cmd = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(stale))));
+        let cmd = update(&mut state, detail_ok(0));
 
         assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
     }
@@ -822,8 +858,7 @@ mod tests {
         let mut state = state_with_commits(3);
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
 
-        let detail = fake_detail(0, "commit 0");
-        let cmd = update(&mut state, Msg::CommitDetailLoaded(Box::new(Ok(detail))));
+        let cmd = update(&mut state, detail_ok(0));
 
         assert_eq!(cmd, Cmd::None);
         assert_eq!(state.graph.detail.as_ref().unwrap().oid, cursor(&state));
@@ -836,10 +871,7 @@ mod tests {
         let mut state = state_with_commits(3);
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
 
-        let cmd = update(
-            &mut state,
-            Msg::CommitDetailLoaded(Box::new(Err(GitReadError::NonUtf8Head))),
-        );
+        let cmd = update(&mut state, detail_err(0));
 
         assert_eq!(cmd, Cmd::None);
         assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
@@ -885,5 +917,86 @@ mod tests {
         let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
 
         assert!(state.graph.detail.is_none());
+    }
+
+    #[test]
+    fn a_detail_that_arrives_after_the_cursor_came_back_is_dropped() {
+        // カーソルが動いて戻ってくると、飛んでいる要求の返りは古いものになる。
+        // 上書きすると、正しいものが出ている画面が「読み込み中」に戻り、
+        // 同じものをもう 1 回読みに行く。
+        let mut state = expanded_with_detail(3);
+        // 2 件目を頼んだ直後に戻る。戻りは `JobTracker` に落とされる。
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::char('j'))),
+            Cmd::LoadCommitDetail(fake_oid(1))
+        );
+        assert_eq!(update(&mut state, Msg::Key(Key::char('k'))), Cmd::None);
+
+        let cmd = update(&mut state, detail_ok(1));
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.graph.detail.as_ref().unwrap().oid, cursor(&state));
+    }
+
+    #[test]
+    fn a_failure_for_another_commit_still_asks_for_the_one_on_screen() {
+        // 「`Err` からは頼み直さない」のは同じコミットの話。カーソルが動いた先の
+        // コミットはまだ一度も試していないので、放っておくと
+        // 「詳細を読み込めませんでした」のまま止まる。
+        let mut state = state_with_commits(3);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        // 読み込み中に 1 行動く。この移動は `JobTracker` に落とされる。
+        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+
+        let cmd = update(&mut state, detail_err(0));
+
+        assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
+        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
+    }
+
+    #[test]
+    fn a_failed_page_is_not_reloaded_by_a_layout_change() {
+        // 失敗すると行を捨てるので「残りが 1 画面以下」が必ず真になる。見ないと、
+        // 以後のレイアウト変化のたびに読み直しを出す。
+        let mut state = state_with_page(3, false);
+        let _ = init(&mut state);
+        let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+
+        assert_eq!(
+            update(&mut state, Msg::Layout { graph_rows: 10 }),
+            Cmd::None
+        );
+        assert_eq!(update(&mut state, Msg::Tick), Cmd::None);
+    }
+
+    #[test]
+    fn moving_the_cursor_restarts_a_failed_load() {
+        // 自動では出さないが、ユーザーの操作からは始める。
+        let mut state = state_with_page(3, false);
+        let _ = init(&mut state);
+        let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::char('j'))),
+            Cmd::LoadLog {
+                count: state.config.graph.page_size
+            }
+        );
+    }
+
+    #[test]
+    fn a_successful_page_clears_the_failure() {
+        let mut state = state_with_page(3, false);
+        let _ = init(&mut state);
+        let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+        assert!(state.graph.load_failed);
+
+        let page = LogPage {
+            commits: vec![commit(1)],
+            done: false,
+        };
+        let _ = update(&mut state, Msg::LogLoaded(Ok(page)));
+
+        assert!(!state.graph.load_failed);
     }
 }

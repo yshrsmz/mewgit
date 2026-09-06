@@ -172,8 +172,8 @@ pub struct GraphState {
     /// 画面最上部に出す行の添字。カーソルだけからは決まらない（カーソルを上に
     /// 動かしたとき、見えているうちは view を動かさない）ので状態として持つ。
     pub scroll: usize,
-    /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Resize`] で運んでくる
-    /// （`crate::app::Msg::Resize`）。core はヘッダや枠の高さを知らない。
+    /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Layout`] で運んでくる
+    /// （`crate::app::Msg::Layout`）。core はヘッダや枠の高さを知らない。
     pub viewport: usize,
     /// 選択コミットの詳細を展開しているか。
     pub expanded: bool,
@@ -183,6 +183,13 @@ pub struct GraphState {
     pub detail: Option<CommitDetail>,
     /// これ以上読むコミットが無い。
     pub loaded_all: bool,
+    /// 直近のログ読み込みが失敗した。
+    ///
+    /// 立っているあいだ追加読み込みを出さない。失敗すると `lines` を捨てるので、
+    /// 「残りが 1 画面以下」の条件が必ず真になり、以後のレイアウト変化のたびに
+    /// 読み直しを出してしまう。次の読み込みはユーザーの操作から始める
+    /// （01 の「追加ページの読み込み」）。
+    pub load_failed: bool,
 }
 
 impl GraphState {

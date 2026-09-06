@@ -178,9 +178,8 @@ impl Runtime {
                 // `log_page` と違って状態を持たない要求なので、このタスクは
                 // 途中で捨てても失うものが無い（02 の「スレッド」）。
                 tokio::spawn(async move {
-                    let _ = tx.send(Msg::CommitDetailLoaded(Box::new(
-                        reader.commit_detail(oid).await,
-                    )));
+                    let result = Box::new(reader.commit_detail(oid).await);
+                    let _ = tx.send(Msg::CommitDetailLoaded { oid, result });
                 });
                 ControlFlow::Continue(())
             }
@@ -497,6 +496,13 @@ mod tests {
         let oid = repo.head_oid();
         let (mut state, reader) = opened(&repo);
         let (runtime, mut msgs) = Runtime::new(reader);
+
+        // 行が無いとカーソルの指すコミットが決まらず、届いた詳細は捨てられる。
+        // 先に 1 ページ積む。
+        let cmd = state.issue(Cmd::LoadLog { count: 10 });
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
 
         let cmd = state.issue(Cmd::LoadCommitDetail(oid));
         assert!(runtime.dispatch(&mut state, cmd).is_continue());

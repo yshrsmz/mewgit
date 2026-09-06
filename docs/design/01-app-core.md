@@ -172,6 +172,12 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 戻すので、そこから再読込を出すと、リーダーが壊れているあいだ「失敗 → 再読込 → 失敗」
 を回し続ける。次の読み込みはユーザーの操作から始める。
 
+**「出さない」は 1 回きりの分岐では足りず、`GraphState.load_failed` として状態に持つ。**
+行を捨てた直後は「残りが 1 画面以下」が必ず真になるので、そのあとに来るどの
+`Msg::Layout` も読み直しを出してしまう。失敗そのものがレイアウトを変えるので
+（行が消えると詳細の領域も消える）、失敗が自分で読み直しを引く形になる。
+フラグを落とすのはカーソルを動かしたとき（`scrolled`）と、読み込みが成功したとき。
+
 `update` が返した `Cmd` は必ず `runtime` が dispatch する。捨てると `issue` が
 `JobTracker` に登録したまま実行されず、以後その種類の `Cmd` が黙って落ち続ける。
 `Cmd` に `#[must_use]` を付けてあるので、捨てるとコンパイルが通らない（CI は
@@ -204,9 +210,16 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
   詳細の oid がカーソルのコミットと違えば、そこでもう 1 回 `Cmd::LoadCommitDetail` を出す。
   素早くスクロールしても、飛んでいる要求は常に 1 つで、最後に止まったコミットに収束する。
   Oid を `JobKind` に持たせると、スクロール中の全コミットぶんの要求が同時に走る
-- **`Err` からは再発行しない。** 通知を出してジョブを畳むだけにする。出すと、リポジトリが
-  壊れているあいだ「失敗 → 再読込 → 失敗」を回し続ける（`LoadLog` と同じ）。次の読み込みは
-  ユーザーの操作から始める
+- **届いた詳細は、いま見ているコミットのものだけを採る。** 飛んでいる要求は 1 つでも、
+  戻ってきたときにカーソルが別のところにいることはある（動いて戻ってきたときなど）。
+  無条件に上書きすると、正しいものが出ている画面が「読み込み中」に戻り、同じものを
+  もう 1 回読みに行く
+- **`Err` からは、失敗したのがいま見ているコミットなら再発行しない。** 通知を出して
+  ジョブを畳むだけにする。出すと、リポジトリが壊れているあいだ「失敗 → 再読込 → 失敗」を
+  回し続ける（`LoadLog` と同じ）。次の読み込みはユーザーの操作から始める。逆に、
+  失敗したのが別のコミットなら、いま見ているものはまだ一度も試していないので頼む。
+  ここを一律に止めると「一度も試していないコミット」が
+  「詳細を読み込めませんでした」のまま残る
 - ログの読み込みが失敗して積んだ行を捨てるときは `detail` も捨てる。`lines` に無い
   コミットの詳細を残さない
 
@@ -277,7 +290,7 @@ pub enum Msg {
     Key(Key), Resize { term: TermSize }, Layout { graph_rows: usize }, Tick,
     // git_read
     LogLoaded(Result<LogPage, GitReadError>),
-    CommitDetailLoaded(Box<Result<CommitDetail, GitReadError>>),
+    CommitDetailLoaded { oid: Oid, result: Box<Result<CommitDetail, GitReadError>> },
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(WorktreeSnapshot),
     DiffLoaded { target: DiffTarget, files: Vec<FileDiff> },
@@ -311,7 +324,9 @@ pub enum Msg {
 内部エラーに留め、`resolve` の中で `DegradedReason` に畳む。
 
 `CommitDetailLoaded` も `Result` を運ぶ。`LogLoaded` と同じで、失敗の通り道が無いと
-`JobKind::LoadCommitDetail` が走ったまま残り、以後の要求が黙って落ちる。
+`JobKind::LoadCommitDetail` が走ったまま残り、以後の要求が黙って落ちる。**要求した Oid を
+一緒に運ぶ。** `Err` のときにどのコミットが失敗したのかを知る手掛かりがこれしかなく、
+無いと「別のコミットの失敗」と「いま見ているコミットの失敗」を区別できない。
 
 `ExecFinished` と `PrLoaded` と `CommitDetailLoaded` は payload を `Box` に入れる。入れないと `Msg` が
 数百バイトになり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。

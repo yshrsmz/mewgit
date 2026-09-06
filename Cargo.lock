@@ -907,6 +907,7 @@ dependencies = [
  "anyhow",
  "git2",
  "globset",
+ "mewgit-core",
  "reqwest",
  "secrecy",
  "serde",

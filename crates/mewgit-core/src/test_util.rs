@@ -1,4 +1,9 @@
-//! 統合テスト用の一時リポジトリ。
+//! テスト用の一時リポジトリ。`test-util` feature でのみコンパイルされる。
+//!
+//! `tests/common/mod.rs` から移してきた。`mod common;` はテストバイナリごとに別々に
+//! コンパイルされるので、テストファイルが 2 つ以上になると、そのバイナリで使わない
+//! ヘルパが `dead_code` になる（`clippy --all-targets -D warnings` で落ちる）。
+//! ライブラリの `pub` な項目にすればその問題が消え、`mewgit-tui` のテストからも使える。
 //!
 //! リポジトリは `git` CLI で作る。git2 で作ると「git が作ったものを git2 で読めるか」
 //! ではなく「git2 が書いたものを git2 で読めるか」のテストになるため。
@@ -21,7 +26,7 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
-use mewgit_core::git_read::Oid;
+use crate::git_read::Oid;
 use tempfile::TempDir;
 
 /// 一時ディレクトリと、実行環境の設定を持ち込まない `git` の実行。

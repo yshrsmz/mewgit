@@ -8,6 +8,7 @@
 
 pub mod lanes;
 pub mod theme;
+pub mod time;
 
 use crate::panes;
 use mewgit_core::app::{AppState, TermSize};
@@ -36,13 +37,18 @@ fn split(area: Rect) -> [Rect; 3] {
     .areas(area)
 }
 
-/// グラフに使える行数。
+/// グラフの行に使える行数。
 ///
 /// `app` がスクロール位置を決めるのに要る（01 の「グラフの行」）。core にレイアウトを
-/// 知らせないよう、実際に描くのと同じ `split` と枠から出して `Msg::Resize` で渡す。
-pub fn graph_rows(term: TermSize) -> usize {
+/// 知らせないよう、実際に描くのと同じ `split` と枠から出して `Msg::Layout` で渡す。
+///
+/// 引数は端末サイズと「詳細を出すか」の 2 つだけ。`&AppState` を丸ごと受けると、
+/// あとから詳細の中身（メッセージの行数など）を見る余地が残る。そうすると詳細が
+/// 届いた瞬間に行数が変わってグラフが跳ねる（07）。判定は
+/// [`panes::graph::shows_detail`]。
+pub fn graph_rows(term: TermSize, shows_detail: bool) -> usize {
     let [_, body, _] = split(Rect::new(0, 0, term.width, term.height));
-    panes::graph::inner(body).height as usize
+    panes::graph::areas(body, shows_detail).0.height as usize
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
@@ -94,9 +100,8 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::test_util::{draw, state_at};
-    use mewgit_core::app::NoticeLevel;
+    use mewgit_core::app::{NoticeLevel, TermSize};
 
     #[test]
     fn header_shows_the_repository_name() {

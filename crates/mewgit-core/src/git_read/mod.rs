@@ -26,6 +26,14 @@ pub(super) fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// git2 の署名を層の値型にする。名前とメールは表示にしか使わないので lossy で残す。
+pub(super) fn signature(sig: &git2::Signature<'_>) -> Signature {
+    Signature {
+        name: lossy(sig.name_bytes()),
+        email: lossy(sig.email_bytes()),
+    }
+}
+
 /// `git_read` 層のエラー。
 ///
 /// `Clone` / `PartialEq` は付かない（`git2::Error` が実装していない）。
@@ -62,6 +70,34 @@ pub struct Commit {
     pub author: Signature,
     /// author time。Unix epoch からの秒数。
     pub time: i64,
+}
+
+/// コミット 1 件の詳細。グラフの行が持たない値だけをまとめる。
+///
+/// グラフで選択されたときに [`RepoReader::commit_detail`] で遅延取得する。ファイル一覧は
+/// 含めない（`diff(DiffTarget::Commit)` の担当。02 の「コミットの詳細」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitDetail {
+    pub oid: Oid,
+    pub parents: Vec<Oid>,
+    /// メッセージ全文（summary + 本文）。末尾の改行は落とす。
+    pub message: String,
+    pub author: Signature,
+    pub author_time: Timestamp,
+    pub committer: Signature,
+    pub committer_time: Timestamp,
+}
+
+/// コミットに刻まれた日時。
+///
+/// オフセットを一緒に持つのは、`git show` と同じくコミット自身のタイムゾーンで
+/// 表示するため。裸の秒数だけだと、表示が見る人の環境のタイムゾーンに寄る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timestamp {
+    /// Unix epoch からの秒数。
+    pub seconds: i64,
+    /// UTC からのオフセット（分）。`+09:00` なら `540`。
+    pub offset_minutes: i32,
 }
 
 /// [`LogSession::next_page`] が返す 1 ページ分。

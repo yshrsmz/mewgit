@@ -26,7 +26,7 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
-use crate::git_read::{Commit, Oid, Signature};
+use crate::git_read::{Commit, CommitDetail, Oid, Signature, Timestamp};
 use tempfile::TempDir;
 
 /// 一時ディレクトリと、実行環境の設定を持ち込まない `git` の実行。
@@ -228,10 +228,7 @@ pub fn fake_commit(index: u8, summary: &str) -> Commit {
         oid: fake_oid(index),
         parents: Vec::new(),
         summary: summary.to_string(),
-        author: Signature {
-            name: "mewgit test".to_string(),
-            email: "test@example.invalid".to_string(),
-        },
+        author: fake_signature(),
         time: 0,
     }
 }
@@ -244,6 +241,34 @@ pub fn fake_commit_with_parents(index: u8, parents: &[u8], summary: &str) -> Com
     Commit {
         parents: parents.iter().copied().map(fake_oid).collect(),
         ..fake_commit(index, summary)
+    }
+}
+
+/// [`fake_commit`] と同じ Oid を持つ詳細。
+///
+/// `app` の遷移テストと `ui` の描画テストの両方で使うのでここに置く。日時は
+/// 固定（1970-01-01 00:00:00 +0000）で、author と committer は同じ値。
+pub fn fake_detail(index: u8, message: &str) -> CommitDetail {
+    let when = Timestamp {
+        seconds: 0,
+        offset_minutes: 0,
+    };
+    CommitDetail {
+        oid: fake_oid(index),
+        parents: Vec::new(),
+        message: message.to_string(),
+        author: fake_signature(),
+        author_time: when,
+        committer: fake_signature(),
+        committer_time: when,
+    }
+}
+
+/// テストの署名。[`TestRepo`] が git config に書き込む名前と同じにしてある。
+fn fake_signature() -> Signature {
+    Signature {
+        name: "mewgit test".to_string(),
+        email: "test@example.invalid".to_string(),
     }
 }
 

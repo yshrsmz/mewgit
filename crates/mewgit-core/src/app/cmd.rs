@@ -4,7 +4,7 @@
 //! 結果を [`Msg`](crate::app::Msg) として返す。
 
 use crate::git_exec::GitOp;
-use crate::git_read::DiffTarget;
+use crate::git_read::{DiffTarget, Oid};
 
 use super::JobKind;
 
@@ -23,6 +23,8 @@ pub enum Cmd {
     LoadLog {
         count: usize,
     },
+    /// 選択コミットの詳細（メッセージ全文・committer・日時）を読む（02）。
+    LoadCommitDetail(Oid),
     LoadStatus,
     LoadDiff(DiffTarget),
     /// リモート・HEAD・ref の索引を読む。起動時と、ref が変わったあと（M3）。
@@ -63,6 +65,7 @@ impl Cmd {
         match self {
             Cmd::None | Cmd::Batch(_) | Cmd::Quit => None,
             Cmd::LoadLog { .. } => Some(JobKind::LoadLog),
+            Cmd::LoadCommitDetail(_) => Some(JobKind::LoadCommitDetail),
             Cmd::LoadStatus => Some(JobKind::LoadStatus),
             Cmd::LoadRepoInfo => Some(JobKind::LoadRepoInfo),
             Cmd::LoadDiff(_) => Some(JobKind::LoadDiff),

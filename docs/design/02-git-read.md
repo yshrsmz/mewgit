@@ -28,6 +28,7 @@ impl RepoReader {
     pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>
     pub fn head(&self) -> Result<HeadInfo, GitReadError>;           // branch name or detached Oid
     pub fn log(&self) -> Result<LogSession<'_>, GitReadError>;   // ページングは LogSession が持つ
+    pub fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;  // 選択時に遅延取得
     pub fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
     pub fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
     pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;
@@ -155,11 +156,41 @@ pub struct LogPage {
 - `next_page` が `Err` を返したらセッションを捨てる。そのページのために walk から取り出した
   Oid は失われており、同じセッションで読み直すとその分がどのページにも現れない。グラフには
   親の見つからない行が残り、2 回目は成功するので UI にも異常が出ない
-- 1 コミットあたり `Commit { oid, parents, summary, author, time }` のみ抽出。本文とファイル一覧は選択時に遅延取得
+- 1 コミットあたり `Commit { oid, parents, summary, author, time }` のみ抽出。本文は選択時に
+  `commit_detail` で、ファイル一覧は `diff(DiffTarget::Commit)`（M2）で遅延取得する
 - `Commit::time` は author 日時だが、行の並びは `Sort::TIME`（= committer 日時）で決まる。
   rebase / cherry-pick された履歴では表示日時が並び順と逆転しうる。`git log` と同じ挙動なので
   そのままにする
 - summary と署名は表示にしか使わないので、非 UTF-8 でも lossy 変換して残す（「非 UTF-8 の扱い」）
+
+## コミットの詳細
+
+グラフの行が持たない値（メッセージ全文、committer、日時のタイムゾーン）を 1 コミットぶん読む。
+グラフで選択されたコミットについて `app` が要求する（01 の `Cmd::LoadCommitDetail`）。
+
+```rust
+pub struct CommitDetail {
+    pub oid: Oid,
+    pub parents: Vec<Oid>,
+    /// メッセージ全文（summary + 本文）。末尾の改行は落とす。
+    pub message: String,
+    pub author: Signature,
+    pub author_time: Timestamp,
+    pub committer: Signature,
+    pub committer_time: Timestamp,
+}
+
+pub struct Timestamp { pub seconds: i64, pub offset_minutes: i32 }
+```
+
+- **`Timestamp` はコミット自身のタイムゾーンのオフセットを持つ。** `Commit::time` のような
+  裸の秒数だけだと、表示が見る人の環境のタイムゾーンに寄ってしまう。`git show` は
+  コミットに刻まれたオフセットで出すので、それに合わせる。`Commit::time` は行の並びと
+  1 行表示にしか使わないのでそのまま
+- メッセージは表示にしか使わないので、非 UTF-8 でも lossy で残す（「非 UTF-8 の扱い」）
+- ファイル一覧は含めない。`diff(DiffTarget::Commit)`（M2）の担当で、そちらは
+  コミットの本文より重い。1 つの要求にまとめると本文だけ見たいときも diff の
+  コストを払うことになる
 
 ## diff とハンク
 
@@ -214,6 +245,7 @@ impl ReaderHandle {
     pub fn spawn(path: &Path) -> Result<Self, GitReadError>;
     pub fn workdir(&self) -> &Path;
     pub async fn log_page(&self, count: usize) -> Result<LogPage, GitReadError>;
+    pub async fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;
     pub async fn refs(&self) -> Result<RefIndex, GitReadError>;
     pub async fn head(&self) -> Result<HeadInfo, GitReadError>;
     pub async fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;

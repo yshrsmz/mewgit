@@ -20,20 +20,10 @@ use ratatui::crossterm::event::{
 pub fn event_to_msg(event: Event) -> Option<Msg> {
     match event {
         Event::Key(key) => key_event_to_key(key).map(Msg::Key),
-        Event::Resize(width, height) => Some(resized(TermSize { width, height })),
+        Event::Resize(width, height) => Some(Msg::Resize {
+            term: TermSize { width, height },
+        }),
         Event::FocusGained | Event::FocusLost | Event::Mouse(_) | Event::Paste(_) => None,
-    }
-}
-
-/// サイズ変更の [`Msg`]。グラフに使える行数はレイアウトから出して一緒に運ぶ。
-///
-/// core がヘッダや枠の高さを知っていると、07 のレイアウトを変えたときに黙ってずれる
-/// （01 の「グラフの行」）。起動時は `Resize` が飛んでこないので、ランタイムが
-/// 最初のサイズでこれを 1 回作る。
-pub fn resized(term: TermSize) -> Msg {
-    Msg::Resize {
-        term,
-        graph_rows: crate::ui::graph_rows(term),
     }
 }
 
@@ -145,23 +135,20 @@ mod tests {
     }
 
     #[test]
-    fn resize_event_carries_the_new_size_and_the_graph_rows() {
-        // グラフに使える行数はレイアウトから出す。core はヘッダや枠の高さを知らない。
+    fn resize_event_carries_the_new_size() {
+        // グラフに使える行数はここでは決めない。レイアウトの変化は `AppState` を
+        // 見ないと分からない（詳細の展開でも変わる）ので、ランタイムが描画の直前に
+        // `Msg::Layout` として流す（01 の「ランタイム」）。
         let term = TermSize {
             width: 120,
             height: 40,
         };
         let msg = event_to_msg(Event::Resize(term.width, term.height));
 
-        let Some(Msg::Resize {
-            term: got,
-            graph_rows,
-        }) = msg
-        else {
+        let Some(Msg::Resize { term: got }) = msg else {
             panic!("Resize になっていません: {msg:?}");
         };
         assert_eq!(got, term);
-        assert_eq!(graph_rows, crate::ui::graph_rows(term));
     }
 
     #[test]

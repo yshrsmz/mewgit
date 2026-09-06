@@ -74,20 +74,30 @@ where
         return Ok(());
     }
 
-    // 起動時に `Resize` は飛んでこないので、最初のサイズは自分で入れる。
-    // 戻ってきた `Cmd` も流す（`init` が読んでいる最中なら `issue` が落とす）。
+    // 起動時に `Resize` は飛んでこないので、最初のサイズは自分で入れる。`Resize` が
+    // するのは `state.term` の更新だけなので `Cmd` は必ず `None`。グラフの行数は
+    // このあとループ先頭の `Msg::Layout` が入れるので、`terminal.size()` が失敗しても
+    // 既定のサイズぶんは入る。
     if let Ok(size) = terminal.size() {
-        let msg = crate::input::resized(TermSize {
-            width: size.width,
-            height: size.height,
-        });
-        let cmd = update(state, msg);
-        if runtime.dispatch(state, cmd).is_break() {
-            return Ok(());
-        }
+        let _ = update(
+            state,
+            Msg::Resize {
+                term: TermSize {
+                    width: size.width,
+                    height: size.height,
+                },
+            },
+        );
     }
 
     loop {
+        // レイアウトの変化を core に伝える唯一の経路。端末のリサイズも `Enter` の
+        // 展開も同じところを通るので、片方だけ更新を忘れることがない（01）。
+        let cmd = layout(state);
+        if runtime.dispatch(state, cmd).is_break() {
+            return Ok(());
+        }
+
         terminal.draw(|frame| ui::render(frame, state))?;
 
         let msg = tokio::select! {
@@ -111,6 +121,18 @@ where
             return Ok(());
         }
     }
+}
+
+/// グラフに使える行数が変わっていたら [`Msg::Layout`] を流す。
+///
+/// 行数を決めるのは `ui` だけ（不変ルール 2 と 07）。`AppState` に直接書かず `update`
+/// を通すのは、`viewport` の計算経路を 1 本に保つため。
+fn layout(state: &mut AppState) -> Cmd {
+    let graph_rows = ui::graph_rows(state.term, crate::panes::graph::shows_detail(&state.graph));
+    if graph_rows == state.graph.viewport {
+        return Cmd::None;
+    }
+    update(state, Msg::Layout { graph_rows })
 }
 
 impl Runtime {
@@ -146,6 +168,18 @@ impl Runtime {
                 // コミットがどのページにも現れなくなる（02 の「スレッド」）。
                 tokio::spawn(async move {
                     let _ = tx.send(Msg::LogLoaded(reader.log_page(count).await));
+                });
+                ControlFlow::Continue(())
+            }
+
+            Cmd::LoadCommitDetail(oid) => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                // `log_page` と違って状態を持たない要求なので、このタスクは
+                // 途中で捨てても失うものが無い（02 の「スレッド」）。
+                tokio::spawn(async move {
+                    let result = Box::new(reader.commit_detail(oid).await);
+                    let _ = tx.send(Msg::CommitDetailLoaded { oid, result });
                 });
                 ControlFlow::Continue(())
             }
@@ -452,6 +486,96 @@ mod tests {
         let nested = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::LoadStatus]), Cmd::FetchPr]);
         assert!(runtime.dispatch(&mut state, nested).is_continue());
         assert_eq!(state.notices.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn load_commit_detail_reaches_the_state_through_the_reader() {
+        let repo = TestRepo::init();
+        repo.commit("subject");
+        repo.git(&["commit", "--amend", "-q", "-m", "subject\n\nbody"]);
+        let oid = repo.head_oid();
+        let (mut state, reader) = opened(&repo);
+        let (runtime, mut msgs) = Runtime::new(reader);
+
+        // 行が無いとカーソルの指すコミットが決まらず、届いた詳細は捨てられる。
+        // 先に 1 ページ積む。
+        let cmd = state.issue(Cmd::LoadLog { count: 10 });
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        let cmd = state.issue(Cmd::LoadCommitDetail(oid));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        let detail = state.graph.detail.as_ref().expect("詳細が入っていません");
+        assert_eq!(detail.oid, oid);
+        assert_eq!(detail.message, "subject\n\nbody");
+        assert!(!state.jobs.is_running(JobKind::LoadCommitDetail));
+    }
+
+    #[tokio::test]
+    async fn enter_reaches_the_state_and_the_viewport_follows() {
+        // `Enter` を打ってループを 1 本走らせる。`viewport` は常に `ui` が出す値と
+        // 一致していること（一致しないとカーソルが画面の外に出る）。
+        let repo = TestRepo::init();
+        repo.commit("first");
+        let (mut state, reader) = opened(&repo);
+        let events = vec![key(KeyCode::Enter), key(KeyCode::Char('q'))];
+
+        run_with(events, &mut state, reader).await.unwrap();
+
+        assert!(state.graph.expanded);
+        assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
+    }
+
+    #[test]
+    fn opening_the_detail_shrinks_the_viewport() {
+        // 展開でグラフが縮むことを core に伝えるのは `layout` だけ。ここが抜けると
+        // `app` は広いままの `viewport` でスクロール位置を決める。
+        // ループを回さないのは、1 ページ目が届く前に `Enter` が処理されると
+        // 行が無く（＝詳細を出さず）縮まないため。
+        let mut state = crate::test_util::state_with_commits(&["first"]);
+        let collapsed = state.graph.viewport;
+
+        state.graph.expanded = true;
+        let _ = layout(&mut state);
+
+        assert!(
+            state.graph.viewport < collapsed,
+            "展開しても viewport が縮んでいません: {collapsed} -> {}",
+            state.graph.viewport
+        );
+        assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
+    }
+
+    #[test]
+    fn an_expanded_but_empty_graph_keeps_the_whole_pane() {
+        // 行が無ければ詳細に出すものも無い。`ui` が描く高さと食い違わせない。
+        let mut state = crate::test_util::state_with_commits(&[]);
+        let whole = state.graph.viewport;
+
+        state.graph.expanded = true;
+        let _ = layout(&mut state);
+
+        assert_eq!(state.graph.viewport, whole);
+    }
+
+    #[tokio::test]
+    async fn the_viewport_is_filled_in_before_the_first_frame() {
+        // `Msg::Resize` は端末サイズしか運ばない。行数を入れるのはループ先頭の
+        // `Msg::Layout` で、そこが抜けると `viewport` が 0 のままスクロールが壊れる。
+        let repo = TestRepo::init();
+        repo.commit("first");
+        let (mut state, reader) = opened(&repo);
+
+        run_with(vec![key(KeyCode::Char('q'))], &mut state, reader)
+            .await
+            .unwrap();
+
+        assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
+        assert!(state.graph.viewport > 0);
     }
 
     #[tokio::test]

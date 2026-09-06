@@ -3,43 +3,95 @@
 //! 1 行は `罫線  短縮 Oid  ラベル  summary`。罫線のセルを文字と色に写すのは
 //! `ui::lanes`。
 
-use mewgit_core::app::{AppState, GraphLine, JobKind};
-use mewgit_core::git_read::RefLabel;
+use mewgit_core::app::{AppState, GraphLine, GraphState, JobKind};
+use mewgit_core::git_read::{CommitDetail, Oid, RefLabel, Signature, Timestamp};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::ui::{lanes, theme};
+use crate::ui::{lanes, theme, time};
 
 /// 短縮 Oid の桁数。`git log --oneline` と同じ。
 const SHORT_OID: usize = 7;
+
+/// 展開した詳細に割く行数（区切り線を含む）。
+const DETAIL_ROWS: u16 = 10;
+
+/// 詳細を出していてもグラフに残す行数。端末を縮めたときに詳細だけが残って
+/// グラフが消えないようにする。
+const MIN_GRAPH_ROWS: u16 = 3;
+
+/// 詳細の領域を取るのに要る行数。区切り線 1 行 + 見出し 3 行。これを割るなら
+/// 出さない。1 行だけ取ると区切り線で埋まり、グラフの行を 1 つ失って何も出ない。
+const MIN_DETAIL_ROWS: u16 = 4;
 
 /// ペインの枠。
 fn block() -> Block<'static> {
     Block::default().borders(Borders::ALL).title("Graph")
 }
 
-/// 枠の内側。`ui::graph_rows` が行数を出すのに使う。
-pub fn inner(area: Rect) -> Rect {
-    block().inner(area)
+/// 詳細の領域を取るか。
+///
+/// 展開していても行が 1 つも無ければ出すものが無いので取らない。**判定はこの 1 つ。**
+/// `ui::graph_rows` と [`render`] が別々に決めると、`app` に渡した行数と実際に描く
+/// 行数がずれ、スクロール位置の計算が静かに狂う。
+pub fn shows_detail(graph: &GraphState) -> bool {
+    graph.expanded && !graph.lines.is_empty()
+}
+
+/// 枠の内側をコミットの行と詳細に割る。詳細を出さないときは 2 つ目が `None`。
+///
+/// `ui::graph_rows` が行数を出すのに使う。
+pub fn areas(area: Rect, shows_detail: bool) -> (Rect, Option<Rect>) {
+    split(block().inner(area), shows_detail)
+}
+
+/// 枠の内側を割る。`Layout` に任せず自分で計算するのは、レイアウトの解に幅を
+/// 持たせないため。
+fn split(inner: Rect, shows_detail: bool) -> (Rect, Option<Rect>) {
+    let detail = if shows_detail {
+        DETAIL_ROWS.min(inner.height.saturating_sub(MIN_GRAPH_ROWS))
+    } else {
+        0
+    };
+    if detail < MIN_DETAIL_ROWS {
+        return (inner, None);
+    }
+
+    let rows = Rect {
+        height: inner.height - detail,
+        ..inner
+    };
+    let detail = Rect {
+        y: inner.y + rows.height,
+        height: detail,
+        ..inner
+    };
+    (rows, Some(detail))
 }
 
 /// グラフペインを描く。
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let block = block();
-    let inner = block.inner(area);
+    // `block()` はタイトルを確保するので 1 フレームに 1 回だけ作る。
+    let (rows, detail) = split(block.inner(area), shows_detail(&state.graph));
     frame.render_widget(block, area);
 
     if state.graph.lines.is_empty() {
-        frame.render_widget(Paragraph::new(empty_message(state)), inner);
+        // 行が無ければ詳細も無い（`shows_detail`）ので、`rows` が枠の内側そのまま。
+        frame.render_widget(Paragraph::new(empty_message(state)), rows);
         return;
+    }
+
+    if let Some(detail) = detail {
+        render_detail(frame, detail, state);
     }
 
     // 見えている行だけを切り出す。添字は `scroll` からの相対で戻せる。
     let start = state.graph.scroll.min(state.graph.lines.len());
-    let end = (start + inner.height as usize).min(state.graph.lines.len());
+    let end = (start + rows.height as usize).min(state.graph.lines.len());
     let visible = &state.graph.lines[start..end];
 
     let view = View {
@@ -61,7 +113,74 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         .map(|(offset, line)| view.commit_line(start + offset, line))
         .collect();
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), rows);
+}
+
+/// 選択コミットの詳細。上辺の罫線でグラフと分ける。
+fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
+    let block = Block::default().borders(Borders::TOP);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = match state.graph.fresh_detail() {
+        Some(detail) => detail_lines(detail, inner.height as usize),
+        // カーソルの指すコミットのものが無い。届いていないのか失敗したのかは
+        // `JobTracker` が知っている（07 の「詳細の展開」）。
+        None => vec![Line::raw(detail_placeholder(state))],
+    };
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// 詳細がまだ無いときの文言。空のグラフの出し分けと同じ形。
+fn detail_placeholder(state: &AppState) -> &'static str {
+    if state.jobs.is_running(JobKind::LoadCommitDetail) {
+        "読み込み中…"
+    } else {
+        "詳細を読み込めませんでした"
+    }
+}
+
+/// 詳細の中身。`git show` の見出しに近い並びにする。
+///
+/// `rows` は描ける行数。メッセージはそこまでで打ち切る。1 行が折り返しで 2 行以上に
+/// なることはあっても 0 行になることはないので、見える行を落とすことはない。マージや
+/// revert の本文は数百行になることがあり、全部組むと毎フレームその数だけ `Line` を
+/// 作ることになる。
+fn detail_lines(detail: &CommitDetail, rows: usize) -> Vec<Line<'_>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("commit {}", detail.oid),
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::raw(who("Author", &detail.author, detail.author_time)),
+        Line::raw(who("Commit", &detail.committer, detail.committer_time)),
+    ];
+
+    if !detail.parents.is_empty() {
+        let parents: Vec<String> = detail.parents.iter().map(short).collect();
+        lines.push(Line::raw(format!("Parent: {}", parents.join(" "))));
+    }
+
+    lines.push(Line::raw(""));
+    lines.extend(
+        detail
+            .message
+            .lines()
+            .take(rows.saturating_sub(lines.len()))
+            .map(Line::raw),
+    );
+    lines
+}
+
+/// `Author: name <mail>  2026-09-06 15:35:55 +0900`。
+fn who(label: &str, sig: &Signature, time: Timestamp) -> String {
+    format!(
+        "{label}: {} <{}>  {}",
+        sig.name,
+        sig.email,
+        time::format(time)
+    )
 }
 
 /// 1 フレームのあいだ変わらない描画条件。行ごとに引き回す値をまとめる。
@@ -77,15 +196,14 @@ struct View<'a> {
 /// 行が 1 つも無いときに出す文言。
 ///
 /// 読み込みが失敗したときに「読み込み中…」のままにしない。エラーの通知は
-/// ステータスバーに出るが、次の通知で上書きされる。読み込み中かどうかは
-/// `JobTracker` が知っているので、状態を増やさずに区別できる。
+/// ステータスバーに出るが、次の通知で上書きされる。
 fn empty_message(state: &AppState) -> &'static str {
     if state.jobs.is_running(JobKind::LoadLog) {
         "読み込み中…"
-    } else if state.graph.loaded_all {
-        "コミットがありません"
-    } else {
+    } else if state.graph.load_failed {
         "コミットを読み込めませんでした"
+    } else {
+        "コミットがありません"
     }
 }
 
@@ -106,7 +224,7 @@ impl<'a> View<'a> {
         spans.reserve(3 + labels.len() * 4);
 
         spans.push(Span::styled(
-            short_oid(line),
+            short(&line.commit.oid),
             Style::default().add_modifier(Modifier::DIM),
         ));
         spans.push(Span::raw(" "));
@@ -152,8 +270,8 @@ fn label_style(label: &RefLabel, head_style: Style) -> Style {
 }
 
 /// 先頭 [`SHORT_OID`] 桁。
-fn short_oid(line: &GraphLine) -> String {
-    let mut text = line.commit.oid.to_string();
+fn short(oid: &Oid) -> String {
+    let mut text = oid.to_string();
     text.truncate(SHORT_OID);
     text
 }
@@ -161,10 +279,12 @@ fn short_oid(line: &GraphLine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, state_at, state_with_commits, state_with_history, terminal_with};
-    use mewgit_core::app::{init, update, Msg, TermSize};
+    use crate::test_util::{
+        draw, graph_rows, state_at, state_with_commits, state_with_history, terminal_with,
+    };
+    use mewgit_core::app::{init, update, JobKind, Key, KeyCode, Msg, TermSize};
     use mewgit_core::git_read::{GitReadError, Oid, RefIndex, RefLabel};
-    use mewgit_core::test_util::fake_commit;
+    use mewgit_core::test_util::{fake_commit, fake_detail, fake_oid};
     use ratatui::buffer::Buffer;
 
     /// その行で最初に `symbol` が出る桁。
@@ -314,7 +434,7 @@ mod tests {
         let drawn = lines.iter().filter(|line| line.contains("commit ")).count();
         // `ui::graph_rows` が `app` に渡す行数と、実際に描く行数は同じでなければならない。
         // ずれるとカーソルが画面の外に出る。
-        assert_eq!(drawn, crate::ui::graph_rows(TermSize::default()));
+        assert_eq!(drawn, graph_rows(&state));
     }
 
     #[test]
@@ -485,5 +605,160 @@ mod tests {
         assert_ne!(other, Oid::zero());
 
         assert!(state.graph.refs.labels(other).is_empty());
+    }
+
+    /// 詳細を展開し、届いた状態にする。`update` を通すので `viewport` も本番と同じ。
+    fn expanded_with(summaries: &[&str], detail: mewgit_core::git_read::CommitDetail) -> AppState {
+        let mut state = state_with_commits(summaries);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        // 展開でグラフが縮む。ランタイムなら `Msg::Layout` が入れる値（01）。
+        state.graph.viewport = graph_rows(&state);
+        let _ = update(
+            &mut state,
+            Msg::CommitDetailLoaded {
+                oid: detail.oid,
+                result: Box::new(Ok(detail)),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn expanding_takes_rows_away_from_the_graph() {
+        let mut state = state_with_commits(&["first"]);
+        let collapsed = graph_rows(&state);
+
+        state.graph.expanded = true;
+        let expanded = graph_rows(&state);
+
+        assert!(
+            expanded < collapsed,
+            "詳細を出しても行数が減っていません: {collapsed} -> {expanded}"
+        );
+        assert_eq!(collapsed - expanded, DETAIL_ROWS as usize);
+    }
+
+    #[test]
+    fn the_detail_shows_the_message_signatures_and_parents() {
+        let mut detail = fake_detail(0, "subject\n\nbody line");
+        detail.parents = vec![fake_oid(1)];
+        let state = expanded_with(&["subject"], detail);
+
+        let lines = draw(&state, TermSize::default());
+        let text = lines.join("\n");
+
+        assert!(text.contains("subject"), "{text}");
+        assert!(text.contains("body line"), "{text}");
+        assert!(text.contains("Author: mewgit test"), "{text}");
+        assert!(text.contains("Commit: mewgit test"), "{text}");
+        // 日時はコミットのタイムゾーンで出す（`fake_detail` は epoch の +0000）。
+        assert!(text.contains("1970-01-01 00:00:00 +0000"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "Parent: {}",
+                &fake_oid(1).to_string()[..SHORT_OID]
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_graph_rows_are_still_drawn_under_the_detail() {
+        let state = expanded_with(&["first", "second"], fake_detail(0, "first"));
+
+        let lines = draw(&state, TermSize::default());
+
+        assert!(lines[2].contains("first"), "{:?}", lines[2]);
+        assert!(lines[3].contains("second"), "{:?}", lines[3]);
+    }
+
+    #[test]
+    fn a_detail_for_another_commit_says_it_is_loading() {
+        // カーソルを動かした直後は、まだ前のコミットの詳細しか無い。
+        let mut state = expanded_with(&["first", "second"], fake_detail(0, "first"));
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        assert!(state.jobs.is_running(JobKind::LoadCommitDetail));
+
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(text.contains("読み込み中"), "{text}");
+        // 前のコミットの本文を出したままにしない。
+        assert!(!text.contains("Author: mewgit test"), "{text}");
+    }
+
+    #[test]
+    fn a_detail_that_failed_says_so_instead_of_loading() {
+        let mut state = expanded_with(&["first", "second"], fake_detail(0, "first"));
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let oid = state.graph.cursor_commit().unwrap().oid;
+        let _ = update(
+            &mut state,
+            Msg::CommitDetailLoaded {
+                oid,
+                result: Box::new(Err(GitReadError::NonUtf8Head)),
+            },
+        );
+
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(text.contains("詳細を読み込めませんでした"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_graph_uses_the_whole_pane_even_when_expanded() {
+        // 行が 1 つも無ければ詳細に出すものも無い。描く高さと `graph_rows` が
+        // 返す行数は、この場合も一致していなければならない。
+        let mut state = state_with_commits(&[]);
+        state.graph.expanded = true;
+
+        let lines = draw(&state, TermSize::default());
+
+        assert!(lines[2].contains("コミットがありません"), "{:?}", lines[2]);
+        assert!(!lines.join("\n").contains("読み込み中"));
+        // 描く高さと `graph_rows` が返す行数は、この場合も一致していること。
+        let expanded = graph_rows(&state);
+        state.graph.expanded = false;
+        assert_eq!(expanded, graph_rows(&state));
+    }
+
+    #[test]
+    fn a_detail_that_would_be_only_a_border_is_not_opened() {
+        // 1 行しか取れないと区切り線で埋まる。グラフの行を 1 つ失って何も出ない
+        // という状態を作らない。
+        let mut state = state_with_commits(&["first"]);
+
+        for height in 3..24u16 {
+            state.term = TermSize { width: 80, height };
+            state.graph.expanded = false;
+            let collapsed = graph_rows(&state);
+            state.graph.expanded = true;
+            let expanded = graph_rows(&state);
+
+            let detail = collapsed - expanded;
+            assert!(
+                detail == 0 || detail >= MIN_DETAIL_ROWS as usize,
+                "height {height}: 詳細に {detail} 行しか取れていません"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_pane_keeps_the_graph_visible() {
+        // 端末を縮めても、詳細だけが残ってグラフが消えることはない。詳細に割けるのは
+        // グラフに `MIN_GRAPH_ROWS` 行を残せる範囲だけで、それも取れなければ出さない。
+        let mut state = state_with_commits(&["first"]);
+
+        for height in 3..16u16 {
+            state.term = TermSize { width: 80, height };
+            state.graph.expanded = false;
+            let collapsed = graph_rows(&state);
+            state.graph.expanded = true;
+            let expanded = graph_rows(&state);
+
+            assert!(
+                expanded >= collapsed.min(MIN_GRAPH_ROWS as usize),
+                "height {height}: 展開すると {collapsed} 行が {expanded} 行になります"
+            );
+        }
     }
 }

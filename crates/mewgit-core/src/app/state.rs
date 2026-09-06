@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use crate::auth::{AccountState, GhLogin, RepoTarget};
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
-    Branch, Commit, DiffTarget, FileDiff, HeadInfo, InProgressOp, RefIndex, Remote, StashEntry,
-    WorktreeSection, WorktreeSnapshot,
+    Branch, Commit, CommitDetail, DiffTarget, FileDiff, HeadInfo, InProgressOp, RefIndex, Remote,
+    StashEntry, WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{Check, PullRequest};
 use crate::graph::{GraphRow, LaneState};
@@ -172,16 +172,43 @@ pub struct GraphState {
     /// 画面最上部に出す行の添字。カーソルだけからは決まらない（カーソルを上に
     /// 動かしたとき、見えているうちは view を動かさない）ので状態として持つ。
     pub scroll: usize,
-    /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Resize`] で運んでくる
-    /// （`crate::app::Msg::Resize`）。core はヘッダや枠の高さを知らない。
+    /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Layout`] で運んでくる
+    /// （`crate::app::Msg::Layout`）。core はヘッダや枠の高さを知らない。
     pub viewport: usize,
     /// 選択コミットの詳細を展開しているか。
     pub expanded: bool,
+    /// 遅延取得した詳細（02）。どのコミットのものかは `detail.oid` で判る。
+    /// カーソルの指すコミットと食い違っていれば、まだ届いていないか失敗したという
+    /// こと。「読み込み中」のフラグを別に持たない（01 の「コミット詳細の遅延取得」）。
+    pub detail: Option<CommitDetail>,
     /// これ以上読むコミットが無い。
     pub loaded_all: bool,
+    /// 直近のログ読み込みが失敗した。
+    ///
+    /// 立っているあいだ追加読み込みを出さない。失敗すると `lines` を捨てるので、
+    /// 「残りが 1 画面以下」の条件が必ず真になり、以後のレイアウト変化のたびに
+    /// 読み直しを出してしまう。次の読み込みはユーザーの操作から始める
+    /// （01 の「追加ページの読み込み」）。
+    pub load_failed: bool,
 }
 
 impl GraphState {
+    /// カーソルが指しているコミット。行が無ければ `None`。
+    pub fn cursor_commit(&self) -> Option<&Commit> {
+        self.lines.get(self.cursor).map(|line| &line.commit)
+    }
+
+    /// カーソルの指すコミットの詳細。別のコミットのものしか無ければ `None`。
+    ///
+    /// 「読み込み中」のフラグを持たず oid の一致で鮮度を見る（01 の「コミット詳細の
+    /// 遅延取得」）。その判定をここに置くのは、`update`（次に何を読むか）と
+    /// `ui`（何を描くか）が同じものを使うため。両方に書くと、片方だけ直したときに
+    /// 古い詳細を出したままになってもコンパイルは通る。
+    pub fn fresh_detail(&self) -> Option<&CommitDetail> {
+        let oid = self.cursor_commit()?.oid;
+        self.detail.as_ref().filter(|detail| detail.oid == oid)
+    }
+
     /// カーソルを `delta` 行動かす。端では止まる。
     pub fn move_cursor(&mut self, delta: isize) {
         if self.lines.is_empty() {
@@ -314,11 +341,14 @@ pub struct Job {
 
 /// タスクの種類。`Cmd` の変種と 1 対 1 で、対応は [`Cmd::job_kind`] が持つ。
 ///
-/// 粒度は種別単位なので、別ファイルの `LoadDiff` 同士は同一視される。対象まで含めた
-/// 同一性が要るかは M1 で `LoadDiff` を実装するときに判断する。
+/// **粒度は種別単位で、対象（Oid やパス）は持たない。** `LoadCommitDetail` では、
+/// カーソルが動いたぶんの追いつきを `Msg::CommitDetailLoaded` の側で行うことにした
+/// （01 の「コミット詳細の遅延取得」）。Oid まで含めて同一性を取ると、スクロール中の
+/// 全コミットぶんの要求が同時に走る。`LoadDiff` も同じ方針で M2 に持ち越す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
     LoadLog,
+    LoadCommitDetail,
     LoadRepoInfo,
     LoadStatus,
     LoadDiff,
@@ -337,6 +367,7 @@ impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
             JobKind::LoadLog => "log",
+            JobKind::LoadCommitDetail => "commit",
             JobKind::LoadRepoInfo => "repo",
             JobKind::LoadStatus => "status",
             JobKind::LoadDiff => "diff",

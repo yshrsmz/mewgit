@@ -124,6 +124,7 @@ pub struct GraphState {
     pub cursor: usize,
     pub scroll: usize,          // 画面最上部に出す行
     pub expanded: bool,
+    pub detail: Option<CommitDetail>,  // 遅延取得した選択コミットの詳細（02）
     pub loaded_all: bool,
 }
 
@@ -138,16 +139,26 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 ときにカーソルが最下行に貼り付いたまま中身だけが流れる。更新は
 `GraphState::move_cursor(delta)` / `scroll_into_view()`。
 
-`viewport` は `ui` がレイアウトから出して `Msg::Resize` で運んでくる（07 の
-`ui::graph_rows`）。core にヘッダや枠の高さを持たせない。持たせると 07 の
+`viewport` は `ui` がレイアウトから出して `Msg::Layout` で運んでくる（07 の
+`ui::graph_rows`）。詳細を出すかの判定（`expanded` かつ行がある）は `ui` 側の
+1 つの関数にまとめ、行数を出すときと描くときで同じものを使う。core にヘッダや枠の高さを持たせない。持たせると 07 の
 レイアウトを変えたときに黙ってずれるうえ、`ui` の描画と `app` の計算のどちらが
 正しいかを決める場所が無くなる。
+
+**`Msg::Resize`（端末サイズ）と `Msg::Layout`（グラフの行数）は別の `Msg`。**
+行数が変わる原因は端末サイズだけではなく、`expanded` の切り替えでも変わる
+（詳細を出すぶんグラフが縮む）。1 つにまとめると、`Enter` を押しただけなのに
+「端末サイズが変わった」という嘘の `Msg` を流すことになる。`Layout` はランタイムが
+描画の直前に `ui::graph_rows(state)` と `viewport` を比べ、食い違ったときだけ出す。
+`ui::graph_rows` は `term` と `expanded` だけから決まる値を返すこと。詳細の中身
+（メッセージの行数など）に依存させると、詳細が届いた瞬間に行数が変わってグラフが
+跳ね、`Layout` → 追加読み込みが毎回走る。
 
 ### 追加ページの読み込み
 
 `loaded_all` が偽で、**残り行数（`lines.len() - cursor`）が 1 画面以下になったら**
 `Cmd::LoadLog { count: page_size }` を出す。判定はカーソルの移動後・ページを積んだ
-直後・`Msg::Resize` の 3 箇所。走っているかは見ない。同種のジョブは
+直後・`Msg::Layout` の 3 箇所。走っているかは見ない。同種のジョブは
 `AppState::issue` が落とすので、2 箇所で同じ判断をしない。
 
 カーソルを動かすキーは 1 つの関数（`scrolled`）を通す。腕ごとに書くと、あとから
@@ -161,6 +172,12 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 戻すので、そこから再読込を出すと、リーダーが壊れているあいだ「失敗 → 再読込 → 失敗」
 を回し続ける。次の読み込みはユーザーの操作から始める。
 
+**「出さない」は 1 回きりの分岐では足りず、`GraphState.load_failed` として状態に持つ。**
+行を捨てた直後は「残りが 1 画面以下」が必ず真になるので、そのあとに来るどの
+`Msg::Layout` も読み直しを出してしまう。失敗そのものがレイアウトを変えるので
+（行が消えると詳細の領域も消える）、失敗が自分で読み直しを引く形になる。
+フラグを落とすのはカーソルを動かしたとき（`scrolled`）と、読み込みが成功したとき。
+
 `update` が返した `Cmd` は必ず `runtime` が dispatch する。捨てると `issue` が
 `JobTracker` に登録したまま実行されず、以後その種類の `Cmd` が黙って落ち続ける。
 `Cmd` に `#[must_use]` を付けてあるので、捨てるとコンパイルが通らない（CI は
@@ -173,6 +190,38 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 
 `LoadRepoInfo` と `LoadLog` はどちらも `tokio::spawn` で投げるので、リーダースレッドに
 どちらの要求が先に届くかは決まらない。順序に頼った設計にしない。
+
+### コミット詳細の遅延取得
+
+`Enter` で `expanded` を切り替える。真にしたときと、真のままカーソルが動いたときに
+`Cmd::LoadCommitDetail(oid)` を出す。取れた値は `GraphState.detail` に入れる。
+
+- **`detail` は `CommitDetail` をそのまま持ち、どのコミットのものかは `detail.oid` で判る。**
+  カーソルの指すコミットと食い違っていれば、まだ届いていない（あるいは失敗した）という
+  ことなので、`ui` はそこで読み込み中かエラーかを出し分ける（07）。「読み込み中」の
+  フラグを別に持たない
+- 既に `detail.oid` がカーソルのコミットと一致していれば出さない。閉じてもう一度開いた
+  ときに読み直さないよう、`expanded` を偽にしても `detail` は捨てない
+- **鮮度の判定は `GraphState::fresh_detail` の 1 つ。** 次に何を読むかを決める `update` と、
+  何を描くかを決める `ui` が同じものを使う。両方に書くと、片方だけ直したときに古い詳細を
+  出したままになってもコンパイルは通る
+- `JobKind::LoadCommitDetail` は対象の Oid を持たない。`JobTracker` の粒度は種別のまま
+  にして、**カーソルが動いたぶんの追いつきは `CommitDetailLoaded` の側で行う**。届いた
+  詳細の oid がカーソルのコミットと違えば、そこでもう 1 回 `Cmd::LoadCommitDetail` を出す。
+  素早くスクロールしても、飛んでいる要求は常に 1 つで、最後に止まったコミットに収束する。
+  Oid を `JobKind` に持たせると、スクロール中の全コミットぶんの要求が同時に走る
+- **届いた詳細は、いま見ているコミットのものだけを採る。** 飛んでいる要求は 1 つでも、
+  戻ってきたときにカーソルが別のところにいることはある（動いて戻ってきたときなど）。
+  無条件に上書きすると、正しいものが出ている画面が「読み込み中」に戻り、同じものを
+  もう 1 回読みに行く
+- **`Err` からは、失敗したのがいま見ているコミットなら再発行しない。** 通知を出して
+  ジョブを畳むだけにする。出すと、リポジトリが壊れているあいだ「失敗 → 再読込 → 失敗」を
+  回し続ける（`LoadLog` と同じ）。次の読み込みはユーザーの操作から始める。逆に、
+  失敗したのが別のコミットなら、いま見ているものはまだ一度も試していないので頼む。
+  ここを一律に止めると「一度も試していないコミット」が
+  「詳細を読み込めませんでした」のまま残る
+- ログの読み込みが失敗して積んだ行を捨てるときは `detail` も捨てる。`lines` に無い
+  コミットの詳細を残さない
 
 ## 実行中ジョブ
 
@@ -238,9 +287,10 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 
 ```rust
 pub enum Msg {
-    Key(Key), Resize { term: TermSize, graph_rows: usize }, Tick,
+    Key(Key), Resize { term: TermSize }, Layout { graph_rows: usize }, Tick,
     // git_read
     LogLoaded(Result<LogPage, GitReadError>),
+    CommitDetailLoaded { oid: Oid, result: Box<Result<CommitDetail, GitReadError>> },
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(WorktreeSnapshot),
     DiffLoaded { target: DiffTarget, files: Vec<FileDiff> },
@@ -273,9 +323,14 @@ pub enum Msg {
 二重に表現し、`update` に手書きのマッピングが生える。`AuthError` は `gh` / `ssh` 実行の
 内部エラーに留め、`resolve` の中で `DegradedReason` に畳む。
 
-`ExecFinished` と `PrLoaded` は payload を `Box` に入れる。入れないと `Msg` が 336 バイトに
-なり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。
-2 つ Box するだけで 96 バイトになる（実測）。
+`CommitDetailLoaded` も `Result` を運ぶ。`LogLoaded` と同じで、失敗の通り道が無いと
+`JobKind::LoadCommitDetail` が走ったまま残り、以後の要求が黙って落ちる。**要求した Oid を
+一緒に運ぶ。** `Err` のときにどのコミットが失敗したのかを知る手掛かりがこれしかなく、
+無いと「別のコミットの失敗」と「いま見ているコミットの失敗」を区別できない。
+
+`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` は payload を `Box` に入れる。入れないと `Msg` が
+数百バイトになり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。
+これらを Box すると 96 バイトに収まる。上限は `msg.rs` のテスト（128 バイト）で見張る。
 
 ## Cmd
 
@@ -283,6 +338,7 @@ pub enum Msg {
 pub enum Cmd {
     None, Batch(Vec<Cmd>),
     LoadLog { count: usize },           // 読む位置は git_read の LogSession が持つ（02）
+    LoadCommitDetail(Oid),             // 選択コミットのメッセージ全文など（02）
     LoadStatus, LoadDiff(DiffTarget),
     LoadRepoInfo,                      // remotes / head / refs。起動時と ref 変更後（M3）
     Exec(GitOp),                       // git CLI 実行（03 参照）
@@ -327,6 +383,8 @@ pub struct Runtime { reader: ReaderHandle, tx: mpsc::UnboundedSender<Msg> }
 let (runtime, mut msgs) = Runtime::new(reader);
 runtime.dispatch(&mut state, app::init(&mut state));
 loop {
+    // レイアウトの変化（リサイズ・詳細の展開）を core に伝える唯一の経路。
+    runtime.dispatch(&mut state, layout_cmd(&mut state));
     terminal.draw(|f| ui::render(f, &state))?;
     let msg = tokio::select! {
         Some(ev) = events.next() => match event_to_msg(ev?) { Some(m) => m, None => continue },
@@ -346,7 +404,9 @@ loop {
 最初の 1 フレームが出るまで画面が真っ黒になる。
 
 初期の端末サイズも `run` がループの前に `Msg::Resize` として `update` に流す。
-`AppState` を直接書かないことで、`viewport` の計算経路を 1 本に保つ。
+`AppState` を直接書かないことで、`viewport` の計算経路を 1 本に保つ。グラフの行数は
+そのあとループの先頭の `Msg::Layout` が入れる（`terminal.size()` が失敗しても、
+既定のサイズぶんの `viewport` は入る）。
 
 `run` は `Backend` とイベントストリームをジェネリックに取る。`TestBackend` と
 `futures::stream::iter` を渡してループ全体をテストできるようにするため。テストを
@@ -369,6 +429,9 @@ loop {
   `Msg` にして `update` に戻す。状態遷移の入口を `update` 1 つに保つため
 - 初期の端末サイズは `Terminal::size()` で取り、`Msg::Resize` にして `update` に流す。
   起動時に `Resize` イベントは飛んでこない
+- **描画の直前に毎回 `ui::graph_rows(state)` と `state.graph.viewport` を比べ、違えば
+  `Msg::Layout` を流す。** これがレイアウトの変化を core に伝える唯一の経路になる。
+  端末のリサイズも `Enter` の展開も同じところを通るので、片方だけ更新を忘れることがない
 - Git CLI 実行中も入力を受け付けるが、書き込み系 `GitOp` は同時に 1 つのみ（キュー）
 - `Tick` は 250ms。進行中ジョブのスピナー更新と、外部変更検知（`.git/HEAD` の mtime 監視）に使う
 

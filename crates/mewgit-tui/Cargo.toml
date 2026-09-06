@@ -20,7 +20,7 @@ tracing-subscriber.workspace = true
 # `unstable-rendered-line-info` は `Paragraph::line_count`（折り返し後の行数）を
 # 開ける。理由は 07 の「モーダル」。
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
 
 [dev-dependencies]

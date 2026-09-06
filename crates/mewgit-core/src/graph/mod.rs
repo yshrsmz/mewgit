@@ -2,17 +2,17 @@
 //!
 //! コミット列（topo-order）からレーン割り当てと罫線セルを生成する。文字と色は持たず、
 //! `ui` が `Cell` を文字に写す（ASCII フォールバックも `ui` 側）。
-//!
-//! 現時点では `app` の `AppState` が参照する型だけを定義している。レーン割り当ての
-//! アルゴリズムは M1 で実装する。
 
-use crate::git_read::{Commit, Oid};
+mod lane;
+
+use crate::git_read::Oid;
+
+pub use lane::LaneState;
 
 /// レーンの色。実際の色は `ui` が `ColorId % palette.len()` で写す。
 ///
-/// `usize` ではなく `u16`。`Cell::Cross` が色を 2 つ持つため、`usize` だと `Cell` が
-/// 24 バイトになる（`u16` なら 6 バイト）。`cells` は行 × レーン数ぶん並び毎フレーム
-/// 読まれるので、ここのサイズがそのままキャッシュに効く。
+/// `usize` ではなく `u16`。`cells` は行 × レーン数ぶん並び毎フレーム読まれるので、
+/// ここのサイズがそのままキャッシュに効く。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorId(pub u16);
 
@@ -22,57 +22,92 @@ pub struct GraphRow {
     pub oid: Oid,
     /// このコミットが置かれた列。
     pub lane: usize,
-    /// 左から順の罫線セル。
+    /// 左から順の罫線セル。末尾の空セルは含まない。
     pub cells: Vec<Cell>,
     pub color: ColorId,
 }
 
-impl GraphRow {
-    /// レーン計算をまだ通していない行。`cells` が空なので `ui` は罫線を描かない。
-    fn unlaned(oid: Oid) -> Self {
-        Self {
-            oid,
-            lane: 0,
-            cells: Vec::new(),
-            color: ColorId(0),
-        }
+/// 罫線 1 マス。
+///
+/// 縦と横を別に持つ。「右へ分岐」のような向きの名前だと `╮`（上が無い）と `┤`
+/// （上から続く）を区別できず、`ui` が隣の行を覗いて文字を決めることになるため
+/// （06 の「なぜ『縦 × 横』なのか」）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Cell {
+    pub vertical: Vertical,
+    pub horizontal: Horizontal,
+}
+
+impl Cell {
+    /// 線が 1 本も通っていない。`ui` は空白を描く。
+    pub fn is_empty(self) -> bool {
+        self.vertical == Vertical::None && self.horizontal == Horizontal::None
     }
 }
 
-/// 罫線 1 マス。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Cell {
-    Empty,
-    /// `│`
-    Vertical(ColorId),
-    /// `●` / merge は `○`
-    Commit(ColorId),
-    /// `├` `╮` など右へ分岐
-    BranchOut(ColorId),
-    /// `╯` `╰` など左へ合流
-    MergeIn(ColorId),
-    /// `─`
-    Horizontal(ColorId),
-    /// `┼`。縦と横で色が違う。
-    Cross(ColorId, ColorId),
+/// マスの縦成分。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Vertical {
+    #[default]
+    None,
+    /// 上下に貫く（`│`）。
+    Through(ColorId),
+    /// 上から来てこの行で終わる（`╯` の縦側）。
+    Up(ColorId),
+    /// この行から下へ伸びる（`╮` の縦側）。
+    Down(ColorId),
+    /// コミット本体。`merge` が真なら親が 2 つ以上（`ui` は `○`、他は `●`）。
+    Commit { color: ColorId, merge: bool },
 }
 
-/// 各レーンが次に待つコミット。行ごとに保存し、追加ページの計算を再開できるようにする。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LaneState {
-    pub lanes: Vec<Option<Oid>>,
+/// マスの横成分。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Horizontal {
+    #[default]
+    None,
+    Left(ColorId),
+    Right(ColorId),
+    /// 左右に通り抜ける。
+    Both(ColorId),
 }
 
-impl LaneState {
-    /// 続きのコミット列にレーンを割り当て、行を返す。状態は末尾行の直後まで進む。
+impl Horizontal {
+    /// 左右の有無と色から作る。
+    fn new(left: bool, right: bool, color: ColorId) -> Self {
+        match (left, right) {
+            (true, true) => Self::Both(color),
+            (true, false) => Self::Left(color),
+            (false, true) => Self::Right(color),
+            (false, false) => Self::None,
+        }
+    }
+
+    /// 左のマスへ線が伸びている。`ui` が隣のレーンとの間を `─` で埋めるのに使う。
+    pub fn goes_left(self) -> bool {
+        matches!(self, Self::Left(_) | Self::Both(_))
+    }
+
+    /// 右のマスへ線が伸びている。
+    pub fn goes_right(self) -> bool {
+        matches!(self, Self::Right(_) | Self::Both(_))
+    }
+
+    fn color(self) -> Option<ColorId> {
+        match self {
+            Self::None => None,
+            Self::Left(color) | Self::Right(color) | Self::Both(color) => Some(color),
+        }
+    }
+
+    /// 別の線をこのマスに重ねる。
     ///
-    /// **中身はまだ実装していない。** レーン割り当てを入れるまでは、罫線の無い行を
-    /// コミットと同じ数だけ返す。`app` は結果を並べるだけなので、アルゴリズムを
-    /// 入れるときに触るのは `graph` だけで済む。
-    pub fn extend(&mut self, commits: &[Commit]) -> Vec<GraphRow> {
-        commits
-            .iter()
-            .map(|commit| GraphRow::unlaned(commit.oid))
-            .collect()
+    /// 色は先に置いたほうを残す。1 マスに出せる色は 1 つで、`graph` は近い線から
+    /// 順に置くので、残るのは `c.lane` に近いほうの色になる（06 の「色」）。
+    fn merged(self, other: Self) -> Self {
+        Self::new(
+            self.goes_left() || other.goes_left(),
+            self.goes_right() || other.goes_right(),
+            self.color().or_else(|| other.color()).unwrap_or(ColorId(0)),
+        )
     }
 }

@@ -79,21 +79,48 @@ pub fn wrapped<'a>(text: impl Into<Text<'a>>, width: u16) -> (Paragraph<'a>, u16
     (paragraph, rows)
 }
 
-/// 一覧のうち描く行の範囲。カーソルが窓に入るまで下へずらす。
+/// 一覧のうち描く行の範囲。`must_show` が窓に入るまでずらす。
+///
+/// **カーソル行 1 行ではなく「必ず見せたい塊」を受ける。** カーソルが 1 行を指す
+/// ペイン（Worktree）は `cursor..cursor + 1` を渡し、塊を指すペイン（Diff のハンク）は
+/// 見出しから本文の末尾までを渡す。カーソル行だけを見る形にすると、ハンクの見出しが
+/// ちょうど窓の下端に来て**選んだハンクの本文が 1 行も見えない**（07 の「Diff ペイン」）。
+///
+/// 塊が窓より高いときは先頭を優先して残りを切る。
 ///
 /// **スクロール位置を状態に持たない。** グラフ（01 の `scroll`）と違ってカーソルが
 /// 下端に貼り付く癖が残るが、そのために `Msg::Layout` にフィールドを足すのは M6
 /// （狭いレイアウト）と一緒にする（07）。
-///
-/// Worktree ペインと Diff ペインで同じものを使う。行の組み立てが別でも「どこを切り出すか」
-/// の規則は 1 つ。
-pub fn window(len: usize, cursor: usize, height: usize) -> Range<usize> {
+pub fn window(len: usize, must_show: Range<usize>, height: usize) -> Range<usize> {
     if height == 0 {
         return 0..0;
     }
-    // `cursor` は必ず行の中にあるので、上の端だけ見れば足りる。
-    let start = cursor.saturating_sub(height - 1);
+    // 塊の末尾が入る位置まで下げ、塊の先頭より下へは行かない。
+    let start = must_show
+        .start
+        .min(must_show.end.saturating_sub(height))
+        .min(len);
     start..(start + height).min(len)
+}
+
+/// `must_show` が入る窓を切り出して描く。
+///
+/// 行の組み立てはペインごとに違うが、**切り出して描くところまでが 1 つ**。
+/// [`window`] だけを共有すると、その戻り値の使い方が各ペインに写る。
+///
+/// **折り返さない**（`Wrap` を付けない）。diff は桁の揃いが意味を持ち、一覧のパスも
+/// 折り返すと行とカーソルの対応が崩れる。
+pub fn render_rows(
+    frame: &mut Frame,
+    area: Rect,
+    mut lines: Vec<Line<'_>>,
+    must_show: Range<usize>,
+) {
+    let window = window(lines.len(), must_show, area.height as usize);
+    frame.render_widget(
+        Paragraph::new(lines.drain(window).collect::<Vec<_>>()),
+        area,
+    );
 }
 
 /// ファイルの表示名。rename は元の名前も出す。
@@ -203,16 +230,26 @@ mod tests {
     }
 
     #[test]
-    fn the_window_follows_the_cursor_past_the_bottom() {
-        // 窓に入っているあいだは先頭から。入らなくなったらカーソルが見えるまでずらす。
-        assert_eq!(window(10, 0, 4), 0..4);
-        assert_eq!(window(10, 3, 4), 0..4);
-        assert_eq!(window(10, 4, 4), 1..5);
-        assert_eq!(window(10, 9, 4), 6..10);
+    fn the_window_follows_a_single_row_past_the_bottom() {
+        // 窓に入っているあいだは先頭から。入らなくなったら見えるまでずらす。
+        assert_eq!(window(10, 0..1, 4), 0..4);
+        assert_eq!(window(10, 3..4, 4), 0..4);
+        assert_eq!(window(10, 4..5, 4), 1..5);
+        assert_eq!(window(10, 9..10, 4), 6..10);
         // 行が窓より少ないときは全部出す。
-        assert_eq!(window(2, 1, 4), 0..2);
+        assert_eq!(window(2, 1..2, 4), 0..2);
         // 高さ 0 でも破綻しない（リサイズ中に起きる）。
-        assert_eq!(window(10, 5, 0), 0..0);
+        assert_eq!(window(10, 5..6, 0), 0..0);
+    }
+
+    #[test]
+    fn the_window_shows_the_whole_block_not_just_its_first_row() {
+        // ハンクの見出しだけを窓に入れると、選んだハンクの本文が 1 行も見えない。
+        // 塊の末尾まで入る位置までずらす。
+        assert_eq!(window(20, 5..9, 4), 5..9);
+        assert_eq!(window(20, 8..12, 4), 8..12);
+        // 塊が窓より高いときは先頭を優先して残りを切る。
+        assert_eq!(window(20, 8..18, 4), 8..12);
     }
 
     /// ペインを描く領域の左上。座標は実際のレイアウトから出す。手で書くと、割り方を

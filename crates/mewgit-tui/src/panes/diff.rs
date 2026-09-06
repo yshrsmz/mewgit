@@ -3,7 +3,9 @@
 //! 左の領域に Graph と差し替えで描く。1 行はハンクの見出し（`@@ ...`）か、
 //! ` ` / `-` / `+` で始まる本文の行。
 
-use mewgit_core::app::{AppState, DiffView, JobKind, Pane};
+use std::ops::Range;
+
+use mewgit_core::app::{AppState, DiffState, DiffView, Pane};
 use mewgit_core::git_read::{DiffTarget, HunkLine, LineOrigin};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -16,64 +18,68 @@ use crate::ui::{self, theme};
 /// タブ幅。`\t` をここまで開く。
 const TAB_WIDTH: usize = 8;
 
+/// タブを開くのに使う空白。[`TAB_WIDTH`] 桁ぶんを切り出して使う。
+const SPACES: &str = "        ";
+
 /// Diff ペインを描く。
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let block = ui::pane_block(title(state), state.focus == Pane::Diff);
+    // **対象は 1 フレームに 1 回だけ導く。** `wanted_diff` は `PathBuf` を作るので、
+    // タイトル・鮮度・文言でそれぞれ呼ぶと 1 フレームに 3 個確保することになる。
+    let wanted = state.wanted_diff();
+    // **`state.diff.view` を直に見ない。** 別のファイルの diff が残っていることがある
+    // （01 の「diff の遅延取得」）。
+    let view = state.diff.fresh_view(wanted.as_ref());
+
+    let block = ui::pane_block(title(view, wanted.as_ref()), state.focus == Pane::Diff);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let Some(view) = &state.diff.view else {
-        frame.render_widget(Paragraph::new(pending_message(state)), inner);
+    let Some(view) = view else {
+        let message = pending_message(&state.diff, wanted.as_ref());
+        frame.render_widget(Paragraph::new(message), inner);
         return;
     };
 
-    let (mut lines, cursor) = lines(view);
+    let (lines, cursor) = lines(view);
     if lines.is_empty() {
         frame.render_widget(Paragraph::new(no_hunks(view)), inner);
         return;
     }
 
-    let window = ui::window(lines.len(), cursor, inner.height as usize);
-    // **折り返さない**（`Wrap` を付けない）。diff は桁の揃いが意味を持つので、
-    // 折り返すとどの行がどの行に対応するのか読めなくなる（07）。
-    frame.render_widget(
-        Paragraph::new(lines.drain(window).collect::<Vec<_>>()),
-        inner,
-    );
+    ui::render_rows(frame, inner, lines, cursor);
 }
 
 /// 枠のタイトル。**対象を必ず出す**（07）。
 ///
 /// 左が Graph から差し替わっているので、出さないと何の diff かを画面から辿れない。
-/// まだ届いていないあいだも、選んでいるファイルの名前は `wanted_diff` から判る。
-fn title(state: &AppState) -> String {
-    let Some(view) = &state.diff.view else {
-        return match state.wanted_diff().as_ref().and_then(DiffTarget::path) {
-            Some(path) => format!("Diff: {}", path.display()),
-            None => "Diff".to_string(),
-        };
-    };
-
-    match view.files.as_slice() {
-        [file] => format!(
+/// 届いていれば rename の旧い名前まで出せる。まだなら選んでいるパスだけ出す。
+fn title(view: Option<&DiffView>, wanted: Option<&DiffTarget>) -> String {
+    match view.map(|view| view.files.as_slice()) {
+        Some([file]) => format!(
             "Diff: {}",
             ui::path_label(&file.path, file.old_path.as_deref())
         ),
-        files => format!("Diff ({} files)", files.len()),
+        Some(files) if !files.is_empty() => format!("Diff ({} files)", files.len()),
+        _ => match wanted.and_then(DiffTarget::path) {
+            Some(path) => format!("Diff: {}", path.display()),
+            None => "Diff".to_string(),
+        },
     }
 }
 
 /// diff がまだ無いときの文言。
 ///
-/// 「読みに行っていない」と「読んで失敗した」を混ぜない。conflicted の行を選んでいる
-/// ときは `wanted_diff` が `None` を返すので、そもそも要求を出していない。
-fn pending_message(state: &AppState) -> &'static str {
-    if state.jobs.is_running(JobKind::LoadDiff) {
-        "読み込み中…"
-    } else if state.wanted_diff().is_none() {
+/// **「読みに行っていない」「失敗した」「待っている」を消去法で導かない。**
+/// conflicted の行を選んでいるときは `wanted_diff` が `None` を返し、失敗したことは
+/// `DiffState.failed` が事実として持っている。`is_running` の否定から導くと、
+/// `Cmd` の発行経路を変えたときに片方だけ直しても通ってしまう。
+fn pending_message(diff: &DiffState, wanted: Option<&DiffTarget>) -> &'static str {
+    if wanted.is_none() {
         "差分を出せる行が選ばれていません"
-    } else {
+    } else if diff.has_failed(wanted) {
         "差分を読み込めませんでした"
+    } else {
+        "読み込み中…"
     }
 }
 
@@ -91,16 +97,19 @@ fn no_hunks(view: &DiffView) -> &'static str {
     }
 }
 
-/// 描く行と、カーソルの指すハンクの見出しが何行目かを返す。
+/// 描く行と、**カーソルの指すハンクが占める行の範囲**を返す。
 ///
 /// 行番号を別の関数で数え直さないのは Worktree ペインと同じ理由で、見出しを何行入れるか
 /// の規則が 2 本になると、反転する行と窓の基準行が静かにずれる。
 ///
+/// **返すのは見出しの行番号ではなくハンク全体の範囲。** 見出し 1 行だけを窓に入れる
+/// 形にすると、それが窓の下端に来て本文が 1 行も見えない（07 の「Diff ペイン」）。
+///
 /// **ファイルの見出しは 2 ファイル以上のときだけ。** 1 ファイルなら枠のタイトルに
 /// 出ているので、同じ名前を 2 度並べても行を消費するだけになる。
-fn lines(view: &DiffView) -> (Vec<Line<'static>>, usize) {
+fn lines(view: &DiffView) -> (Vec<Line<'_>>, Range<usize>) {
     let mut lines = Vec::new();
-    let mut cursor = 0;
+    let mut cursor = 0..0;
     let many = view.files.len() > 1;
 
     for (file_index, file) in view.files.iter().enumerate() {
@@ -110,14 +119,20 @@ fn lines(view: &DiffView) -> (Vec<Line<'static>>, usize) {
         }
 
         for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-            let header = Line::from(Span::styled(hunk.header.clone(), theme::muted()));
-            if view.cursor.file == file_index && view.cursor.hunk == hunk_index {
-                cursor = lines.len();
-                lines.push(header.style(theme::selected()));
+            let start = lines.len();
+            let header = Line::from(Span::styled(hunk.header.as_str(), theme::muted()));
+            let selected = view.cursor.file == file_index && view.cursor.hunk == hunk_index;
+
+            lines.push(if selected {
+                header.style(theme::selected())
             } else {
-                lines.push(header);
-            }
+                header
+            });
             lines.extend(hunk.lines.iter().map(hunk_line));
+
+            if selected {
+                cursor = start..lines.len();
+            }
         }
     }
 
@@ -125,22 +140,23 @@ fn lines(view: &DiffView) -> (Vec<Line<'static>>, usize) {
 }
 
 /// ハンクの 1 行。先頭に種別の記号を付ける。
-fn hunk_line(line: &HunkLine) -> Line<'static> {
+/// 中身は所有した `String` なので、どの寿命の `Line` としても返せる。`'static` に
+/// 固定すると、ヘッダを借用している `Vec<Line<'_>>` に `extend` できない
+/// （`&mut Vec<T>` は `T` に対して不変）。
+fn hunk_line<'a>(line: &HunkLine) -> Line<'a> {
     let (mark, style) = match line.origin {
         LineOrigin::Addition | LineOrigin::AdditionNoEol => ('+', theme::added()),
         LineOrigin::Deletion | LineOrigin::DeletionNoEol => ('-', theme::removed()),
         LineOrigin::Context | LineOrigin::ContextNoEol => (' ', Style::default()),
     };
-    Line::from(Span::styled(
-        format!("{mark}{}", text(&line.content)),
-        style,
-    ))
+    Line::from(Span::styled(marked(mark, &line.content), style))
 }
 
-/// 画面に出す本文。
+/// 記号 1 文字と、その後ろに続く本文。
 ///
 /// `content` は `Vec<u8>` なので**ここで lossy にする**（02 の「ハンクの持ち方」）。
-/// パッチに戻す入力は `content` のままで、こちらは表示専用。
+/// パッチに戻す入力は `content` のままで、こちらは表示専用。記号と本文を 1 つの
+/// `String` に組むのは、`format!` でもう一度丸ごとコピーしないため。
 ///
 /// `\t` は [`TAB_WIDTH`] 桁のタブストップまで空白に開く。1 個の空白に潰すと
 /// インデントが崩れて、上下の行の対応が読めなくなる。桁は**本文の先頭から**数える。
@@ -149,15 +165,16 @@ fn hunk_line(line: &HunkLine) -> Line<'static> {
 /// （タブはほぼインデントに使われるので、実際には手前は空白だけになる）。
 ///
 /// `\r` は落とす。落とさないと CRLF のファイルで制御文字が画面に出る。
-fn text(content: &[u8]) -> String {
-    let mut out = String::new();
-    let mut column = 0;
+fn marked(mark: char, content: &[u8]) -> String {
+    let mut out = String::with_capacity(content.len() + 1);
+    out.push(mark);
 
+    let mut column = 0;
     for ch in String::from_utf8_lossy(content).chars() {
         match ch {
             '\t' => {
                 let pad = TAB_WIDTH - column % TAB_WIDTH;
-                out.push_str(&" ".repeat(pad));
+                out.push_str(&SPACES[..pad]);
                 column += pad;
             }
             '\r' => {}
@@ -176,8 +193,8 @@ mod tests {
     use super::*;
     use crate::test_util::{draw, row_of, state_at, terminal_with};
     use mewgit_core::app::{update, Cmd, Key, KeyCode, Msg, TermSize};
-    use mewgit_core::git_read::{FileDiff, FileStatus, Hunk, WorktreeSnapshot};
-    use mewgit_core::test_util::fake_entry;
+    use mewgit_core::git_read::{FileDiff, FileStatus, WorktreeSnapshot};
+    use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk};
     use ratatui::style::Modifier;
 
     /// 既定の 80x24。左は 46 桁になるので、テストはその幅で読める内容にする。
@@ -186,34 +203,18 @@ mod tests {
         height: 24,
     };
 
-    fn line(origin: LineOrigin, content: &str) -> HunkLine {
-        HunkLine {
-            origin,
-            content: content.as_bytes().to_vec(),
+    /// `a.txt` だけが変更されたワーキングツリー。
+    fn one_file() -> WorktreeSnapshot {
+        WorktreeSnapshot {
+            unstaged: vec![fake_entry("a.txt", FileStatus::Modified)],
+            ..WorktreeSnapshot::default()
         }
     }
 
-    fn hunk(header: &str, lines: Vec<HunkLine>) -> Hunk {
-        Hunk {
-            header: header.to_string(),
-            lines,
-        }
-    }
-
-    fn file(path: &str, hunks: Vec<Hunk>) -> FileDiff {
-        FileDiff {
-            path: path.into(),
-            old_path: None,
-            status: FileStatus::Modified,
-            binary: false,
-            hunks,
-        }
-    }
-
-    /// ワーキングツリーに `a.txt` があり、Diff ペインを開いた状態。
+    /// ワーキングツリーを読み、Diff ペインを開いた状態。
     ///
-    /// `AppState` に直に書かず `Enter` を通すのは、`focus` と `wanted_diff` が
-    /// 実際の経路で揃った形を描くため。
+    /// `AppState` に直に書かず `Enter` を通すのは、`focus` と `wanted_diff` が実際の
+    /// 経路で揃った形を描くため。
     fn opened(snapshot: WorktreeSnapshot) -> AppState {
         let mut state = state_at("/repo");
         let _ = update(&mut state, Msg::StatusLoaded(Box::new(Ok(snapshot))));
@@ -222,37 +223,41 @@ mod tests {
         state
     }
 
-    /// 変更のある `a.txt` 1 つを選び、`files` が届いた状態。
-    fn state_with_diff(files: Vec<FileDiff>) -> AppState {
-        let snapshot = WorktreeSnapshot {
-            unstaged: vec![fake_entry("a.txt", FileStatus::Modified)],
-            ..WorktreeSnapshot::default()
-        };
-        let mut state = opened(snapshot);
+    /// いま選んでいる対象の diff として `files` を届ける。
+    fn deliver(state: &mut AppState, files: Vec<FileDiff>) {
         let target = state.wanted_diff().expect("対象が決まっていません");
         let _ = update(
-            &mut state,
+            state,
             Msg::DiffLoaded {
                 target,
                 result: Box::new(Ok(files)),
             },
         );
+    }
+
+    /// `a.txt` を選び、`files` が届いた状態。
+    fn state_with_diff(files: Vec<FileDiff>) -> AppState {
+        let mut state = opened(one_file());
+        deliver(&mut state, files);
         state
+    }
+
+    /// 1 ファイル 1 ハンクの diff。
+    fn one_hunk(path: &str, header: &str, lines: &[(LineOrigin, &str)]) -> Vec<FileDiff> {
+        vec![fake_file_diff(path, vec![fake_hunk(header, lines)])]
     }
 
     #[test]
     fn hunks_and_lines_are_listed_with_their_marks() {
-        let state = state_with_diff(vec![file(
+        let state = state_with_diff(one_hunk(
             "a.txt",
-            vec![hunk(
-                "@@ -1,2 +1,2 @@ fn main() {",
-                vec![
-                    line(LineOrigin::Context, "keep"),
-                    line(LineOrigin::Deletion, "old"),
-                    line(LineOrigin::Addition, "new"),
-                ],
-            )],
-        )]);
+            "@@ -1,2 +1,2 @@ fn main() {",
+            &[
+                (LineOrigin::Context, "keep"),
+                (LineOrigin::Deletion, "old"),
+                (LineOrigin::Addition, "new"),
+            ],
+        ));
 
         let text = draw(&state, SIZE).join("\n");
 
@@ -266,10 +271,11 @@ mod tests {
     #[test]
     fn a_single_file_is_not_named_twice() {
         // 枠のタイトルに出ているので、本文に見出しを足すと行を消費するだけになる。
-        let state = state_with_diff(vec![file(
+        let state = state_with_diff(one_hunk(
             "a.txt",
-            vec![hunk("@@ -1 +1 @@", vec![line(LineOrigin::Context, "keep")])],
-        )]);
+            "@@ -1 +1 @@",
+            &[(LineOrigin::Context, "keep")],
+        ));
 
         let lines = draw(&state, SIZE);
         let named = lines.iter().filter(|line| line.contains("a.txt")).count();
@@ -280,11 +286,11 @@ mod tests {
 
     #[test]
     fn the_cursor_hunk_header_is_highlighted() {
-        let mut state = state_with_diff(vec![file(
+        let mut state = state_with_diff(vec![fake_file_diff(
             "a.txt",
             vec![
-                hunk("@@ -1 +1 @@ first", vec![line(LineOrigin::Context, "a")]),
-                hunk("@@ -9 +9 @@ second", vec![line(LineOrigin::Context, "b")]),
+                fake_hunk("@@ -1 +1 @@ first", &[(LineOrigin::Context, "a")]),
+                fake_hunk("@@ -9 +9 @@ second", &[(LineOrigin::Context, "b")]),
             ],
         )]);
         // `j` で 2 つ目のハンクへ。
@@ -301,19 +307,107 @@ mod tests {
     }
 
     #[test]
+    fn the_body_of_the_cursor_hunk_is_visible_not_just_its_header() {
+        // 見出し 1 行だけを窓に入れると、見出しがちょうど下端に来て本文が 1 行も
+        // 見えない。**選んだハンクに対して破壊的な操作を押すことになる**（07）。
+        let body = |tag: &str| -> Vec<(LineOrigin, String)> {
+            (0..10)
+                .map(|n| (LineOrigin::Context, format!("{tag}{n}")))
+                .collect()
+        };
+        let hunk = |header: &str, tag: &str| {
+            let owned = body(tag);
+            let lines: Vec<(LineOrigin, &str)> = owned
+                .iter()
+                .map(|(origin, text)| (*origin, text.as_str()))
+                .collect();
+            fake_hunk(header, &lines)
+        };
+        let mut state = state_with_diff(vec![fake_file_diff(
+            "a.txt",
+            vec![
+                hunk("@@ HUNK1 @@", "one"),
+                hunk("@@ HUNK2 @@", "two"),
+                hunk("@@ HUNK3 @@", "three"),
+            ],
+        )]);
+
+        // 2 つ目のハンクへ。ここまでで 22 行あり、ペインの高さ（20 行）を超える。
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
+
+        let text = draw(&state, SIZE).join("\n");
+
+        assert!(text.contains("@@ HUNK2 @@"), "{text}");
+        assert!(
+            text.contains("two0"),
+            "見出しだけで本文が見えていない: {text}"
+        );
+        assert!(text.contains("two9"), "本文の末尾まで見えていない: {text}");
+    }
+
+    #[test]
+    fn a_diff_for_another_file_is_not_shown_while_the_new_one_loads() {
+        // 届くまで前のファイルの diff を出したままにすると、右で b.txt を選んでいるのに
+        // 左は a.txt という画面になる。次のタスクのハンク操作はこの `view` を読むので、
+        // b.txt を選んだまま a.txt のハンクを stage することになる（01）。
+        let snapshot = WorktreeSnapshot {
+            unstaged: vec![
+                fake_entry("a.txt", FileStatus::Modified),
+                fake_entry("b.txt", FileStatus::Modified),
+            ],
+            ..WorktreeSnapshot::default()
+        };
+        let mut state = opened(snapshot);
+        deliver(
+            &mut state,
+            one_hunk("a.txt", "@@ AAA @@", &[(LineOrigin::Addition, "AAALINE")]),
+        );
+
+        // b.txt へ移って開き直す。まだ届いていない。
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Esc)));
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        assert!(matches!(cmd, Cmd::LoadDiff(_)), "{cmd:?}");
+
+        let text = draw(&state, SIZE).join("\n");
+
+        assert!(!text.contains("AAALINE"), "古い diff が残っている: {text}");
+        assert!(
+            !text.contains("Diff: a.txt"),
+            "古いタイトルが残っている: {text}"
+        );
+        assert!(text.contains("Diff: b.txt"), "{text}");
+        assert!(text.contains("読み込み中"), "{text}");
+    }
+
+    #[test]
+    fn reopening_the_same_file_keeps_showing_it_while_it_reloads() {
+        // 同じ対象なら鮮度は保たれているので「読み込み中…」を挟まない。
+        let mut state = state_with_diff(one_hunk(
+            "a.txt",
+            "@@ AAA @@",
+            &[(LineOrigin::Addition, "AAALINE")],
+        ));
+
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Esc)));
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        let text = draw(&state, SIZE).join("\n");
+        assert!(text.contains("AAALINE"), "{text}");
+    }
+
+    #[test]
     fn a_tab_is_opened_to_the_tab_stop() {
         // 1 個の空白に潰すとインデントが崩れて、上下の行の対応が読めなくなる。
         // 桁は本文の先頭から数える（記号を含めると変更行と文脈行で 1 桁ずれる）。
-        let state = state_with_diff(vec![file(
+        let state = state_with_diff(one_hunk(
             "a.txt",
-            vec![hunk(
-                "@@ -1 +1 @@",
-                vec![
-                    line(LineOrigin::Context, "\tone"),
-                    line(LineOrigin::Addition, "\ttwo"),
-                ],
-            )],
-        )]);
+            "@@ -1 +1 @@",
+            &[
+                (LineOrigin::Context, "\tone"),
+                (LineOrigin::Addition, "\ttwo"),
+            ],
+        ));
 
         let lines = draw(&state, SIZE);
         let row = |needle: &str| lines[row_of(&lines, needle) as usize].clone();
@@ -324,15 +418,19 @@ mod tests {
     }
 
     #[test]
+    fn the_spaces_used_for_a_tab_are_wide_enough() {
+        // `SPACES[..pad]` は `pad` が `TAB_WIDTH` まで伸びる。短いと panic する。
+        assert_eq!(SPACES.len(), TAB_WIDTH);
+    }
+
+    #[test]
     fn a_carriage_return_does_not_reach_the_screen() {
         // 落とさないと CRLF のファイルで制御文字が画面に出る。
-        let state = state_with_diff(vec![file(
+        let state = state_with_diff(one_hunk(
             "a.txt",
-            vec![hunk(
-                "@@ -1 +1 @@",
-                vec![line(LineOrigin::Addition, "crlf\r")],
-            )],
-        )]);
+            "@@ -1 +1 @@",
+            &[(LineOrigin::Addition, "crlf\r")],
+        ));
 
         let lines = draw(&state, SIZE);
         let row = &lines[row_of(&lines, "crlf") as usize];
@@ -343,16 +441,12 @@ mod tests {
     #[test]
     fn a_long_line_is_cut_instead_of_wrapped() {
         // 折り返すと、どの行がどの行に対応するのか読めなくなる（07）。
-        let state = state_with_diff(vec![file(
+        let long = "x".repeat(200);
+        let state = state_with_diff(one_hunk(
             "a.txt",
-            vec![hunk(
-                "@@ -1,2 +1,2 @@",
-                vec![
-                    line(LineOrigin::Addition, &"x".repeat(200)),
-                    line(LineOrigin::Context, "TAIL"),
-                ],
-            )],
-        )]);
+            "@@ -1,2 +1,2 @@",
+            &[(LineOrigin::Addition, &long), (LineOrigin::Context, "TAIL")],
+        ));
 
         let lines = draw(&state, SIZE);
 
@@ -366,7 +460,7 @@ mod tests {
 
     #[test]
     fn the_title_shows_both_names_of_a_rename() {
-        let mut renamed = file("new.txt", vec![hunk("@@ -1 +1 @@", Vec::new())]);
+        let mut renamed = fake_file_diff("new.txt", vec![fake_hunk("@@ -1 +1 @@", &[])]);
         renamed.old_path = Some("old.txt".into());
         renamed.status = FileStatus::Renamed;
 
@@ -379,7 +473,7 @@ mod tests {
     #[test]
     fn a_binary_file_says_so() {
         // バイナリと「mode だけの変更」はどちらもハンクが空になる。
-        let mut binary = file("a.png", Vec::new());
+        let mut binary = fake_file_diff("a.png", Vec::new());
         binary.binary = true;
 
         let state = state_with_diff(vec![binary]);
@@ -390,7 +484,7 @@ mod tests {
 
     #[test]
     fn a_mode_only_change_is_not_called_binary() {
-        let state = state_with_diff(vec![file("a.txt", Vec::new())]);
+        let state = state_with_diff(vec![fake_file_diff("a.txt", Vec::new())]);
 
         let text = draw(&state, SIZE).join("\n");
         assert!(text.contains("mode だけの変更"), "{text}");
@@ -400,10 +494,7 @@ mod tests {
     fn a_pending_diff_reads_as_loading() {
         // 起動直後に「読み込めませんでした」と出すと、まだ読んでいないだけなのに
         // 失敗したように見える。
-        let state = opened(WorktreeSnapshot {
-            unstaged: vec![fake_entry("a.txt", FileStatus::Modified)],
-            ..WorktreeSnapshot::default()
-        });
+        let state = opened(one_file());
 
         let text = draw(&state, SIZE).join("\n");
 
@@ -428,10 +519,7 @@ mod tests {
 
     #[test]
     fn a_failed_diff_says_so() {
-        let mut state = opened(WorktreeSnapshot {
-            unstaged: vec![fake_entry("a.txt", FileStatus::Modified)],
-            ..WorktreeSnapshot::default()
-        });
+        let mut state = opened(one_file());
         let target = state.wanted_diff().unwrap();
         let cmd = update(
             &mut state,

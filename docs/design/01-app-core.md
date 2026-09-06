@@ -311,8 +311,23 @@ pub struct WorktreeState {
 | Conflicted / 選択なし / Diff を見せていない | `None` |
 
 core（次に何を読むか）と `ui`（中身を描くか、読み込み中と出すか）が同じものを使う。
-`GraphState::fresh_detail` と同じ形で、分けて書くと片方だけ直したときに別のファイルの
-diff を出したままにできてしまう。**Untracked も `IndexVsWorktree`。** `git_read` が
+
+**`ui` は `DiffState.view` を直に見ず、`DiffState::fresh_view(wanted)` を通す。**
+`GraphState::fresh_detail` と同じ形で、`view.target` が `wanted_diff()` と一致する
+ときだけ中身を返す。読む側で濾さないと、対象が変わってから届くまでのあいだ
+**別のファイルの diff をタイトルごと出したまま**になる（そのファイルの読み込みが
+失敗すると恒久的に残る）。`view` を読む消費者はこの古さをそのまま引き継ぐので、
+ハンク単位の stage を足すと「右で b.txt を選んでいるのに a.txt のハンクが stage
+される」になる。
+
+**代わりに `view` を消して回らない。** フォーカスの移動やカーソル移動のたびに `None`
+にすると、`Cmd::LoadDiff` の発行で避けた「腕ごとの特殊ケース」を消す側で作ることに
+なる。消さないことには利点もあって、同じファイルを開き直したときは読み直しが届くまで
+前の中身を出せる（「読み込み中…」が挟まらない）。
+
+「読み込み中」と「読み込めなかった」の出し分けも `DiffState::has_failed(wanted)` で
+直接見る。`jobs.is_running(LoadDiff)` の否定から消去法で導くと、`Cmd` の発行経路を
+変えたときに片方だけ直してもコンパイルもテストも通る。**Untracked も `IndexVsWorktree`。** `git_read` が
 untracked の中身を出すようにしてあるので、これで新規ファイルの全行が `+` で並ぶ（02）。
 
 **`Cmd::LoadDiff` を出す場所は 3 つ。**

@@ -623,9 +623,10 @@ mod tests {
     use crate::app::{Modal, RepoInfo, TermSize};
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
-    use crate::git_read::{Commit, HeadInfo, Hunk, RefIndex, RefLabel, Remote};
+    use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
     use crate::test_util::{
-        fake_commit, fake_commit_with_parents, fake_detail, fake_entry, fake_oid, fake_snapshot,
+        fake_commit, fake_commit_with_parents, fake_detail, fake_entry, fake_file_diff, fake_hunk,
+        fake_oid, fake_snapshot,
     };
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
@@ -683,18 +684,10 @@ mod tests {
 
     /// 1 ファイルに `hunks` 個のハンクを持つ diff。
     fn fake_diff(path: &str, hunks: usize) -> Vec<FileDiff> {
-        vec![FileDiff {
-            path: path.into(),
-            old_path: None,
-            status: FileStatus::Modified,
-            binary: false,
-            hunks: (0..hunks)
-                .map(|n| Hunk {
-                    header: format!("@@ -{n},1 +{n},1 @@"),
-                    lines: Vec::new(),
-                })
-                .collect(),
-        }]
+        let hunks = (0..hunks)
+            .map(|n| fake_hunk(&format!("@@ -{n},1 +{n},1 @@"), &[]))
+            .collect();
+        vec![fake_file_diff(path, hunks)]
     }
 
     fn diff_ok(target: DiffTarget, files: Vec<FileDiff>) -> Msg {

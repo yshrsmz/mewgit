@@ -359,13 +359,6 @@ impl WorktreeState {
             .collect()
     }
 
-    /// いまのカーソルが [`positions`](Self::positions) の何番目か。無ければ `None`。
-    fn index_in(&self, positions: &[(WorktreeSection, usize)]) -> Option<usize> {
-        positions
-            .iter()
-            .position(|&(section, index)| section == self.section && index == self.cursor)
-    }
-
     /// カーソルの指すファイル。行が無ければ `None`。
     pub fn selected(&self) -> Option<(WorktreeSection, &FileEntry)> {
         let entry = self.snapshot.section(self.section).get(self.cursor)?;
@@ -412,8 +405,14 @@ impl WorktreeState {
     /// 作らないため（01）。
     pub fn move_cursor(&mut self, delta: isize) {
         let positions = self.positions();
-        let current = self.index_in(&positions).unwrap_or(0);
-        self.seat(&positions, current.saturating_add_signed(delta));
+        match stepped(&positions, (self.section, self.cursor), delta) {
+            Some((section, cursor)) => {
+                self.section = section;
+                self.cursor = cursor;
+            }
+            // 1 行も選べない。既定の位置に戻す。
+            None => self.seat(&positions, 0),
+        }
     }
 
     /// `snapshot` を入れ替えたあとに、選べる行へ寄せ直す。
@@ -440,11 +439,37 @@ impl WorktreeState {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DiffState {
     /// 届いている diff。まだ読んでいない / 失敗したときは `None`。
+    ///
+    /// **描くときは直に見ず [`fresh_view`](Self::fresh_view) を通す。** 別の対象の
+    /// ものが残っていることがある。
     pub view: Option<DiffView>,
     /// 直前に失敗した対象。**同じ対象には出し直さない**（「失敗 → 再読込 → 失敗」を
     /// 回さないため）。対象が違えば一度も試していないので頼む。落とすのは読み込みの
     /// 成功と、ワーキングツリーのカーソル移動。
     pub failed: Option<DiffTarget>,
+}
+
+impl DiffState {
+    /// `wanted` の diff。別の対象のものしか無ければ `None`。
+    ///
+    /// [`GraphState::fresh_detail`] と同じ形。**`view` を消して回らない。**
+    /// フォーカスの移動やカーソル移動のたびに消すと、`Cmd::LoadDiff` の発行で避けた
+    /// 「腕ごとの特殊ケース」を今度は消す側で作ることになる。鮮度は読むときに見る。
+    ///
+    /// 消さないことには利点もあって、同じファイルを開き直したときは読み直しが届くまで
+    /// 前の中身をそのまま出せる（「読み込み中…」が挟まらない）。
+    pub fn fresh_view(&self, wanted: Option<&DiffTarget>) -> Option<&DiffView> {
+        let wanted = wanted?;
+        self.view.as_ref().filter(|view| &view.target == wanted)
+    }
+
+    /// `wanted` を読みに行って失敗したままか。
+    ///
+    /// 「読み込み中」と「読み込めなかった」の出し分けに使う。`is_running` の否定から
+    /// 消去法で導くと、`Cmd` の発行経路を変えたときに片方だけ直しても通ってしまう。
+    pub fn has_failed(&self, wanted: Option<&DiffTarget>) -> bool {
+        wanted.is_some() && self.failed.as_ref() == wanted
+    }
 }
 
 /// 表示中の diff。何の diff かは `target` が示す。
@@ -473,20 +498,37 @@ impl DiffView {
     }
 
     /// カーソルを `delta` 個動かす。ファイルをまたぎ、端では止まる。
+    ///
+    /// 1 つも選べる位置が無ければ据え置く（描く中身も無い）。
     pub fn move_cursor(&mut self, delta: isize) {
-        let positions = self.positions();
-        let current = positions
-            .iter()
-            .position(|&position| position == self.cursor)
-            .unwrap_or(0);
-        // 行が足りなければ最後の行。1 つも無ければ既定のまま（描く中身も無い）。
-        if let Some(&next) = positions
-            .get(current.saturating_add_signed(delta))
-            .or(positions.last())
-        {
+        if let Some(next) = stepped(&self.positions(), self.cursor, delta) {
             self.cursor = next;
         }
     }
+
+    /// カーソルの指すハンクが `positions` の何番目か。無ければ `None`。
+    pub fn hunk_index(&self) -> Option<usize> {
+        self.positions()
+            .iter()
+            .position(|&position| position == self.cursor)
+    }
+}
+
+/// `positions` の中で `current` から `delta` 個進んだ位置。端では止まる。
+///
+/// **端の扱いはここ 1 箇所。** [`WorktreeState::move_cursor`] と
+/// [`DiffView::move_cursor`] が同じ規則を使う。並べる中身は違っても「進めて端で
+/// 止める」は 1 つ。要素が無ければ `None` を返し、そのときどうするかは呼び出し側が決める
+/// （Worktree は何も選べない位置に戻し、Diff は据え置く）。
+fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Option<T> {
+    let index = positions
+        .iter()
+        .position(|&position| position == current)
+        .unwrap_or(0);
+    positions
+        .get(index.saturating_add_signed(delta))
+        .or(positions.last())
+        .copied()
 }
 
 /// diff ペインのカーソル。ファイルとその中のハンクを指す。

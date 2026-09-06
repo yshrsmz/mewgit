@@ -16,8 +16,8 @@ pub use cmd::Cmd;
 pub use key::{Key, KeyCode, Modifiers};
 pub use msg::{ExecDone, Msg, RepoSnapshot};
 pub use state::{
-    AppState, BranchState, DiffCursor, DiffView, GraphLine, GraphState, InputIntent, Job, JobKind,
-    JobTracker, Modal, Notice, NoticeLevel, Pane, PrState, RepoInfo, TermSize, TextBuffer,
-    WorktreeState,
+    AppState, BranchState, DiffCursor, DiffState, DiffView, GraphLine, GraphState, InputIntent,
+    Job, JobKind, JobTracker, Modal, Notice, NoticeLevel, Pane, PrState, RepoInfo, TermSize,
+    TextBuffer, WorktreeState,
 };
 pub use update::{init, update};

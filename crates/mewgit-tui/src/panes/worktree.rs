@@ -22,12 +22,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let (mut lines, cursor) = lines(state);
-    let window = ui::window(lines.len(), cursor, inner.height as usize);
-    frame.render_widget(
-        Paragraph::new(lines.drain(window).collect::<Vec<_>>()),
-        inner,
-    );
+    let (lines, cursor) = lines(state);
+    // 見せたいのはカーソルの 1 行だけ。Diff ペインはハンク全体を渡す。
+    ui::render_rows(frame, inner, lines, cursor..cursor + 1);
 }
 
 /// 枠のタイトル。件数は全区画の合計。

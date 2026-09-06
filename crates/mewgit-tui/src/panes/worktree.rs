@@ -3,7 +3,7 @@
 //! 1 行は `<種別 1 文字> <パス>`。区画の見出しと、その中のファイルを並べる。
 
 use mewgit_core::app::{AppState, JobKind, Pane, WorktreeState};
-use mewgit_core::git_read::{FileEntry, FileStatus, WorktreeSection};
+use mewgit_core::git_read::{FileStatus, WorktreeSection};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -23,7 +23,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let (mut lines, cursor) = lines(state);
-    let window = window(lines.len(), cursor, inner.height as usize);
+    let window = ui::window(lines.len(), cursor, inner.height as usize);
     frame.render_widget(
         Paragraph::new(lines.drain(window).collect::<Vec<_>>()),
         inner,
@@ -65,7 +65,11 @@ fn lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
         lines.push(Line::from(Span::styled(heading(section), theme::muted())));
 
         for (index, entry) in entries.iter().enumerate() {
-            let line = Line::raw(format!(" {} {}", mark(entry.status), path(entry)));
+            let line = Line::raw(format!(
+                " {} {}",
+                mark(entry.status),
+                ui::path_label(&entry.path, entry.old_path.as_deref())
+            ));
             if state.worktree.section == section && state.worktree.cursor == index {
                 cursor = lines.len();
                 lines.push(line.style(theme::selected()));
@@ -75,20 +79,6 @@ fn lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
         }
     }
     (lines, cursor)
-}
-
-/// 描く行の範囲。カーソルが窓に入るまで下へずらす。
-///
-/// **スクロール位置を状態に持たない。** グラフ（01 の `scroll`）と違ってカーソルが
-/// 下端に貼り付く癖が残るが、そのために `Msg::Layout` にフィールドを足すのは、
-/// 右ペインの高さが決まる M6（狭いレイアウト）と一緒にする（07）。
-fn window(len: usize, cursor: usize, height: usize) -> std::ops::Range<usize> {
-    if height == 0 {
-        return 0..0;
-    }
-    // `cursor` は必ず行の中にあるので、上の端だけ見れば足りる。
-    let start = cursor.saturating_sub(height - 1);
-    start..(start + height).min(len)
 }
 
 /// 区画の見出し。
@@ -112,14 +102,6 @@ fn mark(status: FileStatus) -> char {
         FileStatus::Typechange => 'T',
         FileStatus::Untracked => '?',
         FileStatus::Conflicted => 'U',
-    }
-}
-
-/// 行に出すパス。rename は元の名前も出す。
-fn path(entry: &FileEntry) -> String {
-    match &entry.old_path {
-        Some(old) => format!("{} -> {}", old.display(), entry.path.display()),
-        None => entry.path.display().to_string(),
     }
 }
 
@@ -223,19 +205,6 @@ mod tests {
         let text = draw(&state, SIZE).join("\n");
 
         assert!(text.contains("読み込み中"), "{text}");
-    }
-
-    #[test]
-    fn the_window_follows_the_cursor_past_the_bottom() {
-        // 窓に入っているあいだは先頭から。入らなくなったらカーソルが見えるまでずらす。
-        assert_eq!(window(10, 0, 4), 0..4);
-        assert_eq!(window(10, 3, 4), 0..4);
-        assert_eq!(window(10, 4, 4), 1..5);
-        assert_eq!(window(10, 9, 4), 6..10);
-        // 行が窓より少ないときは全部出す。
-        assert_eq!(window(2, 1, 4), 0..2);
-        // 高さ 0 でも破綻しない（リサイズ中に起きる）。
-        assert_eq!(window(10, 5, 0), 0..0);
     }
 
     #[test]

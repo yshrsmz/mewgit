@@ -63,10 +63,18 @@ pub enum Msg {
     /// `Cmd::LoadStatus` が黙って落ちる。書き込みのたびに `ExecFinished` が
     /// `LoadStatus` を出すので、詰まると「stage したのに一覧が変わらない」になる。
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
+    /// 対象の diff。`LogLoaded` と同じ理由で `Result` を運ぶ。失敗の通り道が無いと
+    /// `JobKind::LoadDiff` が走ったまま残り、以後の `Cmd::LoadDiff` が黙って落ちる。
+    ///
+    /// `target` は**要求した対象**。`Err` のときにどれが失敗したのかを知る手掛かりは
+    /// これしかない（`CommitDetailLoaded` の `oid` と同じ）。`Ok` でも、届いた diff が
+    /// いま選んでいるファイルのものかの判定に要る。**`FileDiff.path` からは導けない。**
+    /// Staged と Unstaged で同じファイルを選んだときはパスが同じで `DiffTarget` の
+    /// 変種だけが違う。
     DiffLoaded {
         target: DiffTarget,
         /// ファイル単位。平坦化すると `GitOp::StageHunk` に渡す `path` を失う。
-        files: Vec<FileDiff>,
+        result: Box<Result<Vec<FileDiff>, GitReadError>>,
     },
 
     // git_exec

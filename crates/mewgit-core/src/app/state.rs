@@ -29,7 +29,7 @@ pub struct AppState {
     pub worktree: WorktreeState,
     /// 表示中の diff。`worktree` の下ではなく最上位に置く。`Pane::Diff` は独立した
     /// ペインで、グラフで選んだコミットの diff もここに入るため。
-    pub diff: Option<DiffView>,
+    pub diff: DiffState,
     pub branches: BranchState,
     pub stashes: Vec<StashEntry>,
     pub prs: PrState,
@@ -55,7 +55,7 @@ impl AppState {
             account: AccountState::default(),
             graph: GraphState::default(),
             worktree: WorktreeState::default(),
-            diff: None,
+            diff: DiffState::default(),
             branches: BranchState::default(),
             stashes: Vec::new(),
             prs: PrState::default(),
@@ -123,6 +123,32 @@ impl AppState {
             self.notices.pop_front();
         }
     }
+
+    /// いま出すべき diff の対象。出すものが無ければ `None`（01 の「diff の遅延取得」）。
+    ///
+    /// **判定はここ 1 つ。** 次に何を読むかを決める `update` と、中身を描くか
+    /// 「読み込み中」を出すかを決める `ui` が同じものを使う
+    /// ([`GraphState::fresh_detail`] と同じ形)。分けて書くと、片方だけ直したときに
+    /// 別のファイルの diff を出したままにできてしまう。
+    pub fn wanted_diff(&self) -> Option<DiffTarget> {
+        // 左の領域を Graph と差し替えて出すので、見せているかは `focus` で判る（07）。
+        if self.focus != Pane::Diff {
+            return None;
+        }
+
+        let (section, entry) = self.worktree.selected()?;
+        // rename は新しい名前で絞る。`git_read` が `old_path` の側でも一致を見るので、
+        // 片方だけ渡せば rename の行は落ちない（02）。
+        let path = Some(entry.path.clone());
+        match section {
+            WorktreeSection::Staged => Some(DiffTarget::HeadVsIndex(path)),
+            WorktreeSection::Unstaged | WorktreeSection::Untracked => {
+                Some(DiffTarget::IndexVsWorktree(path))
+            }
+            // 解消ビューは MVP 外。conflicted は 2 者の diff で表せない。
+            WorktreeSection::Conflicted => None,
+        }
+    }
 }
 
 /// 開いているリポジトリ。
@@ -172,7 +198,7 @@ impl Pane {
     ///
     /// **まだ実装していないペインは入れない**（07）。移れてしまうと、キーを受ける先の
     /// 無い画面に入り込む。ペインを実装したらここに足す。並びは表示順。
-    pub const FOCUSABLE: &'static [Pane] = &[Pane::Graph, Pane::Worktree];
+    pub const FOCUSABLE: &'static [Pane] = &[Pane::Graph, Pane::Worktree, Pane::Diff];
 
     /// 巡回の次。末尾からは先頭に戻る。
     pub fn next(self) -> Pane {
@@ -407,6 +433,20 @@ impl WorktreeState {
     }
 }
 
+/// diff ペインの状態。
+///
+/// **`failed` を [`DiffView`] の中に置かない。** 失敗したときは `view` が `None` なので、
+/// 中に置くと印ごと消える（01 の「diff の遅延取得」）。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DiffState {
+    /// 届いている diff。まだ読んでいない / 失敗したときは `None`。
+    pub view: Option<DiffView>,
+    /// 直前に失敗した対象。**同じ対象には出し直さない**（「失敗 → 再読込 → 失敗」を
+    /// 回さないため）。対象が違えば一度も試していないので頼む。落とすのは読み込みの
+    /// 成功と、ワーキングツリーのカーソル移動。
+    pub failed: Option<DiffTarget>,
+}
+
 /// 表示中の diff。何の diff かは `target` が示す。
 #[derive(Debug, PartialEq, Eq)]
 pub struct DiffView {
@@ -414,6 +454,39 @@ pub struct DiffView {
     /// ファイル単位で持つ。平坦化すると `GitOp::StageHunk` に渡す `path` を失う。
     pub files: Vec<FileDiff>,
     pub cursor: DiffCursor,
+}
+
+impl DiffView {
+    /// ハンクを (ファイル, ハンク) の順に並べたもの。カーソルが進む順。
+    ///
+    /// ハンクの無いファイル（バイナリ、mode だけの変更）は入らない。**選べない行を
+    /// カーソルの並びに入れない**のは `WorktreeState::positions` と同じ理由で、
+    /// 入れると `j` を押しても何も起きない行ができる。
+    fn positions(&self) -> Vec<DiffCursor> {
+        self.files
+            .iter()
+            .enumerate()
+            .flat_map(|(file, diff)| {
+                (0..diff.hunks.len()).map(move |hunk| DiffCursor { file, hunk })
+            })
+            .collect()
+    }
+
+    /// カーソルを `delta` 個動かす。ファイルをまたぎ、端では止まる。
+    pub fn move_cursor(&mut self, delta: isize) {
+        let positions = self.positions();
+        let current = positions
+            .iter()
+            .position(|&position| position == self.cursor)
+            .unwrap_or(0);
+        // 行が足りなければ最後の行。1 つも無ければ既定のまま（描く中身も無い）。
+        if let Some(&next) = positions
+            .get(current.saturating_add_signed(delta))
+            .or(positions.last())
+        {
+            self.cursor = next;
+        }
+    }
 }
 
 /// diff ペインのカーソル。ファイルとその中のハンクを指す。

@@ -35,6 +35,19 @@ pub fn muted() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
 
+/// diff の追加行。
+///
+/// `selected` / `muted` と同じで、いまは `[theme]` にキーが無い。**ペインに色名を
+/// 直接書かないため**にここへ置く（07）。設定できるようにするときの受け口でもある。
+pub fn added() -> Style {
+    Style::default().fg(Color::Green)
+}
+
+/// diff の削除行。
+pub fn removed() -> Style {
+    Style::default().fg(Color::Red)
+}
+
 /// 色名 1 つ。読めなければ `None`。
 ///
 /// `[graph] colors` の palette もここを通す。「文字列 → 色」の解釈を 1 箇所に置く。

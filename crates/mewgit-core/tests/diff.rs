@@ -250,8 +250,72 @@ fn a_path_narrows_the_diff_and_is_not_a_glob() {
         .diff(DiffTarget::IndexVsWorktree(Some("[x].txt".into())))
         .unwrap();
 
-    // pathspec が glob のままだと `[x]` が文字クラスになり、`x.txt` の方が出る。
+    // 絞り込みは delta のパスとの完全一致。`[x]` を文字クラスとして扱うと
+    // `x.txt` の方が出る。
     assert_eq!(files(&diff), [("[x].txt", None, FileStatus::Untracked)]);
+}
+
+#[test]
+fn a_path_keeps_a_staged_rename_under_either_name() {
+    let repo = TestRepo::init();
+    repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    // pathspec で絞ると、`find_similar` が対にすべき旧パスの delta が先に落ちて
+    // 「全行追加の Added」になる。そのパッチを `git apply --cached` に戻すと、
+    // rename ではなくファイルの新規追加を index に適用することになる（02）。
+    for name in ["new.txt", "old.txt"] {
+        let diff = reader
+            .diff(DiffTarget::HeadVsIndex(Some(name.into())))
+            .unwrap();
+
+        assert_eq!(
+            files(&diff),
+            [("new.txt", Some("old.txt"), FileStatus::Renamed)],
+            "絞り込み: {name}"
+        );
+    }
+}
+
+#[test]
+fn a_path_keeps_a_worktree_rename_under_either_name() {
+    let repo = TestRepo::init();
+    repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");
+    // `add` していない `git mv`。index からは消え、untracked が 1 つ増えた状態。
+    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt")).unwrap();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    // ワーキングツリー側の rename は 2 つの delta を `for_untracked` で対にしている。
+    // pathspec で絞ると、対にする前に片方が落ちる。
+    for name in ["new.txt", "old.txt"] {
+        let diff = reader
+            .diff(DiffTarget::IndexVsWorktree(Some(name.into())))
+            .unwrap();
+
+        assert_eq!(
+            files(&diff),
+            [("new.txt", Some("old.txt"), FileStatus::Renamed)],
+            "絞り込み: {name}"
+        );
+    }
+}
+
+#[test]
+fn a_path_narrows_an_untracked_file_without_reading_the_others() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.write_worktree_file("wanted.txt", b"wanted\n");
+    repo.write_worktree_file("other.txt", b"other\n");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader
+        .diff(DiffTarget::IndexVsWorktree(Some("wanted.txt".into())))
+        .unwrap();
+
+    // untracked も中身が出る（`show_untracked_content`）。絞ったファイルだけ。
+    assert_eq!(files(&diff), [("wanted.txt", None, FileStatus::Untracked)]);
+    assert_eq!(diff[0].hunks.len(), 1);
 }
 
 #[test]

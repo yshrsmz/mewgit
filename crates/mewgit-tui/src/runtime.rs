@@ -225,8 +225,19 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
-            // M2 以降で実装する。
-            Cmd::LoadDiff(_) => not_implemented(state, JobKind::LoadDiff, "LoadDiff"),
+            Cmd::LoadDiff(target) => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    // 要求した対象をそのまま返す。`update` はこれと `wanted_diff()` を
+                    // 比べて、届いた diff がいま選んでいるファイルのものかを見る（01）。
+                    let result = Box::new(reader.diff(target.clone()).await);
+                    let _ = tx.send(Msg::DiffLoaded { target, result });
+                });
+                ControlFlow::Continue(())
+            }
+
+            // M4 以降で実装する。
             Cmd::ResolveAccount => {
                 not_implemented(state, JobKind::ResolveAccount, "ResolveAccount")
             }
@@ -463,6 +474,35 @@ mod tests {
 
         assert_eq!(state.worktree.snapshot.untracked.len(), 1);
         assert!(!state.jobs.is_running(JobKind::LoadStatus));
+    }
+
+    #[tokio::test]
+    async fn load_diff_reaches_the_state_through_the_reader() {
+        let repo = TestRepo::init();
+        repo.commit_file("a.txt", "one\ntwo\n");
+        repo.write_worktree_file("a.txt", b"one\nTWO\n");
+        let (mut state, reader) = opened(&repo);
+        let (runtime, mut msgs) = runtime_for(&repo, reader);
+
+        // ワーキングツリーを読み、Diff ペインを開くところまでを実際の経路で通す。
+        let cmd = state.issue(Cmd::LoadStatus);
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+        state.focus = Pane::Worktree;
+
+        // `KeyCode` は crossterm 側と名前が衝突するので完全修飾で書く。
+        let enter = mewgit_core::app::Key::new(mewgit_core::app::KeyCode::Enter);
+        let cmd = update(&mut state, Msg::Key(enter));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        let view = state.diff.view.expect("diff が届いていません");
+        assert_eq!(view.files.len(), 1);
+        assert_eq!(view.files[0].path, std::path::Path::new("a.txt"));
+        assert_eq!(view.files[0].hunks.len(), 1);
+        assert!(!state.jobs.is_running(JobKind::LoadDiff));
     }
 
     #[tokio::test]

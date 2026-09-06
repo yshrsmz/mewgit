@@ -4,20 +4,20 @@
 //! [`Cmd`] として返す。
 //!
 //! ペインごとのキー処理は、対応するペインのタスクと一緒に足す。いまあるのは
-//! グラフだけ。
+//! グラフ・ワーキングツリー・diff。
 
 use std::path::PathBuf;
 
 use crate::git_exec::{ExecError, GitOp};
 use crate::git_read::{
-    CommitDetail, FileEntry, FileStatus, GitReadError, LogPage, Oid, WorktreeSection,
-    WorktreeSnapshot,
+    CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, LogPage, Oid,
+    WorktreeSection, WorktreeSnapshot,
 };
 use crate::graph::LaneState;
 
 use super::{
-    AppState, Cmd, ExecDone, GraphLine, JobKind, Key, KeyCode, Modal, Msg, NoticeLevel, Pane,
-    RepoSnapshot,
+    AppState, Cmd, DiffCursor, DiffView, ExecDone, GraphLine, JobKind, Key, KeyCode, Modal, Msg,
+    NoticeLevel, Pane, RepoSnapshot,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -44,11 +44,16 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
     state.issue(cmd)
 }
 
-/// **続きを頼む判断は 4 箇所にある。** `scrolled`（カーソル移動）、`log_loaded` の成功、
-/// `commit_detail_loaded` の成功、`Msg::Layout`。`update` の出口にまとめて
-/// 「毎回導き直す」形にはできない。導出は「一度試して失敗した」を表せないので、
-/// 失敗のたびに再発行して「失敗 → 再読込 → 失敗」を回してしまう。M2 で `LoadDiff` を
-/// 足すときは、この 4 箇所を見て要るものを足すこと。
+/// **続きを頼む判断は 7 箇所にある。** `update` の出口にまとめて「毎回導き直す」形には
+/// できない。導出は「一度試して失敗した」を表せないので、失敗のたびに再発行して
+/// 「失敗 → 再読込 → 失敗」を回してしまう。
+///
+/// ログとコミット詳細（01 の「追加ページの読み込み」「コミット詳細の遅延取得」）:
+/// `scrolled`（カーソル移動）、`log_loaded` の成功、`commit_detail_loaded` の成功、
+/// `Msg::Layout`。
+///
+/// diff（01 の「diff の遅延取得」）: `focus`（フォーカスの移動。`Tab` も `Enter` も
+/// `Esc` もここを通る）、`status_loaded` の `clamp` のあと、`diff_loaded` の追いつき。
 fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
     match msg {
         Msg::Key(key) => update_key(state, key),
@@ -74,7 +79,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
         // `Msg` に変種を足したときに実装漏れをコンパイルエラーにするため。
         Msg::StatusLoaded(result) => status_loaded(state, *result),
-        Msg::DiffLoaded { .. } => Cmd::None,
+        Msg::DiffLoaded { target, result } => diff_loaded(state, target, *result),
         Msg::ExecFinished(done) => exec_finished(state, *done),
         Msg::ProgressDetected(_) => Cmd::None,
         Msg::AccountResolved(_) => Cmd::None,
@@ -107,24 +112,99 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
     // ペインが `Tab` を受けずに閉じ込められる。`Shift+Tab` は `BackTab`（修飾なし）に
     // 正規化されている（01 の「キー入力」）。
     match key.code() {
-        KeyCode::Tab => {
-            state.focus = state.focus.next();
-            return Cmd::None;
-        }
-        KeyCode::BackTab => {
-            state.focus = state.focus.prev();
-            return Cmd::None;
-        }
+        KeyCode::Tab => return focus(state, state.focus.next()),
+        KeyCode::BackTab => return focus(state, state.focus.prev()),
         _ => {}
     }
 
     match state.focus {
         Pane::Graph => graph_key(state, key),
         Pane::Worktree => worktree_key(state, key),
+        Pane::Diff => diff_key(state, key),
         // 各ペインのキー処理は対応するマイルストーンで足す。`Pane::FOCUSABLE` に
         // 入っていないので、いまここには来ない。
-        Pane::Branches | Pane::Stash | Pane::Prs | Pane::Diff => Cmd::None,
+        Pane::Branches | Pane::Stash | Pane::Prs => Cmd::None,
     }
+}
+
+/// フォーカスを移し、見えるようになった diff が要るなら頼む。
+///
+/// **フォーカスを動かすキーはすべてここを通す**（`Tab` / `Shift+Tab` の巡回、
+/// Worktree の `Enter`、Diff の `Esc`）。腕ごとに `Cmd::LoadDiff` を書くと、あとから
+/// ペインを足すたびに同じ特殊ケースが増える（01 の「diff の遅延取得」）。
+fn focus(state: &mut AppState, pane: Pane) -> Cmd {
+    state.focus = pane;
+    load_diff(state)
+}
+
+/// 見せている diff が要るなら頼む。
+///
+/// **同じ対象で一度失敗しているなら出さない。** 出すと「失敗 → 再読込 → 失敗」を回す。
+/// 対象が違えば一度も試していないので頼む（01）。
+///
+/// **持っている diff をキャッシュに使わない。** 対象が同じまま中身だけ変わることが
+/// あり（ハンク単位の stage）、それを見分ける印はその書き込みが入るまで踏めない。
+/// いまは見せるたびに読み直す。
+fn load_diff(state: &AppState) -> Cmd {
+    match state.wanted_diff() {
+        Some(wanted) if state.diff.failed.as_ref() != Some(&wanted) => Cmd::LoadDiff(wanted),
+        _ => Cmd::None,
+    }
+}
+
+/// Diff ペインのキー処理。
+///
+/// カーソルはハンク単位（07）。ハンク単位の stage / unstage / discard は次のタスク。
+fn diff_key(state: &mut AppState, key: Key) -> Cmd {
+    match key.code() {
+        KeyCode::Char('j') | KeyCode::Down => move_hunk(state, 1),
+        KeyCode::Char('k') | KeyCode::Up => move_hunk(state, -1),
+        KeyCode::Esc => focus(state, Pane::Worktree),
+        _ => Cmd::None,
+    }
+}
+
+/// diff のカーソルを `delta` ハンク動かす。
+fn move_hunk(state: &mut AppState, delta: isize) -> Cmd {
+    if let Some(view) = state.diff.view.as_mut() {
+        view.move_cursor(delta);
+    }
+    Cmd::None
+}
+
+/// 届いた diff を積む。
+///
+/// `JobTracker` の粒度は種別単位なので、要求が飛んでいるあいだの選択の移動は
+/// 落とされる。ここで追いつく（`commit_detail_loaded` と同じ形）。
+fn diff_loaded(
+    state: &mut AppState,
+    target: DiffTarget,
+    result: Result<Vec<FileDiff>, GitReadError>,
+) -> Cmd {
+    state.jobs.finish(JobKind::LoadDiff);
+
+    match result {
+        Ok(files) => {
+            state.diff.failed = None;
+            // **届いたのがいま選んでいるファイルのものなら採る。** 無条件に上書きすると、
+            // 正しく出ている画面が別のファイルの diff に化ける。
+            if state.wanted_diff().as_ref() == Some(&target) {
+                state.diff.view = Some(DiffView {
+                    target,
+                    files,
+                    cursor: DiffCursor::default(),
+                });
+                return Cmd::None;
+            }
+        }
+        Err(err) => {
+            state.push_notice(NoticeLevel::Error, err.to_string(), None);
+            state.diff.failed = Some(target);
+        }
+    }
+
+    // 対象が違っていた（選択が動いた / 別の対象が失敗した）。いま欲しいものを頼む。
+    load_diff(state)
 }
 
 /// モーダルのキー処理。表示中の入力はすべてここが受ける。
@@ -325,19 +405,26 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cm
 /// `j` / `k` は区画をまたいで 1 本のリストのように動く（01 の「ワーキングツリー」）。
 fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => {
-            state.worktree.move_cursor(1);
-            Cmd::None
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            state.worktree.move_cursor(-1);
-            Cmd::None
-        }
+        KeyCode::Char('j') | KeyCode::Down => moved(state, 1),
+        KeyCode::Char('k') | KeyCode::Up => moved(state, -1),
+        // 左の領域を Diff に差し替える（07）。読むかどうかは `focus` が決める。
+        KeyCode::Enter => focus(state, Pane::Diff),
         KeyCode::Char('s') => act(state, Action::Stage),
         KeyCode::Char('u') => act(state, Action::Unstage),
         KeyCode::Char('x') => act(state, Action::Discard),
         _ => Cmd::None,
     }
+}
+
+/// ワーキングツリーのカーソルを動かす。
+///
+/// **カーソルを動かすキーはすべてここを通す。** 動かすと diff の対象が変わるので、
+/// 直前の失敗を落として 1 回だけ試し直せるようにする（`GraphState.load_failed` を
+/// `scrolled` で落とすのと同じ形。01 の「diff の遅延取得」）。
+fn moved(state: &mut AppState, delta: isize) -> Cmd {
+    state.worktree.move_cursor(delta);
+    state.diff.failed = None;
+    Cmd::None
 }
 
 /// ワーキングツリーで押せる操作。`(操作, 区画)` の表を 1 本にするための語彙。
@@ -483,10 +570,15 @@ fn status_loaded(state: &mut AppState, result: Result<WorktreeSnapshot, GitReadE
     }
 
     // 書き込みの直後に頼んだぶんが落とされていたら、ここで頼み直す。
-    if std::mem::take(&mut state.worktree.stale) {
-        return Cmd::LoadStatus;
-    }
-    Cmd::None
+    let again = if std::mem::take(&mut state.worktree.stale) {
+        Cmd::LoadStatus
+    } else {
+        Cmd::None
+    };
+
+    // **`clamp` のあとに見る。** 書き込みで選んでいたファイルが別の区画へ移ると
+    // diff の対象も変わる（01 の「diff の遅延取得」）。
+    Cmd::batch([again, load_diff(state)])
 }
 
 /// `git` の実行が終わった。
@@ -531,7 +623,7 @@ mod tests {
     use crate::app::{Modal, RepoInfo, TermSize};
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
-    use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
+    use crate::git_read::{Commit, HeadInfo, Hunk, RefIndex, RefLabel, Remote};
     use crate::test_util::{
         fake_commit, fake_commit_with_parents, fake_detail, fake_entry, fake_oid, fake_snapshot,
     };
@@ -578,6 +670,229 @@ mod tests {
 
     fn press(state: &mut AppState, c: char) -> Cmd {
         update(state, Msg::Key(Key::char(c)))
+    }
+
+    fn press_code(state: &mut AppState, code: KeyCode) -> Cmd {
+        update(state, Msg::Key(Key::new(code)))
+    }
+
+    /// ワーキングツリー側の diff の対象。`assert_eq!` を短くするため。
+    fn unstaged_diff(path: &str) -> DiffTarget {
+        DiffTarget::IndexVsWorktree(Some(path.into()))
+    }
+
+    /// 1 ファイルに `hunks` 個のハンクを持つ diff。
+    fn fake_diff(path: &str, hunks: usize) -> Vec<FileDiff> {
+        vec![FileDiff {
+            path: path.into(),
+            old_path: None,
+            status: FileStatus::Modified,
+            binary: false,
+            hunks: (0..hunks)
+                .map(|n| Hunk {
+                    header: format!("@@ -{n},1 +{n},1 @@"),
+                    lines: Vec::new(),
+                })
+                .collect(),
+        }]
+    }
+
+    fn diff_ok(target: DiffTarget, files: Vec<FileDiff>) -> Msg {
+        Msg::DiffLoaded {
+            target,
+            result: Box::new(Ok(files)),
+        }
+    }
+
+    fn diff_err(target: DiffTarget) -> Msg {
+        Msg::DiffLoaded {
+            target,
+            result: Box::new(Err(GitReadError::NonUtf8Head)),
+        }
+    }
+
+    /// Diff ペインを開き、`path` の diff が `hunks` 個のハンクで届いた状態。
+    fn diff_state(paths: &[&str], hunks: usize) -> AppState {
+        let mut state = worktree_state(fake_snapshot(&[], paths, &[]), WorktreeSection::Unstaged);
+        let _ = press_code(&mut state, KeyCode::Enter);
+        let target = unstaged_diff(paths[0]);
+        let _ = update(&mut state, diff_ok(target, fake_diff(paths[0], hunks)));
+        state
+    }
+
+    #[test]
+    fn enter_opens_the_diff_pane_and_asks_for_the_selected_file() {
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt", "b.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(state.focus, Pane::Diff);
+        assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
+    }
+
+    #[test]
+    fn a_staged_row_is_diffed_against_head() {
+        // 同じファイルでも区画で対象が変わる。パスだけでは決まらない。
+        let mut state =
+            worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(
+            cmd,
+            Cmd::LoadDiff(DiffTarget::HeadVsIndex(Some("a.txt".into())))
+        );
+    }
+
+    #[test]
+    fn a_conflicted_row_has_no_diff() {
+        // 解消ビューは MVP 外。2 者の diff では表せない。
+        let snapshot = WorktreeSnapshot {
+            conflicted: vec![fake_entry("c.txt", FileStatus::Conflicted)],
+            ..WorktreeSnapshot::default()
+        };
+        let mut state = worktree_state(snapshot, WorktreeSection::Conflicted);
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(state.focus, Pane::Diff);
+        assert_eq!(cmd, Cmd::None);
+    }
+
+    #[test]
+    fn tab_into_the_diff_pane_asks_for_it_too() {
+        // `Tab` の腕に `LoadDiff` を書かず、フォーカスの移動が 1 箇所を通ることの確認。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+
+        let cmd = press_code(&mut state, KeyCode::Tab);
+
+        assert_eq!(state.focus, Pane::Diff);
+        assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
+    }
+
+    #[test]
+    fn esc_goes_back_to_the_worktree_without_asking_for_anything() {
+        let mut state = diff_state(&["a.txt"], 1);
+
+        let cmd = press_code(&mut state, KeyCode::Esc);
+
+        assert_eq!(state.focus, Pane::Worktree);
+        // 見せていないものは読まない。`wanted_diff` が `None` になる。
+        assert_eq!(cmd, Cmd::None);
+    }
+
+    #[test]
+    fn a_diff_for_another_file_is_dropped_and_the_right_one_is_asked_again() {
+        // `JobKind` の粒度は種別単位なので、要求が飛んでいるあいだの選択の移動は
+        // 落とされる。届いた側で追いつく。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press_code(&mut state, KeyCode::Enter);
+
+        let cmd = update(
+            &mut state,
+            diff_ok(unstaged_diff("b.txt"), fake_diff("b.txt", 1)),
+        );
+
+        assert_eq!(state.diff.view, None);
+        assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
+    }
+
+    #[test]
+    fn a_failed_diff_is_not_asked_again_for_the_same_file() {
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press_code(&mut state, KeyCode::Enter);
+
+        let cmd = update(&mut state, diff_err(unstaged_diff("a.txt")));
+
+        // 出すと「失敗 → 再読込 → 失敗」を回す。
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.notices.len(), 1);
+        // 出入りしても同じ。
+        let _ = press_code(&mut state, KeyCode::Esc);
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+    }
+
+    #[test]
+    fn moving_the_cursor_lets_a_failed_file_be_tried_again() {
+        // 一律に止めると、失敗した対象が二度と読めなくなる。`GraphState.load_failed` を
+        // カーソル移動で落とすのと同じ形。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt", "b.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press_code(&mut state, KeyCode::Enter);
+        let _ = update(&mut state, diff_err(unstaged_diff("a.txt")));
+        let _ = press_code(&mut state, KeyCode::Esc);
+
+        // 動かして戻る。対象は同じ a.txt。
+        let _ = press(&mut state, 'j');
+        let _ = press(&mut state, 'k');
+
+        assert_eq!(
+            press_code(&mut state, KeyCode::Enter),
+            Cmd::LoadDiff(unstaged_diff("a.txt"))
+        );
+    }
+
+    #[test]
+    fn a_failure_for_another_file_does_not_block_the_current_one() {
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press_code(&mut state, KeyCode::Enter);
+
+        let cmd = update(&mut state, diff_err(unstaged_diff("b.txt")));
+
+        // a.txt はまだ一度も試していない。塞ぐと「読み込めませんでした」のまま残る。
+        assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
+    }
+
+    #[test]
+    fn a_write_that_moves_the_file_to_another_section_reloads_the_diff() {
+        // stage すると対象が `IndexVsWorktree` から `HeadVsIndex` に変わる。
+        // 判定は `clamp` のあとでないと、古い区画で対象を決めてしまう。
+        let mut state = diff_state(&["a.txt"], 1);
+
+        let cmd = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&["a.txt"], &[], &[])))),
+        );
+
+        assert_eq!(
+            cmd,
+            Cmd::LoadDiff(DiffTarget::HeadVsIndex(Some("a.txt".into())))
+        );
+    }
+
+    #[test]
+    fn j_and_k_move_the_hunk_cursor_and_stop_at_the_ends() {
+        let mut state = diff_state(&["a.txt"], 3);
+        assert_eq!(state.diff.view.as_ref().unwrap().cursor.hunk, 0);
+
+        let hunk = |state: &AppState| state.diff.view.as_ref().unwrap().cursor.hunk;
+        let _ = press(&mut state, 'j');
+        assert_eq!(hunk(&state), 1);
+        let _ = press(&mut state, 'j');
+        let _ = press(&mut state, 'j');
+        assert_eq!(hunk(&state), 2, "下端で止まる");
+        let _ = press(&mut state, 'k');
+        assert_eq!(hunk(&state), 1);
+        let _ = press(&mut state, 'k');
+        let _ = press(&mut state, 'k');
+        assert_eq!(hunk(&state), 0, "上端で止まる");
     }
 
     #[test]

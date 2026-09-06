@@ -61,5 +61,6 @@
 
 - [ ] `Modal::Help` とキーマップ上書き
 - [ ] 端末幅 < 100 のレイアウト
+- [ ] ロケール（`LC_ALL` / `LC_CTYPE` / `LANG`）から `graph.ascii` の既定を決める
 - [ ] `.git/HEAD` mtime 監視での外部変更検知
 - [ ] README、リリースワークフロー（`cargo dist` or release-please）

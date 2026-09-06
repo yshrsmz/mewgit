@@ -37,14 +37,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let visible: Vec<(usize, &GraphLine)> = state
-        .graph
-        .lines
-        .iter()
-        .enumerate()
-        .skip(state.graph.scroll)
-        .take(inner.height as usize)
-        .collect();
+    // 見えている行だけを切り出す。添字は `scroll` からの相対で戻せる。
+    let start = state.graph.scroll.min(state.graph.lines.len());
+    let end = (start + inner.height as usize).min(state.graph.lines.len());
+    let visible = &state.graph.lines[start..end];
 
     let view = View {
         state,
@@ -53,16 +49,16 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         // 全行で最大を取ると、複雑な履歴で桁が育ち続ける。
         lanes: visible
             .iter()
-            .map(|(_, line)| line.row.cells.len())
+            .map(|line| line.row.cells.len())
             .max()
             .unwrap_or(0),
         palette: lanes::palette(&state.config.graph.colors),
-        ascii: state.config.graph.ascii,
     };
 
     let lines: Vec<Line> = visible
-        .into_iter()
-        .map(|(index, line)| view.commit_line(index, line))
+        .iter()
+        .enumerate()
+        .map(|(offset, line)| view.commit_line(start + offset, line))
         .collect();
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -76,7 +72,6 @@ struct View<'a> {
     /// 罫線に使うレーン数。
     lanes: usize,
     palette: Vec<Color>,
-    ascii: bool,
 }
 
 /// 行が 1 つも無いときに出す文言。
@@ -100,16 +95,16 @@ impl<'a> View<'a> {
         // `&self` より長い借用が要る。ラベルは `state` から借りて行に載せるため。
         let state = self.state;
         let labels = state.graph.refs.labels(line.commit.oid);
-        // 罫線・Oid・空白・ラベル 1 件あたり 4 つ・summary。詰め直しを起こさない
-        // 大きさで取る。
-        let mut spans = Vec::with_capacity(lanes::width(self.lanes) + 3 + labels.len() * 4);
-
-        spans.extend(lanes::spans(
+        // 罫線をそのまま土台にする。Oid・空白・ラベル 1 件あたり 4 つ・summary の
+        // ぶんを足して、詰め直しを起こさない大きさにする。
+        let mut spans: Vec<Span<'a>> = lanes::spans(
             &line.row,
             self.lanes,
             &self.palette,
-            self.ascii,
-        ));
+            state.config.graph.ascii,
+        );
+        spans.reserve(3 + labels.len() * 4);
+
         spans.push(Span::styled(
             short_oid(line),
             Style::default().add_modifier(Modifier::DIM),
@@ -367,13 +362,20 @@ mod tests {
         );
     }
 
+    /// テストで描く履歴のレーン数。どのケースも 2 本に収まる。
+    const LANES: usize = 2;
+
     /// 罫線の桁だけを切り出す。行頭の 1 桁はペインの枠。
-    fn art(lines: &[String], row: usize, lanes: usize) -> String {
-        lines[row].chars().skip(1).take(lanes * 2).collect()
+    fn art(lines: &[String], row: usize) -> String {
+        lines[row]
+            .chars()
+            .skip(1)
+            .take(lanes::width(LANES))
+            .collect()
     }
 
-    /// 枠 1 桁 + 罫線 4 桁のうしろから本文が始まる。
-    const TEXT_COLUMN: usize = 5;
+    /// 枠 1 桁 + 罫線のうしろから本文が始まる。
+    const TEXT_COLUMN: usize = 1 + lanes::width(LANES);
 
     /// マージのあるコミット列。`graph::lane::tests` の
     /// `a_merge_opens_a_lane_for_its_second_parent` と同じ形。
@@ -387,24 +389,25 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        assert_eq!(art(&lines, 2, 2), "○─╮ ");
-        assert_eq!(art(&lines, 3, 2), "● │ ");
-        assert_eq!(art(&lines, 4, 2), "│ ● ");
-        assert_eq!(art(&lines, 5, 2), "●─╯ ");
+        assert_eq!(art(&lines, 2), "○─╮ ");
+        assert_eq!(art(&lines, 3), "● │ ");
+        assert_eq!(art(&lines, 4), "│ ● ");
+        assert_eq!(art(&lines, 5), "●─╯ ");
     }
 
     #[test]
     fn a_second_parent_waiting_on_the_left_draws_a_line_back_to_it() {
-        // `graph::lane::tests` の
-        // `a_second_parent_that_is_already_waiting_is_reached_by_a_line` と同じ形。
+        // `├`（`Through` + `Right`）を通す唯一のケース。`MERGE` では出ない。
+        // 形は `graph::lane::tests` の
+        // `a_second_parent_that_is_already_waiting_is_reached_by_a_line` と同じ。
         let state = state_with_history(&[(1, &[3]), (2, &[4, 3]), (4, &[3]), (3, &[])]);
 
         let lines = draw(&state, TermSize::default());
 
-        assert_eq!(art(&lines, 2, 2), "●   ");
-        assert_eq!(art(&lines, 3, 2), "├─○ ");
-        assert_eq!(art(&lines, 4, 2), "│ ● ");
-        assert_eq!(art(&lines, 5, 2), "●─╯ ");
+        assert_eq!(art(&lines, 2), "●   ");
+        assert_eq!(art(&lines, 3), "├─○ ");
+        assert_eq!(art(&lines, 4), "│ ● ");
+        assert_eq!(art(&lines, 5), "●─╯ ");
     }
 
     #[test]
@@ -414,9 +417,9 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        assert_eq!(art(&lines, 2, 2), "o-\\ ");
-        assert_eq!(art(&lines, 3, 2), "* | ");
-        assert_eq!(art(&lines, 5, 2), "*-/ ");
+        assert_eq!(art(&lines, 2), "o-\\ ");
+        assert_eq!(art(&lines, 3), "* | ");
+        assert_eq!(art(&lines, 5), "*-/ ");
     }
 
     #[test]

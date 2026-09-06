@@ -236,6 +236,17 @@ pub fn fake_commit(index: u8, summary: &str) -> Commit {
     }
 }
 
+/// 親を持つ [`fake_commit`]。親も索引で指す。
+///
+/// レーン割り当てを通すテストは `mewgit-core` と `mewgit-tui` の両方にあるので、
+/// 組み立てはここに置く。
+pub fn fake_commit_with_parents(index: u8, parents: &[u8], summary: &str) -> Commit {
+    Commit {
+        parents: parents.iter().copied().map(fake_oid).collect(),
+        ..fake_commit(index, summary)
+    }
+}
+
 /// `index` から作る Oid。実リポジトリの Oid とは重ならない。
 ///
 /// 親を持つコミットを組むときに要る（`Commit.parents` は Oid の並び）。

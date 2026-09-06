@@ -124,6 +124,12 @@ pub enum Horizontal {
 （`│→|`、`─→-`、`╮ ╭→\ /`、`╯ ╰→/ \`、`├ ┤ ┬ ┴ ┼→+`、`● ○→* o`）。
 `graph` 層は文字を持たないので、置換表は `ui` にしか無い。
 
+罫線の文字（U+2500 台）と `●` `○` は East Asian Ambiguous 幅で、曖昧幅を全角として
+描く端末（`ja_JP` などのロケールで iTerm2 の "Treat ambiguous-width characters as
+double width" を有効にした場合など）では 1 マスが 2 桁になる。ratatui は 1 桁として
+数えるので、その端末では Oid 以降が右にずれ、ペインの右枠が画面外へ出る。
+逃げ道は `ascii = true`。ロケールが UTF-8 でも起きるので、下の自動判定では拾えない。
+
 端末が UTF-8 かどうかの自動判定はまだ入れていない。入れるときは `Config::load()` が
 `LC_ALL` / `LC_CTYPE` / `LANG` を見て `graph.ascii` の既定を決める（08 の「読み込み順」
 手順 4。`ui` は環境変数を読まない）。M6 のタスク。

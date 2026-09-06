@@ -418,9 +418,8 @@ untracked の中身を出すようにしてあるので、これで新規ファ�
 - そのため **`diff_loaded` は必ず最後に `load_diff` を通る。** 採ったときも、採らな
   かったとき（対象違い・鮮度不足）も、続きの判断は同じ 1 箇所で行う
 
-`JobTracker` に世代を持たせれば `WorktreeState.stale` ごと畳める（`start` がジョブに
-世代を刻み、`finish` が「開始後に書き込みが入ったか」を返す形）が、それはこのタスク
-より大きい。`Freshness` はその局所版。
+`JobTracker` に世代を持たせれば `WorktreeState.stale` ごと畳める。**それは M3 の
+fetch で入れる**（下の「実行中ジョブ › 世代」）。`Freshness` はその局所版。
 
 **`Freshness` が `Fresh` でないあいだ、ハンク単位の stage / unstage / discard は
 理由を出して断る。** 古い `view` から組んだパッチは、内容の同じハンクが 2 つある
@@ -455,6 +454,59 @@ impl AppState {
 登録は `update` の出口（`issue`）で行う。ランタイムの `dispatch` が `AppState` に
 書いてよいのは `notices` だけなので、そちらでは登録できない。`Batch` は中身を 1 つずつ
 判定する。まとめて弾くと、同種が走っている `Cmd` 1 つのために他の `Cmd` まで落ちる。
+
+### 世代（M3 の fetch で入れる）
+
+**粒度が種別単位であることの影響は 2 つあり、別々の問題として扱う。**
+
+| | 問題 | いまの解 |
+|---|---|---|
+| (a) | 同種が走っていると**要求が落ちる** | 返信が届いた場所で必ず頼み直す（`diff_loaded` の出口、`status_loaded` の `WorktreeState.stale`） |
+| (b) | 書き込みで**持っている値が古くなる** | `WorktreeState.stale`、`DiffState.freshness` |
+
+**世代（epoch）が解くのは (b) だけ。** (a) を解くには `JobKind` が対象
+（`DiffTarget` など）まで持つ必要があり、それは別の変更。世代を入れても (a) は残る。
+
+```rust
+pub struct JobTracker {
+    /// 書き込み（`ExecFinished`）が起きた回数。持っている値の鮮度の基準。
+    writes: u64,
+    ...
+}
+
+impl JobTracker {
+    /// 書き込みが 1 つ終わった。以後の `start` は新しい世代を刻む。
+    pub fn advance(&mut self);
+    /// 走らせたジョブの世代。`finish` が返すので、届いた返信がいつ頼まれたものかが判る。
+    pub fn finish(&mut self, kind: JobKind) -> u64;
+    /// いまの世代。持っている値がこれと同じなら最新。
+    pub fn epoch(&self) -> u64;
+}
+```
+
+- **刻むのは `AppState::issue`**（`start` の場所）。`dispatch` が `AppState` に書ける
+  範囲を広げずに済む
+- **リーダースレッドには何も足さない。** 世代は `Msg` ではなく `JobTracker` が持ち、
+  `finish` が返す。`Cmd` / `Msg` の形は変わらない
+- **失敗した書き込みでも世代を進める。** `git apply` が途中で落ちても index は動いて
+  いることがある（いまの `exec_finished` も成否を問わず `Stale` にしている）
+
+**畳めるもの**: `DiffState.freshness`（`Fresh` = `view.epoch == epoch()`、
+`Asked` = 走っているジョブの世代が最新、`Stale` = どちらでもない）と
+`WorktreeState.stale`（`status_loaded` での比較 1 本になる）。`DiffView` は読めた
+世代を持つ。
+
+**畳めないもの**: `DiffState.failed` と `GraphState.load_failed` は「失敗の記憶」で
+鮮度ではない。`Msg::CommitDetailLoaded` が Oid を運ぶ形も残す。**値そのものが鍵を
+持っているなら、そちらのほうが強い**（世代は「リポジトリが変わった」しか言えず、
+「選択が動いた」を言えない）。
+
+**M2 では入れない。** 消費者が 2 つしか無く、畳んでも機能は増えない。M3 の fetch で
+3 人目（ref が変わったあとのログの読み直し）が出て、そこで初めて決められる判断が
+ある — **カウンタを 1 本にすると、どの書き込みも全部を無効化する。** diff は
+`status` と同じ規模なので毎回読み直してよいが、**ログはページングしているので全部
+読み直すと高い。**「世代を領域ごとに分けるか」「ログだけ別の方針にするか」は、
+fetch の実装で値段が見えてから決める。いま決めると推測になる。
 
 ## キー入力
 

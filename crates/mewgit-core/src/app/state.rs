@@ -467,8 +467,8 @@ pub struct DiffState {
 /// **対象は持たない。** 書き込みの時点では `clamp` がまだで、そのとき選ばれている
 /// ファイルが読み直しの対象になるとは限らない。
 ///
-/// `JobTracker` に世代を持たせれば [`WorktreeState::stale`] ごと畳めるが、それは
-/// このタスクより大きい。ここはその局所版。
+/// `JobTracker` に世代を持たせれば [`WorktreeState::stale`] ごと畳める。**それは
+/// M3 の fetch で入れる**（01 の「実行中ジョブ › 世代」）。ここはその局所版。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Freshness {
     /// 書き込みより後の diff を持っている（書き込みがまだ無いときも含む）。

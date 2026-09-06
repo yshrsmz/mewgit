@@ -43,6 +43,10 @@
 - [ ] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト
 - [ ] fetch / pull / push の `GitOp`、`-u` 提案、force push 確認（`expected` の受け渡し）、
       ssh のパスフレーズで固まる件の扱い（`BatchMode` と `core.sshCommand`。03 参照）
+- [ ] `JobTracker` に世代を持たせ、`DiffState.freshness` と `WorktreeState.stale` を
+      畳む。fetch で ref が変わったあとのログの読み直しも同じ経路に乗せる
+      （01 の「実行中ジョブ › 世代」）。**カウンタを 1 本にするとログまで毎回
+      読み直すことになるので、領域ごとに分けるかはここで決める**
 - [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文
 - [ ] 実行中ジョブのスピナーとキャンセル
 

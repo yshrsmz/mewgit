@@ -1,6 +1,6 @@
 //! diff とハンク分割。設計は `docs/design/02-git-read.md` の「diff とハンク」。
 
-use git2::{DiffLineType, DiffOptions, ErrorCode, Patch, Tree};
+use git2::{DiffFindOptions, DiffLineType, DiffOptions, ErrorCode, Patch, Tree};
 
 use super::{
     file_entry, lossy, DiffTarget, FileDiff, FileEntry, GitReadError, Hunk, HunkLine, LineOrigin,
@@ -55,7 +55,7 @@ impl RepoReader {
         };
 
         // `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの delta には効かない。
-        diff.find_similar(None)?;
+        diff.find_similar(Some(&mut find_options()))?;
         file_diffs(&diff)
     }
 
@@ -67,6 +67,24 @@ impl RepoReader {
             Err(err) => Err(err.into()),
         }
     }
+}
+
+/// rename 検出の設定。**`status` と同じ条件にするためのもの。**
+///
+/// `find_similar(None)` の既定とは 2 点で違う。
+///
+/// - `for_untracked` を立てる。ワークツリー上の rename（まだ `add` していない
+///   `git mv`）は「index から消えた + untracked で増えた」の 2 つの delta なので、
+///   これが無いと対にならない。`status` は `renames_index_to_workdir` で検出するため、
+///   立てないと同じファイルが status では 1 行の `Renamed`、`diff` では
+///   `Deleted` + `Untracked` の 2 件になる
+/// - `renames` を明示する。既定は `diff.renames` の設定を読むが、`status` の側は
+///   `StatusOptions` で無条件に有効にしている。設定で切っている環境だけ 2 つが
+///   食い違うことになる
+fn find_options() -> DiffFindOptions {
+    let mut options = DiffFindOptions::new();
+    options.renames(true).for_untracked(true);
+    options
 }
 
 /// diff をファイル単位の値型に落とす。

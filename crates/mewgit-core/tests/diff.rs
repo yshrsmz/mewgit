@@ -3,7 +3,9 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
-use mewgit_core::git_read::{DiffTarget, FileDiff, FileStatus, Hunk, LineOrigin, RepoReader};
+use mewgit_core::git_read::{
+    DiffTarget, FileDiff, FileEntry, FileStatus, Hunk, LineOrigin, RepoReader,
+};
 use mewgit_core::test_util::TestRepo;
 
 /// ファイルの並びを `(path, old_path, status)` にする。
@@ -17,6 +19,24 @@ fn files(diffs: &[FileDiff]) -> Vec<(&str, Option<&str>, FileStatus)> {
                     .as_deref()
                     .map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
                 file.status,
+            )
+        })
+        .collect()
+}
+
+/// [`files`] と同じ形で `WorktreeSnapshot` の区画を見る。`FileEntry` と `FileDiff` は
+/// 頭の 3 つが同じ値なので、`status` と `diff` の食い違いを直に比べられる。
+fn rows(entries: &[FileEntry]) -> Vec<(&str, Option<&str>, FileStatus)> {
+    entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.path.to_str().expect("パスが UTF-8 ではありません"),
+                entry
+                    .old_path
+                    .as_deref()
+                    .map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
+                entry.status,
             )
         })
         .collect()
@@ -132,6 +152,26 @@ fn head_vs_index_reports_a_rename_with_both_paths() {
         files(&diff),
         [("new.txt", Some("old.txt"), FileStatus::Renamed)]
     );
+}
+
+#[test]
+fn index_vs_worktree_agrees_with_status_on_a_worktree_rename() {
+    let repo = TestRepo::init();
+    repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");
+    // `add` していない `git mv`。index からは消え、untracked が 1 つ増えた状態。
+    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt")).unwrap();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let status = reader.status().unwrap();
+    let diff = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
+
+    // `for_untracked` が無いと、status は `Renamed` 1 行、diff は
+    // `Deleted` + `Untracked` の 2 件になって食い違う。
+    assert_eq!(
+        rows(&status.unstaged),
+        [("new.txt", Some("old.txt"), FileStatus::Renamed)]
+    );
+    assert_eq!(files(&diff), rows(&status.unstaged));
 }
 
 #[test]

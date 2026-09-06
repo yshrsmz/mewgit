@@ -277,11 +277,29 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
   untracked を選んでも diff が空になる
 - `path` での絞り込みは `disable_pathspec_match(true)` を付けて literal 扱いにする。既定では
   pathspec が glob なので、`[x].txt` や `a*b` という名前のファイルを選ぶと別のファイルが出る
+- **`path` で絞ると rename が検出されない。** pathspec は diff の生成時に効くので、
+  `find_similar` が対にすべき旧パスの delta が先に落ちる。1 ファイルに絞った rename は
+  `Renamed` ではなく「全行追加の `Added`」になり、`status` の一覧（`Renamed`）と食い違う。
+  `git diff -M -- <新パス>` も同じ挙動なので CLI とはずれないが、`StageHunk` のパッチを
+  この diff から組むと rename ではなく「ファイルの新規追加」を適用することになる。
+  絞らずに diff して `path` / `old_path` で `retain` すれば直るが、pathspec による walk の
+  枝刈り（libgit2 は `disable_pathspec_match` のとき pathspec を iterator の pathlist に
+  渡すので、走査そのものが縮む）を失う。**どちらを採るかは `ui::panes::diff` のタスクで
+  決める。** いまは `path` を渡す呼び出し側が無いので表に出ていない
 - rename 検出の `find_similar()` は `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの
   delta には効かない
+- **`find_similar()` の設定は `status` と揃える。既定（`None`）は使わない。**
+  `for_untracked` を立てないと、ワークツリー上の rename（まだ `add` していない `git mv`）が
+  「index から消えた + untracked で増えた」の 2 つの delta のままになる。`status` は
+  `renames_index_to_workdir` で 1 行の `Renamed` にするので、同じファイルの見え方が食い違う。
+  `renames` も明示する。既定は `diff.renames` の設定を読むが `status` 側は無条件に有効なので、
+  設定で切っている環境だけ 2 つがずれる
 - `Delta::Unmodified` / `Ignored` / `Unreadable` の delta は落とす。`FileStatus` に対応する
   変種が無く、この UI では出しても操作できない。`Patch::from_diff` が `None` を返すのも
-  この 3 つだけなので、パッチが作れない delta はそのまま飛ばしてよい
+  libgit2 が「出さない」と判断した delta だけなので、パッチが作れない delta はそのまま飛ばす。
+  ただし libgit2 のその判定には「`INCLUDE_UNTRACKED` が無いときの `Untracked`」も入る。
+  untracked を出す `IndexVsWorktree` が必ずそのフラグを立てているから飛ばして安全であって、
+  無条件に安全なわけではない
 - **`binary` は `Patch` を作ったあとの `patch.delta()` から読む。** libgit2 はバイナリ判定を
   パッチ生成のときに行うので、`Diff::get_delta` を先に読むと立っていないことがある。
   バイナリと「mode だけの変更」はどちらも `hunks` が空になるので、区別はこのフラグで付ける

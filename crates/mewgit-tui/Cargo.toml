@@ -18,8 +18,7 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 # `unstable-rendered-line-info` は `Paragraph::line_count`（折り返し後の行数）を
-# 開ける。自前の見積もりだと単語境界で折れたぶんを数え落とし、確認モーダルの
-# 本文の末尾が黙って切れる（07 の「モーダル」）。
+# 開ける。理由は 07 の「モーダル」。
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"

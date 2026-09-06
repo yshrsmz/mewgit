@@ -14,8 +14,8 @@ use crate::{modals, panes};
 use mewgit_core::app::{AppState, TermSize};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 /// 1 フレーム描く。
@@ -56,17 +56,17 @@ pub fn pane_block(title: String, focused: bool) -> Block<'static> {
     }
 }
 
-/// `paragraph` を幅 `width` で描いたときの行数。
+/// 折り返す `Paragraph` と、それを幅 `width` で描いたときの行数（07 の「モーダル」）。
 ///
-/// **表示幅から見積もらない。** `桁数 / 幅` の切り上げは単語境界で折れたぶんを
-/// 数え落とし、確認モーダルの本文の末尾が黙って切れる。`Paragraph::line_count` は
-/// 描画と同じ `WordWrapper` を通すので実測になる（`unstable-rendered-line-info` を
-/// 有効にしている。`Cargo.toml` 参照）。
-///
-/// **`block` を付けた `Paragraph` を渡さない。** `line_count` は枠の上下を足すので、
-/// 呼び出し側でも枠のぶんを足すと二重になる。
-pub fn wrapped_rows(paragraph: &Paragraph<'_>, width: u16) -> u16 {
-    u16::try_from(paragraph.line_count(width)).unwrap_or(u16::MAX)
+/// **測る `Paragraph` はここでしか組まない。** 測るときと描くときで `Wrap` の設定が
+/// ずれないようにするためと、枠を付けたまま測らせないため。`Paragraph::line_count` は
+/// 枠の上下を行数に足す一方、枠の左右ぶんを幅からは引かないので、枠付きで測ると
+/// 外側の幅で折り返した行数が返り、本文の末尾が切れる。枠のぶんは呼び出し側が
+/// `Block::inner` から出す。
+pub fn wrapped<'a>(text: impl Into<Text<'a>>, width: u16) -> (Paragraph<'a>, u16) {
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    let rows = u16::try_from(paragraph.line_count(width)).unwrap_or(u16::MAX);
+    (paragraph, rows)
 }
 
 /// 画面をヘッダ / 本文 / ステータスバーに割る。
@@ -143,29 +143,25 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{split, split_body, wrapped_rows};
+    use super::{split, split_body, wrapped};
     use crate::test_util::{draw, state_at, terminal_with};
     use mewgit_core::app::{NoticeLevel, Pane, TermSize};
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
-    use ratatui::widgets::{Paragraph, Wrap};
 
     #[test]
-    fn wrapped_rows_counts_the_line_that_word_wrapping_adds() {
-        // 30 桁の語 3 つで 92 桁。幅 58 で割った切り上げなら 2 行だが、語の途中で
+    fn wrapped_counts_the_line_that_word_wrapping_adds() {
+        // 30 桁の語 3 つで 92 桁。幅 58 で割った切り上げなら 2 行だが、語の途中では
         // 折れないので実際は 3 行になる。ここを見積もると本文の末尾が切れる。
         let words = format!("{} {} {}", "a".repeat(30), "b".repeat(30), "c".repeat(30));
-        let paragraph = Paragraph::new(words).wrap(Wrap { trim: false });
 
-        assert_eq!(wrapped_rows(&paragraph, 58), 3);
+        assert_eq!(wrapped(words, 58).1, 3);
     }
 
     #[test]
-    fn wrapped_rows_is_zero_at_zero_width() {
+    fn wrapped_is_zero_rows_at_zero_width() {
         // リサイズの途中で幅 0 が来る。`Constraint::Max(0)` に落ちるだけで済ませる。
-        let paragraph = Paragraph::new("何か").wrap(Wrap { trim: false });
-
-        assert_eq!(wrapped_rows(&paragraph, 0), 0);
+        assert_eq!(wrapped("何か", 0).1, 0);
     }
 
     /// ペインの枠の左上。座標は実際のレイアウトから出す。手で書くと、割り方を

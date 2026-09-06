@@ -137,10 +137,9 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     };
 
-    // 見出しの高さは折り返しを見込んで出し、メッセージのぶんは必ず残す。
-    let head = Paragraph::new(head_lines(detail)).wrap(Wrap { trim: false });
-    let head_rows =
-        ui::wrapped_rows(&head, inner.width).min(inner.height.saturating_sub(MIN_MESSAGE_ROWS));
+    // 見出しの高さは折り返し後の行数から出し、メッセージのぶんは必ず残す。
+    let (head, head_rows) = ui::wrapped(head_lines(detail), inner.width);
+    let head_rows = head_rows.min(inner.height.saturating_sub(MIN_MESSAGE_ROWS));
     let [head_area, message_area] =
         Layout::vertical([Constraint::Length(head_rows), Constraint::Min(0)]).areas(inner);
 

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::git_exec::{ExecError, GitOp};
 use crate::git_read::{
-    CommitDetail, FileEntry, GitReadError, HeadInfo, LogPage, Oid, WorktreeSection,
+    CommitDetail, FileEntry, FileStatus, GitReadError, LogPage, Oid, WorktreeSection,
     WorktreeSnapshot,
 };
 use crate::graph::LaneState;
@@ -362,18 +362,15 @@ enum Plan {
 
 /// 選択行に `action` を適用する。
 fn act(state: &mut AppState, action: Action) -> Cmd {
-    let Some((section, paths)) = state
+    let Some((section, status, paths)) = state
         .worktree
         .selected()
-        .map(|(section, entry)| (section, paths_of(entry)))
+        .map(|(section, entry)| (section, entry.status, paths_of(entry)))
     else {
         return Cmd::None;
     };
-    // `head` がまだ読めていない（起動直後）ときは `Discard` になる。unborn は稀で、
-    // 外した場合も `git` の stderr が通知に出る。
-    let unborn = matches!(state.repo.head, Some(HeadInfo::Unborn { .. }));
 
-    match plan(action, section, paths, unborn) {
+    match plan(action, section, status, paths) {
         Ok(Plan::Exec(op)) => Cmd::Exec(op),
         Ok(Plan::Confirm { title, body, op }) => {
             state.modal = Some(Modal::Confirm {
@@ -397,14 +394,18 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
 /// 足すときに同じ表をもう一度書くことになる。網羅 `match` なので、`WorktreeSection` に
 /// 区画を足すと実装漏れがコンパイルエラーになる。
 ///
-/// discard がどの `GitOp` になるかは区画と HEAD の状態で変わる（03 の
-/// 「discard は 3 変種」）。**この判断はここにしか無い。**`to_command` は純粋関数で
-/// どちらも見られない。
+/// discard がどの `GitOp` になるかは区画と変更種別で変わる（03 の「discard は 3 変種」）。
+/// **この判断はここにしか無い。**`to_command` は純粋関数でどちらも見られない。
+///
+/// **HEAD に無いか（`Added`）は `RepoInfo.head` では判断しない。** `head` は起動時に
+/// 1 回読んだきりで、外部でコミットされると古くなる。古い `Unborn` を信じて
+/// `DiscardAdded` を出すと、HEAD にあるファイルを `git rm --force` で消してしまう。
+/// `FileStatus` は `LoadStatus` が毎回運んでくるので、そちらで判断する。
 fn plan(
     action: Action,
     section: WorktreeSection,
+    status: FileStatus,
     paths: Vec<PathBuf>,
-    unborn: bool,
 ) -> Result<Plan, &'static str> {
     let names = names(&paths);
     match (action, section) {
@@ -426,11 +427,13 @@ fn plan(
             body: format!("{names} を削除します。元に戻せません。"),
             op: GitOp::DiscardUntracked(paths),
         }),
-        (Action::Discard, WorktreeSection::Staged | WorktreeSection::Unstaged) if unborn => {
+        // HEAD に無いファイル。`restore --source=HEAD` はコミットがまだ無いと落ちるが、
+        // `rm --force` は HEAD の有無に依らず同じ結果になる（03）。
+        (Action::Discard, WorktreeSection::Staged) if status == FileStatus::Added => {
             Ok(Plan::Confirm {
                 title: "変更を破棄",
-                body: format!("{names} を index からもワークツリーからも削除します。\nコミットがまだ無いので、戻す先がありません。元に戻せません。"),
-                op: GitOp::DiscardUnborn(paths),
+                body: format!("{names} を index からもワークツリーからも削除します。\nまだコミットに含まれていないので、戻す先がありません。元に戻せません。"),
+                op: GitOp::DiscardAdded(paths),
             })
         }
         (Action::Discard, WorktreeSection::Staged | WorktreeSection::Unstaged) => {
@@ -528,7 +531,7 @@ mod tests {
     use crate::app::{Modal, RepoInfo, TermSize};
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
-    use crate::git_read::{Commit, FileStatus, RefIndex, RefLabel, Remote};
+    use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
     use crate::test_util::{
         fake_commit, fake_commit_with_parents, fake_detail, fake_entry, fake_oid, fake_snapshot,
     };
@@ -735,10 +738,33 @@ mod tests {
     }
 
     #[test]
-    fn x_before_the_first_commit_uses_rm_instead_of_restore() {
-        // unborn HEAD では `restore --source=HEAD` が解決できずに落ちる（03）。
+    fn x_on_a_file_that_is_not_in_head_uses_rm_instead_of_restore() {
+        // `restore --source=HEAD` はコミットが 1 つも無いと解決できずに落ちる。
+        // `Added` なら HEAD の有無に依らず `rm --force` が同じ結果になる（03）。
         let mut state =
             worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
+        state.worktree.snapshot.staged[0].status = FileStatus::Added;
+
+        let _ = press(&mut state, 'x');
+
+        let Some(Modal::Confirm { on_yes, .. }) = &state.modal else {
+            panic!("確認モーダルが出ていません");
+        };
+        assert_eq!(
+            on_yes,
+            &Cmd::Exec(GitOp::DiscardAdded(vec!["a.txt".into()]))
+        );
+    }
+
+    #[test]
+    fn a_stale_unborn_head_does_not_turn_discard_into_a_delete() {
+        // `repo.head` は起動時に 1 回読んだきりなので、外部でコミットされると古くなる。
+        // 古い `Unborn` を信じて `rm --force` を出すと、HEAD にあるファイルが消える。
+        // 判断は `LoadStatus` が毎回運んでくる `FileStatus` で行う。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
         state.repo.head = Some(HeadInfo::Unborn {
             name: "main".to_string(),
         });
@@ -748,10 +774,7 @@ mod tests {
         let Some(Modal::Confirm { on_yes, .. }) = &state.modal else {
             panic!("確認モーダルが出ていません");
         };
-        assert_eq!(
-            on_yes,
-            &Cmd::Exec(GitOp::DiscardUnborn(vec!["a.txt".into()]))
-        );
+        assert_eq!(on_yes, &Cmd::Exec(GitOp::Discard(vec!["a.txt".into()])));
     }
 
     #[test]
@@ -760,23 +783,19 @@ mod tests {
         // インデントをリテラルの空白として残す。見た目は「staged」の前に空白が
         // 20 個並んだ確認文になるが、`contains` を見るテストは素通りする。
         let cases = [
-            (WorktreeSection::Untracked, false),
-            (WorktreeSection::Staged, true),
-            (WorktreeSection::Staged, false),
+            (WorktreeSection::Untracked, FileStatus::Untracked),
+            (WorktreeSection::Staged, FileStatus::Added),
+            (WorktreeSection::Staged, FileStatus::Modified),
         ];
 
-        for (section, unborn) in cases {
+        for (section, status) in cases {
             let mut state =
                 worktree_state(fake_snapshot(&["a.txt"], &["a.txt"], &["a.txt"]), section);
-            if unborn {
-                state.repo.head = Some(HeadInfo::Unborn {
-                    name: "main".to_string(),
-                });
-            }
+            state.worktree.snapshot.staged[0].status = status;
 
             let _ = press(&mut state, 'x');
             let Some(Modal::Confirm { body, .. }) = &state.modal else {
-                panic!("確認モーダルが出ていません: {section:?} unborn={unborn}");
+                panic!("確認モーダルが出ていません: {section:?} {status:?}");
             };
             for line in body.lines() {
                 assert_eq!(line, line.trim_start(), "行頭に空白がある: {body:?}");

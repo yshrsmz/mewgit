@@ -80,11 +80,12 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
             argv.extend(["clean".into(), "--force".into()]);
             push_paths(&mut argv, paths)?;
         }
-        // unborn HEAD では `restore --source=HEAD` が `could not resolve 'HEAD'` で
-        // 落ちる。`git rm --force` は index とワークツリーの両方から消え、HEAD が
-        // あるときに staged な `Added` へ `restore` を掛けた結果と同じになる
-        // （git 2.55 で確認）。`--quiet` は消したファイルの一覧を出させないため。
-        GitOp::DiscardUnborn(paths) => {
+        // HEAD に無いファイル専用。`restore --source=HEAD` はコミットが 1 つも
+        // 無いリポジトリで `could not resolve 'HEAD'` で落ちるが、`git rm --force` は
+        // 通り、しかも HEAD があるときに staged な `Added` へ `restore` を掛けた結果
+        // （index からもワークツリーからも消える）と同じになる（git 2.55 で確認）。
+        // `--quiet` は消したファイルの一覧を出させないため。
+        GitOp::DiscardAdded(paths) => {
             argv.extend(["rm".into(), "--force".into(), "--quiet".into()]);
             push_paths(&mut argv, paths)?;
         }
@@ -263,7 +264,7 @@ mod tests {
             GitOp::UnstageHunk { .. } => "UnstageHunk",
             GitOp::Discard(_) => "Discard",
             GitOp::DiscardUntracked(_) => "DiscardUntracked",
-            GitOp::DiscardUnborn(_) => "DiscardUnborn",
+            GitOp::DiscardAdded(_) => "DiscardAdded",
             GitOp::Commit { .. } => "Commit",
             GitOp::BranchCreate { .. } => "BranchCreate",
             GitOp::Checkout(_) => "Checkout",
@@ -335,7 +336,7 @@ mod tests {
                 vec!["clean", "--force", "--", "new.txt"],
             ),
             (
-                GitOp::DiscardUnborn(vec!["a.txt".into()]),
+                GitOp::DiscardAdded(vec!["a.txt".into()]),
                 vec!["rm", "--force", "--quiet", "--", "a.txt"],
             ),
             (
@@ -586,7 +587,7 @@ mod tests {
             GitOp::Unstage(Vec::new()),
             GitOp::Discard(Vec::new()),
             GitOp::DiscardUntracked(Vec::new()),
-            GitOp::DiscardUnborn(Vec::new()),
+            GitOp::DiscardAdded(Vec::new()),
             GitOp::StashPush {
                 message: None,
                 include_untracked: false,

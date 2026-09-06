@@ -5,13 +5,13 @@
 
 use mewgit_core::app::{AppState, GraphLine, GraphState, JobKind, Pane};
 use mewgit_core::git_read::{CommitDetail, Oid, RefLabel, Signature, Timestamp};
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::ui::{lanes, theme, time};
+use crate::ui::{self, lanes, theme, time};
 
 /// 短縮 Oid の桁数。`git log --oneline` と同じ。
 const SHORT_OID: usize = 7;
@@ -27,9 +27,17 @@ const MIN_GRAPH_ROWS: u16 = 3;
 /// 出さない。1 行だけ取ると区切り線で埋まり、グラフの行を 1 つ失って何も出ない。
 const MIN_DETAIL_ROWS: u16 = 4;
 
+/// 詳細のうち、メッセージに必ず残す行数。
+///
+/// 見出しは幅が狭いと折り返して伸びる（80 桁ではグラフペインが 46 桁になり、
+/// `Author: 名前 <メール>  日時` が 3 行になる）。1 つの `Paragraph` にまとめると、
+/// 伸びたぶんメッセージが下から押し出されて**本文が 1 行も見えなくなる**。先に
+/// メッセージの領域を取り、足りないときは見出しのほうを切る。
+const MIN_MESSAGE_ROWS: u16 = 3;
+
 /// ペインの枠。`focused` はフォーカスの強調だけに効き、内側の大きさは変えない。
 fn block(focused: bool) -> Block<'static> {
-    crate::ui::pane_block("Graph".to_string(), focused)
+    ui::pane_block("Graph".to_string(), focused)
 }
 
 /// 詳細の領域を取るか。
@@ -122,14 +130,26 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines = match state.graph.fresh_detail() {
-        Some(detail) => detail_lines(detail, inner.height as usize),
+    let Some(detail) = state.graph.fresh_detail() else {
         // カーソルの指すコミットのものが無い。届いていないのか失敗したのかは
         // `JobTracker` が知っている（07 の「詳細の展開」）。
-        None => vec![Line::raw(detail_placeholder(state))],
+        frame.render_widget(Paragraph::new(detail_placeholder(state)), inner);
+        return;
     };
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // 見出しの高さは折り返しを見込んで出し、メッセージのぶんは必ず残す。
+    let head = head_lines(detail);
+    let head_rows =
+        ui::wrapped_rows(&head, inner.width).min(inner.height.saturating_sub(MIN_MESSAGE_ROWS));
+    let [head_area, message_area] =
+        Layout::vertical([Constraint::Length(head_rows), Constraint::Min(0)]).areas(inner);
+
+    frame.render_widget(Paragraph::new(head).wrap(Wrap { trim: false }), head_area);
+    frame.render_widget(
+        Paragraph::new(message_lines(detail, message_area.height as usize))
+            .wrap(Wrap { trim: false }),
+        message_area,
+    );
 }
 
 /// 詳細がまだ無いときの文言。空のグラフの出し分けと同じ形。
@@ -141,13 +161,8 @@ fn detail_placeholder(state: &AppState) -> &'static str {
     }
 }
 
-/// 詳細の中身。`git show` の見出しに近い並びにする。
-///
-/// `rows` は描ける行数。メッセージはそこまでで打ち切る。1 行が折り返しで 2 行以上に
-/// なることはあっても 0 行になることはないので、見える行を落とすことはない。マージや
-/// revert の本文は数百行になることがあり、全部組むと毎フレームその数だけ `Line` を
-/// 作ることになる。
-fn detail_lines(detail: &CommitDetail, rows: usize) -> Vec<Line<'_>> {
+/// 詳細の見出し。`git show` の並びに近づける。
+fn head_lines(detail: &CommitDetail) -> Vec<Line<'_>> {
     let mut lines = vec![
         Line::from(Span::styled(
             format!("commit {}", detail.oid),
@@ -163,14 +178,16 @@ fn detail_lines(detail: &CommitDetail, rows: usize) -> Vec<Line<'_>> {
     }
 
     lines.push(Line::raw(""));
-    lines.extend(
-        detail
-            .message
-            .lines()
-            .take(rows.saturating_sub(lines.len()))
-            .map(Line::raw),
-    );
     lines
+}
+
+/// メッセージ全文。`rows` は描ける行数で、そこまでで打ち切る。
+///
+/// 1 行が折り返しで 2 行以上になることはあっても 0 行になることはないので、見える行を
+/// 落とすことはない。マージや revert の本文は数百行になることがあり、全部組むと毎
+/// フレームその数だけ `Line` を作ることになる。
+fn message_lines(detail: &CommitDetail, rows: usize) -> Vec<Line<'_>> {
+    detail.message.lines().take(rows).map(Line::raw).collect()
 }
 
 /// `Author: name <mail>  2026-09-06 15:35:55 +0900`。
@@ -634,6 +651,19 @@ mod tests {
             "詳細を出しても行数が減っていません: {collapsed} -> {expanded}"
         );
         assert_eq!(collapsed - expanded, DETAIL_ROWS as usize);
+    }
+
+    #[test]
+    fn the_message_survives_a_narrow_pane() {
+        // 80 桁だとグラフペインは 46 桁で、見出しが折り返して 10 行を埋める。
+        // 1 つの Paragraph にまとめていると本文が 1 行も見えなくなる。
+        let detail = fake_detail(0, "subject line\n\nbody line");
+        let state = expanded_with(&["subject line"], detail);
+
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(text.contains("subject line"), "{text}");
+        assert!(text.contains("body line"), "{text}");
     }
 
     #[test]

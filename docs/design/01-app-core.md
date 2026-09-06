@@ -262,10 +262,13 @@ pub struct WorktreeState {
 - stage / unstage / discard が渡すパスは `FileEntry` から出す。**rename は旧パスと
   新パスの両方を載せる**（`git add -- <old> <new>` は旧パスの削除も index に入る。
   staged rename の unstage も両方要る。02 の `old_path`）
-- discard は区画と HEAD の状態で `GitOp` が変わる（03 の「discard は 3 変種」）。
-  Untracked なら `DiscardUntracked`、`HeadInfo::Unborn` なら `DiscardUnborn`、
-  それ以外は `Discard`。**判断はここにしか無い。**`to_command` は純粋関数で
-  どちらも見られない
+- discard は区画と変更種別で `GitOp` が変わる（03 の「discard は 3 変種」）。
+  Untracked なら `DiscardUntracked`、staged の `Added`（= HEAD に無い）なら
+  `DiscardAdded`、それ以外は `Discard`。**判断はここにしか無い。**`to_command` は
+  純粋関数でどちらも見られない。**`RepoInfo.head` では判断しない。** あれは起動時に
+  1 回読むきりで外部のコミットで古くなり、古い `Unborn` を信じると HEAD にある
+  ファイルを `git rm --force` で消してしまう。`FileStatus` なら `LoadStatus` が
+  毎回運んでくる
 - Conflicted の行では stage / unstage / discard を出さない。解消ビューは MVP 外で、
   中途半端に `git add` だけ通すと「解消した」と誤解させる
 

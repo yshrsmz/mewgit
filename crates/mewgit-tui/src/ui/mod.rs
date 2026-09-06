@@ -56,6 +56,23 @@ pub fn pane_block(title: String, focused: bool) -> Block<'static> {
     }
 }
 
+/// `lines` を幅 `width` で折り返したときの行数。
+///
+/// ratatui の折り返し行数（`Paragraph::line_count`）は unstable feature の後ろに
+/// あるので、表示幅から見積もる。単語の途中で折れないぶん実際はもう 1 行増える
+/// ことがあるので、**これを使う側は「見積もりが 1 行足りなくても壊れない」形に
+/// する**（確認モーダルはキーの案内を別の領域に、コミット詳細はメッセージの
+/// 領域を先に確保する）。
+pub fn wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    lines
+        .iter()
+        .map(|line| (line.width() as u16).div_ceil(width).max(1))
+        .sum()
+}
+
 /// 画面をヘッダ / 本文 / ステータスバーに割る。
 fn split(area: Rect) -> [Rect; 3] {
     Layout::vertical([

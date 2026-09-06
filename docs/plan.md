@@ -30,7 +30,8 @@
 ## M3: リモート
 
 - [ ] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト
-- [ ] fetch / pull / push の `GitOp`、`-u` 提案、force push 確認
+- [ ] fetch / pull / push の `GitOp`、`-u` 提案、force push 確認（`expected` の受け渡し）、
+      ssh のパスフレーズで固まる件の扱い（`BatchMode` と `core.sshCommand`。03 参照）
 - [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文
 - [ ] 実行中ジョブのスピナーとキャンセル
 

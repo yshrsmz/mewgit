@@ -55,7 +55,7 @@ crates/
     app/        state.rs  msg.rs  update.rs  cmd.rs
     graph/      lane.rs
     git_read/   repo.rs   log.rs  diff.rs  status.rs
-    git_exec/   runner.rs rebase.rs
+    git_exec/   argv.rs   runner.rs rebase.rs
     github/     client.rs pr.rs   checks.rs
     auth/       gh.rs     resolve.rs ssh.rs
     config/     mod.rs

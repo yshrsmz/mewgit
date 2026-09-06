@@ -120,9 +120,14 @@ pub enum Horizontal {
 
 ## ASCII フォールバック
 
-`config.graph.ascii = true` または端末が UTF-8 でないとき、`ui` 側で罫線を ASCII に置き換える
+`config.graph.ascii = true` のとき、`ui` 側で罫線を ASCII に置き換える
 （`│→|`、`─→-`、`╮ ╭→\ /`、`╯ ╰→/ \`、`├ ┤ ┬ ┴ ┼→+`、`● ○→* o`）。
 `graph` 層は文字を持たないので、置換表は `ui` にしか無い。
+
+端末が UTF-8 かどうかの自動判定はまだ入れていない。`ui` は環境変数を読めない
+（不変ルール 2）ので、`main.rs` が `LC_ALL` / `LC_CTYPE` / `LANG` を見て
+`config.graph.ascii` を立てる配線になる。起動時に `Config` を書き換える経路が
+できる M6 で入れる。
 
 ## テスト
 

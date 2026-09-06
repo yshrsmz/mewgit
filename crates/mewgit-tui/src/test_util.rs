@@ -3,8 +3,8 @@
 
 use mewgit_core::app::{update, AppState, Msg, RepoInfo, TermSize};
 use mewgit_core::config::Config;
-use mewgit_core::git_read::LogPage;
-use mewgit_core::test_util::fake_commit;
+use mewgit_core::git_read::{Commit, LogPage};
+use mewgit_core::test_util::{fake_commit, fake_oid};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -15,13 +15,23 @@ use crate::ui;
 /// `TestBackend` の `Display` を使う。自前でセルを走査すると全角文字の 2 セル目が
 /// 空白として混ざる（「新しい通知」→「新 し い 通 知」）が、`Display` は幅を見て
 /// 正しく詰めてくれる。スタイルを見たいときは [`terminal_with`] を使う。
+///
+/// `Display` は 1 行を `"` で囲むので外す。付いたままだと文字列上の桁が
+/// バッファの x 座標と 1 つずれ、桁を見るテストが読みにくくなる。
 pub fn draw(state: &AppState, size: TermSize) -> Vec<String> {
     terminal_with(state, size)
         .backend()
         .to_string()
         .lines()
-        .map(str::to_string)
+        .map(|line| unquote(line).to_string())
         .collect()
+}
+
+/// 前後の `"` を 1 つずつ落とす。
+fn unquote(line: &str) -> &str {
+    line.strip_prefix('"')
+        .and_then(|line| line.strip_suffix('"'))
+        .unwrap_or(line)
 }
 
 /// 1 フレーム描いた `TestBackend` を返す。バッファのスタイルを見るとき用。
@@ -42,20 +52,40 @@ pub fn state_at(path: &str) -> AppState {
     )
 }
 
-/// 与えた summary のコミットを新しい順に積んだ状態。
+/// 与えた summary のコミットを新しい順に積んだ状態。親は持たない。
+pub fn state_with_commits(summaries: &[&str]) -> AppState {
+    let commits = summaries
+        .iter()
+        .enumerate()
+        .map(|(index, summary)| fake_commit(index as u8, summary))
+        .collect();
+    state_with_log(commits)
+}
+
+/// `(索引, 親の索引)` の並びからコミットを組んで積んだ状態。並びは新しい順。
+///
+/// レーンのある行を描くのに使う。oid は索引から作る（`fake_oid`）。
+pub fn state_with_history(history: &[(u8, &[u8])]) -> AppState {
+    let commits = history
+        .iter()
+        .map(|(index, parents)| Commit {
+            parents: parents.iter().copied().map(fake_oid).collect(),
+            ..fake_commit(*index, "summary")
+        })
+        .collect();
+    state_with_log(commits)
+}
+
+/// コミット列を 1 ページとして積んだ状態。
 ///
 /// 実リポジトリを作らない。描画のテストが `git` の挙動で落ちないようにするため。
 /// `viewport` は 24 行の端末で描くときのグラフの行数に合わせる。
-pub fn state_with_commits(summaries: &[&str]) -> AppState {
+pub fn state_with_log(commits: Vec<Commit>) -> AppState {
     let mut state = state_at("/repo");
     state.graph.viewport = ui::graph_rows(TermSize::default());
 
     let page = LogPage {
-        commits: summaries
-            .iter()
-            .enumerate()
-            .map(|(index, summary)| fake_commit(index as u8, summary))
-            .collect(),
+        commits,
         done: true,
     };
     update(&mut state, Msg::LogLoaded(Ok(page)));

@@ -164,18 +164,14 @@ fn connect(cells: &mut Vec<Cell>, from: usize, to: usize, color: ColorId) {
 mod tests {
     use super::*;
     use crate::graph::Horizontal;
-    use crate::test_util::fake_commit;
+    use crate::test_util::{fake_commit, fake_oid};
 
     /// `parents` を持つコミット。oid は添字から作る（`fake_commit`）。
     fn commit(index: u8, parents: &[u8]) -> Commit {
         Commit {
-            parents: parents.iter().map(|&index| oid(index)).collect(),
+            parents: parents.iter().copied().map(fake_oid).collect(),
             ..fake_commit(index, "")
         }
-    }
-
-    fn oid(index: u8) -> Oid {
-        fake_commit(index, "").oid
     }
 
     /// 行を文字にして並べる。期待値を読める形にするためのテスト専用レンダラ。

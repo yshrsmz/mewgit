@@ -224,10 +224,8 @@ impl BareRepo {
 ///
 /// `index` が Oid の最下位バイトになるので、同じ `index` なら常に同じ Oid。
 pub fn fake_commit(index: u8, summary: &str) -> Commit {
-    let mut bytes = [0u8; 20];
-    bytes[19] = index;
     Commit {
-        oid: Oid::from_bytes(&bytes).expect("20 バイトなので Oid になる"),
+        oid: fake_oid(index),
         parents: Vec::new(),
         summary: summary.to_string(),
         author: Signature {
@@ -236,4 +234,13 @@ pub fn fake_commit(index: u8, summary: &str) -> Commit {
         },
         time: 0,
     }
+}
+
+/// `index` から作る Oid。実リポジトリの Oid とは重ならない。
+///
+/// 親を持つコミットを組むときに要る（`Commit.parents` は Oid の並び）。
+pub fn fake_oid(index: u8) -> Oid {
+    let mut bytes = [0u8; 20];
+    bytes[19] = index;
+    Oid::from_bytes(&bytes).expect("20 バイトなので Oid になる")
 }

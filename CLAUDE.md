@@ -64,6 +64,15 @@ python3 scripts/screen.py out.txt 80 24
 
 キーは `printf` で送る。raw mode では Enter は `\r`（`\n` ではない）。
 
+**確認用の一時リポジトリは `env -i` で環境を切って作る。** `GIT_CONFIG_NOSYSTEM` などの
+ために `HOME` をそのリポジトリに向けたまま python などを走らせると、macOS が
+`Library/Caches/...` を作って untracked に何十件も混ざり、画面の確認ができなくなる。
+
+```
+env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  sh -c "cd <dir> && git init -q -b main . && ..."
+```
+
 ## コーディング規約
 
 - Rust 2021、`rustfmt` 既定設定。`clippy` の警告ゼロを維持
@@ -81,12 +90,23 @@ python3 scripts/screen.py out.txt 80 24
 - **`AppState` にコールバック（関数ポインタ・クロージャ）を持たせない。** 確定後に何を
   するかは `Cmd` かデータの enum で表す。関数ポインタは環境をキャプチャできず文脈を
   運べないうえ、状態が `PartialEq` を失って遷移をテストできなくなる
+- **共有先に寄せるときは、その基盤の暗黙の前提が新しい利用者にも成り立つかを確かめる。**
+  `ui::window` は「カーソルが自己完結した 1 行」を前提にしていて、ハンクという塊を指す
+  Diff ペインでは見出しが窓の下端に来て本文が 1 行も見えなかった。**doc コメントに
+  「2 つのペインで同じものを使う」と利点として書いたことが、前提が壊れている事実を
+  隠していた。** 共有を主張する文を書くときは、そこに前提を並べて数える
 
 ## テスト
 
 **テストなしで機能を追加しない。** 実装と同じコミットにテストを含める。`docs/plan.md` のタスクにチェックを付ける条件は、そのタスクの振る舞いを覆うテストが通っていること。
 
 - テストが書きにくい設計になっていたら、テストを省くのではなく設計を直す（`docs/design/` を先に更新する）
+- **テストで踏めない状態をコードに入れない。** 設計書に書いた状態でも、いまの機能では
+  到達経路が無いなら入れず、送り先と理由を設計書に書いて次のタスクへ送る（`DiffState.stale`
+  はハンク単位の書き込みが入るまで踏めないので送った）
+- **「この見張りは本当に落ちるか」を実装を壊して確かめるとき、`cargo test --workspace` は
+  最初に失敗したターゲットで打ち切る。** 後続クレートの結果が出ないまま「落ちなかった」と
+  誤読する。`--no-fail-fast` を付けるか、`-p <crate> --lib <テスト名>` で対象を絞る
 - `mewgit-core` の git 系は `tempfile` に実リポジトリを作って統合テスト。helper は
   `crates/mewgit-core/src/test_util.rs` の `TestRepo`。`test-util` feature でのみコンパイル
   され、`mewgit-core` は自分自身を dev-dependency に書いて有効にしている。ここを使う

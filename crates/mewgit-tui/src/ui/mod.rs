@@ -10,8 +10,11 @@ pub mod lanes;
 pub mod theme;
 pub mod time;
 
+use std::ops::Range;
+use std::path::Path;
+
 use crate::{modals, panes};
-use mewgit_core::app::{AppState, TermSize};
+use mewgit_core::app::{AppState, Pane, TermSize};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -24,7 +27,14 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let [left, right] = split_body(body);
 
     frame.render_widget(header_line(state), header);
-    panes::graph::render(frame, left, state);
+    // **左は Graph と Diff の差し替え。** どちらを描くかは `focus` だけで決まる（07）。
+    // 「いまどちらを見せているか」を別に持つと、`focus` と食い違う状態
+    // （Diff を見せているのにキーは Graph が受ける）が表現できてしまう。
+    if state.focus == Pane::Diff {
+        panes::diff::render(frame, left, state);
+    } else {
+        panes::graph::render(frame, left, state);
+    }
     panes::worktree::render(frame, right, state);
     frame.render_widget(status_line(state), status);
 
@@ -67,6 +77,61 @@ pub fn wrapped<'a>(text: impl Into<Text<'a>>, width: u16) -> (Paragraph<'a>, u16
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
     let rows = u16::try_from(paragraph.line_count(width)).unwrap_or(u16::MAX);
     (paragraph, rows)
+}
+
+/// 一覧のうち描く行の範囲。`must_show` が窓に入るまでずらす。
+///
+/// **カーソル行 1 行ではなく「必ず見せたい塊」を受ける。** カーソルが 1 行を指す
+/// ペイン（Worktree）は `cursor..cursor + 1` を渡し、塊を指すペイン（Diff のハンク）は
+/// 見出しから本文の末尾までを渡す。カーソル行だけを見る形にすると、ハンクの見出しが
+/// ちょうど窓の下端に来て**選んだハンクの本文が 1 行も見えない**（07 の「Diff ペイン」）。
+///
+/// 塊が窓より高いときは先頭を優先して残りを切る。
+///
+/// **スクロール位置を状態に持たない。** グラフ（01 の `scroll`）と違ってカーソルが
+/// 下端に貼り付く癖が残るが、そのために `Msg::Layout` にフィールドを足すのは M6
+/// （狭いレイアウト）と一緒にする（07）。
+pub fn window(len: usize, must_show: Range<usize>, height: usize) -> Range<usize> {
+    if height == 0 {
+        return 0..0;
+    }
+    // 塊の末尾が入る位置まで下げ、塊の先頭より下へは行かない。
+    let start = must_show
+        .start
+        .min(must_show.end.saturating_sub(height))
+        .min(len);
+    start..(start + height).min(len)
+}
+
+/// `must_show` が入る窓を切り出して描く。
+///
+/// 行の組み立てはペインごとに違うが、**切り出して描くところまでが 1 つ**。
+/// [`window`] だけを共有すると、その戻り値の使い方が各ペインに写る。
+///
+/// **折り返さない**（`Wrap` を付けない）。diff は桁の揃いが意味を持ち、一覧のパスも
+/// 折り返すと行とカーソルの対応が崩れる。
+pub fn render_rows(
+    frame: &mut Frame,
+    area: Rect,
+    mut lines: Vec<Line<'_>>,
+    must_show: Range<usize>,
+) {
+    let window = window(lines.len(), must_show, area.height as usize);
+    frame.render_widget(
+        Paragraph::new(lines.drain(window).collect::<Vec<_>>()),
+        area,
+    );
+}
+
+/// ファイルの表示名。rename は元の名前も出す。
+///
+/// `FileEntry`（Worktree ペイン）と `FileDiff`（Diff ペイン）は別の型だが、パスの
+/// 出し方は同じ。2 本に分けると片方だけ rename を落とす。
+pub fn path_label(path: &Path, old_path: Option<&Path>) -> String {
+    match old_path {
+        Some(old) => format!("{} -> {}", old.display(), path.display()),
+        None => path.display().to_string(),
+    }
 }
 
 /// 画面をヘッダ / 本文 / ステータスバーに割る。
@@ -143,7 +208,7 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{split, split_body, wrapped};
+    use super::{split, split_body, window, wrapped};
     use crate::test_util::{draw, state_at, terminal_with};
     use mewgit_core::app::{NoticeLevel, Pane, TermSize};
     use ratatui::layout::Rect;
@@ -164,8 +229,33 @@ mod tests {
         assert_eq!(wrapped("何か", 0).1, 0);
     }
 
-    /// ペインの枠の左上。座標は実際のレイアウトから出す。手で書くと、割り方を
+    #[test]
+    fn the_window_follows_a_single_row_past_the_bottom() {
+        // 窓に入っているあいだは先頭から。入らなくなったら見えるまでずらす。
+        assert_eq!(window(10, 0..1, 4), 0..4);
+        assert_eq!(window(10, 3..4, 4), 0..4);
+        assert_eq!(window(10, 4..5, 4), 1..5);
+        assert_eq!(window(10, 9..10, 4), 6..10);
+        // 行が窓より少ないときは全部出す。
+        assert_eq!(window(2, 1..2, 4), 0..2);
+        // 高さ 0 でも破綻しない（リサイズ中に起きる）。
+        assert_eq!(window(10, 5..6, 0), 0..0);
+    }
+
+    #[test]
+    fn the_window_shows_the_whole_block_not_just_its_first_row() {
+        // ハンクの見出しだけを窓に入れると、選んだハンクの本文が 1 行も見えない。
+        // 塊の末尾まで入る位置までずらす。
+        assert_eq!(window(20, 5..9, 4), 5..9);
+        assert_eq!(window(20, 8..12, 4), 8..12);
+        // 塊が窓より高いときは先頭を優先して残りを切る。
+        assert_eq!(window(20, 8..18, 4), 8..12);
+    }
+
+    /// ペインを描く領域の左上。座標は実際のレイアウトから出す。手で書くと、割り方を
     /// 変えたときにテストだけが古い桁を見て緑のまま無意味になる。
+    ///
+    /// **Graph と Diff は同じ領域を差し替えで使う**（07）ので、同じ座標を返す。
     fn corner(pane: Pane, size: TermSize) -> (u16, u16) {
         let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
         let [left, right] = split_body(body);
@@ -180,17 +270,38 @@ mod tests {
     fn the_focused_pane_is_the_only_one_with_a_bold_border() {
         // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
         let size = TermSize::default();
-        for focus in [Pane::Graph, Pane::Worktree] {
+        for &focus in Pane::FOCUSABLE {
             let mut state = state_at("/repo");
             state.focus = focus;
             let terminal = terminal_with(&state, size);
             let buffer = terminal.backend().buffer();
 
-            for pane in [Pane::Graph, Pane::Worktree] {
+            for &pane in Pane::FOCUSABLE {
                 let bold = buffer[corner(pane, size)].modifier.contains(Modifier::BOLD);
-                assert_eq!(bold, pane == focus, "focus={focus:?} pane={pane:?}");
+                // **`pane == focus` では見られない。** Graph と Diff は同じ領域なので、
+                // Diff にフォーカスがあるとき「Graph の枠」の座標には Diff の枠が
+                // 描かれている。太いかどうかはその領域にフォーカスがあるかで決まる。
+                let expected = corner(pane, size) == corner(focus, size);
+                assert_eq!(bold, expected, "focus={focus:?} pane={pane:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_left_area_swaps_between_the_graph_and_the_diff() {
+        let mut state = state_at("/repo");
+        let text = draw(&state, TermSize::default()).join("\n");
+        assert!(text.contains("Graph"), "{text}");
+
+        state.focus = Pane::Diff;
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        // 差し替えであって分割ではない。両方出すと 80 桁ではどちらも読めない。
+        assert!(!text.contains("Graph"), "{text}");
+        assert!(text.contains("Diff"), "{text}");
+        // **右のワーキングツリーは出したまま。** どのファイルを見ているかが一覧の側でも
+        // 判るようにする（07）。
+        assert!(text.contains("Working tree"), "{text}");
     }
 
     #[test]

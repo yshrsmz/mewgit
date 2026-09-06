@@ -25,9 +25,16 @@
 - [x] `git_exec::Runner` と `to_command` の全 `GitOp` テスト、`ExecErrorKind` の分類テスト
 - [x] `ui::panes::worktree` — フォーカス巡回、`Modal::Confirm`、`Runner` の配線、
       ファイル単位の stage / unstage / discard
-- [ ] `ui::panes::diff` — diff の表示とハンク単位の stage / unstage / discard。
-      `DiffTarget::Commit` をこのペインに出すかもここで決める（07 の「詳細の展開」）
-- [ ] `Modal::CommitMessage` と commit / amend
+- [ ] `ui::panes::diff` — 左の領域を Graph と差し替えて diff を出す経路と、その表示
+      （07 の「レイアウト」）。`Cmd::LoadDiff` の配線、`Msg::DiffLoaded` の `Result` 化、
+      `path` で絞った diff の rename（02）
+- [ ] ハンク単位の stage / unstage / discard — `GitOp::DiscardHunk`、ハンク → パッチの
+      組み立て（`git apply --cached` への round-trip テスト）
+- [ ] `Modal::CommitMessage` と commit / amend。グラフ先頭の WIP 行と、そこを選んだ
+      ときの右ペイン（staging）も一緒に入れる（07 の「どこまで実装したか」）
+- [ ] コミット詳細を右ペインへ移す。グラフ下の展開を廃止し、`shows_detail` /
+      `graph_rows` / `Msg::Layout` を単純にする。コミットに含まれるファイル一覧を
+      右に並べ、選ぶと左が `DiffTarget::Commit` の diff に差し替わる（07）
 - [ ] `ui::panes::branches` — 一覧、作成 / 切替 / 削除 / リネーム、`Modal::Confirm`
 
 ## M3: リモート

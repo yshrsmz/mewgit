@@ -11,7 +11,7 @@ pub struct AppState {
     pub account: AccountState,        // Resolved(login, host) | Degraded(reason) | Resolving
     pub graph: GraphState,            // 読込済みコミット、レーン、選択位置、スクロール
     pub worktree: WorktreeState,      // staged / unstaged / untracked と選択
-    pub diff: Option<DiffView>,       // 表示中の diff。target が何の diff かを示す
+    pub diff: DiffState,              // 表示中の diff と、その鮮度
     pub branches: BranchState,
     pub stashes: Vec<StashEntry>,
     pub prs: PrState,                 // 現ブランチ PR、一覧、チェック
@@ -43,12 +43,20 @@ host / owner / repo は `RepoInfo.target: Option<RepoTarget>` に入れる。下
 グラフで選んだコミットの diff もここに入る。何の diff かは `DiffView.target` が示す。
 
 ```rust
+pub struct DiffState {
+    pub view: Option<DiffView>,     // 届いている diff。未読込 / 失敗のときは None
+    pub failed: Option<DiffTarget>, // 直前に失敗した対象。同じ対象には出し直さない
+}
+
 pub struct DiffView {
     pub target: DiffTarget,
     pub files: Vec<FileDiff>,       // 02 の diff() の戻り値そのまま
     pub cursor: DiffCursor,         // (ファイル, ハンク)
 }
 ```
+
+**`failed` は `DiffView` の中には置けない。** 失敗したときは `view` が `None` なので、
+中に置くと印ごと消える。
 
 `Vec<Hunk>` に平坦化しない。`GitOp::StageHunk { path, patch }` に渡す `path` を
 復元できなくなるうえ、`DiffTarget` の `path` は全変種で `Option` なので複数ファイルに
@@ -87,6 +95,10 @@ pub enum Modal {
     Help,
 }
 ```
+
+巡回（`Pane::FOCUSABLE`）に入れるのは実装済みのペインだけ（07）。いまは `Graph` /
+`Worktree` / `Diff` の 3 つ。**`Pane::Diff` は左の領域を `Graph` と差し替えで使う**ので、
+どちらを描くかは `focus` だけで決まり、「いまどちらを見せているか」を別に持たない（07）。
 
 `Confirm` の `on_yes` は `Msg` ではなく `Cmd`。破壊的操作（force push、`branch -D`、
 discard、abort 系）はすべて `Cmd::Exec(GitOp)` で表せるので、専用の `Msg` 変種を
@@ -284,6 +296,85 @@ pub struct WorktreeState {
 無く、到着時には判定できない。そのため書き込みの側で「あとで頼み直す」と印を付ける。
 鍵を持てるようになるか、M3 で `Exec` をキューにするときに、この印は消える。
 
+### diff の遅延取得
+
+**`Pane::Diff` を見せているあいだだけ読む。** コミット詳細と同じで、見えていないものを
+読んでもリーダーを塞ぐだけ。左の領域を差し替えて出すので、見せているかは
+`focus == Pane::Diff` で判る（07）。
+
+**欲しい対象は `AppState::wanted_diff() -> Option<DiffTarget>` の 1 つで導く。**
+
+| 選んでいる行 | DiffTarget |
+|---|---|
+| Staged | `HeadVsIndex(Some(path))` |
+| Unstaged / Untracked | `IndexVsWorktree(Some(path))` |
+| Conflicted / 選択なし / Diff を見せていない | `None` |
+
+core（次に何を読むか）と `ui`（中身を描くか、読み込み中と出すか）が同じものを使う。
+
+**`ui` は `DiffState.view` を直に見ず、`DiffState::fresh_view(wanted)` を通す。**
+`GraphState::fresh_detail` と同じ形で、`view.target` が `wanted_diff()` と一致する
+ときだけ中身を返す。読む側で濾さないと、対象が変わってから届くまでのあいだ
+**別のファイルの diff をタイトルごと出したまま**になる（そのファイルの読み込みが
+失敗すると恒久的に残る）。`view` を読む消費者はこの古さをそのまま引き継ぐので、
+ハンク単位の stage を足すと「右で b.txt を選んでいるのに a.txt のハンクが stage
+される」になる。
+
+**代わりに `view` を消して回らない。** フォーカスの移動やカーソル移動のたびに `None`
+にすると、`Cmd::LoadDiff` の発行で避けた「腕ごとの特殊ケース」を消す側で作ることに
+なる。消さないことには利点もあって、同じファイルを開き直したときは読み直しが届くまで
+前の中身を出せる（「読み込み中…」が挟まらない）。
+
+「読み込み中」と「読み込めなかった」の出し分けも `DiffState::has_failed(wanted)` で
+直接見る。`jobs.is_running(LoadDiff)` の否定から消去法で導くと、`Cmd` の発行経路を
+変えたときに片方だけ直してもコンパイルもテストも通る。
+
+**カーソルを動かすのも `fresh_view_mut` を通す。** 濾さずに動かすと、画面に出て
+いない `view`（読み込み中・失敗中に残っているもの）のカーソルが黙って動く。
+
+**同じ対象を読み直したときはカーソルを持ち越す。** キャッシュしないので、開き直す
+たびに読み直しが届く。既定に戻すと、選んでいたハンクが先頭へ飛んでから操作が効く
+ことになる。読み直しでハンクが減っていることがあるので、持ち越したあとに選べる
+位置へ寄せ直す（`WorktreeState::clamp` と同じ役目）。**Untracked も `IndexVsWorktree`。** `git_read` が
+untracked の中身を出すようにしてあるので、これで新規ファイルの全行が `+` で並ぶ（02）。
+
+**`Cmd::LoadDiff` を出す場所は 3 つ。**
+
+- **フォーカスが変わった直後**（`update_key` の中で 1 回）。`Tab` / `Shift+Tab` の巡回でも、
+  Worktree の `Enter` でも、Diff の `Esc` でも、同じ 1 箇所を通る
+- `status_loaded` の `clamp` のあと。書き込みで選択が別の区画へ移ると対象が変わる
+- `diff_loaded` の追いつき
+
+`update_inner` の doc コメントにある「続きを頼む判断」の一覧に、この 3 つを足す。
+
+**`Tab` の腕や `Enter` の腕に個別に書かない。** フォーカスの巡回はペインより先に見る
+共通の経路（01 の「キー入力」）なので、そこに Diff 固有の判断を埋めると、あとから
+ペインを足したときに同じ特殊ケースが増える。`Enter` も「`focus` を `Diff` にする」
+だけを行い、読むかどうかは共通の出口が決める。`Esc` で出たときは `wanted_diff()` が
+`None` になるので、同じ出口を通っても何も出ない。
+
+**カーソル移動（`worktree` の `j` / `k`）では出さない。** Diff を見せているあいだは
+ワーキングツリーにフォーカスが無く、カーソルは動かない。
+
+**届いた diff が別の対象のものであることがある。** `DiffLoaded` が運ぶ `target` が
+`wanted_diff()` と違えば、そこでもう 1 回頼む。`CommitDetailLoaded` の追いつきと同じで、
+`JobTracker` の粒度は種別単位なので、要求が飛んでいるあいだの選択の移動は落とされる。
+
+**`view` をキャッシュとして使わない。** 「同じ対象を既に持っているなら読み直さない」に
+すると、対象は変わらないまま中身だけが変わった場合（ハンク単位で stage したときなど）に
+古い diff を出したままになる。それを避けるには `WorktreeState.stale` と同じ印が要るが、
+**ハンク単位の書き込みが入るまでその状態には到達できず、印を付けても踏むテストが
+書けない。** いまは `Pane::Diff` に入るたび、および `status` が届くたびに読み直す。
+ワーキングツリー全体の diff を作ってから絞る（02）ので安くはないが、`status` の
+読み取りと同じ規模で、しかもフォーカスの移動 1 回につき 1 度しか走らない。
+ハンク単位の書き込みを入れるときに、印と一緒にキャッシュを入れる。
+
+**`Err` から再発行してよいのは対象が違うときだけ。** `DiffState.failed` に失敗した対象を
+入れ、`wanted_diff()` がそれと同じなら出さない。`bool` にすると、失敗のあとに書き込みで
+対象だけが変わった（Unstaged → Staged）ときも塞いでしまう。`failed` を落とすのは
+読み込みの成功と、ワーキングツリーのカーソル移動（`GraphState.load_failed` と同じ）。
+移動して戻ってくれば 1 回だけ試し直せる。
+
 ## 実行中ジョブ
 
 `JobKind` は `Cmd` の変種と 1 対 1 なので、列挙を二重に持たず `Cmd` を単一の真実にする。
@@ -354,7 +445,7 @@ pub enum Msg {
     CommitDetailLoaded { oid: Oid, result: Box<Result<CommitDetail, GitReadError>> },
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
-    DiffLoaded { target: DiffTarget, files: Vec<FileDiff> },
+    DiffLoaded { target: DiffTarget, result: Box<Result<Vec<FileDiff>, GitReadError>> },
     // git_exec
     ExecFinished(Box<ExecDone>),       // { op, result, progress }
     ProgressDetected(Option<InProgressOp>),
@@ -396,7 +487,14 @@ pub enum Msg {
 一緒に運ぶ。** `Err` のときにどのコミットが失敗したのかを知る手掛かりがこれしかなく、
 無いと「別のコミットの失敗」と「いま見ているコミットの失敗」を区別できない。
 
-`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` と `StatusLoaded` は payload を `Box` に入れる。入れないと `Msg` が
+`DiffLoaded` も `Result` を運び、**要求した `target` を一緒に運ぶ**。`Result` にする
+理由は `LogLoaded` / `StatusLoaded` と同じで、失敗の通り道が無いと
+`JobKind::LoadDiff` が走ったまま残り、以後の `Cmd::LoadDiff` が黙って落ちる。
+`target` を運ぶ理由は `CommitDetailLoaded` の `oid` と同じで、`Err` のときに
+「どの対象が失敗したか」を知る手掛かりがこれしかない。加えて `Ok` でも、届いた
+diff がいま選んでいるファイルのものかを判定するのに要る。
+
+`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` と `StatusLoaded` と `DiffLoaded` は payload を `Box` に入れる。入れないと `Msg` が
 数百バイトになり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。
 これらを Box すると 96 バイトに収まる。上限は `msg.rs` のテスト（128 バイト）で見張る。
 

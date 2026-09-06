@@ -7,7 +7,7 @@
 //! `GitReadError::ReaderGone` はテストしていない。スレッドを外から落とす手段が無く
 //! （ハンドルが送信側を持つ限りループは終わらない）、公開 API から到達できないため。
 
-use mewgit_core::git_read::{GitReadError, HeadInfo, ReaderHandle};
+use mewgit_core::git_read::{DiffTarget, FileStatus, GitReadError, HeadInfo, ReaderHandle};
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
 /// テストリポジトリに対してリーダースレッドを起こす。
@@ -177,4 +177,48 @@ async fn concurrent_requests_from_clones_lose_nothing() {
     }
     summaries.sort();
     assert_eq!(summaries, ["commit 0", "commit 1", "commit 2", "commit 3"]);
+}
+
+#[tokio::test]
+async fn status_and_diff_come_back_through_the_thread() {
+    // 状態を持たない要求なので、見たいのは「スレッド越しでも同じ結果か」だけ。
+    // 分類とハンク分割の網羅は `status.rs` / `diff.rs` にある。
+    let repo = TestRepo::init();
+    repo.commit_file("file.txt", "one");
+    repo.write_worktree_file("file.txt", b"two\n");
+    let reader = spawn(&repo);
+
+    let status = reader.status().await.unwrap();
+    assert_eq!(status.unstaged.len(), 1);
+    assert_eq!(status.unstaged[0].status, FileStatus::Modified);
+
+    let diff = reader
+        .diff(DiffTarget::IndexVsWorktree(None))
+        .await
+        .unwrap();
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].path, status.unstaged[0].path);
+    assert_eq!(diff[0].hunks.len(), 1);
+}
+
+#[tokio::test]
+async fn diff_reports_a_missing_commit_as_an_error() {
+    // 失敗の通り道が無いと、ランタイムの `JobKind::LoadDiff` が走ったまま残る。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let reader = spawn(&repo);
+
+    let missing = mewgit_core::test_util::fake_oid(7);
+    let err = reader
+        .diff(DiffTarget::Commit {
+            oid: missing,
+            path: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, GitReadError::Git(_)),
+        "git のエラーになっていません: {err:?}"
+    );
 }

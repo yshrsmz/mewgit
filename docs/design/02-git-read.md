@@ -192,16 +192,136 @@ pub struct Timestamp { pub seconds: i64, pub offset_minutes: i32 }
   コミットの本文より重い。1 つの要求にまとめると本文だけ見たいときも diff の
   コストを払うことになる
 
-## diff とハンク
-
-- `DiffTarget = IndexVsWorktree(path) | HeadVsIndex(path) | Commit(oid, path) | Range(a, b, path)`
-- `git2::Diff` → `FileDiff { path, status, hunks: Vec<Hunk> }`
-- `Hunk` は元のヘッダ行と各行を保持し、`git_exec` がパッチとして再構成できる形にする
-
 ## ステータス
 
-- `StatusOptions` で untracked を含め、`recurse_untracked_dirs` を有効化
-- 結果を staged / unstaged / untracked / conflicted に分類
+```rust
+pub struct WorktreeSnapshot {
+    pub staged: Vec<FileEntry>,
+    pub unstaged: Vec<FileEntry>,
+    pub untracked: Vec<FileEntry>,
+    pub conflicted: Vec<FileEntry>,
+}
+
+pub struct FileEntry {
+    pub path: PathBuf,
+    /// rename のときだけ入る元のパス。
+    pub old_path: Option<PathBuf>,
+    pub status: FileStatus,
+}
+```
+
+- `StatusOptions` で untracked を含め、`recurse_untracked_dirs` を有効化する。無効だと
+  新しいディレクトリが 1 行にまとまり、中のファイルを個別に stage できない。ignored は含めない
+- rename 検出は `renames_head_to_index` / `renames_index_to_workdir` を有効にする。切ると
+  `git mv` が「削除 + 追加」の 2 行になり、`git status` の見え方と食い違う
+- 区画は delta の有無で決める。`head_to_index()` があれば staged、`index_to_workdir()` が
+  あれば unstaged（種別が `Untracked` ならそちら）。`CONFLICTED` が立っている entry だけは
+  例外で、conflicted にだけ入れて他の区画には出さない（解消するまで stage も unstage も
+  できない）。**同じファイルが staged と unstaged の両方に出るのは正しい**（一部だけ
+  stage した状態）
+- **変更種別は `Status` のビットではなく delta から決める。** ビットは同時に複数立つ
+  （`git mv` してから編集すると `RENAMED | MODIFIED`）が、どちらを採るかは libgit2 が
+  delta 側で既に解決している。ビットから決め直すと優先順の表が `diff` の写像と 2 本になり、
+  片方だけ直したときに静かにずれる
+- conflicted の delta は `index_to_workdir()` を先に見て、無ければ `head_to_index()` を使う。
+  どちらか一方しか無いことがある
+- **パスは `StatusEntry::path()` からは取らない。** rename のとき `path()` は旧パスを返すので、
+  staged の一覧に新しい名前が出なくなる。delta の `new_file` を `path`、rename と copy の
+  ときだけ `old_file` を `old_path` に入れる
+- `old_path` を持つのは、`FileStatus::Renamed` が旧パス無しでは表示にならず、staged rename の
+  unstage が旧パスと新パスの両方を argv に載せる必要があるため（03）
+- パスが非 UTF-8 のファイルは一覧から落とす（「非 UTF-8 の扱い」）。旧パスだけが非 UTF-8 の
+  rename も落とす。新しい名前は出せても unstage できない
+- **delta から `FileEntry` を組み立てるのは `status` と `diff` で同じ 1 本。** `FileDiff` は
+  `FileEntry` と同じ 3 つを頭に持つ。別々に書くと、非 UTF-8 の落とし方と `old_path` を入れる
+  種別がずれる
+- 並びは区画ごとに `path` 順へ自分で並べ替える。libgit2 の列挙順に依存しない
+  （`RefIndex` のラベルと同じ理由）。区画を手で並べず分解束縛で回し、区画を足したときに
+  並べ替え漏れがコンパイルエラーになるようにする
+
+## diff とハンク
+
+```rust
+pub enum DiffTarget {
+    IndexVsWorktree(Option<PathBuf>),
+    HeadVsIndex(Option<PathBuf>),
+    Commit { oid: Oid, path: Option<PathBuf> },
+    Range { from: Oid, to: Oid, path: Option<PathBuf> },
+}
+
+impl DiffTarget {
+    /// 絞り込みのパス。全変種が持つので、変種ごとの `match` を呼び出し側に配らない。
+    pub fn path(&self) -> Option<&Path>;
+}
+
+pub struct FileDiff {
+    pub path: PathBuf,
+    pub old_path: Option<PathBuf>,
+    pub status: FileStatus,
+    /// バイナリと判定された。`hunks` は空になる。
+    pub binary: bool,
+    pub hunks: Vec<Hunk>,
+}
+
+pub struct Hunk { pub header: String, pub lines: Vec<HunkLine> }
+pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
+```
+
+- `Commit` は**第一親との diff**。ルートコミットは空ツリーと比べる。マージコミットも
+  combined diff ではなく第一親と比べる（`git show` の既定はマージに何も出さないが、
+  それではペインが常に空になる）
+- `HeadVsIndex` は HEAD が unborn なら空ツリーと比べる。最初のコミットを作る前でも
+  staged の中身が見える
+- `IndexVsWorktree` は untracked の中身も出す（`include_untracked` +
+  `recurse_untracked_dirs` + `show_untracked_content`）。出さないと worktree ペインで
+  untracked を選んでも diff が空になる
+- `path` での絞り込みは `disable_pathspec_match(true)` を付けて literal 扱いにする。既定では
+  pathspec が glob なので、`[x].txt` や `a*b` という名前のファイルを選ぶと別のファイルが出る
+- **`path` で絞ると rename が検出されない。** pathspec は diff の生成時に効くので、
+  `find_similar` が対にすべき旧パスの delta が先に落ちる。1 ファイルに絞った rename は
+  `Renamed` ではなく「全行追加の `Added`」になり、`status` の一覧（`Renamed`）と食い違う。
+  `git diff -M -- <新パス>` も同じ挙動なので CLI とはずれないが、`StageHunk` のパッチを
+  この diff から組むと rename ではなく「ファイルの新規追加」を適用することになる。
+  絞らずに diff して `path` / `old_path` で `retain` すれば直るが、pathspec による walk の
+  枝刈り（libgit2 は `disable_pathspec_match` のとき pathspec を iterator の pathlist に
+  渡すので、走査そのものが縮む）を失う。**どちらを採るかは `ui::panes::diff` のタスクで
+  決める。** いまは `path` を渡す呼び出し側が無いので表に出ていない
+- rename 検出の `find_similar()` は `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの
+  delta には効かない
+- **`find_similar()` の設定は `status` と揃える。既定（`None`）は使わない。**
+  `for_untracked` を立てないと、ワークツリー上の rename（まだ `add` していない `git mv`）が
+  「index から消えた + untracked で増えた」の 2 つの delta のままになる。`status` は
+  `renames_index_to_workdir` で 1 行の `Renamed` にするので、同じファイルの見え方が食い違う。
+  `renames` も明示する。既定は `diff.renames` の設定を読むが `status` 側は無条件に有効なので、
+  設定で切っている環境だけ 2 つがずれる
+- `Delta::Unmodified` / `Ignored` / `Unreadable` の delta は落とす。`FileStatus` に対応する
+  変種が無く、この UI では出しても操作できない。`Patch::from_diff` が `None` を返すのも
+  libgit2 が「出さない」と判断した delta だけなので、パッチが作れない delta はそのまま飛ばす。
+  ただし libgit2 のその判定には「`INCLUDE_UNTRACKED` が無いときの `Untracked`」も入る。
+  untracked を出す `IndexVsWorktree` が必ずそのフラグを立てているから飛ばして安全であって、
+  無条件に安全なわけではない
+- **`binary` は `Patch` を作ったあとの `patch.delta()` から読む。** libgit2 はバイナリ判定を
+  パッチ生成のときに行うので、`Diff::get_delta` を先に読むと立っていないことがある。
+  バイナリと「mode だけの変更」はどちらも `hunks` が空になるので、区別はこのフラグで付ける
+
+### ハンクの持ち方
+
+`git_exec` が `git apply --cached` に渡すパッチへ戻せる形で持つ（03 の `StageHunk`）。
+`diff --git` などのファイルヘッダは `path` から組み立て直せるので持たない。
+
+- `header` は `@@ -1,4 +1,6 @@ fn foo() {` の行から末尾の改行を落としたもの。`@@` の後ろの
+  関数コンテキストも残す。ここは非 UTF-8 でも lossy でよい。`git apply` は 2 つ目の `@@` より
+  後ろを読まないので、置換文字が混ざってもパッチとしては壊れない
+- **`content` は `Vec<u8>` で持ち、lossy 変換しない。** ハンクは表示専用ではなく
+  `git apply --cached` に戻す入力でもある（「非 UTF-8 の扱い」の例外）。非 UTF-8 のファイルを
+  lossy で通すと、ステージした結果が元のファイルと変わる。UI が描くときにその場で lossy にする
+- `content` は行末の改行を落として持つ。改行で終わらない行は `origin` を `*NoEol` にする。
+  パッチへ戻すときは、`*NoEol` の行の後ろにだけ `\ No newline at end of file` を足す
+- **libgit2 の `\ No newline at end of file` は独立した 1 行として来る。** 直前の行の内容を
+  運ぶのではなく、`origin` が `=` / `>` / `<`、`content` が
+  `"\n\\ No newline at end of file\n"` の行になる。しかも `>`（`ADD_EOFNL`）が付くのは
+  `-` 行の後ろで、名前と出る場所が合っていない。**マーカー行は捨て、改行の有無は内容の行が
+  `\n` で終わるかどうかで判定する**（git 2.55 / libgit2 1.9 で確認）
 
 ## 進行中操作の検出
 
@@ -249,6 +369,8 @@ impl ReaderHandle {
     pub async fn refs(&self) -> Result<RefIndex, GitReadError>;
     pub async fn head(&self) -> Result<HeadInfo, GitReadError>;
     pub async fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;
+    pub async fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
+    pub async fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
 }
 ```
 
@@ -276,7 +398,7 @@ impl ReaderHandle {
   消えていたら読まない、という判定は競合を狭めるだけで無くせない（`send` が成功した直後に
   受け側が消える窓が残る）ので、ランタイム側の規約にする。**ログ読み込みのタスクは abort
   しない。** M3 のキャンセルは `Cmd::Exec` に効かせる。状態を持たない `refs` / `head` /
-  `remotes` は drop されても捨ててよい
+  `remotes` / `status` / `diff` は drop されても捨ててよい
 - `ReaderHandle` は `Clone`。ランタイムは `Cmd` ごとに tokio タスクを起こし、その中から呼ぶ。
   スレッドは 1 本なので要求は直列に処理される
 - 送信側・受信側のどちらのチャネルが切れても `ReaderGone` にする。ハンドルが全部 drop されたら

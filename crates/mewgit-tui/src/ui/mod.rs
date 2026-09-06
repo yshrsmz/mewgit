@@ -56,21 +56,17 @@ pub fn pane_block(title: String, focused: bool) -> Block<'static> {
     }
 }
 
-/// `lines` を幅 `width` で折り返したときの行数。
+/// `paragraph` を幅 `width` で描いたときの行数。
 ///
-/// ratatui の折り返し行数（`Paragraph::line_count`）は unstable feature の後ろに
-/// あるので、表示幅から見積もる。単語の途中で折れないぶん実際はもう 1 行増える
-/// ことがあるので、**これを使う側は「見積もりが 1 行足りなくても壊れない」形に
-/// する**（確認モーダルはキーの案内を別の領域に、コミット詳細はメッセージの
-/// 領域を先に確保する）。
-pub fn wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
-    if width == 0 {
-        return 0;
-    }
-    lines
-        .iter()
-        .map(|line| (line.width() as u16).div_ceil(width).max(1))
-        .sum()
+/// **表示幅から見積もらない。** `桁数 / 幅` の切り上げは単語境界で折れたぶんを
+/// 数え落とし、確認モーダルの本文の末尾が黙って切れる。`Paragraph::line_count` は
+/// 描画と同じ `WordWrapper` を通すので実測になる（`unstable-rendered-line-info` を
+/// 有効にしている。`Cargo.toml` 参照）。
+///
+/// **`block` を付けた `Paragraph` を渡さない。** `line_count` は枠の上下を足すので、
+/// 呼び出し側でも枠のぶんを足すと二重になる。
+pub fn wrapped_rows(paragraph: &Paragraph<'_>, width: u16) -> u16 {
+    u16::try_from(paragraph.line_count(width)).unwrap_or(u16::MAX)
 }
 
 /// 画面をヘッダ / 本文 / ステータスバーに割る。
@@ -147,11 +143,30 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{split, split_body};
+    use super::{split, split_body, wrapped_rows};
     use crate::test_util::{draw, state_at, terminal_with};
     use mewgit_core::app::{NoticeLevel, Pane, TermSize};
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
+    use ratatui::widgets::{Paragraph, Wrap};
+
+    #[test]
+    fn wrapped_rows_counts_the_line_that_word_wrapping_adds() {
+        // 30 桁の語 3 つで 92 桁。幅 58 で割った切り上げなら 2 行だが、語の途中で
+        // 折れないので実際は 3 行になる。ここを見積もると本文の末尾が切れる。
+        let words = format!("{} {} {}", "a".repeat(30), "b".repeat(30), "c".repeat(30));
+        let paragraph = Paragraph::new(words).wrap(Wrap { trim: false });
+
+        assert_eq!(wrapped_rows(&paragraph, 58), 3);
+    }
+
+    #[test]
+    fn wrapped_rows_is_zero_at_zero_width() {
+        // リサイズの途中で幅 0 が来る。`Constraint::Max(0)` に落ちるだけで済ませる。
+        let paragraph = Paragraph::new("何か").wrap(Wrap { trim: false });
+
+        assert_eq!(wrapped_rows(&paragraph, 0), 0);
+    }
 
     /// ペインの枠の左上。座標は実際のレイアウトから出す。手で書くと、割り方を
     /// 変えたときにテストだけが古い桁を見て緑のまま無意味になる。

@@ -18,10 +18,13 @@ const WIDTH: u16 = 60;
 ///
 /// 下のペインを `Clear` で消してから描く。覆わずに重ねると下の文字が透けて読めなくなる。
 pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
-    let lines: Vec<Line> = body.lines().map(Line::raw).collect();
+    // 枠を付けずに組む。`wrapped_rows` は枠の上下も数えるので、付けたまま渡すと
+    // 下の `+ 4` と二重になる。
+    let text =
+        Paragraph::new(body.lines().map(Line::raw).collect::<Vec<_>>()).wrap(Wrap { trim: false });
     let width = WIDTH.min(area.width);
     // 本文 + 空行 + キーの案内 + 枠の上下。画面に収まらない分は `centered` が削る。
-    let height = ui::wrapped_rows(&lines, width.saturating_sub(2)) + 4;
+    let height = ui::wrapped_rows(&text, width.saturating_sub(2)).saturating_add(4);
     let area = centered(area, width, height);
 
     let block = Block::default()
@@ -38,7 +41,7 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
     let [body_area, hint_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
+    frame.render_widget(text, body_area);
     frame.render_widget(Paragraph::new(Line::from(HINT)), hint_area);
 }
 
@@ -111,6 +114,30 @@ mod tests {
 
         assert!(text.contains("[y] 実行"), "{text}");
         assert!(text.contains("[n] やめる"), "{text}");
+    }
+
+    #[test]
+    fn a_body_wrapped_at_word_boundaries_keeps_its_last_line() {
+        // 幅で割った切り上げは、単語境界で折れて増えたぶんを数え落とす。1 行ぶんは
+        // 枠に取った空行が吸うので、2 行足りない本文でないと踏めない。
+        // 30 桁の語 3 つ（91 桁）は内側 58 桁だと切り上げ 2 行・実際 3 行になる。
+        let a = "a".repeat(30);
+        let b = "b".repeat(30);
+        let c = "c".repeat(30);
+        let tail = format!("{}MARKER", "d".repeat(24));
+        let body = format!("{a} {b} {c}\n{a} {b} {tail}");
+        let state = state_with_confirm("変更を破棄", &body);
+
+        let lines = draw(&state, SIZE);
+        let text = lines.join("\n");
+
+        // 末尾が枠の中に、キーの案内より上にあること。`contains` だけだと、
+        // 案内を押し出しただけの状態も通る。
+        assert!(text.contains("MARKER"), "{text}");
+        assert!(
+            row_of(&lines, "MARKER") < row_of(&lines, "[y] 実行"),
+            "{text}"
+        );
     }
 
     #[test]

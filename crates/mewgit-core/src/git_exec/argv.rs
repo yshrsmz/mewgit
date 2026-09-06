@@ -242,7 +242,8 @@ fn push_paths(argv: &mut Vec<String>, paths: &[PathBuf]) -> Result<(), ArgvError
     Ok(())
 }
 
-fn path_arg(path: &Path) -> Result<String, ArgvError> {
+/// argv やパッチのヘッダに載せるパス。非 UTF-8 は載せられないので拒否する。
+pub(super) fn path_arg(path: &Path) -> Result<String, ArgvError> {
     path.to_str()
         .map(str::to_string)
         .ok_or_else(|| ArgvError::NonUtf8Path {

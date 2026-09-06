@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::git_read::Oid;
 
 pub use argv::{to_command, ArgvError, GitCommand};
-pub use patch::hunk_patch;
+pub use patch::{hunk_patch, supports_hunk_patch};
 pub use runner::Runner;
 
 /// 書き込み操作。[`to_command`] で `git` の argv と標準入力に変換する。

@@ -6,11 +6,11 @@
 //! ペインごとのキー処理は、対応するペインのタスクと一緒に足す。いまあるのは
 //! グラフ・ワーキングツリー・diff。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::git_exec::{hunk_patch, ArgvError, ExecError, GitOp};
+use crate::git_exec::{hunk_patch, supports_hunk_patch, ExecError, GitOp};
 use crate::git_read::{
-    CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, LogPage, Oid,
+    CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, Hunk, LogPage, Oid,
     WorktreeSection, WorktreeSnapshot,
 };
 use crate::graph::LaneState;
@@ -213,9 +213,9 @@ fn diff_loaded(
             // **届いたのがいま選んでいるファイルのものなら採る。** 無条件に上書きすると、
             // 正しく出ている画面が別のファイルの diff に化ける。
             if state.wanted_diff().as_ref() == Some(&target) {
-                // **同じ対象を読み直したときはカーソルを持ち越す。** キャッシュしない
-                // ので `Esc` → `Enter` で開き直すたびに読み直しが届く。既定に戻すと、
-                // 選んでいたハンクが先頭へ飛んでから操作が効くことになる。
+                // **同じ対象を読み直したときはカーソルを持ち越す。** 書き込みのあとは
+                // 同じファイルの diff がもう一度届く。既定に戻すと、選んでいたハンクが
+                // 先頭へ飛んでから操作が効くことになる。
                 let cursor = state
                     .diff
                     .view
@@ -484,21 +484,30 @@ enum Plan {
     },
 }
 
+/// コンフリクトした行を断る文言。`plan` と `discard` の両方に出る。
+const CONFLICTED: &str = "コンフリクトしたファイルは操作できません";
+
+/// 出しているハンクが書き込みより前のものだったときに断る文言。
+///
+/// **「待っています」とだけ書かない。** 読み直しに失敗して二度と来ないこともある。
+const NOT_LATEST: &str = "最新の差分をまだ読めていません";
+
 /// 操作の単位。
 ///
-/// [`plan`] は `(操作, 区画)` で可否を決め、**`GitOp` の組み立てだけをこれに委ねる**。
+/// [`plan`] は `(操作, 区画)` で可否を決め、**`GitOp` はアームごとにこれを見て組む**。
 /// 「stage されていません」のような可否の理由は単位が違っても同じ文言なので、表を
 /// 2 つに割らない（01 の「ワーキングツリー」）。
-enum Scope {
+///
+/// **ハンクは借用で持つ。** パッチを組むのは実際に `GitOp` になるアームだけなので、
+/// 断られる組み合わせ（Unstaged で `u` など）でハンクを丸ごとコピーせずに済む。
+enum Scope<'a> {
     File {
         status: FileStatus,
         paths: Vec<PathBuf>,
     },
     Hunk {
-        path: PathBuf,
-        patch: Vec<u8>,
-        /// 確認モーダルに出す `@@ ...` の行。どのハンクを捨てるのかを名指しする。
-        header: String,
+        path: &'a Path,
+        hunk: &'a Hunk,
     },
 }
 
@@ -515,31 +524,21 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
         return Cmd::None;
     };
 
-    // **読み直しを待っているあいだは断る**（01）。出しているハンクが書き込みより前の
-    // ものなので、そこから組んだパッチは `git apply` のオフセット追従で別のハンクに
-    // 当たりうる。**ファイル単位に落とさない**（`s` がファイル全体を stage する）。
-    if state.focus == Pane::Diff && state.diff.stale {
-        state.push_notice(
-            NoticeLevel::Warn,
-            "diff の読み直しを待っています".to_string(),
-            None,
-        );
-        return Cmd::None;
-    }
+    let scope = hunk_scope(state).unwrap_or(Scope::File { status, paths });
 
-    let scope = match hunk_scope(state) {
-        Some(Ok(scope)) => scope,
-        // ハンクでは表せない。同じキーをファイル単位に落とす（07）。
-        None => Scope::File { status, paths },
-        // パッチにできない名前。**ファイル単位に落とさない。** 押したのはハンク 1 つで、
-        // ファイル全体ではない。
-        Some(Err(err)) => {
-            state.push_notice(NoticeLevel::Warn, err.to_string(), None);
-            return Cmd::None;
-        }
+    // **出しているハンクが書き込みより前のものなら断る**（01）。そこから組んだパッチは
+    // `git apply` のオフセット追従で別のハンクに当たりうる。**ファイル単位に落とさない**
+    // （`s` がファイル全体を stage することになる）。
+    //
+    // 見るのは単位であってペインではない。`focus == Pane::Diff` で書くと、ハンクを
+    // 出す場所が増えたときにガードだけが外れる。
+    let planned = if matches!(scope, Scope::Hunk { .. }) && state.diff.stale {
+        Err(NOT_LATEST.to_string())
+    } else {
+        plan(action, section, scope)
     };
 
-    match plan(action, section, scope) {
+    match planned {
         Ok(Plan::Exec(op)) => Cmd::Exec(op),
         Ok(Plan::Confirm { title, body, op }) => {
             state.modal = Some(Modal::Confirm {
@@ -560,34 +559,48 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
 /// `(操作, 区画)` から出す `GitOp` を決める。できないときはその理由。
 ///
 /// **判定表はここ 1 つ。** ファイル単位もハンク単位もここを通る。可否の理由は単位が
-/// 違っても同じ文言なので、表を 2 つに割らない。単位の違いは [`Scope`] が運び、この
-/// 表は `GitOp` の組み立てだけをそちらに委ねる。網羅 `match` なので、
-/// `WorktreeSection` に区画を足すと実装漏れがコンパイルエラーになる。
+/// 違っても同じ文言なので、表を 2 つに割らない。単位の違いは [`Scope`] が運び、
+/// `GitOp` はアームごとにそれを見て組む。網羅 `match` なので、`WorktreeSection` に
+/// 区画を足すと実装漏れがコンパイルエラーになる。
 ///
 /// discard だけは変種の選び方が単位ごとに違うので [`discard`] に分ける。
-fn plan(action: Action, section: WorktreeSection, scope: Scope) -> Result<Plan, &'static str> {
+///
+/// **パッチを組むのはここ。** 断られる組み合わせでハンクを丸ごとコピーしないため。
+/// 組めなかった名前も「できない理由」の 1 つとして同じ `Err` から出る。
+fn plan(action: Action, section: WorktreeSection, scope: Scope<'_>) -> Result<Plan, String> {
     match (action, section) {
         // 解消ビューは MVP 外。`git add` だけ通すと「解消した」と誤解させる。
-        (_, WorktreeSection::Conflicted) => Err("コンフリクトしたファイルは操作できません"),
+        (_, WorktreeSection::Conflicted) => Err(CONFLICTED.to_string()),
 
         (Action::Stage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
             Ok(Plan::Exec(match scope {
                 Scope::File { paths, .. } => GitOp::Stage(paths),
-                Scope::Hunk { path, patch, .. } => GitOp::StageHunk { path, patch },
+                Scope::Hunk { path, hunk } => GitOp::StageHunk {
+                    path: path.to_path_buf(),
+                    patch: patch_of(path, hunk)?,
+                },
             }))
         }
-        (Action::Stage, WorktreeSection::Staged) => Err("すでに stage されています"),
+        (Action::Stage, WorktreeSection::Staged) => Err("すでに stage されています".to_string()),
 
         (Action::Unstage, WorktreeSection::Staged) => Ok(Plan::Exec(match scope {
             Scope::File { paths, .. } => GitOp::Unstage(paths),
-            Scope::Hunk { path, patch, .. } => GitOp::UnstageHunk { path, patch },
+            Scope::Hunk { path, hunk } => GitOp::UnstageHunk {
+                path: path.to_path_buf(),
+                patch: patch_of(path, hunk)?,
+            },
         })),
         (Action::Unstage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
-            Err("stage されていません")
+            Err("stage されていません".to_string())
         }
 
         (Action::Discard, section) => discard(section, scope),
     }
+}
+
+/// ハンクを `git apply` に渡すパッチに戻す。載せられない名前はその理由。
+fn patch_of(path: &Path, hunk: &Hunk) -> Result<Vec<u8>, String> {
+    hunk_patch(path, hunk).map_err(|err| err.to_string())
 }
 
 /// discard の `GitOp` を選ぶ。**変種の選び方が単位ごとに違うのでここだけ分かれる。**
@@ -601,25 +614,27 @@ fn plan(action: Action, section: WorktreeSection, scope: Scope) -> Result<Plan, 
 /// `FileStatus` は `LoadStatus` が毎回運んでくるので、そちらで判断する。
 ///
 /// ハンクは Unstaged 限定の `DiscardHunk` 1 つだけ。
-fn discard(section: WorktreeSection, scope: Scope) -> Result<Plan, &'static str> {
+fn discard(section: WorktreeSection, scope: Scope<'_>) -> Result<Plan, String> {
     match scope {
         // staged なハンクを捨てるには index とワークツリーの両方に当てることになり、
         // `git apply` は 1 回で片方にしか効かない（03）。2 回に割ると片方だけ通った
         // 中途半端な状態が残るので、先に unstage させる。
         Scope::Hunk { .. } if section == WorktreeSection::Staged => {
-            Err("staged なハンクは破棄できません。先に unstage してください")
+            Err("staged なハンクは破棄できません。先に unstage してください".to_string())
         }
-        Scope::Hunk {
-            path,
-            patch,
-            header,
-        } => Ok(Plan::Confirm {
+        // 確認モーダルにはハンクの見出しも出す。ファイル名だけだとファイル単位の
+        // discard と同じ本文になり、どちらを押したのか画面から判らない。
+        Scope::Hunk { path, hunk } => Ok(Plan::Confirm {
             title: "ハンクを破棄",
             body: format!(
-                "{} の {header} をワークツリーから取り消します。元に戻せません。",
-                path.display()
+                "{} の {} をワークツリーから取り消します。元に戻せません。",
+                path.display(),
+                hunk.header
             ),
-            op: GitOp::DiscardHunk { path, patch },
+            op: GitOp::DiscardHunk {
+                path: path.to_path_buf(),
+                patch: patch_of(path, hunk)?,
+            },
         }),
 
         Scope::File { status, paths } => {
@@ -642,8 +657,8 @@ fn discard(section: WorktreeSection, scope: Scope) -> Result<Plan, &'static str>
                     body: format!("{names} を HEAD の状態に戻します。\nstaged の内容も一緒に戻ります。元に戻せません。"),
                     op: GitOp::Discard(paths),
                 }),
-                // `plan` が先に断っている。
-                WorktreeSection::Conflicted => Err("コンフリクトしたファイルは操作できません"),
+                // `plan` が先に断っている。文言は 1 箇所に置く。
+                WorktreeSection::Conflicted => Err(CONFLICTED.to_string()),
             }
         }
     }
@@ -651,28 +666,24 @@ fn discard(section: WorktreeSection, scope: Scope) -> Result<Plan, &'static str>
 
 /// カーソルの指すハンクを [`Scope::Hunk`] にする。
 ///
-/// **ハンクで表せないものは `None`。** `Modified` 以外（Untracked / Added / Deleted /
-/// Renamed / Typechange）は「ハンク = ファイル全体」で、パッチに `--- /dev/null` や
-/// `rename from` のヘッダが要る。バイナリとハンクの無いファイルも同じ。呼び出し側は
-/// ファイル単位の操作に落とす（07）。
+/// **ハンクで表せないものは `None`。** 何が表せるかは
+/// [`supports_hunk_patch`](crate::git_exec::supports_hunk_patch) が持つ（パッチを組む
+/// 関数の隣。述語をここに写すと、表せる範囲が広がったときに取り残される）。ハンクの
+/// 無いファイルも `None` になる。呼び出し側はファイル単位の操作に落とす（07）。
 ///
 /// Diff ペインを見せていないときも `None`。`wanted_diff()` がそこで `None` を返す。
-///
-/// パッチを組めなかったとき（`git apply` のヘッダに載せられない名前）は `Some(Err)`。
-fn hunk_scope(state: &AppState) -> Option<Result<Scope, ArgvError>> {
+fn hunk_scope(state: &AppState) -> Option<Scope<'_>> {
     let wanted = state.wanted_diff();
     let view = state.diff.fresh_view(wanted.as_ref())?;
     let file = view.files.get(view.cursor.file)?;
-    if file.status != FileStatus::Modified || file.binary {
+    if !supports_hunk_patch(file) {
         return None;
     }
-    let hunk = file.hunks.get(view.cursor.hunk)?;
 
-    Some(hunk_patch(&file.path, hunk).map(|patch| Scope::Hunk {
-        path: file.path.clone(),
-        patch,
-        header: hunk.header.clone(),
-    }))
+    Some(Scope::Hunk {
+        path: &file.path,
+        hunk: file.hunks.get(view.cursor.hunk)?,
+    })
 }
 
 /// `GitOp` に載せるパス。rename は新しい名前と元の名前の両方。
@@ -850,12 +861,26 @@ mod tests {
         }
     }
 
-    /// Diff ペインを開き、`path` の diff が `hunks` 個のハンクで届いた状態。
+    /// Diff ペインを開き、`paths[0]` の diff が `hunks` 個のハンクで届いた状態。
     fn diff_state(paths: &[&str], hunks: usize) -> AppState {
-        let mut state = worktree_state(fake_snapshot(&[], paths, &[]), WorktreeSection::Unstaged);
+        diff_pane(WorktreeSection::Unstaged, paths, fake_diff(paths[0], hunks))
+    }
+
+    /// Diff ペインを開き、`files` が届いた状態。
+    ///
+    /// **Diff ペインの立ち上げはここ 1 本。** 「worktree の状態を作る → `Enter` →
+    /// `diff_ok`」を 2 箇所に書くと、片方だけ直したときに差が出る。
+    fn diff_pane(section: WorktreeSection, paths: &[&str], files: Vec<FileDiff>) -> AppState {
+        let snapshot = match section {
+            WorktreeSection::Staged => fake_snapshot(paths, &[], &[]),
+            WorktreeSection::Unstaged => fake_snapshot(&[], paths, &[]),
+            WorktreeSection::Untracked => fake_snapshot(&[], &[], paths),
+            WorktreeSection::Conflicted => panic!("conflicted は diff を出さない"),
+        };
+        let mut state = worktree_state(snapshot, section);
         let _ = press_code(&mut state, KeyCode::Enter);
-        let target = unstaged_diff(paths[0]);
-        let _ = update(&mut state, diff_ok(target, fake_diff(paths[0], hunks)));
+        let target = state.wanted_diff().expect("対象が決まっていません");
+        let _ = update(&mut state, diff_ok(target, files));
         state
     }
 
@@ -1017,18 +1042,23 @@ mod tests {
     }
 
     #[test]
-    fn reopening_the_same_file_keeps_the_hunk_cursor() {
-        // キャッシュしないので開き直すたびに読み直しが届く。既定に戻すと、選んで
-        // いたハンクが先頭へ飛んでから操作が効くことになる。
+    fn a_reload_of_the_same_file_keeps_the_hunk_cursor() {
+        // 同じ対象の diff がもう一度届くのは書き込みのあと。既定に戻すと、選んで
+        // いたハンクが先頭へ飛んでから次の操作が効くことになる。
         let mut state = diff_state(&["a.txt"], 3);
         let _ = press(&mut state, 'j');
         let _ = press(&mut state, 'j');
         assert_eq!(state.diff.view.as_ref().unwrap().cursor.hunk, 2);
 
-        let _ = press_code(&mut state, KeyCode::Esc);
-        let _ = press_code(&mut state, KeyCode::Enter);
-        let target = unstaged_diff("a.txt");
-        let _ = update(&mut state, diff_ok(target, fake_diff("a.txt", 3)));
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+        let _ = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+        );
+        let _ = update(
+            &mut state,
+            diff_ok(unstaged_diff("a.txt"), fake_diff("a.txt", 3)),
+        );
 
         assert_eq!(state.diff.view.as_ref().unwrap().cursor.hunk, 2);
     }
@@ -1093,25 +1123,6 @@ mod tests {
         )
     }
 
-    /// Diff ペインを開き、`files` が `target` の diff として届いた状態。
-    ///
-    /// `diff_state` と違って区画とファイルの種別を選べる。ハンク単位の `GitOp` を
-    /// 出すかどうかが `FileStatus` と `binary` で変わるため。
-    fn diff_pane(section: WorktreeSection, files: Vec<FileDiff>) -> AppState {
-        let path = files[0].path.to_str().expect("パスが UTF-8 ではありません");
-        let snapshot = match section {
-            WorktreeSection::Staged => fake_snapshot(&[path], &[], &[]),
-            WorktreeSection::Unstaged => fake_snapshot(&[], &[path], &[]),
-            WorktreeSection::Untracked => fake_snapshot(&[], &[], &[path]),
-            WorktreeSection::Conflicted => panic!("conflicted は diff を出さない"),
-        };
-        let mut state = worktree_state(snapshot, section);
-        let _ = press_code(&mut state, KeyCode::Enter);
-        let target = state.wanted_diff().expect("対象が決まっていません");
-        let _ = update(&mut state, diff_ok(target, files));
-        state
-    }
-
     /// ハンク 1 つから組んだパッチ。**実装と同じ関数を通す。**
     /// 期待値を手で書くと、パッチの形を変えたときにテストの側だけが古くなる
     /// （形そのものは `git_exec::patch` のユニットテストと `tests/hunk.rs` が見張る）。
@@ -1124,6 +1135,7 @@ mod tests {
         let hunks = vec![real_hunk(1), real_hunk(9)];
         let mut state = diff_pane(
             WorktreeSection::Unstaged,
+            &["a.txt"],
             vec![fake_file_diff("a.txt", hunks.clone())],
         );
         // 2 番目のハンクへ移る。1 番目のパッチが出たら、選んでいる場所を見ていない。
@@ -1145,6 +1157,7 @@ mod tests {
         let hunks = vec![real_hunk(1)];
         let mut state = diff_pane(
             WorktreeSection::Staged,
+            &["a.txt"],
             vec![fake_file_diff("a.txt", hunks.clone())],
         );
 
@@ -1164,6 +1177,7 @@ mod tests {
         let hunks = vec![real_hunk(1)];
         let mut state = diff_pane(
             WorktreeSection::Unstaged,
+            &["a.txt"],
             vec![fake_file_diff("a.txt", hunks.clone())],
         );
 
@@ -1192,6 +1206,7 @@ mod tests {
     fn x_on_a_staged_hunk_is_refused_with_a_reason() {
         let mut state = diff_pane(
             WorktreeSection::Staged,
+            &["a.txt"],
             vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
         );
 
@@ -1208,13 +1223,10 @@ mod tests {
         // ハンク = ファイル全体になるもの。パッチには `--- /dev/null` や
         // `rename from` のヘッダが要るので、ハンク単位の `GitOp` は出さない（07）。
         let untracked = FileDiff {
-            path: "n.txt".into(),
-            old_path: None,
             status: FileStatus::Untracked,
-            binary: false,
-            hunks: vec![real_hunk(1)],
+            ..fake_file_diff("n.txt", vec![real_hunk(1)])
         };
-        let mut state = diff_pane(WorktreeSection::Untracked, vec![untracked]);
+        let mut state = diff_pane(WorktreeSection::Untracked, &["n.txt"], vec![untracked]);
 
         assert_eq!(
             press(&mut state, 's'),
@@ -1227,13 +1239,10 @@ mod tests {
         // `binary` が立つとハンクは空になるが、`hunks` を見るだけでは
         // 「mode だけの変更」と区別が付かない。旗のほうで落とす。
         let binary = FileDiff {
-            path: "a.png".into(),
-            old_path: None,
-            status: FileStatus::Modified,
             binary: true,
-            hunks: vec![real_hunk(1)],
+            ..fake_file_diff("a.png", vec![real_hunk(1)])
         };
-        let mut state = diff_pane(WorktreeSection::Unstaged, vec![binary]);
+        let mut state = diff_pane(WorktreeSection::Unstaged, &["a.png"], vec![binary]);
 
         assert_eq!(
             press(&mut state, 's'),
@@ -1247,6 +1256,7 @@ mod tests {
         // 落とすと、ハンク 1 つのつもりでファイル全体を stage することになる。
         let mut state = diff_pane(
             WorktreeSection::Unstaged,
+            &["a\tb.txt"],
             vec![fake_file_diff("a\tb.txt", vec![real_hunk(1)])],
         );
 
@@ -1261,6 +1271,7 @@ mod tests {
     fn keys_are_refused_while_the_shown_diff_is_older_than_the_last_write() {
         let mut state = diff_pane(
             WorktreeSection::Unstaged,
+            &["a.txt"],
             vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
         );
         // 書き込みが終わった直後。読み直しはまだ届いていない。

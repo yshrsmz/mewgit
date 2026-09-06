@@ -449,8 +449,13 @@ impl LineOrigin {
         }
     }
 
-    /// 改行で終わっていない行か。パッチに戻すとき、この行の後ろにだけ
-    /// `\ No newline at end of file` を足す（02 の「ハンクの持ち方」）。
+    /// 改行で終わっていない行か。
+    ///
+    /// パッチに戻すとき、この行の後ろにだけ `\ No newline at end of file` を足す
+    /// （02 の「ハンクの持ち方」）。**読むのは `git_exec::hunk_patch` だけ**で、
+    /// [`mark`](Self::mark) のように 2 者で共有する語彙ではない。ここに置くのは
+    /// 変種の並びを知っているのが `git_read` だからで、`origin` の 6 変種を
+    /// `git_exec` で数え直させないため。
     pub fn is_no_eol(self) -> bool {
         matches!(
             self,

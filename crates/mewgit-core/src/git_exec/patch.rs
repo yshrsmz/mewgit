@@ -6,10 +6,22 @@
 use std::path::Path;
 
 use super::ArgvError;
-use crate::git_read::Hunk;
+use crate::git_read::{FileDiff, FileStatus, Hunk};
 
 /// 改行で終わらない行の後ろに置くマーカー。git の出力と同じ綴り。
 const NO_EOL: &[u8] = b"\\ No newline at end of file\n";
+
+/// [`hunk_patch`] でハンク単位のパッチを組めるファイルか。
+///
+/// **述語をパッチを組む関数の隣に置く。** 呼び出し側（`app`）に置くと、表せる範囲を
+/// 広げたときに呼び出し側が取り残され、テストは fallback を期待したまま緑で通る。
+///
+/// いまは `Modified` の非バイナリだけ。それ以外は「ハンク = ファイル全体」で、
+/// パッチに `--- /dev/null`（Added / Deleted）や `rename from` / `rename to`
+/// （Renamed / Copied）のヘッダが要る。呼び出し側はファイル単位の操作に落とす（07）。
+pub fn supports_hunk_patch(file: &FileDiff) -> bool {
+    file.status == FileStatus::Modified && !file.binary
+}
 
 /// `path` の `hunk` 1 つだけを含むパッチ。
 ///
@@ -58,10 +70,10 @@ pub fn hunk_patch(path: &Path, hunk: &Hunk) -> Result<Vec<u8>, ArgvError> {
 /// 禁じる文字を数え上げず「制御文字か」で弾くのは、受け側の細かい規則を写し取らずに
 /// 済ませるため。ファイル単位の stage / unstage / discard はパスを argv に載せる
 /// だけなので、こういう名前でも通る。
-fn patch_path(path: &Path) -> Result<&str, ArgvError> {
-    let name = path.to_str().ok_or_else(|| ArgvError::NonUtf8Path {
-        path: path.to_path_buf(),
-    })?;
+fn patch_path(path: &Path) -> Result<String, ArgvError> {
+    // 非 UTF-8 の判定は argv と同じところを通す。`ArgvError::NonUtf8Path` を組む
+    // 場所が 2 つになると、片方だけ緩めたときに気付けない。
+    let name = super::argv::path_arg(path)?;
 
     if name.starts_with('"') || name.chars().any(char::is_control) {
         return Err(ArgvError::UnquotablePath {
@@ -169,7 +181,7 @@ mod tests {
     #[test]
     fn a_path_with_a_space_or_non_ascii_goes_in_unquoted() {
         // `git diff` は `core.quotePath` の既定で非 ASCII を quote するが、
-        // `git apply` は quote されていないものも読む（tests/git_exec.rs で実際に叩く）。
+        // `git apply` は quote されていないものも読む（tests/hunk.rs で実際に叩く）。
         let hunk = fake_hunk("@@ -1 +1 @@", &[(LineOrigin::Context, "a")]);
         for path in ["sp ace.txt", "日本語.txt", "x b/y.txt"] {
             let patch = hunk_patch(Path::new(path), &hunk).expect("組めませんでした");

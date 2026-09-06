@@ -274,10 +274,18 @@ pub struct WorktreeState {
   「stage されていません」「すでに stage されています」「コンフリクトしたファイルは
   操作できません」はどちらの単位でも同じ文言なので、表を 2 つに割らない
 - **単位の違いは `Scope` で運ぶ。** `Scope::File { status, paths }` と
-  `Scope::Hunk { path, patch, header }` の 2 つ。`plan` は `(操作, 区画)` で可否を
-  決め、`GitOp` の組み立てだけを `Scope` に委ねる。discard だけは変種の選び方が
-  単位ごとに違うので、そこで枝が分かれる（ファイルは 3 変種、ハンクは
-  Unstaged 限定の `DiscardHunk`）
+  `Scope::Hunk { path, hunk }` の 2 つ。`plan` は `(操作, 区画)` で可否を決め、
+  `GitOp` は各アームが `Scope` を見て組む。discard だけは変種の選び方が単位ごとに
+  違うので、そこで枝が分かれる（ファイルは 3 変種、ハンクは Unstaged 限定の
+  `DiscardHunk`）
+- **`Scope::Hunk` はハンクを借用で持ち、パッチを組むのは `plan` のアームの中。**
+  断られる組み合わせ（Unstaged で `u` など）でハンクを丸ごとコピーしない。パッチに
+  できない名前（03 の `UnquotablePath`）も「できない理由」の 1 つとして同じ `Err` から
+  出るので、断る経路が `act` に 2 本並ばない
+- **「ハンクで表せるファイルか」の述語は `app` に置かない。**
+  `git_exec::supports_hunk_patch` がパッチを組む関数の隣で持つ。`app` に写すと、
+  表せる範囲を広げたときに呼び出し側が取り残され、テストは fallback を期待した
+  まま緑で通る
 - stage / unstage / discard が渡すパスは `FileEntry` から出す。**rename は旧パスと
   新パスの両方を載せる**（`git add -- <old> <new>` は旧パスの削除も index に入る。
   staged rename の unstage も両方要る。02 の `old_path`）

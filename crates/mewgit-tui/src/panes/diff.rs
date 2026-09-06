@@ -152,12 +152,18 @@ fn lines(view: &DiffView) -> (Vec<Line<'_>>, Range<usize>) {
 /// 固定すると、ヘッダを借用している `Vec<Line<'_>>` に `extend` できない
 /// （`&mut Vec<T>` は `T` に対して不変）。
 fn hunk_line<'a>(line: &HunkLine) -> Line<'a> {
-    let (mark, style) = match line.origin {
-        LineOrigin::Addition | LineOrigin::AdditionNoEol => ('+', theme::added()),
-        LineOrigin::Deletion | LineOrigin::DeletionNoEol => ('-', theme::removed()),
-        LineOrigin::Context | LineOrigin::ContextNoEol => (' ', Style::default()),
+    // **記号は `LineOrigin::mark()`。** パッチに戻す `git_exec::hunk_patch` と同じ
+    // ものを使う。ここで別に書くと「画面では文脈行、パッチでは追加行」になりうる。
+    // 色だけがこちらの持ち物（`theme` は core に無い）。
+    let style = match line.origin {
+        LineOrigin::Addition | LineOrigin::AdditionNoEol => theme::added(),
+        LineOrigin::Deletion | LineOrigin::DeletionNoEol => theme::removed(),
+        LineOrigin::Context | LineOrigin::ContextNoEol => Style::default(),
     };
-    Line::from(Span::styled(marked(mark, &line.content), style))
+    Line::from(Span::styled(
+        marked(line.origin.mark(), &line.content),
+        style,
+    ))
 }
 
 /// 記号 1 文字と、その後ろに続く本文。

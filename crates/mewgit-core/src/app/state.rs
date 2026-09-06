@@ -447,6 +447,18 @@ pub struct DiffState {
     /// 回さないため）。対象が違えば一度も試していないので頼む。落とすのは読み込みの
     /// 成功と、ワーキングツリーのカーソル移動。
     pub failed: Option<DiffTarget>,
+    /// 持っている [`view`](Self::view)、または飛んでいる要求が、直前の書き込みより
+    /// 前のもの。
+    ///
+    /// [`view`](Self::view) をキャッシュに使うための無効化の印（01 の
+    /// 「diff のキャッシュと `DiffState.stale`」）。対象は変わらないまま中身だけが
+    /// 変わる経路があるため要る（ハンク単位で stage すると `IndexVsWorktree(a.txt)` の
+    /// まま中身が減る）。立てるのは `exec_finished`、落とすのは `load_diff` が
+    /// `Cmd::LoadDiff` を実際に出せたときだけ。
+    ///
+    /// **対象は持たない。** 書き込みの時点では `clamp` がまだで、そのとき選ばれて
+    /// いるファイルが読み直しの対象になるとは限らない。
+    pub stale: bool,
 }
 
 impl DiffState {

@@ -9,7 +9,7 @@
 ```rust
 pub enum GitOp {
     Stage(Vec<PathBuf>), Unstage(Vec<PathBuf>),
-    StageHunk { path, patch: Vec<u8> }, UnstageHunk { .. },
+    StageHunk { path, patch: Vec<u8> }, UnstageHunk { .. }, DiscardHunk { .. },
     Discard(Vec<PathBuf>), DiscardUntracked(Vec<PathBuf>), DiscardAdded(Vec<PathBuf>),
     Commit { message: String, amend: bool },
     BranchCreate { name, start: Option<String>, checkout: bool },
@@ -29,6 +29,14 @@ pub enum GitOp {
 - **`patch` は `Vec<u8>`。** `git apply --cached` に戻す入力なので、lossy 変換すると
   非 UTF-8 のファイルをステージした結果が元のファイルと変わる（02 の「ハンクの持ち方」と
   同じ理由）
+- **ハンクの discard だけ `--cached` が付かない。** `StageHunk` / `UnstageHunk` は
+  index を書き換えるが、`DiscardHunk` はワークツリーのファイルを書き換える。
+  **index とワークツリーの両方に適用する変種は作らない。** `git apply` は 1 回で
+  片方にしか効かず（`--index` は「両方」だが index とワークツリーが一致していることを
+  要求するので、staged な変更があると `does not match index` で落ちる。git 2.55 で
+  確認）、2 回に割ると
+  片方だけ通った中途半端な状態が残る。staged なハンクの discard は「先に unstage して
+  ください」で断る（07 の Diff ペイン）
 - **discard は tracked / untracked / 「HEAD に無い」の 3 変種に分ける。** untracked な
   ファイルは `git restore` では消せず `git clean` が要る。HEAD に無いファイル
   （`FileStatus::Added`）は、コミットが 1 つも無いと `restore --source=HEAD` 自体が
@@ -58,6 +66,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `Unstage(paths)` | `reset --quiet -- <paths>` |
 | `StageHunk { patch }` | `apply --cached -`（patch を stdin） |
 | `UnstageHunk { patch }` | `apply --cached --reverse -`（patch を stdin） |
+| `DiscardHunk { patch }` | `apply --reverse -`（patch を stdin。`--cached` は付けない） |
 | `Discard(paths)` | `restore --source=HEAD --staged --worktree -- <paths>` |
 | `DiscardUntracked(paths)` | `clean --force -- <paths>` |
 | `DiscardAdded(paths)` | `rm --force --quiet -- <paths>` |
@@ -114,6 +123,54 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   消す余地を残さない
 - `switch` / `restore` を使うので git 2.23 以降が要る
 
+## ハンクからパッチを組む
+
+`GitOp` の `patch` を作るのも純粋関数。`git_read` が持つ 1 つの `Hunk`（02 の
+「ハンクの持ち方」）を `git apply` に渡せるパッチにする。
+
+```rust
+pub fn hunk_patch(path: &Path, hunk: &Hunk) -> Result<Vec<u8>, ArgvError>;
+```
+
+出力はこの 4 つを並べたもの。
+
+```
+diff --git a/<path> b/<path>
+--- a/<path>
++++ b/<path>
+<hunk.header>
+<行>...
+```
+
+- **`index <blob>..<blob> <mode>` の行は出さない。** blob の hash を `git_read` が
+  持っておらず、無くても `git apply` は通る（git 2.55 で確認）。3-way merge
+  （`--3way`）は使わないので落ちる経路も無い
+- **ハンクのヘッダ（`@@ -a,b +c,d @@`）はそのまま載せる。** 数を組み直さない。
+  `git apply` はヘッダの行数と実際の行数が食い違うと `corrupt patch` で落ちるので、
+  数え直しは「元は正しかったものを壊す」側にしか働かない。開始行のほうは
+  3 方向とも当てたい側の位置が入っている（stage は `-` 側 = index、unstage は
+  `+` 側 = index、discard は `+` 側 = ワークツリー）ので、2 つ目以降のハンクだけを
+  送っても探索なしで当たる
+- **行は `<記号><content>` に `\n` を足したもの。** `content` は改行を落として
+  持っているので（02）、`\r` はそのまま残り CRLF のファイルが壊れない
+- **`*NoEol` の行の後ろにだけ `\ No newline at end of file` を足す。** マーカーは
+  ヘッダの行数に数えない（git の出力もそうなっている。git 2.55 で確認）
+- **パスは quote しない。** 非 ASCII も空白も、そのままの UTF-8 バイト列で
+  `git apply` が受ける（git 2.55 で確認）。`git diff` の出力は
+  `core.quotePath` の既定で非 ASCII を `"a/\346\227\245.txt"` と quote するが、
+  受け側は両方を読める。`diff --git a/x b/y.txt b/x b/y.txt` のように `diff --git`
+  行だけでは割り切れない名前でも、`---` / `+++` の 2 行から決め直すので当たる
+- **ただし制御文字を含むパスと `"` で始まるパスは `ArgvError::UnquotablePath`
+  で拒否する。** quote しない以上、tab は名前の終わりと読まれ（`---` の行は tab で
+  区切る決まり）、`\r` は CRLF のパッチとして落とされ、`"` で始まる名前は quote
+  されたものとして unescape される。どれも**別のファイルに patch を当てる**形の
+  失敗なので、静かに通さない。禁じる文字を数え上げるのではなく「制御文字か」で
+  弾くのは、受け側の細かい規則を写し取らずに済ませるため。
+  ファイル単位の stage / unstage / discard はパスを argv に載せるだけなので、
+  こういう名前でも通る
+- 非 UTF-8 のパスは `to_command` と同じ `ArgvError::NonUtf8Path`。`git_read` が
+  一覧ごと落とすので実際には来ない
+
 ## Runner
 
 ```rust
@@ -151,7 +208,8 @@ pub enum ExecError {
   で即座に失敗して分類できるが、ユーザーの `GIT_SSH_COMMAND` や `core.sshCommand` を
   黙って上書きする。**どう避けるかは M3（fetch / pull / push）で決める。**
   それまでこの経路は UI から到達しない
-- stdin は閉じる。ハンク適用は `git apply --cached -` に patch を stdin で渡す例外
+- stdin は閉じる。例外はハンクの 3 操作（`StageHunk` / `UnstageHunk` / `DiscardHunk`）
+  だけで、どれも `git apply … -` に patch を stdin で渡す
 - stdout / stderr は表示専用なので lossy で `String` にする
 - タイムアウトは設けない（fetch の長さは予測不能）。代わりに UI からキャンセル可能にし、子プロセスを kill する（`kill_on_drop`）
 - **`RebaseInteractive` は `Runner` が実行せずに拒否する**（M5 まで）。todo を差し替えずに `git rebase -i` を走らせると、`GIT_EDITOR=true` により全 `pick` の rebase が実行され、`plan` を黙って捨てた破壊的操作になる。M5 で `--sequence-editor` を配線したら外す

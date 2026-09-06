@@ -311,8 +311,9 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
 
 ### ハンクの持ち方
 
-`git_exec` が `git apply --cached` に渡すパッチへ戻せる形で持つ（03 の `StageHunk`）。
-`diff --git` などのファイルヘッダは `path` から組み立て直せるので持たない。
+`git_exec` が `git apply` に渡すパッチへ戻せる形で持つ。戻すのは
+`git_exec::hunk_patch`（03 の「ハンクからパッチを組む」）。`diff --git` などの
+ファイルヘッダは `path` から組み立て直せるので持たない。
 
 - `header` は `@@ -1,4 +1,6 @@ fn foo() {` の行から末尾の改行を落としたもの。`@@` の後ろの
   関数コンテキストも残す。ここは非 UTF-8 でも lossy でよい。`git apply` は 2 つ目の `@@` より

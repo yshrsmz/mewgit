@@ -20,13 +20,18 @@ pub struct GitCommand {
     pub stdin: Option<Vec<u8>>,
 }
 
-/// argv を組めなかった理由。
+/// `git` に渡す形（argv とパッチ）を組めなかった理由。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArgvError {
     /// `git_read` が非 UTF-8 のパスを一覧ごと落とすので実際には来ない。それでも
     /// 塞ぐのは、黙って lossy 変換すると別のファイルを操作してしまうため。
     #[error("パスが UTF-8 ではないため git に渡せません: {}", .path.display())]
     NonUtf8Path { path: PathBuf },
+    /// パッチのヘッダに quote せずには載せられない名前
+    /// （[`hunk_patch`](super::hunk_patch)）。`git apply` が名前の区切りとして読む
+    /// 文字を含むので、そのまま載せると**別のファイルに patch を当てる**。
+    #[error("パスに制御文字か先頭の引用符が含まれるため、ハンク単位では操作できません: {}", .path.display())]
+    UnquotablePath { path: PathBuf },
     /// pathspec が空。`--` だけを置くと「指定なし」= リポジトリ全体になる。
     #[error("パスの指定が空です: git {} -- は対象をリポジトリ全体に広げてしまいます", .argv.join(" "))]
     EmptyPathspec { argv: Vec<String> },
@@ -63,6 +68,11 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
                 "--reverse".into(),
                 "-".into(),
             ]);
+            stdin = Some(patch.clone());
+        }
+        // **`--cached` を付けない。** 当たるのはワークツリーだけ（03）。
+        GitOp::DiscardHunk { path: _, patch } => {
+            argv.extend(["apply".into(), "--reverse".into(), "-".into()]);
             stdin = Some(patch.clone());
         }
         GitOp::Discard(paths) => {
@@ -262,6 +272,7 @@ mod tests {
             GitOp::Unstage(_) => "Unstage",
             GitOp::StageHunk { .. } => "StageHunk",
             GitOp::UnstageHunk { .. } => "UnstageHunk",
+            GitOp::DiscardHunk { .. } => "DiscardHunk",
             GitOp::Discard(_) => "Discard",
             GitOp::DiscardUntracked(_) => "DiscardUntracked",
             GitOp::DiscardAdded(_) => "DiscardAdded",
@@ -293,7 +304,7 @@ mod tests {
     /// [`variant`] のアームの数。`GitOp` に変種を足すと `variant` の網羅 `match` が
     /// コンパイルエラーになり、ここに来る。アームと一緒にこの数と [`cases`] も足す
     /// （足し忘れは `covers_every_variant` が落とす）。
-    const VARIANT_COUNT: usize = 29;
+    const VARIANT_COUNT: usize = 30;
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
     fn cases() -> Vec<(GitOp, Vec<&'static str>)> {
@@ -319,6 +330,14 @@ mod tests {
                     patch: b"@@ -1 +1 @@\n".to_vec(),
                 },
                 vec!["apply", "--cached", "--reverse", "-"],
+            ),
+            (
+                GitOp::DiscardHunk {
+                    path: "a.txt".into(),
+                    patch: b"@@ -1 +1 @@\n".to_vec(),
+                },
+                // `--cached` が無い。付くと index を戻してワークツリーが残る。
+                vec!["apply", "--reverse", "-"],
             ),
             (
                 GitOp::Discard(vec!["a.txt".into()]),
@@ -552,7 +571,10 @@ mod tests {
     fn only_hunk_ops_use_stdin() {
         for (op, _) in cases() {
             let command = to_command(&op).expect("argv を組めませんでした");
-            let expects_stdin = matches!(op, GitOp::StageHunk { .. } | GitOp::UnstageHunk { .. });
+            let expects_stdin = matches!(
+                op,
+                GitOp::StageHunk { .. } | GitOp::UnstageHunk { .. } | GitOp::DiscardHunk { .. }
+            );
             assert_eq!(command.stdin.is_some(), expects_stdin, "{op:?}");
         }
     }

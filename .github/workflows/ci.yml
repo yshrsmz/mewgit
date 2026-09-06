@@ -1,9 +1,35 @@
 name: CI
 
+# ビルドに関係しないファイルだけの変更では走らせない。`paths-ignore` は変更された
+# ファイルが**すべて**一致したときだけスキップするので、docs とコードを同じ PR で
+# 触れば走る。
+#
+# `.github/workflows/**` は意図的に入れていない。ワークフロー自身の変更は、その
+# ワークフローで検証したい。
+#
+# **必須ステータスチェックを設定するときはこの書き方をやめること。** `paths-ignore`
+# でスキップされたチェックは「実行されなかった」ではなく「報告が無い」になり、PR が
+# 永久に pending でマージできなくなる。そのときは同名の常に成功するジョブを別途置く。
+# いまの ruleset は deletion / non_fast_forward / pull_request の 3 つだけで、
+# 必須チェックは無い。
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.claude/**'
+      - '.gitignore'
+      - 'LICENSE-*'
+      - 'renovate.json'
   pull_request:
+    # GitHub Actions は YAML のアンカー / エイリアスを解釈しないので、上と同じ並びを
+    # 手で書く。片方だけ足すとブランチと PR で挙動が割れる。
+    paths-ignore:
+      - '**.md'
+      - '.claude/**'
+      - '.gitignore'
+      - 'LICENSE-*'
+      - 'renovate.json'
 
 permissions:
   contents: read

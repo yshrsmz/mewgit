@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use mewgit_core::app::{AppState, DiffState, DiffView, Pane};
-use mewgit_core::git_read::{DiffTarget, HunkLine, LineOrigin};
+use mewgit_core::git_read::{DiffTarget, FileStatus, HunkLine, LineOrigin};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -85,15 +85,23 @@ fn pending_message(diff: &DiffState, wanted: Option<&DiffTarget>) -> &'static st
 
 /// 届いてはいるがハンクが 1 つも無いときの文言。
 ///
-/// バイナリと「mode だけの変更」はどちらも `hunks` が空になるので、`binary` で分ける
-/// （02 の「diff とハンク」）。
+/// バイナリ・mode だけの変更・内容の同じ rename・中身が空のファイルは、どれも
+/// `hunks` が空になる（02 の「diff とハンク」）。**一括りにしない。** すべてを
+/// 「mode だけの変更」と出すと、`touch` しただけの空ファイルにも mode の話をする。
 fn no_hunks(view: &DiffView) -> &'static str {
-    if view.files.is_empty() {
-        "差分はありません"
-    } else if view.files.iter().any(|file| file.binary) {
-        "バイナリファイルです"
-    } else {
-        "内容の変更はありません（mode だけの変更）"
+    match view.files.as_slice() {
+        [] => "差分はありません",
+        [file] if file.binary => "バイナリファイルです",
+        [file] => match file.status {
+            // 追加・削除なのに行が無い = 中身が空。
+            FileStatus::Added | FileStatus::Deleted | FileStatus::Untracked => "空のファイルです",
+            // 中身は同じまま名前だけ変わった。
+            FileStatus::Renamed | FileStatus::Copied => "名前が変わっただけで、内容は同じです",
+            // 内容が同じで mode だけ変わった。
+            _ => "内容の変更はありません（mode だけの変更）",
+        },
+        // 複数ファイル（`DiffTarget::Commit`）で 1 つもハンクが無い形。
+        _ => "内容の変更はありません",
     }
 }
 
@@ -193,7 +201,7 @@ mod tests {
     use super::*;
     use crate::test_util::{draw, row_of, state_at, terminal_with};
     use mewgit_core::app::{update, Cmd, Key, KeyCode, Msg, TermSize};
-    use mewgit_core::git_read::{FileDiff, FileStatus, WorktreeSnapshot};
+    use mewgit_core::git_read::{FileDiff, WorktreeSnapshot};
     use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk};
     use ratatui::style::Modifier;
 
@@ -488,6 +496,32 @@ mod tests {
 
         let text = draw(&state, SIZE).join("\n");
         assert!(text.contains("mode だけの変更"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_file_is_not_called_a_mode_change() {
+        // `touch` しただけのファイルもハンクが 0 個になる。一括りに「mode だけの
+        // 変更」と出すと、mode を触っていないファイルに mode の話をすることになる。
+        let mut empty = fake_file_diff("empty.txt", Vec::new());
+        empty.status = FileStatus::Untracked;
+
+        let state = state_with_diff(vec![empty]);
+
+        let text = draw(&state, SIZE).join("\n");
+        assert!(text.contains("空のファイル"), "{text}");
+        assert!(!text.contains("mode"), "{text}");
+    }
+
+    #[test]
+    fn a_rename_without_content_changes_says_so() {
+        let mut renamed = fake_file_diff("new.txt", Vec::new());
+        renamed.old_path = Some("old.txt".into());
+        renamed.status = FileStatus::Renamed;
+
+        let state = state_with_diff(vec![renamed]);
+
+        let text = draw(&state, SIZE).join("\n");
+        assert!(text.contains("名前が変わっただけ"), "{text}");
     }
 
     #[test]

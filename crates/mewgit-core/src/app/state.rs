@@ -463,6 +463,16 @@ impl DiffState {
         self.view.as_ref().filter(|view| &view.target == wanted)
     }
 
+    /// [`fresh_view`](Self::fresh_view) の可変版。カーソルを動かすのに使う。
+    ///
+    /// **見えていない diff のカーソルを動かさない。** 描くのは `fresh_view` を通した
+    /// ものだけなので、濾さずに動かすと画面に出ていない `view` のカーソルが黙って
+    /// 動く。次のタスクのハンク操作はこの `view` を読む。
+    pub fn fresh_view_mut(&mut self, wanted: Option<&DiffTarget>) -> Option<&mut DiffView> {
+        let wanted = wanted?;
+        self.view.as_mut().filter(|view| &view.target == wanted)
+    }
+
     /// `wanted` を読みに行って失敗したままか。
     ///
     /// 「読み込み中」と「読み込めなかった」の出し分けに使う。`is_running` の否定から

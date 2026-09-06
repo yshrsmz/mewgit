@@ -165,8 +165,13 @@ fn diff_key(state: &mut AppState, key: Key) -> Cmd {
 }
 
 /// diff のカーソルを `delta` ハンク動かす。
+///
+/// **いま見えている diff だけを動かす。** 別の対象のものが `view` に残っていることが
+/// あり（読み込み中・失敗中）、濾さずに動かすと画面に出ていない diff のカーソルが
+/// 黙って動く。
 fn move_hunk(state: &mut AppState, delta: isize) -> Cmd {
-    if let Some(view) = state.diff.view.as_mut() {
+    let wanted = state.wanted_diff();
+    if let Some(view) = state.diff.fresh_view_mut(wanted.as_ref()) {
         view.move_cursor(delta);
     }
     Cmd::None
@@ -189,11 +194,23 @@ fn diff_loaded(
             // **届いたのがいま選んでいるファイルのものなら採る。** 無条件に上書きすると、
             // 正しく出ている画面が別のファイルの diff に化ける。
             if state.wanted_diff().as_ref() == Some(&target) {
-                state.diff.view = Some(DiffView {
+                // **同じ対象を読み直したときはカーソルを持ち越す。** キャッシュしない
+                // ので `Esc` → `Enter` で開き直すたびに読み直しが届く。既定に戻すと、
+                // 選んでいたハンクが先頭へ飛んでから操作が効くことになる。
+                let cursor = state
+                    .diff
+                    .view
+                    .as_ref()
+                    .filter(|view| view.target == target)
+                    .map_or_else(DiffCursor::default, |view| view.cursor);
+                let mut view = DiffView {
                     target,
                     files,
-                    cursor: DiffCursor::default(),
-                });
+                    cursor,
+                };
+                // 読み直しでハンクが減っていることがある。選べる位置へ寄せ直す。
+                view.move_cursor(0);
+                state.diff.view = Some(view);
                 return Cmd::None;
             }
         }
@@ -868,6 +885,51 @@ mod tests {
             cmd,
             Cmd::LoadDiff(DiffTarget::HeadVsIndex(Some("a.txt".into())))
         );
+    }
+
+    #[test]
+    fn reopening_the_same_file_keeps_the_hunk_cursor() {
+        // キャッシュしないので開き直すたびに読み直しが届く。既定に戻すと、選んで
+        // いたハンクが先頭へ飛んでから操作が効くことになる。
+        let mut state = diff_state(&["a.txt"], 3);
+        let _ = press(&mut state, 'j');
+        let _ = press(&mut state, 'j');
+        assert_eq!(state.diff.view.as_ref().unwrap().cursor.hunk, 2);
+
+        let _ = press_code(&mut state, KeyCode::Esc);
+        let _ = press_code(&mut state, KeyCode::Enter);
+        let target = unstaged_diff("a.txt");
+        let _ = update(&mut state, diff_ok(target, fake_diff("a.txt", 3)));
+
+        assert_eq!(state.diff.view.as_ref().unwrap().cursor.hunk, 2);
+    }
+
+    #[test]
+    fn a_reload_with_fewer_hunks_seats_the_cursor_again() {
+        let mut state = diff_state(&["a.txt"], 3);
+        let _ = press(&mut state, 'j');
+        let _ = press(&mut state, 'j');
+
+        // ハンクが 1 つに減って届く。
+        let target = unstaged_diff("a.txt");
+        let _ = update(&mut state, diff_ok(target, fake_diff("a.txt", 1)));
+
+        assert_eq!(state.diff.view.as_ref().unwrap().cursor.hunk, 0);
+    }
+
+    #[test]
+    fn keys_do_not_move_the_cursor_of_a_diff_that_is_not_shown() {
+        // 別の対象のものが `view` に残っているあいだ（読み込み中・失敗中）に `j` を
+        // 押しても、画面に出ていない diff のカーソルは動かさない。
+        let mut state = diff_state(&["a.txt", "b.txt"], 3);
+        let _ = press_code(&mut state, KeyCode::Esc);
+        let _ = press(&mut state, 'j');
+        let _ = press_code(&mut state, KeyCode::Enter);
+
+        // b.txt はまだ届いていない。`view` には a.txt が残っている。
+        let _ = press(&mut state, 'j');
+
+        assert_eq!(state.diff.view.as_ref().unwrap().cursor.hunk, 0);
     }
 
     #[test]

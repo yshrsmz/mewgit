@@ -2,7 +2,10 @@
 
 use crate::auth::AccountState;
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
-use crate::git_read::{Commit, DiffTarget, FileDiff, InProgressOp, WorktreeSnapshot};
+use crate::git_read::{
+    DiffTarget, FileDiff, GitReadError, HeadInfo, InProgressOp, LogPage, RefIndex, Remote,
+    WorktreeSnapshot,
+};
 use crate::github::{Check, GithubError, PullRequest};
 
 use super::{Key, TermSize};
@@ -13,21 +16,31 @@ use super::{Key, TermSize};
 /// （`SecretString`）を持つため。
 ///
 /// 大きい payload は `Box` に入れる。入れないと `Msg` が 336 バイトになり、1 打鍵ごとに
-/// 作られる [`Msg::Key`]（実データ 12 バイト）まで同じ大きさで動く。[`Msg::ExecFinished`]
-/// と [`Msg::PrLoaded`] の 2 つを箱に入れると 96 バイトになる。
+/// 作られる [`Msg::Key`]（実データ 12 バイト）まで同じ大きさで動く。
 #[derive(Debug)]
 pub enum Msg {
     Key(Key),
-    Resize(TermSize),
+    /// 端末のサイズが変わった。グラフに使える行数を一緒に運ぶ。
+    ///
+    /// 行数は `ui` がレイアウトから出す。core がヘッダやステータスバーの高さを
+    /// 知っていると、07 のレイアウトを変えたときに黙ってずれる（01 の「グラフの行」）。
+    Resize {
+        term: TermSize,
+        graph_rows: usize,
+    },
     /// 250ms 周期。スピナー更新と外部変更検知に使う。
     Tick,
 
     // git_read
-    LogLoaded {
-        commits: Vec<Commit>,
-        /// これ以上読むコミットが無い。
-        done: bool,
-    },
+    /// ログの 1 ページ。`Result` にしているのは、失敗しても必ずここに来るようにするため。
+    /// 失敗の通り道が無いと `JobKind::LoadLog` が走ったまま残り、以後の `Cmd::LoadLog` が
+    /// 黙って捨てられる。
+    LogLoaded(Result<LogPage, GitReadError>),
+    /// リポジトリの概要。起動時と、ref が変わったあと（M3）に読む。
+    ///
+    /// 3 つを 1 通にまとめるのは、どれもリポジトリの ref から導かれる値で、
+    /// fetch の後には揃って古くなるため。`Box` は `Msg` を小さく保つため。
+    RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),
     StatusLoaded(WorktreeSnapshot),
     DiffLoaded {
         target: DiffTarget,
@@ -49,6 +62,14 @@ pub enum Msg {
     PrLoaded(Box<Result<Option<PullRequest>, GithubError>>),
     ChecksLoaded(Result<Vec<Check>, GithubError>),
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),
+}
+
+/// [`Msg::RepoInfoLoaded`] の中身。
+#[derive(Debug)]
+pub struct RepoSnapshot {
+    pub remotes: Vec<Remote>,
+    pub head: HeadInfo,
+    pub refs: RefIndex,
 }
 
 /// [`Msg::ExecFinished`] の中身。

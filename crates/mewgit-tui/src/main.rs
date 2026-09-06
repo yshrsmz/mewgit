@@ -4,31 +4,27 @@
 //! interactive rebase 用（`docs/design/03-git-exec.md`）。M5 で実装する。
 //!
 //! ここは配線だけで、実端末が必要なためテストを書かない（CLAUDE.md の例外）。
+//! 分岐のある処理は `runtime` 側に置く。
 
 mod input;
 mod modals;
 mod panes;
 mod runtime;
+#[cfg(test)]
+mod test_util;
 mod ui;
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
-use mewgit_core::app::{AppState, NoticeLevel, RepoInfo, TermSize};
+use mewgit_core::app::NoticeLevel;
 use mewgit_core::config::Config;
 use ratatui::crossterm::event::EventStream;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let (config, warnings) = Config::load();
-
-    let mut state = AppState::new(
-        RepoInfo {
-            path: repo_path()?,
-            ..RepoInfo::default()
-        },
-        config,
-    );
+    let (mut state, reader) = runtime::open(&repo_path()?, config)?;
 
     // 設定の警告は起動時に見せる。読み込み自体は失敗しない（08 参照）。
     for warning in warnings {
@@ -38,15 +34,7 @@ async fn main() -> Result<()> {
     // raw mode / 代替画面 / パニックフックは ratatui が持っている。
     let mut terminal = ratatui::try_init()?;
 
-    // 起動時に Resize は飛んでこないので、初期サイズは自分で取る。
-    if let Ok(size) = terminal.size() {
-        state.term = TermSize {
-            width: size.width,
-            height: size.height,
-        };
-    }
-
-    let result = runtime::run(&mut terminal, EventStream::new(), &mut state).await;
+    let result = runtime::run(&mut terminal, EventStream::new(), &mut state, reader).await;
     // restore は () を返すので、ループのエラーを後始末のエラーで踏み潰さない。
     ratatui::restore();
     result

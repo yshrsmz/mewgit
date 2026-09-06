@@ -20,6 +20,8 @@ pub enum Cmd {
     },
     LoadStatus,
     LoadDiff(DiffTarget),
+    /// リモート・HEAD・ref の索引を読む。起動時と、ref が変わったあと（M3）。
+    LoadRepoInfo,
     /// git CLI の実行（03 参照）。
     Exec(GitOp),
     ResolveAccount,
@@ -57,6 +59,7 @@ impl Cmd {
             Cmd::None | Cmd::Batch(_) | Cmd::Quit => None,
             Cmd::LoadLog { .. } => Some(JobKind::LoadLog),
             Cmd::LoadStatus => Some(JobKind::LoadStatus),
+            Cmd::LoadRepoInfo => Some(JobKind::LoadRepoInfo),
             Cmd::LoadDiff(_) => Some(JobKind::LoadDiff),
             Cmd::Exec(_) => Some(JobKind::Exec),
             Cmd::ResolveAccount => Some(JobKind::ResolveAccount),

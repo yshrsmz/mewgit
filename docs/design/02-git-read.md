@@ -61,6 +61,8 @@ impl RefIndex {
     pub fn labels(&self, oid: Oid) -> &[RefLabel];
 }
 
+impl FromIterator<(Oid, RefLabel)> for RefIndex { /* 並べ替えは new を通る */ }
+
 pub enum RefLabel {
     Local { name: String, is_head: bool },   // "main"
     Remote { name: String },                 // "origin/main"
@@ -86,6 +88,9 @@ pub enum RefLabel {
 - ラベルの並べ替え（種別 Local → Remote → Tag、同種内は名前順）は `RefIndex` を作る
   ところに置く。git2 の列挙順は安定しておらず、索引を組む経路が増えたときに
   並べ替えを忘れると描画順とテストの期待値だけが静かにずれる
+- `FromIterator` を実装して `refs()` を通さずにも索引を組めるようにする。`ui` のテストが
+  ラベルの描画を実リポジトリ無しで表現できるようにするため。どちらの経路でも
+  並べ替えは同じところを通る
 
 ### 非 UTF-8 の扱い
 

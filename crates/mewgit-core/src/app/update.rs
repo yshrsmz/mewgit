@@ -3,24 +3,56 @@
 //! `update` は同期・純粋（`AppState` の変更を除く）。I/O は呼ばず、必要な副作用は
 //! [`Cmd`] として返す。
 //!
-//! 現時点では骨組みだけを実装している。ペインごとのキー処理は M1 以降で、対応する
-//! ペインのタスクと一緒に足す。
+//! ペインごとのキー処理は、対応するペインのタスクと一緒に足す。いまあるのは
+//! グラフだけ。
 
-use super::{AppState, Cmd, Key, KeyCode, Msg};
+use crate::git_read::{GitReadError, LogPage};
+use crate::graph::LaneState;
+
+use super::{
+    AppState, Cmd, GraphLine, JobKind, Key, KeyCode, Msg, NoticeLevel, Pane, RepoSnapshot,
+};
+
+/// 起動直後に実行してほしい副作用。
+///
+/// `runtime::run` がループに入る前に呼ぶ。`main.rs` から呼ぶとテストの外に出てしまう。
+/// status / アカウント解決は、それぞれのタスクでここに足す。
+pub fn init(state: &mut AppState) -> Cmd {
+    let cmd = Cmd::batch([
+        Cmd::LoadRepoInfo,
+        Cmd::LoadLog {
+            count: state.config.graph.page_size,
+        },
+    ]);
+    state.issue(cmd)
+}
 
 /// 1 つの [`Msg`] を状態に適用し、実行してほしい副作用を返す。
+///
+/// 返す `Cmd` は [`AppState::issue`] を通す。同種のジョブが走っているあいだ二重に
+/// 発行しないため（01 の「update の原則」）。
 pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
+    let cmd = update_inner(state, msg);
+    state.issue(cmd)
+}
+
+fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
     match msg {
         Msg::Key(key) => update_key(state, key),
-        Msg::Resize(size) => {
-            state.term = size;
+        Msg::Resize { term, graph_rows } => {
+            state.term = term;
+            state.graph.viewport = graph_rows;
+            // 縮んだ端末でカーソルが窓の外に出たままにならないようにする。
+            state.graph.scroll_into_view();
             Cmd::None
         }
         Msg::Tick => Cmd::None,
 
+        Msg::LogLoaded(result) => log_loaded(state, result),
+        Msg::RepoInfoLoaded(result) => repo_info_loaded(state, *result),
+
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
         // `Msg` に変種を足したときに実装漏れをコンパイルエラーにするため。
-        Msg::LogLoaded { .. } => Cmd::None,
         Msg::StatusLoaded(_) => Cmd::None,
         Msg::DiffLoaded { .. } => Cmd::None,
         Msg::ExecFinished(_) => Cmd::None,
@@ -53,17 +85,350 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         return Cmd::Quit;
     }
 
+    match state.focus {
+        Pane::Graph => graph_key(state, key),
+        // 各ペインのキー処理は対応するマイルストーンで足す。
+        Pane::Branches | Pane::Stash | Pane::Prs | Pane::Worktree | Pane::Diff => Cmd::None,
+    }
+}
+
+/// グラフペインのキー処理。
+///
+/// いまは上下移動だけ。`Enter` の詳細展開・`g` / `G`・スクロール追随の追加読み込みは
+/// それぞれ別のタスクで足す。
+fn graph_key(state: &mut AppState, key: Key) -> Cmd {
+    match key.code() {
+        KeyCode::Char('j') | KeyCode::Down => state.graph.move_cursor(1),
+        KeyCode::Char('k') | KeyCode::Up => state.graph.move_cursor(-1),
+        _ => {}
+    }
+    Cmd::None
+}
+
+/// リポジトリの概要を反映する。
+///
+/// 一部だけ成功という形にしていないのは、3 つとも同じ ref から導かれる値で、
+/// 途中まで新しい状態を持っても意味が無いため。失敗しても通知だけで続ける
+/// （ラベルもリモートも無いままグラフは出せる）。
+fn repo_info_loaded(state: &mut AppState, result: Result<RepoSnapshot, GitReadError>) -> Cmd {
+    state.jobs.finish(JobKind::LoadRepoInfo);
+
+    match result {
+        Ok(info) => {
+            state.repo.remotes = info.remotes;
+            state.repo.head = Some(info.head);
+            state.graph.refs = info.refs;
+        }
+        Err(err) => state.push_notice(NoticeLevel::Warn, err.to_string(), None),
+    }
+    Cmd::None
+}
+
+/// ログのページを積む。
+fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cmd {
+    state.jobs.finish(JobKind::LoadLog);
+
+    let page = match result {
+        Ok(page) => page,
+        Err(err) => {
+            state.push_notice(NoticeLevel::Error, err.to_string(), None);
+            // 失敗したセッションは捨てられ、次の読み込みは先頭から来る（02）。
+            // 積んだ行を残すと同じコミットが二重に並ぶ。レーンの状態も、もう
+            // `lines` に無いコミットを指したままにしない。
+            state.graph.lines.clear();
+            state.graph.lanes = LaneState::default();
+            state.graph.cursor = 0;
+            state.graph.scroll = 0;
+            state.graph.loaded_all = false;
+            return Cmd::None;
+        }
+    };
+
+    // レーンの割り当ては `graph` の担当。`app` は返ってきた行を並べるだけ。
+    let rows = state.graph.lanes.extend(&page.commits);
+    state.graph.lines.extend(
+        page.commits
+            .into_iter()
+            .zip(rows)
+            .map(|(commit, row)| GraphLine { commit, row }),
+    );
+    state.graph.loaded_all = page.done;
     Cmd::None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Modal, Pane, RepoInfo, TermSize};
+    use crate::app::{Modal, RepoInfo, TermSize};
     use crate::config::Config;
+    use crate::git_read::{Commit, HeadInfo, RefIndex, RefLabel, Remote};
+    use crate::test_util::fake_commit;
+
+    /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
+    const ROWS: usize = 20;
 
     fn state() -> AppState {
-        AppState::new(RepoInfo::default(), Config::default())
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        state.graph.viewport = ROWS;
+        state
+    }
+
+    fn commit(n: u8) -> Commit {
+        fake_commit(n, &format!("commit {n}"))
+    }
+
+    /// `n` 件のコミットを積んだ状態。
+    fn state_with_commits(n: u8) -> AppState {
+        let mut state = state();
+        let page = LogPage {
+            commits: (0..n).map(commit).collect(),
+            done: true,
+        };
+        update(&mut state, Msg::LogLoaded(Ok(page)));
+        state
+    }
+
+    #[test]
+    fn init_asks_for_the_repository_and_the_first_page() {
+        let mut state = state();
+
+        let cmd = init(&mut state);
+
+        assert_eq!(
+            cmd,
+            Cmd::Batch(vec![
+                Cmd::LoadRepoInfo,
+                Cmd::LoadLog {
+                    count: state.config.graph.page_size
+                }
+            ])
+        );
+        assert!(state.jobs.is_running(JobKind::LoadLog));
+        assert!(state.jobs.is_running(JobKind::LoadRepoInfo));
+    }
+
+    #[test]
+    fn repo_info_fills_in_the_remotes_head_and_ref_labels() {
+        let mut state = state();
+        init(&mut state);
+        let oid = commit(1).oid;
+        let info = RepoSnapshot {
+            remotes: vec![Remote {
+                name: "origin".to_string(),
+                url: "git@github.com:owner/repo.git".to_string(),
+            }],
+            head: HeadInfo::Branch {
+                name: "main".to_string(),
+                oid,
+            },
+            refs: RefIndex::from_iter([(
+                oid,
+                RefLabel::Local {
+                    name: "main".to_string(),
+                    is_head: true,
+                },
+            )]),
+        };
+
+        update(&mut state, Msg::RepoInfoLoaded(Box::new(Ok(info))));
+
+        assert_eq!(state.repo.remotes.len(), 1);
+        assert!(state.repo.head.is_some());
+        assert_eq!(state.graph.refs.labels(oid).len(), 1);
+        assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
+    }
+
+    #[test]
+    fn a_failed_repo_info_notices_and_keeps_going() {
+        // ラベルもリモートも無いままグラフは出せる。起動は止めない。
+        let mut state = state();
+        init(&mut state);
+
+        update(
+            &mut state,
+            Msg::RepoInfoLoaded(Box::new(Err(GitReadError::NonUtf8Head))),
+        );
+
+        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Warn);
+        assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
+    }
+
+    #[test]
+    fn a_second_load_while_one_is_running_is_dropped() {
+        // 二重に投げると同じページを 2 回積む。
+        let mut state = state();
+        init(&mut state);
+
+        let again = state.issue(Cmd::LoadLog { count: 10 });
+
+        assert_eq!(again, Cmd::None);
+    }
+
+    #[test]
+    fn batch_only_drops_the_duplicated_cmd() {
+        let mut state = state();
+        init(&mut state);
+
+        let cmd = state.issue(Cmd::Batch(vec![
+            Cmd::LoadLog { count: 10 },
+            Cmd::LoadStatus,
+        ]));
+
+        // 走っているのは LoadLog だけなので、LoadStatus は残る。
+        assert_eq!(cmd, Cmd::LoadStatus);
+    }
+
+    #[test]
+    fn log_loaded_appends_lines_and_finishes_the_job() {
+        let mut state = state();
+        init(&mut state);
+
+        let page = LogPage {
+            commits: vec![commit(1), commit(2)],
+            done: false,
+        };
+        assert_eq!(update(&mut state, Msg::LogLoaded(Ok(page))), Cmd::None);
+
+        let summaries: Vec<&str> = state
+            .graph
+            .lines
+            .iter()
+            .map(|line| line.commit.summary.as_str())
+            .collect();
+        assert_eq!(summaries, ["commit 1", "commit 2"]);
+        assert!(!state.graph.loaded_all);
+        // ジョブを片付けないと、以後の LoadLog が黙って捨てられる。
+        assert!(!state.jobs.is_running(JobKind::LoadLog));
+    }
+
+    #[test]
+    fn a_second_page_is_appended_after_the_first() {
+        let mut state = state();
+        let first = LogPage {
+            commits: vec![commit(1)],
+            done: false,
+        };
+        update(&mut state, Msg::LogLoaded(Ok(first)));
+
+        let second = LogPage {
+            commits: vec![commit(2)],
+            done: true,
+        };
+        update(&mut state, Msg::LogLoaded(Ok(second)));
+
+        assert_eq!(state.graph.lines.len(), 2);
+        assert!(state.graph.loaded_all);
+    }
+
+    #[test]
+    fn a_failed_load_notices_and_drops_what_was_stacked() {
+        // 失敗したセッションは捨てられ、次の読み込みは先頭から来る（02）。
+        // 積んだ行を残すと同じコミットが二重に並ぶ。
+        let mut state = state_with_commits(3);
+        init(&mut state);
+
+        update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+
+        assert!(state.graph.lines.is_empty());
+        assert_eq!(state.graph.lanes, LaneState::default());
+        assert_eq!(state.graph.cursor, 0);
+        assert!(!state.graph.loaded_all);
+        assert!(!state.jobs.is_running(JobKind::LoadLog));
+        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
+    }
+
+    #[test]
+    fn j_and_k_move_the_graph_cursor() {
+        let mut state = state_with_commits(3);
+
+        update(&mut state, Msg::Key(Key::char('j')));
+        assert_eq!(state.graph.cursor, 1);
+
+        update(&mut state, Msg::Key(Key::new(KeyCode::Down)));
+        assert_eq!(state.graph.cursor, 2);
+
+        update(&mut state, Msg::Key(Key::char('k')));
+        assert_eq!(state.graph.cursor, 1);
+
+        update(&mut state, Msg::Key(Key::new(KeyCode::Up)));
+        assert_eq!(state.graph.cursor, 0);
+    }
+
+    #[test]
+    fn the_cursor_stops_at_both_ends() {
+        let mut state = state_with_commits(2);
+
+        update(&mut state, Msg::Key(Key::char('k')));
+        assert_eq!(state.graph.cursor, 0);
+
+        for _ in 0..5 {
+            update(&mut state, Msg::Key(Key::char('j')));
+        }
+        assert_eq!(state.graph.cursor, 1);
+    }
+
+    #[test]
+    fn moving_the_cursor_on_an_empty_graph_does_nothing() {
+        let mut state = state();
+
+        update(&mut state, Msg::Key(Key::char('j')));
+
+        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.scroll, 0);
+    }
+
+    #[test]
+    fn the_view_follows_the_cursor_past_the_bottom() {
+        // 端末 24 行 = グラフ 20 行。21 行目に降りるとスクロールが 1 進む。
+        let mut state = state_with_commits(30);
+
+        for _ in 0..20 {
+            update(&mut state, Msg::Key(Key::char('j')));
+        }
+
+        assert_eq!(state.graph.cursor, 20);
+        assert_eq!(state.graph.scroll, 1);
+    }
+
+    #[test]
+    fn widening_the_terminal_pulls_the_view_back_to_the_end() {
+        // 末尾に貼り付いたまま端末を大きくすると、カーソルは窓の中にいるので
+        // スクロールが動かず、上に行があるのに空白が残る。
+        let mut state = state_with_commits(30);
+        state.graph.viewport = 5;
+        state.graph.cursor = 29;
+        state.graph.scroll_into_view();
+        assert_eq!(state.graph.scroll, 25);
+
+        state.graph.viewport = 25;
+        state.graph.scroll_into_view();
+
+        assert_eq!(state.graph.scroll, 5);
+    }
+
+    #[test]
+    fn a_viewport_larger_than_the_history_scrolls_to_the_top() {
+        let mut state = state_with_commits(3);
+        state.graph.scroll = 2;
+
+        state.graph.scroll_into_view();
+
+        assert_eq!(state.graph.scroll, 0);
+    }
+
+    #[test]
+    fn the_view_stays_put_while_the_cursor_is_visible() {
+        // 下端から 1 つ戻ってもスクロールは動かない。動かすとカーソルが最下行に
+        // 貼り付いたまま中身だけが流れる。
+        let mut state = state_with_commits(30);
+        for _ in 0..20 {
+            update(&mut state, Msg::Key(Key::char('j')));
+        }
+
+        update(&mut state, Msg::Key(Key::char('k')));
+
+        assert_eq!(state.graph.cursor, 19);
+        assert_eq!(state.graph.scroll, 1);
     }
 
     #[test]
@@ -131,15 +496,41 @@ mod tests {
     }
 
     #[test]
-    fn resize_updates_the_terminal_size() {
+    fn resize_updates_the_terminal_size_and_the_viewport() {
         let mut state = state();
-        let size = TermSize {
+        let term = TermSize {
             width: 120,
             height: 40,
         };
 
-        assert_eq!(update(&mut state, Msg::Resize(size)), Cmd::None);
-        assert_eq!(state.term, size);
+        let msg = Msg::Resize {
+            term,
+            graph_rows: 36,
+        };
+        assert_eq!(update(&mut state, msg), Cmd::None);
+        assert_eq!(state.term, term);
+        assert_eq!(state.graph.viewport, 36);
+    }
+
+    #[test]
+    fn shrinking_the_terminal_pulls_the_cursor_back_into_view() {
+        // 縮んだ端末でカーソルが窓の外に残ると、選択行が見えないまま操作することになる。
+        let mut state = state_with_commits(30);
+        for _ in 0..25 {
+            update(&mut state, Msg::Key(Key::char('j')));
+        }
+        assert_eq!(state.graph.cursor, 25);
+
+        let msg = Msg::Resize {
+            term: TermSize {
+                width: 80,
+                height: 9,
+            },
+            graph_rows: 5,
+        };
+        update(&mut state, msg);
+
+        assert_eq!(state.graph.scroll, 21);
     }
 
     #[test]

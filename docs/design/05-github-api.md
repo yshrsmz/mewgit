@@ -25,6 +25,9 @@ impl GithubClient {
 ```
 
 - ヘッダ: `Authorization: Bearer`、`Accept: application/vnd.github+json`、`X-GitHub-Api-Version`、`User-Agent: mewgit/<ver>`
+- ベース URL は `host` から組む（`https://api.{host}`。github.com も同じ形）。
+  **`auth::RemoteUrl` は port を捨てる**ので、非既定ポートで動く GHES はここに届かない。
+  `new` に port を足すか、そもそも対応しないかは**このクライアントを書くタスクで決める**（04）
 
 ### TLS とルート証明書
 

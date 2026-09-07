@@ -28,13 +28,57 @@ pub struct GhLogin { pub host: String, pub login: String, pub active: bool, pub 
 ## SSH エイリアスの正規化
 
 ```rust
-pub async fn resolve_ssh_host(alias: &str) -> Result<String>   // ssh -G alias → hostname
+pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh -G -- alias → hostname
 ```
 
-- リモート URL を `RemoteUrl { scheme, host_raw, owner, repo }` に解析（`git@alias:owner/repo.git`、`ssh://git@alias/owner/repo`、`https://host/owner/repo` に対応）
+- リモート URL を `RemoteUrl { scheme, host_raw, owner, repo }` に解析（`auth/url.rs`）。
+  受けるのは scp 形式 `git@alias:owner/repo.git`、`ssh://git@alias:2222/owner/repo`、
+  `https://host/owner/repo` の 3 つ。`git://` / `http://` / `file://` / ローカルパスと、
+  `owner/repo` の 2 段にならないパスは `InvalidRemoteUrl` で拒む。**拒んでも Git 操作は
+  動く**（GitHub 機能が degraded になるだけ）ので、読めない形を無理に通さない
+- port は捨てる。`RemoteUrl` は host / owner / repo しか持たない。**非既定ポートの
+  GHES では API のベース URL が違う**が、ベース URL を組むのは `github`（05）なので
+  そちらのタスクで決める
 - scheme が ssh のときのみ `ssh -G` を実行し、`hostname` 行を実ホストとする
 - 結果は `app` が `RepoInfo.target.host` として保持する（例: `github.com`、`acme.ghe.com`）
 - `ssh` が無い、または解決失敗なら `host_raw` をそのまま使い、通知に出す
+
+### ssh -G の実測（OpenSSH 10.3p1）
+
+- **未定義の alias でも exit 0** で `hostname <alias>` を返す。「エイリアスが無かった」は
+  エラーではなく「正規化しても同じだった」。`Err` にするのは spawn 失敗と非 0 終了だけ
+- 出力は `host <alias>` の行が `hostname <実ホスト>` の行より先に来る。**`hostname ` の
+  完全一致**で拾う（`host` の prefix で見ると最初の行を取ってしまう）
+- `HostName %h.example.com` のトークンは `-G` の時点で展開済みの値が出る
+- 構文エラーのある設定は exit 255 で、stderr に `line N: Bad configuration option`
+- stdin が端末でないと `Pseudo-terminal will not be allocated` が stderr に出るが、
+  **これが出るのは成功する経路だけ**（設定エラーもホスト名エラーも、その手前で落ちる）。
+  成功時の stderr は使わないので `-T` で止める必要は無い。**止めても観測できる差が
+  無く、見張りを書けない**ので入れない
+- `-F <file>` を渡すと `/etc/ssh/ssh_config` も含めて無視するので、実 ssh を使った
+  テストを環境から切り離せる（テストのための stub は要らない）
+
+### alias は argv の positional に載る
+
+`.git/config` の URL はユーザーが打ったものとは限らない（clone してきたリポジトリの値が
+そのまま入る）。`git@-oProxyCommand=...:a/b.git` のような URL を素直に渡すと
+`ssh -G -oProxyCommand=...` になり、**ホスト名ではなくオプションとして解釈される**。
+2 段で塞ぐ。
+
+- パーサが `-` で始まる `host_raw` を `InvalidRemoteUrl` で拒む（git 自身と同じ判断）
+- `resolve_ssh_host` は `ssh -G -- <alias>` と `--` を置く。**`--` の有無で結果が変わる** —
+  無ければ ssh は usage を出して落ち、有れば「ホスト名として不正」で落ちる。公開関数なので
+  パーサを通らない呼び出しもありうる
+
+「危ない引数を渡していないか」ではなく「危ない解釈をされる余地があるか」で数える
+（`git branch --move` の `to` と同じ形）。
+
+### 既定リモートを決めるのは M4
+
+`RepoInfo.target` を埋めるには「どのリモートの URL を見るか」を決める必要があるが、
+`origin` を採るのか現在のブランチの upstream の remote を見るのかは、どの設計書にも
+書いていない。**`auth::resolve` を書く M4 のタスクで決める。** それまで `target` は
+`None` のままで、この節が用意するのは `RemoteUrl::parse` と `resolve_ssh_host` だけ。
 
 ## アカウント解決
 

@@ -56,11 +56,10 @@ pub enum Cmd {
     /// そのコストを払わせることになる（`LoadCommitFiles` を `LoadCommitDetail` と
     /// 分けたのと同じ理由）。
     ///
-    /// **いま出すのは `init` だけ。** 古くなる時点は `LoadRepoInfo` と同じなので、
-    /// ref を動かす書き込みの後に読み直す経路は [`update::Reload`] に足すが、それは
-    /// 切替と削除のタスク（そこで初めて ref を動かす書き込みが入る）。
-    ///
-    /// [`update::Reload`]: crate::app::update::Reload
+    /// **古くなる時点は [`Cmd::LoadRepoInfo`] と同じ**なので、起動時と、ref を動かす
+    /// 書き込みの後（`update::Reload` の `Refs` 以上）に出す。commit は
+    /// `refs/heads/<現在>` を動かすので、ここを外すと Branches ペインが commit 前の
+    /// ahead を出したまま残る。
     LoadBranches,
     /// git CLI の実行（03 参照）。
     Exec(GitOp),

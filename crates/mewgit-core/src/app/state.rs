@@ -834,6 +834,17 @@ impl DiffView {
 /// **平坦な添字のカーソルはここを通らない。** `0..len` が全部選べるので並びを組む
 /// 必要が無く、組ませるとカーソルを 1 行動かすたびに `Vec` を確保することになる。
 /// そちらは [`stepped_index`] が持つ。
+fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Option<T> {
+    let index = positions
+        .iter()
+        .position(|&position| position == current)
+        .unwrap_or(0);
+    positions
+        .get(index.saturating_add_signed(delta))
+        .or(positions.last())
+        .copied()
+}
+
 /// `0..len` の添字を `delta` 動かした位置。端では止まり、要素が無ければ据え置く。
 ///
 /// **平坦な添字のカーソルの端の扱いはここ 1 箇所。** [`CommitFiles::move_cursor`] と
@@ -846,17 +857,6 @@ fn stepped_index(cursor: usize, len: usize, delta: isize) -> usize {
         return cursor;
     };
     cursor.saturating_add_signed(delta).min(last)
-}
-
-fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Option<T> {
-    let index = positions
-        .iter()
-        .position(|&position| position == current)
-        .unwrap_or(0);
-    positions
-        .get(index.saturating_add_signed(delta))
-        .or(positions.last())
-        .copied()
 }
 
 /// diff ペインのカーソル。ファイルとその中のハンクを指す。
@@ -893,14 +893,18 @@ pub enum BranchLoad {
 }
 
 impl BranchState {
-    /// 届いた一覧で置き換える。カーソルは HEAD のブランチへ座らせる。
+    /// 届いた一覧で置き換える。
     ///
-    /// **読み直しをまたいでユーザーのカーソルを保つかは、切替と削除のタスクで決める**
-    /// （01）。いまは読み込みが起動時の 1 回しかないので、保つ相手がいない。
+    /// **カーソルは選んでいたブランチの名前で座り直す**（01 の「ブランチ一覧」）。
+    /// 読み直しは commit のたびに来るので、HEAD へ戻すだけだと別のブランチを見ながら
+    /// commit した人のカーソルが毎回飛ぶ。**添字では座り直さない** — 一覧は名前順
+    /// なので、ブランチが 1 本増えるだけで同じ添字が別のブランチを指す。
     pub(super) fn loaded(&mut self, branches: Vec<Branch>) {
-        self.cursor = branches
-            .iter()
-            .position(|branch| branch.is_head)
+        let selected = self.branches.get(self.cursor).map(|branch| &branch.name);
+        self.cursor = selected
+            .and_then(|name| branches.iter().position(|branch| &branch.name == name))
+            // 選んでいたものが消えた（削除 / リネーム）か、まだ何も選んでいない。
+            .or_else(|| branches.iter().position(|branch| branch.is_head))
             // detached / unborn ではどの行にも印が付かないので先頭に座る。
             .unwrap_or(0);
         self.branches = branches;
@@ -1651,6 +1655,37 @@ mod tests {
         ]);
 
         assert_eq!(cursor_name(&branches), Some("another"));
+    }
+
+    #[test]
+    fn a_reload_keeps_the_cursor_on_the_branch_by_name() {
+        // 読み直しは commit のたびに来る（01 の `update::Reload`）。HEAD へ戻すだけだと、
+        // 別のブランチを見ながら commit した人のカーソルが毎回飛ぶ。
+        let mut branches = BranchState::default();
+        branches.loaded(vec![fake_branch("main", true), fake_branch("topic", false)]);
+        branches.move_cursor(1);
+        assert_eq!(cursor_name(&branches), Some("topic"));
+
+        // ブランチが 1 本増えて添字がずれる（一覧は名前順）。
+        branches.loaded(vec![
+            fake_branch("alpha", false),
+            fake_branch("main", true),
+            fake_branch("topic", false),
+        ]);
+
+        assert_eq!(cursor_name(&branches), Some("topic"));
+    }
+
+    #[test]
+    fn a_reload_that_loses_the_selected_branch_falls_back_to_the_head() {
+        // 消えた（削除 / リネーム）ときの行き先。
+        let mut branches = BranchState::default();
+        branches.loaded(vec![fake_branch("main", true), fake_branch("topic", false)]);
+        branches.move_cursor(1);
+
+        branches.loaded(vec![fake_branch("main", true)]);
+
+        assert_eq!(cursor_name(&branches), Some("main"));
     }
 
     #[test]

@@ -1188,12 +1188,19 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
 
     match Reload::after(&done.op, done.result.is_ok()) {
         Reload::Nothing => Cmd::LoadStatus,
-        Reload::Refs => Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo]),
+        // **ブランチ一覧も ref から導かれる。** commit は `refs/heads/<現在>` を
+        // 動かすので、読み直さないと Branches ペインが commit 前の ahead のまま残る。
+        Reload::Refs => Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches]),
         Reload::RefsAndLog => {
             // 落とされたぶんは印を付け、走っていたページが届いた時点で頼み直す
             // （`WorktreeState.stale` と同じ形。01 の「ログの読み直し」）。
             state.graph.reload_pending = state.jobs.is_running(JobKind::LoadLog);
-            Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, reload_log(state)])
+            Cmd::batch([
+                Cmd::LoadStatus,
+                Cmd::LoadRepoInfo,
+                Cmd::LoadBranches,
+                reload_log(state),
+            ])
         }
     }
 }
@@ -3931,10 +3938,40 @@ mod tests {
 
         let cmd = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
 
+        // **ブランチ一覧も読み直す。** commit は `refs/heads/<現在>` を動かすので、
+        // 外すと Branches ペインが commit 前の ahead を出したまま残る。
         assert_eq!(
             cmd,
-            Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, reload(&state)])
+            Cmd::batch([
+                Cmd::LoadStatus,
+                Cmd::LoadRepoInfo,
+                Cmd::LoadBranches,
+                reload(&state)
+            ])
         );
+    }
+
+    #[test]
+    fn a_commit_reloads_the_branch_list_but_staging_does_not() {
+        // commit は `refs/heads/<現在>` を動かすので、読み直さないと Branches ペインが
+        // commit 前の ahead を出したまま残る。index しか触らない操作では要らない。
+        let mut state = state_with_commits(3);
+        let _ = state.issue(Cmd::Exec(commit_op()));
+        let cmd = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
+        assert!(issued(&cmd, &Cmd::LoadBranches), "{cmd:?}");
+
+        let mut state = state_with_commits(3);
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+        let cmd = update(&mut state, exec_done(Ok(fake_output())));
+        assert!(!issued(&cmd, &Cmd::LoadBranches), "{cmd:?}");
+    }
+
+    /// `cmd` に `wanted` が含まれるか。`Batch` の中も見る。
+    fn issued(cmd: &Cmd, wanted: &Cmd) -> bool {
+        match cmd {
+            Cmd::Batch(cmds) => cmds.iter().any(|cmd| issued(cmd, wanted)),
+            cmd => cmd == wanted,
+        }
     }
 
     #[test]
@@ -3962,7 +3999,10 @@ mod tests {
         let cmd = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
 
         // 読み直しは落ちている。
-        assert_eq!(cmd, Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo]));
+        assert_eq!(
+            cmd,
+            Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches])
+        );
         assert!(state.graph.reload_pending);
 
         // **走っていたページは積まない。** 積んでも直後の読み直しで捨てるだけで、
@@ -4068,7 +4108,11 @@ mod tests {
 
         let cmd = update(&mut state, exec_done_of(op, Ok(fake_output())));
 
-        assert_eq!(cmd, Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo]));
+        // ラベル・HEAD・ブランチ一覧は ref から導かれるので読み直す。行は動かない。
+        assert_eq!(
+            cmd,
+            Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches])
+        );
         assert!(!state.graph.reload_pending);
     }
 

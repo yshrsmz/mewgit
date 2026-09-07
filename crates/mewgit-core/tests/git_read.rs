@@ -767,6 +767,36 @@ fn branches_keeps_a_branch_whose_upstream_ref_is_gone() {
 }
 
 #[test]
+fn branches_survives_a_broken_tracking_ref() {
+    // 中断した fetch のあとなど、追跡 ref が存在しないオブジェクトを指すことがある。
+    // **その 1 本のために一覧全体を失わない**（他のブランチはどれも読めている）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["branch", "topic"]);
+    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    // まず正しい追跡 ref を作り（ディレクトリもここでできる）、中身をどのオブジェクトも
+    // 指さない oid に書き換える。`update-ref` は存在を検査するのでファイルを直に書く。
+    let oid = repo.head_oid().to_string();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &oid]);
+    repo.write_git_file(
+        "refs/remotes/origin/main",
+        b"0000000000000000000000000000000000000001\n",
+    );
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let branches = reader.branches().unwrap();
+
+    let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["main", "topic"]);
+    // 比べる相手が引けないので ahead / behind は出さない。
+    let main = branches.iter().find(|b| b.name == "main").unwrap();
+    assert_eq!(main.upstream, None);
+    assert_eq!((main.ahead, main.behind), (0, 0));
+}
+
+#[test]
 fn branches_drops_a_non_utf8_name() {
     let repo = TestRepo::init();
     repo.commit("first");

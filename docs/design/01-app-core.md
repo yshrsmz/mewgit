@@ -376,9 +376,12 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 | | 出す `Cmd` | 例 |
 |---|---|---|
 | `Nothing` | `LoadStatus` | stage / unstage / discard、stash |
-| `Refs` | `+ LoadRepoInfo` | checkout、branch 作成 / リネーム、非 force push |
+| `Refs` | `+ LoadRepoInfo` `+ LoadBranches` | checkout、branch 作成 / リネーム、非 force push |
 | `RefsAndLog` | `+ LoadLog { restart }` | commit、fetch / pull、force push、branch 削除、rebase / cherry-pick / revert |
 
+- **ブランチ一覧も `Refs` に入れる。** ラベルと HEAD（`LoadRepoInfo`）と同じく ref から
+  導かれる値で、同じ書き込みで古くなる。commit は `refs/heads/<現在>` を動かすので、
+  外すと Branches ペインが commit 前の ahead を出したまま残る
 - **`Refs` と `RefsAndLog` を分ける。** グラフのラベルと HEAD は行に焼き込まず
   `GraphState.refs` から引く（07）ので、**既にあるコミットを指し直すだけの操作では
   行は 1 つも動かない**。ログの読み直しは `LogSession` の作り直しで履歴全体のコストが
@@ -775,11 +778,12 @@ pub struct BranchState {
 - **`WorktreeState.loaded`（`bool`）と形が違う理由。** ワーキングツリーは書き込みの
   たびに読み直すので「読み込み中…」のまま留まらないが、ブランチ一覧を読むのは
   起動時と ref を動かす書き込みの後だけで、起動時に失敗すると次が無い
-- **カーソルは読み込みのたびに HEAD のブランチへ座らせる**（detached / unborn なら
-  先頭）。**読み直しをまたいでユーザーのカーソルを保つかは、切替と削除のタスクで
-  決める。** いまは読み込みが起動時の 1 回しかないので保つ相手がいない。あちらでは
-  「削除したブランチは消えている」「checkout すると HEAD が別の行に移る」の両方を
-  同時に見ることになるので、そこで決めるほうが早い
+- **カーソルは選んでいたブランチの名前で座り直す。** 見つからなければ（消えた /
+  リネームされた）HEAD のブランチ、それも無ければ（detached / unborn）先頭。
+  **添字では座り直さない。** 一覧は名前順なので、ブランチが 1 本増えるだけで
+  同じ添字が別のブランチを指す。**読み直しは commit のたびに来る**ので
+  （上の `update::Reload`）、カーソルを HEAD に戻すだけだと、別のブランチを見ながら
+  commit した人のカーソルが毎回飛ぶ
 
 ## 実行中ジョブ
 

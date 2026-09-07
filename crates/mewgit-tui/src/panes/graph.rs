@@ -9,7 +9,7 @@
 //! 分割だったのが原因で、右へ移すとその引数ごと消えた（07 の「CommitDetail ペイン」）。
 
 use mewgit_core::app::{AppState, GraphLine, GraphSelection, JobKind, Pane};
-use mewgit_core::git_read::RefLabel;
+use mewgit_core::git_read::{short_oid, RefLabel, SHORT_OID};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -123,7 +123,7 @@ impl<'a> View<'a> {
     /// 同じ桁に揃えるため。
     fn wip_line(&self) -> Line<'static> {
         let glyph = lanes::wip_glyph(self.state.config.graph.ascii);
-        let pad = lanes::width(self.lanes) + ui::SHORT_OID + 1 - glyph.chars().count();
+        let pad = lanes::width(self.lanes) + SHORT_OID + 1 - glyph.chars().count();
 
         Line::from(vec![
             Span::raw(glyph),
@@ -149,10 +149,7 @@ impl<'a> View<'a> {
         );
         spans.reserve(3 + labels.len() * 4);
 
-        spans.push(Span::styled(
-            ui::short_oid(&line.commit.oid),
-            theme::muted(),
-        ));
+        spans.push(Span::styled(short_oid(&line.commit.oid), theme::muted()));
         spans.push(Span::raw(" "));
 
         for label in labels {
@@ -239,12 +236,12 @@ mod tests {
         );
         let oid = state.graph.lines[0].commit.oid.to_string();
         assert!(
-            lines[FIRST_ROW].contains(&format!("{} newest", &oid[..ui::SHORT_OID])),
+            lines[FIRST_ROW].contains(&format!("{} newest", &oid[..SHORT_OID])),
             "短縮 Oid が summary の前にありません: {:?}",
             lines[FIRST_ROW]
         );
         assert!(
-            !lines[FIRST_ROW].contains(&oid[..ui::SHORT_OID + 1]),
+            !lines[FIRST_ROW].contains(&oid[..SHORT_OID + 1]),
             "Oid を切り詰めていません: {:?}",
             lines[FIRST_ROW]
         );
@@ -286,7 +283,7 @@ mod tests {
             .chars()
             .position(|c| c.is_ascii_hexdigit())
             .expect("Oid がありません")
-            + ui::SHORT_OID
+            + SHORT_OID
             + 1;
         let wip = lines[WIP_ROW]
             .chars()

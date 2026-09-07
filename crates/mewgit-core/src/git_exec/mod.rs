@@ -75,7 +75,12 @@ pub enum GitOp {
     BranchCreate {
         name: String,
         start: Option<String>,
-        checkout: bool,
+        /// 作ったブランチに切り替えるか（`switch --create` か `branch`）。
+        ///
+        /// **UI から出るのは常に `true`。** `false` を組む経路は無く（01 の
+        /// `InputIntent` は真偽値を持たない）、`branch <name>` の側は
+        /// [`to_command`](argv::to_command) のテストでだけ踏む。
+        switch: bool,
     },
     /// ブランチに切り替える（`switch <name>`）。
     ///
@@ -83,7 +88,7 @@ pub enum GitOp {
     /// `switch --detach` が要るので、そのときは別の変種を足す（M5 の cherry-pick /
     /// revert で「このコミットを取り出す」が要るならそこで決める）。ここに Oid を
     /// 渡すと `fatal: invalid reference` で落ちる（git 2.55 で確認）。
-    Checkout(String),
+    Switch(String),
     BranchDelete {
         name: String,
         force: bool,

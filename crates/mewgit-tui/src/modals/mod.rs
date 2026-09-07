@@ -4,8 +4,9 @@
 
 pub mod commit_message;
 pub mod confirm;
+pub mod input;
 
-use mewgit_core::app::Modal;
+use mewgit_core::app::{Modal, TextBuffer};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
@@ -20,9 +21,11 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
     match modal {
         Modal::Confirm { title, body, .. } => confirm::render(frame, area, title, body),
         Modal::CommitMessage { buf, amend } => commit_message::render(frame, area, buf, *amend),
+        Modal::Input {
+            title, prompt, buf, ..
+        } => input::render(frame, area, title, prompt, buf),
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
-        Modal::Input { .. }
-        | Modal::RebaseEditor { .. }
+        Modal::RebaseEditor { .. }
         | Modal::PrCreate { .. }
         | Modal::AccountPicker { .. }
         | Modal::Help => {}
@@ -107,4 +110,19 @@ fn probe(area: Rect, want: u16) -> Rect {
 /// ない。差が無いので、この 2 つを見分けるテストは書けない。
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     area.centered(Constraint::Max(width), Constraint::Max(height))
+}
+
+/// カーソルの桁と、それを枠に収めるための横のずらし幅。
+///
+/// **列からバイト位置への変換は [`TextBuffer::before_cursor`] に任せる。** 「列は
+/// 文字数」という約束を 2 箇所で解くと、単位を変えたときに core だけ直して端末の
+/// カーソルが黙ってずれる（01 の `TextBuffer`）。桁の数え方は ratatui の
+/// [`Line::width`] に合わせ、描画と同じにする。
+///
+/// **ずらし幅を一緒に返すのは、桁だけを共有すると使う側が同じ引き算を書くから。**
+/// 編集中のモーダルはどちらも折り返さないので、カーソルが右端を越えたぶんだけ横に
+/// ずらす（`CommitMessage` と `Input` の 2 人目が出た時点でここへ移した）。
+pub fn cursor_col(buf: &TextBuffer, width: u16) -> (u16, u16) {
+    let col = u16::try_from(Line::from(buf.before_cursor()).width()).unwrap_or(u16::MAX);
+    (col, col.saturating_sub(width.saturating_sub(1)))
 }

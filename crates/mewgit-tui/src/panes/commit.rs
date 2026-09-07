@@ -4,7 +4,7 @@
 //! どちらを描くかは `focus` ではなくグラフの選択で決まる（`ui::render`）。
 
 use mewgit_core::app::{AppState, Pane};
-use mewgit_core::git_read::{Commit, CommitDetail, Signature, Timestamp};
+use mewgit_core::git_read::{short_oid, Commit, CommitDetail, Signature, Timestamp};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
@@ -28,7 +28,7 @@ const MIN_MESSAGE_ROWS: u16 = 3;
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) {
     // **対象を枠に出す。** 右が差し替わっているので、出さないと誰の詳細かを画面から
     // 辿れない（Diff ペインと同じ理由）。
-    let title = format!("Commit {}", ui::short_oid(&commit.oid));
+    let title = format!("Commit {}", short_oid(&commit.oid));
     let block = ui::pane_block(title, state.focus == Pane::CommitDetail);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -149,7 +149,7 @@ fn head_lines(detail: &CommitDetail) -> Vec<Line<'_>> {
     ];
 
     if !detail.parents.is_empty() {
-        let parents: Vec<String> = detail.parents.iter().map(ui::short_oid).collect();
+        let parents: Vec<String> = detail.parents.iter().map(short_oid).collect();
         lines.push(Line::raw(format!("Parent: {}", parents.join(" "))));
     }
 
@@ -179,9 +179,10 @@ fn who(label: &str, sig: &Signature, time: Timestamp) -> String {
 #[cfg(test)]
 mod tests {
     use crate::test_util::{draw, pane_text, row_is_reversed, state_on_first_commit};
-    use crate::ui;
     use mewgit_core::app::{update, AppState, JobKind, Key, Msg, Pane, TermSize};
-    use mewgit_core::git_read::{CommitDetail, FileEntry, FileStatus, GitReadError, Oid};
+    use mewgit_core::git_read::{
+        short_oid, CommitDetail, FileEntry, FileStatus, GitReadError, Oid,
+    };
     use mewgit_core::test_util::{fake_detail, fake_entry, fake_oid};
 
     /// 1 件目のコミットを選び、その詳細が届いた状態。
@@ -213,7 +214,7 @@ mod tests {
         let text = draw(&state, WIDE).join("\n");
 
         assert!(
-            text.contains(&format!("Commit {}", ui::short_oid(&fake_oid(0)))),
+            text.contains(&format!("Commit {}", short_oid(&fake_oid(0)))),
             "{text}"
         );
     }
@@ -233,7 +234,7 @@ mod tests {
         // 日時はコミットのタイムゾーンで出す（`fake_detail` は epoch の +0000）。
         assert!(text.contains("1970-01-01 00:00:00 +0000"), "{text}");
         assert!(
-            text.contains(&format!("Parent: {}", ui::short_oid(&fake_oid(1)))),
+            text.contains(&format!("Parent: {}", short_oid(&fake_oid(1)))),
             "{text}"
         );
     }

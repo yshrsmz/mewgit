@@ -44,8 +44,7 @@ pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool) {
     // **`ui::render_rows` は使わない。** あちらは横位置を持たず、diff と一覧は
     // それでよい（長い行は右で切れるだけ）。編集中はカーソルが右端を越えるので、
     // 越えたぶんだけ横にずらす必要がある。
-    let cursor_col = display_col(buf);
-    let scroll_x = cursor_col.saturating_sub(body_area.width.saturating_sub(1));
+    let (cursor_col, scroll_x) = modals::cursor_col(buf, body_area.width);
 
     let lines: Vec<Line<'_>> = buf.lines[shown.clone()]
         .iter()
@@ -64,16 +63,6 @@ pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool) {
             y: body_area.y + u16::try_from(row - shown.start).unwrap_or(u16::MAX),
         });
     }
-}
-
-/// カーソルの左にある本文の表示桁数。
-///
-/// **列からバイト位置への変換は [`TextBuffer::before_cursor`] に任せる。** 「列は
-/// 文字数」という約束を 2 箇所で解くと、単位を変えたときに core だけ直して端末の
-/// カーソルが黙ってずれる（01 の `TextBuffer`）。桁の数え方は ratatui の
-/// [`Line::width`] に合わせ、描画と同じにする。
-fn display_col(buf: &TextBuffer) -> u16 {
-    u16::try_from(Line::from(buf.before_cursor()).width()).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]

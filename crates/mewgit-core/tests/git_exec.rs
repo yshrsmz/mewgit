@@ -267,7 +267,7 @@ async fn discard_untracked_deletes_the_file() {
 }
 
 #[tokio::test]
-async fn checkout_never_takes_the_target_as_a_path() {
+async fn switch_never_takes_the_target_as_a_path() {
     // `git checkout topic` は「topic というファイルを index から取り出す」と解釈され、
     // ワークツリーの変更を黙って捨てる。`switch` は pathspec を取らないので
     // `fatal: invalid reference: topic` で止まる（git 2.55 で確認）。ブランチが無いの
@@ -282,7 +282,7 @@ async fn checkout_never_takes_the_target_as_a_path() {
 
     let err = repo
         .runner()
-        .run(&GitOp::Checkout("topic".into()))
+        .run(&GitOp::Switch("topic".into()))
         .await
         .expect_err("ブランチではないので失敗するはずです");
 
@@ -295,15 +295,15 @@ async fn checkout_never_takes_the_target_as_a_path() {
 }
 
 #[tokio::test]
-async fn checkout_switches_to_a_branch() {
+async fn switch_moves_head_to_a_branch() {
     let repo = TestRepo::init();
     repo.commit("first");
     repo.git(&["branch", "topic"]);
 
     repo.runner()
-        .run(&GitOp::Checkout("topic".into()))
+        .run(&GitOp::Switch("topic".into()))
         .await
-        .expect("checkout できませんでした");
+        .expect("ブランチを切り替えられませんでした");
 
     assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "topic");
 }
@@ -318,7 +318,7 @@ async fn branch_create_switch_delete_and_rename() {
         .run(&GitOp::BranchCreate {
             name: "feat/x".into(),
             start: Some("main".into()),
-            checkout: true,
+            switch: true,
         })
         .await
         .expect("ブランチを作れませんでした");
@@ -334,9 +334,9 @@ async fn branch_create_switch_delete_and_rename() {
     assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "feat/y");
 
     runner
-        .run(&GitOp::Checkout("main".into()))
+        .run(&GitOp::Switch("main".into()))
         .await
-        .expect("checkout できませんでした");
+        .expect("ブランチを切り替えられませんでした");
     runner
         .run(&GitOp::BranchDelete {
             name: "feat/y".into(),
@@ -548,7 +548,7 @@ async fn the_configured_git_binary_is_the_one_that_runs() {
 
     let err = Runner::new(repo.path(), repo.path().join("no-such-git"))
         .with_env(repo.runner_env())
-        .run(&GitOp::Checkout("main".into()))
+        .run(&GitOp::Switch("main".into()))
         .await
         .expect_err("起動できないはずです");
 
@@ -589,7 +589,7 @@ async fn a_failing_command_carries_argv_and_stderr() {
 
     let err = repo
         .runner()
-        .run(&GitOp::Checkout("no-such-branch".into()))
+        .run(&GitOp::Switch("no-such-branch".into()))
         .await
         .expect_err("失敗するはずです");
 

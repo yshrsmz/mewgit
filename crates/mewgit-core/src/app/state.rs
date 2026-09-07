@@ -1135,13 +1135,21 @@ pub enum Modal {
 /// データで持つことで [`Modal`] が `PartialEq` を保て、遷移をテストできる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputIntent {
+    /// ブランチを作る。作ったら切り替える（`switch --create`）。
+    ///
+    /// **`GitOp::BranchCreate` の `switch: bool` はここに持たない。** UI からの作成は
+    /// 常に切り替えるので `false` を組む経路が無く、持たせるとどのテストからも
+    /// 踏めない腕が 1 つ増える（03）。
     BranchCreate {
+        /// 起点。`None` が HEAD（Branches ペインの `n`）、`Some` がグラフで選んで
+        /// いるコミットの Oid（Graph ペインの `n`）。
+        ///
+        /// タグを起点にしたいときは、そのタグのラベルが乗った行をグラフで選ぶ
+        /// （タグ一覧のペインは無い。07 の「Graph ペイン」）。
         start: Option<String>,
-        checkout: bool,
     },
-    BranchRename {
-        from: String,
-    },
+    /// ブランチの名前を変える（`branch --move`）。`from` は元の名前。
+    BranchRename { from: String },
 }
 
 /// 複数行の編集バッファ。

@@ -10,14 +10,14 @@ use std::path::{Path, PathBuf};
 
 use crate::git_exec::{hunk_patch, supports_hunk_patch, ExecError, GitOp};
 use crate::git_read::{
-    Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, Hunk, LogPage,
-    Oid, WorktreeSection, WorktreeSnapshot,
+    short_oid, Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError,
+    Hunk, LogPage, Oid, WorktreeSection, WorktreeSnapshot,
 };
 
 use super::{
     AppState, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, Freshness, GraphLine,
-    GraphSelection, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, RepoSnapshot,
-    TextBuffer,
+    GraphSelection, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
+    RepoSnapshot, TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -160,8 +160,14 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
 /// 行き先が無く、`Msg::Key` に割り直すと bracketed paste を有効にした意味が消える
 /// （01 の「コミットメッセージの編集」）。
 fn paste(state: &mut AppState, text: &str) -> Cmd {
-    if let Some(Modal::CommitMessage { buf, .. }) = state.modal.as_mut() {
-        buf.insert_text(text);
+    match state.modal.as_mut() {
+        Some(Modal::CommitMessage { buf, .. }) => buf.insert_text(text),
+        // **1 行入力では改行を除いて 1 行につなぐ**（01 の「1 行入力」）。落とすと
+        // 「末尾に改行が付いただけ」の正当な貼り付けまで拒み、1 行目だけを採ると
+        // 残りが黙って消える。つないだ結果は入力欄にそのまま出ていて、`Enter` を
+        // 押すまで git は走らない。
+        Some(Modal::Input { buf, .. }) => buf.insert_text(&text.replace('\n', "")),
+        _ => {}
     }
     Cmd::None
 }
@@ -313,6 +319,7 @@ fn modal_key(state: &mut AppState, key: Key) -> Cmd {
     match state.modal {
         Some(Modal::Confirm { .. }) => confirm_key(state, key),
         Some(Modal::CommitMessage { .. }) => commit_message_key(state, key),
+        Some(Modal::Input { .. }) => input_key(state, key),
         // 他のモーダルはそれぞれのタスクで実装する。閉じる道だけ開けておく。
         Some(_) => {
             if key == Key::new(KeyCode::Esc) {
@@ -352,6 +359,13 @@ fn graph_key(state: &mut AppState, key: Key) -> Cmd {
         // 右の領域に移る。行き先は選択で決まる（`GraphSelection::right_pane`）。
         // Worktree の `Enter` → Diff と同じ形で、`Esc` で戻る。
         KeyCode::Enter => focus(state, state.graph.selection().right_pane()),
+        // **カーソルの指すコミットを起点にブランチを作る**（07 の「Graph ペイン」）。
+        // WIP 行なら起点は無し（= HEAD）。**Oid を渡すのは、その行に何のラベルが
+        // 乗っていても同じ結果になるから** — タグから作りたい人はそのタグの行を選ぶ。
+        KeyCode::Char('n') => {
+            let start = state.graph.cursor_commit().map(|commit| commit.oid);
+            open_branch_create(state, start)
+        }
         _ => Cmd::None,
     }
 }
@@ -387,6 +401,11 @@ fn branches_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::Enter => switch_branch(state),
         KeyCode::Char('d') => delete_branch(state, false),
         KeyCode::Char('D') => delete_branch(state, true),
+        // **起点は HEAD。** このペインは起点の情報を持たない（カーソル行を起点に
+        // すると、一覧を眺めているだけのつもりで別のブランチから生やすことになる）。
+        // 起点を選んで作るのは Graph ペインの `n`（07 の「Branches ペイン」）。
+        KeyCode::Char('n') => open_branch_create(state, None),
+        KeyCode::Char('r') => rename_branch(state),
         // **`Tab` でしか入れないペインにも出口を用意する**（07）。戻り先を
         // `right_pane()` にしないのは、このペインが左の選択と無関係だから。
         KeyCode::Esc => focus(state, Pane::Graph),
@@ -400,14 +419,14 @@ fn branches_key(state: &mut AppState, key: Key) -> Cmd {
 /// 「Branches ペイン」にある）。手前で弾くと、同じ判定が mewgit と git の 2 箇所に載る。
 ///
 /// **フォーカスは Branches に残す。** 切り替えたあと続けて別のブランチを選べる。
-/// 一覧の読み直しは `update::Reload` が出す（`Checkout` は `Reload::Refs`）。
+/// 一覧の読み直しは `update::Reload` が出す（`Switch` は `Reload::Refs`）。
 fn switch_branch(state: &AppState) -> Cmd {
     // 一覧が空（読み込み中・失敗・コミットが 1 つも無いリポジトリ）。カーソル行が
     // 描かれていないので、通知を出す相手もいない。
     let Some(branch) = state.branches.selected() else {
         return Cmd::None;
     };
-    Cmd::Exec(GitOp::Checkout(branch.name.clone()))
+    Cmd::Exec(GitOp::Switch(branch.name.clone()))
 }
 
 /// `d` / `D`。カーソルの指すブランチを消す。破壊的なので確認モーダルを通す
@@ -434,6 +453,75 @@ fn delete_branch(state: &mut AppState, force: bool) -> Cmd {
         ("ブランチを削除", format!("{name} を削除します。"))
     };
     confirm(state, title, body, GitOp::BranchDelete { name, force })
+}
+
+/// `n`。ブランチを作る入力モーダルを開く（01 の「1 行入力」）。
+///
+/// `start` は起点。`None` なら HEAD で、そのときはタイトルに起点を書かない。
+///
+/// **一覧が空でも開く。** 作成はカーソル行を要らず、`git init` の直後（ブランチが
+/// 1 本も無い）はまさに作りたい状態。`switch --create` は unborn HEAD でも通り、
+/// `HEAD` を新しい名前に向け替える（git 2.55 で確認）。
+fn open_branch_create(state: &mut AppState, start: Option<Oid>) -> Cmd {
+    // **タイトルに起点を出す。** どのコミットから生やすかは押す前に読めないといけない
+    // （`Confirm` の本文に対象をそのまま出すのと同じ理由。07 の「Input モーダル」）。
+    let title = match &start {
+        Some(oid) => format!("ブランチを作成 ({} から)", short_oid(oid)),
+        None => "ブランチを作成".to_string(),
+    };
+    input(
+        state,
+        title,
+        "新しいブランチの名前".to_string(),
+        TextBuffer::default(),
+        // argv には 40 桁をそのまま載せる。短縮はタイトルの表示だけの都合で、
+        // 渡す先を短くすると曖昧な省略形を git に解かせることになる。
+        InputIntent::BranchCreate {
+            start: start.map(|oid| oid.to_string()),
+        },
+    )
+}
+
+/// `r`。カーソルの指すブランチの名前を変える入力モーダルを開く。
+///
+/// **初期値は元の名前**（カーソルは末尾）。名前を少し直す操作なので空から打ち直させない。
+///
+/// **`Modal::Confirm` を通さない。** 不変ルール 5 が確認を求めるのは破壊的な操作で、
+/// `branch --move` は `--force` を付けないので既存の名前と衝突すれば git が断る
+/// （`fatal: a branch named 'x' already exists`。git 2.55 で確認）。
+fn rename_branch(state: &mut AppState) -> Cmd {
+    // 一覧が空。カーソル行が描かれていないので、通知を出す相手もいない（`d` と同じ）。
+    let Some(branch) = state.branches.selected() else {
+        return Cmd::None;
+    };
+    let from = branch.name.clone();
+    input(
+        state,
+        "ブランチをリネーム".to_string(),
+        format!("{from} の新しい名前"),
+        TextBuffer::from_text(&from),
+        InputIntent::BranchRename { from },
+    )
+}
+
+/// 入力モーダルを開く。
+///
+/// **`Modal::Input` を組むのはここ 1 本**（[`confirm`] と同じ理由。2 箇所で組むと、
+/// フィールドが増えたときに片方だけ直した状態が生まれる）。
+fn input(
+    state: &mut AppState,
+    title: String,
+    prompt: String,
+    buf: TextBuffer,
+    intent: InputIntent,
+) -> Cmd {
+    state.modal = Some(Modal::Input {
+        title,
+        prompt,
+        buf,
+        intent,
+    });
+    Cmd::None
 }
 
 /// 破壊的な `GitOp` を確認モーダルに載せる（不変ルール 5）。
@@ -825,13 +913,21 @@ fn commit_submit(state: &mut AppState) -> Cmd {
         message: buf.text(),
         amend: *amend,
     };
+    submit_exec(state, op)
+}
 
-    // **`Cmd::Exec` が落とされるなら閉じない。** `confirm_key` は先に閉じてから返すが、
-    // あちらのモーダルはユーザーが打ったものを持っていない。ここで同じことをすると、
-    // 前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
-    // 「ほかの git 実行が終わるまで待ってください」と出て**本文ごと消える**。
-    // 判定は `issue` と同じ `jobs.is_running`（`load_diff` が `Freshness::Asked` を
-    // 決めるのと同じ形）。
+/// 編集中のモーダルを確定して `Cmd::Exec` を返す。
+///
+/// **`Cmd::Exec` が落とされるなら閉じない。** [`confirm_key`] は先に閉じてから返すが、
+/// あちらのモーダルはユーザーが打ったものを持っていない。ここで同じことをすると、
+/// 前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
+/// 「ほかの git 実行が終わるまで待ってください」と出て**打った文字ごと消える**。
+/// 判定は [`AppState::issue`] と同じ `jobs.is_running`（`load_diff` が
+/// `Freshness::Asked` を決めるのと同じ形）。
+///
+/// **2 人目（`Modal::Input`）が出た時点でここへ移した。** 写すと、片方だけ
+/// 「閉じてから返す」形に戻ったときに気付けない（01 の「1 行入力」）。
+fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
     if state.jobs.is_running(JobKind::Exec) {
         if let Some(message) = JobKind::Exec.drop_notice() {
             state.push_notice(NoticeLevel::Warn, message.to_string(), None);
@@ -842,6 +938,78 @@ fn commit_submit(state: &mut AppState) -> Cmd {
     // 閉じずに返すと、`Cmd` が落とされたときにモーダルだけが画面に残る。
     state.modal = None;
     Cmd::Exec(op)
+}
+
+/// [`Modal::Input`] のキー処理。**文字キーはすべて入力になる。**
+///
+/// `CommitMessage` と違い**改行のキーを 1 つも受けない**。行が 1 本しか無く、受けると
+/// `TextBuffer` に 2 行目ができて、`text()` の返す `\n` 入りの文字列がそのまま
+/// ブランチ名になる（01 の「1 行入力」）。
+fn input_key(state: &mut AppState, key: Key) -> Cmd {
+    // 取り消し。**確認は挟まない**（`CommitMessage` と同じ。01）。
+    if key == Key::new(KeyCode::Esc) {
+        state.modal = None;
+        return Cmd::None;
+    }
+
+    // **修飾の有無を問わず確定。** `CommitMessage` のつもりで `Alt+Enter` を打った人に
+    // 「何も起きない」を返さないため。`Ctrl-J` はここに落とさない（修飾付きの文字キーは
+    // 入力にしない規則に沿う）。
+    if key.code() == KeyCode::Enter {
+        return input_submit(state);
+    }
+
+    let Some(Modal::Input { buf, .. }) = state.modal.as_mut() else {
+        return Cmd::None;
+    };
+
+    match key.code() {
+        KeyCode::Backspace => buf.backspace(),
+        KeyCode::Delete => buf.delete(),
+        KeyCode::Left => buf.move_cursor(Motion::Left),
+        KeyCode::Right => buf.move_cursor(Motion::Right),
+        KeyCode::Home => buf.move_cursor(Motion::Home),
+        KeyCode::End => buf.move_cursor(Motion::End),
+        // `↑` `↓` は落とす。行が 1 本しか無く、動かす先が無い。
+        //
+        // 修飾付きの文字は入力にしない（`Ctrl-C` は `update_key` が先に見る）。
+        KeyCode::Char(c) if !key.mods().ctrl && !key.mods().alt => buf.insert_char(c),
+        _ => {}
+    }
+    Cmd::None
+}
+
+/// 入力を確定し、[`InputIntent`] の指す `GitOp` を出す。
+///
+/// **名前が正しいかは手前で判定しない**（不変ルール 4）。`git check-ref-format` の規則を
+/// 写すことになり、写した規則は git の版が変わっても追随しない。**空だけは断る** —
+/// `git switch --create ""` は落ちるが、その時点でモーダルは閉じていて打った文字が
+/// 戻らない（`commit_submit` と同じ理由。01 の「1 行入力」）。
+fn input_submit(state: &mut AppState) -> Cmd {
+    let Some(Modal::Input { buf, intent, .. }) = &state.modal else {
+        return Cmd::None;
+    };
+
+    if buf.is_blank() {
+        state.push_notice(NoticeLevel::Warn, "名前が空です".to_string(), None);
+        return Cmd::None;
+    }
+
+    let name = buf.text();
+    let op = match intent {
+        // **`switch: true` を組むのはここ。** UI からの作成は常に切り替えるので
+        // `InputIntent` は真偽値を持たない（03）。
+        InputIntent::BranchCreate { start } => GitOp::BranchCreate {
+            name,
+            start: start.clone(),
+            switch: true,
+        },
+        InputIntent::BranchRename { from } => GitOp::BranchRename {
+            from: from.clone(),
+            to: name,
+        },
+    };
+    submit_exec(state, op)
 }
 
 /// amend の初期値が届いた。
@@ -1299,12 +1467,12 @@ impl Reload {
             // `Push` が非 force なら `origin/x` はローカルの先端へ早送りされるので、
             // 行はもう並んでいる。
             //
-            // **断られた `Checkout` でも読み直す。** ref も HEAD も動いていないので
+            // **断られた `Switch` でも読み直す。** ref も HEAD も動いていないので
             // 無駄に見えるが（`switch` は断った時点で post-checkout hook すら走らない。
             // git 2.55 で確認）、**断られる理由の 1 つが「一覧が古い」**（別の端末で
             // 消されたブランチに `Enter` を押した）で、そこで読み直さないと画面から
             // 消えない行が残る。払うのはキー押下 1 回あたりの読み取り 2 本。
-            GitOp::Checkout(_)
+            GitOp::Switch(_)
             | GitOp::BranchCreate { .. }
             | GitOp::BranchRename { .. }
             | GitOp::Push { force: false, .. } => Reload::Refs,
@@ -2182,7 +2350,7 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(GitOp::Checkout("another".to_string())));
+        assert_eq!(cmd, Cmd::Exec(GitOp::Switch("another".to_string())));
         // 切り替えたあと続けて別のブランチを選べる。確認モーダルも通さない。
         assert_eq!(state.focus, Pane::Branches);
         assert_eq!(state.modal, None);
@@ -2198,7 +2366,7 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(GitOp::Checkout("main".to_string())));
+        assert_eq!(cmd, Cmd::Exec(GitOp::Switch("main".to_string())));
     }
 
     /// `d` / `D` を押したときの確認モーダルの本文と `on_yes`。
@@ -2251,6 +2419,274 @@ mod tests {
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
         assert_eq!(press(&mut state, 'd'), Cmd::None);
         assert_eq!(press(&mut state, 'D'), Cmd::None);
+        // `r` も同じ。**`n` はここに入れない** — 作成はカーソル行を要らず、
+        // ブランチが 1 本も無い状態はまさに作りたい状態（下のテスト）。
+        assert_eq!(press(&mut state, 'r'), Cmd::None);
+        assert_eq!(state.modal, None);
+    }
+
+    /// 開いている入力モーダル。開いていなければ落とす。
+    fn open_input(state: &AppState) -> (&str, &str, &TextBuffer, &InputIntent) {
+        let Some(Modal::Input {
+            title,
+            prompt,
+            buf,
+            intent,
+        }) = &state.modal
+        else {
+            panic!("入力モーダルが開いていません: {:?}", state.modal);
+        };
+        (title, prompt, buf, intent)
+    }
+
+    #[test]
+    fn n_on_the_branches_pane_opens_an_empty_input_for_a_branch_from_head() {
+        let mut state = state_on_branches(&[("main", true), ("topic", false)]);
+        let _ = press(&mut state, 'k');
+
+        let cmd = press(&mut state, 'n');
+
+        assert_eq!(cmd, Cmd::None, "確認より先に git を走らせています");
+        let (title, _, buf, intent) = open_input(&state);
+        // **カーソル行（main）を起点にしない。** 一覧を眺めているだけのつもりで
+        // 別のブランチから生やすことになる（07 の「Branches ペイン」）。
+        assert_eq!(intent, &InputIntent::BranchCreate { start: None });
+        // 起点が HEAD のときはタイトルに起点を書かない。
+        assert!(!title.contains("から"), "{title}");
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn n_opens_even_when_the_branch_list_is_empty() {
+        // `git init` の直後（ブランチが 1 本も無い）はまさに作りたい状態。
+        // `switch --create` は unborn HEAD でも通る（git 2.55 で確認）。
+        let mut state = state_with_commits(2);
+        state.focus = Pane::Branches;
+        assert_eq!(state.branches.load(), BranchLoad::Pending);
+
+        let _ = press(&mut state, 'n');
+
+        let (_, _, _, intent) = open_input(&state);
+        assert_eq!(intent, &InputIntent::BranchCreate { start: None });
+    }
+
+    #[test]
+    fn n_on_the_graph_starts_the_branch_at_the_commit_under_the_cursor() {
+        let mut state = state_with_commits(2);
+        // **`fake_oid` のままでは見張れない。** 20 バイト目にだけ index を置くので
+        // 短縮 Oid が常に `0000000` になり、別のコミットの Oid を出しても通る。
+        let oid = Oid::from_str("a1b2c3d4e5f60718293a4b5c6d7e8f9001122334").expect("40 桁");
+        state.graph.lines[1].commit.oid = oid;
+        // WIP 行 → 1 件目 → 2 件目。
+        let _ = press(&mut state, 'j');
+        let _ = press(&mut state, 'j');
+
+        let cmd = press(&mut state, 'n');
+
+        assert_eq!(cmd, Cmd::None);
+        let (title, _, _, intent) = open_input(&state);
+        // **どのコミットから生やすかは押す前に読めないといけない**（07）。
+        assert!(title.contains("a1b2c3d"), "{title}");
+        // argv には 40 桁をそのまま載せる。曖昧な省略形を git に解かせない。
+        assert_eq!(
+            intent,
+            &InputIntent::BranchCreate {
+                start: Some(oid.to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn n_on_the_wip_row_starts_the_branch_at_head() {
+        // WIP 行にはコミットが無い。**「グラフに居るから起点がある」ではない。**
+        let mut state = state_with_commits(2);
+        assert_eq!(state.graph.cursor, 0);
+
+        let _ = press(&mut state, 'n');
+
+        let (_, _, _, intent) = open_input(&state);
+        assert_eq!(intent, &InputIntent::BranchCreate { start: None });
+    }
+
+    #[test]
+    fn r_prefills_the_current_name_and_says_which_branch_is_being_renamed() {
+        let mut state = state_on_branches(&[("main", true), ("topic", false)]);
+        assert_eq!(state.branches.selected().expect("空です").name, "main");
+
+        let cmd = press(&mut state, 'r');
+
+        assert_eq!(cmd, Cmd::None);
+        let (_, prompt, buf, intent) = open_input(&state);
+        // 名前を少し直す操作なので空から打ち直させない。カーソルは末尾。
+        assert_eq!(buf.text(), "main");
+        assert_eq!(buf.cursor, (0, 4));
+        assert!(prompt.contains("main"), "{prompt}");
+        assert_eq!(
+            intent,
+            &InputIntent::BranchRename {
+                from: "main".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn enter_creates_the_branch_and_switches_to_it() {
+        let mut state = state_on_branches(&[("main", true)]);
+        let _ = press(&mut state, 'n');
+        for c in "feat/x".chars() {
+            let _ = press(&mut state, c);
+        }
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(
+            cmd,
+            Cmd::Exec(GitOp::BranchCreate {
+                name: "feat/x".to_string(),
+                start: None,
+                // UI からの作成は常に切り替える（03）。
+                switch: true,
+            })
+        );
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn enter_renames_the_branch_under_the_cursor() {
+        let mut state = state_on_branches(&[("topic", false)]);
+        let _ = press(&mut state, 'r');
+        // 末尾に足す（初期値がそのまま残っている）。
+        for c in "-2".chars() {
+            let _ = press(&mut state, c);
+        }
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(
+            cmd,
+            Cmd::Exec(GitOp::BranchRename {
+                from: "topic".to_string(),
+                to: "topic-2".to_string(),
+            })
+        );
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn a_blank_name_is_refused_without_closing_the_input() {
+        // `git switch --create ""` は落ちるが、その時点でモーダルは閉じていて
+        // 打った文字が戻らない（01 の「1 行入力」）。空白だけも同じ。
+        let mut state = state_on_branches(&[("main", true)]);
+        let _ = press(&mut state, 'n');
+        let _ = press(&mut state, ' ');
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::None);
+        let (_, _, buf, _) = open_input(&state);
+        assert_eq!(buf.text(), " ");
+        assert_eq!(
+            state.notices.back().map(|notice| notice.level),
+            Some(NoticeLevel::Warn)
+        );
+    }
+
+    #[test]
+    fn a_busy_git_keeps_the_input_and_what_was_typed() {
+        // 閉じてから `Cmd` を返すと、`issue` に落とされたときに打った文字ごと消える
+        // （`commit_submit` と同じ。01 の「1 行入力」）。
+        let mut state = state_on_branches(&[("main", true)]);
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+        let _ = press(&mut state, 'n');
+        for c in "feat/x".chars() {
+            let _ = press(&mut state, c);
+        }
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::None);
+        let (_, _, buf, _) = open_input(&state);
+        assert_eq!(buf.text(), "feat/x");
+    }
+
+    #[test]
+    fn the_input_never_grows_a_second_line() {
+        // 行が 2 本になると `text()` に `\n` が混ざり、そのままブランチ名になる
+        // （01 の「1 行入力」）。`Ctrl-J` は `CommitMessage` では改行のキー。
+        let mut state = state_on_branches(&[("main", true)]);
+        let _ = press(&mut state, 'n');
+        let _ = press(&mut state, 'a');
+
+        let cmd = update(&mut state, Msg::Key(Key::ctrl('j')));
+
+        assert_eq!(cmd, Cmd::None);
+        let (_, _, buf, _) = open_input(&state);
+        assert_eq!(buf.lines.len(), 1);
+        assert_eq!(buf.text(), "a");
+    }
+
+    #[test]
+    fn a_modified_enter_confirms_like_a_plain_one() {
+        // `CommitMessage` のつもりで `Alt+Enter` を打った人に「何も起きない」を
+        // 返さない。こちらに改行の意味は無い（01 の「1 行入力」）。
+        let mut state = state_on_branches(&[("main", true)]);
+        let _ = press(&mut state, 'n');
+        let _ = press(&mut state, 'x');
+
+        let cmd = update(
+            &mut state,
+            Msg::Key(Key::with_mods(
+                KeyCode::Enter,
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+            )),
+        );
+
+        assert_eq!(
+            cmd,
+            Cmd::Exec(GitOp::BranchCreate {
+                name: "x".to_string(),
+                start: None,
+                switch: true,
+            })
+        );
+    }
+
+    #[test]
+    fn pasting_several_lines_joins_them_into_one_name() {
+        // **`Msg::Paste` を受けるモーダルが 2 つ目。** 腕が無いと貼り付けが
+        // 1 文字ずつ `Msg::Key` として届く形に戻り、最初の改行で確定して残りが
+        // ペインのキーになる（#34 で踏んだ形）。
+        let mut state = state_on_branches(&[("main", true)]);
+        let _ = press(&mut state, 'n');
+
+        let cmd = update(
+            &mut state,
+            Msg::Paste(
+                "feat/a
+feat/b
+"
+                .to_string(),
+            ),
+        );
+
+        assert_eq!(cmd, Cmd::None);
+        let (_, _, buf, _) = open_input(&state);
+        assert_eq!(buf.lines.len(), 1);
+        assert_eq!(buf.text(), "feat/afeat/b");
+    }
+
+    #[test]
+    fn esc_closes_the_input_without_running_anything() {
+        let mut state = state_on_branches(&[("main", true)]);
+        let _ = press(&mut state, 'n');
+        let _ = press(&mut state, 'x');
+
+        let cmd = press_code(&mut state, KeyCode::Esc);
+
+        assert_eq!(cmd, Cmd::None);
         assert_eq!(state.modal, None);
     }
 
@@ -4182,7 +4618,7 @@ mod tests {
         );
 
         assert_eq!(
-            Reload::after(&GitOp::Checkout("main".into()), true),
+            Reload::after(&GitOp::Switch("main".into()), true),
             Reload::Refs
         );
         assert_eq!(Reload::after(&push(false), true), Reload::Refs);
@@ -4248,7 +4684,7 @@ mod tests {
     #[test]
     fn an_operation_that_only_moves_labels_does_not_reload_the_log() {
         let mut state = state_with_commits(3);
-        let op = GitOp::Checkout("main".into());
+        let op = GitOp::Switch("main".into());
         let _ = state.issue(Cmd::Exec(op.clone()));
 
         let cmd = update(&mut state, exec_done_of(op, Ok(fake_output())));

@@ -104,9 +104,9 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
         GitOp::BranchCreate {
             name,
             start,
-            checkout,
+            switch,
         } => {
-            if *checkout {
+            if *switch {
                 argv.extend(["switch".into(), "--create".into(), name.clone()]);
             } else {
                 argv.extend(["branch".into(), name.clone()]);
@@ -115,7 +115,7 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
         }
         // **`checkout` ではなく `switch`。** `switch` は pathspec を取らないので、
         // 同名のファイルがあっても「そのファイルを取り出す」に化けない（03）。
-        GitOp::Checkout(target) => {
+        GitOp::Switch(target) => {
             argv.extend(["switch".into(), target.clone()]);
         }
         GitOp::BranchDelete { name, force } => {
@@ -292,7 +292,7 @@ mod tests {
             GitOp::DiscardAdded(_) => "DiscardAdded",
             GitOp::Commit { .. } => "Commit",
             GitOp::BranchCreate { .. } => "BranchCreate",
-            GitOp::Checkout(_) => "Checkout",
+            GitOp::Switch(_) => "Switch",
             GitOp::BranchDelete { .. } => "BranchDelete",
             GitOp::BranchRename { .. } => "BranchRename",
             GitOp::Fetch { .. } => "Fetch",
@@ -390,7 +390,7 @@ mod tests {
                 GitOp::BranchCreate {
                     name: "feat/x".into(),
                     start: Some("main".into()),
-                    checkout: true,
+                    switch: true,
                 },
                 vec!["switch", "--create", "feat/x", "main"],
             ),
@@ -398,11 +398,11 @@ mod tests {
                 GitOp::BranchCreate {
                     name: "feat/x".into(),
                     start: None,
-                    checkout: false,
+                    switch: false,
                 },
                 vec!["branch", "feat/x"],
             ),
-            (GitOp::Checkout("main".into()), vec!["switch", "main"]),
+            (GitOp::Switch("main".into()), vec!["switch", "main"]),
             (
                 GitOp::BranchDelete {
                     name: "old".into(),

@@ -12,8 +12,8 @@ pub enum GitOp {
     StageHunk { path, patch: Vec<u8> }, UnstageHunk { .. }, DiscardHunk { .. },
     Discard(Vec<PathBuf>), DiscardUntracked(Vec<PathBuf>), DiscardAdded(Vec<PathBuf>),
     Commit { message: String, amend: bool },
-    BranchCreate { name, start: Option<String>, checkout: bool },
-    Checkout(String), BranchDelete { name, force }, BranchRename { from, to },
+    BranchCreate { name, start: Option<String>, switch: bool },
+    Switch(String), BranchDelete { name, force }, BranchRename { from, to },
     Fetch { remote: Option<String>, prune: bool },
     Pull { mode: PullMode },
     Push { remote, branch, set_upstream, force, expected: Option<Oid> },
@@ -79,9 +79,9 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `DiscardUntracked(paths)` | `clean --force -- <paths>` |
 | `DiscardAdded(paths)` | `rm --force --quiet -- <paths>` |
 | `Commit { message, amend }` | `commit [--amend] --message <message>` |
-| `BranchCreate { checkout: true }` | `switch --create <name> [<start>]` |
-| `BranchCreate { checkout: false }` | `branch <name> [<start>]` |
-| `Checkout(name)` | `switch <name>` |
+| `BranchCreate { switch: true }` | `switch --create <name> [<start>]` |
+| `BranchCreate { switch: false }` | `branch <name> [<start>]` |
+| `Switch(name)` | `switch <name>` |
 | `BranchDelete { name, force }` | `branch --delete [--force] <name>` |
 | `BranchRename { from, to }` | `branch --move <from> <to>` |
 | `Fetch { remote, prune }` | `fetch [--prune] [<remote>]` |
@@ -111,10 +111,12 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   （git 2.55 で確認）。`--` を置いて `checkout` を守る形と違い、`--` を落としたときに
   黙って危なくなる余地が無い。**`Checkout` が受けるのはブランチ名だけ**で、commit を
   detached で取り出すには `switch --detach` が要る（要るようになったら別の変種にする）
-- **変種名 `Checkout` は argv（`switch`）と食い違ったままにしてある。** 改名するなら
-  `BranchCreate { checkout: bool }` と `InputIntent::BranchCreate { checkout }`（01）も
-  同じ語彙で揃えることになるので、**ブランチの作成とリネームのタスクで一緒に決める**。
-  片方だけ改名すると、同じ「作ってから切り替える」を 2 つの語彙で書くことになる
+- **変種名は `Checkout` から `Switch` に改めた**（ブランチの作成とリネームのタスクで
+  一緒に決めた）。argv が `switch` なのに変種名が `checkout` だと、同じ「作ってから
+  切り替える」を 2 つの語彙で書くことになる。`BranchCreate { checkout: bool }` も
+  `switch: bool` に揃えた。**`InputIntent`（01）は真偽値を持たない** — UI からの作成は
+  常に切り替えるので、`switch: false` を組む経路が無い（`branch <name>` の側は
+  `to_command` のテストでだけ踏む）
 - **force push は `--force-with-lease`。`--force` は他人のコミットを消せるので使わない。**
   **値（`=<branch>:<expected>`）を必ず添える。** 省くと lease は remote-tracking ref
   （`origin/main`）と比べるだけになり、`git fetch` を挟むと他人が進めた位置がそこに入って

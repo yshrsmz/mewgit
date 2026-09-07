@@ -4,6 +4,7 @@
 //! helper・hook・`GIT_*` 環境変数を自動で効かせるため。
 
 mod argv;
+mod patch;
 mod runner;
 
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 use crate::git_read::Oid;
 
 pub use argv::{to_command, ArgvError, GitCommand};
+pub use patch::{hunk_patch, supports_hunk_patch};
 pub use runner::Runner;
 
 /// 書き込み操作。[`to_command`] で `git` の argv と標準入力に変換する。
@@ -29,6 +31,17 @@ pub enum GitOp {
         patch: Vec<u8>,
     },
     UnstageHunk {
+        path: PathBuf,
+        patch: Vec<u8>,
+    },
+    /// ハンク単位の discard。**ワークツリーだけを書き換える**（`--cached` は付かない）。
+    ///
+    /// index とワークツリーの両方に当てる変種は作らない。`git apply --index` は
+    /// 2 つが一致していることを要求するので、staged な変更があるファイルでは
+    /// `does not match index` で落ちる。2 回に割ると片方だけ通った中途半端な状態が
+    /// 残るので、staged なハンクの discard は UI が「先に unstage してください」と
+    /// 断る（03）。
+    DiscardHunk {
         path: PathBuf,
         patch: Vec<u8>,
     },

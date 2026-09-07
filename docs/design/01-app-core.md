@@ -11,7 +11,7 @@ pub struct AppState {
     pub account: AccountState,        // Resolved(login, host) | Degraded(reason) | Resolving
     pub graph: GraphState,            // 読込済みコミット、レーン、選択位置、スクロール
     pub worktree: WorktreeState,      // staged / unstaged / untracked と選択
-    pub diff: Option<DiffView>,       // 表示中の diff。target が何の diff かを示す
+    pub diff: DiffState,              // 表示中の diff と、その鮮度
     pub branches: BranchState,
     pub stashes: Vec<StashEntry>,
     pub prs: PrState,                 // 現ブランチ PR、一覧、チェック
@@ -43,12 +43,21 @@ host / owner / repo は `RepoInfo.target: Option<RepoTarget>` に入れる。下
 グラフで選んだコミットの diff もここに入る。何の diff かは `DiffView.target` が示す。
 
 ```rust
+pub struct DiffState {
+    pub view: Option<DiffView>,     // 届いている diff。未読込 / 失敗のときは None
+    pub failed: Option<DiffTarget>, // 直前に失敗した対象。同じ対象には出し直さない
+    pub freshness: Freshness,       // Fresh | Stale | Asked（下の「diff のキャッシュと鮮度」）
+}
+
 pub struct DiffView {
     pub target: DiffTarget,
     pub files: Vec<FileDiff>,       // 02 の diff() の戻り値そのまま
     pub cursor: DiffCursor,         // (ファイル, ハンク)
 }
 ```
+
+**`failed` は `DiffView` の中には置けない。** 失敗したときは `view` が `None` なので、
+中に置くと印ごと消える。
 
 `Vec<Hunk>` に平坦化しない。`GitOp::StageHunk { path, patch }` に渡す `path` を
 復元できなくなるうえ、`DiffTarget` の `path` は全変種で `Option` なので複数ファイルに
@@ -75,7 +84,7 @@ impl AppState {
 自分では定義しない。
 
 ```rust
-pub enum Pane { Graph, Branches, Stash, Prs, Worktree, Diff }
+pub enum Pane { Graph, Branches, Stash, Prs, Worktree, CommitDetail, Diff }
 
 pub enum Modal {
     Confirm { title: String, body: String, on_yes: Cmd },
@@ -87,6 +96,29 @@ pub enum Modal {
     Help,
 }
 ```
+
+巡回に入れるのは実装済みで、**かついま画面に出ているペインだけ**（07）。一覧は定数では
+なく `AppState::focus_candidates()` が状態から返す。グラフが WIP 行を選んでいれば
+`[Graph, Worktree, Diff]`、コミットを選んでいれば `[Graph, CommitDetail]`。並びは
+`Pane` の宣言順。
+
+**選択と右ペインの対応は `GraphSelection::right_pane()` の 1 つ。** `Enter` の行き先
+（グラフの `Enter` は右ペインへ移る）と巡回の候補が別々に決めると、画面はコミット詳細
+なのにキーは Working tree が受ける状態を作れる。`ui::render` だけは中身（`&GraphLine`）を
+取り出す必要があるので変種で分岐するが、**候補が必ず `right_pane()` を含むことは
+テストで見張る**。
+
+**候補を状態から出すのは、`focus` と右ペインの中身が食い違う状態を表現できなくする
+ため。** コミットを選んだまま `focus` が `Worktree` でいられると、`s` / `u` / `x` が
+画面に出ていないファイルを stage する。キーごとにガードを置く形にすると、キーを足す
+たびに書き足す必要があり、書き忘れが静かに通る。グラフのカーソルが WIP 行を出入り
+したところで、候補から外れた `focus` を `Graph` に座り直させる（どちらの選択でも
+候補にある唯一のペイン）。
+
+**`Pane::Diff` は左の領域を `Graph` と差し替えで使う**ので、どちらを描くかは `focus`
+だけで決まり、「いまどちらを見せているか」を別に持たない（07）。**`Pane::CommitDetail`
+は右の領域を `Worktree` と差し替えで使うが、そちらは `focus` では決めない。** 右ペインは
+左で選んでいるものの中身なので、フォーカスが左にあるあいだも追随する必要がある。
 
 `Confirm` の `on_yes` は `Msg` ではなく `Cmd`。破壊的操作（force push、`branch -D`、
 discard、abort 系）はすべて `Cmd::Exec(GitOp)` で表せるので、専用の `Msg` 変種を
@@ -117,11 +149,114 @@ pub enum InputIntent {
 `PartialEq` を保て、モーダル遷移のテストが書ける。
 
 `TextBuffer` は複数行の編集バッファ。ratatui のウィジェットや `tui-textarea` は
-使わない（core が UI に依存してしまうため）。編集操作の実装は M2 の commit タスクで行う。
+使わない（core が UI に依存してしまうため）。
 
 ```rust
 pub struct TextBuffer { pub lines: Vec<String>, pub cursor: (usize, usize) }  // (行, 列)
+
+impl TextBuffer {
+    pub fn from_text(text: &str) -> Self;
+    pub fn text(&self) -> String;
+    pub fn insert_char(&mut self, c: char);
+    pub fn insert_text(&mut self, text: &str);   // 貼り付け。改行で行を割り、制御文字は落とす
+    pub fn insert_newline(&mut self);
+    pub fn backspace(&mut self);
+    pub fn delete(&mut self);
+    pub fn move_cursor(&mut self, to: Motion);   // Left | Right | Up | Down | Home | End
+}
 ```
+
+- **`cursor` の列は「文字数」で数える。** バイト位置にすると非 ASCII の 1 文字を
+  消すのに何バイト戻るかを呼び出し側が知ることになり、UI が桁を出すときにも
+  変換が要る。挿入・削除の中でだけ文字位置をバイト位置に直す
+- **`lines` は必ず 1 行以上**（空のバッファも `[""]`）。`cursor` の指す行が常に
+  存在するようにするため。`backspace` で最後の行を消さない
+- **行末より右・最終行より下へは出ない。** 上下移動で短い行に移ったときは行末へ
+  寄せる。「元の桁を覚えて長い行で戻す」形にはしない（覚えた桁は状態が増えるうえ、
+  編集で無効になる時点を決められない）
+- **`Motion` は core の enum。** `KeyCode` をそのまま渡すと、文字キーまで移動として
+  受けられる形になる
+
+### コミットメッセージの編集
+
+`Modal::CommitMessage` のキーは他のモーダルと違い、**文字キーがすべて入力になる**。
+
+| キー | 動作 |
+|---|---|
+| 文字 | 挿入 |
+| `Enter`（修飾なし） | 確定（`Cmd::Exec(GitOp::Commit)`） |
+| `Alt+Enter` / `Shift+Enter` / `Ctrl-J` | 改行 |
+| `Backspace` / `Delete` | 削除 |
+| `←` `→` `↑` `↓` `Home` `End` | カーソル移動 |
+| `Esc` | 取り消し |
+| `Ctrl-C` | 終了（`update_key` がモーダルより先に見る） |
+
+**改行のキーを 3 つ受けるのは、1 つでは全端末を覆えないため。** 素の端末は
+`Shift+Enter` を `Enter` と同じ `\r` で送り、修飾情報を載せない。そこで Claude Code が
+採っている形（`/terminal-setup` が書き込む設定を実際に読んで確かめた）に合わせる。
+
+| キー | 届き方 | 効く端末 |
+|---|---|---|
+| `Alt+Enter` | `ESC CR`。crossterm が `Enter` + `ALT` に直す | `Shift+Enter` に `\u001b\r` を割り当てた端末（VS Code / Zed / Alacritty の設定）と、Option を Meta にした Terminal.app の `Option+Enter` |
+| `Shift+Enter` | `CSI 13;2u` | kitty keyboard protocol を有効にした端末（Ghostty / kitty / WezTerm / foot など） |
+| `Ctrl-J` | `0x0A`。raw mode では `\n` が `Ctrl+j` として届く | すべて |
+
+- **`Enter` の意味は端末によらず確定。** kitty protocol が効いていてもいなくても
+  変わらない。**増えるのは受けられる改行キーだけ**にする。「対応端末では `Enter` が
+  改行、非対応端末では確定」のように割ると、tmux を挟んだだけで同じキーの結果が
+  変わり、改行のつもりの打鍵がコミットになる
+- kitty protocol の有効化は `main.rs`（端末の初期化。テストを書かない配線）で行う。
+  押す旗は `DISAMBIGUATE_ESCAPE_CODES` だけにする。`REPORT_EVENT_TYPES` まで押すと
+  離鍵も届き、1 打鍵が 2 つの `Msg::Key` になる
+- **対応するかを端末に問い合わせない。** `crossterm::terminal::supports_keyboard_enhancement`
+  は `CSI ?u` を投げて応答を待ち、**応答しない端末では 2 秒待ってから諦める**
+  （crossterm 0.28.1 の `terminal/sys/unix.rs`）。pty で測ると起動が 0.82 秒 →
+  2.04 秒になった。対応しない端末ほど黒い画面を長く見ることになる。`CSI > 1 u` は
+  private な CSI なので、解さない端末は読み飛ばす。押せたかを知る必要も無い
+  （`Enter` の意味はどちらでも変わらず、増えるのは受けられる改行キーだけ）
+- **`Ctrl-Enter` は使えない。** 端末が `Enter` と区別して送らない
+- **`Esc` の取り消しに確認を挟まない。** `AppState.modal` は 1 つしか持てず、確認を
+  重ねるにはモーダルのスタックが要る。不変ルール 5 が確認を求めるのは git の破壊的
+  操作で、編集中バッファの取り消しは含まれない。`Ctrl-C` も同じ（そちらは終了なので
+  なおさら挟めない）。**押した本文が消えるのは事実なので、キーの案内に `Esc` を出す**
+- **空のメッセージは `update` が断る。** `git commit --message ""` に任せない。git が
+  落ちる時点でモーダルは閉じていて、書いた本文が戻らない。空白だけの行も同じ
+  （`trim` して空なら断る）
+- **`Cmd::Exec` が `issue` に落とされるなら、モーダルを閉じない。** `Confirm` は先に
+  閉じてから `on_yes` を返すが、あちらはユーザーが打ったものを持っていない。同じ形に
+  すると、前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
+  「ほかの git 実行が終わるまで待ってください」だけが出て**本文ごと消える**。判定は
+  `jobs.is_running(JobKind::Exec)`（`load_diff` が `Freshness::Asked` を決めるのと同じ形）
+- **貼り付けは `Msg::Paste` で 1 通で受ける。** 端末に bracketed paste を要求しないと、
+  貼り付けた文字は 1 文字ずつ `Msg::Key` として届く。**コミットメッセージを貼ると
+  最初の改行で確定し、残りがペインのキーとして解釈される**（`x` で discard の確認が
+  開き、あとから来た `y` がそれを実行する）。要求するのは `main.rs`、バッファへ入れる
+  のは `TextBuffer::insert_text`。**受けるのは編集中のモーダルだけ**で、それ以外では
+  捨てる（ペインには行き先が無く、`Msg::Key` に割り直すと有効にした意味が消える）。
+  制御文字は落とす（CR は CRLF、タブは `ui` が数える桁とずれてカーソルが合わなくなる）
+- `amend` は `Modal::CommitMessage` が持つ。`GitOp::Commit { message, amend }` に
+  そのまま渡す
+
+### commit
+
+`c` と `C` はワーキングツリーペインで受ける（07 のキーバインド）。
+
+- **`c` は staged が空なら断る。** ただし**いま持っている一覧を信じられるときだけ**。
+  書き込み直後の一覧は古く（`WorktreeState.stale`）、一度も読めていない一覧は空と
+  区別が付かない（`WorktreeState.loaded`）。どちらを根拠にしても「変更がありません」は
+  嘘になりうるので、そのときは開いて git の側に判定を任せる。**空の `snapshot` には
+  2 つの意味がある** — 「変更が無い」と「まだ読めていない」。`stale` では後者を
+  表せない（あれは書き込みでしか立たない）
+- **`C`（amend）は staged が空でも通す。** reword だけの amend は正当な操作
+- **amend の初期値は `Cmd::LoadHeadMessage` で読む。** `RepoInfo.head` からは取らない。
+  あれは起動時に 1 回読んだきりで、1 回コミットした時点で古い（`Cmd::LoadRepoInfo` が
+  `issue` に落とされていれば commit のあとも古いまま）。**古い初期値は「1 つ前の
+  コミットのメッセージで HEAD を上書きする」になる。** HEAD の解決と本文の取得は
+  リーダースレッドの中で 1 回で行い、途中で HEAD が動く隙を作らない
+- **届いた本文でモーダルを開くのは `modal` が空のときだけ。** `C` を押してから届く
+  までのあいだに別のモーダル（`x` の確認など）が開いていることがある。無条件に
+  上書きすると、確認モーダルが編集画面に化ける
+- コミットが 1 つも無い（unborn HEAD）ときは `Ok(None)` が返る。通知を出して開かない
 
 ## グラフの行
 
@@ -132,15 +267,32 @@ pub struct GraphState {
     pub lines: Vec<GraphLine>,
     pub lanes: LaneState,       // 末尾行の直後の状態。追加ページはここから再開（06）
     pub refs: RefIndex,         // 行の右に並べるラベル（02）
-    pub cursor: usize,
+    pub cursor: usize,          // 表示行の添字。0 は WIP 行、1.. が `lines`
     pub scroll: usize,          // 画面最上部に出す行
-    pub expanded: bool,
     pub detail: Option<CommitDetail>,  // 遅延取得した選択コミットの詳細（02）
     pub loaded_all: bool,
 }
 
 pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
+
+pub enum GraphSelection<'a> { Wip, Commit(&'a GraphLine) }
 ```
+
+**先頭の WIP 行はコミットではないので `lines` に入れない。** かわりに `cursor` を
+「表示行」の添字とし、表示行数を `GraphState::rows()`（= `1 + lines.len()`）で表す。
+`scroll` / `viewport` / 追加読み込みの算術は表示行の上で回るのでそのまま使える。
+
+**表示行の添字を `lines` の添字に読み替えるのは `GraphState::row(index)` の 1 つ。**
+`ui` が窓を切り出すときもここを通す。各所で `lines.get(index - 1)` と書くと、`- 1` の
+書き忘れが 1 行ずれとして静かに通り、**反転する行と右ペインの中身が食い違う**。
+`selection()` は `row(cursor)`、`cursor_commit()` はその上の薄い包み。
+
+コミット側が `&GraphLine`（コミット + 罫線）なのは、`ui` が罫線を描くのに要るため。
+`&Commit` にすると、窓を切り出した `ui` が同じ添字で `lines` を引き直すことになり、
+上の「読み替えは 1 箇所」が崩れる。
+
+**WIP 行は変更が無くても常に出す**（07）。件数で出し入れすると `StatusLoaded` が届く
+たびに表示行数が変わり、カーソルが指すコミットを oid で座り直させる必要が出る。
 
 `RefIndex` はここに置く。引くのはグラフペインだけで、`RepoInfo` に入れると
 「パスとリモートの入れ物」に描画専用の索引が混ざる。起動時に `head` / `remotes` と
@@ -151,23 +303,26 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 `GraphState::move_cursor(delta)` / `scroll_into_view()`。
 
 `viewport` は `ui` がレイアウトから出して `Msg::Layout` で運んでくる（07 の
-`ui::graph_rows`）。詳細を出すかの判定（`expanded` かつ行がある）は `ui` 側の
-1 つの関数にまとめ、行数を出すときと描くときで同じものを使う。core にヘッダや枠の高さを持たせない。持たせると 07 の
-レイアウトを変えたときに黙ってずれるうえ、`ui` の描画と `app` の計算のどちらが
-正しいかを決める場所が無くなる。
+`ui::graph_rows`）。core にヘッダや枠の高さを持たせない。持たせると 07 のレイアウトを
+変えたときに黙ってずれるうえ、`ui` の描画と `app` の計算のどちらが正しいかを決める
+場所が無くなる。
 
 **`Msg::Resize`（端末サイズ）と `Msg::Layout`（グラフの行数）は別の `Msg`。**
-行数が変わる原因は端末サイズだけではなく、`expanded` の切り替えでも変わる
-（詳細を出すぶんグラフが縮む）。1 つにまとめると、`Enter` を押しただけなのに
-「端末サイズが変わった」という嘘の `Msg` を流すことになる。`Layout` はランタイムが
-描画の直前に `ui::graph_rows(state)` と `viewport` を比べ、食い違ったときだけ出す。
-`ui::graph_rows` は `term` と `expanded` だけから決まる値を返すこと。詳細の中身
-（メッセージの行数など）に依存させると、詳細が届いた瞬間に行数が変わってグラフが
-跳ね、`Layout` → 追加読み込みが毎回走る。
+`Resize` が運ぶのは端末の幅と高さで、そこからグラフの行数を出せるのは `ui` だけ
+（ヘッダ・ステータスバー・枠のぶんを知っているのはあちら）。1 つにまとめると、
+その引き算を core に持ち込むことになる。`Layout` はランタイムが描画の直前に
+`ui::graph_rows(state.term)` と `viewport` を比べ、食い違ったときだけ出す。
+
+**`ui::graph_rows` は `term` だけから決まる値を返すこと。** M1 ではコミット詳細を
+グラフの下部に展開していたので「詳細を出すか」も引数にあり、`Enter` を押すだけで
+行数が変わっていた。詳細を右ペインへ移してこの依存は消えている（07 の
+「CommitDetail ペイン」）。状態を引数に戻さない。詳細の中身（メッセージの行数など）に
+依存させると、詳細が届いた瞬間に行数が変わってグラフが跳ね、`Layout` → 追加読み込みが
+毎回走る。
 
 ### 追加ページの読み込み
 
-`loaded_all` が偽で、**残り行数（`lines.len() - cursor`）が 1 画面以下になったら**
+`loaded_all` が偽で、**残り行数（`rows() - cursor`）が 1 画面以下になったら**
 `Cmd::LoadLog { count: page_size }` を出す。判定はカーソルの移動後・ページを積んだ
 直後・`Msg::Layout` の 3 箇所。走っているかは見ない。同種のジョブは
 `AppState::issue` が落とすので、2 箇所で同じ判断をしない。
@@ -189,6 +344,77 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 （行が消えると詳細の領域も消える）、失敗が自分で読み直しを引く形になる。
 フラグを落とすのはカーソルを動かしたとき（`scrolled`）と、読み込みが成功したとき。
 
+### ログの読み直し
+
+commit は HEAD を動かすので、積んだ行が丸ごと古くなる。**続きを読む経路では直せない**
+（新しいコミットは末尾ではなく先頭に付く）。`Cmd::LoadLog` に `restart` を足し、
+リーダースレッドの `LogSession` を捨てて先頭から読み直す。
+
+```rust
+Cmd::LoadLog { count: usize, restart: bool }
+Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
+```
+
+**出すかどうかは `update::Reload` が決める。** `app` に置く。
+
+| | 出す `Cmd` | 例 |
+|---|---|---|
+| `Nothing` | `LoadStatus` | stage / unstage / discard、stash |
+| `Refs` | `+ LoadRepoInfo` | checkout、branch 作成 / リネーム、非 force push |
+| `RefsAndLog` | `+ LoadLog { restart }` | commit、fetch / pull、force push、branch 削除、rebase / cherry-pick / revert |
+
+- **`Refs` と `RefsAndLog` を分ける。** グラフのラベルと HEAD は行に焼き込まず
+  `GraphState.refs` から引く（07）ので、**既にあるコミットを指し直すだけの操作では
+  行は 1 つも動かない**。ログの読み直しは `LogSession` の作り直しで履歴全体のコストが
+  掛かる（02 の「セッションは作り直さず使い回す」）ので、要らないところでは払わない
+- **`git_exec` に `GitOp::moves_refs()` として置かない。** stash が `Nothing` なのは
+  「`refs/stash` をグラフの walk に押していない」からで、git は ref を動かしている。
+  git の事実を約束する名前で UI の方針を返すと、Stash ペインが入ったときに黙って
+  嘘になる。**どの ref を辿るかを知っているのは `app` 側**
+- **失敗した書き込みで読み直すのは、途中まで ref が動きうる操作だけ。** fetch / pull は
+  一部の ref だけ更新して落ちうるし、rebase / cherry-pick / revert は途中で止まる。
+  commit / branch 削除 / force push は 1 回で決まるので、失敗したなら ref は元のまま。
+  **読み直しは行を捨てるだけでなく `GraphState::restart` がカーソルとスクロールを
+  先頭に戻す**ので、pre-commit hook に弾かれただけでグラフの位置を失う
+- **新しい `Cmd` の変種にせず `LoadLog` のフィールドにする。** `job_kind` が
+  `JobKind::LoadLog` と必ず同じになり、続きの読み込みと読み直しが同時に走らない。
+  別変種にすると `job_kind` を揃えるのは手書きの約束になる
+- **`Msg::LogLoaded` は `restart` を運ぶ。** 届いたページが「続き」か「先頭から」かは
+  中身からは判らない（`LogPage` に位置が無い）。`CommitDetailLoaded` の `oid` と
+  `DiffLoaded` の `target` と同じで、**要求した内容を返信に載せる**
+- **読み直すのは先頭 1 ページ（`graph.page_size`）だけ。** 積んでいたぶんを全部
+  読み直すと、履歴を深く辿ったあとの commit が高くつく。commit の直後に見たいのは
+  新しい先頭なので、カーソルとスクロールは 0 に戻す
+- 行を捨てて積み直す処理は**ログ読み込みの失敗と同じ**（02 の契約により、失敗した
+  セッションも先頭から読み直しになる）。`GraphState::restart()` の 1 本にまとめ、
+  `lines` / `lanes` / `detail` / `cursor` / `scroll` / `loaded_all` を揃って戻す
+
+**読み直しは `issue` に落とされうる。** 続きの読み込みが走っているあいだに commit すると
+同種なので落ちる。落ちたぶんは `GraphState.reload_pending` に印を付け、走っていた
+ページが届いた時点で頼み直す。**立てる条件まで `WorktreeState.stale` と同じ**にする
+（`jobs.is_running(LoadLog)`）。「常に立てて届いたら落とす」形にすると、同じ形だと
+書いてある 2 つが別のことを指す。
+
+- **印が立っているあいだに届いたページは、続きでも読み直しでも捨てる。** 印が立つのは
+  「読み直しを頼めなかった」ときで、そのとき飛んでいたページは必ず印を立てた書き込みより
+  前に頼まれたもの。積んでも直後の読み直しで捨てるだけで、そのあいだ古い行に新しい行が
+  継ぎ足された状態が画面に出る。**`restart` かどうかで分けてはいけない** — 1 つ前の
+  書き込みの読み直しが届いたときに印だけ落ちて、新しい書き込みが二度とグラフに出なく
+  なる（続けて 2 回コミットすると踏む）
+- **印が立っているあいだは必ず `JobKind::LoadLog` が走っている**（落とした相手が
+  それ）。だから `load_more` に印を見る分岐は要らない — 続きを出しても `issue` が
+  落とす。**見る形にすると、テストで踏めない分岐が残る**
+- **読み直しを組む関数にも「出すか」の判断を置かない。** 呼び出し元は 2 つあり、
+  どちらも出すと決めたあとで呼ぶ。置くと、やはり踏めない偽の腕が残る
+- 印を落とすのは `restart: true` のページが届いたときと、ログ読み込みが失敗したとき。
+  **3 状態は要らない。** `DiffState.freshness` が 3 つ要ったのは「短絡してよいか」と
+  「パッチを組んでよいか」で見る時点が違ったため。ここは読む 2 箇所（読み直しを
+  出すか・届いたページを採るか）がどちらも「読み直しが欠けている」という同じ時点を
+  見ている
+- **`Cmd::LoadRepoInfo` も一緒に出す。** ref のラベル（`main` が新しいコミットへ動く）と
+  `RepoInfo.head` が古くなるため。こちらが `issue` に落ちたときの追いつきは持たない。
+  発行元が起動時とここの 2 つしかなく、重なる窓が実質無い。M3 の世代で畳む
+
 `update` が返した `Cmd` は必ず `runtime` が dispatch する。捨てると `issue` が
 `JobTracker` に登録したまま実行されず、以後その種類の `Cmd` が黙って落ち続ける。
 `Cmd` に `#[must_use]` を付けてあるので、捨てるとコンパイルが通らない（CI は
@@ -204,15 +430,20 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 
 ### コミット詳細の遅延取得
 
-`Enter` で `expanded` を切り替える。真にしたときと、真のままカーソルが動いたときに
-`Cmd::LoadCommitDetail(oid)` を出す。取れた値は `GraphState.detail` に入れる。
+コミットを選んでいるあいだ、詳細は常に右ペインに出ている（07 の「CommitDetail ペイン」）。
+カーソルがコミットの行に乗るたびに `Cmd::LoadCommitDetail(oid)` を出し、取れた値は
+`GraphState.detail` に入れる。WIP 行に乗っているあいだは出さない（読むものが無い）。
+
+**「開いているか」の状態を持たない。** M1 では `Enter` で `expanded` を切り替え、真の
+あいだだけ読んでいた。右ペインへ移すと出す・出さないはグラフの選択だけで決まるので、
+その旗は消える。`Enter` はコミットの行で `focus` を `CommitDetail` に移すキーになった。
 
 - **`detail` は `CommitDetail` をそのまま持ち、どのコミットのものかは `detail.oid` で判る。**
   カーソルの指すコミットと食い違っていれば、まだ届いていない（あるいは失敗した）という
   ことなので、`ui` はそこで読み込み中かエラーかを出し分ける（07）。「読み込み中」の
   フラグを別に持たない
-- 既に `detail.oid` がカーソルのコミットと一致していれば出さない。閉じてもう一度開いた
-  ときに読み直さないよう、`expanded` を偽にしても `detail` は捨てない
+- 既に `detail.oid` がカーソルのコミットと一致していれば出さない。WIP 行を通り過ぎる
+  たびに読み直さないよう、選択が WIP に移っても `detail` は捨てない
 - **鮮度の判定は `GraphState::fresh_detail` の 1 つ。** 次に何を読むかを決める `update` と、
   何を描くかを決める `ui` が同じものを使う。両方に書くと、片方だけ直したときに古い詳細を
   出したままになってもコンパイルは通る
@@ -255,10 +486,24 @@ pub struct WorktreeState {
   区画が空になっていたら次の区画へ寄せる。寄せ先も無ければ先頭に戻す。**この
   詰め直しは `WorktreeState` の 1 つの関数（`clamp`）に置く。** `j` / `k` の移動と
   同じ「次に選べる行」の定義を 2 度書かない
-- **`(操作, 区画)` から `GitOp` を決める表は 1 つ**（`update::plan`）。操作ごとに
-  `match` を分けると、`Pane::Diff` でハンク単位の同じ操作を足すときに同じ表を
-  もう一度書くことになる。**できない組み合わせは理由を返し、通知に出す。**
-  黙って落とすと、キーが効いていないのか対象が悪いのかが判らない
+- **`(操作, 区画)` から `GitOp` を決める表は 1 つ**（`update::plan`）。ファイル単位も
+  ハンク単位もここを通る。**できない組み合わせは理由を返し、通知に出す。**
+  黙って落とすと、キーが効いていないのか対象が悪いのかが判らない。
+  「stage されていません」「すでに stage されています」「コンフリクトしたファイルは
+  操作できません」はどちらの単位でも同じ文言なので、表を 2 つに割らない
+- **単位の違いは `Scope` で運ぶ。** `Scope::File { status, paths }` と
+  `Scope::Hunk { path, hunk }` の 2 つ。`plan` は `(操作, 区画)` で可否を決め、
+  `GitOp` は各アームが `Scope` を見て組む。discard だけは変種の選び方が単位ごとに
+  違うので、そこで枝が分かれる（ファイルは 3 変種、ハンクは Unstaged 限定の
+  `DiscardHunk`）
+- **`Scope::Hunk` はハンクを借用で持ち、パッチを組むのは `plan` のアームの中。**
+  断られる組み合わせ（Unstaged で `u` など）でハンクを丸ごとコピーしない。パッチに
+  できない名前（03 の `UnquotablePath`）も「できない理由」の 1 つとして同じ `Err` から
+  出るので、断る経路が `act` に 2 本並ばない
+- **「ハンクで表せるファイルか」の述語は `app` に置かない。**
+  `git_exec::supports_hunk_patch` がパッチを組む関数の隣で持つ。`app` に写すと、
+  表せる範囲を広げたときに呼び出し側が取り残され、テストは fallback を期待した
+  まま緑で通る
 - stage / unstage / discard が渡すパスは `FileEntry` から出す。**rename は旧パスと
   新パスの両方を載せる**（`git add -- <old> <new>` は旧パスの削除も index に入る。
   staged rename の unstage も両方要る。02 の `old_path`）
@@ -284,6 +529,128 @@ pub struct WorktreeState {
 無く、到着時には判定できない。そのため書き込みの側で「あとで頼み直す」と印を付ける。
 鍵を持てるようになるか、M3 で `Exec` をキューにするときに、この印は消える。
 
+### diff の遅延取得
+
+**`Pane::Diff` を見せているあいだだけ読む。** コミット詳細と同じで、見えていないものを
+読んでもリーダーを塞ぐだけ。左の領域を差し替えて出すので、見せているかは
+`focus == Pane::Diff` で判る（07）。
+
+**欲しい対象は `AppState::wanted_diff() -> Option<DiffTarget>` の 1 つで導く。**
+
+| 選んでいる行 | DiffTarget |
+|---|---|
+| Staged | `HeadVsIndex(Some(path))` |
+| Unstaged / Untracked | `IndexVsWorktree(Some(path))` |
+| Conflicted / 選択なし / Diff を見せていない | `None` |
+
+core（次に何を読むか）と `ui`（中身を描くか、読み込み中と出すか）が同じものを使う。
+
+**`ui` は `DiffState.view` を直に見ず、`DiffState::fresh_view(wanted)` を通す。**
+`GraphState::fresh_detail` と同じ形で、`view.target` が `wanted_diff()` と一致する
+ときだけ中身を返す。読む側で濾さないと、対象が変わってから届くまでのあいだ
+**別のファイルの diff をタイトルごと出したまま**になる（そのファイルの読み込みが
+失敗すると恒久的に残る）。`view` を読む消費者はこの古さをそのまま引き継ぐので、
+ハンク単位の stage を足すと「右で b.txt を選んでいるのに a.txt のハンクが stage
+される」になる。
+
+**代わりに `view` を消して回らない。** フォーカスの移動やカーソル移動のたびに `None`
+にすると、`Cmd::LoadDiff` の発行で避けた「腕ごとの特殊ケース」を消す側で作ることに
+なる。消さないことには利点もあって、同じファイルを開き直したときは読み直しが届くまで
+前の中身を出せる（「読み込み中…」が挟まらない）。
+
+「読み込み中」と「読み込めなかった」の出し分けも `DiffState::has_failed(wanted)` で
+直接見る。`jobs.is_running(LoadDiff)` の否定から消去法で導くと、`Cmd` の発行経路を
+変えたときに片方だけ直してもコンパイルもテストも通る。
+
+**カーソルを動かすのも `fresh_view_mut` を通す。** 濾さずに動かすと、画面に出て
+いない `view`（読み込み中・失敗中に残っているもの）のカーソルが黙って動く。
+
+**同じ対象を読み直したときはカーソルを持ち越す。** キャッシュしないので、開き直す
+たびに読み直しが届く。既定に戻すと、選んでいたハンクが先頭へ飛んでから操作が効く
+ことになる。読み直しでハンクが減っていることがあるので、持ち越したあとに選べる
+位置へ寄せ直す（`WorktreeState::clamp` と同じ役目）。**Untracked も `IndexVsWorktree`。** `git_read` が
+untracked の中身を出すようにしてあるので、これで新規ファイルの全行が `+` で並ぶ（02）。
+
+**`Cmd::LoadDiff` を出す場所は 3 つ。**
+
+- **フォーカスが変わった直後**（`update_key` の中で 1 回）。`Tab` / `Shift+Tab` の巡回でも、
+  Worktree の `Enter` でも、Diff の `Esc` でも、同じ 1 箇所を通る
+- `status_loaded` の `clamp` のあと。書き込みで選択が別の区画へ移ると対象が変わる
+- `diff_loaded` の追いつき
+
+`update_inner` の doc コメントにある「続きを頼む判断」の一覧に、この 3 つを足す。
+
+**`Tab` の腕や `Enter` の腕に個別に書かない。** フォーカスの巡回はペインより先に見る
+共通の経路（01 の「キー入力」）なので、そこに Diff 固有の判断を埋めると、あとから
+ペインを足したときに同じ特殊ケースが増える。`Enter` も「`focus` を `Diff` にする」
+だけを行い、読むかどうかは共通の出口が決める。`Esc` で出たときは `wanted_diff()` が
+`None` になるので、同じ出口を通っても何も出ない。
+
+**カーソル移動（`worktree` の `j` / `k`）では出さない。** Diff を見せているあいだは
+ワーキングツリーにフォーカスが無く、カーソルは動かない。
+
+**届いた diff が別の対象のものであることがある。** `DiffLoaded` が運ぶ `target` が
+`wanted_diff()` と違えば、そこでもう 1 回頼む。`CommitDetailLoaded` の追いつきと同じで、
+`JobTracker` の粒度は種別単位なので、要求が飛んでいるあいだの選択の移動は落とされる。
+
+**`Err` から再発行してよいのは対象が違うときだけ。** `DiffState.failed` に失敗した対象を
+入れ、`wanted_diff()` がそれと同じなら出さない。`bool` にすると、失敗のあとに書き込みで
+対象だけが変わった（Unstaged → Staged）ときも塞いでしまう。`failed` を落とすのは
+読み込みの成功と、ワーキングツリーのカーソル移動（`GraphState.load_failed` と同じ）。
+移動して戻ってくれば 1 回だけ試し直せる。
+
+### diff のキャッシュと鮮度
+
+**同じ対象を既に持っているなら読み直さない。** ワーキングツリーの diff は 1 ファイル
+ぶんでもワークツリー全体を走査してから絞る（02 で pathspec を捨てたため）ので、
+`Esc` / `Enter` のたびに走らせると `LoadLog` を待たせる。リーダースレッドは直列。
+
+**キャッシュには無効化の印が要る。** 対象は変わらないまま中身だけが変わる経路が
+あるため（ハンク単位で stage すると `IndexVsWorktree(a.txt)` のまま中身が減る）。
+
+**印は `bool` ではなく 3 状態（`Freshness`）。** 短絡してよいか（= 読み直しを
+**頼んだ**か）と、出しているハンクからパッチを組んでよいか（= 読み直しが**届いた**か）
+は切り替わる時点が違う。1 つの `bool` はどちらか片方の時点でしか倒れず、もう片方は
+「頼んだだけで届いていない diff」を新しいものとして扱う。
+
+| 状態 | 意味 |
+|---|---|
+| `Fresh` | 書き込みより後の diff を持っている（書き込みがまだ無いときも含む） |
+| `Stale` | 書き込みより前の diff しか無く、読み直しをまだ頼めていない |
+| `Asked` | 書き込みより前の diff しか無いが、読み直しは頼んである |
+
+- **`ExecFinished` は無条件に `Stale`。** 対象は見ない。書き込みの時点では `clamp` が
+  まだで、そのとき選ばれているファイルが読み直しの対象になるとは限らない。どの
+  `GitOp` がどの diff を変えるかを表にするより、1 回余分に読むほうが安い
+- **`Stale` → `Asked` は `load_diff` が `Cmd::LoadDiff` を実際に出せたときだけ。**
+  `LoadDiff` が走っていれば `issue` に落とされ、いま飛んでいる要求は書き込みより前の
+  ものなので `Stale` のまま（`WorktreeState.stale` と同じ形）。判定は
+  `jobs.is_running(LoadDiff)`
+- **`Asked` のあいだ `LoadDiff` はちょうど 1 つ飛んでいる。** だから `DiffLoaded` は
+  その 1 通を指していると言える。**届いた時点で必ず `Fresh` か `Stale` に倒す。**
+  倒さないと、`Esc` で対象が消えたときや読み取りが失敗したときに「頼んである」まま
+  取り残され、次の書き込みまで古い diff を新しいものとして扱う。`Fresh` になるのは
+  実際に `view` へ採れたときだけ
+- **`Stale` のあいだに届いた返信は採らない。** その返信は書き込みより前に頼まれた
+  ものなので、採ると読み直しが届くまでのあいだ書き込み前の中身を出すことになる
+- そのため **`diff_loaded` は必ず最後に `load_diff` を通る。** 採ったときも、採らな
+  かったとき（対象違い・鮮度不足）も、続きの判断は同じ 1 箇所で行う
+
+`JobTracker` に世代を持たせれば `WorktreeState.stale` ごと畳める。**それは M3 の
+fetch で入れる**（下の「実行中ジョブ › 世代」）。`Freshness` はその局所版。
+
+**`Freshness` が `Fresh` でないあいだ、ハンク単位の stage / unstage / discard は
+理由を出して断る。** 古い `view` から組んだパッチは、内容の同じハンクが 2 つある
+ファイルで `git apply` のオフセット追従に拾われ、**別のハンクに当たりうる**。
+#24 で「見えていないハンクに破壊的な操作を押させない」と決めたのと同じ理由。
+
+- **ファイル単位の操作に落とさない**（`s` がファイル全体を stage することになる）
+- **断るのはハンク単位のときだけ。** ペイン名（`focus == Pane::Diff`）で書くと、
+  古いパッチを一切使わない操作（Diff ペインで untracked に `s`）まで塞ぐうえ、
+  ハンクを出す場所が増えたときにガードだけが外れる
+- 文言は「待っています」ではなく「最新の差分をまだ読めていません」。`Asked` の
+  読み直しが失敗すると `Stale` に戻り、そこからは何も来ない
+
 ## 実行中ジョブ
 
 `JobKind` は `Cmd` の変種と 1 対 1 なので、列挙を二重に持たず `Cmd` を単一の真実にする。
@@ -305,6 +672,70 @@ impl AppState {
 登録は `update` の出口（`issue`）で行う。ランタイムの `dispatch` が `AppState` に
 書いてよいのは `notices` だけなので、そちらでは登録できない。`Batch` は中身を 1 つずつ
 判定する。まとめて弾くと、同種が走っている `Cmd` 1 つのために他の `Cmd` まで落ちる。
+
+### 世代（M3 の fetch で入れる）
+
+**粒度が種別単位であることの影響は 2 つあり、別々の問題として扱う。**
+
+| | 問題 | いまの解 |
+|---|---|---|
+| (a) | 同種が走っていると**要求が落ちる** | 返信が届いた場所で必ず頼み直す（`diff_loaded` の出口、`status_loaded` の `WorktreeState.stale`） |
+| (b) | 書き込みで**持っている値が古くなる** | `WorktreeState.stale`、`DiffState.freshness` |
+
+**世代（epoch）が解くのは (b) だけ。** (a) を解くには `JobKind` が対象
+（`DiffTarget` など）まで持つ必要があり、それは別の変更。世代を入れても (a) は残る。
+
+```rust
+pub struct JobTracker {
+    /// 書き込み（`ExecFinished`）が起きた回数。持っている値の鮮度の基準。
+    writes: u64,
+    ...
+}
+
+impl JobTracker {
+    /// 書き込みが 1 つ終わった。以後の `start` は新しい世代を刻む。
+    pub fn advance(&mut self);
+    /// 走らせたジョブの世代。`finish` が返すので、届いた返信がいつ頼まれたものかが判る。
+    pub fn finish(&mut self, kind: JobKind) -> u64;
+    /// いまの世代。持っている値がこれと同じなら最新。
+    pub fn epoch(&self) -> u64;
+}
+```
+
+- **刻むのは `AppState::issue`**（`start` の場所）。`dispatch` が `AppState` に書ける
+  範囲を広げずに済む
+- **リーダースレッドには何も足さない。** 世代は `Msg` ではなく `JobTracker` が持ち、
+  `finish` が返す。`Cmd` / `Msg` の形は変わらない
+- **失敗した書き込みでも世代を進める。** `git apply` が途中で落ちても index は動いて
+  いることがある（いまの `exec_finished` も成否を問わず `Stale` にしている）
+
+**畳めるもの**: `DiffState.freshness`（`Fresh` = `view.epoch == epoch()`、
+`Asked` = 走っているジョブの世代が最新、`Stale` = どちらでもない）と
+`WorktreeState.stale`（`status_loaded` での比較 1 本になる）。`DiffView` は読めた
+世代を持つ。
+
+**畳めないもの**: `DiffState.failed` と `GraphState.load_failed` は「失敗の記憶」で
+鮮度ではない。`Msg::CommitDetailLoaded` が Oid を運ぶ形も残す。**値そのものが鍵を
+持っているなら、そちらのほうが強い**（世代は「リポジトリが変わった」しか言えず、
+「選択が動いた」を言えない）。
+
+**3 人目は M2 で出た。** 元はここに「M3 の fetch で 3 人目（ref が変わったあとの
+ログの読み直し）が出る」と書いていたが、commit のタスクで先に出た
+（`GraphState.reload_pending`）。同じタスクで 4 人目の穴も見えている — 書き込みの
+あとに出す `Cmd::LoadRepoInfo` は `issue` に落とされうるのに追いつきを持たない。
+発行元が起動時とここの 2 つしかなく重なる窓が実質無いので、いまは塞いでいない。
+
+**それでも M2 では入れない。** ここで待っていた材料のうち、片方は揃った —
+上の `update::Reload` が「どの書き込みがどの領域を無効化するか」の判別子で、
+**カウンタを 1 本にするとログまで毎回無効化して高い**という懸念には
+「領域ごとに分ける」という答えが出せる。揃っていないのはもう片方で、fetch は
+
+- 落ちた要求の追いつき（(a)）を**世代では解けない**まま残す
+- ref が変わったあとのログの読み直しを、この `restart` に乗せる（plan.md の M3）
+
+の 2 つを同時に持ち込む。**3 人目を数え終わってから畳むほうが、畳む形を 2 回
+変えずに済む。** M3 の世代のタスクで、`DiffState.freshness` / `WorktreeState.stale` /
+`GraphState.reload_pending` と `LoadRepoInfo` の穴をまとめて見る。
 
 ## キー入力
 
@@ -350,11 +781,13 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 pub enum Msg {
     Key(Key), Resize { term: TermSize }, Layout { graph_rows: usize }, Tick,
     // git_read
-    LogLoaded(Result<LogPage, GitReadError>),
+    Paste(String),                     // bracketed paste。編集中のモーダルだけが受ける
+    LogLoaded { restart: bool, result: Result<LogPage, GitReadError> },
     CommitDetailLoaded { oid: Oid, result: Box<Result<CommitDetail, GitReadError>> },
+    HeadMessageLoaded(Result<Option<String>, GitReadError>),  // amend の初期値。None は unborn
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
-    DiffLoaded { target: DiffTarget, files: Vec<FileDiff> },
+    DiffLoaded { target: DiffTarget, result: Box<Result<Vec<FileDiff>, GitReadError>> },
     // git_exec
     ExecFinished(Box<ExecDone>),       // { op, result, progress }
     ProgressDetected(Option<InProgressOp>),
@@ -373,8 +806,11 @@ pub enum Msg {
 新しい状態を持っても意味が無いため。失敗しても通知だけで続ける（ラベルもリモートも
 無いままグラフは出せる）。
 
-`LogLoaded` は `Result` を運ぶ。失敗の通り道が無いと `JobKind::LoadLog` が走ったまま
-残り、以後の `Cmd::LoadLog` が `JobTracker` に黙って落とされて二度と読めなくなる。
+`LogLoaded` は `Result` と、要求した `restart` を運ぶ。`Result` にするのは、失敗の
+通り道が無いと `JobKind::LoadLog` が走ったまま残り、以後の `Cmd::LoadLog` が
+`JobTracker` に黙って落とされて二度と読めなくなるため。`restart` を運ぶのは、
+届いたページが先頭からのものか続きかを `LogPage` から導けないため（上の
+「ログの読み直し」）。
 受けたら成功・失敗を問わず `jobs.finish(LoadLog)` する。失敗のときは積んだ行も捨てる。
 失敗したセッションは捨てられ、次の読み込みは履歴の先頭から来る（02）ので、残すと
 同じコミットが二重に並ぶ。
@@ -396,7 +832,14 @@ pub enum Msg {
 一緒に運ぶ。** `Err` のときにどのコミットが失敗したのかを知る手掛かりがこれしかなく、
 無いと「別のコミットの失敗」と「いま見ているコミットの失敗」を区別できない。
 
-`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` と `StatusLoaded` は payload を `Box` に入れる。入れないと `Msg` が
+`DiffLoaded` も `Result` を運び、**要求した `target` を一緒に運ぶ**。`Result` にする
+理由は `LogLoaded` / `StatusLoaded` と同じで、失敗の通り道が無いと
+`JobKind::LoadDiff` が走ったまま残り、以後の `Cmd::LoadDiff` が黙って落ちる。
+`target` を運ぶ理由は `CommitDetailLoaded` の `oid` と同じで、`Err` のときに
+「どの対象が失敗したか」を知る手掛かりがこれしかない。加えて `Ok` でも、届いた
+diff がいま選んでいるファイルのものかを判定するのに要る。
+
+`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` と `StatusLoaded` と `DiffLoaded` は payload を `Box` に入れる。入れないと `Msg` が
 数百バイトになり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。
 これらを Box すると 96 バイトに収まる。上限は `msg.rs` のテスト（128 バイト）で見張る。
 
@@ -405,8 +848,9 @@ pub enum Msg {
 ```rust
 pub enum Cmd {
     None, Batch(Vec<Cmd>),
-    LoadLog { count: usize },           // 読む位置は git_read の LogSession が持つ（02）
+    LoadLog { count: usize, restart: bool },  // 位置は LogSession が持つ。restart で捨てる（02）
     LoadCommitDetail(Oid),             // 選択コミットのメッセージ全文など（02）
+    LoadHeadMessage,                   // amend の初期値。HEAD の解決ごとリーダーで行う
     LoadStatus, LoadDiff(DiffTarget),
     LoadRepoInfo,                      // remotes / head / refs。起動時と ref 変更後（M3）
     Exec(GitOp),                       // git CLI 実行（03 参照）
@@ -424,8 +868,9 @@ pub fn init(state: &mut AppState) -> Cmd;
 
 `runtime::run` がループに入る前に 1 回呼ぶ。`main.rs` から呼ぶと、テストを書かない
 配線の側に処理が出てしまう。いまは `LoadRepoInfo` と
-`LoadLog { count: config.graph.page_size }` と `LoadStatus` の 3 つで、`ResolveAccount` は
-そのタスクでここに足す。
+`LoadLog { count: config.graph.page_size, restart: false }` と `LoadStatus` の 3 つで、
+`ResolveAccount` はそのタスクでここに足す。起動時はまだ何も読んでいないので
+`restart` は偽でよい（`LogSession` が無ければ `restart` の有無に関わらず先頭から開く）。
 
 ## update の原則
 
@@ -451,7 +896,7 @@ pub struct Runtime { reader: ReaderHandle, tx: mpsc::UnboundedSender<Msg> }
 let (runtime, mut msgs) = Runtime::new(reader);
 runtime.dispatch(&mut state, app::init(&mut state));
 loop {
-    // レイアウトの変化（リサイズ・詳細の展開）を core に伝える唯一の経路。
+    // レイアウトの変化（いまは端末のリサイズだけ）を core に伝える唯一の経路。
     runtime.dispatch(&mut state, layout_cmd(&mut state));
     terminal.draw(|f| ui::render(f, &state))?;
     let msg = tokio::select! {
@@ -497,9 +942,10 @@ loop {
   `Msg` にして `update` に戻す。状態遷移の入口を `update` 1 つに保つため
 - 初期の端末サイズは `Terminal::size()` で取り、`Msg::Resize` にして `update` に流す。
   起動時に `Resize` イベントは飛んでこない
-- **描画の直前に毎回 `ui::graph_rows(state)` と `state.graph.viewport` を比べ、違えば
+- **描画の直前に毎回 `ui::graph_rows(state.term)` と `state.graph.viewport` を比べ、違えば
   `Msg::Layout` を流す。** これがレイアウトの変化を core に伝える唯一の経路になる。
-  端末のリサイズも `Enter` の展開も同じところを通るので、片方だけ更新を忘れることがない
+  いま行数を動かすのは端末のリサイズだけだが（07 の「CommitDetail ペイン」）、比べる
+  場所を 1 つにしておくと、狭いレイアウト（M6）でペインを隠すときも同じ経路で通る
 - Git CLI 実行中も入力を受け付けるが、書き込み系 `GitOp` は同時に 1 つのみ。
   **いまはキューに積まず、`AppState::issue` が落として通知を出す。** `JobKind::Exec` の
   粒度は種別単位なので 2 本目は必ず落ちる。黙って落とすと「押したのに何も起きない」に
@@ -523,4 +969,5 @@ loop {
   なる（M2 の `CommitMessage`）ため、常に効く脱出口が要る。モーダルより先に判定する
 - M3 で実行中ジョブのキャンセルを入れるときは、ジョブがあれば `Ctrl-C` はキャンセルを
   優先し、無いときだけ終了する
-- 編集中のモーダルを `Ctrl-C` で捨てる際の確認は M2 の commit タスクで判断する
+- 編集中のモーダルを `Ctrl-C` で捨てる際も確認は挟まない。`modal` は 1 つしか持てず、
+  確認を重ねるにはモーダルのスタックが要る（上の「コミットメッセージの編集」）

@@ -4,11 +4,12 @@
 
 pub mod commit_message;
 pub mod confirm;
+pub mod input;
 
-use mewgit_core::app::Modal;
+use mewgit_core::app::{Modal, TextBuffer};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
@@ -20,14 +21,23 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
     match modal {
         Modal::Confirm { title, body, .. } => confirm::render(frame, area, title, body),
         Modal::CommitMessage { buf, amend } => commit_message::render(frame, area, buf, *amend),
+        Modal::Input {
+            title, prompt, buf, ..
+        } => input::render(frame, area, title, prompt, buf),
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
-        Modal::Input { .. }
-        | Modal::RebaseEditor { .. }
+        Modal::RebaseEditor { .. }
         | Modal::PrCreate { .. }
         | Modal::AccountPicker { .. }
         | Modal::Help => {}
     }
 }
+
+/// モーダルの既定の幅。狭い端末では画面の幅まで縮む。
+///
+/// **`Confirm` と `Input` で同じ**。「同じ」をコメントで主張すると、片方を広げた
+/// ときに主張だけが残る。広く取る理由があるモーダル（`CommitMessage` は 72 桁で
+/// 折る慣習を目で測れるようにする）だけが自分の値を持つ。
+pub const WIDTH: u16 = 60;
 
 /// 本文とキーの案内のあいだに空ける行数。
 const GAP_ROWS: u16 = 1;
@@ -107,4 +117,51 @@ fn probe(area: Rect, want: u16) -> Rect {
 /// ない。差が無いので、この 2 つを見分けるテストは書けない。
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     area.centered(Constraint::Max(width), Constraint::Max(height))
+}
+
+/// 端末カーソルを置く**領域内の**桁と、本文を横にずらす幅。
+///
+/// **列からバイト位置への変換は [`TextBuffer::before_cursor`] に任せる。** 「列は
+/// 文字数」という約束を 2 箇所で解くと、単位を変えたときに core だけ直して端末の
+/// カーソルが黙ってずれる（01 の `TextBuffer`）。桁の数え方は ratatui の
+/// [`Span::width`] に合わせ、描画と同じにする。
+///
+/// **返すのはバッファ上の桁ではなく、ずらしたあとの見える桁。** 生の桁を返すと
+/// 使う側が `area.x + col - scroll_x` を書くことになり、その式が利用者のぶんだけ
+/// 増える（`CommitMessage` と `Input` の 2 人目が出た時点でここへ移した）。
+/// 編集中のモーダルはどちらも折り返さないので、カーソルが右端を越えたぶんだけ横に
+/// ずらすのが両方に共通の約束になる。
+pub fn cursor_col(buf: &TextBuffer, width: u16) -> (u16, u16) {
+    // **`Line::from` を通さない。** あちらは幅を測るためだけに `Vec<Span>` を
+    // 1 本確保する。`Span` は `&str` を借りるだけで、`width()` の中身は同じ。
+    let col = u16::try_from(Span::raw(buf.before_cursor()).width()).unwrap_or(u16::MAX);
+    let scroll_x = col.saturating_sub(width.saturating_sub(1));
+    (col - scroll_x, scroll_x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cursor_col;
+    use mewgit_core::app::TextBuffer;
+
+    #[test]
+    fn the_cursor_column_counts_display_width_not_characters() {
+        // `TextBuffer` の列は文字数なので、全角を含む行ではそのまま桁にできない
+        // （01 の `TextBuffer`）。桁で数えないと、全角のぶんだけ左にずれる。
+        let buf = TextBuffer::from_text("あいう");
+        assert_eq!(buf.cursor, (0, 3));
+
+        assert_eq!(cursor_col(&buf, 20), (6, 0));
+    }
+
+    #[test]
+    fn a_line_wider_than_the_area_scrolls_until_the_cursor_is_at_the_right_edge() {
+        // 折り返さないので、横にずらさないとカーソルが領域の外に出る。
+        let buf = TextBuffer::from_text(&"x".repeat(30));
+
+        let (col, scroll_x) = cursor_col(&buf, 10);
+
+        assert_eq!(col, 9, "カーソルが領域の右端に来ていません");
+        assert_eq!(scroll_x, 21);
+    }
 }

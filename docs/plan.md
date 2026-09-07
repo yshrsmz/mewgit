@@ -55,10 +55,15 @@
       `switch <target>` に直す**（03 は既に `switch` / `restore` 前提で、
       `checkout <target> --` だけが残っていた）。`update::Reload` のブランチ一覧の
       読み直しは #40 で入っているので追加はなし
-- [ ] ブランチの作成とリネーム — `n` / `r` で `Modal::Input`（`InputIntent`）、
-      `GitOp::BranchCreate { checkout: true }` / `GitOp::BranchRename`。
+- [x] ブランチの作成とリネーム — `n` / `r` で `Modal::Input`（`InputIntent`）、
+      `GitOp::BranchCreate { switch: true }` / `GitOp::BranchRename`。
       **`Modal::Input` の最初の利用者**なので `modals/input.rs` と、1 行入力での
-      貼り付けの扱いをここで決める
+      貼り付けの扱いをここで決める。**グラフの `n`（カーソルの指すコミットを起点に
+      作る）も同じ本に入れる** — 起点を選ぶ経路がどこにも無いとタグや過去のコミット
+      からブランチを作れず、`InputIntent::BranchCreate { start }` の `Some` 側が
+      どのテストからも踏めない（07 の「Graph ペイン」）。**`GitOp::Checkout` は
+      `Switch` に改名する**（03 がこのタスクへ送っていた。`BranchCreate` の
+      `checkout: bool` も `switch: bool` に揃える）
 
 `ui::panes::branches` を 3 本に割った理由。1 本目は新しい読み取り（`git_read::branches`）と
 右列のレイアウト変更で、書き込みを 1 つも足さない。2 本目は書き込みだが既存の

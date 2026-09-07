@@ -9,17 +9,14 @@ use crate::ui;
 /// キーの案内。`update::confirm_key` が受けるキーと揃える。
 const HINT: &str = "[y] 実行   [n] やめる";
 
-/// モーダルの幅。狭い端末では画面の幅まで縮む。
-const WIDTH: u16 = 60;
-
 /// 破壊的操作の確認を描く。
 pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
     let block = modals::block(title);
     // **折り返してからでないと高さが決まらない。** `桁数 / 幅` の切り上げで見積もると
     // 単語境界で折れて増えたぶんを数え落とし、本文の末尾が黙って切れる（07）。
-    let (text, body_rows) = ui::wrapped(body, modals::inner_width(area, WIDTH, &block));
+    let (text, body_rows) = ui::wrapped(body, modals::inner_width(area, modals::WIDTH, &block));
 
-    let body_area = modals::place(frame, area, block, WIDTH, body_rows, HINT);
+    let body_area = modals::place(frame, area, block, modals::WIDTH, body_rows, HINT);
     frame.render_widget(text, body_area);
 }
 

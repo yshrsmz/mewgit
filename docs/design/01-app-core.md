@@ -147,13 +147,20 @@ discard、abort 系）はすべて `Cmd::Exec(GitOp)` で表せるので、専�
 
 ```rust
 pub enum InputIntent {
-    BranchCreate { start: Option<String>, checkout: bool },
+    BranchCreate { start: Option<String> },
     BranchRename { from: String },
 }
 ```
 
 変種は必要になったマイルストーンで足す。データで持つことで `Modal` が
 `PartialEq` を保て、モーダル遷移のテストが書ける。
+
+- **`start` は起点。** `None` が HEAD（Branches ペインの `n`）、`Some` がグラフで
+  選んでいるコミットの Oid（Graph ペインの `n`）。**どちらも UI から踏める**ので
+  `Option` を持つ。タグを起点にしたいときは、そのタグのラベルが乗った行を
+  グラフで選ぶ（タグ一覧のペインは無い。07 の「Graph ペイン」）
+- **`GitOp::BranchCreate` の `switch: bool` は `InputIntent` に持たせない。**
+  UI からの作成は常に切り替える（理由は 03 の「argv への変換」に置いた）
 
 `TextBuffer` は複数行の編集バッファ。ratatui のウィジェットや `tui-textarea` は
 使わない（core が UI に依存してしまうため）。
@@ -166,6 +173,7 @@ impl TextBuffer {
     pub fn text(&self) -> String;
     pub fn insert_char(&mut self, c: char);
     pub fn insert_text(&mut self, text: &str);   // 貼り付け。改行で行を割り、制御文字は落とす
+    pub fn insert_line(&mut self, text: &str);   // 行を増やさずに入れる（改行も制御文字として落ちる）
     pub fn insert_newline(&mut self);
     pub fn backspace(&mut self);
     pub fn delete(&mut self);
@@ -264,6 +272,52 @@ impl TextBuffer {
   までのあいだに別のモーダル（`x` の確認など）が開いていることがある。無条件に
   上書きすると、確認モーダルが編集画面に化ける
 - コミットが 1 つも無い（unborn HEAD）ときは `Ok(None)` が返る。通知を出して開かない
+
+### 1 行入力
+
+`Modal::Input` の最初の利用者はブランチの作成（`n`）とリネーム（`r`）。
+`CommitMessage` と同じく**文字キーがすべて入力になる**が、行が 1 本しか無い。
+
+| キー | 動作 |
+|---|---|
+| 文字 | 挿入 |
+| `Enter`（修飾の有無を問わず） | 確定（`InputIntent` の `GitOp` を出す） |
+| `Ctrl-J` | 何もしない |
+| `Backspace` / `Delete` | 削除 |
+| `←` `→` `Home` `End` | カーソル移動 |
+| `↑` `↓` | 何もしない |
+| `Esc` | 取り消し |
+| `Ctrl-C` | 終了（`update_key` がモーダルより先に見る） |
+
+- **改行のキーは 1 つも受けない。** `CommitMessage` が `Alt+Enter` / `Shift+Enter` /
+  `Ctrl-J` を改行にしているのは複数行を打つためで、こちらは行が 1 本。受けると
+  `TextBuffer` に 2 行目ができ、`text()` が返す `\n` 入りの文字列がそのまま
+  ブランチ名になる。**修飾付きの `Enter` を確定に落とすのは、`CommitMessage` の
+  つもりで `Alt+Enter` を打った人に「何も起きない」を返さないため**（そちらの
+  改行キーはここでは意味を持たない）。`Ctrl-J` だけは確定に落とさない —
+  修飾付きの文字キーは入力にしない規則（`CommitMessage` と同じ）に沿う
+- **`lines` が 1 本のままであることをテストで見張る。** 改行のキーと貼り付けの
+  どちらからも増やせないので、増えたときに気付ける腕がここにしか無い
+- **貼り付け（`Msg::Paste`）は改行を除いて 1 行につなぐ。** 除くのは
+  `TextBuffer::insert_line`（改行も制御文字として落ちる）で、**`paste` の側で
+  `replace` してから `insert_text` に渡さない** — 改行をどう扱うかの判断が 2 箇所に
+  割れる。落とすと「末尾に改行が付いただけ」の正当な 1 行貼り付けまで拒むことになり、
+  1 行目だけを採ると残りが黙って消える。**2 つの名前を貼れば連結された 1 つの名前になる**が、それは入力欄に
+  そのまま出ていて、`Enter` を押すまで git は走らない。**`Msg::Paste` を受ける
+  モーダルが 2 つ目になる** — `paste` が `CommitMessage` にしか腕を持たないままだと、
+  貼り付けた文字が 1 文字ずつ `Msg::Key` として届く形に戻り、最初の改行で確定して
+  残りがペインのキーになる（#34 で踏んだ形）
+- **空の入力は `update` が断る**（`commit_submit` と同じ）。`git switch --create ""` は
+  `fatal: '' is not a valid branch name` で落ち、その時点でモーダルは閉じていて
+  打った文字が戻らない。**空白だけも同じ**（`trim` して空なら断る）
+- **`Cmd::Exec` が `issue` に落とされるならモーダルを閉じない**（`commit_submit` と
+  同じ理由。閉じると打った文字ごと消える）。**判定を書くのは 2 箇所目**なので、
+  `commit_submit` と共有する
+- **名前が正しいかは手前で判定しない**（不変ルール 4）。`git check-ref-format` の規則を
+  mewgit に写すことになり、写した規則は git の版が変わっても追随しない。空だけを
+  断るのは、上のとおり「打った文字が戻らない」を避けるため
+- **`r` の初期値はカーソル行のブランチ名**（`TextBuffer::from_text`、カーソルは末尾）。
+  リネームは既存の名前を少し直す操作なので、空から打ち直させない。`n` は空で開く
 
 ## グラフの行
 

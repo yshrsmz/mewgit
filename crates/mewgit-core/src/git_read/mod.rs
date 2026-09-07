@@ -3,7 +3,9 @@
 //! git2 による読み取り専用の層。書き込みは一切行わない（不変ルール 1）。
 //!
 //! ここには層をまたいで受け渡す値型を置き、読み取りの実装は `repo` などの
-//! サブモジュールに置く。
+//! サブモジュールに置く。**その値型を読む側で表示に直す関数も置く**（`lossy` /
+//! [`short_oid`]）。`ui` だけが読み手だったころは `ui` にあったが、`app` が
+//! モーダルの文言を組むようになって 2 人目が出た（01 の「1 行入力」）。
 
 mod diff;
 mod log;
@@ -18,6 +20,43 @@ pub use git2::Oid;
 pub use log::LogSession;
 pub use repo::RepoReader;
 pub use thread::ReaderHandle;
+
+/// 短縮 Oid の桁数。`git log --oneline` と同じ 7 桁。
+pub const SHORT_OID: usize = 7;
+
+/// 先頭 [`SHORT_OID`] 桁。
+///
+/// **`git_read` に置くのは、`ui` の外にも読み手が出たから。** グラフの行と
+/// コミット詳細の親の一覧のほかに、`app` がブランチ作成モーダルのタイトル
+/// （`ブランチを作成 (a1b2c3d から)`）を組む（01 の「1 行入力」）。2 本に分けると
+/// 桁数を変えたときに片方だけ古いままになる。
+///
+/// **`Oid::to_string()` を切り詰めない。** あちらは 40 桁を組んでから 33 桁を捨てる。
+/// グラフは可視行ぶんを毎フレーム作るので、そのぶんの確保がまるごと無駄になる。
+///
+/// **同じ理由で、ここでも余分な桁を組んでから切らない。** バイト単位に回して
+/// `truncate` する形は、奇数桁（7）だと 8 桁目を push した時点で 7 バイトの確保を
+/// 使い切って伸長が走る（`with_capacity(7)` に 8 文字入れると容量が 14 になり、
+/// `truncate` しても戻らない。rustc 1.90 で実測）。ニブル単位に回せば確保は 1 回。
+pub fn short_oid(oid: &Oid) -> String {
+    let bytes = oid.as_bytes();
+    let mut text = String::with_capacity(SHORT_OID);
+    // 1 バイトが 2 桁。偶数桁が上位ニブル、奇数桁が下位ニブル。
+    for digit in 0..SHORT_OID {
+        let byte = bytes[digit / 2];
+        text.push(hex(if digit % 2 == 0 {
+            byte >> 4
+        } else {
+            byte & 0x0f
+        }));
+    }
+    text
+}
+
+/// 下位 4 ビットを 16 進 1 桁に。呼ぶ側がマスクしているので添字は外れない。
+fn hex(nibble: u8) -> char {
+    b"0123456789abcdef"[usize::from(nibble)] as char
+}
 
 /// 表示にしか使わない文字列を UTF-8 に寄せる。
 ///
@@ -491,4 +530,27 @@ pub enum InProgressOp {
     Merge {
         oid: Oid,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{short_oid, Oid, SHORT_OID};
+
+    #[test]
+    fn a_short_oid_is_the_first_seven_hex_digits() {
+        // `Oid::to_string()` を切り詰めるのをやめて自前で 16 進を組んでいるので、
+        // 桁の並びが git と同じであることを見張る。奇数桁（7）の切り方も含む。
+        //
+        // **先頭が 0 で埋まった Oid だけでは足りない。** 上下のニブルを入れ替えても
+        // 通ってしまうので、両方が立っている値を混ぜる。
+        for hex in [
+            "0000000000000000000000000000000000000000",
+            "0f1e2d3c4b5a69788796a5b4c3d2e1f001234567",
+            "ffffffffffffffffffffffffffffffffffffffff",
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+        ] {
+            let oid = Oid::from_str(hex).expect("40 桁の 16 進");
+            assert_eq!(short_oid(&oid), hex[..SHORT_OID], "{hex}");
+        }
+    }
 }

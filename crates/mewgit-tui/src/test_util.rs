@@ -6,6 +6,7 @@ use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, LogPage};
 use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents};
 use ratatui::backend::TestBackend;
+use ratatui::layout::Position;
 use ratatui::style::Modifier;
 use ratatui::text::Line;
 use ratatui::Terminal;
@@ -68,6 +69,17 @@ pub fn terminal_with(state: &AppState, size: TermSize) -> Terminal<TestBackend> 
 /// **描いて座標を突き合わせるところまでが 1 つ。** `terminal_with` と `row_of` を
 /// 各ペインで組み合わせると、反転の見方（どのセルを見るか）がペインの数だけ増える。
 /// 行の右側は余白でスタイルが付かないので、1 セルでも反転していれば真とする。
+/// 端末カーソルの位置。
+///
+/// **編集中のモーダルは端末側のカーソルを出す**（反転の升目を自前で描かない。07）ので、
+/// どこに置いたかはバッファからは見えない。`CommitMessage` と `Input` の 2 人目が
+/// 出た時点でここへ移した。
+pub fn cursor(state: &AppState, size: TermSize) -> Position {
+    terminal_with(state, size)
+        .get_cursor_position()
+        .expect("カーソル位置を取れませんでした")
+}
+
 pub fn row_is_reversed(state: &AppState, size: TermSize, needle: &str) -> bool {
     let row = row_of(&draw(state, size), needle);
     let terminal = terminal_with(state, size);

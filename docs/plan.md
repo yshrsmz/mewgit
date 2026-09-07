@@ -50,10 +50,11 @@
 - [x] `ui::panes::branches` の一覧 — `git_read::branches`、`Cmd::LoadBranches`、
       右列を Branches と（Working tree / コミット詳細）の上下に割る、`Tab` の巡回に
       `Pane::Branches` を足す。**読み取りだけ。** 書き込みは下の 2 本
-- [ ] ブランチの切替と削除 — `Enter` で `GitOp::Checkout`、`d` / `D` で
-      `GitOp::BranchDelete`（`Modal::Confirm` を通す）、`update::Reload` に
-      ブランチ一覧の読み直しを足す。**`Checkout` の argv を `switch <target>` に直す**
-      （03 は既に `switch` / `restore` 前提で、`checkout <target> --` だけが残っていた）
+- [x] ブランチの切替と削除 — `Enter` で `GitOp::Checkout`、`d` / `D` で
+      `GitOp::BranchDelete`（`Modal::Confirm` を通す）。**`Checkout` の argv を
+      `switch <target>` に直す**（03 は既に `switch` / `restore` 前提で、
+      `checkout <target> --` だけが残っていた）。`update::Reload` のブランチ一覧の
+      読み直しは #40 で入っているので追加はなし
 - [ ] ブランチの作成とリネーム — `n` / `r` で `Modal::Input`（`InputIntent`）、
       `GitOp::BranchCreate { checkout: true }` / `GitOp::BranchRename`。
       **`Modal::Input` の最初の利用者**なので `modals/input.rs` と、1 行入力での
@@ -113,7 +114,10 @@
       すると `config.keymap` の上書きがヒントに効かない（07 の「ステータスバー」）
 - [ ] ステータスバー — 通知の消え方（dismiss / 期限切れ）と履歴表示。
       **いまは一度出た通知が次の通知まで消えない。** 成功した操作は通知を出さないので、
-      「stage 済みに `s`」の警告が `u` の成功後も出たままになる（01 の「通知」）
+      「stage 済みに `s`」の警告が `u` の成功後も出たままになる（01 の「通知」）。
+      **`Notice.detail`（argv と stderr）を出すのもここ。** いまは要約行しか描かないので、
+      git が断った理由（`would be overwritten`、未マージのときの `-D` のヒント）が
+      画面に出ない。不変ルール 4 が「UI まで届ける」と言っているのはこの詳細のこと
 - [ ] 端末幅 < 100 のレイアウト
 - [ ] ロケール（`LC_ALL` / `LC_CTYPE` / `LANG`）から `graph.ascii` の既定を決める
       （曖昧幅を全角扱いする端末は UTF-8 でもずれる。06 の「ASCII フォールバック」）

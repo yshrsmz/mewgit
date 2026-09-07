@@ -372,8 +372,8 @@ fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
 
 /// Branches ペインのキー処理。
 ///
-/// **`Enter`（切替）と `n` / `d` / `D` / `r` は次のタスク**（07 の「どこまで実装したか」）。
-/// ここでは移動と出口だけを受ける。
+/// **`n`（作成）と `r`（リネーム）は次のタスク**（07 の「どこまで実装したか」）。
+/// `Modal::Input` の最初の利用者になるので、モーダルごと別の PR にしてある。
 fn branches_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         KeyCode::Char('j') | KeyCode::Down => {
@@ -384,11 +384,69 @@ fn branches_key(state: &mut AppState, key: Key) -> Cmd {
             state.branches.move_cursor(-1);
             Cmd::None
         }
+        KeyCode::Enter => switch_branch(state),
+        KeyCode::Char('d') => delete_branch(state, false),
+        KeyCode::Char('D') => delete_branch(state, true),
         // **`Tab` でしか入れないペインにも出口を用意する**（07）。戻り先を
         // `right_pane()` にしないのは、このペインが左の選択と無関係だから。
         KeyCode::Esc => focus(state, Pane::Graph),
         _ => Cmd::None,
     }
+}
+
+/// `Enter`。カーソルの指すブランチに切り替える。
+///
+/// **押せるかを手前で判定しない**（不変ルール 4。git の実文言は 07 の
+/// 「Branches ペイン」にある）。手前で弾くと、同じ判定が mewgit と git の 2 箇所に載る。
+///
+/// **フォーカスは Branches に残す。** 切り替えたあと続けて別のブランチを選べる。
+/// 一覧の読み直しは `update::Reload` が出す（`Checkout` は `Reload::Refs`）。
+fn switch_branch(state: &AppState) -> Cmd {
+    // 一覧が空（読み込み中・失敗・コミットが 1 つも無いリポジトリ）。カーソル行が
+    // 描かれていないので、通知を出す相手もいない。
+    let Some(branch) = state.branches.selected() else {
+        return Cmd::None;
+    };
+    Cmd::Exec(GitOp::Checkout(branch.name.clone()))
+}
+
+/// `d` / `D`。カーソルの指すブランチを消す。破壊的なので確認モーダルを通す
+/// （不変ルール 5）。`force` が `D`（`branch --delete --force`）。
+///
+/// **未マージかも、HEAD のブランチかも手前で判定しない**（[`switch_branch`] と同じ理由）。
+///
+/// **本文は `force` で変える。** 同じ文言だと、どちらのキーで開いた確認なのかが画面から
+/// 判らない（ハンクとファイルの discard で本文を分けたのと同じ理由）。
+fn delete_branch(state: &mut AppState, force: bool) -> Cmd {
+    let Some(branch) = state.branches.selected() else {
+        return Cmd::None;
+    };
+    let name = branch.name.clone();
+    // **本文に「ブランチ」を重ねない。** 枠のタイトルが言っているうえ、80 桁の端末で
+    // 名前の直後に折り返し、「ブランチ topic」「を削除します。…」と割れる（#22 の
+    // 「幅を変える変更は既定サイズのままで見えるものを確かめる」）。
+    let (title, body) = if force {
+        (
+            "ブランチを強制削除",
+            format!("{name} を削除します。未マージのコミットも失われます。"),
+        )
+    } else {
+        ("ブランチを削除", format!("{name} を削除します。"))
+    };
+    confirm(state, title, body, GitOp::BranchDelete { name, force })
+}
+
+/// 破壊的な `GitOp` を確認モーダルに載せる（不変ルール 5）。
+///
+/// **`Modal::Confirm` を組むのはここ 1 本。** 2 箇所で組むと、フィールドが増えたときに
+/// 片方だけ直した状態が生まれる（`Modal` の構築は網羅を強制しない）。
+fn confirm(state: &mut AppState, title: &str, body: String, op: GitOp) -> Cmd {
+    state.modal = Some(Modal::Confirm {
+        title: title.to_string(),
+        body,
+        on_yes: Cmd::Exec(op),
+    });
+    Cmd::None
 }
 
 /// ファイル一覧のカーソルを `delta` 行動かす。
@@ -943,14 +1001,7 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
 
     match planned {
         Ok(Plan::Exec(op)) => Cmd::Exec(op),
-        Ok(Plan::Confirm { title, body, op }) => {
-            state.modal = Some(Modal::Confirm {
-                title: title.to_string(),
-                body,
-                on_yes: Cmd::Exec(op),
-            });
-            Cmd::None
-        }
+        Ok(Plan::Confirm { title, body, op }) => confirm(state, title, body, op),
         // 黙って何も起きないと、キーが効いていないのか対象が悪いのかが判らない。
         Err(reason) => {
             state.push_notice(NoticeLevel::Warn, reason.to_string(), None);
@@ -1247,6 +1298,12 @@ impl Reload {
             // どれも「既にある、どこかの ref から辿れるコミット」を指すだけ。
             // `Push` が非 force なら `origin/x` はローカルの先端へ早送りされるので、
             // 行はもう並んでいる。
+            //
+            // **断られた `Checkout` でも読み直す。** ref も HEAD も動いていないので
+            // 無駄に見えるが（`switch` は断った時点で post-checkout hook すら走らない。
+            // git 2.55 で確認）、**断られる理由の 1 つが「一覧が古い」**（別の端末で
+            // 消されたブランチに `Enter` を押した）で、そこで読み直さないと画面から
+            // 消えない行が残る。払うのはキー押下 1 回あたりの読み取り 2 本。
             GitOp::Checkout(_)
             | GitOp::BranchCreate { .. }
             | GitOp::BranchRename { .. }
@@ -2119,6 +2176,85 @@ mod tests {
     }
 
     #[test]
+    fn enter_switches_to_the_branch_under_the_cursor() {
+        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        let _ = press(&mut state, 'k');
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::Exec(GitOp::Checkout("another".to_string())));
+        // 切り替えたあと続けて別のブランチを選べる。確認モーダルも通さない。
+        assert_eq!(state.focus, Pane::Branches);
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn enter_on_the_head_branch_still_asks_git() {
+        // **押せるかを手前で判定しない**（不変ルール 4）。`is_head` は最後に読んだ
+        // 一覧の値でしかないので、これで「切り替えなくてよい」と決めると、別の端末で
+        // 切り替えられていたときに `Enter` が何も起こさなくなる（07 の「Branches ペイン」）。
+        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        assert!(state.branches.selected().expect("空です").is_head);
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::Exec(GitOp::Checkout("main".to_string())));
+    }
+
+    /// `d` / `D` を押したときの確認モーダルの本文と `on_yes`。
+    ///
+    /// **押すたびに新しい state を作る。** 続けて押すには確認を閉じることになり、
+    /// `confirm_key` の見張り（`confirming_runs_the_command_and_closes_the_modal`）が
+    /// このテストに紛れ込む。
+    fn branch_delete_confirm(force: bool) -> (String, Cmd) {
+        let mut state = state_on_branches(&[("topic", false)]);
+
+        let cmd = press(&mut state, if force { 'D' } else { 'd' });
+
+        assert_eq!(cmd, Cmd::None, "確認より先に git を走らせています");
+        let Some(Modal::Confirm { body, on_yes, .. }) = state.modal else {
+            panic!(
+                "確認モーダルが開いていません: force={force} {:?}",
+                state.modal
+            );
+        };
+        (body, on_yes)
+    }
+
+    fn branch_delete(force: bool) -> Cmd {
+        Cmd::Exec(GitOp::BranchDelete {
+            name: "topic".to_string(),
+            force,
+        })
+    }
+
+    #[test]
+    fn d_and_shift_d_confirm_before_deleting_and_say_which_one_is_open() {
+        let (plain, on_yes) = branch_delete_confirm(false);
+        assert!(plain.contains("topic"), "{plain}");
+        assert_eq!(on_yes, branch_delete(false));
+
+        let (forced, on_yes) = branch_delete_confirm(true);
+        assert_eq!(on_yes, branch_delete(true));
+        // **同じ本文にしない。** どちらのキーで開いた確認なのかが画面から判らなくなる。
+        assert_ne!(forced, plain, "d と D の本文が同じです");
+    }
+
+    #[test]
+    fn the_branch_keys_do_nothing_while_the_list_is_empty() {
+        // 読み込み中・失敗・コミットが 1 つも無いリポジトリ。カーソル行が描かれて
+        // いないので、`branches[cursor]` を書くと添字が外れる。
+        let mut state = state_with_commits(2);
+        state.focus = Pane::Branches;
+        assert_eq!(state.branches.load(), BranchLoad::Pending);
+
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+        assert_eq!(press(&mut state, 'd'), Cmd::None);
+        assert_eq!(press(&mut state, 'D'), Cmd::None);
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
     fn status_loaded_replaces_the_snapshot_and_reseats_the_cursor() {
         let mut state = worktree_state(
             fake_snapshot(&[], &["a.txt", "b.txt"], &[]),
@@ -2304,6 +2440,7 @@ mod tests {
             (WorktreeSection::Staged, FileStatus::Modified),
         ];
 
+        let mut bodies = Vec::new();
         for (section, status) in cases {
             let mut state =
                 worktree_state(fake_snapshot(&["a.txt"], &["a.txt"], &["a.txt"]), section);
@@ -2313,6 +2450,14 @@ mod tests {
             let Some(Modal::Confirm { body, .. }) = &state.modal else {
                 panic!("確認モーダルが出ていません: {section:?} {status:?}");
             };
+            bodies.push(body.clone());
+        }
+        // **本文を組む場所は worktree の discard だけではない。** 産出元が増えたら
+        // ここに通す。片方だけ守っていても `contains` を見るテストは素通りする。
+        bodies.push(branch_delete_confirm(false).0);
+        bodies.push(branch_delete_confirm(true).0);
+
+        for body in bodies {
             for line in body.lines() {
                 assert_eq!(line, line.trim_start(), "行頭に空白がある: {body:?}");
                 assert!(!line.contains("  "), "空白が連なっている: {body:?}");

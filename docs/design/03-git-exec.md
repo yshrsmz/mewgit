@@ -81,7 +81,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `Commit { message, amend }` | `commit [--amend] --message <message>` |
 | `BranchCreate { checkout: true }` | `switch --create <name> [<start>]` |
 | `BranchCreate { checkout: false }` | `branch <name> [<start>]` |
-| `Checkout(target)` | `checkout <target> --` |
+| `Checkout(name)` | `switch <name>` |
 | `BranchDelete { name, force }` | `branch --delete [--force] <name>` |
 | `BranchRename { from, to }` | `branch --move <from> <to>` |
 | `Fetch { remote, prune }` | `fetch [--prune] [<remote>]` |
@@ -104,8 +104,17 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   （unborn HEAD）で `git restore --staged` は `fatal: could not resolve 'HEAD'` で落ちる。
   `git reset -- <paths>` は同じ状態でも通る（git 2.55 で確認）。`--quiet` は
   「Unstaged changes after reset:」の一覧を出させないため
-- **`checkout <target> --` の `--` は revision として読ませるため。** 同名のファイルが
-  あるときに「そのファイルを取り出す」と解釈されるのを防ぐ
+- **ブランチの切替は `checkout` ではなく `switch`。** `git checkout <名前>` は同名の
+  ブランチとファイルがあるとブランチを優先するが、**ファイルだけが存在する名前**では
+  「そのファイルを index から取り出す」と解釈してワークツリーの変更を黙って捨てる。
+  `switch` は pathspec を取らないので `fatal: invalid reference: <名前>` で止まる
+  （git 2.55 で確認）。`--` を置いて `checkout` を守る形と違い、`--` を落としたときに
+  黙って危なくなる余地が無い。**`Checkout` が受けるのはブランチ名だけ**で、commit を
+  detached で取り出すには `switch --detach` が要る（要るようになったら別の変種にする）
+- **変種名 `Checkout` は argv（`switch`）と食い違ったままにしてある。** 改名するなら
+  `BranchCreate { checkout: bool }` と `InputIntent::BranchCreate { checkout }`（01）も
+  同じ語彙で揃えることになるので、**ブランチの作成とリネームのタスクで一緒に決める**。
+  片方だけ改名すると、同じ「作ってから切り替える」を 2 つの語彙で書くことになる
 - **force push は `--force-with-lease`。`--force` は他人のコミットを消せるので使わない。**
   **値（`=<branch>:<expected>`）を必ず添える。** 省くと lease は remote-tracking ref
   （`origin/main`）と比べるだけになり、`git fetch` を挟むと他人が進めた位置がそこに入って

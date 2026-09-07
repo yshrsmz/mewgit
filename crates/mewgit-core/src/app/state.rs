@@ -900,9 +900,9 @@ impl BranchState {
     /// commit した人のカーソルが毎回飛ぶ。**添字では座り直さない** — 一覧は名前順
     /// なので、ブランチが 1 本増えるだけで同じ添字が別のブランチを指す。
     pub(super) fn loaded(&mut self, branches: Vec<Branch>) {
-        let selected = self.branches.get(self.cursor).map(|branch| &branch.name);
+        let selected = self.selected().map(|branch| branch.name.clone());
         self.cursor = selected
-            .and_then(|name| branches.iter().position(|branch| &branch.name == name))
+            .and_then(|name| branches.iter().position(|branch| branch.name == name))
             // 選んでいたものが消えた（削除 / リネーム）か、まだ何も選んでいない。
             .or_else(|| branches.iter().position(|branch| branch.is_head))
             // detached / unborn ではどの行にも印が付かないので先頭に座る。
@@ -923,6 +923,15 @@ impl BranchState {
     /// **`jobs.is_running` の否定から消去法で導かない**（01 の「失敗の記憶」）。
     pub fn load(&self) -> BranchLoad {
         self.load
+    }
+
+    /// カーソルの指すブランチ。一覧が空なら `None`。
+    ///
+    /// **切替・削除の対象はここからしか取らない。** `branches[cursor]` を呼び出し側で
+    /// 書くと、一覧が空のとき（読み込み中・失敗・`git init` の直後）に添字が外れる腕が
+    /// 増える。
+    pub fn selected(&self) -> Option<&Branch> {
+        self.branches.get(self.cursor)
     }
 
     /// カーソルを `delta` 行動かす。端では止まる。
@@ -1621,13 +1630,9 @@ mod tests {
         }
     }
 
-    /// カーソルの指すブランチ名。**`BranchState` に `selected()` は持たせない** —
-    /// 使うのは切替と削除のタスクなので、そこで足す（07 の「どこまで実装したか」）。
+    /// カーソルの指すブランチ名。
     fn cursor_name(branches: &BranchState) -> Option<&str> {
-        branches
-            .branches
-            .get(branches.cursor)
-            .map(|branch| branch.name.as_str())
+        branches.selected().map(|branch| branch.name.as_str())
     }
 
     #[test]

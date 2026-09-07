@@ -113,10 +113,10 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
             }
             argv.extend(start.clone());
         }
-        // 末尾の `--` は revision として読ませるため。同名のファイルがあるときに
-        // 「そのファイルを取り出す」と解釈されるのを防ぐ。
+        // **`checkout` ではなく `switch`。** `switch` は pathspec を取らないので、
+        // 同名のファイルがあっても「そのファイルを取り出す」に化けない（03）。
         GitOp::Checkout(target) => {
-            argv.extend(["checkout".into(), target.clone(), "--".into()]);
+            argv.extend(["switch".into(), target.clone()]);
         }
         GitOp::BranchDelete { name, force } => {
             argv.extend(["branch".into(), "--delete".into()]);
@@ -402,10 +402,7 @@ mod tests {
                 },
                 vec!["branch", "feat/x"],
             ),
-            (
-                GitOp::Checkout("main".into()),
-                vec!["checkout", "main", "--"],
-            ),
+            (GitOp::Checkout("main".into()), vec!["switch", "main"]),
             (
                 GitOp::BranchDelete {
                     name: "old".into(),

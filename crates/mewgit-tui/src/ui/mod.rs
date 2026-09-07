@@ -10,11 +10,13 @@ pub mod lanes;
 pub mod theme;
 pub mod time;
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::path::Path;
 
 use crate::{modals, panes};
-use mewgit_core::app::{AppState, Pane, TermSize};
+use mewgit_core::app::{AppState, GraphSelection, Pane, TermSize};
+use mewgit_core::git_read::Oid;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -35,7 +37,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     } else {
         panes::graph::render(frame, left, state);
     }
-    panes::worktree::render(frame, right, state);
+    // **右は Working tree とコミット詳細の差し替え。** どちらを描くかはグラフの
+    // 選択だけで決まる（07）。`focus` で決めると、Graph にフォーカスした瞬間に
+    // 右が消える。
+    match state.graph.selection() {
+        GraphSelection::Wip => panes::worktree::render(frame, right, state),
+        GraphSelection::Commit(line) => panes::commit::render(frame, right, state, &line.commit),
+    }
     frame.render_widget(status_line(state), status);
 
     // モーダルは最後。下のペインを覆って描く（07）。
@@ -57,8 +65,10 @@ fn split_body(area: Rect) -> [Rect; 2] {
 /// **フォーカスのあるペインは枠を強調する**（07）。どちらがキーを受けるか判らないと、
 /// `s` や `x` が別のペインに飛んだように見える。枠の内側の大きさは強調の有無で
 /// 変わらないので、レイアウトの計算は `focused` を偽で呼んでよい。
-pub fn pane_block(title: String, focused: bool) -> Block<'static> {
-    let block = Block::default().borders(Borders::ALL).title(title);
+pub fn pane_block(title: impl Into<Cow<'static, str>>, focused: bool) -> Block<'static> {
+    // **`&'static str` も受ける。** グラフの枠は行数を測るのに `runtime::layout` から
+    // ループのたびに組まれるので、そこで毎回 `String` を確保しない。
+    let block = Block::default().borders(Borders::ALL).title(title.into());
     if focused {
         block.border_style(Style::default().add_modifier(Modifier::BOLD))
     } else {
@@ -154,14 +164,40 @@ fn split(area: Rect) -> [Rect; 3] {
 /// `app` がスクロール位置を決めるのに要る（01 の「グラフの行」）。core にレイアウトを
 /// 知らせないよう、実際に描くのと同じ `split` と枠から出して `Msg::Layout` で渡す。
 ///
-/// 引数は端末サイズと「詳細を出すか」の 2 つだけ。`&AppState` を丸ごと受けると、
-/// あとから詳細の中身（メッセージの行数など）を見る余地が残る。そうすると詳細が
-/// 届いた瞬間に行数が変わってグラフが跳ねる（07）。判定は
-/// [`panes::graph::shows_detail`]。
-pub fn graph_rows(term: TermSize, shows_detail: bool) -> usize {
+/// **引数は端末サイズだけ。** `&AppState` を丸ごと受けると、あとから状態を見る余地が
+/// 残る。M1 ではコミット詳細をグラフの下部に展開していたので「詳細を出すか」も
+/// 引数にあり、`Enter` を押すだけで行数が変わっていた。詳細を右ペインへ移して
+/// この依存は消えている（07 の「CommitDetail ペイン」）。
+pub fn graph_rows(term: TermSize) -> usize {
     let [_, body, _] = split(Rect::new(0, 0, term.width, term.height));
     let [left, _] = split_body(body);
-    panes::graph::areas(left, shows_detail).0.height as usize
+    panes::graph::area(left).height as usize
+}
+
+/// 短縮 Oid の桁数。`git log --oneline` と同じ。
+pub const SHORT_OID: usize = 7;
+
+/// 先頭 [`SHORT_OID`] 桁。
+///
+/// グラフの行と、コミット詳細の親の一覧で同じものを使う。2 本に分けると、桁数を
+/// 変えたときに片方だけ古いままになる（`path_label` と同じ理由）。
+///
+/// **`Oid::to_string()` を切り詰めない。** あちらは 40 桁を組んでから 33 桁を捨てる。
+/// グラフは可視行ぶんを毎フレーム作るので、そのぶんの確保がまるごと無駄になる。
+pub fn short_oid(oid: &Oid) -> String {
+    let mut text = String::with_capacity(SHORT_OID);
+    // 1 バイトが 2 桁。桁数が奇数なら 1 桁多く組んでから切る。
+    for byte in &oid.as_bytes()[..SHORT_OID.div_ceil(2)] {
+        text.push(hex(byte >> 4));
+        text.push(hex(byte & 0x0f));
+    }
+    text.truncate(SHORT_OID);
+    text
+}
+
+/// 下位 4 ビットを 16 進 1 桁に。呼ぶ側がマスクしているので添字は外れない。
+fn hex(nibble: u8) -> char {
+    b"0123456789abcdef"[usize::from(nibble)] as char
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
@@ -213,9 +249,10 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{split, split_body, window, wrapped};
+    use super::{short_oid, split, split_body, window, wrapped, SHORT_OID};
     use crate::test_util::{draw, state_at, terminal_with};
     use mewgit_core::app::{NoticeLevel, Pane, TermSize};
+    use mewgit_core::git_read::Oid;
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
@@ -265,7 +302,7 @@ mod tests {
         let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
         let [left, right] = split_body(body);
         let area = match pane {
-            Pane::Worktree => right,
+            Pane::Worktree | Pane::CommitDetail => right,
             _ => left,
         };
         (area.x, area.y)
@@ -275,13 +312,15 @@ mod tests {
     fn the_focused_pane_is_the_only_one_with_a_bold_border() {
         // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
         let size = TermSize::default();
-        for &focus in Pane::FOCUSABLE {
+        // 巡回の候補はグラフの選択で変わる（01）。`state_at` は行が無いので WIP 側。
+        let candidates = state_at("/repo").focus_candidates();
+        for &focus in candidates {
             let mut state = state_at("/repo");
             state.focus = focus;
             let terminal = terminal_with(&state, size);
             let buffer = terminal.backend().buffer();
 
-            for &pane in Pane::FOCUSABLE {
+            for &pane in candidates {
                 let bold = buffer[corner(pane, size)].modifier.contains(Modifier::BOLD);
                 // **`pane == focus` では見られない。** Graph と Diff は同じ領域なので、
                 // Diff にフォーカスがあるとき「Graph の枠」の座標には Diff の枠が
@@ -307,6 +346,50 @@ mod tests {
         // **右のワーキングツリーは出したまま。** どのファイルを見ているかが一覧の側でも
         // 判るようにする（07）。
         assert!(text.contains("Working tree"), "{text}");
+    }
+
+    #[test]
+    fn the_right_area_swaps_between_the_worktree_and_the_commit_detail() {
+        // 右ペインの中身はグラフの選択だけで決まる。`focus` では決めない（07）。
+        let state = crate::test_util::state_with_commits(&["first"]);
+        let text = draw(&state, TermSize::default()).join("\n");
+        assert!(text.contains("Working tree"), "{text}");
+        assert!(!text.contains("Commit "), "{text}");
+
+        let state = crate::test_util::state_on_first_commit(&["first"]);
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(!text.contains("Working tree"), "{text}");
+        assert!(text.contains("Commit "), "{text}");
+    }
+
+    #[test]
+    fn the_right_area_follows_the_selection_even_while_the_graph_has_focus() {
+        // `focus` で決めると、Graph にフォーカスした瞬間に右が消える（07）。
+        let mut state = crate::test_util::state_on_first_commit(&["first"]);
+        state.focus = Pane::Graph;
+
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(text.contains("Commit "), "{text}");
+    }
+
+    #[test]
+    fn a_short_oid_is_the_first_seven_hex_digits() {
+        // `Oid::to_string()` を切り詰めるのをやめて自前で 16 進を組んでいるので、
+        // 桁の並びが git と同じであることを見張る。奇数桁（7）の切り方も含む。
+        //
+        // **`fake_oid` は使えない。** あれは 20 バイト目にだけ index を置くので先頭
+        // 7 桁が常に `0000000` になり、上下のニブルを入れ替えても通ってしまう。
+        for hex in [
+            "0000000000000000000000000000000000000000",
+            "0f1e2d3c4b5a69788796a5b4c3d2e1f001234567",
+            "ffffffffffffffffffffffffffffffffffffffff",
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9001122334",
+        ] {
+            let oid = Oid::from_str(hex).expect("40 桁の 16 進");
+            assert_eq!(short_oid(&oid), hex[..SHORT_OID], "{hex}");
+        }
     }
 
     #[test]

@@ -84,7 +84,7 @@ impl AppState {
 自分では定義しない。
 
 ```rust
-pub enum Pane { Graph, Branches, Stash, Prs, Worktree, Diff }
+pub enum Pane { Graph, Branches, Stash, Prs, Worktree, CommitDetail, Diff }
 
 pub enum Modal {
     Confirm { title: String, body: String, on_yes: Cmd },
@@ -97,9 +97,28 @@ pub enum Modal {
 }
 ```
 
-巡回（`Pane::FOCUSABLE`）に入れるのは実装済みのペインだけ（07）。いまは `Graph` /
-`Worktree` / `Diff` の 3 つ。**`Pane::Diff` は左の領域を `Graph` と差し替えで使う**ので、
-どちらを描くかは `focus` だけで決まり、「いまどちらを見せているか」を別に持たない（07）。
+巡回に入れるのは実装済みで、**かついま画面に出ているペインだけ**（07）。一覧は定数では
+なく `AppState::focus_candidates()` が状態から返す。グラフが WIP 行を選んでいれば
+`[Graph, Worktree, Diff]`、コミットを選んでいれば `[Graph, CommitDetail]`。並びは
+`Pane` の宣言順。
+
+**選択と右ペインの対応は `GraphSelection::right_pane()` の 1 つ。** `Enter` の行き先
+（グラフの `Enter` は右ペインへ移る）と巡回の候補が別々に決めると、画面はコミット詳細
+なのにキーは Working tree が受ける状態を作れる。`ui::render` だけは中身（`&GraphLine`）を
+取り出す必要があるので変種で分岐するが、**候補が必ず `right_pane()` を含むことは
+テストで見張る**。
+
+**候補を状態から出すのは、`focus` と右ペインの中身が食い違う状態を表現できなくする
+ため。** コミットを選んだまま `focus` が `Worktree` でいられると、`s` / `u` / `x` が
+画面に出ていないファイルを stage する。キーごとにガードを置く形にすると、キーを足す
+たびに書き足す必要があり、書き忘れが静かに通る。グラフのカーソルが WIP 行を出入り
+したところで、候補から外れた `focus` を `Graph` に座り直させる（どちらの選択でも
+候補にある唯一のペイン）。
+
+**`Pane::Diff` は左の領域を `Graph` と差し替えで使う**ので、どちらを描くかは `focus`
+だけで決まり、「いまどちらを見せているか」を別に持たない（07）。**`Pane::CommitDetail`
+は右の領域を `Worktree` と差し替えで使うが、そちらは `focus` では決めない。** 右ペインは
+左で選んでいるものの中身なので、フォーカスが左にあるあいだも追随する必要がある。
 
 `Confirm` の `on_yes` は `Msg` ではなく `Cmd`。破壊的操作（force push、`branch -D`、
 discard、abort 系）はすべて `Cmd::Exec(GitOp)` で表せるので、専用の `Msg` 変種を
@@ -248,15 +267,32 @@ pub struct GraphState {
     pub lines: Vec<GraphLine>,
     pub lanes: LaneState,       // 末尾行の直後の状態。追加ページはここから再開（06）
     pub refs: RefIndex,         // 行の右に並べるラベル（02）
-    pub cursor: usize,
+    pub cursor: usize,          // 表示行の添字。0 は WIP 行、1.. が `lines`
     pub scroll: usize,          // 画面最上部に出す行
-    pub expanded: bool,
     pub detail: Option<CommitDetail>,  // 遅延取得した選択コミットの詳細（02）
     pub loaded_all: bool,
 }
 
 pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
+
+pub enum GraphSelection<'a> { Wip, Commit(&'a GraphLine) }
 ```
+
+**先頭の WIP 行はコミットではないので `lines` に入れない。** かわりに `cursor` を
+「表示行」の添字とし、表示行数を `GraphState::rows()`（= `1 + lines.len()`）で表す。
+`scroll` / `viewport` / 追加読み込みの算術は表示行の上で回るのでそのまま使える。
+
+**表示行の添字を `lines` の添字に読み替えるのは `GraphState::row(index)` の 1 つ。**
+`ui` が窓を切り出すときもここを通す。各所で `lines.get(index - 1)` と書くと、`- 1` の
+書き忘れが 1 行ずれとして静かに通り、**反転する行と右ペインの中身が食い違う**。
+`selection()` は `row(cursor)`、`cursor_commit()` はその上の薄い包み。
+
+コミット側が `&GraphLine`（コミット + 罫線）なのは、`ui` が罫線を描くのに要るため。
+`&Commit` にすると、窓を切り出した `ui` が同じ添字で `lines` を引き直すことになり、
+上の「読み替えは 1 箇所」が崩れる。
+
+**WIP 行は変更が無くても常に出す**（07）。件数で出し入れすると `StatusLoaded` が届く
+たびに表示行数が変わり、カーソルが指すコミットを oid で座り直させる必要が出る。
 
 `RefIndex` はここに置く。引くのはグラフペインだけで、`RepoInfo` に入れると
 「パスとリモートの入れ物」に描画専用の索引が混ざる。起動時に `head` / `remotes` と
@@ -267,23 +303,26 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 `GraphState::move_cursor(delta)` / `scroll_into_view()`。
 
 `viewport` は `ui` がレイアウトから出して `Msg::Layout` で運んでくる（07 の
-`ui::graph_rows`）。詳細を出すかの判定（`expanded` かつ行がある）は `ui` 側の
-1 つの関数にまとめ、行数を出すときと描くときで同じものを使う。core にヘッダや枠の高さを持たせない。持たせると 07 の
-レイアウトを変えたときに黙ってずれるうえ、`ui` の描画と `app` の計算のどちらが
-正しいかを決める場所が無くなる。
+`ui::graph_rows`）。core にヘッダや枠の高さを持たせない。持たせると 07 のレイアウトを
+変えたときに黙ってずれるうえ、`ui` の描画と `app` の計算のどちらが正しいかを決める
+場所が無くなる。
 
 **`Msg::Resize`（端末サイズ）と `Msg::Layout`（グラフの行数）は別の `Msg`。**
-行数が変わる原因は端末サイズだけではなく、`expanded` の切り替えでも変わる
-（詳細を出すぶんグラフが縮む）。1 つにまとめると、`Enter` を押しただけなのに
-「端末サイズが変わった」という嘘の `Msg` を流すことになる。`Layout` はランタイムが
-描画の直前に `ui::graph_rows(state)` と `viewport` を比べ、食い違ったときだけ出す。
-`ui::graph_rows` は `term` と `expanded` だけから決まる値を返すこと。詳細の中身
-（メッセージの行数など）に依存させると、詳細が届いた瞬間に行数が変わってグラフが
-跳ね、`Layout` → 追加読み込みが毎回走る。
+`Resize` が運ぶのは端末の幅と高さで、そこからグラフの行数を出せるのは `ui` だけ
+（ヘッダ・ステータスバー・枠のぶんを知っているのはあちら）。1 つにまとめると、
+その引き算を core に持ち込むことになる。`Layout` はランタイムが描画の直前に
+`ui::graph_rows(state.term)` と `viewport` を比べ、食い違ったときだけ出す。
+
+**`ui::graph_rows` は `term` だけから決まる値を返すこと。** M1 ではコミット詳細を
+グラフの下部に展開していたので「詳細を出すか」も引数にあり、`Enter` を押すだけで
+行数が変わっていた。詳細を右ペインへ移してこの依存は消えている（07 の
+「CommitDetail ペイン」）。状態を引数に戻さない。詳細の中身（メッセージの行数など）に
+依存させると、詳細が届いた瞬間に行数が変わってグラフが跳ね、`Layout` → 追加読み込みが
+毎回走る。
 
 ### 追加ページの読み込み
 
-`loaded_all` が偽で、**残り行数（`lines.len() - cursor`）が 1 画面以下になったら**
+`loaded_all` が偽で、**残り行数（`rows() - cursor`）が 1 画面以下になったら**
 `Cmd::LoadLog { count: page_size }` を出す。判定はカーソルの移動後・ページを積んだ
 直後・`Msg::Layout` の 3 箇所。走っているかは見ない。同種のジョブは
 `AppState::issue` が落とすので、2 箇所で同じ判断をしない。
@@ -391,15 +430,20 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 
 ### コミット詳細の遅延取得
 
-`Enter` で `expanded` を切り替える。真にしたときと、真のままカーソルが動いたときに
-`Cmd::LoadCommitDetail(oid)` を出す。取れた値は `GraphState.detail` に入れる。
+コミットを選んでいるあいだ、詳細は常に右ペインに出ている（07 の「CommitDetail ペイン」）。
+カーソルがコミットの行に乗るたびに `Cmd::LoadCommitDetail(oid)` を出し、取れた値は
+`GraphState.detail` に入れる。WIP 行に乗っているあいだは出さない（読むものが無い）。
+
+**「開いているか」の状態を持たない。** M1 では `Enter` で `expanded` を切り替え、真の
+あいだだけ読んでいた。右ペインへ移すと出す・出さないはグラフの選択だけで決まるので、
+その旗は消える。`Enter` はコミットの行で `focus` を `CommitDetail` に移すキーになった。
 
 - **`detail` は `CommitDetail` をそのまま持ち、どのコミットのものかは `detail.oid` で判る。**
   カーソルの指すコミットと食い違っていれば、まだ届いていない（あるいは失敗した）という
   ことなので、`ui` はそこで読み込み中かエラーかを出し分ける（07）。「読み込み中」の
   フラグを別に持たない
-- 既に `detail.oid` がカーソルのコミットと一致していれば出さない。閉じてもう一度開いた
-  ときに読み直さないよう、`expanded` を偽にしても `detail` は捨てない
+- 既に `detail.oid` がカーソルのコミットと一致していれば出さない。WIP 行を通り過ぎる
+  たびに読み直さないよう、選択が WIP に移っても `detail` は捨てない
 - **鮮度の判定は `GraphState::fresh_detail` の 1 つ。** 次に何を読むかを決める `update` と、
   何を描くかを決める `ui` が同じものを使う。両方に書くと、片方だけ直したときに古い詳細を
   出したままになってもコンパイルは通る
@@ -852,7 +896,7 @@ pub struct Runtime { reader: ReaderHandle, tx: mpsc::UnboundedSender<Msg> }
 let (runtime, mut msgs) = Runtime::new(reader);
 runtime.dispatch(&mut state, app::init(&mut state));
 loop {
-    // レイアウトの変化（リサイズ・詳細の展開）を core に伝える唯一の経路。
+    // レイアウトの変化（いまは端末のリサイズだけ）を core に伝える唯一の経路。
     runtime.dispatch(&mut state, layout_cmd(&mut state));
     terminal.draw(|f| ui::render(f, &state))?;
     let msg = tokio::select! {
@@ -898,9 +942,10 @@ loop {
   `Msg` にして `update` に戻す。状態遷移の入口を `update` 1 つに保つため
 - 初期の端末サイズは `Terminal::size()` で取り、`Msg::Resize` にして `update` に流す。
   起動時に `Resize` イベントは飛んでこない
-- **描画の直前に毎回 `ui::graph_rows(state)` と `state.graph.viewport` を比べ、違えば
+- **描画の直前に毎回 `ui::graph_rows(state.term)` と `state.graph.viewport` を比べ、違えば
   `Msg::Layout` を流す。** これがレイアウトの変化を core に伝える唯一の経路になる。
-  端末のリサイズも `Enter` の展開も同じところを通るので、片方だけ更新を忘れることがない
+  いま行数を動かすのは端末のリサイズだけだが（07 の「CommitDetail ペイン」）、比べる
+  場所を 1 つにしておくと、狭いレイアウト（M6）でペインを隠すときも同じ経路で通る
 - Git CLI 実行中も入力を受け付けるが、書き込み系 `GitOp` は同時に 1 つのみ。
   **いまはキューに積まず、`AppState::issue` が落として通知を出す。** `JobKind::Exec` の
   粒度は種別単位なので 2 本目は必ず落ちる。黙って落とすと「押したのに何も起きない」に

@@ -900,9 +900,9 @@ impl BranchState {
     /// commit した人のカーソルが毎回飛ぶ。**添字では座り直さない** — 一覧は名前順
     /// なので、ブランチが 1 本増えるだけで同じ添字が別のブランチを指す。
     pub(super) fn loaded(&mut self, branches: Vec<Branch>) {
-        let selected = self.branches.get(self.cursor).map(|branch| &branch.name);
+        let selected = self.selected().map(|branch| branch.name.clone());
         self.cursor = selected
-            .and_then(|name| branches.iter().position(|branch| &branch.name == name))
+            .and_then(|name| branches.iter().position(|branch| branch.name == name))
             // 選んでいたものが消えた（削除 / リネーム）か、まだ何も選んでいない。
             .or_else(|| branches.iter().position(|branch| branch.is_head))
             // detached / unborn ではどの行にも印が付かないので先頭に座る。

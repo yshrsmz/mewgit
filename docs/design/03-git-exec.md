@@ -111,6 +111,10 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   （git 2.55 で確認）。`--` を置いて `checkout` を守る形と違い、`--` を落としたときに
   黙って危なくなる余地が無い。**`Checkout` が受けるのはブランチ名だけ**で、commit を
   detached で取り出すには `switch --detach` が要る（要るようになったら別の変種にする）
+- **変種名 `Checkout` は argv（`switch`）と食い違ったままにしてある。** 改名するなら
+  `BranchCreate { checkout: bool }` と `InputIntent::BranchCreate { checkout }`（01）も
+  同じ語彙で揃えることになるので、**ブランチの作成とリネームのタスクで一緒に決める**。
+  片方だけ改名すると、同じ「作ってから切り替える」を 2 つの語彙で書くことになる
 - **force push は `--force-with-lease`。`--force` は他人のコミットを消せるので使わない。**
   **値（`=<branch>:<expected>`）を必ず添える。** 省くと lease は remote-tracking ref
   （`origin/main`）と比べるだけになり、`git fetch` を挟むと他人が進めた位置がそこに入って

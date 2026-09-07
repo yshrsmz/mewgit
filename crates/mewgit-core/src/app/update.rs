@@ -396,10 +396,8 @@ fn branches_key(state: &mut AppState, key: Key) -> Cmd {
 
 /// `Enter`。カーソルの指すブランチに切り替える。
 ///
-/// **押せるかを手前で判定しない**（不変ルール 4）。HEAD のブランチなら
-/// `git switch` は `Already on 'main'` で成功し、ワークツリーの変更が衝突すれば
-/// git が断って stderr がそのまま案内になる（どちらも git 2.55 で確認）。手前で弾くと、
-/// 同じ判定を mewgit と git の 2 箇所に置くことになる。
+/// **押せるかを手前で判定しない**（不変ルール 4。git の実文言は 07 の
+/// 「Branches ペイン」にある）。手前で弾くと、同じ判定が mewgit と git の 2 箇所に載る。
 ///
 /// **フォーカスは Branches に残す。** 切り替えたあと続けて別のブランチを選べる。
 /// 一覧の読み直しは `update::Reload` が出す（`Checkout` は `Reload::Refs`）。
@@ -413,13 +411,9 @@ fn switch_branch(state: &AppState) -> Cmd {
 }
 
 /// `d` / `D`。カーソルの指すブランチを消す。破壊的なので確認モーダルを通す
-/// （不変ルール 5）。
+/// （不変ルール 5）。`force` が `D`（`branch --delete --force`）。
 ///
-/// `force` が `D`（`branch --delete --force`）。**未マージかを手前で判定しない** —
-/// `--delete` は git が `the branch 'x' is not fully merged` で断り、`-D` を使えという
-/// ヒントまで出す。HEAD のブランチも git が
-/// `cannot delete branch 'main' used by worktree at ...` で断る（どちらも git 2.55 で
-/// 確認）。
+/// **未マージかも、HEAD のブランチかも手前で判定しない**（[`switch_branch`] と同じ理由）。
 ///
 /// **本文は `force` で変える。** 同じ文言だと、どちらのキーで開いた確認なのかが画面から
 /// 判らない（ハンクとファイルの discard で本文を分けたのと同じ理由）。
@@ -439,10 +433,18 @@ fn delete_branch(state: &mut AppState, force: bool) -> Cmd {
     } else {
         ("ブランチを削除", format!("{name} を削除します。"))
     };
+    confirm(state, title, body, GitOp::BranchDelete { name, force })
+}
+
+/// 破壊的な `GitOp` を確認モーダルに載せる（不変ルール 5）。
+///
+/// **`Modal::Confirm` を組むのはここ 1 本。** 2 箇所で組むと、フィールドが増えたときに
+/// 片方だけ直した状態が生まれる（`Modal` の構築は網羅を強制しない）。
+fn confirm(state: &mut AppState, title: &str, body: String, op: GitOp) -> Cmd {
     state.modal = Some(Modal::Confirm {
         title: title.to_string(),
         body,
-        on_yes: Cmd::Exec(GitOp::BranchDelete { name, force }),
+        on_yes: Cmd::Exec(op),
     });
     Cmd::None
 }
@@ -999,14 +1001,7 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
 
     match planned {
         Ok(Plan::Exec(op)) => Cmd::Exec(op),
-        Ok(Plan::Confirm { title, body, op }) => {
-            state.modal = Some(Modal::Confirm {
-                title: title.to_string(),
-                body,
-                on_yes: Cmd::Exec(op),
-            });
-            Cmd::None
-        }
+        Ok(Plan::Confirm { title, body, op }) => confirm(state, title, body, op),
         // 黙って何も起きないと、キーが効いていないのか対象が悪いのかが判らない。
         Err(reason) => {
             state.push_notice(NoticeLevel::Warn, reason.to_string(), None);
@@ -1303,6 +1298,12 @@ impl Reload {
             // どれも「既にある、どこかの ref から辿れるコミット」を指すだけ。
             // `Push` が非 force なら `origin/x` はローカルの先端へ早送りされるので、
             // 行はもう並んでいる。
+            //
+            // **断られた `Checkout` でも読み直す。** ref も HEAD も動いていないので
+            // 無駄に見えるが（`switch` は断った時点で post-checkout hook すら走らない。
+            // git 2.55 で確認）、**断られる理由の 1 つが「一覧が古い」**（別の端末で
+            // 消されたブランチに `Enter` を押した）で、そこで読み直さないと画面から
+            // 消えない行が残る。払うのはキー押下 1 回あたりの読み取り 2 本。
             GitOp::Checkout(_)
             | GitOp::BranchCreate { .. }
             | GitOp::BranchRename { .. }
@@ -2200,51 +2201,43 @@ mod tests {
         assert_eq!(cmd, Cmd::Exec(GitOp::Checkout("main".to_string())));
     }
 
-    #[test]
-    fn d_and_shift_d_confirm_before_deleting_and_say_which_one_is_open() {
+    /// `d` / `D` を押したときの確認モーダルの本文と `on_yes`。
+    ///
+    /// **押すたびに新しい state を作る。** 続けて押すには確認を閉じることになり、
+    /// `confirm_key` の見張り（`confirming_runs_the_command_and_closes_the_modal`）が
+    /// このテストに紛れ込む。
+    fn branch_delete_confirm(force: bool) -> (String, Cmd) {
         let mut state = state_on_branches(&[("topic", false)]);
 
-        let cmd = press(&mut state, 'd');
+        let cmd = press(&mut state, if force { 'D' } else { 'd' });
 
-        assert_eq!(cmd, Cmd::None);
-        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
-            panic!("確認モーダルが開いていません: {:?}", state.modal);
+        assert_eq!(cmd, Cmd::None, "確認より先に git を走らせています");
+        let Some(Modal::Confirm { body, on_yes, .. }) = state.modal else {
+            panic!(
+                "確認モーダルが開いていません: force={force} {:?}",
+                state.modal
+            );
         };
-        assert!(body.contains("topic"), "{body}");
-        assert_eq!(
-            on_yes,
-            &Cmd::Exec(GitOp::BranchDelete {
-                name: "topic".to_string(),
-                force: false,
-            })
-        );
-        let plain = body.clone();
+        (body, on_yes)
+    }
 
-        // 確認を通って初めて git が走る（不変ルール 5）。
-        let cmd = press(&mut state, 'y');
-        assert_eq!(
-            cmd,
-            Cmd::Exec(GitOp::BranchDelete {
-                name: "topic".to_string(),
-                force: false,
-            })
-        );
-        assert_eq!(state.modal, None);
+    fn branch_delete(force: bool) -> Cmd {
+        Cmd::Exec(GitOp::BranchDelete {
+            name: "topic".to_string(),
+            force,
+        })
+    }
 
-        let _ = press(&mut state, 'D');
+    #[test]
+    fn d_and_shift_d_confirm_before_deleting_and_say_which_one_is_open() {
+        let (plain, on_yes) = branch_delete_confirm(false);
+        assert!(plain.contains("topic"), "{plain}");
+        assert_eq!(on_yes, branch_delete(false));
 
-        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
-            panic!("確認モーダルが開いていません: {:?}", state.modal);
-        };
-        assert_eq!(
-            on_yes,
-            &Cmd::Exec(GitOp::BranchDelete {
-                name: "topic".to_string(),
-                force: true,
-            })
-        );
+        let (forced, on_yes) = branch_delete_confirm(true);
+        assert_eq!(on_yes, branch_delete(true));
         // **同じ本文にしない。** どちらのキーで開いた確認なのかが画面から判らなくなる。
-        assert_ne!(body, &plain, "d と D の本文が同じです");
+        assert_ne!(forced, plain, "d と D の本文が同じです");
     }
 
     #[test]
@@ -2447,6 +2440,7 @@ mod tests {
             (WorktreeSection::Staged, FileStatus::Modified),
         ];
 
+        let mut bodies = Vec::new();
         for (section, status) in cases {
             let mut state =
                 worktree_state(fake_snapshot(&["a.txt"], &["a.txt"], &["a.txt"]), section);
@@ -2456,6 +2450,14 @@ mod tests {
             let Some(Modal::Confirm { body, .. }) = &state.modal else {
                 panic!("確認モーダルが出ていません: {section:?} {status:?}");
             };
+            bodies.push(body.clone());
+        }
+        // **本文を組む場所は worktree の discard だけではない。** 産出元が増えたら
+        // ここに通す。片方だけ守っていても `contains` を見るテストは素通りする。
+        bodies.push(branch_delete_confirm(false).0);
+        bodies.push(branch_delete_confirm(true).0);
+
+        for body in bodies {
             for line in body.lines() {
                 assert_eq!(line, line.trim_start(), "行頭に空白がある: {body:?}");
                 assert!(!line.contains("  "), "空白が連なっている: {body:?}");

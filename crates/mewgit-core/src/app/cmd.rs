@@ -22,9 +22,24 @@ pub enum Cmd {
     /// 途中の Oid からやり直せないので、位置はランタイム側の `LogSession` が持つ（02）。
     LoadLog {
         count: usize,
+        /// セッションを捨てて先頭から読み直す。commit で HEAD が動くと積んだ行が
+        /// 丸ごと古くなり、続きを読む経路では直せない（新しいコミットは末尾ではなく
+        /// 先頭に付く）。
+        ///
+        /// **別の `Cmd` の変種にしないのはここが理由。** [`Cmd::job_kind`] が
+        /// [`JobKind::LoadLog`] と必ず同じになり、続きの読み込みと読み直しが同時に
+        /// 走らない。変種を分けると、揃えるのは手書きの約束になる（01 の
+        /// 「ログの読み直し」）。
+        restart: bool,
     },
     /// 選択コミットの詳細（メッセージ全文・committer・日時）を読む（02）。
     LoadCommitDetail(Oid),
+    /// amend の初期値にする HEAD のメッセージ全文（02 の `head_message`）。
+    ///
+    /// `RepoInfo.head` からは取らない。起動時に 1 回読んだきりなので、1 回コミット
+    /// した時点で古い。古い初期値は「1 つ前のコミットのメッセージで HEAD を上書き
+    /// する」になる（01 の「commit」）。
+    LoadHeadMessage,
     LoadStatus,
     LoadDiff(DiffTarget),
     /// リモート・HEAD・ref の索引を読む。起動時と、ref が変わったあと（M3）。
@@ -66,6 +81,7 @@ impl Cmd {
             Cmd::None | Cmd::Batch(_) | Cmd::Quit => None,
             Cmd::LoadLog { .. } => Some(JobKind::LoadLog),
             Cmd::LoadCommitDetail(_) => Some(JobKind::LoadCommitDetail),
+            Cmd::LoadHeadMessage => Some(JobKind::LoadHeadMessage),
             Cmd::LoadStatus => Some(JobKind::LoadStatus),
             Cmd::LoadRepoInfo => Some(JobKind::LoadRepoInfo),
             Cmd::LoadDiff(_) => Some(JobKind::LoadDiff),

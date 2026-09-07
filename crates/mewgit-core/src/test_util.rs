@@ -28,8 +28,10 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
+use crate::git_exec::Runner;
 use crate::git_read::{
-    Commit, CommitDetail, FileEntry, FileStatus, Oid, Signature, Timestamp, WorktreeSnapshot,
+    Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
+    Signature, Timestamp, WorktreeSnapshot,
 };
 use tempfile::TempDir;
 
@@ -72,6 +74,17 @@ impl Sandbox {
 
     /// `git` を実行し、標準出力を末尾の改行を落として返す。失敗したら panic する。
     fn git<S: AsRef<OsStr>>(&self, args: &[S]) -> String {
+        String::from_utf8(self.git_bytes(args))
+            .expect("git の出力が UTF-8 ではありません")
+            .trim_end()
+            .to_string()
+    }
+
+    /// `git` を実行し、標準出力を**そのまま**返す。失敗したら panic する。
+    ///
+    /// [`git`](Self::git) が末尾の改行を落とすので、CRLF や「改行で終わらない」を
+    /// 見るテストはこちらを使う（`\r\n` の `\r` まで一緒に落ちる）。
+    fn git_bytes<S: AsRef<OsStr>>(&self, args: &[S]) -> Vec<u8> {
         let out = self.try_git(args);
         assert!(
             out.status.success(),
@@ -79,10 +92,7 @@ impl Sandbox {
             shown(args),
             String::from_utf8_lossy(&out.stderr)
         );
-        String::from_utf8(out.stdout)
-            .expect("git の出力が UTF-8 ではありません")
-            .trim_end()
-            .to_string()
+        out.stdout
     }
 
     /// `git` を実行して結果をそのまま返す。失敗しても panic しない。
@@ -158,6 +168,27 @@ impl TestRepo {
     /// [`Sandbox`] を直接触らずに済むようにするため。
     pub fn git<S: AsRef<OsStr>>(&self, args: &[S]) -> String {
         self.sandbox.git(args)
+    }
+
+    /// `git` を実行し、標準出力を生バイト列で返す。
+    ///
+    /// [`git`](Self::git) は末尾の改行を落とすので、CRLF や「改行で終わらない」を
+    /// 見るテストはこちらを使う。
+    pub fn git_bytes<S: AsRef<OsStr>>(&self, args: &[S]) -> Vec<u8> {
+        self.sandbox.git_bytes(args)
+    }
+
+    /// `git status --porcelain` の出力。
+    pub fn porcelain(&self) -> String {
+        self.git(&["status", "--porcelain"])
+    }
+
+    /// このリポジトリを対象にした [`Runner`]。実行環境の設定を持ち込まない。
+    ///
+    /// **統合テストごとに書かない。** テストバイナリは別々にコンパイルされるので、
+    /// 各 `tests/*.rs` に置くとファイルを足すたびにコピーが増える。
+    pub fn runner(&self) -> Runner {
+        Runner::new(self.path(), "git").with_env(self.runner_env())
     }
 
     /// `git` を実行し、成功したかどうかだけを返す。失敗しても panic しない。
@@ -347,6 +378,35 @@ pub fn fake_snapshot(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> 
         unstaged: entries(unstaged),
         untracked: entries(untracked),
         conflicted: Vec::new(),
+    }
+}
+
+/// 1 ファイルぶんの diff。`path` と `hunks` 以外は `Modified` の既定値。
+///
+/// `fake_entry` と同じく、`app` の遷移テストと `ui` の描画テストの両方から使う。
+/// 2 箇所で組み立てを持つと、`FileDiff` にフィールドを足したときに片方だけ直しても
+/// `cargo test -p <crate>` の単体実行でしか落ちない。
+pub fn fake_file_diff(path: &str, hunks: Vec<Hunk>) -> FileDiff {
+    FileDiff {
+        path: path.into(),
+        old_path: None,
+        status: FileStatus::Modified,
+        binary: false,
+        hunks,
+    }
+}
+
+/// ハンク 1 つ。`lines` は `(種別, 内容)` の並び。
+pub fn fake_hunk(header: &str, lines: &[(LineOrigin, &str)]) -> Hunk {
+    Hunk {
+        header: header.to_string(),
+        lines: lines
+            .iter()
+            .map(|(origin, content)| HunkLine {
+                origin: *origin,
+                content: content.as_bytes().to_vec(),
+            })
+            .collect(),
     }
 }
 

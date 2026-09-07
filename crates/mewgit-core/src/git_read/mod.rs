@@ -435,6 +435,35 @@ pub enum LineOrigin {
     DeletionNoEol,
 }
 
+impl LineOrigin {
+    /// 行頭に置く記号。
+    ///
+    /// **パッチに戻す `git_exec::hunk_patch` と、画面に出す `ui` が同じものを使う。**
+    /// 別々に書くと、片方だけ直したときに「画面では文脈行、パッチでは追加行」に
+    /// なりうる。色は `ui` が `origin` から別に決める（`theme` は core に無い）。
+    pub fn mark(self) -> char {
+        match self {
+            LineOrigin::Context | LineOrigin::ContextNoEol => ' ',
+            LineOrigin::Addition | LineOrigin::AdditionNoEol => '+',
+            LineOrigin::Deletion | LineOrigin::DeletionNoEol => '-',
+        }
+    }
+
+    /// 改行で終わっていない行か。
+    ///
+    /// パッチに戻すとき、この行の後ろにだけ `\ No newline at end of file` を足す
+    /// （02 の「ハンクの持ち方」）。**読むのは `git_exec::hunk_patch` だけ**で、
+    /// [`mark`](Self::mark) のように 2 者で共有する語彙ではない。ここに置くのは
+    /// 変種の並びを知っているのが `git_read` だからで、`origin` の 6 変種を
+    /// `git_exec` で数え直させないため。
+    pub fn is_no_eol(self) -> bool {
+        matches!(
+            self,
+            LineOrigin::ContextNoEol | LineOrigin::AdditionNoEol | LineOrigin::DeletionNoEol
+        )
+    }
+}
+
 /// stash 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StashEntry {

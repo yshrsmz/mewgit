@@ -166,6 +166,23 @@ impl RepoReader {
         })
     }
 
+    /// HEAD のコミットメッセージ全文。コミットが 1 つも無ければ `None`。
+    ///
+    /// amend の初期値に使う（01 の「commit」）。**HEAD の解決とメッセージの取得を
+    /// 1 回で行う。** 呼び出し側が [`RepoReader::head`] と
+    /// [`RepoReader::commit_detail`] を 2 回に分けて呼ぶと、そのあいだに HEAD が
+    /// 動く隙ができ、1 つ前のコミットのメッセージで HEAD を上書きすることになる。
+    ///
+    /// unborn を `Err` にしないのは、「読めなかった」と「amend する相手がいない」で
+    /// 上位の出し分けが違うため。
+    pub fn head_message(&self) -> Result<Option<String>, GitReadError> {
+        let oid = match self.head()? {
+            HeadInfo::Unborn { .. } => return Ok(None),
+            HeadInfo::Branch { oid, .. } | HeadInfo::Detached(oid) => oid,
+        };
+        Ok(Some(self.commit_detail(oid)?.message))
+    }
+
     /// unborn な HEAD が指しているブランチ名。
     ///
     /// unborn は「HEAD が symbolic で、指す先の ref がまだ無い」状態なので、

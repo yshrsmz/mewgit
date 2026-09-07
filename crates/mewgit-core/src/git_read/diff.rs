@@ -1,5 +1,7 @@
 //! diff とハンク分割。設計は `docs/design/02-git-read.md` の「diff とハンク」。
 
+use std::path::Path;
+
 use git2::{DiffFindOptions, DiffLineType, DiffOptions, ErrorCode, Patch, Tree};
 
 use super::{
@@ -13,12 +15,11 @@ impl RepoReader {
     /// ハンクは `git_exec` が `git apply --cached` に渡すパッチへ戻せる形で持つ
     /// （02 の「ハンクの持ち方」）。
     pub fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError> {
+        // **`path` は `DiffOptions` に渡さない。** pathspec は diff の生成時に効くので、
+        // `find_similar` が対にすべき旧パスの delta が先に落ち、1 ファイルに絞った
+        // rename が「全行追加の `Added`」になる。そのパッチを `git apply --cached` に
+        // 戻すと、rename ではなくファイルの新規追加を index に適用してしまう（02）。
         let mut opts = DiffOptions::new();
-        if let Some(path) = target.path() {
-            // pathspec は既定で glob。`[x].txt` や `a*b` という名前のファイルを選ぶと
-            // 別のファイルが出る。
-            opts.disable_pathspec_match(true).pathspec(path);
-        }
 
         let mut diff = match &target {
             DiffTarget::IndexVsWorktree(_) => {
@@ -56,7 +57,7 @@ impl RepoReader {
 
         // `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの delta には効かない。
         diff.find_similar(Some(&mut find_options()))?;
-        file_diffs(&diff)
+        file_diffs(&diff, target.path())
     }
 
     /// HEAD のツリー。コミットが 1 つも無ければ `None`（空ツリーと比べる）。
@@ -87,11 +88,28 @@ fn find_options() -> DiffFindOptions {
     options
 }
 
-/// diff をファイル単位の値型に落とす。
-fn file_diffs(diff: &git2::Diff<'_>) -> Result<Vec<FileDiff>, GitReadError> {
-    let mut files = Vec::with_capacity(diff.deltas().len());
+/// diff をファイル単位の値型に落とす。`path` があればそのファイルだけ残す。
+fn file_diffs(diff: &git2::Diff<'_>, path: Option<&Path>) -> Result<Vec<FileDiff>, GitReadError> {
+    let mut files = Vec::new();
 
     for index in 0..diff.deltas().len() {
+        // **絞り込みは `Patch` を作る手前で行う。** delta のパスは `Patch` を作る前でも
+        // 正しい（パッチ生成まで確定しないのは binary の旗だけ）。出口の `Vec<FileDiff>`
+        // で `retain` すると、`IndexVsWorktree` は `show_untracked_content` を立てて
+        // いるぶん、全 untracked ファイルの中身を読んでから捨てることになる（02）。
+        if let Some(want) = path {
+            let Some(delta) = diff.get_delta(index) else {
+                continue;
+            };
+            // **`old_path` の側でも見る。** rename を新しい名前で絞ったときに、
+            // 旧パスしか持たない delta を落とさないため。
+            let hit =
+                delta.new_file().path() == Some(want) || delta.old_file().path() == Some(want);
+            if !hit {
+                continue;
+            }
+        }
+
         // `from_diff` が `None` を返すのは libgit2 が「出さない」と判断した delta
         // （`Unmodified` / `Ignored` / `Unreadable`）だけで、それは `file_entry` も落とす。
         let Some(patch) = Patch::from_diff(diff, index)? else {

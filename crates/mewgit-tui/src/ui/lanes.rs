@@ -111,6 +111,14 @@ fn glyph(cell: Cell, ascii: bool) -> &'static str {
 /// 横線。レーンの継ぎ目にも使う。
 const HORIZONTAL: (&str, &str) = ("─", "-");
 
+/// グラフ先頭の WIP 行の印。
+///
+/// **コミットの `●` / `○` と重ならない字を選ぶ。** WIP 行はコミットではなく、
+/// `graph` 層を通らない（06 の「責務」）。ASCII 側も同じ理由で `*` / `o` を避ける。
+pub fn wip_glyph(ascii: bool) -> &'static str {
+    pick_charset(("◇", "@"), ascii)
+}
+
 fn pick_charset(glyphs: (&'static str, &'static str), ascii: bool) -> &'static str {
     if ascii {
         glyphs.1

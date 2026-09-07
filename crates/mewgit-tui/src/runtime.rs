@@ -135,7 +135,7 @@ where
 /// 行数を決めるのは `ui` だけ（不変ルール 2 と 07）。`AppState` に直接書かず `update`
 /// を通すのは、`viewport` の計算経路を 1 本に保つため。
 fn layout(state: &mut AppState) -> Cmd {
-    let graph_rows = ui::graph_rows(state.term, crate::panes::graph::shows_detail(&state.graph));
+    let graph_rows = ui::graph_rows(state.term);
     if graph_rows == state.graph.viewport {
         return Cmd::None;
     }
@@ -167,14 +167,26 @@ impl Runtime {
             }
             Cmd::Quit => ControlFlow::Break(()),
 
-            Cmd::LoadLog { count } => {
+            Cmd::LoadLog { count, restart } => {
                 let reader = self.reader.clone();
                 let tx = self.tx.clone();
                 // このタスクは abort しない。`log_page` の future を途中で捨てると、
                 // リーダースレッドは walk を進めたあとで返り先を失い、そのページの
                 // コミットがどのページにも現れなくなる（02 の「スレッド」）。
                 tokio::spawn(async move {
-                    let _ = tx.send(Msg::LogLoaded(reader.log_page(count).await));
+                    // 要求した `restart` をそのまま返す。届いたページが先頭からの
+                    // ものか続きかは `LogPage` からは判らない（01）。
+                    let result = reader.log_page(count, restart).await;
+                    let _ = tx.send(Msg::LogLoaded { restart, result });
+                });
+                ControlFlow::Continue(())
+            }
+
+            Cmd::LoadHeadMessage => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::HeadMessageLoaded(reader.head_message().await));
                 });
                 ControlFlow::Continue(())
             }
@@ -225,8 +237,19 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
-            // M2 以降で実装する。
-            Cmd::LoadDiff(_) => not_implemented(state, JobKind::LoadDiff, "LoadDiff"),
+            Cmd::LoadDiff(target) => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    // 要求した対象をそのまま返す。`update` はこれと `wanted_diff()` を
+                    // 比べて、届いた diff がいま選んでいるファイルのものかを見る（01）。
+                    let result = Box::new(reader.diff(target.clone()).await);
+                    let _ = tx.send(Msg::DiffLoaded { target, result });
+                });
+                ControlFlow::Continue(())
+            }
+
+            // M4 以降で実装する。
             Cmd::ResolveAccount => {
                 not_implemented(state, JobKind::ResolveAccount, "ResolveAccount")
             }
@@ -466,6 +489,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_diff_reaches_the_state_through_the_reader() {
+        let repo = TestRepo::init();
+        repo.commit_file("a.txt", "one\ntwo\n");
+        repo.write_worktree_file("a.txt", b"one\nTWO\n");
+        let (mut state, reader) = opened(&repo);
+        let (runtime, mut msgs) = runtime_for(&repo, reader);
+
+        // ワーキングツリーを読み、Diff ペインを開くところまでを実際の経路で通す。
+        let cmd = state.issue(Cmd::LoadStatus);
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+        state.focus = Pane::Worktree;
+
+        // `KeyCode` は crossterm 側と名前が衝突するので完全修飾で書く。
+        let enter = mewgit_core::app::Key::new(mewgit_core::app::KeyCode::Enter);
+        let cmd = update(&mut state, Msg::Key(enter));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        let view = state.diff.view.expect("diff が届いていません");
+        assert_eq!(view.files.len(), 1);
+        assert_eq!(view.files[0].path, std::path::Path::new("a.txt"));
+        assert_eq!(view.files[0].hunks.len(), 1);
+        assert!(!state.jobs.is_running(JobKind::LoadDiff));
+    }
+
+    #[tokio::test]
     async fn exec_runs_git_and_the_reload_shows_the_result() {
         // `Cmd::Exec` から `git` を回して、そのあとの `LoadStatus` までを通す。
         let repo = TestRepo::init();
@@ -605,10 +657,15 @@ mod tests {
 
         // 行が無いとカーソルの指すコミットが決まらず、届いた詳細は捨てられる。
         // 先に 1 ページ積む。
-        let cmd = state.issue(Cmd::LoadLog { count: 10 });
+        let cmd = state.issue(Cmd::LoadLog {
+            count: 10,
+            restart: false,
+        });
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
         let msg = msgs.recv().await.expect("Msg が返りませんでした");
         let _ = update(&mut state, msg);
+        // 表示行 0 は WIP 行。1 件目のコミットはその 1 つ下。
+        state.graph.cursor = 1;
 
         let cmd = state.issue(Cmd::LoadCommitDetail(oid));
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
@@ -623,7 +680,8 @@ mod tests {
 
     #[tokio::test]
     async fn enter_reaches_the_state_and_the_viewport_follows() {
-        // `Enter` を打ってループを 1 本走らせる。`viewport` は常に `ui` が出す値と
+        // `Enter` を打ってループを 1 本走らせる。カーソルは WIP 行にあるので、
+        // `Enter` は右ペイン（Working tree）へ移る。`viewport` は常に `ui` が出す値と
         // 一致していること（一致しないとカーソルが画面の外に出る）。
         let repo = TestRepo::init();
         repo.commit("first");
@@ -632,40 +690,22 @@ mod tests {
 
         run_with(events, &mut state, reader).await.unwrap();
 
-        assert!(state.graph.expanded);
+        assert_eq!(state.focus, Pane::Worktree);
         assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
     }
 
     #[test]
-    fn opening_the_detail_shrinks_the_viewport() {
-        // 展開でグラフが縮むことを core に伝えるのは `layout` だけ。ここが抜けると
-        // `app` は広いままの `viewport` でスクロール位置を決める。
-        // ループを回さないのは、1 ページ目が届く前に `Enter` が処理されると
-        // 行が無く（＝詳細を出さず）縮まないため。
+    fn the_viewport_does_not_move_when_the_selection_changes() {
+        // コミット詳細は右ペインに出るので、選択が変わってもグラフの高さは動かない
+        // （07 の「CommitDetail ペイン」）。動くと `Msg::Layout` が毎回流れ、そのたびに
+        // 追加読み込みの判定まで走る。
         let mut state = crate::test_util::state_with_commits(&["first"]);
-        let collapsed = state.graph.viewport;
+        let on_wip = state.graph.viewport;
 
-        state.graph.expanded = true;
-        let _ = layout(&mut state);
+        state.graph.cursor = 1;
 
-        assert!(
-            state.graph.viewport < collapsed,
-            "展開しても viewport が縮んでいません: {collapsed} -> {}",
-            state.graph.viewport
-        );
-        assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
-    }
-
-    #[test]
-    fn an_expanded_but_empty_graph_keeps_the_whole_pane() {
-        // 行が無ければ詳細に出すものも無い。`ui` が描く高さと食い違わせない。
-        let mut state = crate::test_util::state_with_commits(&[]);
-        let whole = state.graph.viewport;
-
-        state.graph.expanded = true;
-        let _ = layout(&mut state);
-
-        assert_eq!(state.graph.viewport, whole);
+        assert_eq!(layout(&mut state), Cmd::None);
+        assert_eq!(state.graph.viewport, on_wip);
     }
 
     #[tokio::test]

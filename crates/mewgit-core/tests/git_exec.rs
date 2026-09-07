@@ -11,16 +11,6 @@ use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, Runner};
 use mewgit_core::git_read::Oid;
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
-/// 実行環境の設定を持ち込まない `Runner`。
-fn runner(repo: &TestRepo) -> Runner {
-    Runner::new(repo.path(), "git").with_env(repo.runner_env())
-}
-
-/// `git status --porcelain` の出力。
-fn porcelain(repo: &TestRepo) -> String {
-    repo.git(&["status", "--porcelain"])
-}
-
 /// `origin` に bare リポジトリを登録したワークツリー付きリポジトリ。
 fn clone_of(remote: &BareRepo) -> TestRepo {
     let repo = TestRepo::init();
@@ -79,18 +69,18 @@ async fn stage_and_unstage_a_tracked_file() {
     repo.commit("first");
     repo.write_worktree_file("file.txt", b"changed\n");
 
-    let runner = runner(&repo);
+    let runner = repo.runner();
     runner
         .run(&GitOp::Stage(vec!["file.txt".into()]))
         .await
         .expect("stage できませんでした");
-    assert_eq!(porcelain(&repo), "M  file.txt");
+    assert_eq!(repo.porcelain(), "M  file.txt");
 
     runner
         .run(&GitOp::Unstage(vec!["file.txt".into()]))
         .await
         .expect("unstage できませんでした");
-    assert_eq!(porcelain(&repo), " M file.txt");
+    assert_eq!(repo.porcelain(), " M file.txt");
 }
 
 #[tokio::test]
@@ -100,13 +90,13 @@ async fn unstage_works_before_the_first_commit() {
     let repo = TestRepo::init();
     repo.write_worktree_file("file.txt", b"new\n");
     repo.git(&["add", "file.txt"]);
-    assert_eq!(porcelain(&repo), "A  file.txt");
+    assert_eq!(repo.porcelain(), "A  file.txt");
 
-    runner(&repo)
+    repo.runner()
         .run(&GitOp::Unstage(vec!["file.txt".into()]))
         .await
         .expect("unstage できませんでした");
-    assert_eq!(porcelain(&repo), "?? file.txt");
+    assert_eq!(repo.porcelain(), "?? file.txt");
 }
 
 #[tokio::test]
@@ -115,11 +105,11 @@ async fn a_dashed_file_name_is_not_read_as_an_option() {
     repo.commit("first");
     repo.write_worktree_file("-n", b"dashed\n");
 
-    runner(&repo)
+    repo.runner()
         .run(&GitOp::Stage(vec!["-n".into()]))
         .await
         .expect("stage できませんでした");
-    assert_eq!(porcelain(&repo), "A  -n");
+    assert_eq!(repo.porcelain(), "A  -n");
 }
 
 #[tokio::test]
@@ -133,7 +123,7 @@ async fn commit_runs_hooks() {
         .expect("hook に実行権限を付けられませんでした");
 
     repo.write_worktree_file("file.txt", b"second\n");
-    let runner = runner(&repo);
+    let runner = repo.runner();
     runner
         .run(&GitOp::Stage(vec!["file.txt".into()]))
         .await
@@ -159,11 +149,38 @@ async fn commit_runs_hooks() {
 }
 
 #[tokio::test]
+async fn a_commit_message_keeps_its_body() {
+    // モーダルは改行の打てる複数行バッファなので、`--message` に本文ごと渡る
+    // （01 の「コミットメッセージの編集」）。1 行に潰れると要約しか残らない。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.write_worktree_file("file.txt", b"second\n");
+    let runner = repo.runner();
+    runner
+        .run(&GitOp::Stage(vec!["file.txt".into()]))
+        .await
+        .expect("stage できませんでした");
+
+    runner
+        .run(&GitOp::Commit {
+            message: "subject\n\nbody 1\nbody 2".into(),
+            amend: false,
+        })
+        .await
+        .expect("commit できませんでした");
+
+    assert_eq!(
+        repo.git(&["log", "-1", "--pretty=%B"]),
+        "subject\n\nbody 1\nbody 2"
+    );
+}
+
+#[tokio::test]
 async fn amend_replaces_the_last_commit() {
     let repo = TestRepo::init();
     repo.commit("first");
 
-    runner(&repo)
+    repo.runner()
         .run(&GitOp::Commit {
             message: "amended".into(),
             amend: true,
@@ -186,7 +203,7 @@ async fn stage_hunk_sends_the_patch_on_stdin() {
         b"diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n"
             .to_vec();
 
-    let runner = runner(&repo);
+    let runner = repo.runner();
     runner
         .run(&GitOp::StageHunk {
             path: "file.txt".into(),
@@ -194,7 +211,7 @@ async fn stage_hunk_sends_the_patch_on_stdin() {
         })
         .await
         .expect("ハンクを stage できませんでした");
-    assert_eq!(porcelain(&repo), "M  file.txt");
+    assert_eq!(repo.porcelain(), "M  file.txt");
 
     // 同じパッチを逆に当てると index が元に戻る。
     runner
@@ -204,7 +221,7 @@ async fn stage_hunk_sends_the_patch_on_stdin() {
         })
         .await
         .expect("ハンクを unstage できませんでした");
-    assert_eq!(porcelain(&repo), " M file.txt");
+    assert_eq!(repo.porcelain(), " M file.txt");
 }
 
 #[tokio::test]
@@ -214,12 +231,12 @@ async fn discard_returns_a_tracked_file_to_head() {
     repo.write_worktree_file("file.txt", b"changed\n");
     repo.git(&["add", "file.txt"]);
 
-    runner(&repo)
+    repo.runner()
         .run(&GitOp::Discard(vec!["file.txt".into()]))
         .await
         .expect("discard できませんでした");
 
-    assert_eq!(porcelain(&repo), "");
+    assert_eq!(repo.porcelain(), "");
     assert_eq!(
         fs::read(repo.path().join("file.txt")).expect("読めませんでした"),
         b"original\n"
@@ -233,19 +250,20 @@ async fn discard_untracked_deletes_the_file() {
     repo.write_worktree_file("new.txt", b"new\n");
 
     // tracked 用の discard では untracked を消せない。変種を分けている理由。
-    let err = runner(&repo)
+    let err = repo
+        .runner()
         .run(&GitOp::Discard(vec!["new.txt".into()]))
         .await
         .expect_err("untracked を restore できてはいけません");
     assert_eq!(failure_kind(&err), ExecErrorKind::Other);
     assert!(repo.path().join("new.txt").exists());
 
-    runner(&repo)
+    repo.runner()
         .run(&GitOp::DiscardUntracked(vec!["new.txt".into()]))
         .await
         .expect("clean できませんでした");
     assert!(!repo.path().join("new.txt").exists());
-    assert_eq!(porcelain(&repo), "");
+    assert_eq!(repo.porcelain(), "");
 }
 
 #[tokio::test]
@@ -257,7 +275,8 @@ async fn checkout_reads_the_target_as_a_revision() {
     repo.commit_file("topic", "add a file named topic");
     repo.write_worktree_file("topic", b"work in progress\n");
 
-    let err = runner(&repo)
+    let err = repo
+        .runner()
         .run(&GitOp::Checkout("topic".into()))
         .await
         .expect_err("ブランチではないので失敗するはずです");
@@ -276,7 +295,7 @@ async fn checkout_switches_to_a_branch() {
     repo.commit("first");
     repo.git(&["branch", "topic"]);
 
-    runner(&repo)
+    repo.runner()
         .run(&GitOp::Checkout("topic".into()))
         .await
         .expect("checkout できませんでした");
@@ -288,7 +307,7 @@ async fn checkout_switches_to_a_branch() {
 async fn branch_create_switch_delete_and_rename() {
     let repo = TestRepo::init();
     repo.commit("first");
-    let runner = runner(&repo);
+    let runner = repo.runner();
 
     runner
         .run(&GitOp::BranchCreate {
@@ -328,7 +347,7 @@ async fn stash_push_and_pop() {
     let repo = TestRepo::init();
     repo.commit_bytes("file.txt", b"original\n", "first");
     repo.write_worktree_file("file.txt", b"changed\n");
-    let runner = runner(&repo);
+    let runner = repo.runner();
 
     runner
         .run(&GitOp::StashPush {
@@ -338,14 +357,14 @@ async fn stash_push_and_pop() {
         })
         .await
         .expect("stash できませんでした");
-    assert_eq!(porcelain(&repo), "");
+    assert_eq!(repo.porcelain(), "");
     assert!(repo.git(&["stash", "list"]).contains("wip"));
 
     runner
         .run(&GitOp::StashPop(0))
         .await
         .expect("stash を戻せませんでした");
-    assert_eq!(porcelain(&repo), " M file.txt");
+    assert_eq!(repo.porcelain(), " M file.txt");
 }
 
 #[tokio::test]
@@ -357,7 +376,8 @@ async fn a_conflicting_cherry_pick_is_classified_as_conflict() {
     repo.git(&["switch", "-q", "main"]);
     repo.commit_bytes("file.txt", b"main\n", "main");
 
-    let err = runner(&repo)
+    let err = repo
+        .runner()
         .run(&GitOp::CherryPick(vec![side]))
         .await
         .expect_err("コンフリクトするはずです");
@@ -372,11 +392,11 @@ async fn a_conflicting_cherry_pick_is_classified_as_conflict() {
     assert_eq!(*code, Some(1));
     assert_eq!(argv[0], "cherry-pick");
 
-    runner(&repo)
+    repo.runner()
         .run(&GitOp::CherryPickAbort)
         .await
         .expect("abort できませんでした");
-    assert_eq!(porcelain(&repo), "");
+    assert_eq!(repo.porcelain(), "");
 }
 
 #[tokio::test]
@@ -384,7 +404,7 @@ async fn a_rejected_push_is_classified_as_non_fast_forward() {
     let remote = BareRepo::init();
     let repo = clone_of(&remote);
     repo.commit("first");
-    let runner = runner(&repo);
+    let runner = repo.runner();
 
     runner
         .run(&push(true))
@@ -417,7 +437,7 @@ async fn force_with_lease_refuses_when_someone_else_moved_the_remote() {
     let remote = BareRepo::init();
     let mine = clone_of(&remote);
     mine.commit("first");
-    let runner = runner(&mine);
+    let runner = mine.runner();
     runner
         .run(&push(true))
         .await
@@ -449,7 +469,7 @@ async fn the_lease_survives_a_fetch() {
     let remote = BareRepo::init();
     let mine = clone_of(&remote);
     mine.commit("first");
-    let runner = runner(&mine);
+    let runner = mine.runner();
     runner
         .run(&push(true))
         .await
@@ -493,7 +513,8 @@ async fn interactive_rebase_is_refused_without_running_git() {
     repo.commit("first");
     let before = repo.head_oid();
 
-    let err = runner(&repo)
+    let err = repo
+        .runner()
         .run(&GitOp::RebaseInteractive {
             onto: "main".into(),
             plan: Default::default(),
@@ -541,7 +562,8 @@ async fn a_non_utf8_path_never_reaches_git() {
     repo.commit("first");
     let bad = PathBuf::from(OsString::from_vec(vec![0x66, 0xff]));
 
-    let err = runner(&repo)
+    let err = repo
+        .runner()
         .run(&GitOp::Stage(vec![bad]))
         .await
         .expect_err("実行してはいけません");
@@ -551,7 +573,7 @@ async fn a_non_utf8_path_never_reaches_git() {
         "git が走ってしまった: {err:?}"
     );
     assert!(err.argv().is_empty(), "argv を組めていない");
-    assert_eq!(porcelain(&repo), "");
+    assert_eq!(repo.porcelain(), "");
 }
 
 #[tokio::test]
@@ -560,7 +582,8 @@ async fn a_failing_command_carries_argv_and_stderr() {
     let repo = TestRepo::init();
     repo.commit("first");
 
-    let err = runner(&repo)
+    let err = repo
+        .runner()
         .run(&GitOp::Checkout("no-such-branch".into()))
         .await
         .expect_err("失敗するはずです");

@@ -153,6 +153,9 @@ pub struct LogPage {
 - `LogSession<'repo>` は `RepoReader` を借りる。`Repository` と同じ構造体には入れられない
   （自己参照になる）ので、リーダースレッドではループのローカル変数として
   `RepoReader` の隣に置く（状態の持ち方は「スレッド」を参照）
+- **先頭から読み直す経路は `LogSession` を捨てることで表す。** セッションを持ったまま
+  巻き戻す API は作らない（`Revwalk::reset` は push した ref も落とすので、結局
+  作り直しと同じコストになる）。上位から見える形は `log_page` の `restart`（「スレッド」）
 - `next_page` が `Err` を返したらセッションを捨てる。そのページのために walk から取り出した
   Oid は失われており、同じセッションで読み直すとその分がどのページにも現れない。グラフには
   親の見つからない行が残り、2 回目は成功するので UI にも異常が出ない
@@ -275,17 +278,22 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
 - `IndexVsWorktree` は untracked の中身も出す（`include_untracked` +
   `recurse_untracked_dirs` + `show_untracked_content`）。出さないと worktree ペインで
   untracked を選んでも diff が空になる
-- `path` での絞り込みは `disable_pathspec_match(true)` を付けて literal 扱いにする。既定では
-  pathspec が glob なので、`[x].txt` や `a*b` という名前のファイルを選ぶと別のファイルが出る
-- **`path` で絞ると rename が検出されない。** pathspec は diff の生成時に効くので、
-  `find_similar` が対にすべき旧パスの delta が先に落ちる。1 ファイルに絞った rename は
-  `Renamed` ではなく「全行追加の `Added`」になり、`status` の一覧（`Renamed`）と食い違う。
-  `git diff -M -- <新パス>` も同じ挙動なので CLI とはずれないが、`StageHunk` のパッチを
-  この diff から組むと rename ではなく「ファイルの新規追加」を適用することになる。
-  絞らずに diff して `path` / `old_path` で `retain` すれば直るが、pathspec による walk の
-  枝刈り（libgit2 は `disable_pathspec_match` のとき pathspec を iterator の pathlist に
-  渡すので、走査そのものが縮む）を失う。**どちらを採るかは `ui::panes::diff` のタスクで
-  決める。** いまは `path` を渡す呼び出し側が無いので表に出ていない
+- **`path` で絞るのは diff を作ったあと。pathspec は使わない。** pathspec は diff の
+  生成時に効くので、`find_similar` が対にすべき旧パスの delta が先に落ちる。1 ファイルに
+  絞った rename は `Renamed` ではなく「全行追加の `Added`」になり、`status` の一覧
+  （`Renamed`）と食い違う。`git diff -M -- <新パス>` も同じ挙動なので CLI とはずれないが、
+  **`StageHunk` のパッチをこの diff から組むと、rename ではなく「ファイルの新規追加」を
+  index に適用することになる**。代わりに pathspec による walk の枝刈り（libgit2 は
+  `disable_pathspec_match` のとき pathspec を iterator の pathlist に渡すので、走査
+  そのものが縮む）を失うが、ワーキングツリーの diff を 1 ファイルぶん出すのに払う値段
+  としては rename が壊れないほうを採る。**pathspec を使わないので
+  `disable_pathspec_match`（glob 扱いを止めて `[x].txt` のような名前を守るもの）も要らない**
+- **絞る位置は `Patch::from_diff` の手前。** delta のパス（`old_file()` / `new_file()`）は
+  `Patch` を作る前でも正しいので、そこで見て飛ばす。出口の `Vec<FileDiff>` で `retain`
+  すると、`IndexVsWorktree` は `show_untracked_content` を立てているぶん**全 untracked
+  ファイルの中身を読んでから捨てる**ことになる。`find_similar` は diff 全体に掛けたあと
+  なので、手前で飛ばしても rename の対は残る。**`old_path` の側でも一致を見る**
+  （新パスで絞ったときに rename の行が消えないようにするため）
 - rename 検出の `find_similar()` は `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの
   delta には効かない
 - **`find_similar()` の設定は `status` と揃える。既定（`None`）は使わない。**
@@ -306,8 +314,9 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
 
 ### ハンクの持ち方
 
-`git_exec` が `git apply --cached` に渡すパッチへ戻せる形で持つ（03 の `StageHunk`）。
-`diff --git` などのファイルヘッダは `path` から組み立て直せるので持たない。
+`git_exec` が `git apply` に渡すパッチへ戻せる形で持つ。戻すのは
+`git_exec::hunk_patch`（03 の「ハンクからパッチを組む」）。`diff --git` などの
+ファイルヘッダは `path` から組み立て直せるので持たない。
 
 - `header` は `@@ -1,4 +1,6 @@ fn foo() {` の行から末尾の改行を落としたもの。`@@` の後ろの
   関数コンテキストも残す。ここは非 UTF-8 でも lossy でよい。`git apply` は 2 つ目の `@@` より
@@ -364,8 +373,9 @@ pub struct ReaderHandle { /* mpsc::UnboundedSender<Request>, workdir: PathBuf */
 impl ReaderHandle {
     pub fn spawn(path: &Path) -> Result<Self, GitReadError>;
     pub fn workdir(&self) -> &Path;
-    pub async fn log_page(&self, count: usize) -> Result<LogPage, GitReadError>;
+    pub async fn log_page(&self, count: usize, restart: bool) -> Result<LogPage, GitReadError>;
     pub async fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;
+    pub async fn head_message(&self) -> Result<Option<String>, GitReadError>;
     pub async fn refs(&self) -> Result<RefIndex, GitReadError>;
     pub async fn head(&self) -> Result<HeadInfo, GitReadError>;
     pub async fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;
@@ -399,6 +409,16 @@ impl ReaderHandle {
   受け側が消える窓が残る）ので、ランタイム側の規約にする。**ログ読み込みのタスクは abort
   しない。** M3 のキャンセルは `Cmd::Exec` に効かせる。状態を持たない `refs` / `head` /
   `remotes` / `status` / `diff` は drop されても捨ててよい
+- **`log_page(count, restart)` の `restart` はセッションを捨ててから読む。** commit や
+  fetch で HEAD が動くと積んだ行が丸ごと古くなり、続きを読む経路では直せない（新しい
+  コミットは末尾ではなく先頭に付く）。`Live` も `Exhausted` も `Idle` に落としてから
+  読むので、先頭の 1 ページが返る。**別のメソッドに分けず引数にする。** 分けると
+  「セッションを取り出して成功したときだけ戻す」契約を 2 箇所で守ることになる
+- **`head_message` は HEAD の解決とメッセージの取得をスレッドの中で 1 回で行う。**
+  amend の初期値に使う（01 の「commit」）。`head()` と `commit_detail()` の 2 回に
+  分けると、そのあいだに HEAD が動く隙ができ、**1 つ前のコミットのメッセージで HEAD を
+  上書きする**ことになる。コミットが 1 つも無い（unborn）ときは `Ok(None)`。
+  「読めなかった」と「amend する相手がいない」は上位の出し分けが違う
 - `ReaderHandle` は `Clone`。ランタイムは `Cmd` ごとに tokio タスクを起こし、その中から呼ぶ。
   スレッドは 1 本なので要求は直列に処理される
 - 送信側・受信側のどちらのチャネルが切れても `ReaderGone` にする。ハンドルが全部 drop されたら

@@ -109,11 +109,15 @@ mod tests {
         assert!(long > short, "{long} <= {short}");
     }
 
-    /// 枠（`┌`）から `└` までの行数。
+    /// 枠（`┌確認`）から、**その下で最初に見つかる** `└` までの行数。
+    ///
+    /// 先頭から `└` を探さない。モーダルの下に描かれているペインの枠も `└` を持つので、
+    /// ペインが増えると先に当たる（Branches ペインが入って実際に当たった）。
     fn height_of(body: &str) -> u16 {
         let state = state_with_confirm("確認", body);
         let lines = draw(&state, SIZE);
-        row_of(&lines, "└") - row_of(&lines, "┌確認") + 1
+        let top = row_of(&lines, "┌確認");
+        row_of(&lines[top as usize..], "└") + 1
     }
 
     #[test]

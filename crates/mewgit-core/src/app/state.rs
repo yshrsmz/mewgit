@@ -150,7 +150,9 @@ impl AppState {
     /// 候補から外れた `focus` を [`Pane::Graph`] に座り直させる。
     ///
     /// グラフのカーソルが WIP 行を出入りすると候補が入れ替わる。戻す先を `Graph` に
-    /// するのは、どちらの選択でも候補にある唯一のペインだから。
+    /// するのは、**座り直しがユーザーの選んでいない移動**だから。どちらの選択でも
+    /// 候補にあるペインは `Graph` / `Branches` / `Diff` の 3 つあるが、いま見ている
+    /// 左の領域に戻すのが説明の付く動き（07 の「ペインとフォーカス」）。
     ///
     /// **フォーカスを動かすキーが通る `update::focus` は経由しない。** あちらは
     /// 「見えるようになった diff を頼む」ためのもので、ここが移す先は必ず `Graph`
@@ -256,7 +258,7 @@ impl Pane {
     ///
     /// **まだ実装していないペインは入れない**（07）。移れてしまうと、キーを受ける先の
     /// 無い画面に入り込む。ペインを実装したらここに足す。並びは `Pane` の宣言順。
-    const WIP_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::Worktree, Pane::Diff];
+    const WIP_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::Branches, Pane::Worktree, Pane::Diff];
 
     /// コミットを選んでいるあいだの巡回先。右は [`GraphSelection::right_pane`] が決める。
     ///
@@ -266,7 +268,11 @@ impl Pane {
     ///
     /// **`Diff` は両方に入るが、出る diff は違う。** ワーキングツリーのファイルか、
     /// コミットのファイルか。決めるのは [`AppState::wanted_diff`] の 1 つ。
-    const COMMIT_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::CommitDetail, Pane::Diff];
+    ///
+    /// **`Branches` も両方に入る。** 右列の上に常に出ていて、左の選択で中身が
+    /// 変わらないため（07 の「レイアウト」）。
+    const COMMIT_FOCUS: &'static [Pane] =
+        &[Pane::Graph, Pane::Branches, Pane::CommitDetail, Pane::Diff];
 
     /// `panes` の並びのうち `delta` 個先。端では反対側に回る。
     ///
@@ -551,10 +557,7 @@ impl CommitFiles {
     ///
     /// 行が 1 つも無ければ据え置く（選べるものが無い）。
     pub fn move_cursor(&mut self, delta: isize) {
-        let Some(last) = self.entries.len().checked_sub(1) else {
-            return;
-        };
-        self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+        self.cursor = stepped_index(self.cursor, self.entries.len(), delta);
     }
 }
 
@@ -828,10 +831,9 @@ impl DiffView {
 /// そのときどうするかは呼び出し側が決める（Worktree は何も選べない位置に戻し、
 /// Diff は据え置く）。
 ///
-/// **平坦な添字のカーソルはここを通らない。** [`GraphState::move_cursor`] と
-/// [`CommitFiles::move_cursor`] は `0..len` が全部選べるので並びを組む必要が無く、
-/// `saturating_add_signed(delta).min(last)` の 2 行で済む。並びを組ませると、
-/// カーソルを 1 行動かすたびに `Vec` を確保することになる。
+/// **平坦な添字のカーソルはここを通らない。** `0..len` が全部選べるので並びを組む
+/// 必要が無く、組ませるとカーソルを 1 行動かすたびに `Vec` を確保することになる。
+/// そちらは [`stepped_index`] が持つ。
 fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Option<T> {
     let index = positions
         .iter()
@@ -843,6 +845,20 @@ fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Op
         .copied()
 }
 
+/// `0..len` の添字を `delta` 動かした位置。端では止まり、要素が無ければ据え置く。
+///
+/// **平坦な添字のカーソルの端の扱いはここ 1 箇所。** [`CommitFiles::move_cursor`] と
+/// [`BranchState::move_cursor`] が同じ規則を使う（Stash / PRs も同じ形になる）。
+///
+/// [`GraphState::move_cursor`] は通らない。WIP 行があるので行数が 0 にならず、
+/// カーソルを動かしたらスクロールも寄せる必要があるため。
+fn stepped_index(cursor: usize, len: usize, delta: isize) -> usize {
+    let Some(last) = len.checked_sub(1) else {
+        return cursor;
+    };
+    cursor.saturating_add_signed(delta).min(last)
+}
+
 /// diff ペインのカーソル。ファイルとその中のハンクを指す。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DiffCursor {
@@ -850,11 +866,71 @@ pub struct DiffCursor {
     pub hunk: usize,
 }
 
-/// ブランチペインの状態。
+/// ブランチペインの状態（01 の「ブランチ一覧」）。
 #[derive(Debug, Default)]
 pub struct BranchState {
+    /// 名前順。`git_read::branches` の戻り値そのまま。
     pub branches: Vec<Branch>,
     pub cursor: usize,
+    /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分けるのに要る。
+    load: BranchLoad,
+}
+
+/// ブランチ一覧の読み込みがどこまで進んだか。
+///
+/// **`bool` を 2 つ（`loaded` / `failed`）にしない。** 4 通りのうち「まだ届いて
+/// いないのに失敗した」が表現でき、どのテストからも踏めない腕になる（01）。
+///
+/// **`ui` には述語ではなくこの enum を見せる**（[`BranchState::load`]）。`has_failed`
+/// のような述語を並べると、段階を足したときに `ui` の else に黙って落ちる。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum BranchLoad {
+    /// まだ届いていない。
+    #[default]
+    Pending,
+    Loaded,
+    Failed,
+}
+
+impl BranchState {
+    /// 届いた一覧で置き換える。
+    ///
+    /// **カーソルは選んでいたブランチの名前で座り直す**（01 の「ブランチ一覧」）。
+    /// 読み直しは commit のたびに来るので、HEAD へ戻すだけだと別のブランチを見ながら
+    /// commit した人のカーソルが毎回飛ぶ。**添字では座り直さない** — 一覧は名前順
+    /// なので、ブランチが 1 本増えるだけで同じ添字が別のブランチを指す。
+    pub(super) fn loaded(&mut self, branches: Vec<Branch>) {
+        let selected = self.branches.get(self.cursor).map(|branch| &branch.name);
+        self.cursor = selected
+            .and_then(|name| branches.iter().position(|branch| &branch.name == name))
+            // 選んでいたものが消えた（削除 / リネーム）か、まだ何も選んでいない。
+            .or_else(|| branches.iter().position(|branch| branch.is_head))
+            // detached / unborn ではどの行にも印が付かないので先頭に座る。
+            .unwrap_or(0);
+        self.branches = branches;
+        self.load = BranchLoad::Loaded;
+    }
+
+    /// 読み込みが失敗した。**読めていた一覧は捨てない**（`StatusLoaded` と同じ理由。
+    /// 捨てると画面から消えるだけになる）。
+    pub(super) fn failed(&mut self) {
+        self.load = BranchLoad::Failed;
+    }
+
+    /// 読み込みの段階。一覧が空のときに `ui` が出す文言をここから決める
+    /// （07 の「Branches ペイン」）。
+    ///
+    /// **`jobs.is_running` の否定から消去法で導かない**（01 の「失敗の記憶」）。
+    pub fn load(&self) -> BranchLoad {
+        self.load
+    }
+
+    /// カーソルを `delta` 行動かす。端では止まる。
+    ///
+    /// 行が 1 つも無ければ据え置く（[`stepped_index`]）。
+    pub(super) fn move_cursor(&mut self, delta: isize) {
+        self.cursor = stepped_index(self.cursor, self.branches.len(), delta);
+    }
 }
 
 /// PR ペインの状態。
@@ -929,6 +1005,7 @@ pub enum JobKind {
     LoadHeadMessage,
     LoadRepoInfo,
     LoadStatus,
+    LoadBranches,
     LoadDiff,
     Exec,
     ResolveAccount,
@@ -953,6 +1030,7 @@ impl JobKind {
             | JobKind::LoadHeadMessage
             | JobKind::LoadRepoInfo
             | JobKind::LoadStatus
+            | JobKind::LoadBranches
             | JobKind::LoadDiff
             | JobKind::ResolveAccount
             | JobKind::FetchPr
@@ -973,6 +1051,7 @@ impl JobKind {
             JobKind::LoadHeadMessage => "head",
             JobKind::LoadRepoInfo => "repo",
             JobKind::LoadStatus => "status",
+            JobKind::LoadBranches => "branches",
             JobKind::LoadDiff => "diff",
             JobKind::Exec => "git",
             JobKind::ResolveAccount => "account",
@@ -1230,7 +1309,7 @@ mod tests {
 
     use crate::app::Msg;
     use crate::git_read::LogPage;
-    use crate::test_util::fake_snapshot;
+    use crate::test_util::{fake_branch, fake_snapshot};
 
     /// 指定した区画にファイルを並べ、staged の先頭を選んだ状態。
     fn worktree(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> WorktreeState {
@@ -1525,6 +1604,123 @@ mod tests {
                 state.focus_candidates()
             );
         }
+    }
+
+    #[test]
+    fn the_branches_pane_is_a_candidate_whatever_the_graph_selects() {
+        // 右列の上に常に出ていて、左の選択で中身が変わらない（07 の「レイアウト」）。
+        // 候補から外れると、画面に出ているペインへ `Tab` で行けない。
+        let mut state = state_with_a_commit();
+        for cursor in [0, 1] {
+            state.graph.cursor = cursor;
+            assert!(
+                state.focus_candidates().contains(&Pane::Branches),
+                "cursor={cursor} candidates={:?}",
+                state.focus_candidates()
+            );
+        }
+    }
+
+    /// カーソルの指すブランチ名。**`BranchState` に `selected()` は持たせない** —
+    /// 使うのは切替と削除のタスクなので、そこで足す（07 の「どこまで実装したか」）。
+    fn cursor_name(branches: &BranchState) -> Option<&str> {
+        branches
+            .branches
+            .get(branches.cursor)
+            .map(|branch| branch.name.as_str())
+    }
+
+    #[test]
+    fn a_loaded_branch_list_seats_the_cursor_on_the_head() {
+        let mut branches = BranchState::default();
+
+        branches.loaded(vec![
+            fake_branch("another", false),
+            fake_branch("main", true),
+            fake_branch("topic", false),
+        ]);
+
+        assert_eq!(cursor_name(&branches), Some("main"));
+        assert_eq!(branches.load(), BranchLoad::Loaded);
+    }
+
+    #[test]
+    fn a_detached_head_seats_the_branch_cursor_on_the_first_row() {
+        // detached / unborn ではどの行にも印が付かない（02 の「ブランチ一覧」）。
+        let mut branches = BranchState::default();
+
+        branches.loaded(vec![
+            fake_branch("another", false),
+            fake_branch("main", false),
+        ]);
+
+        assert_eq!(cursor_name(&branches), Some("another"));
+    }
+
+    #[test]
+    fn a_reload_keeps_the_cursor_on_the_branch_by_name() {
+        // 読み直しは commit のたびに来る（01 の `update::Reload`）。HEAD へ戻すだけだと、
+        // 別のブランチを見ながら commit した人のカーソルが毎回飛ぶ。
+        let mut branches = BranchState::default();
+        branches.loaded(vec![fake_branch("main", true), fake_branch("topic", false)]);
+        branches.move_cursor(1);
+        assert_eq!(cursor_name(&branches), Some("topic"));
+
+        // ブランチが 1 本増えて添字がずれる（一覧は名前順）。
+        branches.loaded(vec![
+            fake_branch("alpha", false),
+            fake_branch("main", true),
+            fake_branch("topic", false),
+        ]);
+
+        assert_eq!(cursor_name(&branches), Some("topic"));
+    }
+
+    #[test]
+    fn a_reload_that_loses_the_selected_branch_falls_back_to_the_head() {
+        // 消えた（削除 / リネーム）ときの行き先。
+        let mut branches = BranchState::default();
+        branches.loaded(vec![fake_branch("main", true), fake_branch("topic", false)]);
+        branches.move_cursor(1);
+
+        branches.loaded(vec![fake_branch("main", true)]);
+
+        assert_eq!(cursor_name(&branches), Some("main"));
+    }
+
+    #[test]
+    fn the_branch_cursor_stops_at_both_ends() {
+        let mut branches = BranchState::default();
+        branches.loaded(vec![fake_branch("a", false), fake_branch("b", false)]);
+
+        branches.move_cursor(-1);
+        assert_eq!(branches.cursor, 0);
+        branches.move_cursor(1);
+        branches.move_cursor(1);
+        assert_eq!(branches.cursor, 1);
+    }
+
+    #[test]
+    fn an_empty_branch_list_leaves_the_cursor_where_it_is() {
+        // 選べるものが無い。`CommitFiles::move_cursor` と同じ。
+        let mut branches = BranchState::default();
+
+        branches.move_cursor(1);
+
+        assert_eq!(branches.cursor, 0);
+        assert_eq!(cursor_name(&branches), None);
+    }
+
+    #[test]
+    fn a_failed_branch_list_keeps_what_was_already_there() {
+        // 読めていた一覧は捨てない（`status_loaded` と同じ理由）。
+        let mut branches = BranchState::default();
+        branches.loaded(vec![fake_branch("main", true)]);
+
+        branches.failed();
+
+        assert_eq!(branches.load(), BranchLoad::Failed);
+        assert_eq!(branches.branches.len(), 1);
     }
 
     #[test]

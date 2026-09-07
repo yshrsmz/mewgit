@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, LogPage, LogSession,
-    Oid, RefIndex, Remote, RepoReader, WorktreeSnapshot,
+    Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, LogPage,
+    LogSession, Oid, RefIndex, Remote, RepoReader, WorktreeSnapshot,
 };
 
 /// リーダースレッドへの窓口。
@@ -47,6 +47,7 @@ enum Request {
         reply: Reply<Vec<FileEntry>>,
     },
     Refs(Reply<RefIndex>),
+    Branches(Reply<Vec<Branch>>),
     Head(Reply<HeadInfo>),
     HeadMessage(Reply<Option<String>>),
     Remotes(Reply<Vec<Remote>>),
@@ -135,6 +136,15 @@ impl ReaderHandle {
     /// ref の索引（Oid → ラベル）。
     pub async fn refs(&self) -> Result<RefIndex, GitReadError> {
         self.request(Request::Refs).await
+    }
+
+    /// ローカルブランチの一覧（02 の「ブランチ一覧」）。
+    ///
+    /// `refs` と分けているのは、こちらがブランチの本数だけ upstream の解決と
+    /// `graph_ahead_behind` の walk を行うため。グラフのラベルと HEAD だけが欲しい
+    /// 経路にそのコストを払わせない（01）。
+    pub async fn branches(&self) -> Result<Vec<Branch>, GitReadError> {
+        self.request(Request::Branches).await
     }
 
     /// HEAD の状態。
@@ -228,6 +238,9 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
             }
             Request::Refs(reply) => {
                 let _ = reply.send(reader.refs());
+            }
+            Request::Branches(reply) => {
+                let _ = reply.send(reader.branches());
             }
             Request::Head(reply) => {
                 let _ = reply.send(reader.head());

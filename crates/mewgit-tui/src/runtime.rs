@@ -225,6 +225,15 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
+            Cmd::LoadBranches => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::BranchesLoaded(Box::new(reader.branches().await)));
+                });
+                ControlFlow::Continue(())
+            }
+
             Cmd::LoadStatus => {
                 let reader = self.reader.clone();
                 let tx = self.tx.clone();

@@ -12,7 +12,7 @@ pub struct AppState {
     pub graph: GraphState,            // 読込済みコミット、レーン、選択位置、スクロール
     pub worktree: WorktreeState,      // staged / unstaged / untracked と選択
     pub diff: DiffState,              // 表示中の diff と、その鮮度
-    pub branches: BranchState,
+    pub branches: BranchState,     // ローカルブランチの一覧と選択（下の「ブランチ一覧」）
     pub stashes: Vec<StashEntry>,
     pub prs: PrState,                 // 現ブランチ PR、一覧、チェック
     pub progress: Option<InProgressOp>, // Rebase | CherryPick | Revert | Merge
@@ -101,10 +101,12 @@ pub enum Modal {
 
 巡回に入れるのは実装済みで、**かついま画面に出ているペインだけ**（07）。一覧は定数では
 なく `AppState::focus_candidates()` が状態から返す。グラフが WIP 行を選んでいれば
-`[Graph, Worktree, Diff]`、コミットを選んでいれば `[Graph, CommitDetail, Diff]`。並びは
-`Pane` の宣言順。**どちらの選択でも `Diff` が入るが、出る diff は違う**（ワーキング
-ツリーのファイルか、コミットのファイルか）。決めるのは `AppState::wanted_diff()` の
-1 つで、`focus` と選択の両方を見る（下の「diff の遅延取得」）。
+`[Graph, Branches, Worktree, Diff]`、コミットを選んでいれば
+`[Graph, Branches, CommitDetail, Diff]`。並びは `Pane` の宣言順。**`Branches` は
+どちらにも入る**（右列の上に常に出ていて、左の選択で中身が変わらないため）。
+**`Diff` もどちらにも入るが、出る diff は違う**（ワーキングツリーのファイルか、
+コミットのファイルか）。決めるのは `AppState::wanted_diff()` の 1 つで、`focus` と
+選択の両方を見る（下の「diff の遅延取得」）。
 
 **選択と右ペインの対応は `GraphSelection::right_pane()` の 1 つ。** `Enter` の行き先
 （グラフの `Enter` は右ペインへ移る）と巡回の候補が別々に決めると、画面はコミット詳細
@@ -116,8 +118,9 @@ pub enum Modal {
 ため。** コミットを選んだまま `focus` が `Worktree` でいられると、`s` / `u` / `x` が
 画面に出ていないファイルを stage する。キーごとにガードを置く形にすると、キーを足す
 たびに書き足す必要があり、書き忘れが静かに通る。グラフのカーソルが WIP 行を出入り
-したところで、候補から外れた `focus` を `Graph` に座り直させる（どちらの選択でも
-候補にある唯一のペイン）。
+したところで、候補から外れた `focus` を `Graph` に座り直させる。**`Graph` を選ぶのは
+「どちらの選択でも候補にある」からだけではない**（`Branches` と `Diff` もそうなった）。
+座り直しはユーザーが選んでいない移動なので、いま見ている左の領域に戻す（07）。
 
 **`Pane::Diff` は左の領域を `Graph` と差し替えで使う**ので、どちらを描くかは `focus`
 だけで決まり、「いまどちらを見せているか」を別に持たない（07）。**`Pane::CommitDetail`
@@ -373,9 +376,12 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 | | 出す `Cmd` | 例 |
 |---|---|---|
 | `Nothing` | `LoadStatus` | stage / unstage / discard、stash |
-| `Refs` | `+ LoadRepoInfo` | checkout、branch 作成 / リネーム、非 force push |
+| `Refs` | `+ LoadRepoInfo` `+ LoadBranches` | checkout、branch 作成 / リネーム、非 force push |
 | `RefsAndLog` | `+ LoadLog { restart }` | commit、fetch / pull、force push、branch 削除、rebase / cherry-pick / revert |
 
+- **ブランチ一覧も `Refs` に入れる。** ラベルと HEAD（`LoadRepoInfo`）と同じく ref から
+  導かれる値で、同じ書き込みで古くなる。commit は `refs/heads/<現在>` を動かすので、
+  外すと Branches ペインが commit 前の ahead を出したまま残る
 - **`Refs` と `RefsAndLog` を分ける。** グラフのラベルと HEAD は行に焼き込まず
   `GraphState.refs` から引く（07）ので、**既にあるコミットを指し直すだけの操作では
   行は 1 つも動かない**。ログの読み直しは `LogSession` の作り直しで履歴全体のコストが
@@ -717,7 +723,7 @@ fetch で入れる**（下の「実行中ジョブ › 世代」）。`Freshness
 ### 失敗の記憶
 
 読み取りは失敗しうるので、**「一度試して失敗した」を状態に持つ。** 持たないと、
-失敗のたびに再発行して「失敗 → 再読込 → 失敗」を回す。4 つあり、どれも同じ形
+失敗のたびに再発行して「失敗 → 再読込 → 失敗」を回す。5 つあり、上の 4 つは同じ形
 （何に対して失敗したかを覚え、対象が変わるか成功したら落とす）。
 
 | 印 | 何の失敗か | 落とすところ |
@@ -726,6 +732,7 @@ fetch で入れる**（下の「実行中ジョブ › 世代」）。`Freshness
 | `GraphState.detail_failed` | コミット詳細 | 同上 |
 | `GraphState.files_failed` | ファイル一覧 | 同上 |
 | `DiffState.failed` | diff | ワーキングツリーとファイル一覧のカーソル移動、成功 |
+| `BranchState.load` | ブランチ一覧 | 読み込みの成功（下の「ブランチ一覧」） |
 
 - **対象を持つものは `Option<T>` にする**（`detail_failed` / `files_failed` は `Oid`、
   `DiffState.failed` は `DiffTarget`）。`bool` にすると、別の対象の失敗のあとに来た
@@ -738,10 +745,45 @@ fetch で入れる**（下の「実行中ジョブ › 世代」）。`Freshness
   発行経路を変えたときに、片方だけ直してもコンパイルもテストも通ってしまう
 - **詳細と一覧は別の印。** 片方だけが失敗することがあり（一覧はツリーの比較で、
   本文の読み出しとは別の失敗をする）、1 本にすると成功したほうまで塞ぐ
+- **`BranchState.load` だけは `Option<T>` ではなく 3 状態の enum。** ブランチ一覧は
+  対象を持たない（リポジトリ全体で 1 つ）ので覚える対象が無く、代わりに
+  「まだ届いていない / 届いた / 失敗した」を出し分ける必要がある。`Vec` が空でも
+  それが `git init` 直後の正常な状態なのか、まだ来ていないのかは中身から判らない。
+  **`bool` を 2 つ（`loaded` と `failed`）にしない。** 4 通りのうち踏めない組が
+  できる（下の「ブランチ一覧」）
 
 **4 つとも冪等になったので、読み込みの発行は `update` の出口で導出できる形になった。**
 いまは呼び出し箇所に散っている（下の `update_inner` の doc）。畳むかどうかは M3 で
 `JobTracker` に世代を入れるときに決める（そこで `Freshness` と `stale` も一緒に見る）。
+
+## ブランチ一覧
+
+```rust
+pub struct BranchState {
+    pub branches: Vec<Branch>,   // 名前順。02 の branches() の戻り値そのまま
+    pub cursor: usize,
+    load: BranchLoad,            // Pending | Loaded | Failed
+}
+```
+
+- **`load` は 3 状態の enum。** 一覧が空でも、それが `git init` 直後（ブランチが 1 本も
+  無い）なのか、まだ届いていないのかは `Vec` からは判らない。`ui` はこの 3 つを
+  「ブランチはありません」「読み込み中…」「ブランチを読み込めませんでした」に写す
+  （07 の「Branches ペイン」）
+- **`bool` を 2 つ（`loaded` / `failed`）にしない。** 4 通りのうち
+  「まだ届いていないのに失敗した」は表現できてしまい、どのテストからも踏めない
+- **`ui` が `load` を見るのは一覧が空のときだけ。** 中身があるならそれを描く。
+  読み直しが失敗しても読めていた一覧は捨てない（`StatusLoaded` と同じ理由。捨てると
+  画面から消えるだけになる）ので、「失敗したが一覧はある」を文言に化けさせない
+- **`WorktreeState.loaded`（`bool`）と形が違う理由。** ワーキングツリーは書き込みの
+  たびに読み直すので「読み込み中…」のまま留まらないが、ブランチ一覧を読むのは
+  起動時と ref を動かす書き込みの後だけで、起動時に失敗すると次が無い
+- **カーソルは選んでいたブランチの名前で座り直す。** 見つからなければ（消えた /
+  リネームされた）HEAD のブランチ、それも無ければ（detached / unborn）先頭。
+  **添字では座り直さない。** 一覧は名前順なので、ブランチが 1 本増えるだけで
+  同じ添字が別のブランチを指す。**読み直しは commit のたびに来る**ので
+  （上の `update::Reload`）、カーソルを HEAD に戻すだけだと、別のブランチを見ながら
+  commit した人のカーソルが毎回飛ぶ
 
 ## 実行中ジョブ
 
@@ -880,6 +922,7 @@ pub enum Msg {
     HeadMessageLoaded(Result<Option<String>, GitReadError>),  // amend の初期値。None は unborn
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
+    BranchesLoaded(Box<Result<Vec<Branch>, GitReadError>>),   // ローカルブランチの一覧
     DiffLoaded { target: DiffTarget, result: Box<Result<Vec<FileDiff>, GitReadError>> },
     // git_exec
     ExecFinished(Box<ExecDone>),       // { op, result, progress }
@@ -932,6 +975,12 @@ pub enum Msg {
 「どの対象が失敗したか」を知る手掛かりがこれしかない。加えて `Ok` でも、届いた
 diff がいま選んでいるファイルのものかを判定するのに要る。
 
+`BranchesLoaded` も `Result` を運ぶ。理由は `StatusLoaded` と同じで、失敗の通り道が
+無いと `JobKind::LoadBranches` が走ったまま残り、以後の `Cmd::LoadBranches` が黙って
+落ちる。**要求した内容は運ばない。** 一覧は対象を持たない（リポジトリ全体で 1 つ）ので、
+`CommitDetailLoaded` の `oid` に当たるものが無い。`LogLoaded` の `restart` のような
+「同じ `Cmd` の 2 つの意味」も無い。
+
 `CommitFilesLoaded` は `CommitDetailLoaded` と同じ形（`Result` + 要求した Oid）。
 理由も同じなので繰り返さない。**別の `Msg` にするのは `Cmd` を分けているから**で、
 1 通にまとめると本文だけ見えていれば足りる時点でも一覧を待つことになる
@@ -952,6 +1001,7 @@ pub enum Cmd {
     LoadHeadMessage,                   // amend の初期値。HEAD の解決ごとリーダーで行う
     LoadStatus, LoadDiff(DiffTarget),
     LoadRepoInfo,                      // remotes / head / refs。起動時と ref 変更後（M3）
+    LoadBranches,                      // ローカルブランチ一覧。RepoInfo とは別（02）
     Exec(GitOp),                       // git CLI 実行（03 参照）
     ResolveAccount,
     FetchPr, FetchChecks, FetchPrList,
@@ -967,8 +1017,8 @@ pub fn init(state: &mut AppState) -> Cmd;
 
 `runtime::run` がループに入る前に 1 回呼ぶ。`main.rs` から呼ぶと、テストを書かない
 配線の側に処理が出てしまう。いまは `LoadRepoInfo` と
-`LoadLog { count: config.graph.page_size, restart: false }` と `LoadStatus` の 3 つで、
-`ResolveAccount` はそのタスクでここに足す。起動時はまだ何も読んでいないので
+`LoadLog { count: config.graph.page_size, restart: false }` と `LoadStatus` と
+`LoadBranches` の 4 つで、`ResolveAccount` はそのタスクでここに足す。起動時はまだ何も読んでいないので
 `restart` は偽でよい（`LogSession` が無ければ `restart` の有無に関わらず先頭から開く）。
 
 ## update の原則

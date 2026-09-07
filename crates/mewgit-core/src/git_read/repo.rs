@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
-    lossy, signature, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex, RefLabel, Remote,
-    Timestamp,
+    lossy, signature, Branch, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex, RefLabel,
+    Remote, Timestamp,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -119,6 +119,82 @@ impl RepoReader {
         }
 
         Ok(RefIndex::new(labels))
+    }
+
+    /// ローカルブランチの一覧。名前順。
+    ///
+    /// [`RepoReader::refs`] とは別の読み取り（02 の「ブランチ一覧」）。あちらが返す
+    /// [`RefIndex`] は Oid → ラベルの索引で、**upstream も ahead / behind も持たない**
+    /// ので、Branches ペインはそこからは組めない。
+    pub fn branches(&self) -> Result<Vec<Branch>, GitReadError> {
+        // HEAD は 1 回だけ解決する。`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を
+        // 読み直すので、ブランチの本数だけファイル読みが増える（`refs` と同じ）。
+        let head = self.repo.find_reference("HEAD")?;
+        let head_target = head.symbolic_target().ok().flatten();
+
+        // **`refs/heads/*` だけを列挙する。** `references()` で全部辿ってから捨てると、
+        // loose ref のリポジトリで `refs/remotes/*` と `refs/tags/*` のファイルまで
+        // 読むことになる（libgit2 は接頭辞のあるグロブでディレクトリの走査を絞る。
+        // `refdb_fs.c` の `iter_load_optimize_prefix`）。`*` は `/` も跨ぐので
+        // `feat/x` のような名前も入る（統合テストで確かめている）。
+        let mut branches = Vec::new();
+        for reference in self.repo.references_glob("refs/heads/*")? {
+            let reference = reference?;
+            // 非 UTF-8 のブランチ名は識別子として使えない（`git_exec` の argv にも
+            // 載せられない）ので落とす。切替も削除もできない行を出さないため。
+            let Some(name) = reference.shorthand().ok().map(str::to_string) else {
+                continue;
+            };
+            let is_head = reference.name().is_ok_and(|full| head_target == Some(full));
+            // 指す先が commit でない ref（ありえないが、壊れたリポジトリでは起きる）は
+            // 落とす。`refs` が peel できないタグを落とすのと同じ扱い。
+            let Ok(oid) = reference.peel_to_commit().map(|commit| commit.id()) else {
+                continue;
+            };
+
+            let branch = git2::Branch::wrap(reference);
+            // **upstream が引けないブランチも一覧に残す。** 未設定なら
+            // `NotFound`（class=Config）、設定はあるが追跡 ref が消えていれば
+            // `NotFound`（class=Reference。git2 0.21 で確認）。**理由を問わず
+            // `(None, 0, 0)` に落とすのは、1 本の壊れた追跡 ref で一覧全体を
+            // 失わせないため**（他のブランチはどれも読めている。02）。
+            let (upstream, ahead, behind) = match branch.upstream() {
+                Ok(upstream) => self.tracking(oid, &upstream),
+                Err(_) => (None, 0, 0),
+            };
+
+            branches.push(Branch {
+                name,
+                oid,
+                upstream,
+                ahead,
+                behind,
+                is_head,
+            });
+        }
+
+        // git2 の列挙順は安定していない（`RefIndex::new` と同じ理由）。
+        branches.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(branches)
+    }
+
+    /// upstream の短縮名と、それに対する ahead / behind。
+    ///
+    /// **出せないときは `(None, 0, 0)`。`Err` を返さない。** 追跡 ref が壊れている
+    /// （中断した fetch のあとなど）ブランチが 1 本あるだけで一覧全体が消えると、
+    /// 読めているブランチまで画面から無くなる。名前が非 UTF-8（識別子として扱えない）、
+    /// symbolic な remote-tracking ref（ラベルと同じく解決しない）、`ahead_behind` が
+    /// 引けない（指す先のオブジェクトが無い）のどれも、**一覧の読み手にとっては同じ
+    /// 「比べる相手がいない」**（02）。
+    fn tracking(&self, local: Oid, upstream: &git2::Branch<'_>) -> (Option<String>, usize, usize) {
+        let (Ok(Some(name)), Some(upstream_oid)) = (upstream.name(), upstream.get().target())
+        else {
+            return (None, 0, 0);
+        };
+        match self.repo.graph_ahead_behind(local, upstream_oid) {
+            Ok((ahead, behind)) => (Some(name.to_string()), ahead, behind),
+            Err(_) => (None, 0, 0),
+        }
     }
 
     /// コミット 1 件の詳細。グラフの行が持たない値（メッセージ全文・committer・

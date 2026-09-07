@@ -87,7 +87,7 @@ fn heading(section: WorktreeSection) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, row_is_reversed, state_at};
+    use crate::test_util::{draw, pane_text, row_is_reversed, state_at};
     use mewgit_core::app::{update, Msg, TermSize};
     use mewgit_core::git_read::{FileStatus, WorktreeSnapshot};
     use mewgit_core::test_util::fake_entry;
@@ -173,7 +173,9 @@ mod tests {
         let mut state = state_at("/repo");
         let _ = state.issue(mewgit_core::app::Cmd::LoadStatus);
 
-        let text = draw(&state, SIZE).join("\n");
+        // **このペインの中だけを見る。** 画面全体を見ると、まだ届いていない
+        // ブランチ一覧が出した同じ文言で通ってしまう（`ui::LOADING` は共有）。
+        let text = pane_text(&state, SIZE, Pane::Worktree);
 
         assert!(text.contains("読み込み中"), "{text}");
     }

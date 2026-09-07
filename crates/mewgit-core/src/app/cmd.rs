@@ -49,6 +49,18 @@ pub enum Cmd {
     LoadDiff(DiffTarget),
     /// リモート・HEAD・ref の索引を読む。起動時と、ref が変わったあと（M3）。
     LoadRepoInfo,
+    /// ローカルブランチの一覧を読む（02 の「ブランチ一覧」）。
+    ///
+    /// **[`Cmd::LoadRepoInfo`] に乗せない。** ブランチの本数だけ upstream の解決と
+    /// `graph_ahead_behind` の walk が要り、グラフのラベルと HEAD だけが欲しい経路に
+    /// そのコストを払わせることになる（`LoadCommitFiles` を `LoadCommitDetail` と
+    /// 分けたのと同じ理由）。
+    ///
+    /// **古くなる時点は [`Cmd::LoadRepoInfo`] と同じ**なので、起動時と、ref を動かす
+    /// 書き込みの後（`update::Reload` の `Refs` 以上）に出す。commit は
+    /// `refs/heads/<現在>` を動かすので、ここを外すと Branches ペインが commit 前の
+    /// ahead を出したまま残る。
+    LoadBranches,
     /// git CLI の実行（03 参照）。
     Exec(GitOp),
     ResolveAccount,
@@ -90,6 +102,7 @@ impl Cmd {
             Cmd::LoadHeadMessage => Some(JobKind::LoadHeadMessage),
             Cmd::LoadStatus => Some(JobKind::LoadStatus),
             Cmd::LoadRepoInfo => Some(JobKind::LoadRepoInfo),
+            Cmd::LoadBranches => Some(JobKind::LoadBranches),
             Cmd::LoadDiff(_) => Some(JobKind::LoadDiff),
             Cmd::Exec(_) => Some(JobKind::Exec),
             Cmd::ResolveAccount => Some(JobKind::ResolveAccount),

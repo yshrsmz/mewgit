@@ -27,6 +27,7 @@ impl RepoReader {
     pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;     // name, url（生の値）
     pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>
     pub fn head(&self) -> Result<HeadInfo, GitReadError>;           // branch name or detached Oid
+    pub fn branches(&self) -> Result<Vec<Branch>, GitReadError>;    // ローカルブランチ + upstream の ahead/behind
     pub fn log(&self) -> Result<LogSession<'_>, GitReadError>;   // ページングは LogSession が持つ
     pub fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;  // 選択時に遅延取得
     pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;  // 同上（一覧だけ）
@@ -93,6 +94,63 @@ pub enum RefLabel {
 - `FromIterator` を実装して `refs()` を通さずにも索引を組めるようにする。`ui` のテストが
   ラベルの描画を実リポジトリ無しで表現できるようにするため。どちらの経路でも
   並べ替えは同じところを通る
+
+### ブランチ一覧
+
+```rust
+pub struct Branch {
+    pub name: String,            // "feat/x"
+    pub oid: Oid,
+    pub upstream: Option<String>,  // "origin/feat/x"。未設定なら None
+    pub ahead: usize,            // upstream に対する ahead / behind
+    pub behind: usize,
+    pub is_head: bool,
+}
+```
+
+Branches ペイン（07）が使う。`refs()` が返すのは Oid → ラベルの索引で、**ラベルには
+upstream も ahead / behind も無い**ので、そちらからは組めない。
+
+- **列挙は `references_glob("refs/heads/*")`。** `references()` で全部辿ってから捨てると、
+  loose ref のリポジトリで `refs/remotes/*` と `refs/tags/*` のファイルまで読む
+  （libgit2 は接頭辞のあるグロブでディレクトリの走査を絞る。`refdb_fs.c` の
+  `iter_load_optimize_prefix`）。`*` は `/` も跨ぐので `feat/x` も入る。
+  git2 の `branches()` は使わない — 内部は絞り込みの無い `references()` と同じ
+- **`is_head` は `HEAD` の symbolic target との比較**で決め、HEAD は 1 回だけ解決する
+  （`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直す）。unborn と detached は
+  どちらも「どのブランチも HEAD ではない」に落ちる。`refs()` と同じ形
+- **非 UTF-8 のブランチ名は落とす**（`refs()` と同じ。識別子は `git_exec` の argv に
+  載せられないので、出しても切替も削除もできない行になる）
+- **並べ替えは名前順**。git2 の列挙順は安定していない（`RefIndex` と同じ理由）
+- **upstream が引けないブランチは `upstream: None` にして一覧に残す。** 理由は 4 つある。
+  `upstream()` が未設定で `NotFound`（class=Config）、設定はあるが追跡 ref が消えていて
+  `NotFound`（class=Reference。`fetch --prune` のあと。どちらも git2 0.21 で確認）、
+  名前が非 UTF-8、symbolic な remote-tracking ref。**`None` の理由が 2 つ以上あるときは、
+  呼び出し側が同じ扱いをしてよいかを数える**（#31 の `hunk_scope` は「ハンクで表せない」と
+  「まだ届いていない」を同じ `None` にして、ファイル全体を stage する事故になった）。
+  数えた結果、**この一覧の読み手（Branches ペイン）にとっては 4 つとも同じ**
+  ——「ahead / behind を出す相手がいない」。`NotFound` 以外の `Err` はそのまま返す
+  （壊れたリポジトリなので `refs()` と同じ扱い）
+- **`Branch.upstream` から push の `-u` を決めない**（M3）。「upstream が無い」と
+  「upstream はあるがこの一覧では出せない」が同じ `None` に落ちているので、`-u` を
+  付けるかは `branch.<name>.merge` を読んで決める。ここは表示のための値
+- **ahead / behind は `graph_ahead_behind(local, upstream)`。** upstream があるときだけ
+  引く。無いブランチで 0 / 0 を入れると「同期している」と読めてしまう
+- **`upstream()` はブランチ 1 本ごとにリモートを引き直す。** libgit2 1.9.7 の
+  `branch.c: git_branch_upstream_name` は、呼ばれるたびに config の snapshot を取り、
+  `branch.<name>.remote` が `.` でなければ `git_remote_lookup` する（ソースで確認）。
+  ブランチが多いリポジトリでは、ここが `graph_ahead_behind` の walk より重くなる。
+  **畳むなら config を 1 回だけ読み、リモートを名前で覚えて refspec 変換を自分でかける**
+  ことになるが、`branch.<name>.remote = "."`（ローカル追跡）まで自前で再現することに
+  なるので、**M3 の fetch / pull のタスクで決める**（あそこで一覧の読み直しが増える）
+
+**`refs()` / `head` / `remotes` と 1 通にまとめない**（`Cmd::LoadRepoInfo` に乗せない）。
+ブランチの本数だけ upstream の解決と `graph_ahead_behind` の walk が要り、グラフの
+ラベルと HEAD だけが欲しい経路にそのコストを払わせることになる。`commit_files` を
+`commit_detail` と分けたのと同じ理由（01 の「コミットのファイル一覧」）。**古くなる
+時点は同じ**なので、ref を動かす書き込みの後は両方を読み直す。**その配線は切替と削除の
+タスク**（01 の `update::Reload`。一覧を出すだけのタスクには ref を動かす書き込みが
+無いので、足しても踏めない）。
 
 ### 非 UTF-8 の扱い
 

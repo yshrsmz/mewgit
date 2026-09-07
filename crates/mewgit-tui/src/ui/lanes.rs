@@ -8,7 +8,7 @@ use mewgit_core::graph::{Cell, ColorId, GraphRow, Horizontal, Vertical};
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
-use crate::ui::theme;
+use crate::ui::{self, theme};
 
 /// 1 レーンが占める桁数。罫線 1 桁 + 隣との継ぎ目 1 桁。
 const LANE_WIDTH: usize = 2;
@@ -43,7 +43,7 @@ pub fn spans(row: &GraphRow, lanes: usize, palette: &[Color], ascii: bool) -> Ve
         let joined = cell.horizontal.goes_right() && next.horizontal.goes_left();
         spans.push(if joined {
             let color = cell.horizontal.color().and_then(|id| pick(id, palette));
-            Span::styled(pick_charset(HORIZONTAL, ascii), fg(color))
+            Span::styled(ui::pick_charset(HORIZONTAL, ascii), fg(color))
         } else {
             Span::raw(" ")
         });
@@ -105,7 +105,7 @@ fn glyph(cell: Cell, ascii: bool) -> &'static str {
         (V::Down(_), H::Both(_)) => ("┬", "+"),
     };
 
-    pick_charset((utf8, plain), ascii)
+    ui::pick_charset((utf8, plain), ascii)
 }
 
 /// 横線。レーンの継ぎ目にも使う。
@@ -116,15 +116,7 @@ const HORIZONTAL: (&str, &str) = ("─", "-");
 /// **コミットの `●` / `○` と重ならない字を選ぶ。** WIP 行はコミットではなく、
 /// `graph` 層を通らない（06 の「責務」）。ASCII 側も同じ理由で `*` / `o` を避ける。
 pub fn wip_glyph(ascii: bool) -> &'static str {
-    pick_charset(("◇", "@"), ascii)
-}
-
-fn pick_charset(glyphs: (&'static str, &'static str), ascii: bool) -> &'static str {
-    if ascii {
-        glyphs.1
-    } else {
-        glyphs.0
-    }
+    ui::pick_charset(("◇", "@"), ascii)
 }
 
 #[cfg(test)]

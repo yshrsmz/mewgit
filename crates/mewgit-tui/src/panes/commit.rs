@@ -20,14 +20,6 @@ use crate::ui::{self, theme, time};
 /// メッセージの領域を取り、足りないときは見出しのほうを切る。
 const MIN_MESSAGE_ROWS: u16 = 3;
 
-/// ファイル一覧に割ける高さの上限（内側の高さに対する割合の分母）。
-///
-/// 一覧は必要なぶんだけ取り、それが内側の半分を超えたらここで頭打ちにする。上限が
-/// 無いと、ファイルの多いコミットで**メッセージが 1 行も見えなくなる**（見出しに
-/// `MIN_MESSAGE_ROWS` を確保しているのと同じ理由）。逆に固定で割かないのは、
-/// メッセージが 1 行の summary で終わるコミットのほうが多いため（07）。
-const FILES_SHARE: u16 = 2;
-
 /// コミット詳細ペインを描く。
 ///
 /// **選んでいるコミットを引数で受ける。** `state` から引き直すと「選んでいないのに
@@ -45,9 +37,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) 
     // 行数を変えたときに片方だけ直しても通り、枠からはみ出すか余白が残る
     // （`panes::worktree::lines` と同じ理由）。残りを詳細に使う。
     let (files, files_cursor) = files_lines(state);
-    let files_rows = u16::try_from(files.len())
-        .unwrap_or(u16::MAX)
-        .min(inner.height / FILES_SHARE);
+    // 上限は内側の半分。ファイルの多いコミットで**メッセージが 1 行も見えなくなる**のを
+    // 防ぐ（見出しに `MIN_MESSAGE_ROWS` を確保しているのと同じ理由）。規則は
+    // Branches ペインと共有する（`ui::capped_rows`）。
+    let files_rows = ui::capped_rows(files.len(), inner.height);
     let [top, files_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(files_rows)]).areas(inner);
 
@@ -185,9 +178,9 @@ fn who(label: &str, sig: &Signature, time: Timestamp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, row_is_reversed, state_on_first_commit};
+    use crate::test_util::{draw, pane_text, row_is_reversed, state_on_first_commit};
     use crate::ui;
-    use mewgit_core::app::{update, AppState, JobKind, Key, Msg, TermSize};
+    use mewgit_core::app::{update, AppState, JobKind, Key, Msg, Pane, TermSize};
     use mewgit_core::git_read::{CommitDetail, FileEntry, FileStatus, GitReadError, Oid};
     use mewgit_core::test_util::{fake_detail, fake_entry, fake_oid};
 
@@ -265,7 +258,9 @@ mod tests {
         let _ = update(&mut state, Msg::Key(Key::char('j')));
         assert!(state.jobs.is_running(JobKind::LoadCommitDetail));
 
-        let text = draw(&state, WIDE).join("\n");
+        // **このペインの中だけを見る。** `ui::LOADING` は 5 つのペインが共有して
+        // いるので、画面全体を見ると別のペインの「読み込み中…」で通ってしまう。
+        let text = pane_text(&state, WIDE, Pane::CommitDetail);
 
         assert!(text.contains("読み込み中"), "{text}");
         // 前のコミットの本文を出したままにしない。
@@ -344,7 +339,7 @@ mod tests {
         // `--allow-empty` のコミット。**「読み込み中」と同じ見た目にしない**（01）。
         let state = with_detail_and_files(Vec::new());
 
-        let text = draw(&state, TermSize::default()).join("\n");
+        let text = pane_text(&state, TermSize::default(), Pane::CommitDetail);
 
         assert!(text.contains("変更はありません"), "{text}");
         assert!(!text.contains("読み込み中"), "{text}");
@@ -356,7 +351,7 @@ mod tests {
         // なる時点が普通にある（07）。
         let state = with_detail(&["subject"], fake_detail(0, "subject"));
 
-        let text = draw(&state, WIDE).join("\n");
+        let text = pane_text(&state, WIDE, Pane::CommitDetail);
 
         assert!(state.jobs.is_running(JobKind::LoadCommitFiles));
         assert!(text.contains("subject"), "{text}");

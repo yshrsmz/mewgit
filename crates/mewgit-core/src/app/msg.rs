@@ -3,8 +3,8 @@
 use crate::auth::AccountState;
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
-    CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp, LogPage,
-    Oid, RefIndex, Remote, WorktreeSnapshot,
+    Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp,
+    LogPage, Oid, RefIndex, Remote, WorktreeSnapshot,
 };
 use crate::github::{Check, GithubError, PullRequest};
 
@@ -90,6 +90,13 @@ pub enum Msg {
     /// `Cmd::LoadStatus` が黙って落ちる。書き込みのたびに `ExecFinished` が
     /// `LoadStatus` を出すので、詰まると「stage したのに一覧が変わらない」になる。
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
+    /// ローカルブランチの一覧。`StatusLoaded` と同じ理由で `Result` を運ぶ。失敗の
+    /// 通り道が無いと `JobKind::LoadBranches` が走ったまま残り、以後の
+    /// `Cmd::LoadBranches` が黙って落ちる。
+    ///
+    /// **要求した内容は運ばない。** 一覧はリポジトリ全体で 1 つなので、
+    /// `CommitDetailLoaded` の `oid` に当たる「どれを頼んだか」が無い。
+    BranchesLoaded(Box<Result<Vec<Branch>, GitReadError>>),
     /// 対象の diff。`LogLoaded` と同じ理由で `Result` を運ぶ。失敗の通り道が無いと
     /// `JobKind::LoadDiff` が走ったまま残り、以後の `Cmd::LoadDiff` が黙って落ちる。
     ///

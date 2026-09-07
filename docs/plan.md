@@ -47,7 +47,23 @@
       新しい読み取りを足さず、こちらは `git_read::commit_files` の追加と
       `AppState::wanted_diff` の拡張が要る（割った理由は 07 の「どこまで実装したか」）。
       **一覧は `diff(DiffTarget::Commit { path: None })` では作らない**（02）
-- [ ] `ui::panes::branches` — 一覧、作成 / 切替 / 削除 / リネーム、`Modal::Confirm`
+- [x] `ui::panes::branches` の一覧 — `git_read::branches`、`Cmd::LoadBranches`、
+      右列を Branches と（Working tree / コミット詳細）の上下に割る、`Tab` の巡回に
+      `Pane::Branches` を足す。**読み取りだけ。** 書き込みは下の 2 本
+- [ ] ブランチの切替と削除 — `Enter` で `GitOp::Checkout`、`d` / `D` で
+      `GitOp::BranchDelete`（`Modal::Confirm` を通す）、`update::Reload` に
+      ブランチ一覧の読み直しを足す。**`Checkout` の argv を `switch <target>` に直す**
+      （03 は既に `switch` / `restore` 前提で、`checkout <target> --` だけが残っていた）
+- [ ] ブランチの作成とリネーム — `n` / `r` で `Modal::Input`（`InputIntent`）、
+      `GitOp::BranchCreate { checkout: true }` / `GitOp::BranchRename`。
+      **`Modal::Input` の最初の利用者**なので `modals/input.rs` と、1 行入力での
+      貼り付けの扱いをここで決める
+
+`ui::panes::branches` を 3 本に割った理由。1 本目は新しい読み取り（`git_read::branches`）と
+右列のレイアウト変更で、書き込みを 1 つも足さない。2 本目は書き込みだが既存の
+`Modal::Confirm` しか使わず、3 本目は `Modal::Input` という**新しいモーダル型**の最初の
+利用者になる（`modals::place` の 3 人目）。**どれも単独で画面から触れるものが増える。**
+詳しくは 07 の「どこまで実装したか」。
 
 ## M3: リモート
 

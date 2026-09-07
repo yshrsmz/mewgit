@@ -205,7 +205,7 @@ fn marked(mark: char, content: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, row_is_reversed, row_of, state_at};
+    use crate::test_util::{draw, pane_text, row_is_reversed, row_of, state_at};
     use mewgit_core::app::{update, Cmd, Key, KeyCode, Msg, TermSize};
     use mewgit_core::git_read::{FileDiff, WorktreeSnapshot};
     use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk};
@@ -384,7 +384,10 @@ mod tests {
             "古いタイトルが残っている: {text}"
         );
         assert!(text.contains("Diff: b.txt"), "{text}");
-        assert!(text.contains("読み込み中"), "{text}");
+        assert!(
+            pane_text(&state, SIZE, Pane::Diff).contains("読み込み中"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -529,7 +532,9 @@ mod tests {
         // 失敗したように見える。
         let state = opened(one_file());
 
-        let text = draw(&state, SIZE).join("\n");
+        // **このペインの中だけを見る。** 画面全体を見ると、まだ届いていない
+        // ブランチ一覧が出した同じ文言で通ってしまう（`ui::LOADING` は共有）。
+        let text = pane_text(&state, SIZE, Pane::Diff);
 
         assert!(text.contains("読み込み中"), "{text}");
         // 届く前でも、何の diff を待っているかは出す。

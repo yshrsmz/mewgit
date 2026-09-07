@@ -697,3 +697,132 @@ fn commit_detail_fails_for_an_oid_that_is_not_in_the_repository() {
         "予期しないエラーです: {err:?}"
     );
 }
+
+#[test]
+fn branches_lists_local_branches_by_name_with_the_head_marked() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["branch", "topic"]);
+    repo.git(&["branch", "another"]);
+    // `/` を含む名前も落とさない（列挙の絞り込みが `refs/heads/*` なので）。
+    repo.git(&["branch", "feat/nested"]);
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let branches = reader.branches().unwrap();
+
+    // git2 の列挙順には依存しない。名前順に並べ替えて返す。
+    let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["another", "feat/nested", "main", "topic"]);
+    // HEAD の印は 1 本だけ。
+    let head: Vec<&str> = branches
+        .iter()
+        .filter(|b| b.is_head)
+        .map(|b| b.name.as_str())
+        .collect();
+    assert_eq!(head, ["main"]);
+    // upstream が無ければ ahead / behind は出さない。
+    assert!(branches.iter().all(|b| b.upstream.is_none()));
+}
+
+#[test]
+fn branches_reports_the_upstream_and_how_far_it_diverged() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    // リモートを実際に持たせる。libgit2 の `upstream()` は `branch.<name>.remote` が
+    // 指すリモートが `.git/config` に無いと `NotFound` になる。
+    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+    let base = repo.head_oid().to_string();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &base]);
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    // ローカルだけを 2 つ進める。
+    repo.commit("second");
+    repo.commit("third");
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let branches = reader.branches().unwrap();
+
+    let main = branches.iter().find(|b| b.name == "main").unwrap();
+    assert_eq!(main.upstream.as_deref(), Some("origin/main"));
+    assert_eq!((main.ahead, main.behind), (2, 0));
+}
+
+#[test]
+fn branches_keeps_a_branch_whose_upstream_ref_is_gone() {
+    // 設定はあるが追跡 ref が消えている（`fetch --prune` のあと）。`upstream()` は
+    // 未設定と同じ `NotFound` を返すので、どちらも「比べる相手がいない」に畳む（02）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let branches = reader.branches().unwrap();
+
+    // 一覧ごと `Err` にしない。
+    let main = branches.iter().find(|b| b.name == "main").unwrap();
+    assert_eq!(main.upstream, None);
+    assert_eq!((main.ahead, main.behind), (0, 0));
+}
+
+#[test]
+fn branches_survives_a_broken_tracking_ref() {
+    // 中断した fetch のあとなど、追跡 ref が存在しないオブジェクトを指すことがある。
+    // **その 1 本のために一覧全体を失わない**（他のブランチはどれも読めている）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["branch", "topic"]);
+    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    // まず正しい追跡 ref を作り（ディレクトリもここでできる）、中身をどのオブジェクトも
+    // 指さない oid に書き換える。`update-ref` は存在を検査するのでファイルを直に書く。
+    let oid = repo.head_oid().to_string();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &oid]);
+    repo.write_git_file(
+        "refs/remotes/origin/main",
+        b"0000000000000000000000000000000000000001\n",
+    );
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let branches = reader.branches().unwrap();
+
+    let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["main", "topic"]);
+    // 比べる相手が引けないので ahead / behind は出さない。
+    let main = branches.iter().find(|b| b.name == "main").unwrap();
+    assert_eq!(main.upstream, None);
+    assert_eq!((main.ahead, main.behind), (0, 0));
+}
+
+#[test]
+fn branches_drops_a_non_utf8_name() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let oid = repo.head_oid().to_string();
+    // **loose ref としては作れない。** ref 名がそのままファイル名になるので、macOS の
+    // APFS が `Illegal byte sequence` で弾く（非 UTF-8 のパスを index にだけ入れるのと
+    // 同じ制約。CLAUDE.md）。`packed-refs` は 1 つのファイルの中身なので通る。
+    let mut packed = b"# pack-refs with: peeled fully-peeled sorted \n".to_vec();
+    packed.extend_from_slice(oid.as_bytes());
+    packed.extend_from_slice(b" refs/heads/\xff\xfe\n");
+    repo.write_git_file("packed-refs", &packed);
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let branches = reader.branches().unwrap();
+
+    // 識別子として使えないので落とす。残すと切替も削除もできない行が出る（02）。
+    let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["main"]);
+}
+
+#[test]
+fn branches_is_empty_before_the_first_commit() {
+    // unborn HEAD ではブランチの ref がまだ無い。**`Err` ではない。**
+    let repo = TestRepo::init();
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert_eq!(reader.branches().unwrap(), Vec::new());
+}

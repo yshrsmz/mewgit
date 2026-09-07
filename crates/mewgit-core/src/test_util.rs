@@ -30,7 +30,7 @@ const TICK: i64 = 60;
 
 use crate::git_exec::Runner;
 use crate::git_read::{
-    Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
+    Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
     Signature, Timestamp, WorktreeSnapshot,
 };
 use tempfile::TempDir;
@@ -350,6 +350,21 @@ fn shown<S: AsRef<OsStr>>(args: &[S]) -> String {
         .map(|arg| arg.as_ref().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// ブランチ 1 件。upstream は持たない（要るテストは戻り値のフィールドを足す）。
+///
+/// oid は [`fake_oid`] の 0 番。ブランチの一覧は名前と印だけで読めるので、
+/// テストが oid を気にせずに済むようにする。
+pub fn fake_branch(name: &str, is_head: bool) -> Branch {
+    Branch {
+        name: name.to_string(),
+        oid: fake_oid(0),
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        is_head,
+    }
 }
 
 /// 変更のあったファイル 1 件。rename は `old_path` を呼び出し側で足す。

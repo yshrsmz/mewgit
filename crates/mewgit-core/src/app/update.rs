@@ -2190,9 +2190,9 @@ mod tests {
 
     #[test]
     fn enter_on_the_head_branch_still_asks_git() {
-        // **押せるかを手前で判定しない**（不変ルール 4）。`git switch main` は
-        // `Already on 'main'` で成功するので、弾く理由が無い。同じ判定を mewgit と
-        // git の 2 箇所に置かないため。
+        // **押せるかを手前で判定しない**（不変ルール 4）。`is_head` は最後に読んだ
+        // 一覧の値でしかないので、これで「切り替えなくてよい」と決めると、別の端末で
+        // 切り替えられていたときに `Enter` が何も起こさなくなる（07 の「Branches ペイン」）。
         let mut state = state_on_branches(&[("another", false), ("main", true)]);
         assert!(state.branches.selected().expect("空です").is_head);
 

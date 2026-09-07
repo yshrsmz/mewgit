@@ -639,7 +639,7 @@ mod tests {
     fn an_unknown_oid_has_no_labels() {
         let state = state_with_commits(&["first"]);
         let other = fake_commit(99, "other").oid;
-        assert_ne!(other, Oid::zero());
+        assert_ne!(other, Oid::ZERO_SHA1);
 
         assert!(state.graph.refs.labels(other).is_empty());
     }

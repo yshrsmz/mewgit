@@ -51,7 +51,7 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
     state.issue(cmd)
 }
 
-/// **続きを頼む判断は 8 箇所にある。** `update` の出口にまとめて「毎回導き直す」形には
+/// **続きを頼む判断は 9 箇所にある。** `update` の出口にまとめて「毎回導き直す」形には
 /// できない。導出は「一度試して失敗した」を表せないので、失敗のたびに再発行して
 /// 「失敗 → 再読込 → 失敗」を回してしまう（`focus` の座り直しは導出で足りるので
 /// 出口にある。あちらは失敗を持たない）。
@@ -397,7 +397,12 @@ fn commit_detail_loaded(
         // 戻ってきたときにカーソルが別のところにいることはある（動いて戻ってきた
         // ときなど）。無条件に上書きすると、正しいものが出ている画面が
         // 「読み込み中」に戻り、同じものをもう 1 回読みに行く。
-        Ok(detail) if cursor == Some(detail.oid) => {
+        //
+        // **カーソルが WIP 行にあるときは採る。** そこでは詳細を 1 つも出していない
+        // ので、置いても新しいものを潰さない。捨てると、コミットに乗って戻るだけで
+        // 同じものを読み直して「読み込み中…」をもう 1 回見せることになる
+        // （01 の「選択が WIP に移っても `detail` は捨てない」）。
+        Ok(detail) if cursor.is_none() || cursor == Some(detail.oid) => {
             state.graph.detail = Some(detail);
         }
         Ok(_) => {}
@@ -533,6 +538,10 @@ fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::Char('k') | KeyCode::Up => moved(state, -1),
         // 左の領域を Diff に差し替える（07）。読むかどうかは `focus` が決める。
         KeyCode::Enter => focus(state, Pane::Diff),
+        // **グラフの `Enter` で入ってきた先なので、`Esc` で戻れる。** 戻り先を
+        // 用意しないと、`Enter` の行き先がコミット詳細か Working tree かで出口が
+        // 変わる（片方は `Esc`、もう片方は `Tab` を探す）ことになる。
+        KeyCode::Esc => focus(state, Pane::Graph),
         KeyCode::Char('s') => act(state, Action::Stage),
         KeyCode::Char('u') => act(state, Action::Unstage),
         KeyCode::Char('x') => act(state, Action::Discard),
@@ -2778,6 +2787,40 @@ mod tests {
 
         assert_eq!(state.focus, Pane::Graph);
         assert_eq!(cmd, Cmd::None);
+    }
+
+    #[test]
+    fn esc_leaves_the_worktree_for_the_graph() {
+        // グラフの `Enter` で入ってくる先なので、出口を揃える。無いと `Enter` の
+        // 行き先によって戻り方が変わる。
+        let mut state = state_with_commits(3);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        assert_eq!(state.focus, Pane::Worktree);
+
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Esc)));
+
+        assert_eq!(state.focus, Pane::Graph);
+    }
+
+    #[test]
+    fn a_detail_that_lands_while_the_wip_row_is_selected_is_kept() {
+        // WIP 行では詳細を 1 つも出していないので、置いても新しいものを潰さない。
+        // 捨てると、コミットに乗って戻るだけで同じものを読み直すことになる。
+        let mut state = state_with_commits(3);
+        // 1 件目に乗って頼み、返る前に WIP 行へ戻る。
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::char('j'))),
+            Cmd::LoadCommitDetail(fake_oid(0))
+        );
+        assert_eq!(update(&mut state, Msg::Key(Key::char('k'))), Cmd::None);
+        assert_eq!(state.graph.selection(), GraphSelection::Wip);
+
+        let cmd = update(&mut state, detail_ok(0));
+
+        assert_eq!(cmd, Cmd::None);
+        // 戻っても読み直しは出ない。
+        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+        assert!(state.graph.fresh_detail().is_some());
     }
 
     #[test]

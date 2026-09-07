@@ -28,6 +28,6 @@ test-util = ["dep:tempfile"]
 anyhow.workspace = true
 mewgit-core = { path = ".", features = ["test-util"] }
 # 統合テストが `tempfile::tempdir()` を直に使う（リポジトリの外を開くケース）。
-tempfile = "3"
-wiremock = "0.6"
+tempfile = "=3.27.0"
+wiremock = "=0.6.5"
 tokio = { workspace = true, features = ["test-util"] }

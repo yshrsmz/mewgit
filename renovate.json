@@ -3,5 +3,12 @@
   "extends": [
     "local>yshrsmz/renovate-config"
   ],
-  "reviewers": ["yshrsmz"]
+  "reviewers": ["yshrsmz"],
+  "packageRules": [
+    {
+      "description": "Cargo は Cargo.lock が固定の役目を持つので Cargo.toml は範囲のままにする（CLAUDE.md の「開発環境」）。pin すると同じ固定が 2 箇所になり、パッチ更新のたびに PR が増える",
+      "matchManagers": ["cargo"],
+      "rangeStrategy": "replace"
+    }
+  ]
 }

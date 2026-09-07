@@ -63,6 +63,9 @@ pub async fn run<B, S>(
 ) -> Result<()>
 where
     B: Backend,
+    // ratatui 0.30 で `Backend::Error` が関連型になり、`io::Error` 固定ではなくなった。
+    // `?` で `anyhow::Error` に載せるので、`anyhow` が `From` を張れる境界を要求する。
+    B::Error: std::error::Error + Send + Sync + 'static,
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let mut tick = tokio::time::interval(TICK);

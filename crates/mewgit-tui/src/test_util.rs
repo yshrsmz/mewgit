@@ -1,12 +1,13 @@
 //! テスト用のヘルパ。`mewgit-tui` は 1 つのバイナリクレートなので、単体テストは
 //! すべて同じコンパイル単位に入る。feature で切り分ける必要はない。
 
-use mewgit_core::app::{update, AppState, Key, Modal, Msg, RepoInfo, TermSize};
+use mewgit_core::app::{update, AppState, Key, Modal, Msg, Pane, RepoInfo, TermSize};
 use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, LogPage};
 use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents};
 use ratatui::backend::TestBackend;
 use ratatui::style::Modifier;
+use ratatui::text::Line;
 use ratatui::Terminal;
 
 use crate::ui;
@@ -72,6 +73,37 @@ pub fn row_is_reversed(state: &AppState, size: TermSize, needle: &str) -> bool {
     let terminal = terminal_with(state, size);
     let buffer = terminal.backend().buffer();
     (0..size.width).any(|x| buffer[(x, row)].modifier.contains(Modifier::REVERSED))
+}
+
+/// そのペインの領域だけを取り出した描画結果。
+///
+/// **画面全体の `contains` で見ない。** 文言はペインをまたいで共有しているので
+/// （`ui::LOADING` は 5 つのペインが出す）、全体を見ると**別のペインが出した同じ
+/// 文字で通ってしまう**。Branches ペインを足した時点で、Worktree と Diff の
+/// 「読み込み中…」の見張りが実際に死んだ（`draw` の全画面 `contains` が、まだ届いて
+/// いないブランチ一覧の文言を拾っていた）。
+///
+/// **全角文字の 2 セル目は読み飛ばす。** ratatui は widget が覆ったセルを
+/// `Cell::reset()`（= 空白 1 つ）に戻すので、素直に並べると「日 本 語」になり、
+/// `contains` を見る見張りが静かに素通りする（`ratatui-core` の
+/// `Buffer::set_stringn` で確認）。幅は ratatui 自身の `Line::width` から取る。
+pub fn pane_text(state: &AppState, size: TermSize, pane: Pane) -> String {
+    let area = ui::pane_area(pane, size, state);
+    let terminal = terminal_with(state, size);
+    let buffer = terminal.backend().buffer();
+
+    let mut rows = Vec::with_capacity(area.height as usize);
+    for y in area.y..area.bottom() {
+        let mut row = String::new();
+        let mut x = area.x;
+        while x < area.right() {
+            let symbol = buffer[(x, y)].symbol();
+            row.push_str(symbol);
+            x += u16::try_from(Line::raw(symbol).width()).unwrap_or(1).max(1);
+        }
+        rows.push(row);
+    }
+    rows.join("\n")
 }
 
 /// `runtime::layout` がその状態に入れるのと同じグラフの行数。
@@ -152,9 +184,10 @@ fn state_with_log(commits: Vec<Commit>) -> AppState {
             result: Ok(page),
         },
     );
-    // **一覧の返信も届ける。** 届けないと Branches ペインが「読み込み中…」のまま
-    // 描かれ、その文言を見る他のペインのテストが当たる。ジョブを発行するヘルパは
-    // その返信まで届ける（CLAUDE.md。#38 で同じ形の抜けが既存テストを素通りさせた）。
+    // **ブランチ一覧も届いた状態にする。** ここが作るのは「読み込みが済んだ
+    // リポジトリ」なので、一覧だけ「読み込み中…」で残っていると画面が実際とずれる。
+    // （文言が他のペインのテストに当たるのは別の問題で、そちらは `pane_text` が
+    // ペインの中だけを見ることで塞いである。）
     let _ = update(
         &mut state,
         Msg::BranchesLoaded(Box::new(Ok(vec![fake_branch("main", true)]))),
@@ -165,6 +198,20 @@ fn state_with_log(commits: Vec<Commit>) -> AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_text_keeps_wide_characters_and_stops_at_the_pane_edge() {
+        // 全角の 2 セル目が空文字であることに乗っている。混ざると「読 み 込 み」に
+        // なり、`contains` を見る見張りが静かに素通りする。
+        let state = state_with_commits(&["日本語のコミットメッセージ"]);
+
+        let text = pane_text(&state, TermSize::default(), Pane::Graph);
+
+        assert!(text.contains("日本語のコミットメッセージ"), "{text}");
+        // 右のペインの中身は入らない。
+        assert!(!text.contains("Working tree"), "{text}");
+        assert!(!text.contains("Branches"), "{text}");
+    }
 
     #[test]
     fn a_row_with_wide_characters_comes_back_without_the_quotes() {

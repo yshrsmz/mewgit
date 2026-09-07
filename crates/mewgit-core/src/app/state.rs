@@ -557,10 +557,7 @@ impl CommitFiles {
     ///
     /// 行が 1 つも無ければ据え置く（選べるものが無い）。
     pub fn move_cursor(&mut self, delta: isize) {
-        let Some(last) = self.entries.len().checked_sub(1) else {
-            return;
-        };
-        self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+        self.cursor = stepped_index(self.cursor, self.entries.len(), delta);
     }
 }
 
@@ -834,10 +831,23 @@ impl DiffView {
 /// そのときどうするかは呼び出し側が決める（Worktree は何も選べない位置に戻し、
 /// Diff は据え置く）。
 ///
-/// **平坦な添字のカーソルはここを通らない。** [`GraphState::move_cursor`] と
-/// [`CommitFiles::move_cursor`] は `0..len` が全部選べるので並びを組む必要が無く、
-/// `saturating_add_signed(delta).min(last)` の 2 行で済む。並びを組ませると、
-/// カーソルを 1 行動かすたびに `Vec` を確保することになる。
+/// **平坦な添字のカーソルはここを通らない。** `0..len` が全部選べるので並びを組む
+/// 必要が無く、組ませるとカーソルを 1 行動かすたびに `Vec` を確保することになる。
+/// そちらは [`stepped_index`] が持つ。
+/// `0..len` の添字を `delta` 動かした位置。端では止まり、要素が無ければ据え置く。
+///
+/// **平坦な添字のカーソルの端の扱いはここ 1 箇所。** [`CommitFiles::move_cursor`] と
+/// [`BranchState::move_cursor`] が同じ規則を使う（Stash / PRs も同じ形になる）。
+///
+/// [`GraphState::move_cursor`] は通らない。WIP 行があるので行数が 0 にならず、
+/// カーソルを動かしたらスクロールも寄せる必要があるため。
+fn stepped_index(cursor: usize, len: usize, delta: isize) -> usize {
+    let Some(last) = len.checked_sub(1) else {
+        return cursor;
+    };
+    cursor.saturating_add_signed(delta).min(last)
+}
+
 fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Option<T> {
     let index = positions
         .iter()
@@ -857,7 +867,7 @@ pub struct DiffCursor {
 }
 
 /// ブランチペインの状態（01 の「ブランチ一覧」）。
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct BranchState {
     /// 名前順。`git_read::branches` の戻り値そのまま。
     pub branches: Vec<Branch>,
@@ -870,8 +880,11 @@ pub struct BranchState {
 ///
 /// **`bool` を 2 つ（`loaded` / `failed`）にしない。** 4 通りのうち「まだ届いて
 /// いないのに失敗した」が表現でき、どのテストからも踏めない腕になる（01）。
+///
+/// **`ui` には述語ではなくこの enum を見せる**（[`BranchState::load`]）。`has_failed`
+/// のような述語を並べると、段階を足したときに `ui` の else に黙って落ちる。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum BranchLoad {
+pub enum BranchLoad {
     /// まだ届いていない。
     #[default]
     Pending,
@@ -900,32 +913,19 @@ impl BranchState {
         self.load = BranchLoad::Failed;
     }
 
-    /// 一覧が空のときに `ui` が出す文言を決めるための印（07 の「Branches ペイン」）。
+    /// 読み込みの段階。一覧が空のときに `ui` が出す文言をここから決める
+    /// （07 の「Branches ペイン」）。
     ///
     /// **`jobs.is_running` の否定から消去法で導かない**（01 の「失敗の記憶」）。
-    pub fn has_failed(&self) -> bool {
-        self.load == BranchLoad::Failed
-    }
-
-    /// 一度でも届いたか。空の一覧を「ブランチはありません」と読んでよいかの判定。
-    pub fn is_loaded(&self) -> bool {
-        self.load == BranchLoad::Loaded
-    }
-
-    /// カーソルの指すブランチ。一覧が空なら `None`。
-    pub fn selected(&self) -> Option<&Branch> {
-        self.branches.get(self.cursor)
+    pub fn load(&self) -> BranchLoad {
+        self.load
     }
 
     /// カーソルを `delta` 行動かす。端では止まる。
     ///
-    /// 行が 1 つも無ければ据え置く（[`CommitFiles::move_cursor`] と同じ。`0..len` が
-    /// 全部選べる平坦な添字なので [`stepped`] は通らない）。
+    /// 行が 1 つも無ければ据え置く（[`stepped_index`]）。
     pub(super) fn move_cursor(&mut self, delta: isize) {
-        let Some(last) = self.branches.len().checked_sub(1) else {
-            return;
-        };
-        self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+        self.cursor = stepped_index(self.cursor, self.branches.len(), delta);
     }
 }
 
@@ -1617,6 +1617,15 @@ mod tests {
         }
     }
 
+    /// カーソルの指すブランチ名。**`BranchState` に `selected()` は持たせない** —
+    /// 使うのは切替と削除のタスクなので、そこで足す（07 の「どこまで実装したか」）。
+    fn cursor_name(branches: &BranchState) -> Option<&str> {
+        branches
+            .branches
+            .get(branches.cursor)
+            .map(|branch| branch.name.as_str())
+    }
+
     #[test]
     fn a_loaded_branch_list_seats_the_cursor_on_the_head() {
         let mut branches = BranchState::default();
@@ -1627,9 +1636,8 @@ mod tests {
             fake_branch("topic", false),
         ]);
 
-        assert_eq!(branches.selected().map(|b| b.name.as_str()), Some("main"));
-        assert!(branches.is_loaded());
-        assert!(!branches.has_failed());
+        assert_eq!(cursor_name(&branches), Some("main"));
+        assert_eq!(branches.load(), BranchLoad::Loaded);
     }
 
     #[test]
@@ -1642,10 +1650,7 @@ mod tests {
             fake_branch("main", false),
         ]);
 
-        assert_eq!(
-            branches.selected().map(|b| b.name.as_str()),
-            Some("another")
-        );
+        assert_eq!(cursor_name(&branches), Some("another"));
     }
 
     #[test]
@@ -1668,7 +1673,7 @@ mod tests {
         branches.move_cursor(1);
 
         assert_eq!(branches.cursor, 0);
-        assert_eq!(branches.selected(), None);
+        assert_eq!(cursor_name(&branches), None);
     }
 
     #[test]
@@ -1679,7 +1684,7 @@ mod tests {
 
         branches.failed();
 
-        assert!(branches.has_failed());
+        assert_eq!(branches.load(), BranchLoad::Failed);
         assert_eq!(branches.branches.len(), 1);
     }
 

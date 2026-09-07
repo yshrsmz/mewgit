@@ -704,13 +704,15 @@ fn branches_lists_local_branches_by_name_with_the_head_marked() {
     repo.commit("first");
     repo.git(&["branch", "topic"]);
     repo.git(&["branch", "another"]);
+    // `/` を含む名前も落とさない（列挙の絞り込みが `refs/heads/*` なので）。
+    repo.git(&["branch", "feat/nested"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
     let branches = reader.branches().unwrap();
 
     // git2 の列挙順には依存しない。名前順に並べ替えて返す。
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
-    assert_eq!(names, ["another", "main", "topic"]);
+    assert_eq!(names, ["another", "feat/nested", "main", "topic"]);
     // HEAD の印は 1 本だけ。
     let head: Vec<&str> = branches
         .iter()

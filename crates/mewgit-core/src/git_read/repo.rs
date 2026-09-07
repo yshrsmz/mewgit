@@ -132,12 +132,14 @@ impl RepoReader {
         let head = self.repo.find_reference("HEAD")?;
         let head_target = head.symbolic_target().ok().flatten();
 
+        // **`refs/heads/*` だけを列挙する。** `references()` で全部辿ってから捨てると、
+        // loose ref のリポジトリで `refs/remotes/*` と `refs/tags/*` のファイルまで
+        // 読むことになる（libgit2 は接頭辞のあるグロブでディレクトリの走査を絞る。
+        // `refdb_fs.c` の `iter_load_optimize_prefix`）。`*` は `/` も跨ぐので
+        // `feat/x` のような名前も入る（統合テストで確かめている）。
         let mut branches = Vec::new();
-        for reference in self.repo.references()? {
+        for reference in self.repo.references_glob("refs/heads/*")? {
             let reference = reference?;
-            if !reference.is_branch() {
-                continue;
-            }
             // 非 UTF-8 のブランチ名は識別子として使えない（`git_exec` の argv にも
             // 載せられない）ので落とす。切替も削除もできない行を出さないため。
             let Some(name) = reference.shorthand().ok().map(str::to_string) else {
@@ -186,15 +188,14 @@ impl RepoReader {
         local: Oid,
         upstream: &git2::Branch<'_>,
     ) -> Result<(Option<String>, usize, usize), GitReadError> {
-        let Some(name) = upstream.name()?.map(str::to_string) else {
-            return Ok((None, 0, 0));
-        };
-        let Some(upstream_oid) = upstream.get().target() else {
-            // symbolic な remote-tracking ref。ラベルと同じく解決せずに落とす。
+        // 名前が非 UTF-8（識別子として扱えない）か、symbolic な remote-tracking ref
+        // （ラベルと同じく解決しない）。**どちらも「一覧に出せる upstream ではない」の
+        // 1 つに畳む。** 呼び出し側の扱いが同じなので腕を分けても踏み分けられない。
+        let (Some(name), Some(upstream_oid)) = (upstream.name()?, upstream.get().target()) else {
             return Ok((None, 0, 0));
         };
         let (ahead, behind) = self.repo.graph_ahead_behind(local, upstream_oid)?;
-        Ok((Some(name), ahead, behind))
+        Ok((Some(name.to_string()), ahead, behind))
     }
 
     /// コミット 1 件の詳細。グラフの行が持たない値（メッセージ全文・committer・

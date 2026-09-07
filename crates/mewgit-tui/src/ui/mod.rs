@@ -3,8 +3,8 @@
 //! `render` は [`AppState`] のみを参照する（不変ルール 2）。git2 / CLI / HTTP を
 //! ここから呼ばない。
 //!
-//! いまはヘッダ・グラフ・ワーキングツリー・ステータスバー。右上の
-//! `Branches | Stash | PRs` は、そのタブを実装するタスクで足す（07）。
+//! いまはヘッダ・グラフ・ブランチ一覧・ワーキングツリー（またはコミット詳細）・
+//! ステータスバー。`Stash` と `PRs` は、そのタブを実装するタスクで足す（07）。
 
 pub mod lanes;
 pub mod theme;
@@ -39,8 +39,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
     // **右列の上は Branches。** 左の選択でも `focus` でも入れ替わらないので、
     // 一覧を先に置いて残りを下のペインに渡す（07 の「レイアウト」）。
-    let [branches, right] = split_right(state, right);
-    panes::branches::render(frame, branches, state);
+    // **組むのはここ 1 回**で、高さの決定と描画の両方に回す。
+    let view = panes::branches::lines(state);
+    let [branches, right] = split_right(state, &view, right);
+    panes::branches::render(frame, branches, state, view);
     // **右列の下は Working tree とコミット詳細の差し替え。** どちらを描くかはグラフの
     // 選択だけで決まる（07）。`focus` で決めると、Graph にフォーカスした瞬間に
     // 右が消える。
@@ -68,8 +70,8 @@ fn split_body(area: Rect) -> [Rect; 2] {
 ///
 /// **割る位置を決めるのは Branches ペイン自身**（`panes::branches::rows`）。一覧の
 /// 行数から出すので、ここで高さを書くと規則が 2 本になる。
-fn split_right(state: &AppState, right: Rect) -> [Rect; 2] {
-    let rows = panes::branches::rows(state, right.height);
+fn split_right(state: &AppState, view: &panes::branches::View, right: Rect) -> [Rect; 2] {
+    let rows = panes::branches::rows(view, state, right.height);
     Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(right)
 }
 
@@ -149,6 +151,39 @@ pub fn render_rows(
         Paragraph::new(lines.drain(window).collect::<Vec<_>>()),
         area,
     );
+}
+
+/// UTF-8 と ASCII の字を選ぶ。`config.graph.ascii` に従う（08）。
+///
+/// **選ぶところは 1 本。** キーは `[graph]` の下にあるが、既定は locale から決まる
+/// ので意味は「この端末が非 ASCII の字を出せるか」。グラフのレーンだけに効かせると、
+/// 同じ端末で Branches ペインの矢印だけが化ける（07）。
+pub fn pick_charset(glyphs: (&'static str, &'static str), ascii: bool) -> &'static str {
+    if ascii {
+        glyphs.1
+    } else {
+        glyphs.0
+    }
+}
+
+/// ペインを描く領域。テスト用。
+///
+/// **座標を手で書かせない。** 実際の割り方（[`split`] / [`split_body`] /
+/// [`split_right`]）をそのまま通すので、割り方を変えたときにテストだけが古い桁を
+/// 見て緑のまま無意味になることがない。
+#[cfg(test)]
+pub fn pane_area(pane: Pane, size: TermSize, state: &AppState) -> Rect {
+    let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
+    let [left, right] = split_body(body);
+    // 右列は Branches とその下に割れている。割る位置も実際の関数から出す。
+    let [branches, below] = split_right(state, &panes::branches::lines(state), right);
+    match pane {
+        Pane::Branches => branches,
+        Pane::Worktree | Pane::CommitDetail => below,
+        // **Graph と Diff は同じ領域を差し替えで使う**（07）ので同じ Rect を返す。
+        // Stash / PRs はまだ描かないので、来たら左を返すだけ。
+        _ => left,
+    }
 }
 
 /// 一覧に割く行数。必要なぶん、ただし `available` の半分まで（07）。
@@ -311,11 +346,10 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_row, short_oid, split, split_body, split_right, window, wrapped, SHORT_OID};
+    use super::{file_row, pane_area, short_oid, window, wrapped, SHORT_OID};
     use crate::test_util::{draw, state_at, terminal_with};
     use mewgit_core::app::{AppState, NoticeLevel, Pane, TermSize};
     use mewgit_core::git_read::Oid;
-    use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
     #[test]
@@ -379,20 +413,9 @@ mod tests {
         assert_eq!(window(20, 8..18, 4), 8..12);
     }
 
-    /// ペインを描く領域の左上。座標は実際のレイアウトから出す。手で書くと、割り方を
-    /// 変えたときにテストだけが古い桁を見て緑のまま無意味になる。
-    ///
-    /// **Graph と Diff は同じ領域を差し替えで使う**（07）ので、同じ座標を返す。
+    /// ペインを描く領域の左上。**Graph と Diff は同じ領域**なので同じ座標になる（07）。
     fn corner(pane: Pane, size: TermSize, state: &AppState) -> (u16, u16) {
-        let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
-        let [left, right] = split_body(body);
-        // 右列は Branches とその下に割れている。割る位置も実際の関数から出す。
-        let [branches, below] = split_right(state, right);
-        let area = match pane {
-            Pane::Branches => branches,
-            Pane::Worktree | Pane::CommitDetail => below,
-            _ => left,
-        };
+        let area = pane_area(pane, size, state);
         (area.x, area.y)
     }
 

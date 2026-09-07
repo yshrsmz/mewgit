@@ -131,6 +131,13 @@ pub enum Horizontal {
 （`│→|`、`─→-`、`╮ ╭→\ /`、`╯ ╰→/ \`、`├ ┤ ┬ ┴ ┼→+`、`● ○→* o`）。
 `graph` 層は文字を持たないので、置換表は `ui` にしか無い。
 
+**このキーはグラフ以外の記号にも効く。** Branches ペインの ahead / behind
+（`↑ ↓ → ^ v`。07）が最初の例で、選ぶところは `ui::pick_charset` の 1 本。
+キーが `[graph]` の下にあるのは最初の利用者がグラフだったからで、意味は
+「この端末が非 ASCII の記号を出せるか」（既定は locale から決まる。08）。
+`↑`（U+2191）/ `↓`（U+2193）は下の罫線と同じ East Asian Ambiguous 幅なので、
+曖昧幅を全角に描く端末でずれるのも同じ。
+
 罫線の文字（U+2500 台）と `●` `○` は East Asian Ambiguous 幅で、曖昧幅を全角として
 描く端末（`ja_JP` などのロケールで iTerm2 の "Treat ambiguous-width characters as
 double width" を有効にした場合など）では 1 マスが 2 桁になる。ratatui は 1 桁として

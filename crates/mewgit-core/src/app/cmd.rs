@@ -54,8 +54,13 @@ pub enum Cmd {
     /// **[`Cmd::LoadRepoInfo`] に乗せない。** ブランチの本数だけ upstream の解決と
     /// `graph_ahead_behind` の walk が要り、グラフのラベルと HEAD だけが欲しい経路に
     /// そのコストを払わせることになる（`LoadCommitFiles` を `LoadCommitDetail` と
-    /// 分けたのと同じ理由）。古くなる時点は同じなので、ref を動かす書き込みの後は
-    /// 両方を読み直す。
+    /// 分けたのと同じ理由）。
+    ///
+    /// **いま出すのは `init` だけ。** 古くなる時点は `LoadRepoInfo` と同じなので、
+    /// ref を動かす書き込みの後に読み直す経路は [`update::Reload`] に足すが、それは
+    /// 切替と削除のタスク（そこで初めて ref を動かす書き込みが入る）。
+    ///
+    /// [`update::Reload`]: crate::app::update::Reload
     LoadBranches,
     /// git CLI の実行（03 参照）。
     Exec(GitOp),

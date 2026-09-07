@@ -117,11 +117,7 @@ mod tests {
         let state = state_with_confirm("確認", body);
         let lines = draw(&state, SIZE);
         let top = row_of(&lines, "┌確認");
-        let bottom = lines[top as usize..]
-            .iter()
-            .position(|line| line.contains('└'))
-            .expect("枠の底がありません") as u16;
-        bottom + 1
+        row_of(&lines[top as usize..], "└") + 1
     }
 
     #[test]

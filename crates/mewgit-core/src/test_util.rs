@@ -352,9 +352,6 @@ fn shown<S: AsRef<OsStr>>(args: &[S]) -> String {
         .join(" ")
 }
 
-/// 変更のあったファイル 1 件。rename は `old_path` を呼び出し側で足す。
-///
-/// `fake_commit` と同じく、`app` の遷移テストと `ui` の描画テストの両方から使う。
 /// ブランチ 1 件。upstream は持たない（要るテストは戻り値のフィールドを足す）。
 ///
 /// oid は [`fake_oid`] の 0 番。ブランチの一覧は名前と印だけで読めるので、
@@ -370,6 +367,9 @@ pub fn fake_branch(name: &str, is_head: bool) -> Branch {
     }
 }
 
+/// 変更のあったファイル 1 件。rename は `old_path` を呼び出し側で足す。
+///
+/// `fake_commit` と同じく、`app` の遷移テストと `ui` の描画テストの両方から使う。
 pub fn fake_entry(path: &str, status: FileStatus) -> FileEntry {
     FileEntry {
         path: path.into(),

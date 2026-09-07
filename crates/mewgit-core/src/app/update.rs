@@ -1112,7 +1112,6 @@ fn names(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
-/// ワーキングツリーの一覧を入れ替える。
 /// ブランチ一覧が届いた。
 ///
 /// **成功も失敗も `jobs.finish` を通る。** 通らないと `JobKind::LoadBranches` が走った
@@ -1133,6 +1132,7 @@ fn branches_loaded(state: &mut AppState, result: Result<Vec<Branch>, GitReadErro
     Cmd::None
 }
 
+/// ワーキングツリーの一覧を入れ替える。
 fn status_loaded(state: &mut AppState, result: Result<WorktreeSnapshot, GitReadError>) -> Cmd {
     state.jobs.finish(JobKind::LoadStatus);
 
@@ -1300,7 +1300,9 @@ fn exec_detail(err: &ExecError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{GraphSelection, Job, Modal, Modifiers, RepoInfo, TermSize, TextBuffer};
+    use crate::app::{
+        BranchLoad, GraphSelection, Job, Modal, Modifiers, RepoInfo, TermSize, TextBuffer,
+    };
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
     use crate::git_read::{Commit, HeadInfo, Hunk, LineOrigin, RefIndex, RefLabel, Remote};
@@ -2065,7 +2067,7 @@ mod tests {
         // 通らないとジョブが走ったまま残り、以後の `LoadBranches` が黙って落ちる。
         assert!(!state.jobs.is_running(JobKind::LoadBranches));
         assert_eq!(state.branches.branches.len(), 2);
-        assert!(state.branches.is_loaded());
+        assert_eq!(state.branches.load(), BranchLoad::Loaded);
     }
 
     #[test]
@@ -2078,8 +2080,7 @@ mod tests {
         assert_eq!(cmd, Cmd::None);
         assert!(!state.jobs.is_running(JobKind::LoadBranches));
         // **「読み込み中…」のまま固まらせない。** 印は `ui` が文言を出し分けるのに要る。
-        assert!(state.branches.has_failed());
-        assert!(!state.branches.is_loaded());
+        assert_eq!(state.branches.load(), BranchLoad::Failed);
         assert_eq!(
             state.notices.back().map(|notice| notice.level),
             Some(NoticeLevel::Error)

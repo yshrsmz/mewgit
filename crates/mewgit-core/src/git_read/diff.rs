@@ -6,7 +6,7 @@ use git2::{DiffFindOptions, DiffLineType, DiffOptions, ErrorCode, Patch, Tree};
 
 use super::{
     file_entry, lossy, DiffTarget, FileDiff, FileEntry, GitReadError, Hunk, HunkLine, LineOrigin,
-    RepoReader,
+    Oid, RepoReader,
 };
 
 impl RepoReader {
@@ -37,16 +37,7 @@ impl RepoReader {
                 self.repo
                     .diff_tree_to_index(head.as_ref(), None, Some(&mut opts))?
             }
-            DiffTarget::Commit { oid, .. } => {
-                let commit = self.repo.find_commit(*oid)?;
-                // マージも第一親と比べる。combined diff は出さない（`git show` の
-                // 既定はマージに何も出さないが、それではペインが常に空になる）。
-                // ルートコミットは親が無いので空ツリーと比べる。
-                let parent = commit.parents().next().map(|p| p.tree()).transpose()?;
-                let tree = commit.tree()?;
-                self.repo
-                    .diff_tree_to_tree(parent.as_ref(), Some(&tree), Some(&mut opts))?
-            }
+            DiffTarget::Commit { oid, .. } => self.commit_diff(*oid, &mut opts)?,
             DiffTarget::Range { from, to, .. } => {
                 let from = self.repo.find_commit(*from)?.tree()?;
                 let to = self.repo.find_commit(*to)?.tree()?;
@@ -58,6 +49,47 @@ impl RepoReader {
         // `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの delta には効かない。
         diff.find_similar(Some(&mut find_options()))?;
         file_diffs(&diff, target.path())
+    }
+
+    /// コミットが変更したファイルの一覧。中身（ハンク）は組まない（02）。
+    ///
+    /// 右ペインのコミット詳細に並べ、選んだ 1 件が
+    /// `diff(DiffTarget::Commit { path: Some(..) })` で Diff ペインに出る（07）。
+    ///
+    /// **`diff(DiffTarget::Commit { path: None })` で代用しない。** 一覧に要るのは
+    /// パスと種別だけなので、代用するとコミット全体のハンクを組むことになり、
+    /// 依存の更新のような巨大なコミットでリーダースレッドが止まる。
+    pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError> {
+        let mut opts = DiffOptions::new();
+        let mut diff = self.commit_diff(oid, &mut opts)?;
+        // **`diff` と同じ設定で呼ぶ**（[`find_options`]）。ここだけ既定にすると、
+        // 一覧では 2 行の Deleted + Added、diff では 1 行の Renamed になる。
+        diff.find_similar(Some(&mut find_options()))?;
+        Ok(diff
+            .deltas()
+            .filter_map(|delta| file_entry(&delta))
+            .collect())
+    }
+
+    /// コミットと第一親の diff。
+    ///
+    /// **`diff` と `commit_files` の両方がここを通る。** 比べる 2 つのツリーを別々に
+    /// 書くと、「一覧に出ているファイルを選んだのに diff が空」という形でずれる（02）。
+    /// 出口（[`file_entry`]）だけ共有しても、入口が 2 本あれば結果は揃わない。
+    fn commit_diff(
+        &self,
+        oid: Oid,
+        opts: &mut DiffOptions,
+    ) -> Result<git2::Diff<'_>, GitReadError> {
+        let commit = self.repo.find_commit(oid)?;
+        // マージも第一親と比べる。combined diff は出さない（`git show` の既定は
+        // マージに何も出さないが、それではペインが常に空になる）。
+        // ルートコミットは親が無いので空ツリーと比べる。
+        let parent = commit.parents().next().map(|p| p.tree()).transpose()?;
+        let tree = commit.tree()?;
+        Ok(self
+            .repo
+            .diff_tree_to_tree(parent.as_ref(), Some(&tree), Some(opts))?)
     }
 
     /// HEAD のツリー。コミットが 1 つも無ければ `None`（空ツリーと比べる）。

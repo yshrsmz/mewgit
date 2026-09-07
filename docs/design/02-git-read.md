@@ -29,6 +29,7 @@ impl RepoReader {
     pub fn head(&self) -> Result<HeadInfo, GitReadError>;           // branch name or detached Oid
     pub fn log(&self) -> Result<LogSession<'_>, GitReadError>;   // ページングは LogSession が持つ
     pub fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;  // 選択時に遅延取得
+    pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;  // 同上（一覧だけ）
     pub fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
     pub fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
     pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;
@@ -160,7 +161,7 @@ pub struct LogPage {
   Oid は失われており、同じセッションで読み直すとその分がどのページにも現れない。グラフには
   親の見つからない行が残り、2 回目は成功するので UI にも異常が出ない
 - 1 コミットあたり `Commit { oid, parents, summary, author, time }` のみ抽出。本文は選択時に
-  `commit_detail` で、ファイル一覧は `diff(DiffTarget::Commit)`（M2）で遅延取得する
+  `commit_detail` で、ファイル一覧は `commit_files` で遅延取得する（下の「コミットのファイル一覧」）
 - `Commit::time` は author 日時だが、行の並びは `Sort::TIME`（= committer 日時）で決まる。
   rebase / cherry-pick された履歴では表示日時が並び順と逆転しうる。`git log` と同じ挙動なので
   そのままにする
@@ -191,9 +192,31 @@ pub struct Timestamp { pub seconds: i64, pub offset_minutes: i32 }
   コミットに刻まれたオフセットで出すので、それに合わせる。`Commit::time` は行の並びと
   1 行表示にしか使わないのでそのまま
 - メッセージは表示にしか使わないので、非 UTF-8 でも lossy で残す（「非 UTF-8 の扱い」）
-- ファイル一覧は含めない。`diff(DiffTarget::Commit)`（M2）の担当で、そちらは
-  コミットの本文より重い。1 つの要求にまとめると本文だけ見たいときも diff の
-  コストを払うことになる
+- ファイル一覧は含めない。`commit_files`（下）の担当で、そちらはコミットの本文より
+  重い。1 つの要求にまとめると本文だけ見たいときも一覧のコストを払うことになる
+
+## コミットのファイル一覧
+
+コミットが変更したファイルを、中身（ハンク）抜きで並べる。右ペインのコミット詳細に出し、
+選んだ 1 件が `diff(DiffTarget::Commit { oid, path: Some(..) })` で左の Diff ペインに出る（07）。
+
+```rust
+pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;
+```
+
+- **戻り値は `FileEntry`**（ステータスの区画と同じ型）。`ui` の行の組み立ても `FileStatus` の
+  1 文字もそのまま使える。`FileDiff` を空の `hunks` で返す形にすると、一覧の行が
+  「ハンクの無いファイル」（バイナリ・mode だけの変更）と区別できなくなる
+- **比べる 2 つのツリーと rename 検出の設定は `diff()` と同じものを使う**（第一親、ルート
+  コミットは空ツリー、`find_similar` は `status` に合わせた設定）。実装でも同じ関数を通す。
+  **出口（delta → `FileEntry` の写像）だけを共有しても、入口の設定が 2 本あれば結果はずれる。**
+  ずれは「一覧に出ているファイルを選んだのに diff が空」という形で出る
+- **`Patch` は作らない。** 一覧に要るのはパスと種別だけで、そこがこの読み取りを
+  `diff(DiffTarget::Commit { path: None })` で代用しない理由でもある。代用すると一覧を出す
+  ためだけにコミット全体のハンクを組むことになり、依存の更新のような巨大なコミットで
+  リーダースレッドが止まる（01 の「コミットのファイル一覧」に app 側の理由もある）
+- 変更が 1 つも無いコミット（`--allow-empty`）では空の `Vec`。**「まだ読めていない」との
+  区別は `app` が付ける**（`Option` で持つ。01）
 
 ## ステータス
 
@@ -375,6 +398,7 @@ impl ReaderHandle {
     pub fn workdir(&self) -> &Path;
     pub async fn log_page(&self, count: usize, restart: bool) -> Result<LogPage, GitReadError>;
     pub async fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;
+    pub async fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;
     pub async fn head_message(&self) -> Result<Option<String>, GitReadError>;
     pub async fn refs(&self) -> Result<RefIndex, GitReadError>;
     pub async fn head(&self) -> Result<HeadInfo, GitReadError>;

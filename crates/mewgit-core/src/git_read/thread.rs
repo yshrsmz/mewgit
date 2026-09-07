@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    CommitDetail, DiffTarget, FileDiff, GitReadError, HeadInfo, LogPage, LogSession, Oid, RefIndex,
-    Remote, RepoReader, WorktreeSnapshot,
+    CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, LogPage, LogSession,
+    Oid, RefIndex, Remote, RepoReader, WorktreeSnapshot,
 };
 
 /// リーダースレッドへの窓口。
@@ -41,6 +41,10 @@ enum Request {
     CommitDetail {
         oid: Oid,
         reply: Reply<CommitDetail>,
+    },
+    CommitFiles {
+        oid: Oid,
+        reply: Reply<Vec<FileEntry>>,
     },
     Refs(Reply<RefIndex>),
     Head(Reply<HeadInfo>),
@@ -116,6 +120,15 @@ impl ReaderHandle {
     /// `log_page` と違って状態を持たないので、この future は drop してよい。
     pub async fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError> {
         self.request(|reply| Request::CommitDetail { oid, reply })
+            .await
+    }
+
+    /// コミット 1 件のファイル一覧（02 の「コミットのファイル一覧」）。
+    ///
+    /// `commit_detail` と分けているのは、こちらがツリー同士の比較でより重いため。
+    /// 1 通にまとめると、本文しか見えていない時点でも一覧のコストを払う（01）。
+    pub async fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError> {
+        self.request(|reply| Request::CommitFiles { oid, reply })
             .await
     }
 
@@ -209,6 +222,9 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
             }
             Request::CommitDetail { oid, reply } => {
                 let _ = reply.send(reader.commit_detail(oid));
+            }
+            Request::CommitFiles { oid, reply } => {
+                let _ = reply.send(reader.commit_files(oid));
             }
             Request::Refs(reply) => {
                 let _ = reply.send(reader.refs());

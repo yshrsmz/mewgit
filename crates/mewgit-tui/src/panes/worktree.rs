@@ -3,7 +3,7 @@
 //! 1 行は `<種別 1 文字> <パス>`。区画の見出しと、その中のファイルを並べる。
 
 use mewgit_core::app::{AppState, JobKind, Pane, WorktreeState};
-use mewgit_core::git_read::{FileStatus, WorktreeSection};
+use mewgit_core::git_read::WorktreeSection;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -62,11 +62,7 @@ fn lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
         lines.push(Line::from(Span::styled(heading(section), theme::muted())));
 
         for (index, entry) in entries.iter().enumerate() {
-            let line = Line::raw(format!(
-                " {} {}",
-                mark(entry.status),
-                ui::path_label(&entry.path, entry.old_path.as_deref())
-            ));
+            let line = Line::raw(ui::file_row(entry));
             if state.worktree.section == section && state.worktree.cursor == index {
                 cursor = lines.len();
                 lines.push(line.style(theme::selected()));
@@ -88,26 +84,12 @@ fn heading(section: WorktreeSection) -> &'static str {
     }
 }
 
-/// 変更種別の 1 文字。`git status --short` と同じ字を使う。
-fn mark(status: FileStatus) -> char {
-    match status {
-        FileStatus::Added => 'A',
-        FileStatus::Modified => 'M',
-        FileStatus::Deleted => 'D',
-        FileStatus::Renamed => 'R',
-        FileStatus::Copied => 'C',
-        FileStatus::Typechange => 'T',
-        FileStatus::Untracked => '?',
-        FileStatus::Conflicted => 'U',
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::{draw, row_of, state_at, terminal_with};
     use mewgit_core::app::{update, Msg, TermSize};
-    use mewgit_core::git_read::WorktreeSnapshot;
+    use mewgit_core::git_read::{FileStatus, WorktreeSnapshot};
     use mewgit_core::test_util::fake_entry;
     use ratatui::style::Modifier;
 

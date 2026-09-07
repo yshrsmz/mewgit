@@ -16,7 +16,7 @@ use std::path::Path;
 
 use crate::{modals, panes};
 use mewgit_core::app::{AppState, GraphSelection, Pane, TermSize};
-use mewgit_core::git_read::Oid;
+use mewgit_core::git_read::{FileEntry, FileStatus, Oid};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -146,6 +146,33 @@ pub fn path_label(path: &Path, old_path: Option<&Path>) -> String {
     match old_path {
         Some(old) => format!("{} -> {}", old.display(), path.display()),
         None => path.display().to_string(),
+    }
+}
+
+/// ファイル一覧の 1 行。`M src/main.rs`、rename は `R old.txt -> new.txt`。
+///
+/// **Worktree ペインとコミット詳細のファイル一覧が同じものを使う**（07）。区画の
+/// 見出しを挟むかどうかはペインごとに違うが、行そのものが 2 本あると種別の字だけが
+/// 片方で古くなる。
+pub fn file_row(entry: &FileEntry) -> String {
+    format!(
+        " {} {}",
+        mark(entry.status),
+        path_label(&entry.path, entry.old_path.as_deref())
+    )
+}
+
+/// 変更種別の 1 文字。`git status --short` と同じ字を使う。
+fn mark(status: FileStatus) -> char {
+    match status {
+        FileStatus::Added => 'A',
+        FileStatus::Modified => 'M',
+        FileStatus::Deleted => 'D',
+        FileStatus::Renamed => 'R',
+        FileStatus::Copied => 'C',
+        FileStatus::Typechange => 'T',
+        FileStatus::Untracked => '?',
+        FileStatus::Conflicted => 'U',
     }
 }
 

@@ -15,8 +15,9 @@ use crate::git_read::{
 };
 
 use super::{
-    AppState, Cmd, DiffCursor, DiffView, ExecDone, Freshness, GraphLine, JobKind, Key, KeyCode,
-    Modal, Motion, Msg, NoticeLevel, Pane, RepoSnapshot, TextBuffer,
+    AppState, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, Freshness, GraphLine,
+    GraphSelection, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, RepoSnapshot,
+    TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -56,16 +57,20 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 /// 「失敗 → 再読込 → 失敗」を回してしまう（`focus` の座り直しは導出で足りるので
 /// 出口にある。あちらは失敗を持たない）。
 ///
-/// ログとコミット詳細（01 の「追加ページの読み込み」「コミット詳細の遅延取得」）:
-/// `scrolled`（カーソル移動）、`log_loaded` の成功、`commit_detail_loaded` の成功、
-/// `Msg::Layout`。
+/// ログ（01 の「追加ページの読み込み」）: `scrolled`（カーソル移動）、`log_loaded` の
+/// 成功、`Msg::Layout`。
+///
+/// コミットの詳細とファイル一覧（01 の「コミット詳細の遅延取得」「コミットのファイル
+/// 一覧」）: `scrolled`、`commit_detail_loaded` の出口、`commit_files_loaded` の出口。
+/// **この 3 つはどれも `load_commit` を呼ぶ**（詳細と一覧を別々に配らない）。
 ///
 /// ログの読み直し（01 の「ログの読み直し」）: `exec_finished`（書き込みで HEAD が
 /// 動きうる）、`log_loaded` の出口（`issue` に落とされたぶんの追いつき）。
 ///
 /// diff（01 の「diff の遅延取得」）: `focus`（フォーカスの移動。`Tab` も `Enter` も
 /// `Esc` もここを通る）、`status_loaded` の `clamp` のあと、`diff_loaded` の出口
-/// （対象が違ったときの追いつきと、書き込みより前の diff しか無いときの読み直し）。
+/// （対象が違ったときの追いつきと、書き込みより前の diff しか無いときの読み直し）、
+/// `commit_files_loaded` の出口（一覧が届くまで対象が決まらないため）。
 fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
     match msg {
         Msg::Key(key) => update_key(state, key),
@@ -87,6 +92,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
 
         Msg::LogLoaded { restart, result } => log_loaded(state, restart, result),
         Msg::CommitDetailLoaded { oid, result } => commit_detail_loaded(state, oid, *result),
+        Msg::CommitFilesLoaded { oid, result } => commit_files_loaded(state, oid, *result),
         Msg::HeadMessageLoaded(result) => head_message_loaded(state, result),
         Msg::RepoInfoLoaded(result) => repo_info_loaded(state, *result),
 
@@ -205,7 +211,10 @@ fn diff_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::Char('s') => act(state, Action::Stage),
         KeyCode::Char('u') => act(state, Action::Unstage),
         KeyCode::Char('x') => act(state, Action::Discard),
-        KeyCode::Esc => focus(state, Pane::Worktree),
+        // **戻り先は `Enter` の行き先と同じ 1 つの関数から出す**
+        // （`GraphSelection::right_pane`）。WIP 行なら Working tree、コミットなら
+        // コミット詳細。別々に書くと、来た側と違うペインに戻る腕ができる。
+        KeyCode::Esc => focus(state, state.graph.selection().right_pane()),
         _ => Cmd::None,
     }
 }
@@ -343,13 +352,35 @@ fn graph_key(state: &mut AppState, key: Key) -> Cmd {
 
 /// コミット詳細ペインのキー処理。
 ///
-/// カーソルを持たないので、いまは `Esc` で戻るだけ。`j` / `k` でファイル一覧を選ぶのは
-/// 次のタスク（07 の「CommitDetail ペイン」）。
+/// カーソルはファイル一覧の行を指す。`Enter` で左を `DiffTarget::Commit` の diff に
+/// 差し替える（07 の「CommitDetail ペイン」）。
 fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
+        KeyCode::Char('j') | KeyCode::Down => move_file(state, 1),
+        KeyCode::Char('k') | KeyCode::Up => move_file(state, -1),
+        KeyCode::Enter => focus(state, Pane::Diff),
         KeyCode::Esc => focus(state, Pane::Graph),
         _ => Cmd::None,
     }
+}
+
+/// ファイル一覧のカーソルを `delta` 行動かす。
+///
+/// **動かすと diff の対象が変わるので、直前の失敗を落とす**（ワーキングツリーの
+/// [`moved`] と同じ形）。移動して戻ってくれば 1 回だけ試し直せる。
+///
+/// **動かすのは出ている一覧だけ。** 別のコミットのものが残っていることがあり
+/// （読み込み中・失敗中）、濾さずに動かすと画面に出ていない一覧のカーソルが黙って動く。
+fn move_file(state: &mut AppState, delta: isize) -> Cmd {
+    let Some(oid) = state.graph.cursor_commit().map(|commit| commit.oid) else {
+        return Cmd::None;
+    };
+    let Some(files) = state.graph.files.as_mut().filter(|files| files.oid == oid) else {
+        return Cmd::None;
+    };
+    files.move_cursor(delta);
+    state.diff.failed = None;
+    Cmd::None
 }
 
 /// カーソルを動かし、続きが要るなら頼む。
@@ -359,10 +390,21 @@ fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
 /// カーソルが動かないので、「動いたかどうか」では判定できない。
 fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
     state.graph.move_cursor(delta);
-    // カーソルを動かすのはユーザーの操作なので、失敗したログの読み直しはここから
-    // 始める。自動では出さない（`load_more`）。
+    // カーソルを動かすのはユーザーの操作なので、失敗した読み直しはここから始める。
+    // 自動では出さない（`load_more`）。**移動して戻ってくれば 1 回だけ試し直せる。**
     state.graph.load_failed = false;
-    Cmd::batch([load_more(state), load_detail(state)])
+    state.graph.detail_failed = None;
+    state.graph.files_failed = None;
+    Cmd::batch([load_more(state), load_commit(state)])
+}
+
+/// カーソルの指すコミットについて、まだ持っていないものを頼む。
+///
+/// **詳細と一覧は必ずここから頼む。** どちらも「カーソルがコミットに乗った」で要る
+/// ので、呼び出し側に 2 つ配ると片方だけ書き足す事故が起きる（01 の「コミットの
+/// ファイル一覧」）。`Cmd` を分けているのは、一覧のほうが重いため。
+fn load_commit(state: &AppState) -> Cmd {
+    Cmd::batch([load_detail(state), load_files(state)])
 }
 
 /// カーソルの指すコミットの詳細が要るなら頼む。
@@ -374,8 +416,25 @@ fn load_detail(state: &AppState) -> Cmd {
         return Cmd::None;
     }
     match state.graph.cursor_commit() {
-        Some(commit) => Cmd::LoadCommitDetail(commit.oid),
-        None => Cmd::None,
+        // **同じコミットで一度失敗しているなら出さない。** 出すと
+        // 「失敗 → 再読込 → 失敗」を回す（`load_diff` と同じ形）。
+        Some(commit) if state.graph.detail_failed != Some(commit.oid) => {
+            Cmd::LoadCommitDetail(commit.oid)
+        }
+        _ => Cmd::None,
+    }
+}
+
+/// カーソルの指すコミットのファイル一覧が要るなら頼む。[`load_detail`] と同じ形。
+fn load_files(state: &AppState) -> Cmd {
+    if state.graph.fresh_files().is_some() {
+        return Cmd::None;
+    }
+    match state.graph.cursor_commit() {
+        Some(commit) if state.graph.files_failed != Some(commit.oid) => {
+            Cmd::LoadCommitFiles(commit.oid)
+        }
+        _ => Cmd::None,
     }
 }
 
@@ -403,21 +462,53 @@ fn commit_detail_loaded(
         // 同じものを読み直して「読み込み中…」をもう 1 回見せることになる
         // （01 の「選択が WIP に移っても `detail` は捨てない」）。
         Ok(detail) if cursor.is_none() || cursor == Some(detail.oid) => {
+            state.graph.detail_failed = None;
             state.graph.detail = Some(detail);
         }
         Ok(_) => {}
         Err(err) => {
             state.push_notice(NoticeLevel::Error, err.to_string(), None);
-            // **失敗したのがいま見ているコミットなら頼み直さない。** 出すと、
-            // リポジトリが壊れているあいだ「失敗 → 再読込 → 失敗」を回し続ける
-            // （`log_loaded` と同じ）。別のコミットの失敗なら、いま見ているものは
-            // まだ一度も試していないので下で頼む。
-            if cursor == Some(oid) {
-                return Cmd::None;
-            }
+            // **失敗した相手を覚えて頼み直さない。** 出すと、リポジトリが壊れて
+            // いるあいだ「失敗 → 再読込 → 失敗」を回し続ける（`log_loaded` と同じ）。
+            // 別のコミットの失敗なら、いま見ているものはまだ一度も試していないので
+            // 下で頼む（`load_detail` が `detail_failed` を見る）。
+            state.graph.detail_failed = Some(oid);
         }
     }
-    load_detail(state)
+    load_commit(state)
+}
+
+/// 届いたファイル一覧を積む。[`commit_detail_loaded`] と同じ形。
+///
+/// **一覧が届いたら `load_diff` も通す。** 左が Diff に差し替わっていても、一覧が
+/// 届くまでは選んでいるファイルが決まらない（`wanted_diff()` が `None`）。`Enter` や
+/// `Tab` で先に `Pane::Diff` へ移れるので、ここで頼み直さないと Diff ペインが
+/// 「読み込めませんでした」のまま残る（01 の「コミットのファイル一覧」）。
+fn commit_files_loaded(
+    state: &mut AppState,
+    oid: Oid,
+    result: Result<Vec<FileEntry>, GitReadError>,
+) -> Cmd {
+    state.jobs.finish(JobKind::LoadCommitFiles);
+    let cursor = state.graph.cursor_commit().map(|commit| commit.oid);
+
+    match result {
+        // 採る条件は詳細と同じ（いま見ているコミットのものか、WIP 行にいるか）。
+        Ok(entries) if cursor.is_none() || cursor == Some(oid) => {
+            state.graph.files_failed = None;
+            state.graph.files = Some(CommitFiles {
+                oid,
+                entries,
+                cursor: 0,
+            });
+        }
+        Ok(_) => {}
+        Err(err) => {
+            state.push_notice(NoticeLevel::Error, err.to_string(), None);
+            state.graph.files_failed = Some(oid);
+        }
+    }
+    Cmd::batch([load_commit(state), load_diff(state)])
 }
 
 /// 下端に近づいたら次のページを頼む。
@@ -732,6 +823,9 @@ enum Plan {
 /// コンフリクトした行を断る文言。`plan` と `discard` の両方に出る。
 const CONFLICTED: &str = "コンフリクトしたファイルは操作できません";
 
+/// コミットの diff で `s` / `u` / `x` を断る文言。
+const COMMIT_DIFF: &str = "コミットの差分は変更できません";
+
 /// 出している diff が最新でないときに断る文言。
 ///
 /// 「まだ届いていない」「読み込めなかった」「書き込みより前のもの」の 3 つに使う。
@@ -762,6 +856,15 @@ enum Scope<'a> {
 /// Diff ペインではカーソルの指すハンクに効く。**ハンクで表せないファイルでは、同じ
 /// キーがファイル単位の操作に落ちる**（07）。
 fn act(state: &mut AppState, action: Action) -> Cmd {
+    // **コミットの diff を見ているあいだは効かせない。** 対象はワーキングツリーの
+    // 選択行だが、画面に出ているのはコミットの中身なので、通すと**見えていない
+    // ファイル**を stage する（07 の「Diff ペイン」）。`focus` の候補で
+    // `Pane::Worktree` を外しているのと同じ事故を、`Pane::Diff` の側で防ぐ。
+    if matches!(state.graph.selection(), GraphSelection::Commit(_)) {
+        state.push_notice(NoticeLevel::Warn, COMMIT_DIFF.to_string(), None);
+        return Cmd::None;
+    }
+
     let Some((section, status, paths)) = state
         .worktree
         .selected()
@@ -2622,9 +2725,9 @@ mod tests {
 
         assert_eq!(
             update(&mut state, Msg::Key(Key::char('j'))),
-            Cmd::LoadCommitDetail(cursor(&state))
+            commit_loads(cursor(&state))
         );
-        // 2 回目の詳細は `JobTracker` に落ちる。続きはまだ出さない。
+        // 2 回目の詳細と一覧は `JobTracker` に落ちる。続きはまだ出さない。
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), more(&state));
     }
@@ -2640,10 +2743,10 @@ mod tests {
         });
 
         // 下端に着いても `JobTracker` が落とす。`update` を通さないと見えない。
-        // 残るのは新しいカーソルの詳細だけ。
+        // 残るのは新しいカーソルの詳細と一覧だけ。
         assert_eq!(
             update(&mut state, Msg::Key(Key::char('j'))),
-            Cmd::LoadCommitDetail(cursor(&state))
+            commit_loads(cursor(&state))
         );
     }
 
@@ -2688,14 +2791,24 @@ mod tests {
             .oid
     }
 
-    /// `n` 件を積み、1 件目のコミットにカーソルを乗せて詳細が届いた状態。
+    /// `n` 件を積み、1 件目のコミットにカーソルを乗せて詳細と一覧が届いた状態。
     ///
-    /// 起動直後のカーソルは WIP 行なので、`j` を 1 回打って乗せる。
+    /// 起動直後のカーソルは WIP 行なので、`j` を 1 回打って乗せる。**一覧も届ける。**
+    /// 届けないと `JobKind::LoadCommitFiles` が走ったままになり、以後の
+    /// `Cmd::LoadCommitFiles` が `issue` に落とされて、テストが見ているのが
+    /// 「出なかった」なのか「落とされた」なのか判らなくなる。
     fn on_first_commit(n: usize) -> AppState {
         let mut state = state_with_commits(n);
         let _ = update(&mut state, Msg::Key(Key::char('j')));
         let _ = update(&mut state, detail_ok(0));
+        let _ = update(&mut state, files_ok(0));
         state
+    }
+
+    /// カーソルがコミットに乗ったときに出る `Cmd`。詳細と一覧を一緒に頼む（01 の
+    /// 「コミットのファイル一覧」）。
+    fn commit_loads(oid: Oid) -> Cmd {
+        Cmd::batch([Cmd::LoadCommitDetail(oid), Cmd::LoadCommitFiles(oid)])
     }
 
     /// 索引 `index` のコミットの詳細が届いた [`Msg`]。
@@ -2715,6 +2828,274 @@ mod tests {
         }
     }
 
+    /// コミットの diff の対象。`assert_eq!` を短くするため。
+    fn commit_diff_target(state: &AppState, path: &str) -> DiffTarget {
+        DiffTarget::Commit {
+            oid: cursor(state),
+            path: Some(path.into()),
+        }
+    }
+
+    /// 1 件目のコミットを選び、一覧の 1 件目で Diff ペインを開いた状態。
+    ///
+    /// **コミット側の Diff ペインの立ち上げはここ 1 本**（ワーキングツリー側の
+    /// `diff_pane` と同じ理由）。
+    fn commit_diff_pane() -> AppState {
+        let mut state = on_first_commit(3);
+        let _ = press_code(&mut state, KeyCode::Enter);
+        let _ = press_code(&mut state, KeyCode::Enter);
+        assert_eq!(state.focus, Pane::Diff);
+        let target = state.wanted_diff().expect("対象が決まっていません");
+        let _ = update(&mut state, diff_ok(target, fake_diff("a.txt", 1)));
+        state
+    }
+
+    #[test]
+    fn a_commit_diff_is_the_file_the_list_has_selected() {
+        // `path: None`（コミット全体）は出さない。一覧を出すためだけに全ファイルの
+        // ハンクを組むことになる（01 の「diff の遅延取得」）。
+        let mut state = on_first_commit(3);
+        state.graph.files = Some(CommitFiles {
+            oid: cursor(&state),
+            entries: vec![
+                fake_entry("a.txt", FileStatus::Modified),
+                fake_entry("b.txt", FileStatus::Added),
+            ],
+            cursor: 1,
+        });
+        state.focus = Pane::Diff;
+
+        assert_eq!(
+            state.wanted_diff(),
+            Some(commit_diff_target(&state, "b.txt"))
+        );
+    }
+
+    #[test]
+    fn a_commit_without_a_file_list_wants_no_diff() {
+        // 一覧が届くまで対象が決まらない。ここで `path: None` に落とすと、
+        // 一覧のためにコミット全体のハンクを組むことになる。
+        let mut state = state_with_commits(3);
+        let _ = press(&mut state, 'j');
+        state.focus = Pane::Diff;
+
+        assert_eq!(state.wanted_diff(), None);
+    }
+
+    #[test]
+    fn a_file_list_that_lands_while_the_diff_pane_is_open_asks_for_the_diff() {
+        // **`Tab` や `Enter` で先に Diff ペインへ移れる。** 一覧が届くまでは
+        // `wanted_diff()` が `None` なので、届いた時点で頼み直さないと Diff ペインが
+        // 「読み込めませんでした」のまま残る（01 の「コミットのファイル一覧」）。
+        let mut state = state_with_commits(3);
+        let _ = press(&mut state, 'j');
+        let _ = update(&mut state, detail_ok(0));
+        let _ = press_code(&mut state, KeyCode::Enter);
+        let _ = press_code(&mut state, KeyCode::Enter);
+        assert_eq!(state.focus, Pane::Diff);
+        assert_eq!(state.wanted_diff(), None);
+
+        let cmd = update(&mut state, files_ok(0));
+
+        assert_eq!(cmd, Cmd::LoadDiff(commit_diff_target(&state, "a.txt")));
+    }
+
+    #[test]
+    fn moving_the_file_cursor_changes_the_diff_target() {
+        let mut state = commit_diff_pane();
+        state.graph.files.as_mut().unwrap().entries = vec![
+            fake_entry("a.txt", FileStatus::Modified),
+            fake_entry("b.txt", FileStatus::Added),
+        ];
+        let _ = press_code(&mut state, KeyCode::Esc);
+        assert_eq!(state.focus, Pane::CommitDetail);
+
+        let _ = press(&mut state, 'j');
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::LoadDiff(commit_diff_target(&state, "b.txt")));
+    }
+
+    #[test]
+    fn moving_the_file_cursor_clears_the_failed_diff() {
+        // 対象が変わるので、一度失敗したファイルにも戻ってくれば試し直せる
+        // （ワーキングツリーの `moved` と同じ形）。
+        let mut state = on_first_commit(3);
+        let _ = press_code(&mut state, KeyCode::Enter);
+        state.diff.failed = Some(commit_diff_target(&state, "a.txt"));
+
+        let _ = press(&mut state, 'j');
+
+        assert_eq!(state.diff.failed, None);
+    }
+
+    #[test]
+    fn the_file_cursor_only_moves_the_list_that_is_on_screen() {
+        // 別のコミットの一覧が残っていることがある（読み込み中・失敗中）。
+        // 濾さずに動かすと、画面に出ていない一覧のカーソルが黙って動く。
+        let mut state = on_first_commit(3);
+        state.graph.files = Some(CommitFiles {
+            oid: fake_oid(2),
+            entries: vec![
+                fake_entry("a.txt", FileStatus::Modified),
+                fake_entry("b.txt", FileStatus::Added),
+            ],
+            cursor: 0,
+        });
+
+        let _ = press(&mut state, 'j');
+
+        assert_eq!(state.graph.files.as_ref().unwrap().cursor, 0);
+    }
+
+    #[test]
+    fn esc_from_a_commit_diff_returns_to_the_commit_detail() {
+        // 戻り先は `Enter` の行き先と同じ関数から出す（`right_pane`）。WIP 行から
+        // 来たときは Working tree に戻る（既存のテスト）。
+        let mut state = commit_diff_pane();
+
+        let _ = press_code(&mut state, KeyCode::Esc);
+
+        assert_eq!(state.focus, Pane::CommitDetail);
+    }
+
+    #[test]
+    fn a_commit_diff_refuses_stage_unstage_and_discard() {
+        // **対象はワーキングツリーの選択行だが、画面に出ているのはコミットの中身。**
+        // 通すと見えていないファイルを stage する（07 の「Diff ペイン」）。
+        // ワーキングツリー側にも選択を用意する。用意しないと `act` の
+        // 「選択が無い」腕で戻ってしまい、この見張りを踏まない。
+        let mut state = commit_diff_pane();
+        let _ = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&["s.txt"], &["u.txt"], &[])))),
+        );
+        assert!(state.worktree.selected().is_some());
+
+        for key in ['s', 'u', 'x'] {
+            let cmd = press(&mut state, key);
+
+            assert_eq!(cmd, Cmd::None, "{key}");
+            assert_eq!(state.modal, None, "{key}");
+            assert_eq!(
+                state.notices.back().map(|notice| notice.message.as_str()),
+                Some(COMMIT_DIFF),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_list_for_another_commit_is_dropped_and_asked_again() {
+        // `JobTracker` の粒度は種別単位なので、要求が飛んでいるあいだのカーソル移動は
+        // 落とされる。届いた側で追いつく（詳細と同じ形）。
+        let mut state = state_with_commits(5);
+        let _ = press(&mut state, 'j');
+        assert_eq!(press(&mut state, 'j'), Cmd::None);
+
+        let cmd = update(&mut state, files_ok(0));
+
+        assert_eq!(cmd, Cmd::LoadCommitFiles(cursor(&state)));
+        assert!(state.graph.fresh_files().is_none());
+    }
+
+    #[test]
+    fn a_file_list_that_lands_on_the_wip_row_is_kept() {
+        // WIP 行では一覧を 1 つも出していないので、置いても新しいものを潰さない
+        // （詳細と同じ）。
+        let mut state = state_with_commits(3);
+        let _ = press(&mut state, 'j');
+        assert_eq!(press(&mut state, 'k'), Cmd::None);
+
+        let _ = update(&mut state, files_ok(0));
+
+        assert_eq!(press(&mut state, 'j'), Cmd::None);
+        assert!(state.graph.fresh_files().is_some());
+    }
+
+    #[test]
+    fn a_failed_file_list_is_not_asked_for_again() {
+        // 出すと「失敗 → 再読込 → 失敗」を回す（詳細と同じ）。
+        let mut state = state_with_commits(3);
+        let _ = press(&mut state, 'j');
+        let _ = update(&mut state, detail_ok(0));
+
+        let cmd = update(&mut state, files_err(0));
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
+
+        // カーソルが動いて戻ってくれば 1 回だけ試し直せる。**2 件目のぶんを届けて
+        // ジョブを畳んでから戻る。** 畳まないと、戻ったときの要求が `issue` に
+        // 落とされて「印が落ちたか」を見られない。
+        let _ = press(&mut state, 'j');
+        let _ = update(&mut state, detail_ok(1));
+        let _ = update(&mut state, files_ok(1));
+
+        assert_eq!(press(&mut state, 'k'), commit_loads(fake_oid(0)));
+    }
+
+    #[test]
+    fn a_file_list_failure_for_another_commit_still_asks_for_the_one_on_screen() {
+        // 一律に止めると、一度も試していないコミットが「読み込めませんでした」の
+        // まま残る（詳細と同じ）。
+        let mut state = state_with_commits(3);
+        let _ = press(&mut state, 'j');
+        let _ = update(&mut state, detail_ok(0));
+        // 読み込み中に 1 行動く。一覧の要求は `JobTracker` に落とされ、詳細だけが飛ぶ。
+        assert_eq!(press(&mut state, 'j'), Cmd::LoadCommitDetail(fake_oid(1)));
+
+        let cmd = update(&mut state, files_err(0));
+
+        // いま見ているコミットの一覧はまだ一度も試していないので頼む
+        // （詳細は走っているので `issue` が落とす）。
+        assert_eq!(cmd, Cmd::LoadCommitFiles(cursor(&state)));
+    }
+
+    #[test]
+    fn a_failed_detail_does_not_block_the_file_list() {
+        // 詳細と一覧は別々に失敗する。1 本の印にすると、片方の失敗でもう片方まで
+        // 塞ぐ（`GraphState::detail_failed` / `files_failed`）。
+        let mut state = state_with_commits(3);
+        let _ = press(&mut state, 'j');
+
+        let cmd = update(&mut state, detail_err(0));
+
+        assert_eq!(cmd, Cmd::None, "一覧は既に走っているので落とされる");
+        assert!(state.jobs.is_running(JobKind::LoadCommitFiles));
+        // 一覧が届いても、失敗した詳細は頼み直さない。
+        assert_eq!(update(&mut state, files_ok(0)), Cmd::None);
+    }
+
+    #[test]
+    fn a_reload_drops_the_file_list() {
+        // `lines` に無いコミットの一覧を残さない（詳細と同じ）。
+        let mut state = on_first_commit(3);
+        assert!(state.graph.files.is_some());
+
+        state.graph.restart();
+
+        assert!(state.graph.files.is_none());
+        assert!(state.graph.files_failed.is_none());
+    }
+
+    /// 索引 `index` のコミットのファイル一覧が届いた [`Msg`]。
+    fn files_ok(index: u8) -> Msg {
+        files_loaded(index, Ok(vec![fake_entry("a.txt", FileStatus::Modified)]))
+    }
+
+    /// 索引 `index` のコミットのファイル一覧が失敗した [`Msg`]。
+    fn files_err(index: u8) -> Msg {
+        files_loaded(index, Err(GitReadError::NonUtf8Head))
+    }
+
+    fn files_loaded(index: u8, result: Result<Vec<FileEntry>, GitReadError>) -> Msg {
+        Msg::CommitFilesLoaded {
+            oid: fake_oid(index),
+            result: Box::new(result),
+        }
+    }
+
     #[test]
     fn moving_onto_a_commit_asks_for_its_detail() {
         let mut state = state_with_commits(3);
@@ -2723,8 +3104,9 @@ mod tests {
 
         let cmd = update(&mut state, Msg::Key(Key::char('j')));
 
-        assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
+        assert_eq!(cmd, commit_loads(cursor(&state)));
         assert!(state.jobs.is_running(JobKind::LoadCommitDetail));
+        assert!(state.jobs.is_running(JobKind::LoadCommitFiles));
     }
 
     #[test]
@@ -2755,7 +3137,7 @@ mod tests {
 
         let cmd = update(&mut state, Msg::Key(Key::char('j')));
 
-        assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
+        assert_eq!(cmd, commit_loads(cursor(&state)));
     }
 
     #[test]
@@ -2810,7 +3192,7 @@ mod tests {
         // 1 件目に乗って頼み、返る前に WIP 行へ戻る。
         assert_eq!(
             update(&mut state, Msg::Key(Key::char('j'))),
-            Cmd::LoadCommitDetail(fake_oid(0))
+            commit_loads(fake_oid(0))
         );
         assert_eq!(update(&mut state, Msg::Key(Key::char('k'))), Cmd::None);
         assert_eq!(state.graph.selection(), GraphSelection::Wip);
@@ -2827,12 +3209,12 @@ mod tests {
     fn tab_does_not_reach_the_worktree_while_a_commit_is_selected() {
         // コミットを選んだまま Working tree にフォーカスできると、`s` / `u` / `x` が
         // 画面に出ていないファイルを stage する（01 の「Pane と Modal」）。
+        // **`Diff` は候補に残る**（コミットのファイル一覧で選んだ 1 件を左に出す）。
         let mut state = on_first_commit(3);
 
         for _ in 0..4 {
             let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
             assert_ne!(state.focus, Pane::Worktree, "{:?}", state.focus);
-            assert_ne!(state.focus, Pane::Diff, "{:?}", state.focus);
         }
     }
 
@@ -2950,7 +3332,7 @@ mod tests {
         // 2 件目を頼んだ直後に戻る。戻りは `JobTracker` に落とされる。
         assert_eq!(
             update(&mut state, Msg::Key(Key::char('j'))),
-            Cmd::LoadCommitDetail(fake_oid(1))
+            commit_loads(fake_oid(1))
         );
         assert_eq!(update(&mut state, Msg::Key(Key::char('k'))), Cmd::None);
 

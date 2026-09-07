@@ -27,6 +27,7 @@ impl RepoReader {
     pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;     // name, url（生の値）
     pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>
     pub fn head(&self) -> Result<HeadInfo, GitReadError>;           // branch name or detached Oid
+    pub fn branches(&self) -> Result<Vec<Branch>, GitReadError>;    // ローカルブランチ + upstream の ahead/behind
     pub fn log(&self) -> Result<LogSession<'_>, GitReadError>;   // ページングは LogSession が持つ
     pub fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;  // 選択時に遅延取得
     pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;  // 同上（一覧だけ）
@@ -93,6 +94,48 @@ pub enum RefLabel {
 - `FromIterator` を実装して `refs()` を通さずにも索引を組めるようにする。`ui` のテストが
   ラベルの描画を実リポジトリ無しで表現できるようにするため。どちらの経路でも
   並べ替えは同じところを通る
+
+### ブランチ一覧
+
+```rust
+pub struct Branch {
+    pub name: String,            // "feat/x"
+    pub oid: Oid,
+    pub upstream: Option<String>,  // "origin/feat/x"。未設定なら None
+    pub ahead: usize,            // upstream に対する ahead / behind
+    pub behind: usize,
+    pub is_head: bool,
+}
+```
+
+Branches ペイン（07）が使う。`refs()` が返すのは Oid → ラベルの索引で、**ラベルには
+upstream も ahead / behind も無い**ので、そちらからは組めない。
+
+- **`refs()` と同じく `references()` の 1 パス**で、`is_branch()` のものだけ拾う。
+  種別ごとに `branches()`（git2 の）を呼んでも内部では全 ref を走査する
+- **`is_head` は `HEAD` の symbolic target との比較**で決め、HEAD は 1 回だけ解決する
+  （`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直す）。unborn と detached は
+  どちらも「どのブランチも HEAD ではない」に落ちる。`refs()` と同じ形
+- **非 UTF-8 のブランチ名は落とす**（`refs()` と同じ。識別子は `git_exec` の argv に
+  載せられないので、出しても切替も削除もできない行になる）
+- **並べ替えは名前順**。git2 の列挙順は安定していない（`RefIndex` と同じ理由）
+- **upstream が引けないブランチは `upstream: None` にして一覧に残す。** `upstream()` は
+  未設定なら `NotFound`（class=Config）、設定はあるが追跡 ref が消えていれば
+  `NotFound`（class=Reference）を返す（git2 0.21 で確認）。**この 2 つを同じ扱いに
+  してよい**のは、どちらでも「いま比べる相手がいない」で、ahead / behind を出さないのが
+  正しく、M3 の push でも `-u` を付けるのが正しいため。**`None` の理由が 2 つある
+  ときは、呼び出し側が同じ扱いをしてよいかを数える**（#31 の `hunk_scope` は
+  「ハンクで表せない」と「まだ届いていない」を同じ `None` にして、ファイル全体を
+  stage する事故になった）。ここは数えて同じだった。
+  `NotFound` 以外はそのまま `Err` にする（壊れたリポジトリなので `refs()` と同じ扱い）
+- **ahead / behind は `graph_ahead_behind(local, upstream)`。** upstream があるときだけ
+  引く。無いブランチで 0 / 0 を入れると「同期している」と読めてしまう
+
+**`refs()` / `head` / `remotes` と 1 通にまとめない**（`Cmd::LoadRepoInfo` に乗せない）。
+ブランチの本数だけ upstream の解決と `graph_ahead_behind` の walk が要り、グラフの
+ラベルと HEAD だけが欲しい経路にそのコストを払わせることになる。`commit_files` を
+`commit_detail` と分けたのと同じ理由（01 の「コミットのファイル一覧」）。**古くなる
+時点は同じ**なので、ref を動かす書き込みの後は両方を読み直す（01 の `update::Reload`）。
 
 ### 非 UTF-8 の扱い
 

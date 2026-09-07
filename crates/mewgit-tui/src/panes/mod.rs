@@ -2,6 +2,7 @@
 //!
 //! 各ペインは `AppState` を読むだけで、`Cmd` を作らない（不変ルール 2）。
 
+pub mod branches;
 pub mod commit;
 pub mod diff;
 pub mod graph;

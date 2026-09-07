@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::git_exec::{hunk_patch, supports_hunk_patch, ExecError, GitOp};
 use crate::git_read::{
-    CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, Hunk, LogPage, Oid,
-    WorktreeSection, WorktreeSnapshot,
+    Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, Hunk, LogPage,
+    Oid, WorktreeSection, WorktreeSnapshot,
 };
 
 use super::{
@@ -33,6 +33,7 @@ pub fn init(state: &mut AppState) -> Cmd {
             restart: false,
         },
         Cmd::LoadStatus,
+        Cmd::LoadBranches,
     ]);
     state.issue(cmd)
 }
@@ -102,6 +103,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
         // `Msg` に変種を足したときに実装漏れをコンパイルエラーにするため。
         Msg::StatusLoaded(result) => status_loaded(state, *result),
+        Msg::BranchesLoaded(result) => branches_loaded(state, *result),
         Msg::DiffLoaded { target, result } => diff_loaded(state, target, *result),
         Msg::ExecFinished(done) => exec_finished(state, *done),
         Msg::ProgressDetected(_) => Cmd::None,
@@ -142,12 +144,13 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
 
     match state.focus {
         Pane::Graph => graph_key(state, key),
+        Pane::Branches => branches_key(state, key),
         Pane::Worktree => worktree_key(state, key),
         Pane::CommitDetail => commit_detail_key(state, key),
         Pane::Diff => diff_key(state, key),
         // 各ペインのキー処理は対応するマイルストーンで足す。巡回の候補
         // （`AppState::focus_candidates`）に入っていないので、いまここには来ない。
-        Pane::Branches | Pane::Stash | Pane::Prs => Cmd::None,
+        Pane::Stash | Pane::Prs => Cmd::None,
     }
 }
 
@@ -362,6 +365,27 @@ fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::Char('j') | KeyCode::Down => move_file(state, 1),
         KeyCode::Char('k') | KeyCode::Up => move_file(state, -1),
         KeyCode::Enter => focus(state, Pane::Diff),
+        KeyCode::Esc => focus(state, Pane::Graph),
+        _ => Cmd::None,
+    }
+}
+
+/// Branches ペインのキー処理。
+///
+/// **`Enter`（切替）と `n` / `d` / `D` / `r` は次のタスク**（07 の「どこまで実装したか」）。
+/// ここでは移動と出口だけを受ける。
+fn branches_key(state: &mut AppState, key: Key) -> Cmd {
+    match key.code() {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.branches.move_cursor(1);
+            Cmd::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.branches.move_cursor(-1);
+            Cmd::None
+        }
+        // **`Tab` でしか入れないペインにも出口を用意する**（07）。戻り先を
+        // `right_pane()` にしないのは、このペインが左の選択と無関係だから。
         KeyCode::Esc => focus(state, Pane::Graph),
         _ => Cmd::None,
     }
@@ -1089,6 +1113,26 @@ fn names(paths: &[PathBuf]) -> String {
 }
 
 /// ワーキングツリーの一覧を入れ替える。
+/// ブランチ一覧が届いた。
+///
+/// **成功も失敗も `jobs.finish` を通る。** 通らないと `JobKind::LoadBranches` が走った
+/// まま残り、以後の `Cmd::LoadBranches` が黙って落ちる（`status_loaded` と同じ）。
+fn branches_loaded(state: &mut AppState, result: Result<Vec<Branch>, GitReadError>) -> Cmd {
+    state.jobs.finish(JobKind::LoadBranches);
+
+    match result {
+        Ok(branches) => state.branches.loaded(branches),
+        // 読めていた一覧は捨てない（`status_loaded` と同じ理由）。空のまま失敗した
+        // ときに「読み込み中…」で固まらないよう、印だけ立てる（01 の「ブランチ一覧」）。
+        Err(err) => {
+            state.branches.failed();
+            state.push_notice(NoticeLevel::Error, err.to_string(), None);
+        }
+    }
+
+    Cmd::None
+}
+
 fn status_loaded(state: &mut AppState, result: Result<WorktreeSnapshot, GitReadError>) -> Cmd {
     state.jobs.finish(JobKind::LoadStatus);
 
@@ -1262,8 +1306,8 @@ mod tests {
     use crate::git_read::{Commit, HeadInfo, Hunk, LineOrigin, RefIndex, RefLabel, Remote};
     use crate::graph::LaneState;
     use crate::test_util::{
-        fake_commit, fake_commit_with_parents, fake_detail, fake_entry, fake_file_diff, fake_hunk,
-        fake_oid, fake_snapshot,
+        fake_branch, fake_commit, fake_commit_with_parents, fake_detail, fake_entry,
+        fake_file_diff, fake_hunk, fake_oid, fake_snapshot,
     };
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
@@ -1974,6 +2018,9 @@ mod tests {
         // WIP 行に戻す。コミットを選んでいるあいだ Worktree は巡回に入らない（01）。
         let _ = press(&mut state, 'k');
 
+        // 巡回の並びは `Pane` の宣言順なので、Graph の次は Branches（01）。
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
+        assert_eq!(state.focus, Pane::Branches);
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
         assert_eq!(state.focus, Pane::Worktree);
 
@@ -1983,6 +2030,83 @@ mod tests {
         assert_eq!(state.worktree.cursor, 1);
 
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::BackTab)));
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::BackTab)));
+        assert_eq!(state.focus, Pane::Graph);
+    }
+
+    /// ブランチ一覧の返信を届ける。**成功も失敗もここを通す。**
+    fn with_branches(state: &mut AppState, result: Result<Vec<Branch>, GitReadError>) -> Cmd {
+        update(state, Msg::BranchesLoaded(Box::new(result)))
+    }
+
+    /// Branches ペインにフォーカスを置き、一覧が届いた状態。
+    fn state_on_branches(names: &[(&str, bool)]) -> AppState {
+        let mut state = state_with_commits(2);
+        state.focus = Pane::Branches;
+        let branches = names
+            .iter()
+            .map(|(name, is_head)| fake_branch(name, *is_head))
+            .collect();
+        let _ = with_branches(&mut state, Ok(branches));
+        state
+    }
+
+    #[test]
+    fn branches_loaded_fills_in_the_list_and_ends_the_job() {
+        let mut state = state();
+        let _ = state.issue(Cmd::LoadBranches);
+
+        let cmd = with_branches(
+            &mut state,
+            Ok(vec![fake_branch("main", true), fake_branch("topic", false)]),
+        );
+
+        assert_eq!(cmd, Cmd::None);
+        // 通らないとジョブが走ったまま残り、以後の `LoadBranches` が黙って落ちる。
+        assert!(!state.jobs.is_running(JobKind::LoadBranches));
+        assert_eq!(state.branches.branches.len(), 2);
+        assert!(state.branches.is_loaded());
+    }
+
+    #[test]
+    fn branches_loaded_marks_the_failure_and_tells_the_user() {
+        let mut state = state();
+        let _ = state.issue(Cmd::LoadBranches);
+
+        let cmd = with_branches(&mut state, Err(GitReadError::ReaderGone));
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(!state.jobs.is_running(JobKind::LoadBranches));
+        // **「読み込み中…」のまま固まらせない。** 印は `ui` が文言を出し分けるのに要る。
+        assert!(state.branches.has_failed());
+        assert!(!state.branches.is_loaded());
+        assert_eq!(
+            state.notices.back().map(|notice| notice.level),
+            Some(NoticeLevel::Error)
+        );
+    }
+
+    #[test]
+    fn j_and_k_move_the_branch_cursor_without_touching_the_graph() {
+        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        // カーソルは HEAD の行に座っている。
+        assert_eq!(state.branches.cursor, 1);
+
+        let _ = press(&mut state, 'k');
+
+        assert_eq!(state.branches.cursor, 0);
+        // 同じ `j` / `k` がグラフに漏れない。
+        assert_eq!(state.graph.cursor, 0);
+    }
+
+    #[test]
+    fn esc_leaves_the_branches_pane_for_the_graph() {
+        // **`Tab` でしか入れないペインにも出口を用意する**（07）。戻り先は
+        // `right_pane()` ではない。このペインは左の選択と無関係なので。
+        let mut state = state_on_branches(&[("main", true)]);
+
+        let _ = press_code(&mut state, KeyCode::Esc);
+
         assert_eq!(state.focus, Pane::Graph);
     }
 
@@ -2354,11 +2478,17 @@ mod tests {
 
         assert_eq!(
             cmd,
-            Cmd::Batch(vec![Cmd::LoadRepoInfo, more(&state), Cmd::LoadStatus,])
+            Cmd::Batch(vec![
+                Cmd::LoadRepoInfo,
+                more(&state),
+                Cmd::LoadStatus,
+                Cmd::LoadBranches,
+            ])
         );
         assert!(state.jobs.is_running(JobKind::LoadLog));
         assert!(state.jobs.is_running(JobKind::LoadRepoInfo));
         assert!(state.jobs.is_running(JobKind::LoadStatus));
+        assert!(state.jobs.is_running(JobKind::LoadBranches));
     }
 
     #[test]

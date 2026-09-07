@@ -4,7 +4,7 @@
 use mewgit_core::app::{update, AppState, Key, Modal, Msg, RepoInfo, TermSize};
 use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, LogPage};
-use mewgit_core::test_util::{fake_commit, fake_commit_with_parents};
+use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents};
 use ratatui::backend::TestBackend;
 use ratatui::style::Modifier;
 use ratatui::Terminal;
@@ -151,6 +151,13 @@ fn state_with_log(commits: Vec<Commit>) -> AppState {
             restart: false,
             result: Ok(page),
         },
+    );
+    // **一覧の返信も届ける。** 届けないと Branches ペインが「読み込み中…」のまま
+    // 描かれ、その文言を見る他のペインのテストが当たる。ジョブを発行するヘルパは
+    // その返信まで届ける（CLAUDE.md。#38 で同じ形の抜けが既存テストを素通りさせた）。
+    let _ = update(
+        &mut state,
+        Msg::BranchesLoaded(Box::new(Ok(vec![fake_branch("main", true)]))),
     );
     state
 }

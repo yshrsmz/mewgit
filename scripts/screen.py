@@ -18,7 +18,10 @@ import sys
 import unicodedata
 
 # CSI シーケンス。解釈するのは H / J / K だけで、色などの SGR は捨てる。
-CSI = re.compile(r"\x1b\[([0-9;?]*)([a-zA-Z])")
+#
+# 中間バイトに `<` `>` `=` も許す。終了時に出る `\x1b[<1u`（キーボードプロトコルの
+# pop）が外れると、そのまま画面に文字として落ちて最後のフレームに混ざる。
+CSI = re.compile(r"\x1b\[([0-9;?<>=]*)([a-zA-Z])")
 # 文字集合の切り替え（`\x1b(B` など）。ratatui は出さないが `script` の記録に混ざる。
 CHARSET = re.compile(r"\x1b[()][A-Z0-9]")
 

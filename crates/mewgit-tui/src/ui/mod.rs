@@ -37,7 +37,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     } else {
         panes::graph::render(frame, left, state);
     }
-    // **右は Working tree とコミット詳細の差し替え。** どちらを描くかはグラフの
+    // **右列の上は Branches。** 左の選択でも `focus` でも入れ替わらないので、
+    // 一覧を先に置いて残りを下のペインに渡す（07 の「レイアウト」）。
+    let [branches, right] = split_right(state, right);
+    panes::branches::render(frame, branches, state);
+    // **右列の下は Working tree とコミット詳細の差し替え。** どちらを描くかはグラフの
     // 選択だけで決まる（07）。`focus` で決めると、Graph にフォーカスした瞬間に
     // 右が消える。
     match state.graph.selection() {
@@ -58,6 +62,15 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 /// 隠すほうだけ先に入れると 80 桁の端末から右ペインへ到達できなくなる。
 fn split_body(area: Rect) -> [Rect; 2] {
     Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area)
+}
+
+/// 右列を Branches と、その下のペイン（Working tree / コミット詳細）に割る。
+///
+/// **割る位置を決めるのは Branches ペイン自身**（`panes::branches::rows`）。一覧の
+/// 行数から出すので、ここで高さを書くと規則が 2 本になる。
+fn split_right(state: &AppState, right: Rect) -> [Rect; 2] {
+    let rows = panes::branches::rows(state, right.height);
+    Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(right)
 }
 
 /// ペインの枠。
@@ -136,6 +149,18 @@ pub fn render_rows(
         Paragraph::new(lines.drain(window).collect::<Vec<_>>()),
         area,
     );
+}
+
+/// 一覧に割く行数。必要なぶん、ただし `available` の半分まで（07）。
+///
+/// **上限が要るのは、一覧が伸びると同じ領域を分け合う相手が潰れるため。**
+/// コミット詳細ではメッセージが、右列では Working tree / コミット詳細が相手になる。
+/// 逆に固定で割かないのは、行が少ないときに空行を抱えるため。
+///
+/// **2 つのペインが同じ規則を使うので 1 本にする。** 写すと、片方だけ上限を変えた
+/// ときに気付けない。
+pub fn capped_rows(needed: usize, available: u16) -> u16 {
+    u16::try_from(needed).unwrap_or(u16::MAX).min(available / 2)
 }
 
 /// ファイルの表示名。rename は元の名前も出す。
@@ -286,9 +311,9 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_row, short_oid, split, split_body, window, wrapped, SHORT_OID};
+    use super::{file_row, short_oid, split, split_body, split_right, window, wrapped, SHORT_OID};
     use crate::test_util::{draw, state_at, terminal_with};
-    use mewgit_core::app::{NoticeLevel, Pane, TermSize};
+    use mewgit_core::app::{AppState, NoticeLevel, Pane, TermSize};
     use mewgit_core::git_read::Oid;
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
@@ -358,11 +383,14 @@ mod tests {
     /// 変えたときにテストだけが古い桁を見て緑のまま無意味になる。
     ///
     /// **Graph と Diff は同じ領域を差し替えで使う**（07）ので、同じ座標を返す。
-    fn corner(pane: Pane, size: TermSize) -> (u16, u16) {
+    fn corner(pane: Pane, size: TermSize, state: &AppState) -> (u16, u16) {
         let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
         let [left, right] = split_body(body);
+        // 右列は Branches とその下に割れている。割る位置も実際の関数から出す。
+        let [branches, below] = split_right(state, right);
         let area = match pane {
-            Pane::Worktree | Pane::CommitDetail => right,
+            Pane::Branches => branches,
+            Pane::Worktree | Pane::CommitDetail => below,
             _ => left,
         };
         (area.x, area.y)
@@ -381,14 +409,27 @@ mod tests {
             let buffer = terminal.backend().buffer();
 
             for &pane in candidates {
-                let bold = buffer[corner(pane, size)].modifier.contains(Modifier::BOLD);
+                let at = corner(pane, size, &state);
+                let bold = buffer[at].modifier.contains(Modifier::BOLD);
                 // **`pane == focus` では見られない。** Graph と Diff は同じ領域なので、
                 // Diff にフォーカスがあるとき「Graph の枠」の座標には Diff の枠が
                 // 描かれている。太いかどうかはその領域にフォーカスがあるかで決まる。
-                let expected = corner(pane, size) == corner(focus, size);
+                let expected = at == corner(focus, size, &state);
                 assert_eq!(bold, expected, "focus={focus:?} pane={pane:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_right_column_stacks_the_branches_over_the_selected_pane() {
+        // 左と違って右は差し替えではない。ブランチ一覧はグラフの選択と無関係なので、
+        // Working tree（またはコミット詳細）と同時に出る（07 の「レイアウト」）。
+        let state = state_at("/repo");
+
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(text.contains("Branches"), "{text}");
+        assert!(text.contains("Working tree"), "{text}");
     }
 
     #[test]

@@ -36,6 +36,14 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
   `https://host/owner/repo` の 3 つ。`git://` / `http://` / `file://` / ローカルパスと、
   `owner/repo` の 2 段にならないパスは `InvalidRemoteUrl` で拒む。**拒んでも Git 操作は
   動く**（GitHub 機能が degraded になるだけ）ので、読めない形を無理に通さない
+- `git+ssh://` も ssh として受ける（git が ssh 経路に流すことを argv のダンプで確認）。
+  **大文字の scheme は受けない** — `SSH://` は git 自身が `remote-SSH` ヘルパを探して落ち、
+  `HTTPS://` は dumb-http に落ちて GitHub に拒否されるので、どちらも git で動かない
+- **`owner` / `repo` も `host` と対称に検査する。** この 2 つは `GET /repos/{owner}/{repo}`
+  に補間される（05）ので、`..` を通すと `/repos/../users` になり、`?` や `#` を通すと
+  query / fragment になる。英数と `.` `-` `_` だけを受け、`.` と `..` は拒む
+- **`InvalidRemoteUrl` に載せる URL は資格情報を伏せる。** `https://x-access-token:<PAT>@host/…`
+  は CI の checkout が書く形で、解析に失敗した URL は通知にもログにも出る（不変ルール 3）
 - port は捨てる。`RemoteUrl` は host / owner / repo しか持たない。**非既定ポートの
   GHES では API のベース URL が違う**が、ベース URL を組むのは `github`（05）なので
   そちらのタスクで決める
@@ -46,7 +54,9 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
 ### ssh -G の実測（OpenSSH 10.3p1）
 
 - **未定義の alias でも exit 0** で `hostname <alias>` を返す。「エイリアスが無かった」は
-  エラーではなく「正規化しても同じだった」。`Err` にするのは spawn 失敗と非 0 終了だけ
+  エラーではなく「正規化しても同じだった」。`Err` にするのは 3 つ — spawn 失敗、非 0 終了、
+  出力に `hostname` の行が無いこと（ssh が形を変えたときにしか起きないが、正規化して
+  いない値を正規化済みとして下流に渡さないために落とす）
 - 出力は `host <alias>` の行が `hostname <実ホスト>` の行より先に来る。**`hostname ` の
   完全一致**で拾う（`host` の prefix で見ると最初の行を取ってしまう）
 - `HostName %h.example.com` のトークンは `-G` の時点で展開済みの値が出る
@@ -57,6 +67,11 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
   無く、見張りを書けない**ので入れない
 - `-F <file>` を渡すと `/etc/ssh/ssh_config` も含めて無視するので、実 ssh を使った
   テストを環境から切り離せる（テストのための stub は要らない）
+- **`Host` の照合は大小文字を区別する。** `Host GH-Work` の設定に `ssh -G gh-work` は
+  当たらない（当たらなければ引数がそのまま返るので、失敗せずに正規化だけが効かない）。
+  したがって **`RemoteUrl` は `host_raw` を小文字化しない。** https 側だけ小文字化すると
+  2 つの経路で別の文字列が下流に入るので、ホスト比較の正規化は `ssh -G` を通したあとの
+  値に対して M4 で決める
 
 ### alias は argv の positional に載る
 

@@ -38,14 +38,19 @@ impl RemoteUrl {
     /// **拒んでも Git 操作は動く**（GitHub 機能が degraded になるだけ）ので、
     /// 読めない形を無理に通さない。
     pub fn parse(url: &str) -> Result<Self, AuthError> {
-        parse_inner(url.trim()).ok_or_else(|| AuthError::InvalidRemoteUrl {
-            url: url.to_string(),
-        })
+        let url = url.trim();
+        parse_inner(url).ok_or_else(|| AuthError::InvalidRemoteUrl { url: redacted(url) })
     }
 }
 
 fn parse_inner(url: &str) -> Option<RemoteUrl> {
-    let (authority, path, scheme) = if let Some(rest) = url.strip_prefix("ssh://") {
+    let (authority, path, scheme) = if let Some(rest) = url
+        .strip_prefix("ssh://")
+        // `git+ssh://` は git が ssh 経路に流す（`core.sshCommand` で argv をダンプして
+        // 確認）。大文字の `SSH://` は git 自身が `remote-SSH` ヘルパを探して落ちるので
+        // 受けない。同じ理由で scheme の照合は大小文字を区別したままにする。
+        .or_else(|| url.strip_prefix("git+ssh://"))
+    {
         let (authority, path) = rest.split_once('/')?;
         (authority, path, RemoteScheme::Ssh)
     } else if let Some(rest) = url.strip_prefix("https://") {
@@ -117,10 +122,48 @@ fn split_owner_repo(path: &str) -> Option<(&str, &str)> {
     // GitHub のパスは 2 段だけ。3 段以上（GitLab のサブグループなど）は owner を
     // 決められないので受けない。`owner` が空になる経路は無い（先頭の `/` は落として
     // あるので、`split_once` が `Some` を返す時点で左は非空）。
-    if repo.is_empty() || repo.contains('/') {
+    if repo.contains('/') || !valid_segment(owner) || !valid_segment(repo) {
         return None;
     }
     Some((owner, repo))
+}
+
+/// owner / repo として受ける形か。
+///
+/// **`valid_host` と対称に数える。** この 2 つは `GET /repos/{owner}/{repo}` に補間される
+/// （05）ので、`..` を通すと `/repos/../users` になり、`?` や `#` を通すと query や
+/// fragment になる。`.git/config` の値は clone 由来で任意なので、ここで止める。
+fn valid_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// エラーに載せる前に、URL に埋め込まれた資格情報を落とす。
+///
+/// `https://x-access-token:<PAT>@host/owner/repo` の形は珍しくない（CI の checkout が
+/// 書く）。**解析に失敗した URL は通知にもログにも出る**ので、そのまま載せると
+/// トークンが漏れる（不変ルール 3）。scp 形式にパスワードは書けないので、`://` を
+/// 含む形だけを見る。
+fn redacted(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let authority_start = scheme_end + "://".len();
+    let authority_end = url[authority_start..]
+        .find('/')
+        .map_or(url.len(), |offset| authority_start + offset);
+    match url[authority_start..authority_end].rsplit_once('@') {
+        Some((_userinfo, host)) => format!(
+            "{}***@{host}{}",
+            &url[..authority_start],
+            &url[authority_end..]
+        ),
+        None => url.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +226,11 @@ mod tests {
             parsed("ssh://git@acme.ghe.com:2222/acme/tools"),
             ssh("acme.ghe.com", "acme", "tools")
         );
+        // git が ssh 経路に流す形（実測）。
+        assert_eq!(
+            parsed("git+ssh://git@github.com/a/b.git"),
+            ssh("github.com", "a", "b")
+        );
     }
 
     #[test]
@@ -234,6 +282,36 @@ mod tests {
         ] {
             rejected(url);
         }
+    }
+
+    #[test]
+    fn rejects_owner_or_repo_that_would_change_the_api_path() {
+        // この 2 つは `GET /repos/{owner}/{repo}` に補間される（05）。`..` は
+        // `/repos/../users` になり、`?` と `#` は query / fragment になる。
+        for url in [
+            "https://github.com/../users",
+            "https://github.com/a/..",
+            "https://github.com/./b",
+            "https://github.com/a/b?x=1",
+            "https://github.com/a/b#frag",
+            "https://github.com/a%2fb/c",
+            "git@github.com:a/b c.git",
+        ] {
+            rejected(url);
+        }
+    }
+
+    #[test]
+    fn keeps_credentials_out_of_the_error() {
+        // CI の checkout が書く形。解析に失敗した URL は通知に出るので、そのまま
+        // 載せるとトークンが漏れる（不変ルール 3）。
+        let err = RemoteUrl::parse("https://x-access-token:ghp_secret@github.com/a/b/c")
+            .expect_err("3 段のパスは受けない");
+        let message = err.to_string();
+        assert!(!message.contains("ghp_secret"), "{message}");
+        assert!(!message.contains("x-access-token"), "{message}");
+        // どのリモートで失敗したかは残す。
+        assert!(message.contains("github.com/a/b/c"), "{message}");
     }
 
     #[test]

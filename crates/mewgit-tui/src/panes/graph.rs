@@ -476,7 +476,13 @@ mod tests {
         // ペインが「読み込み中…」のままだと、何も起きていないように見える。
         let mut state = state_at("/repo");
         let _ = init(&mut state);
-        let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Err(GitReadError::NonUtf8Head),
+            },
+        );
 
         let lines = draw(&state, TermSize::default());
 

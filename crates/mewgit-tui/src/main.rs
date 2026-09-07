@@ -19,7 +19,11 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use mewgit_core::app::NoticeLevel;
 use mewgit_core::config::Config;
-use ratatui::crossterm::event::EventStream;
+use ratatui::crossterm::event::{
+    EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
+use ratatui::crossterm::execute;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,11 +37,36 @@ async fn main() -> Result<()> {
 
     // raw mode / 代替画面 / パニックフックは ratatui が持っている。
     let mut terminal = ratatui::try_init()?;
+    push_keyboard_enhancement();
 
     let result = runtime::run(&mut terminal, EventStream::new(), &mut state, reader).await;
+
+    let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     // restore は () を返すので、ループのエラーを後始末のエラーで踏み潰さない。
     ratatui::restore();
     result
+}
+
+/// kitty keyboard protocol を要求する。
+///
+/// 有効になると `Shift+Enter` が `Enter` と区別して届く（`CSI 13;2u`）。コミット
+/// メッセージの改行に使う（01 の「コミットメッセージの編集」）。対応しない端末では
+/// 何も起きず、そこでは `Alt+Enter`（`ESC CR`）と `Ctrl-J` が改行になる。
+///
+/// **対応するかを問い合わせない。** `crossterm::terminal::supports_keyboard_enhancement`
+/// は端末に `CSI ?u` を投げて応答を待ち、**応答しない端末では 2 秒待ってから諦める**
+/// （crossterm 0.28.1 の `terminal/sys/unix.rs`）。実測で起動が 0.82 秒 → 2.04 秒に
+/// なった。対応しない端末ほど黒い画面を長く見ることになる。`CSI > 1 u` は private な
+/// CSI なので、解さない端末は読み飛ばす。押せたかを知る必要も無い（`Enter` の意味は
+/// どちらでも変わらず、増えるのは受けられる改行キーだけ）。
+///
+/// 押す旗は `DISAMBIGUATE_ESCAPE_CODES` だけにする。`REPORT_EVENT_TYPES` まで押すと
+/// 離鍵も届き、1 打鍵が 2 つの `Msg::Key` になる。
+fn push_keyboard_enhancement() {
+    let _ = execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
 }
 
 /// 開くリポジトリ。引数が無ければカレントディレクトリ。

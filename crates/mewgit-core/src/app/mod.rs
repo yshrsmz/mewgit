@@ -17,7 +17,7 @@ pub use key::{Key, KeyCode, Modifiers};
 pub use msg::{ExecDone, Msg, RepoSnapshot};
 pub use state::{
     AppState, BranchState, DiffCursor, DiffState, DiffView, Freshness, GraphLine, GraphState,
-    InputIntent, Job, JobKind, JobTracker, Modal, Notice, NoticeLevel, Pane, PrState, RepoInfo,
-    TermSize, TextBuffer, WorktreeState,
+    InputIntent, Job, JobKind, JobTracker, Modal, Motion, Notice, NoticeLevel, Pane, PrState,
+    RepoInfo, TermSize, TextBuffer, WorktreeState,
 };
 pub use update::{init, update};

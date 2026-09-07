@@ -322,6 +322,43 @@ fn head_reports_an_unborn_branch() {
     );
 }
 
+#[test]
+fn head_message_reports_the_whole_message_of_head() {
+    // amend の初期値に使う。summary だけだと、本文のあるコミットを amend したときに
+    // 本文が消える（01 の「commit」）。
+    let repo = TestRepo::init();
+    repo.commit("subject");
+    repo.git(&["commit", "--amend", "-q", "-m", "subject\n\nbody 1\nbody 2"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert_eq!(
+        reader.head_message().unwrap().as_deref(),
+        Some("subject\n\nbody 1\nbody 2")
+    );
+}
+
+#[test]
+fn head_message_follows_head_instead_of_a_branch_name() {
+    // detached でも読める。ブランチ名を経由すると detached で読めなくなる。
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    repo.commit("second");
+    repo.git(&["checkout", "-q", &first.to_string()]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert_eq!(reader.head_message().unwrap().as_deref(), Some("first"));
+}
+
+#[test]
+fn head_message_is_none_without_any_commit() {
+    // 「読めなかった」と「amend する相手がいない」は上位の案内が違うので、
+    // unborn を `Err` に畳まない（02 の「スレッド」）。
+    let repo = TestRepo::init();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert_eq!(reader.head_message().unwrap(), None);
+}
+
 // ---- ログ列挙 ----
 
 /// ページの Oid だけを取り出す。

@@ -1,11 +1,12 @@
 //! 確認モーダルの描画。設計は `docs/design/07-ui.md` の「モーダル」。
 
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::modals::centered;
 use crate::ui;
 
 /// キーの案内。`update::confirm_key` が受けるキーと揃える。
@@ -54,20 +55,6 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
 
     frame.render_widget(text, body_area);
     frame.render_widget(Paragraph::new(Line::from(HINT)), hint_area);
-}
-
-/// 画面の中央に `width` x `height` を取る。画面が小さければそのぶん縮める。
-///
-/// 中央寄せの算術は書かず ratatui の [`Flex::Center`] に任せる。`Max` にしているのは、
-/// 端末が小さいときに縮めるため（`Length` だとはみ出す）。
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let [area] = Layout::horizontal([Constraint::Max(width)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([Constraint::Max(height)])
-        .flex(Flex::Center)
-        .areas(area);
-    area
 }
 
 #[cfg(test)]

@@ -13,11 +13,10 @@ use crate::git_read::{
     CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, Hunk, LogPage, Oid,
     WorktreeSection, WorktreeSnapshot,
 };
-use crate::graph::LaneState;
 
 use super::{
     AppState, Cmd, DiffCursor, DiffView, ExecDone, Freshness, GraphLine, JobKind, Key, KeyCode,
-    Modal, Msg, NoticeLevel, Pane, RepoSnapshot,
+    Modal, Motion, Msg, NoticeLevel, Pane, RepoSnapshot, TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -29,6 +28,8 @@ pub fn init(state: &mut AppState) -> Cmd {
         Cmd::LoadRepoInfo,
         Cmd::LoadLog {
             count: state.config.graph.page_size,
+            // まだ何も読んでいないので、セッションを捨てる必要が無い。
+            restart: false,
         },
         Cmd::LoadStatus,
     ]);
@@ -44,13 +45,16 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
     state.issue(cmd)
 }
 
-/// **続きを頼む判断は 7 箇所にある。** `update` の出口にまとめて「毎回導き直す」形には
+/// **続きを頼む判断は 9 箇所にある。** `update` の出口にまとめて「毎回導き直す」形には
 /// できない。導出は「一度試して失敗した」を表せないので、失敗のたびに再発行して
 /// 「失敗 → 再読込 → 失敗」を回してしまう。
 ///
 /// ログとコミット詳細（01 の「追加ページの読み込み」「コミット詳細の遅延取得」）:
 /// `scrolled`（カーソル移動）、`log_loaded` の成功、`commit_detail_loaded` の成功、
 /// `Msg::Layout`。
+///
+/// ログの読み直し（01 の「ログの読み直し」）: `exec_finished`（書き込みで HEAD が
+/// 動きうる）、`log_loaded` の出口（`issue` に落とされたぶんの追いつき）。
 ///
 /// diff（01 の「diff の遅延取得」）: `focus`（フォーカスの移動。`Tab` も `Enter` も
 /// `Esc` もここを通る）、`status_loaded` の `clamp` のあと、`diff_loaded` の出口
@@ -73,8 +77,9 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         }
         Msg::Tick => Cmd::None,
 
-        Msg::LogLoaded(result) => log_loaded(state, result),
+        Msg::LogLoaded { restart, result } => log_loaded(state, restart, result),
         Msg::CommitDetailLoaded { oid, result } => commit_detail_loaded(state, oid, *result),
+        Msg::HeadMessageLoaded(result) => head_message_loaded(state, result),
         Msg::RepoInfoLoaded(result) => repo_info_loaded(state, *result),
 
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
@@ -271,6 +276,7 @@ fn diff_loaded(
 fn modal_key(state: &mut AppState, key: Key) -> Cmd {
     match state.modal {
         Some(Modal::Confirm { .. }) => confirm_key(state, key),
+        Some(Modal::CommitMessage { .. }) => commit_message_key(state, key),
         // 他のモーダルはそれぞれのタスクで実装する。閉じる道だけ開けておく。
         Some(_) => {
             if key == Key::new(KeyCode::Esc) {
@@ -389,6 +395,11 @@ fn commit_detail_loaded(
 /// 残りが 1 画面を切ったら出す。同じ種類のジョブが走っているあいだは
 /// [`AppState::issue`] が落とすので、ここでは走っているかを見ない
 /// （見ると 2 箇所で同じことを判断することになる）。
+///
+/// **`GraphState::reload_pending` も見ない。** 印が立っているあいだは必ず `LoadLog` が
+/// 走っている（立てる `exec_finished` がその場で読み直しを出し、出せなければ落とした
+/// 相手が走っているため。落とすのも `log_loaded` の出口で必ず出し直す）ので、ここで
+/// 続きを出しても `issue` が落とす。見る形にすると、テストで踏めない分岐が残る。
 fn load_more(state: &AppState) -> Cmd {
     let remaining = state.graph.lines.len().saturating_sub(state.graph.cursor);
     // 失敗したあとは行が空なので「残りが 1 画面以下」が必ず真になる。見ないと、
@@ -400,6 +411,22 @@ fn load_more(state: &AppState) -> Cmd {
 
     Cmd::LoadLog {
         count: state.config.graph.page_size,
+        restart: false,
+    }
+}
+
+/// 先頭からの読み直しが要るなら頼む。
+///
+/// `issue` に落とされたら `reload_pending` が立ったままになり、走っていたページが
+/// 届いた時点で `log_loaded` がここをもう一度通る（01 の「ログの読み直し」）。
+fn reload_log(state: &AppState) -> Cmd {
+    if !state.graph.reload_pending {
+        return Cmd::None;
+    }
+
+    Cmd::LoadLog {
+        count: state.config.graph.page_size,
+        restart: true,
     }
 }
 
@@ -423,7 +450,10 @@ fn repo_info_loaded(state: &mut AppState, result: Result<RepoSnapshot, GitReadEr
 }
 
 /// ログのページを積む。
-fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cmd {
+///
+/// `restart` は**要求した内容**で、届いたページが先頭からのものか続きかを表す
+/// （`LogPage` は位置を持たない）。
+fn log_loaded(state: &mut AppState, restart: bool, result: Result<LogPage, GitReadError>) -> Cmd {
     state.jobs.finish(JobKind::LoadLog);
 
     let page = match result {
@@ -431,19 +461,27 @@ fn log_loaded(state: &mut AppState, result: Result<LogPage, GitReadError>) -> Cm
         Err(err) => {
             state.push_notice(NoticeLevel::Error, err.to_string(), None);
             // 失敗したセッションは捨てられ、次の読み込みは先頭から来る（02）。
-            // 積んだ行を残すと同じコミットが二重に並ぶ。レーンの状態も、もう
-            // `lines` に無いコミットを指したままにしない。
-            state.graph.lines.clear();
-            state.graph.lanes = LaneState::default();
-            // `lines` に無いコミットの詳細を残さない。
-            state.graph.detail = None;
-            state.graph.cursor = 0;
-            state.graph.scroll = 0;
-            state.graph.loaded_all = false;
+            // 積んだ行を残すと同じコミットが二重に並ぶ。
+            state.graph.restart();
             state.graph.load_failed = true;
+            // 次の読み込みはユーザーの操作から始めるので、頼んでいない読み直しの
+            // 印も落とす。残すと、この失敗のあと `load_more` が永久に黙る。
+            state.graph.reload_pending = false;
             return Cmd::None;
         }
     };
+
+    // **読み直しを待っているあいだに届いた「続き」は捨てる。** 積んでも直後の
+    // 読み直しで捨てるだけで、そのあいだ古い行に新しい行が継ぎ足された状態が
+    // 画面に出る（01 の「ログの読み直し」）。
+    if state.graph.reload_pending && !restart {
+        return reload_log(state);
+    }
+
+    if restart {
+        state.graph.restart();
+        state.graph.reload_pending = false;
+    }
 
     // レーンの割り当ては `graph` の担当。`app` は返ってきた行を並べるだけ。
     let rows = state.graph.lanes.extend(&page.commits);
@@ -472,8 +510,142 @@ fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::Char('s') => act(state, Action::Stage),
         KeyCode::Char('u') => act(state, Action::Unstage),
         KeyCode::Char('x') => act(state, Action::Discard),
+        KeyCode::Char('c') => commit(state),
+        // **初期値は読んでから開く**（01 の「commit」）。`RepoInfo.head` は起動時に
+        // 1 回読んだきりなので、1 回コミットした時点で古い。
+        KeyCode::Char('C') => Cmd::LoadHeadMessage,
         _ => Cmd::None,
     }
+}
+
+/// `c`。staged を新しいコミットにする。
+///
+/// **staged が空でも、届く予定の一覧があるなら断らない。** 書き込み直後の一覧は古く、
+/// それを根拠に「変更がありません」と言うと、実際には stage されているのに拒否する
+/// （01 の「commit」）。そのときは開いて git の側に判定を任せる。
+fn commit(state: &mut AppState) -> Cmd {
+    if !state.worktree.stale && state.worktree.snapshot.staged.is_empty() {
+        state.push_notice(
+            NoticeLevel::Warn,
+            "stage された変更がありません".to_string(),
+            None,
+        );
+        return Cmd::None;
+    }
+
+    state.modal = Some(Modal::CommitMessage {
+        buf: TextBuffer::default(),
+        amend: false,
+    });
+    Cmd::None
+}
+
+/// [`Modal::CommitMessage`] のキー処理。**文字キーはすべて入力になる。**
+///
+/// 確定は `Enter`、改行は `Alt+Enter` / `Shift+Enter` / `Ctrl-J`
+/// （01 の「コミットメッセージの編集」）。
+fn commit_message_key(state: &mut AppState, key: Key) -> Cmd {
+    // **確認は挟まない。** `modal` は 1 つしか持てず、重ねるにはモーダルのスタックが
+    // 要る。不変ルール 5 が確認を求めるのは git の破壊的操作で、編集中バッファの
+    // 取り消しは含まれない（01）。
+    if key == Key::new(KeyCode::Esc) {
+        state.modal = None;
+        return Cmd::None;
+    }
+
+    // **修飾なしの `Enter` だけが確定。** 修飾付きは下の改行に落ちる。
+    if key == Key::new(KeyCode::Enter) {
+        return commit_submit(state);
+    }
+
+    let Some(Modal::CommitMessage { buf, .. }) = state.modal.as_mut() else {
+        return Cmd::None;
+    };
+
+    // `Ctrl-J` はどの端末でも届く改行。raw mode では `\n` が `Ctrl+j` として来る。
+    if key == Key::ctrl('j') {
+        buf.insert_newline();
+        return Cmd::None;
+    }
+
+    match key.code() {
+        // ここに来る `Enter` は修飾付き（`Alt+Enter` = `ESC CR`、`Shift+Enter`）。
+        KeyCode::Enter => buf.insert_newline(),
+        KeyCode::Backspace => buf.backspace(),
+        KeyCode::Delete => buf.delete(),
+        KeyCode::Left => buf.move_cursor(Motion::Left),
+        KeyCode::Right => buf.move_cursor(Motion::Right),
+        KeyCode::Up => buf.move_cursor(Motion::Up),
+        KeyCode::Down => buf.move_cursor(Motion::Down),
+        KeyCode::Home => buf.move_cursor(Motion::Home),
+        KeyCode::End => buf.move_cursor(Motion::End),
+        // 修飾付きの文字は入力にしない。`Ctrl-J` は上で拾っており、残りは
+        // まだ割り当てが無いので落とす（`Ctrl-C` は `update_key` が先に見る）。
+        KeyCode::Char(c) if !key.mods().ctrl && !key.mods().alt => buf.insert_char(c),
+        _ => {}
+    }
+    Cmd::None
+}
+
+/// コミットメッセージを確定する。
+fn commit_submit(state: &mut AppState) -> Cmd {
+    let Some(Modal::CommitMessage { buf, amend }) = &state.modal else {
+        return Cmd::None;
+    };
+
+    // **`git commit --message ""` に任せない。** git が落ちる時点でモーダルは閉じて
+    // いて、書いた本文が戻らない（01 の「コミットメッセージの編集」）。
+    if buf.is_blank() {
+        state.push_notice(
+            NoticeLevel::Warn,
+            "コミットメッセージが空です".to_string(),
+            None,
+        );
+        return Cmd::None;
+    }
+
+    let op = GitOp::Commit {
+        message: buf.text(),
+        amend: *amend,
+    };
+    // 先に閉じてから返す（`confirm_key` と同じ。閉じずに返すと、`Cmd` が `issue` に
+    // 落とされたときにモーダルだけが画面に残る）。
+    state.modal = None;
+    Cmd::Exec(op)
+}
+
+/// amend の初期値が届いた。
+fn head_message_loaded(state: &mut AppState, result: Result<Option<String>, GitReadError>) -> Cmd {
+    state.jobs.finish(JobKind::LoadHeadMessage);
+
+    let message = match result {
+        Ok(Some(message)) => message,
+        Ok(None) => {
+            state.push_notice(
+                NoticeLevel::Warn,
+                "amend できるコミットがありません".to_string(),
+                None,
+            );
+            return Cmd::None;
+        }
+        Err(err) => {
+            state.push_notice(NoticeLevel::Error, err.to_string(), None);
+            return Cmd::None;
+        }
+    };
+
+    // **開くのは `modal` が空のときだけ。** 頼んでから届くまでのあいだに別のモーダル
+    // （`x` の確認など）が開いていることがある。無条件に上書きすると、確認モーダルが
+    // 編集画面に化ける（01 の「commit」）。
+    if state.modal.is_some() {
+        return Cmd::None;
+    }
+
+    state.modal = Some(Modal::CommitMessage {
+        buf: TextBuffer::from_text(&message),
+        amend: true,
+    });
+    Cmd::None
 }
 
 /// ワーキングツリーのカーソルを動かす。
@@ -796,7 +968,20 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     // `IndexVsWorktree(a.txt)` のまま中身が減る。対象は見ない（この時点では `clamp`
     // がまだで、いま選ばれているファイルが読み直しの対象になるとは限らない。01）。
     state.diff.freshness = Freshness::Stale;
-    // 成否は問わない。失敗しても index が途中まで動いていることがある。
+
+    // **ref が動く操作なら、積んだログとラベルも古い。** 続きを読む経路では直せない
+    // （新しいコミットは末尾ではなく先頭に付く）ので、先頭から読み直す。
+    // index やワークツリーしか触らない操作では出さない。読み直しは `LogSession` の
+    // 作り直しで履歴全体のコストが掛かるので、stage のたびには払えない
+    // （01 の「ログの読み直し」）。
+    //
+    // 成否は問わない。失敗しても index が途中まで動いていることがあり、rebase の
+    // ように途中まで ref を動かして落ちるものもある。
+    if done.op.moves_refs() {
+        state.graph.reload_pending = true;
+        return Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, reload_log(state)]);
+    }
+
     Cmd::LoadStatus
 }
 
@@ -816,10 +1001,11 @@ fn exec_detail(err: &ExecError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Job, Modal, RepoInfo, TermSize};
+    use crate::app::{Job, Modal, Modifiers, RepoInfo, TermSize, TextBuffer};
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
     use crate::git_read::{Commit, HeadInfo, Hunk, LineOrigin, RefIndex, RefLabel, Remote};
+    use crate::graph::LaneState;
     use crate::test_util::{
         fake_commit, fake_commit_with_parents, fake_detail, fake_entry, fake_file_diff, fake_hunk,
         fake_oid, fake_snapshot,
@@ -851,7 +1037,13 @@ mod tests {
             commits: (0..n).map(commit).collect(),
             done,
         };
-        let _ = update(&mut state, Msg::LogLoaded(Ok(page)));
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Ok(page),
+            },
+        );
         state
     }
 
@@ -1788,10 +1980,15 @@ mod tests {
         }
     }
 
-    /// `git` の実行結果。
+    /// `git` の実行結果。ref を動かさない操作。
     fn exec_done(result: Result<ExecOutput, ExecError>) -> Msg {
+        exec_done_of(GitOp::Stage(vec!["a.txt".into()]), result)
+    }
+
+    /// `op` の実行結果。ref を動かすかどうかで `exec_finished` の出す `Cmd` が変わる。
+    fn exec_done_of(op: GitOp, result: Result<ExecOutput, ExecError>) -> Msg {
         Msg::ExecFinished(Box::new(ExecDone {
-            op: GitOp::Stage(vec!["a.txt".into()]),
+            op,
             result,
             progress: None,
         }))
@@ -1883,7 +2080,8 @@ mod tests {
             Cmd::Batch(vec![
                 Cmd::LoadRepoInfo,
                 Cmd::LoadLog {
-                    count: state.config.graph.page_size
+                    count: state.config.graph.page_size,
+                    restart: false
                 },
                 Cmd::LoadStatus,
             ])
@@ -1945,7 +2143,10 @@ mod tests {
         let mut state = state();
         let _ = init(&mut state);
 
-        let again = state.issue(Cmd::LoadLog { count: 10 });
+        let again = state.issue(Cmd::LoadLog {
+            count: 10,
+            restart: false,
+        });
 
         assert_eq!(again, Cmd::None);
     }
@@ -1956,7 +2157,10 @@ mod tests {
         let _ = init(&mut state);
 
         let cmd = state.issue(Cmd::Batch(vec![
-            Cmd::LoadLog { count: 10 },
+            Cmd::LoadLog {
+                count: 10,
+                restart: false,
+            },
             Cmd::ResolveAccount,
         ]));
 
@@ -1973,7 +2177,16 @@ mod tests {
             commits: vec![commit(1), commit(2)],
             done: true,
         };
-        assert_eq!(update(&mut state, Msg::LogLoaded(Ok(page))), Cmd::None);
+        assert_eq!(
+            update(
+                &mut state,
+                Msg::LogLoaded {
+                    restart: false,
+                    result: Ok(page)
+                }
+            ),
+            Cmd::None
+        );
 
         let summaries: Vec<&str> = state
             .graph
@@ -1998,9 +2211,16 @@ mod tests {
         };
 
         assert_eq!(
-            update(&mut state, Msg::LogLoaded(Ok(page))),
+            update(
+                &mut state,
+                Msg::LogLoaded {
+                    restart: false,
+                    result: Ok(page)
+                }
+            ),
             Cmd::LoadLog {
-                count: state.config.graph.page_size
+                count: state.config.graph.page_size,
+                restart: false
             }
         );
     }
@@ -2022,13 +2242,25 @@ mod tests {
             commits: vec![fake_commit_with_parents(1, &[2], "commit 1")],
             done: false,
         };
-        let _ = update(&mut state, Msg::LogLoaded(Ok(first)));
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Ok(first),
+            },
+        );
 
         let second = LogPage {
             commits: vec![fake_commit_with_parents(2, &[], "commit 2")],
             done: true,
         };
-        let _ = update(&mut state, Msg::LogLoaded(Ok(second)));
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Ok(second),
+            },
+        );
 
         assert_eq!(state.graph.lines[1].row.lane, state.graph.lines[0].row.lane);
         assert_eq!(
@@ -2047,7 +2279,13 @@ mod tests {
         let mut state = state_with_commits(3);
         let _ = init(&mut state);
 
-        let cmd = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+        let cmd = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Err(GitReadError::NonUtf8Head),
+            },
+        );
 
         // ここから読み直しを頼まない。行を捨てて `cursor` を 0 に戻した直後なので、
         // 出すとリーダーが壊れているあいだ「失敗 → 再読込 → 失敗」を回し続ける。
@@ -2242,7 +2480,8 @@ mod tests {
         assert_eq!(
             update(&mut state, Msg::Layout { graph_rows: 36 }),
             Cmd::LoadLog {
-                count: state.config.graph.page_size
+                count: state.config.graph.page_size,
+                restart: false
             }
         );
         assert_eq!(state.graph.viewport, 36);
@@ -2261,7 +2500,8 @@ mod tests {
         assert_eq!(
             update(&mut state, Msg::Layout { graph_rows: 35 }),
             Cmd::LoadLog {
-                count: state.config.graph.page_size
+                count: state.config.graph.page_size,
+                restart: false
             }
         );
     }
@@ -2277,7 +2517,8 @@ mod tests {
         assert_eq!(
             update(&mut state, Msg::Key(Key::char('j'))),
             Cmd::LoadLog {
-                count: state.config.graph.page_size
+                count: state.config.graph.page_size,
+                restart: false
             }
         );
     }
@@ -2287,7 +2528,10 @@ mod tests {
         let mut state = state_with_page(ROWS + 2, false);
         state.graph.cursor = ROWS;
         // 1 ページ目の続きを頼んだ直後の状態を作る。
-        let _ = state.issue(Cmd::LoadLog { count: 1 });
+        let _ = state.issue(Cmd::LoadLog {
+            count: 1,
+            restart: false,
+        });
 
         // 下端に着いても `JobTracker` が落とす。`update` を通さないと見えない。
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
@@ -2474,7 +2718,13 @@ mod tests {
             commits: vec![commit(1)],
             done: true,
         };
-        let cmd = update(&mut state, Msg::LogLoaded(Ok(page)));
+        let cmd = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Ok(page),
+            },
+        );
 
         assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
     }
@@ -2485,7 +2735,13 @@ mod tests {
         let mut state = expanded_with_detail(3);
         let _ = init(&mut state);
 
-        let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Err(GitReadError::NonUtf8Head),
+            },
+        );
 
         assert!(state.graph.detail.is_none());
     }
@@ -2531,7 +2787,13 @@ mod tests {
         // 以後のレイアウト変化のたびに読み直しを出す。
         let mut state = state_with_page(3, false);
         let _ = init(&mut state);
-        let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Err(GitReadError::NonUtf8Head),
+            },
+        );
 
         assert_eq!(
             update(&mut state, Msg::Layout { graph_rows: 10 }),
@@ -2545,12 +2807,19 @@ mod tests {
         // 自動では出さないが、ユーザーの操作からは始める。
         let mut state = state_with_page(3, false);
         let _ = init(&mut state);
-        let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Err(GitReadError::NonUtf8Head),
+            },
+        );
 
         assert_eq!(
             update(&mut state, Msg::Key(Key::char('j'))),
             Cmd::LoadLog {
-                count: state.config.graph.page_size
+                count: state.config.graph.page_size,
+                restart: false
             }
         );
     }
@@ -2559,15 +2828,389 @@ mod tests {
     fn a_successful_page_clears_the_failure() {
         let mut state = state_with_page(3, false);
         let _ = init(&mut state);
-        let _ = update(&mut state, Msg::LogLoaded(Err(GitReadError::NonUtf8Head)));
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Err(GitReadError::NonUtf8Head),
+            },
+        );
         assert!(state.graph.load_failed);
 
         let page = LogPage {
             commits: vec![commit(1)],
             done: false,
         };
-        let _ = update(&mut state, Msg::LogLoaded(Ok(page)));
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Ok(page),
+            },
+        );
 
         assert!(!state.graph.load_failed);
+    }
+
+    // ---- commit / amend ----
+
+    /// staged にファイルがあり、worktree にフォーカスした状態。
+    fn ready_to_commit() -> AppState {
+        worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged)
+    }
+
+    /// `Enter` に修飾を付けた打鍵。`Alt+Enter` は `ESC CR` として届く。
+    fn enter_with(mods: Modifiers) -> Msg {
+        Msg::Key(Key::with_mods(KeyCode::Enter, mods))
+    }
+
+    /// 編集中のバッファ。モーダルが出ていなければ `None`。
+    fn buffer(state: &AppState) -> Option<&TextBuffer> {
+        match &state.modal {
+            Some(Modal::CommitMessage { buf, .. }) => Some(buf),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn c_opens_the_commit_message_modal() {
+        let mut state = ready_to_commit();
+
+        assert_eq!(press(&mut state, 'c'), Cmd::None);
+
+        assert_eq!(
+            state.modal,
+            Some(Modal::CommitMessage {
+                buf: TextBuffer::default(),
+                amend: false,
+            })
+        );
+    }
+
+    #[test]
+    fn c_is_refused_when_nothing_is_staged() {
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+
+        assert_eq!(press(&mut state, 'c'), Cmd::None);
+
+        assert!(state.modal.is_none());
+        assert!(
+            state.notices.back().unwrap().message.contains("stage"),
+            "{:?}",
+            state.notices.back()
+        );
+    }
+
+    #[test]
+    fn c_is_not_refused_while_the_status_is_older_than_the_last_write() {
+        // 書き込み直後の一覧は届いていない。古い「空の staged」を根拠に断ると、
+        // 実際には stage されているのに拒否する（01 の「commit」）。
+        let mut state = worktree_state(fake_snapshot(&[], &[], &[]), WorktreeSection::Unstaged);
+        state.worktree.stale = true;
+
+        let _ = press(&mut state, 'c');
+
+        assert!(state.modal.is_some());
+    }
+
+    #[test]
+    fn typing_goes_into_the_buffer_and_q_does_not_quit() {
+        let mut state = ready_to_commit();
+        let _ = press(&mut state, 'c');
+
+        for c in "fix: q".chars() {
+            assert_eq!(press(&mut state, c), Cmd::None);
+        }
+
+        // `q` はモーダル表示中は入力文字（01 の「終了経路」）。脱出口は `Ctrl-C`。
+        assert_eq!(buffer(&state).unwrap().text(), "fix: q");
+    }
+
+    #[test]
+    fn enter_commits_what_was_typed() {
+        let mut state = ready_to_commit();
+        let _ = press(&mut state, 'c');
+        for c in "fix".chars() {
+            let _ = press(&mut state, c);
+        }
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(
+            cmd,
+            Cmd::Exec(GitOp::Commit {
+                message: "fix".to_string(),
+                amend: false,
+            })
+        );
+        // **先に閉じてから返す。** 閉じずに返すと、`Cmd` が `issue` に落とされたときに
+        // モーダルだけが画面に残る。
+        assert!(state.modal.is_none());
+    }
+
+    #[test]
+    fn a_modified_enter_and_ctrl_j_insert_a_newline() {
+        // 修飾なしの `Enter` だけが確定。`Alt+Enter`（`ESC CR`）と `Shift+Enter`
+        // （kitty protocol）と `Ctrl-J` は改行で、どれか 1 つはどの端末でも届く
+        // （01 の「コミットメッセージの編集」）。
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+
+        for newline in [enter_with(alt), enter_with(shift), Msg::Key(Key::ctrl('j'))] {
+            let mut state = ready_to_commit();
+            let _ = press(&mut state, 'c');
+            let _ = press(&mut state, 'a');
+
+            assert_eq!(update(&mut state, newline), Cmd::None);
+            let _ = press(&mut state, 'b');
+
+            assert_eq!(buffer(&state).unwrap().text(), "a\nb");
+        }
+    }
+
+    #[test]
+    fn an_empty_message_is_refused_instead_of_being_handed_to_git() {
+        // `git commit --message ""` に任せると、落ちる時点でモーダルは閉じていて
+        // 書いた本文が戻らない（01）。空白だけの本文も同じ。
+        let mut state = ready_to_commit();
+        let _ = press(&mut state, 'c');
+        let _ = press(&mut state, ' ');
+
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+
+        assert!(state.modal.is_some());
+        assert!(
+            state.notices.back().unwrap().message.contains("空"),
+            "{:?}",
+            state.notices.back()
+        );
+    }
+
+    #[test]
+    fn esc_throws_the_message_away_without_running_git() {
+        let mut state = ready_to_commit();
+        let _ = press(&mut state, 'c');
+        let _ = press(&mut state, 'x');
+
+        // 確認は挟まない。`modal` は 1 つしか持てず、重ねるにはスタックが要る（01）。
+        assert_eq!(press_code(&mut state, KeyCode::Esc), Cmd::None);
+        assert!(state.modal.is_none());
+    }
+
+    #[test]
+    fn amend_reads_the_head_message_before_opening() {
+        // **`RepoInfo.head` からは取らない。** 起動時に 1 回読んだきりで、1 回
+        // コミットした時点で古い（01 の「commit」）。
+        let mut state = ready_to_commit();
+
+        assert_eq!(press(&mut state, 'C'), Cmd::LoadHeadMessage);
+        assert!(state.modal.is_none());
+
+        let cmd = update(
+            &mut state,
+            Msg::HeadMessageLoaded(Ok(Some("feat: 前のコミット\n\n本文".to_string()))),
+        );
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(
+            state.modal,
+            Some(Modal::CommitMessage {
+                buf: TextBuffer::from_text("feat: 前のコミット\n\n本文"),
+                amend: true,
+            })
+        );
+    }
+
+    #[test]
+    fn amend_commits_with_the_amend_flag() {
+        let mut state = ready_to_commit();
+        let _ = press(&mut state, 'C');
+        let _ = update(
+            &mut state,
+            Msg::HeadMessageLoaded(Ok(Some("old".to_string()))),
+        );
+
+        assert_eq!(
+            press_code(&mut state, KeyCode::Enter),
+            Cmd::Exec(GitOp::Commit {
+                message: "old".to_string(),
+                amend: true,
+            })
+        );
+    }
+
+    #[test]
+    fn amend_on_a_repository_without_commits_says_so() {
+        // `Ok(None)` は unborn HEAD。「読めなかった」とは案内が違うので `Err` に
+        // 畳まない（02 の `head_message`）。
+        let mut state = ready_to_commit();
+        let _ = press(&mut state, 'C');
+
+        let _ = update(&mut state, Msg::HeadMessageLoaded(Ok(None)));
+
+        assert!(state.modal.is_none());
+        assert!(
+            state.notices.back().unwrap().message.contains("amend"),
+            "{:?}",
+            state.notices.back()
+        );
+    }
+
+    #[test]
+    fn a_head_message_that_arrives_after_another_modal_opened_is_dropped() {
+        // 頼んでから届くまでのあいだに `x` の確認が開いていることがある。無条件に
+        // 上書きすると、確認モーダルが編集画面に化ける（01 の「commit」）。
+        let mut state = ready_to_commit();
+        let _ = press(&mut state, 'C');
+        let confirm = Modal::Confirm {
+            title: "変更を破棄".to_string(),
+            body: "a.txt".to_string(),
+            on_yes: Cmd::Exec(GitOp::Discard(vec!["a.txt".into()])),
+        };
+        state.modal = Some(confirm.clone());
+
+        let _ = update(
+            &mut state,
+            Msg::HeadMessageLoaded(Ok(Some("old".to_string()))),
+        );
+
+        assert_eq!(state.modal, Some(confirm));
+    }
+
+    // ---- ログの読み直し ----
+
+    /// 読み直しの `Cmd`。既定の 1 ページを先頭から。
+    fn reload(state: &AppState) -> Cmd {
+        Cmd::LoadLog {
+            count: state.config.graph.page_size,
+            restart: true,
+        }
+    }
+
+    fn commit_op() -> GitOp {
+        GitOp::Commit {
+            message: "fix".to_string(),
+            amend: false,
+        }
+    }
+
+    #[test]
+    fn a_commit_reloads_the_log_from_the_top_and_the_refs() {
+        // 続きを読む経路では直せない。新しいコミットは末尾ではなく先頭に付く
+        // （01 の「ログの読み直し」）。ラベルは `LoadRepoInfo` が読み直す。
+        let mut state = state_with_commits(3);
+        let _ = state.issue(Cmd::Exec(commit_op()));
+
+        let cmd = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
+
+        assert_eq!(
+            cmd,
+            Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, reload(&state)])
+        );
+    }
+
+    #[test]
+    fn staging_does_not_reload_the_log() {
+        // 読み直しは `LogSession` の作り直しで履歴全体のコストが掛かる（02）。
+        // index しか触らない操作のたびには払えない。
+        let mut state = state_with_commits(3);
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+
+        let cmd = update(&mut state, exec_done(Ok(fake_output())));
+
+        assert_eq!(cmd, Cmd::LoadStatus);
+        assert!(!state.graph.reload_pending);
+    }
+
+    #[test]
+    fn a_page_asked_for_before_the_reload_is_dropped_and_the_reload_is_asked_again() {
+        // 続きの読み込みが走っていると、読み直しは `issue` に落ちる。落ちたぶんは
+        // 印を付け、走っていたページが届いた時点で頼み直す（01）。
+        // 1 ページが窓より短いので、`log_loaded` の `load_more` が続きを頼んだまま。
+        let mut state = state_with_page(3, false);
+        assert!(state.jobs.is_running(JobKind::LoadLog));
+        let _ = state.issue(Cmd::Exec(commit_op()));
+
+        let cmd = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
+
+        // 読み直しは落ちている。
+        assert_eq!(cmd, Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo]));
+        assert!(state.graph.reload_pending);
+
+        // **走っていたページは積まない。** 積んでも直後の読み直しで捨てるだけで、
+        // そのあいだ古い行に新しい行が継ぎ足された状態が画面に出る。
+        let page = LogPage {
+            commits: vec![commit(9)],
+            done: false,
+        };
+        let cmd = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Ok(page),
+            },
+        );
+
+        assert_eq!(state.graph.lines.len(), 3);
+        assert_eq!(cmd, reload(&state));
+        assert!(state.graph.reload_pending);
+    }
+
+    #[test]
+    fn a_reloaded_page_replaces_the_rows_and_seats_the_cursor_at_the_top() {
+        let mut state = state_with_commits(3);
+        state.graph.cursor = 2;
+        state.graph.detail = Some(fake_detail(2, "old"));
+        let _ = state.issue(Cmd::Exec(commit_op()));
+        let _ = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
+
+        let page = LogPage {
+            commits: vec![commit(7)],
+            done: true,
+        };
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: true,
+                result: Ok(page),
+            },
+        );
+
+        assert_eq!(state.graph.lines.len(), 1);
+        assert_eq!(state.graph.lines[0].commit.oid, commit(7).oid);
+        assert_eq!(state.graph.cursor, 0);
+        // `lines` に無いコミットの詳細を残さない。
+        assert!(state.graph.detail.is_none());
+        assert!(!state.graph.reload_pending);
+    }
+
+    #[test]
+    fn a_reload_that_fails_does_not_leave_the_log_waiting_for_one() {
+        // 失敗のあとの読み込みはユーザーの操作から始まる。印を残すと、届かない
+        // 読み直しを待ち続ける。
+        let mut state = state_with_commits(3);
+        let _ = state.issue(Cmd::Exec(commit_op()));
+        let _ = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
+
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: true,
+                result: Err(GitReadError::NonUtf8Head),
+            },
+        );
+
+        assert!(!state.graph.reload_pending);
+        assert!(state.graph.load_failed);
+        assert!(state.graph.lines.is_empty());
     }
 }

@@ -31,7 +31,7 @@
 - [x] ハンク単位の stage / unstage / discard — `GitOp::DiscardHunk`、ハンク → パッチの
       組み立て（`git apply` への round-trip テスト）、`view` のキャッシュと
       `Freshness`（01）
-- [ ] `Modal::CommitMessage` と commit / amend。`TextBuffer` の編集操作、Worktree の
+- [x] `Modal::CommitMessage` と commit / amend。`TextBuffer` の編集操作、Worktree の
       `c` / `C`、`GitOp::Commit` の配線。**commit したあとログを読み直す経路も
       ここで入れる**（`Cmd::LoadLog { restart }` と `GraphState.reload_pending`。01 の
       「ログの読み直し」）。無いと commit しても左のグラフが古い先頭のまま動かない

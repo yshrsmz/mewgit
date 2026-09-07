@@ -42,7 +42,15 @@ pub enum Msg {
     /// ログの 1 ページ。`Result` にしているのは、失敗しても必ずここに来るようにするため。
     /// 失敗の通り道が無いと `JobKind::LoadLog` が走ったまま残り、以後の `Cmd::LoadLog` が
     /// 黙って捨てられる。
-    LogLoaded(Result<LogPage, GitReadError>),
+    ///
+    /// `restart` は**要求した内容**。届いたページが先頭からのものか続きかは
+    /// [`LogPage`] からは判らない（位置を持たない）。`CommitDetailLoaded` の `oid` や
+    /// `DiffLoaded` の `target` と同じで、要求した内容を返信に載せる（01 の
+    /// 「ログの読み直し」）。
+    LogLoaded {
+        restart: bool,
+        result: Result<LogPage, GitReadError>,
+    },
     /// 選択コミットの詳細。`LogLoaded` と同じ理由で `Result` を運ぶ。失敗の通り道が
     /// 無いと `JobKind::LoadCommitDetail` が走ったまま残り、以後の要求が黙って落ちる。
     ///
@@ -53,6 +61,10 @@ pub enum Msg {
         oid: Oid,
         result: Box<Result<CommitDetail, GitReadError>>,
     },
+    /// amend の初期値にする HEAD のメッセージ全文。`Ok(None)` はコミットが 1 つも
+    /// 無い（unborn HEAD）。「読めなかった」と「amend する相手がいない」で案内が
+    /// 違うので、`Err` に畳まない。
+    HeadMessageLoaded(Result<Option<String>, GitReadError>),
     /// リポジトリの概要。起動時と、ref が変わったあと（M3）に読む。
     ///
     /// 3 つを 1 通にまとめるのは、どれもリポジトリの ref から導かれる値で、

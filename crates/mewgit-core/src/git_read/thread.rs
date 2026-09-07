@@ -32,6 +32,8 @@ pub struct ReaderHandle {
 enum Request {
     LogPage {
         count: usize,
+        /// 進行中のセッションを捨てて先頭から読み直す（02 の「スレッド」）。
+        restart: bool,
         reply: Reply<LogPage>,
     },
     /// 状態を持たないので、返り先が消えても失うものは無い（M3 のキャンセルで
@@ -42,6 +44,7 @@ enum Request {
     },
     Refs(Reply<RefIndex>),
     Head(Reply<HeadInfo>),
+    HeadMessage(Reply<Option<String>>),
     Remotes(Reply<Vec<Remote>>),
     Status(Reply<WorktreeSnapshot>),
     Diff {
@@ -95,9 +98,17 @@ impl ReaderHandle {
     /// walk を進めたあとで返り先を失い、そのページのコミットはどのページにも現れなく
     /// なる（グラフに親の見つからない行が残る）。ランタイムはログ読み込みのタスクを
     /// abort しないこと。M3 で入れるキャンセルは `Cmd::Exec`（git CLI の実行）に効かせる。
-    pub async fn log_page(&self, count: usize) -> Result<LogPage, GitReadError> {
-        self.request(|reply| Request::LogPage { count, reply })
-            .await
+    /// **`restart` はセッションを捨ててから読む。** commit や fetch で HEAD が動くと
+    /// 積んだ行が丸ごと古くなり、続きを読む経路では直せない（新しいコミットは末尾では
+    /// なく先頭に付く）。別のメソッドに分けないのは、「セッションを取り出して成功した
+    /// ときだけ戻す」契約を 2 箇所で守ることにならないようにするため（02）。
+    pub async fn log_page(&self, count: usize, restart: bool) -> Result<LogPage, GitReadError> {
+        self.request(|reply| Request::LogPage {
+            count,
+            restart,
+            reply,
+        })
+        .await
     }
 
     /// コミット 1 件の詳細。グラフで選択されたときに読む（02 の「コミットの詳細」）。
@@ -116,6 +127,14 @@ impl ReaderHandle {
     /// HEAD の状態。
     pub async fn head(&self) -> Result<HeadInfo, GitReadError> {
         self.request(Request::Head).await
+    }
+
+    /// HEAD のコミットメッセージ全文。コミットが 1 つも無ければ `None`。
+    ///
+    /// amend の初期値に使う。`head` と `commit_detail` に分けないのは、そのあいだに
+    /// HEAD が動く隙を作らないため（[`RepoReader::head_message`]）。
+    pub async fn head_message(&self) -> Result<Option<String>, GitReadError> {
+        self.request(Request::HeadMessage).await
     }
 
     /// リモート一覧。
@@ -176,7 +195,16 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
         // 他のハンドルはまだ生きている。`LogPage` だけは読み進めたページが失われるが、
         // それは要求元を捨てないことで防ぐ（[`ReaderHandle::log_page`] の注記）。
         match request {
-            Request::LogPage { count, reply } => {
+            Request::LogPage {
+                count,
+                restart,
+                reply,
+            } => {
+                // 捨てるのはここで 1 回だけ。`next_page` は「取り出して成功したときだけ
+                // 戻す」ことに専念する。
+                if restart {
+                    log = Log::Idle;
+                }
                 let _ = reply.send(next_page(&reader, &mut log, count));
             }
             Request::CommitDetail { oid, reply } => {
@@ -187,6 +215,9 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
             }
             Request::Head(reply) => {
                 let _ = reply.send(reader.head());
+            }
+            Request::HeadMessage(reply) => {
+                let _ = reply.send(reader.head_message());
             }
             Request::Remotes(reply) => {
                 let _ = reply.send(reader.remotes());

@@ -1,7 +1,7 @@
 //! テスト用のヘルパ。`mewgit-tui` は 1 つのバイナリクレートなので、単体テストは
 //! すべて同じコンパイル単位に入る。feature で切り分ける必要はない。
 
-use mewgit_core::app::{update, AppState, Modal, Msg, RepoInfo, TermSize};
+use mewgit_core::app::{update, AppState, Key, Modal, Msg, RepoInfo, TermSize};
 use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, LogPage};
 use mewgit_core::test_util::{fake_commit, fake_commit_with_parents};
@@ -88,6 +88,17 @@ pub fn state_with_commits(summaries: &[&str]) -> AppState {
         .map(|(index, summary)| fake_commit(index as u8, summary))
         .collect();
     state_with_log(commits)
+}
+
+/// 1 件目のコミットを選んだ状態。詳細はまだ届いていない。
+///
+/// 起動直後のカーソルは WIP 行なので、`j` を 1 回打って乗せる。**`cursor = 1` を
+/// 直に書かない。** 表示行の構成（先頭が WIP 行）を知る場所を増やすと、構成を
+/// 変えたときに片方だけ古くなる。`update` を通すので `JobTracker` も本番と同じ。
+pub fn state_on_first_commit(summaries: &[&str]) -> AppState {
+    let mut state = state_with_commits(summaries);
+    let _ = update(&mut state, Msg::Key(Key::char('j')));
+    state
 }
 
 /// モーダルを出した状態。下に何か描かれていること（覆いのテスト）が要るので、

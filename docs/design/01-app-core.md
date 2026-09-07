@@ -102,6 +102,12 @@ pub enum Modal {
 `[Graph, Worktree, Diff]`、コミットを選んでいれば `[Graph, CommitDetail]`。並びは
 `Pane` の宣言順。
 
+**選択と右ペインの対応は `GraphSelection::right_pane()` の 1 つ。** `Enter` の行き先
+（グラフの `Enter` は右ペインへ移る）と巡回の候補が別々に決めると、画面はコミット詳細
+なのにキーは Working tree が受ける状態を作れる。`ui::render` だけは中身（`&GraphLine`）を
+取り出す必要があるので変種で分岐するが、**候補が必ず `right_pane()` を含むことは
+テストで見張る**。
+
 **候補を状態から出すのは、`focus` と右ペインの中身が食い違う状態を表現できなくする
 ため。** コミットを選んだまま `focus` が `Worktree` でいられると、`s` / `u` / `x` が
 画面に出ていないファイルを stage する。キーごとにガードを置く形にすると、キーを足す
@@ -269,16 +275,21 @@ pub struct GraphState {
 
 pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 
-pub enum GraphSelection<'a> { Wip, Commit(&'a Commit) }
+pub enum GraphSelection<'a> { Wip, Commit(&'a GraphLine) }
 ```
 
 **先頭の WIP 行はコミットではないので `lines` に入れない。** かわりに `cursor` を
 「表示行」の添字とし、表示行数を `GraphState::rows()`（= `1 + lines.len()`）で表す。
 `scroll` / `viewport` / 追加読み込みの算術は表示行の上で回るのでそのまま使える。
 
-**`cursor` から意味を取り出すのは `GraphState::selection()` の 1 つ。** 各所で
-`lines.get(cursor - 1)` と書くと、`- 1` の書き忘れが 1 行ずれとして静かに通る。
-`cursor_commit()` はこの上の薄い包み（`selection()` が `Commit` のときだけ `Some`）。
+**表示行の添字を `lines` の添字に読み替えるのは `GraphState::row(index)` の 1 つ。**
+`ui` が窓を切り出すときもここを通す。各所で `lines.get(index - 1)` と書くと、`- 1` の
+書き忘れが 1 行ずれとして静かに通り、**反転する行と右ペインの中身が食い違う**。
+`selection()` は `row(cursor)`、`cursor_commit()` はその上の薄い包み。
+
+コミット側が `&GraphLine`（コミット + 罫線）なのは、`ui` が罫線を描くのに要るため。
+`&Commit` にすると、窓を切り出した `ui` が同じ添字で `lines` を引き直すことになり、
+上の「読み替えは 1 箇所」が崩れる。
 
 **WIP 行は変更が無くても常に出す**（07）。件数で出し入れすると `StatusLoaded` が届く
 たびに表示行数が変わり、カーソルが指すコミットを oid で座り直させる必要が出る。

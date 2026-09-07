@@ -15,8 +15,8 @@ use crate::git_read::{
 };
 
 use super::{
-    AppState, Cmd, DiffCursor, DiffView, ExecDone, Freshness, GraphLine, GraphSelection, JobKind,
-    Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, RepoSnapshot, TextBuffer,
+    AppState, Cmd, DiffCursor, DiffView, ExecDone, Freshness, GraphLine, JobKind, Key, KeyCode,
+    Modal, Motion, Msg, NoticeLevel, Pane, RepoSnapshot, TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -334,19 +334,10 @@ fn graph_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         KeyCode::Char('j') | KeyCode::Down => scrolled(state, 1),
         KeyCode::Char('k') | KeyCode::Up => scrolled(state, -1),
-        KeyCode::Enter => focus(state, right_pane(state)),
+        // 右の領域に移る。行き先は選択で決まる（`GraphSelection::right_pane`）。
+        // Worktree の `Enter` → Diff と同じ形で、`Esc` で戻る。
+        KeyCode::Enter => focus(state, state.graph.selection().right_pane()),
         _ => Cmd::None,
-    }
-}
-
-/// いま右の領域に出ているペイン。
-///
-/// **`focus` では決めない**（07 の「ペインとフォーカス」）。右ペインは左で選んで
-/// いるものの中身なので、フォーカスが左にあるあいだも選択に追随する。
-fn right_pane(state: &AppState) -> Pane {
-    match state.graph.selection() {
-        GraphSelection::Wip => Pane::Worktree,
-        GraphSelection::Commit(_) => Pane::CommitDetail,
     }
 }
 
@@ -1135,7 +1126,7 @@ fn exec_detail(err: &ExecError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Job, Modal, Modifiers, RepoInfo, TermSize, TextBuffer};
+    use crate::app::{GraphSelection, Job, Modal, Modifiers, RepoInfo, TermSize, TextBuffer};
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
     use crate::git_read::{Commit, HeadInfo, Hunk, LineOrigin, RefIndex, RefLabel, Remote};

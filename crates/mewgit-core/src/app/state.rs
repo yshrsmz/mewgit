@@ -233,13 +233,13 @@ pub enum Pane {
 }
 
 impl Pane {
-    /// WIP 行を選んでいるあいだの巡回先。右は Working tree。
+    /// WIP 行を選んでいるあいだの巡回先。右は [`GraphSelection::right_pane`] が決める。
     ///
     /// **まだ実装していないペインは入れない**（07）。移れてしまうと、キーを受ける先の
     /// 無い画面に入り込む。ペインを実装したらここに足す。並びは `Pane` の宣言順。
     const WIP_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::Worktree, Pane::Diff];
 
-    /// コミットを選んでいるあいだの巡回先。右はコミット詳細。
+    /// コミットを選んでいるあいだの巡回先。右は [`GraphSelection::right_pane`] が決める。
     ///
     /// **`Worktree` と `Diff` を入れない。** 入れると、コミットを選んだまま
     /// `focus == Pane::Worktree` でいられてしまい、`s` / `u` / `x` が画面に出ていない
@@ -249,7 +249,10 @@ impl Pane {
 
     /// `panes` の並びのうち `delta` 個先。端では反対側に回る。
     ///
-    /// 一覧に無いペイン（選択が変わって候補から外れた直後など）は先頭から数え直す。
+    /// **一覧に無いペインは先頭から数え直すが、そこへ来る経路は無い。**
+    /// [`AppState::reseat_focus`] が `update` の出口で候補から外れた `focus` を潰すので、
+    /// ここに入る `self` は必ず `panes` にいる。`unwrap_or(0)` はその保険で、
+    /// 座り直す先を変えたときにここも直す必要はない（先頭は常に `Graph`）。
     fn cycle(self, panes: &[Pane], delta: isize) -> Pane {
         let current = panes.iter().position(|&pane| pane == self).unwrap_or(0);
         let len = panes.len() as isize;
@@ -258,15 +261,34 @@ impl Pane {
     }
 }
 
-/// グラフのカーソルが指しているもの。
+/// グラフの表示行が指しているもの。
 ///
-/// **先頭の WIP 行はコミットではない**ので `GraphState::lines` に入れず、カーソルの
+/// **先頭の WIP 行はコミットではない**ので `GraphState::lines` に入れず、表示行の
 /// 添字を解くここで場合分けする（01 の「グラフの行」）。
+///
+/// コミット側が [`GraphLine`]（コミット + 罫線）なのは、`ui` が罫線を描くのに要るため。
+/// [`GraphState::cursor_commit`] がコミットだけを取り出す薄い包み。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphSelection<'a> {
     /// ワーキングツリーの変更（グラフ先頭の `◇ WIP` 行）。
     Wip,
-    Commit(&'a Commit),
+    Commit(&'a GraphLine),
+}
+
+impl GraphSelection<'_> {
+    /// 右の領域に出るペイン。
+    ///
+    /// **選択とペインの対応はここ 1 つ。** `Enter` の行き先（`update::graph_key`）と
+    /// 巡回の候補（[`AppState::focus_candidates`]）が別々に決めると、画面はコミット詳細
+    /// なのにキーは Working tree が受ける状態を作れてしまう。`ui::render` だけは
+    /// 中身（`&GraphLine`）を取り出す必要があるので変種で分岐するが、そちらが
+    /// この対応と食い違っていないことはテストで見張る。
+    pub fn right_pane(self) -> Pane {
+        match self {
+            GraphSelection::Wip => Pane::Worktree,
+            GraphSelection::Commit(_) => Pane::CommitDetail,
+        }
+    }
 }
 
 /// グラフペインの状態。
@@ -352,18 +374,30 @@ impl GraphState {
         self.lines.len() + 1
     }
 
-    /// カーソルが指しているもの。
-    pub fn selection(&self) -> GraphSelection<'_> {
-        match self.cursor.checked_sub(1).and_then(|at| self.lines.get(at)) {
-            Some(line) => GraphSelection::Commit(&line.commit),
-            None => GraphSelection::Wip,
+    /// `index` 番目の表示行。[`rows`](Self::rows) の外なら `None`。
+    ///
+    /// **表示行から `lines` の添字への変換はここだけ。** `ui` が窓を切り出すときも
+    /// ここを通す。各所で `lines.get(index - 1)` と書くと、`- 1` の書き忘れが 1 行ずれ
+    /// として静かに通り、反転する行と右ペインの中身が食い違う（01 の「グラフの行」）。
+    pub fn row(&self, index: usize) -> Option<GraphSelection<'_>> {
+        match index.checked_sub(1) {
+            Some(at) => self.lines.get(at).map(GraphSelection::Commit),
+            None => Some(GraphSelection::Wip),
         }
+    }
+
+    /// カーソルが指しているもの。
+    ///
+    /// カーソルは常に表示行の中にいる（[`move_cursor`](Self::move_cursor) が丸める）ので
+    /// `Wip` に落ちるのは本当に WIP 行を指しているときだけ。
+    pub fn selection(&self) -> GraphSelection<'_> {
+        self.row(self.cursor).unwrap_or(GraphSelection::Wip)
     }
 
     /// カーソルが指しているコミット。WIP 行を指していれば `None`。
     pub fn cursor_commit(&self) -> Option<&Commit> {
         match self.selection() {
-            GraphSelection::Commit(commit) => Some(commit),
+            GraphSelection::Commit(line) => Some(&line.commit),
             GraphSelection::Wip => None,
         }
     }
@@ -1067,6 +1101,8 @@ fn byte_at(line: &str, col: usize) -> usize {
 mod tests {
     use super::*;
 
+    use crate::app::Msg;
+    use crate::git_read::LogPage;
     use crate::test_util::fake_snapshot;
 
     /// 指定した区画にファイルを並べ、staged の先頭を選んだ状態。
@@ -1314,16 +1350,23 @@ mod tests {
     }
 
     /// コミットを 1 件積んだ状態。カーソルは WIP 行のまま。
+    ///
+    /// **`GraphLine` を手で組まない。** `LaneState::extend` を通らない `GraphRow` は
+    /// `lane` も `cells` も実際には出てこない値になり、レーンや色を見るテストを
+    /// 足した瞬間に「通るが現実と違う」状態になる。
     fn state_with_a_commit() -> AppState {
         let mut state = AppState::new(RepoInfo::default(), Config::default());
-        let commit = crate::test_util::fake_commit(1, "summary");
-        let row = GraphRow {
-            oid: commit.oid,
-            lane: 0,
-            cells: Vec::new(),
-            color: crate::graph::ColorId(0),
+        let page = LogPage {
+            commits: vec![crate::test_util::fake_commit(1, "summary")],
+            done: true,
         };
-        state.graph.lines.push(GraphLine { commit, row });
+        let _ = crate::app::update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Ok(page),
+            },
+        );
         state
     }
 
@@ -1342,11 +1385,32 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_outside_the_cycle_falls_back_to_the_first() {
-        // 実装前のペインが `focus` に入っていても、`Tab` で巡回に戻れる。
-        let mut state = AppState::new(RepoInfo::default(), Config::default());
-        state.focus = Pane::Prs;
-        assert_eq!(state.next_focus(), state.focus_candidates()[1]);
+    fn the_right_pane_is_always_one_of_the_candidates() {
+        // 候補は 2 本の定数、右ペインは `GraphSelection::right_pane` が決める。
+        // 食い違うと、画面に出ているペインへ `Tab` で行けない（またはその逆）。
+        let mut state = state_with_a_commit();
+        for cursor in [0, 1] {
+            state.graph.cursor = cursor;
+            let right = state.graph.selection().right_pane();
+            assert!(
+                state.focus_candidates().contains(&right),
+                "cursor={cursor} right={right:?} candidates={:?}",
+                state.focus_candidates()
+            );
+        }
+    }
+
+    #[test]
+    fn a_display_row_past_the_end_is_none() {
+        // 窓の切り出し（`panes::graph`）が末尾を跨ぐので、範囲外は `None` で返す。
+        let state = state_with_a_commit();
+
+        assert_eq!(state.graph.row(0), Some(GraphSelection::Wip));
+        assert!(matches!(
+            state.graph.row(1),
+            Some(GraphSelection::Commit(_))
+        ));
+        assert_eq!(state.graph.row(2), None);
     }
 
     #[test]

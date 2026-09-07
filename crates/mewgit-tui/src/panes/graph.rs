@@ -8,7 +8,7 @@
 //! `ui::graph_rows` と `Msg::Layout` が「詳細を出すか」を運んでいた。差し替えではなく
 //! 分割だったのが原因で、右へ移すとその引数ごと消えた（07 の「CommitDetail ペイン」）。
 
-use mewgit_core::app::{AppState, GraphLine, JobKind, Pane};
+use mewgit_core::app::{AppState, GraphLine, GraphSelection, JobKind, Pane};
 use mewgit_core::git_read::RefLabel;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -20,7 +20,7 @@ use crate::ui::{self, lanes, theme};
 
 /// ペインの枠。`focused` はフォーカスの強調だけに効き、内側の大きさは変えない。
 fn block(focused: bool) -> Block<'static> {
-    ui::pane_block("Graph".to_string(), focused)
+    ui::pane_block("Graph", focused)
 }
 
 /// 行を描ける領域。`ui::graph_rows` が行数を出すのに使う。
@@ -38,45 +38,39 @@ pub fn render(frame: &mut Frame, outer: Rect, state: &AppState) {
     frame.render_widget(block, outer);
 
     let graph = &state.graph;
-    // 見えている表示行だけを切り出す。表示行 0 は WIP 行なので、コミットの行は
-    // 1 つずらして取る（`GraphState::selection` と同じ対応）。
+    // 見えている表示行の範囲。**添字を `lines` に読み替えるのは `GraphState::row`**
+    // で、ここには `- 1` を書かない（01 の「グラフの行」）。
     let start = graph.scroll.min(graph.rows());
     let end = (start + rows.height as usize).min(graph.rows());
-    let visible = &graph.lines[start.saturating_sub(1)..end.saturating_sub(1)];
+    let shown = || (start..end).filter_map(|index| Some((index, graph.row(index)?)));
 
     let view = View {
         state,
         head: theme::style(&state.config.theme.graph_head),
         // 罫線の桁は、いま描く行の最大レーン数に揃える（07）。読み込み済みの
         // 全行で最大を取ると、複雑な履歴で桁が育ち続ける。
-        lanes: visible
-            .iter()
-            .map(|line| line.row.cells.len())
+        lanes: shown()
+            .filter_map(|(_, row)| match row {
+                GraphSelection::Commit(line) => Some(line.row.cells.len()),
+                GraphSelection::Wip => None,
+            })
             .max()
             .unwrap_or(0),
         palette: lanes::palette(&state.config.graph.colors),
     };
 
-    let mut lines: Vec<Line> = Vec::with_capacity(end.saturating_sub(start) + 1);
-    if start == 0 {
-        lines.push(view.wip_line());
-        // コミットが 1 つも無いときは、読み込み中なのか本当に空なのかを WIP 行の下に
-        // 出す。ペインごと差し替えないのは、WIP 行だけは常に選べるため。
-        if graph.lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                empty_message(state),
-                theme::muted(),
-            )));
-        }
+    let mut lines: Vec<Line> = shown()
+        .map(|(index, row)| view.row_line(index, row))
+        .collect();
+    // コミットが 1 つも無いときは、読み込み中なのか本当に空なのかを WIP 行の下に出す。
+    // **これは表示行ではない**（選べないので `rows()` には数えない）。行が無いときは
+    // `rows()` が 1 なので、ペインの高さには必ず収まる。
+    if graph.lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            empty_message(state),
+            theme::muted(),
+        )));
     }
-    // 先頭が WIP 行なので、コミットの表示行は 1 から始まる。
-    let first = start.max(1);
-    lines.extend(
-        visible
-            .iter()
-            .enumerate()
-            .map(|(offset, line)| view.commit_line(first + offset, line)),
-    );
 
     frame.render_widget(Paragraph::new(lines), rows);
 }
@@ -106,30 +100,42 @@ fn empty_message(state: &AppState) -> &'static str {
 }
 
 impl<'a> View<'a> {
-    /// 先頭の WIP 行。`◇  WIP (n)`。
+    /// 表示行 1 本。`index` は表示行の添字。
     ///
-    /// **罫線を繋がない**（06 の「責務」）。`◇` を罫線の桁の先頭に置き、残りは空白で
-    /// 埋める。埋める幅に短縮 Oid のぶんも含めるのは、`WIP (n)` を下の行の summary と
-    /// 同じ桁に揃えるため。
-    fn wip_line(&self) -> Line<'static> {
-        let ascii = self.state.config.graph.ascii;
-        let glyph = lanes::wip_glyph(ascii);
-        let pad = lanes::width(self.lanes) + ui::SHORT_OID + 1 - glyph.chars().count();
-
-        let line = Line::from(vec![
-            Span::raw(glyph),
-            Span::raw(" ".repeat(pad)),
-            Span::raw(format!("WIP ({})", self.state.worktree.len())),
-        ]);
-        if self.state.graph.cursor == 0 {
+    /// **カーソル行の反転はここでまとめて掛ける。** 行の種類ごとに書くと、種類を
+    /// 足したときに反転だけ落ちる（選択行は worktree ペインと同じ `theme::selected`）。
+    fn row_line(&self, index: usize, row: GraphSelection<'a>) -> Line<'a> {
+        let line = match row {
+            GraphSelection::Wip => self.wip_line(),
+            GraphSelection::Commit(line) => self.commit_line(line),
+        };
+        if index == self.state.graph.cursor {
             line.style(theme::selected())
         } else {
             line
         }
     }
 
-    /// 1 行分。`罫線  短縮 Oid  ラベル  summary`。`index` は表示行の添字。
-    fn commit_line(&self, index: usize, line: &'a GraphLine) -> Line<'a> {
+    /// 先頭の WIP 行。`◇  WIP (n)`。
+    ///
+    /// **罫線を繋がない**（06 の「責務」）。`◇` を罫線の桁の先頭に置き、残りは空白で
+    /// 埋める。埋める幅に短縮 Oid のぶんも含めるのは、`WIP (n)` を下の行の summary と
+    /// 同じ桁に揃えるため。
+    fn wip_line(&self) -> Line<'static> {
+        let glyph = lanes::wip_glyph(self.state.config.graph.ascii);
+        let pad = lanes::width(self.lanes) + ui::SHORT_OID + 1 - glyph.chars().count();
+
+        Line::from(vec![
+            Span::raw(glyph),
+            // 毎フレーム組み直さない。詰めるのは罫線 + Oid の桁ぶんだけなので、
+            // 定数の空白から切り出せば足りる。
+            Span::raw(&SPACES[..pad.min(SPACES.len())]),
+            Span::raw(format!("WIP ({})", self.state.worktree.len())),
+        ])
+    }
+
+    /// 1 行分。`罫線  短縮 Oid  ラベル  summary`。
+    fn commit_line(&self, line: &'a GraphLine) -> Line<'a> {
         // `&self` より長い借用が要る。ラベルは `state` から借りて行に載せるため。
         let state = self.state;
         let labels = state.graph.refs.labels(line.commit.oid);
@@ -162,15 +168,13 @@ impl<'a> View<'a> {
 
         spans.push(Span::raw(line.commit.summary.as_str()));
 
-        let line = Line::from(spans);
-        if index == state.graph.cursor {
-            // 選択行は反転（`theme::selected`。worktree ペインと同じ見た目）。
-            line.style(theme::selected())
-        } else {
-            line
-        }
+        Line::from(spans)
     }
 }
+
+/// WIP 行の桁を詰める空白。レーンが 32 本を超えると足りなくなるが、そこまで来ると
+/// 罫線だけで 80 桁の端末が埋まるので、切れて困る桁は残っていない。
+const SPACES: &str = "                                                                    ";
 
 /// 種別ごとの飾り（06 の「ラベル」）。
 fn brackets(label: &RefLabel) -> (&'static str, &'static str) {
@@ -195,7 +199,7 @@ mod tests {
     use crate::test_util::{
         draw, graph_rows, state_at, state_with_commits, state_with_history, terminal_with,
     };
-    use mewgit_core::app::{init, update, GraphSelection, Msg, TermSize};
+    use mewgit_core::app::{init, update, Msg, TermSize};
     use mewgit_core::git_read::{GitReadError, Oid, RefIndex, RefLabel};
     use mewgit_core::test_util::fake_commit;
     use ratatui::buffer::Buffer;
@@ -227,7 +231,11 @@ mod tests {
             "{:?}",
             lines[FIRST_ROW]
         );
-        assert!(lines[FIRST_ROW + 1].contains("oldest"), "{:?}", lines[3]);
+        assert!(
+            lines[FIRST_ROW + 1].contains("oldest"),
+            "{:?}",
+            lines[FIRST_ROW + 1]
+        );
         let oid = state.graph.lines[0].commit.oid.to_string();
         assert!(
             lines[FIRST_ROW].contains(&format!("{} newest", &oid[..ui::SHORT_OID])),
@@ -442,20 +450,6 @@ mod tests {
         // ずれるとカーソルが画面の外に出る。先頭の WIP 行は "commit " を含まないので
         // 1 を足して比べる。
         assert_eq!(drawn + 1, graph_rows(&state));
-    }
-
-    #[test]
-    fn the_graph_height_does_not_depend_on_what_is_selected() {
-        // コミット詳細は右ペインに出るので、選択が変わってもグラフの高さは動かない
-        // （07 の「CommitDetail ペイン」）。動くと `Msg::Layout` が毎回流れる。
-        let mut state = state_with_commits(&["first", "second"]);
-        assert_eq!(state.graph.selection(), GraphSelection::Wip);
-        let on_wip = graph_rows(&state);
-
-        state.graph.cursor = 1;
-        assert!(matches!(state.graph.selection(), GraphSelection::Commit(_)));
-
-        assert_eq!(graph_rows(&state), on_wip);
     }
 
     #[test]

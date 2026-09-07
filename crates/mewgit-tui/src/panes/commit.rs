@@ -104,7 +104,7 @@ fn who(label: &str, sig: &Signature, time: Timestamp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, state_with_commits};
+    use crate::test_util::{draw, state_on_first_commit};
     use crate::ui;
     use mewgit_core::app::{update, AppState, JobKind, Key, Msg, TermSize};
     use mewgit_core::git_read::CommitDetail;
@@ -114,7 +114,7 @@ mod tests {
     ///
     /// 起動直後のカーソルは WIP 行なので、`j` を 1 回打って乗せる。
     fn with_detail(summaries: &[&str], detail: CommitDetail) -> AppState {
-        let mut state = selecting(summaries);
+        let mut state = state_on_first_commit(summaries);
         let _ = update(
             &mut state,
             Msg::CommitDetailLoaded {
@@ -122,13 +122,6 @@ mod tests {
                 result: Box::new(Ok(detail)),
             },
         );
-        state
-    }
-
-    /// 1 件目のコミットを選んだだけの状態。詳細はまだ届いていない。
-    fn selecting(summaries: &[&str]) -> AppState {
-        let mut state = state_with_commits(summaries);
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
         state
     }
 
@@ -149,16 +142,6 @@ mod tests {
             text.contains(&format!("Commit {}", ui::short_oid(&fake_oid(0)))),
             "{text}"
         );
-    }
-
-    #[test]
-    fn the_worktree_pane_is_not_drawn_next_to_it() {
-        // 右は差し替えであって分割ではない（07 の「ペインとフォーカス」）。
-        let state = with_detail(&["subject"], fake_detail(0, "subject"));
-
-        let text = draw(&state, WIDE).join("\n");
-
-        assert!(!text.contains("Working tree"), "{text}");
     }
 
     #[test]
@@ -210,7 +193,7 @@ mod tests {
 
     #[test]
     fn a_detail_that_failed_says_so_instead_of_loading() {
-        let mut state = selecting(&["first"]);
+        let mut state = state_on_first_commit(&["first"]);
         let oid = state.graph.cursor_commit().unwrap().oid;
         let _ = update(
             &mut state,

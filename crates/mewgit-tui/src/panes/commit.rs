@@ -41,16 +41,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let Some(detail) = state.graph.fresh_detail() else {
-        // カーソルの指すコミットのものが無い。届いていないのか失敗したのかは
-        // `JobTracker` が知っている（07 の「CommitDetail ペイン」）。
-        frame.render_widget(Paragraph::new(placeholder(state)), inner);
-        return;
-    };
-
     // **一覧は先に組んでから高さを決める。** 行数を別に数えると、見出しや文言の
     // 行数を変えたときに片方だけ直しても通り、枠からはみ出すか余白が残る
-    // （`panes::worktree::lines` と同じ理由）。残りを見出しとメッセージで分ける。
+    // （`panes::worktree::lines` と同じ理由）。残りを詳細に使う。
     let (files, files_cursor) = files_lines(state);
     let files_rows = u16::try_from(files.len())
         .unwrap_or(u16::MAX)
@@ -58,11 +51,27 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) 
     let [top, files_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(files_rows)]).areas(inner);
 
+    // **詳細と一覧は別々に届くので、片方だけで描く。** 詳細が無いからと一覧ごと
+    // 落とすと、`app` は一覧を「画面に出ている」として扱う（`fresh_files_mut` が
+    // カーソルを動かし、`Enter` が `DiffTarget::Commit` を開く）のに、ユーザーは
+    // その行を一度も見ていないことになる。
+    render_detail(frame, top, state);
+    ui::render_rows(frame, files_area, files, files_cursor..files_cursor + 1);
+}
+
+/// 見出しとメッセージを描く。届いていなければ理由を出す。
+fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
+    let Some(detail) = state.graph.fresh_detail() else {
+        // カーソルの指すコミットのものが無い（07 の「CommitDetail ペイン」）。
+        frame.render_widget(Paragraph::new(placeholder(state)), area);
+        return;
+    };
+
     // 見出しの高さは折り返し後の行数から出し、メッセージのぶんは必ず残す。
-    let (head, head_rows) = ui::wrapped(head_lines(detail), top.width);
-    let head_rows = head_rows.min(top.height.saturating_sub(MIN_MESSAGE_ROWS));
+    let (head, head_rows) = ui::wrapped(head_lines(detail), area.width);
+    let head_rows = head_rows.min(area.height.saturating_sub(MIN_MESSAGE_ROWS));
     let [head_area, message_area] =
-        Layout::vertical([Constraint::Length(head_rows), Constraint::Min(0)]).areas(top);
+        Layout::vertical([Constraint::Length(head_rows), Constraint::Min(0)]).areas(area);
 
     frame.render_widget(head, head_area);
     frame.render_widget(
@@ -70,7 +79,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) 
             .wrap(Wrap { trim: false }),
         message_area,
     );
-    ui::render_rows(frame, files_area, files, files_cursor..files_cursor + 1);
 }
 
 /// ファイル一覧の行と、カーソルが何行目か。
@@ -386,6 +394,32 @@ mod tests {
         assert!(text.contains("subject line"), "{text}");
         assert!(text.contains("body line"), "{text}");
         assert!(text.contains("Files (40)"), "{text}");
+    }
+
+    #[test]
+    fn the_file_list_shows_even_when_the_detail_failed() {
+        // 詳細と一覧は別々に届く。詳細が無いからと一覧ごと落とすと、`app` は一覧を
+        // 「画面に出ている」として扱う（カーソルが動き、`Enter` が diff を開く）のに、
+        // ユーザーはその行を一度も見ていないことになる。
+        let mut state = state_on_first_commit(&["subject"]);
+        let oid = state.graph.cursor_commit().unwrap().oid;
+        let _ = update(
+            &mut state,
+            Msg::CommitDetailLoaded {
+                oid,
+                result: Box::new(Err(GitReadError::NonUtf8Head)),
+            },
+        );
+        with_files(
+            &mut state,
+            oid,
+            Ok(vec![fake_entry("a.txt", FileStatus::Modified)]),
+        );
+
+        let text = draw(&state, WIDE).join("\n");
+
+        assert!(text.contains("詳細を読み込めませんでした"), "{text}");
+        assert!(text.contains("M a.txt"), "{text}");
     }
 
     #[test]

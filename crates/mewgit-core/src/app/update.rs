@@ -15,8 +15,9 @@ use crate::git_read::{
 };
 
 use super::{
-    AppState, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, Freshness, GraphLine, JobKind, Key,
-    KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, RepoSnapshot, TextBuffer,
+    AppState, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, Freshness, GraphLine,
+    GraphSelection, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, RepoSnapshot,
+    TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -387,12 +388,20 @@ fn move_file(state: &mut AppState, delta: isize) -> Cmd {
 /// 腕ごとに `load_more` を書くと、足したキーが素通りする。下端で `j` を押したときは
 /// カーソルが動かないので、「動いたかどうか」では判定できない。
 fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
+    let before = state.graph.cursor;
     state.graph.move_cursor(delta);
     // カーソルを動かすのはユーザーの操作なので、失敗した読み直しはここから始める。
-    // 自動では出さない（`load_more`）。**移動して戻ってくれば 1 回だけ試し直せる。**
+    // 自動では出さない（`load_more`）。**ログの印は無条件に落とす** — 失敗すると
+    // 行を捨てるので、動ける先が無いところからでも押し直せる必要がある。
     state.graph.load_failed = false;
-    state.graph.detail_failed = None;
-    state.graph.files_failed = None;
+    // **詳細と一覧の印はカーソルが動いたときだけ落とす。** どちらもカーソルの指す
+    // コミットに紐づくので、端で押しても対象は変わらず、試し直す根拠が無い。
+    // 無条件に落とすと、末尾の行で `j` を押し続けるあいだ「失敗 → 再読込 → 失敗」を
+    // 打鍵のたびに回して通知を積む（01 の「失敗の記憶」）。
+    if state.graph.cursor != before {
+        state.graph.detail_failed = None;
+        state.graph.files_failed = None;
+    }
     Cmd::batch([load_more(state), load_commit(state)])
 }
 
@@ -821,20 +830,8 @@ enum Plan {
 /// コンフリクトした行を断る文言。`plan` と `discard` の両方に出る。
 const CONFLICTED: &str = "コンフリクトしたファイルは操作できません";
 
-/// 書き戻せない diff で `s` / `u` / `x` を断る文言。
+/// コミットの diff で `s` / `u` / `x` を断る文言。
 const COMMIT_DIFF: &str = "コミットの差分は変更できません";
-
-/// この diff は index / ワークツリーに書き戻せるか。
-///
-/// 書き戻せるのはワーキングツリーの 2 つだけ。コミットや範囲は過去のツリー同士の
-/// 比較なので、`s` / `u` / `x` の当て先が無い。**網羅 `match` にしているのは、
-/// `DiffTarget` に変種を足したときにどちらなのかを選ばせるため。**
-fn writable(target: Option<&DiffTarget>) -> bool {
-    match target {
-        Some(DiffTarget::IndexVsWorktree(_) | DiffTarget::HeadVsIndex(_)) => true,
-        Some(DiffTarget::Commit { .. } | DiffTarget::Range { .. }) | None => false,
-    }
-}
 
 /// 出している diff が最新でないときに断る文言。
 ///
@@ -866,19 +863,22 @@ enum Scope<'a> {
 /// Diff ペインではカーソルの指すハンクに効く。**ハンクで表せないファイルでは、同じ
 /// キーがファイル単位の操作に落ちる**（07）。
 fn act(state: &mut AppState, action: Action) -> Cmd {
-    // **Diff ペインが出しているのがワーキングツリーの diff でなければ断る。** 対象は
-    // ワーキングツリーの選択行なので、通すと**画面に出ていないファイル**を stage する
-    // （07 の「Diff ペイン」）。`focus` の候補で `Pane::Worktree` を外しているのと
-    // 同じ事故を、`Pane::Diff` の側で防ぐ。
+    // **コミットを選んでいるあいだは効かせない。** 対象はワーキングツリーの選択行
+    // だが、右ペインに出ているのはコミット詳細なので、通すと**画面に出ていない
+    // ファイル**を stage する（07 の「Diff ペイン」）。`focus` の候補で
+    // `Pane::Worktree` を外しているのと同じ事故を、`Pane::Diff` の側で防ぐ。
     //
-    // **見るのは対象であってグラフの選択ではない。** 選択で書くと、`Range`（stash や
-    // 比較ビュー、M3 以降）を Diff ペインに出したときにガードだけが黙って外れる
-    // （すぐ下の「見るのは単位であってペインではない」と同じ理由）。
+    // **見るのはグラフの選択で、`wanted_diff()` が `None` かどうかではない。**
+    // あちらの `None` は 3 つのことを指す — 「Diff ペインを見せていない」
+    // 「コミットの一覧がまだ届いていない」「ワーキングツリーの行に diff が無い
+    // （conflicted）」。無いことを根拠にすると、3 つ目で
+    // 「コンフリクトしたファイルは操作できません」がこの文言に化ける。
     //
-    // **`wanted_diff()` の `None` には 2 つの意味があるので、先に `focus` を見る。**
-    // 「Diff ペインを見せていない」（ワーキングツリーのキーはそのまま通す）と
-    // 「見せているが対象がまだ決まっていない」（コミットの一覧が未着。断る）。
-    if state.focus == Pane::Diff && !writable(state.wanted_diff().as_ref()) {
+    // **`DiffTarget::Range` を Diff ペインに出すときはここを見直す**（stash や比較
+    // ビュー、M3 以降）。WIP 行を選んだまま stash の diff を出せるようになると、
+    // この判定だけでは足りない（そのハンクは worktree のファイルに当たらない）。
+    // いま出す経路が無いので、踏めない腕は先に入れない。
+    if !matches!(state.graph.selection(), GraphSelection::Wip) {
         state.push_notice(NoticeLevel::Warn, COMMIT_DIFF.to_string(), None);
         return Cmd::None;
     }
@@ -3032,6 +3032,47 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn a_conflicted_row_still_says_it_is_conflicted_in_the_diff_pane() {
+        // **`wanted_diff()` の `None` は 3 つのことを指す。** ここは 3 つ目
+        // （ワーキングツリーの行に diff が無い）で、コミットは 1 つも関わらない。
+        // 「無い」を根拠に断ると、コンフリクトの案内がコミットの文言に化ける。
+        let snapshot = WorktreeSnapshot {
+            conflicted: vec![fake_entry("both.txt", FileStatus::Conflicted)],
+            ..WorktreeSnapshot::default()
+        };
+        let mut state = worktree_state(snapshot, WorktreeSection::Conflicted);
+        let _ = press_code(&mut state, KeyCode::Enter);
+        assert_eq!(state.focus, Pane::Diff);
+        assert_eq!(state.wanted_diff(), None);
+
+        let cmd = press(&mut state, 's');
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(
+            state.notices.back().map(|notice| notice.message.as_str()),
+            Some(CONFLICTED)
+        );
+    }
+
+    #[test]
+    fn pressing_j_at_the_last_row_does_not_retry_a_failed_file_list() {
+        // カーソルが動かないなら対象も変わらないので、試し直す根拠が無い。
+        // 落とすと、末尾で `j` を押し続けるあいだ打鍵のたびに失敗を繰り返す。
+        let mut state = state_with_commits(1);
+        let _ = press(&mut state, 'j');
+        let _ = update(&mut state, detail_ok(0));
+        let _ = update(&mut state, files_err(0));
+        assert_eq!(state.graph.files_failed, Some(fake_oid(0)));
+        let notices = state.notices.len();
+
+        // 末尾の行。`j` を押してもカーソルは動かない。
+        assert_eq!(press(&mut state, 'j'), Cmd::None);
+
+        assert_eq!(state.graph.files_failed, Some(fake_oid(0)));
+        assert_eq!(state.notices.len(), notices);
     }
 
     #[test]

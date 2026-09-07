@@ -25,6 +25,22 @@ impl GithubClient {
 ```
 
 - ヘッダ: `Authorization: Bearer`、`Accept: application/vnd.github+json`、`X-GitHub-Api-Version`、`User-Agent: mewgit/<ver>`
+
+### TLS とルート証明書
+
+**`reqwest` は 0.12 のまま据え置いてある。** 宣言だけで、まだ 1 行も呼んでいない。
+
+0.13 で `rustls-tls` feature が消えた。0.12 のそれは「rustls + 同梱の webpki ルート」
+だったが、0.13 はルート証明書の feature 自体を廃止し、既定を
+`rustls-platform-verifier`（OS のトラストストア）にした。同梱ルートに戻すには
+`webpki-root-certs` を足して `ClientBuilder::tls_certs_only` を呼ぶコードが要る。
+`query`（`?per_page=100` に使う）も opt-in になった。
+
+**どの feature が要るかは、このクライアントを書いてからでないと決められない。**
+宣言だけの状態で上げると、検証する手段が無いまま feature の組み合わせと
+`aws-lc-sys`（重い build.rs を持つ crypto provider）を選ぶことになる。上げるのは
+`GithubClient` を書くタスクと同じ PR で行う（`docs/plan.md` の M4）。
+
 - 認証付きリクエストは同時 4 本まで（`Semaphore`）
 - レートリミット残量をヘッダから読み、`app` に渡してステータスバーに表示
 

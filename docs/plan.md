@@ -63,6 +63,11 @@
 
 ## M4: GitHub 統合
 
+- [ ] `reqwest` を 0.13 に上げる。**GithubClient を書くタスクと同じ PR で行う。**
+      0.13 は `rustls-tls` feature が消えて `rustls`（crypto は aws-lc-rs、ルート証明書は
+      `rustls-platform-verifier` = OS のトラストストア）になり、`query` が opt-in に
+      なった（ページネーションに要る）。**どの feature が要るかは呼ぶコードが無いと
+      検証できない**ので、宣言だけの状態で上げない（05 の「TLS とルート証明書」）
 - [ ] `auth::gh::GhCli` — detect / auth_status（JSON とテキスト両対応）/ token
 - [ ] `github::GithubClient` — `repo` / `pr_for_branch` / `checks` / `reviews` + wiremock テスト
 - [ ] `auth::resolve` — 明示設定 → 単一 → probe → Ambiguous の流れ + テスト

@@ -248,7 +248,7 @@ fn refs_is_empty_before_the_first_commit() {
 
     let index = reader.refs().unwrap();
 
-    assert_eq!(index.labels(Oid::zero()), []);
+    assert_eq!(index.labels(Oid::ZERO_SHA1), []);
 }
 
 #[test]

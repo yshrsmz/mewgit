@@ -70,7 +70,9 @@ impl RepoReader {
 
         for name in names.iter() {
             // 名前が非 UTF-8 のリモートは `git_exec` の argv にも載せられないので落とす。
-            let Some(name) = name else { continue };
+            // git2 0.21 から `Err`（非 UTF-8）と `Ok(None)`（NULL 要素）が分かれたが、
+            // どちらも「名前として使えない」なので同じく落とす。
+            let Ok(Some(name)) = name else { continue };
             let remote = self.repo.find_remote(name)?;
             // URL は表示と `auth` の解析にしか使わないので、非 UTF-8 でもリモート自体は
             // 消さずに lossy で残す。
@@ -92,7 +94,12 @@ impl RepoReader {
         // unborn なら symbolic target の指す ref が存在せず、detached なら HEAD が
         // symbolic ではないので、どちらも「どのブランチも HEAD ではない」に落ちる。
         let head = self.repo.find_reference("HEAD")?;
-        let head_target = head.symbolic_target();
+        // git2 0.21 から `Err`（target が非 UTF-8）と `Ok(None)`（symbolic でない）が
+        // 分かれた。**ここでは畳んでよい。** 使い道は下の `ref_label` での ref 名との
+        // 一致判定だけで、比較相手は UTF-8 の `&str` なので、非 UTF-8 の target は
+        // どの ref とも一致しない。つまり「どのブランチも HEAD ではない」に落ちる点で
+        // unborn / detached と同じ。
+        let head_target = head.symbolic_target().ok().flatten();
 
         // `refs/*` を 1 パスで走査して種別に振り分ける。`branches()` も内部では全 ref を
         // 列挙してから接頭辞で捨てるので、種別ごとに呼ぶと同じ走査を繰り返すことになる。
@@ -159,7 +166,9 @@ impl RepoReader {
         }
         // ブランチに乗っているのに名前を落とすと detached と区別が付かなくなるので、
         // ここだけは非 UTF-8 を握りつぶさずエラーにする（02 の「非 UTF-8 の扱い」）。
-        let name = head.shorthand().ok_or(GitReadError::NonUtf8Head)?;
+        // git2 0.21 の `shorthand()` は `Err` が非 UTF-8 そのものなので、`Option` を
+        // 経由していた 0.20 より意図に近い。
+        let name = head.shorthand().map_err(|_| GitReadError::NonUtf8Head)?;
         Ok(HeadInfo::Branch {
             name: name.to_string(),
             oid,
@@ -185,11 +194,17 @@ impl RepoReader {
 
     /// unborn な HEAD が指しているブランチ名。
     ///
-    /// unborn は「HEAD が symbolic で、指す先の ref がまだ無い」状態なので、
-    /// `symbolic_target()` が `None` を返すのは target が非 UTF-8 のときだけ。
+    /// unborn は「HEAD が symbolic で、指す先の ref がまだ無い」状態。git2 0.21 から
+    /// `symbolic_target()` は `Err`（target が非 UTF-8）と `Ok(None)`（HEAD が symbolic
+    /// でない）を分けて返すが、**呼ぶのは [`RepoReader::head`] が `UnbornBranch` を
+    /// 受けたあとだけ**なので後者は起きない。腕を分けても踏めないので、
+    /// 「ブランチ名を出せない」という同じ結果に畳む。
     fn unborn_branch_name(&self) -> Result<String, GitReadError> {
         let head = self.repo.find_reference("HEAD")?;
-        let target = head.symbolic_target().ok_or(GitReadError::NonUtf8Head)?;
+        let target = head
+            .symbolic_target()
+            .map_err(|_| GitReadError::NonUtf8Head)?
+            .ok_or(GitReadError::NonUtf8Head)?;
         Ok(target.strip_prefix("refs/heads/").unwrap_or(target).into())
     }
 }
@@ -211,14 +226,14 @@ fn ref_label(reference: &Reference<'_>, head_target: Option<&str>) -> Option<Ref
         return None;
     }
     // 非 UTF-8 の ref 名は識別子として扱えないので落とす（02 の「非 UTF-8 の扱い」）。
-    let name = reference.shorthand()?.to_string();
+    // git2 0.21 の `shorthand()` は `Err` が非 UTF-8 そのもの。落とすのがここの方針
+    // （HEAD だけは `head()` でエラーにする）なので `.ok()?` が移行先。
+    let name = reference.shorthand().ok()?.to_string();
 
     // 載せるのはローカル / リモート追跡ブランチとタグだけ。`refs/stash` や
     // `refs/notes/*` はそれぞれ別のペインの担当で、グラフのラベルにはしない。
     if reference.is_branch() {
-        let is_head = reference
-            .name()
-            .is_some_and(|full| head_target == Some(full));
+        let is_head = reference.name().is_ok_and(|full| head_target == Some(full));
         Some(RefLabel::Local { name, is_head })
     } else if reference.is_remote() {
         Some(RefLabel::Remote { name })

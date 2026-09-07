@@ -6,6 +6,7 @@ use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, LogPage};
 use mewgit_core::test_util::{fake_commit, fake_commit_with_parents};
 use ratatui::backend::TestBackend;
+use ratatui::style::Modifier;
 use ratatui::Terminal;
 
 use crate::ui;
@@ -59,6 +60,18 @@ pub fn terminal_with(state: &AppState, size: TermSize) -> Terminal<TestBackend> 
     let mut terminal = Terminal::new(TestBackend::new(size.width, size.height)).unwrap();
     terminal.draw(|frame| ui::render(frame, state)).unwrap();
     terminal
+}
+
+/// `needle` を含む行が反転しているか（カーソル行の見張り）。
+///
+/// **描いて座標を突き合わせるところまでが 1 つ。** `terminal_with` と `row_of` を
+/// 各ペインで組み合わせると、反転の見方（どのセルを見るか）がペインの数だけ増える。
+/// 行の右側は余白でスタイルが付かないので、1 セルでも反転していれば真とする。
+pub fn row_is_reversed(state: &AppState, size: TermSize, needle: &str) -> bool {
+    let row = row_of(&draw(state, size), needle);
+    let terminal = terminal_with(state, size);
+    let buffer = terminal.backend().buffer();
+    (0..size.width).any(|x| buffer[(x, row)].modifier.contains(Modifier::REVERSED))
 }
 
 /// `runtime::layout` がその状態に入れるのと同じグラフの行数。

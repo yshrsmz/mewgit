@@ -36,9 +36,9 @@ fn title(state: &AppState) -> String {
 /// （グラフの空表示と同じ形）。
 fn empty_message(state: &AppState) -> &'static str {
     if state.jobs.is_running(JobKind::LoadStatus) {
-        "読み込み中…"
+        ui::LOADING
     } else {
-        "変更はありません"
+        ui::NO_CHANGES
     }
 }
 
@@ -87,11 +87,10 @@ fn heading(section: WorktreeSection) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, row_of, state_at, terminal_with};
+    use crate::test_util::{draw, row_is_reversed, state_at};
     use mewgit_core::app::{update, Msg, TermSize};
     use mewgit_core::git_read::{FileStatus, WorktreeSnapshot};
     use mewgit_core::test_util::fake_entry;
-    use ratatui::style::Modifier;
 
     /// 既定の 80x24。右ペインは 32 桁になるので、テストはその幅で読める内容にする。
     const SIZE: TermSize = TermSize {
@@ -153,16 +152,9 @@ mod tests {
         });
         state.worktree.move_cursor(1);
 
-        let terminal = terminal_with(&state, SIZE);
-        let buffer = terminal.backend().buffer();
-        let lines = draw(&state, SIZE);
-        // 反転しているセルがあるか。行の右側は余白なのでスタイルが付かない。
-        let reversed =
-            |y: u16| (0..SIZE.width).any(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED));
-
-        assert!(reversed(row_of(&lines, "b.txt")));
+        assert!(row_is_reversed(&state, SIZE, "b.txt"));
         // 反転するのはカーソル行だけ。
-        assert!(!reversed(row_of(&lines, "a.txt")));
+        assert!(!row_is_reversed(&state, SIZE, "a.txt"));
     }
 
     #[test]

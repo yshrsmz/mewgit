@@ -6,7 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use mewgit_core::git_read::{
     DiffTarget, FileDiff, FileEntry, FileStatus, Hunk, LineOrigin, RepoReader,
 };
-use mewgit_core::test_util::TestRepo;
+use mewgit_core::test_util::{fake_oid, TestRepo};
 
 /// ファイルの並びを `(path, old_path, status)` にする。
 fn files(diffs: &[FileDiff]) -> Vec<(&str, Option<&str>, FileStatus)> {
@@ -174,8 +174,11 @@ fn index_vs_worktree_agrees_with_status_on_a_worktree_rename() {
     assert_eq!(files(&diff), rows(&status.unstaged));
 }
 
-#[test]
-fn commit_diffs_against_the_first_parent() {
+/// `main` に `topic` を `--no-ff` でマージしたリポジトリと、そのマージコミット。
+///
+/// **第一親（main）側の変更は `main.txt`、第二親（topic）側は `topic.txt`。**
+/// 第一親と比べていれば `topic.txt` だけが出る。
+fn merged_repo() -> (TestRepo, mewgit_core::git_read::Oid) {
     let repo = TestRepo::init();
     repo.commit_file("base.txt", "base");
     repo.git(&["checkout", "-q", "-b", "topic"]);
@@ -184,6 +187,12 @@ fn commit_diffs_against_the_first_parent() {
     repo.commit_file("main.txt", "main");
     repo.git(&["merge", "-q", "--no-ff", "-m", "merge topic", "topic"]);
     let merge = repo.head_oid();
+    (repo, merge)
+}
+
+#[test]
+fn commit_diffs_against_the_first_parent() {
+    let (repo, merge) = merged_repo();
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let diff = reader
@@ -529,14 +538,7 @@ fn commit_files_pairs_a_rename_like_the_diff_does() {
 
 #[test]
 fn commit_files_uses_the_first_parent_of_a_merge() {
-    let repo = TestRepo::init();
-    repo.commit_file("base.txt", "base");
-    repo.git(&["checkout", "-q", "-b", "topic"]);
-    repo.commit_file("topic.txt", "topic");
-    repo.git(&["checkout", "-q", "main"]);
-    repo.commit_file("main.txt", "main");
-    repo.git(&["merge", "-q", "--no-ff", "-m", "merge topic", "topic"]);
-    let merge = repo.head_oid();
+    let (repo, merge) = merged_repo();
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let entries = reader.commit_files(merge).unwrap();
@@ -598,12 +600,9 @@ fn commit_files_and_the_commit_diff_see_the_same_files() {
 #[test]
 fn commit_files_reports_a_missing_commit() {
     let repo = TestRepo::init();
-    let known = repo.commit_file("file.txt", "first");
+    repo.commit_file("file.txt", "first");
     let reader = RepoReader::open(repo.path()).unwrap();
-    // 存在しない Oid。1 バイト目を反転させる。
-    let mut bytes = known.as_bytes().to_vec();
-    bytes[0] ^= 0xff;
-    let missing = mewgit_core::git_read::Oid::from_bytes(&bytes).unwrap();
 
-    assert!(reader.commit_files(missing).is_err());
+    // `fake_oid` は実リポジトリの Oid と重ならない（`test_util`）。
+    assert!(reader.commit_files(fake_oid(7)).is_err());
 }

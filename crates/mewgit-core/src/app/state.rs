@@ -467,6 +467,36 @@ impl GraphState {
         self.files.as_ref().filter(|files| files.oid == oid)
     }
 
+    /// [`fresh_files`](Self::fresh_files) の可変版。カーソルを動かすのに使う。
+    ///
+    /// **見えていない一覧のカーソルを動かさない。** 描くのも `wanted_diff` が対象を
+    /// 決めるのも `fresh_files` を通したものだけなので、濾さずに動かすと画面に出て
+    /// いない一覧のカーソルが黙って動く（[`DiffState::fresh_view_mut`] と同じ形）。
+    pub fn fresh_files_mut(&mut self) -> Option<&mut CommitFiles> {
+        let oid = self.cursor_commit()?.oid;
+        self.files.as_mut().filter(|files| files.oid == oid)
+    }
+
+    /// カーソルの指すコミットの詳細を読みに行って失敗したままか。
+    ///
+    /// 「読み込み中」と「読み込めなかった」の出し分けに使う。**`ui` は
+    /// `jobs.is_running` の否定から消去法で導かない。** `Cmd` の発行経路を変えた
+    /// ときに片方だけ直しても通ってしまう（[`DiffState::has_failed`] と同じ形）。
+    pub fn has_detail_failed(&self) -> bool {
+        self.failed_here(self.detail_failed)
+    }
+
+    /// カーソルの指すコミットのファイル一覧を読みに行って失敗したままか。
+    /// [`has_detail_failed`](Self::has_detail_failed) と同じ形。
+    pub fn has_files_failed(&self) -> bool {
+        self.failed_here(self.files_failed)
+    }
+
+    /// 失敗の印がカーソルの指すコミットのものか。
+    fn failed_here(&self, failed: Option<Oid>) -> bool {
+        failed.is_some() && self.cursor_commit().map(|commit| commit.oid) == failed
+    }
+
     /// カーソルの指すコミットの一覧で選んでいるファイル。
     ///
     /// 一覧がまだ届いていないときと、変更が 1 つも無いコミットのときは `None`。
@@ -792,10 +822,16 @@ impl DiffView {
 
 /// `positions` の中で `current` から `delta` 個進んだ位置。端では止まる。
 ///
-/// **端の扱いはここ 1 箇所。** [`WorktreeState::move_cursor`] と
-/// [`DiffView::move_cursor`] が同じ規則を使う。並べる中身は違っても「進めて端で
-/// 止める」は 1 つ。要素が無ければ `None` を返し、そのときどうするかは呼び出し側が決める
-/// （Worktree は何も選べない位置に戻し、Diff は据え置く）。
+/// **「選べる位置の並び」を持つカーソルの端の扱いはここ 1 箇所。**
+/// [`WorktreeState::move_cursor`] と [`DiffView::move_cursor`] が同じ規則を使う。
+/// 並べる中身は違っても「進めて端で止める」は 1 つ。要素が無ければ `None` を返し、
+/// そのときどうするかは呼び出し側が決める（Worktree は何も選べない位置に戻し、
+/// Diff は据え置く）。
+///
+/// **平坦な添字のカーソルはここを通らない。** [`GraphState::move_cursor`] と
+/// [`CommitFiles::move_cursor`] は `0..len` が全部選べるので並びを組む必要が無く、
+/// `saturating_add_signed(delta).min(last)` の 2 行で済む。並びを組ませると、
+/// カーソルを 1 行動かすたびに `Vec` を確保することになる。
 fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Option<T> {
     let index = positions
         .iter()

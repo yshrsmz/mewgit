@@ -217,6 +217,21 @@ pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;
   リーダースレッドが止まる（01 の「コミットのファイル一覧」に app 側の理由もある）
 - 変更が 1 つも無いコミット（`--allow-empty`）では空の `Vec`。**「まだ読めていない」との
   区別は `app` が付ける**（`Option` で持つ。01）
+- **1 ファイルの diff でもコミット全体の delta 生成と `find_similar` が毎回走る。**
+  `path` は `DiffOptions` に渡していない（渡すと rename が壊れる。上の「diff とハンク」）
+  ので、一覧を出すのに 1 回、選んだファイルの diff にもう 1 回、同じツリー比較を
+  リーダースレッドで直列に走らせる。ファイルを選び直すたびに 1 回ずつ増える
+  （`DiffState` のキャッシュは対象 1 件ぶん）。ディレクトリごと移動したコミットのように
+  add / delete が数百あると、`find_similar` の総当たりを毎回やり直しながら `LoadLog` や
+  `LoadStatus` を待たせる。**塞ぎ方は判っている** — `DiffTarget::Commit` に `old_path` を
+  持たせ、新旧のパスを両方 `opts.pathspec(..)` に渡したうえで
+  `disable_pathspec_match(true)` を立てる。rename は対のまま残り、旗を立てると
+  pathspec がイテレータの `pathlist` になって walk 自体が絞られる（旗が無いと libgit2 は
+  pathspec の**共通接頭辞**しか枝刈りに使わないので、`old.txt` / `new.txt` のように
+  接頭辞を共有しない対では効かない。git2 0.21 / libgit2 1.9 の
+  `diff_generate.c` の `diff_prepare_iterator_opts` で確認）。`DiffTarget` の形が変わり
+  01 の `wanted_diff` も一覧の `old_path` を運ぶことになるので、**M3 で fetch の
+  読み直しを入れるときに一緒に決める**（そこで `JobTracker` の世代も見る）
 
 ## ステータス
 

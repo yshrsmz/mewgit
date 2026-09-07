@@ -309,6 +309,33 @@ async fn switch_moves_head_to_a_branch() {
 }
 
 #[tokio::test]
+async fn a_rename_target_starting_with_a_dash_never_becomes_an_option() {
+    // **`git branch` は parse-options なので、`--` が無いと `-` 始まりの `to` を
+    // オプションとして拾う。** `git branch --move topic --force` は「`--force` へ
+    // 改名」ではなく「HEAD を `topic` へ強制改名」になり、**元の `topic` が黙って
+    // 消えて exit 0 で返る**（git 2.55 で確認）。`to` は `Modal::Input` が受けた
+    // 文字がそのまま載る唯一の positional なので、ここだけは踏める。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["branch", "topic"]);
+    repo.commit("second");
+    let topic = repo.git(&["rev-parse", "topic"]);
+
+    repo.runner()
+        .run(&GitOp::BranchRename {
+            from: "topic".into(),
+            to: "--force".into(),
+        })
+        .await
+        .expect_err("git が断るはずです");
+
+    // **成否だけでは見張れない。** `--` を落とすと git は exit 0 で返るので、
+    // 消えていないことをブランチの側で見る。
+    assert_eq!(repo.git(&["rev-parse", "topic"]), topic);
+    assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+}
+
+#[tokio::test]
 async fn branch_create_switch_delete_and_rename() {
     let repo = TestRepo::init();
     repo.commit("first");

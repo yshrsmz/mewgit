@@ -83,7 +83,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `BranchCreate { switch: false }` | `branch <name> [<start>]` |
 | `Switch(name)` | `switch <name>` |
 | `BranchDelete { name, force }` | `branch --delete [--force] <name>` |
-| `BranchRename { from, to }` | `branch --move <from> <to>` |
+| `BranchRename { from, to }` | `branch --move -- <from> <to>` |
 | `Fetch { remote, prune }` | `fetch [--prune] [<remote>]` |
 | `Pull { mode }` | `pull --no-rebase` / `--rebase` / `--ff-only` |
 | `Push { .. }` | `push [--force-with-lease[=<branch>:<expected>]] [--set-upstream] <remote> <branch>` |
@@ -100,6 +100,15 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 
 - **パスの前には必ず `--` を置く。** `-n` や `HEAD` という名前のファイルがオプションや
   revision として解釈されるのを防ぐ
+- **ユーザーが打った文字が positional に載るところにも `--` を置く。** いまは
+  `BranchRename` の `to` だけ（`Modal::Input` が受けた文字がそのまま来る）。
+  `git branch` は parse-options なので、`git branch --move topic --force` は
+  「`--force` へ改名」ではなく**「HEAD を `topic` へ強制改名」**と読まれ、元の
+  `topic` が黙って消えて **exit 0 で返る**（git 2.55 で確認）。`--` があれば
+  `fatal: '--force' is not a valid branch name` で断られる。
+  **`BranchCreate` には置かない** — `switch --create` は次の argv を無条件に名前として
+  食うので `-` 始まりでも fatal になり、逆に `--create --` と書くと `--` 自体が名前に
+  なって `fatal: invalid reference` で壊れる（git 2.55 で確認）
 - **unstage は `restore --staged` ではなく `reset`。** コミットが 1 つも無いリポジトリ
   （unborn HEAD）で `git restore --staged` は `fatal: could not resolve 'HEAD'` で落ちる。
   `git reset -- <paths>` は同じ状態でも通る（git 2.55 で確認）。`--quiet` は

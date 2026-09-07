@@ -386,7 +386,6 @@ fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
 }
 
 /// Branches ペインのキー処理。
-/// `Modal::Input` の最初の利用者になるので、モーダルごと別の PR にしてある。
 fn branches_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         KeyCode::Char('j') | KeyCode::Down => {

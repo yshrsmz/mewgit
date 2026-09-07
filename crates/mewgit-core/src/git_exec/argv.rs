@@ -125,8 +125,25 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
             }
             argv.push(name.clone());
         }
+        // **`--` を置く。** `to` は**ユーザーが打った文字がそのまま positional に
+        // 載る唯一の場所**で、`git branch` は parse-options なので `-` で始まる値を
+        // オプションとして拾う。`git branch --move topic --force` は「`--force` に
+        // 改名」ではなく「HEAD を `topic` へ強制改名」になり、**元の `topic` が
+        // 黙って消えて exit 0 で返る**（git 2.55 で確認）。`--` があれば
+        // `fatal: '--force' is not a valid branch name` で断られる。
+        //
+        // 同じ穴が `BranchCreate` に無いのは、`--create` が次の argv を無条件に
+        // 名前として食うため（`switch --create --force` も同じ fatal になる）。
+        // **`--create` の直後に `--` を置いてはいけない** — `--` が名前になり、
+        // 続く名前が起点として読まれて `fatal: invalid reference` になる。
         GitOp::BranchRename { from, to } => {
-            argv.extend(["branch".into(), "--move".into(), from.clone(), to.clone()]);
+            argv.extend([
+                "branch".into(),
+                "--move".into(),
+                "--".into(),
+                from.clone(),
+                to.clone(),
+            ]);
         }
         GitOp::Fetch { remote, prune } => {
             argv.push("fetch".into());
@@ -422,7 +439,7 @@ mod tests {
                     from: "old".into(),
                     to: "new".into(),
                 },
-                vec!["branch", "--move", "old", "new"],
+                vec!["branch", "--move", "--", "old", "new"],
             ),
             (
                 GitOp::Fetch {

@@ -45,65 +45,62 @@ impl RemoteUrl {
 }
 
 fn parse_inner(url: &str) -> Option<RemoteUrl> {
-    if let Some(rest) = url.strip_prefix("ssh://") {
-        from_authority(rest, RemoteScheme::Ssh)
+    let (authority, path, scheme) = if let Some(rest) = url.strip_prefix("ssh://") {
+        let (authority, path) = rest.split_once('/')?;
+        (authority, path, RemoteScheme::Ssh)
     } else if let Some(rest) = url.strip_prefix("https://") {
-        from_authority(rest, RemoteScheme::Https)
+        let (authority, path) = rest.split_once('/')?;
+        (authority, path, RemoteScheme::Https)
     } else if url.contains("://") {
         // `git://` は認証が効かず、`http://` は平文、`file://` と `rsync://` は
         // GitHub のリモートではない。scp 形式と誤って読まないよう、ここで落とす。
-        None
+        return None;
     } else {
-        from_scp(url)
-    }
-}
+        // scp 形式 `[user@]host:owner/repo`。`://` を含まない文字列のうち、
+        // **最初の `/` より前に `:` があるもの**だけが scp 形式。
+        let (authority, path) = url.split_once(':')?;
+        // authority に `/` があればローカルパス（`~/repos/x@host:a/b.git` など）。
+        // **`valid_host` では落ちない** — `host_of` が最後の `@` から後ろだけを見るので、
+        // `/` を含む部分がそこで消える。
+        if authority.contains('/') {
+            return None;
+        }
+        (authority, path, RemoteScheme::Ssh)
+    };
 
-/// `[user@]host[:port]/owner/repo` を割る。
-fn from_authority(rest: &str, scheme: RemoteScheme) -> Option<RemoteUrl> {
-    let (authority, path) = rest.split_once('/')?;
+    // 確保はここ 1 か所。読めない URL では 1 つも作らない。
+    let host = host_of(authority)?;
     let (owner, repo) = split_owner_repo(path)?;
     Some(RemoteUrl {
         scheme,
-        host_raw: host_of(authority)?,
-        owner,
-        repo,
-    })
-}
-
-/// scp 形式 `[user@]host:owner/repo` を割る。
-///
-/// `://` を含まない文字列のうち、**最初の `/` より前に `:` があるもの**だけが scp 形式。
-/// ローカルパス（`/srv/repos/x.git`）と区別が付く。
-fn from_scp(url: &str) -> Option<RemoteUrl> {
-    let (authority, path) = url.split_once(':')?;
-    if authority.contains('/') {
-        return None;
-    }
-    let (owner, repo) = split_owner_repo(path)?;
-    Some(RemoteUrl {
-        scheme: RemoteScheme::Ssh,
-        host_raw: host_of(authority)?,
-        owner,
-        repo,
+        host_raw: host.to_string(),
+        owner: owner.to_string(),
+        repo: repo.to_string(),
     })
 }
 
 /// `[user@]host[:port]` からホストだけを取る。
-fn host_of(authority: &str) -> Option<String> {
+fn host_of(authority: &str) -> Option<&str> {
     // user 名に `@` が入ることがあるので、最後の `@` で割る。
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
     // port を落とす。IPv6 リテラル（`[::1]:22`）は `[` を含むので下の検査で落ちる。
     let host = host.split_once(':').map_or(host, |(host, _port)| host);
-    valid_host(host).then(|| host.to_string())
+    valid_host(host).then_some(host)
 }
 
 /// ホスト名として受ける文字だけでできているか。
 ///
-/// **`-` 始まりを弾くのが眼目**（04 の「alias は argv の positional に載る」）。
-/// ssh の host_raw は `ssh -G` の positional に載るので、`-oProxyCommand=...` のような
-/// 値をここで止める。git 自身も `-` 始まりのホストを拒む。
+/// **`-` 始まりを弾くのが眼目。** 理由は 2 つある。第一に、ホスト名の構文として
+/// `-` 始まりは受けない（`https://-4/a/b` を拒むのはこちらの理由）。第二に、
+/// [`host_of`] が `user@` を捨てるので、通すと**裸の** `-4` が `ssh -G` の positional
+/// に載る（04 の「alias は argv の positional に載る」）。
+///
+/// **git と同じ判断ではない。** git 2.55 が拒むのは `user@host` 全体が `-` で始まる
+/// ときだけで、`git@-4:a/b.git` も `git@-oProxyCommand=id:a/b.git` も素通りする
+/// （`core.sshCommand` で argv をダンプして確認。`git@-4` を 1 語で ssh に渡すので
+/// オプションにならない）。user を捨てるこちらだけが裸の host を作る。
 fn valid_host(host: &str) -> bool {
     !host.is_empty()
         && !host.starts_with('-')
@@ -113,16 +110,17 @@ fn valid_host(host: &str) -> bool {
 }
 
 /// `[/]owner/repo[.git][/]` を割る。
-fn split_owner_repo(path: &str) -> Option<(String, String)> {
+fn split_owner_repo(path: &str) -> Option<(&str, &str)> {
     let path = path.trim_matches('/');
     let (owner, repo) = path.split_once('/')?;
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
     // GitHub のパスは 2 段だけ。3 段以上（GitLab のサブグループなど）は owner を
-    // 決められないので受けない。
-    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+    // 決められないので受けない。`owner` が空になる経路は無い（先頭の `/` は落として
+    // あるので、`split_once` が `Some` を返す時点で左は非空）。
+    if repo.is_empty() || repo.contains('/') {
         return None;
     }
-    Some((owner.to_string(), repo.to_string()))
+    Some((owner, repo))
 }
 
 #[cfg(test)]
@@ -146,6 +144,14 @@ mod tests {
         RemoteUrl {
             scheme: RemoteScheme::Https,
             ..ssh(host, owner, repo)
+        }
+    }
+
+    /// 読めない URL であることを確かめる。2 つのテストが同じ形で使う。
+    fn rejected(url: &str) {
+        match RemoteUrl::parse(url) {
+            Err(AuthError::InvalidRemoteUrl { .. }) => {}
+            other => panic!("{url} を受けてしまった: {other:?}"),
         }
     }
 
@@ -211,6 +217,10 @@ mod tests {
             // ローカルパス。`:` が無いので scp 形式にもならない。
             "/srv/repos/b.git",
             "../sibling",
+            // `:` はあるが、その手前に `/` があるローカルパス。**`valid_host` では
+            // 落ちない** — `host_of` が最後の `@` から後ろだけを見るので、
+            // `~/repos/x` の部分が消えて `host` だけが残る。
+            "~/repos/x@host:a/b.git",
             // owner か repo が足りない / 多い。
             "https://github.com/a",
             "git@github.com:a",
@@ -222,21 +232,16 @@ mod tests {
             "ssh://git@github.com",
             "",
         ] {
-            assert!(
-                matches!(
-                    RemoteUrl::parse(url),
-                    Err(AuthError::InvalidRemoteUrl { .. })
-                ),
-                "{url} を受けてしまった: {:?}",
-                RemoteUrl::parse(url)
-            );
+            rejected(url);
         }
     }
 
     #[test]
     fn rejects_option_like_host() {
-        // `host_raw` は `ssh -G` の positional に載る。`-` 始まりを通すと、clone して
-        // きたリポジトリの `.git/config` が ssh のオプションになる（04）。
+        // `-` 始まりは 2 つの理由で受けない。ホスト名の構文として不正であること
+        // （`https://-4/a/b` はこちら）と、`host_of` が `user@` を捨てるので裸の値が
+        // `ssh -G` の positional に載ること（04）。**git は `git@-4:a/b.git` を通す**
+        // ので、git に合わせると後者が塞げない（`valid_host` の doc に実測がある）。
         for url in [
             "git@-oProxyCommand=id:a/b.git",
             "git@-4:a/b.git",
@@ -244,14 +249,7 @@ mod tests {
             "https://-4/a/b",
             "-4:a/b",
         ] {
-            assert!(
-                matches!(
-                    RemoteUrl::parse(url),
-                    Err(AuthError::InvalidRemoteUrl { .. })
-                ),
-                "{url} を受けてしまった: {:?}",
-                RemoteUrl::parse(url)
-            );
+            rejected(url);
         }
     }
 }

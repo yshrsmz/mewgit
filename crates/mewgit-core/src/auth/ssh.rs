@@ -13,9 +13,11 @@ use super::AuthError;
 
 /// 実行する ssh。`git_bin` / `gh_bin` と違って設定で差し替えられない。
 ///
-/// ssh を呼ぶのはホスト名の正規化だけで、Git の通信自体は `git` が
-/// `core.sshCommand` / `GIT_SSH_COMMAND` に従って行う（03）。ここに設定を足すと、
-/// 「どちらの ssh で解決したか」と「どちらの ssh で繋いだか」が食い違いうる。
+/// **揃えるべき相手は設定値ではなく、git が実際に使う ssh。** Git の通信は
+/// `core.sshCommand` / `GIT_SSH_COMMAND` に従うので、そこを別の ssh（別の config を
+/// 読むもの）に向けている環境では、PATH の ssh で解決している**いまの形が既に
+/// 食い違う**。それを読むかどうかは、`BatchMode` と一緒に fetch / push のタスクで
+/// 決める（03 の「Runner」）。
 const SSH_BIN: &str = "ssh";
 
 /// エイリアスを実ホスト名に正規化する。
@@ -47,15 +49,19 @@ async fn resolve_with(
         cmd.arg("-F").arg(path);
     }
     cmd.arg("-G")
-        // **`alias` は positional に載る。** `.git/config` の URL は clone してきた
-        // 値がそのまま入るので、`-oProxyCommand=...` をオプションとして解釈させない
-        // （04 の「alias は argv の positional に載る」）。
+        // **`alias` は positional に載る**ので `--` を置く（03 の「argv への変換」と
+        // 同じ数え方）。`.git/config` の URL は clone してきた値がそのまま入り、
+        // `RemoteUrl` の `host_of` が `user@` を捨てるので、`git@-oProxyCommand=...`
+        // は裸の `-oProxyCommand=...` になってここへ来る（04）。
         .arg("--")
         .arg(alias)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // エラー文を安定させる（`git_exec::Runner` と同じ）。
+        // ここから下の 2 つと下の spawn エラーの文言は `git_exec::Runner::spawn` と
+        // 同じ（エラー文の安定と、キャンセルで子を残さないこと）。**共有先はまだ
+        // 作らない** — 抽出できるのは `Command` の組み立てだけで、エラー型が違うので
+        // 呼び出し側で包み直しが要る。M4 の `GhCli` が 3 本目になったら数え直す。
         .env("LC_ALL", "C")
         .kill_on_drop(true);
 
@@ -90,34 +96,29 @@ async fn resolve_with(
 ///
 /// **`host <alias>` の行が `hostname <実ホスト>` より先に来る**ので、`host` の prefix で
 /// 見ると最初の行を取ってしまう。キーは完全一致で見る（04 の実測）。
+///
+/// 値を `trim` しないのは、`str::lines` が CRLF の `\r` を自分で落とすため。空値を
+/// 飛ばす腕も足さない — `None` の理由を「`hostname ` の行が無い」1 つに保つ
+/// （呼び出し側の案内はそう言っている）。
 fn hostname_from_dump(dump: &str) -> Option<&str> {
-    dump.lines().find_map(|line| {
-        let value = line.strip_prefix("hostname ")?.trim();
-        (!value.is_empty()).then_some(value)
-    })
+    dump.lines().find_map(|line| line.strip_prefix("hostname "))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
-    use std::path::PathBuf;
-
-    use tempfile::TempDir;
-
     use super::*;
 
-    /// `-F` に渡す ssh_config を書く。`TempDir` は落とすと消えるので呼び出し側で持つ。
-    fn ssh_config(dir: &TempDir, body: &str) -> PathBuf {
-        let path = dir.path().join("config");
-        let mut file = std::fs::File::create(&path).expect("ssh_config を作れなかった");
-        file.write_all(body.as_bytes())
-            .expect("ssh_config を書けなかった");
-        path
+    /// `-F` に渡す ssh_config を書いて、そこで `ssh -G` を回す。
+    ///
+    /// `TempDir` はこの中で作って呼び出しのあいだだけ持つ。テストごとに書くと
+    /// 「`TempDir` を束縛し続ける」注意書きが人数分に増える。
+    async fn resolve(ssh_config: &str, alias: &str) -> Result<String, AuthError> {
+        let (_dir, path) = crate::test_util::temp_file("config", ssh_config);
+        resolve_with(Path::new(SSH_BIN), Some(&path), alias).await
     }
 
-    async fn resolve(config: &Path, alias: &str) -> Result<String, AuthError> {
-        resolve_with(Path::new(SSH_BIN), Some(config), alias).await
-    }
+    /// エイリアスが 1 つだけ書かれた ssh_config。
+    const GH_WORK: &str = "Host gh-work\n  HostName github.com\n  User git\n";
 
     #[test]
     fn takes_the_hostname_line_not_the_host_line() {
@@ -127,28 +128,23 @@ mod tests {
     }
 
     #[test]
-    fn ignores_dumps_without_a_hostname() {
+    fn reports_no_hostname_when_the_line_is_missing() {
         assert_eq!(hostname_from_dump("host gh-work\nuser git\n"), None);
-        // 値の無い行は無いものとして扱う（あれば次の行を見る）。
-        assert_eq!(
-            hostname_from_dump("hostname \nhostname a.example\n"),
-            Some("a.example")
-        );
     }
 
     #[test]
-    fn trims_the_line_ending() {
+    fn reads_a_crlf_dump() {
+        // 値を `trim` していないのは `str::lines` が `\r` を落とすから。
+        // ここが落ちたら `trim` を戻すのではなく、`lines` の前提を疑う。
         assert_eq!(
-            hostname_from_dump("hostname github.com\r\n"),
+            hostname_from_dump("host gh-work\r\nhostname github.com\r\n"),
             Some("github.com")
         );
     }
 
     #[tokio::test]
     async fn resolves_an_alias_to_its_hostname() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config = ssh_config(&dir, "Host gh-work\n  HostName github.com\n  User git\n");
-        assert_eq!(resolve(&config, "gh-work").await.unwrap(), "github.com");
+        assert_eq!(resolve(GH_WORK, "gh-work").await.unwrap(), "github.com");
     }
 
     #[tokio::test]
@@ -156,10 +152,8 @@ mod tests {
         // `ssh -G` は未定義のエイリアスでも exit 0 で引数をそのまま返す（04 の実測）。
         // 「解決できなかった」を `Err` にすると、エイリアスを使っていないふつうの
         // リモートが全部エラーになる。
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config = ssh_config(&dir, "Host gh-work\n  HostName github.com\n");
         assert_eq!(
-            resolve(&config, "acme.ghe.com").await.unwrap(),
+            resolve(GH_WORK, "acme.ghe.com").await.unwrap(),
             "acme.ghe.com"
         );
     }
@@ -167,11 +161,9 @@ mod tests {
     #[tokio::test]
     async fn an_option_like_alias_is_not_read_as_an_option() {
         // **`--` の見張り。** 外すと ssh が `-4` をオプションとして読み、ホストが
-        // 無いまま usage を出して落ちる。`--` があればホスト名として不正だと言う。
-        // どちらも `Err` なので、見張れるのは理由のほうだけ。
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config = ssh_config(&dir, "Host gh-work\n  HostName github.com\n");
-        let err = resolve(&config, "-4").await.unwrap_err();
+        // 無いまま usage を出して落ちる。`--` があればホスト名として不正だと言う
+        // （この拒否は OpenSSH 7.6 以降）。どちらも `Err` なので、見張れるのは理由のほう。
+        let err = resolve(GH_WORK, "-4").await.unwrap_err();
         let message = err.to_string();
         assert!(
             !message.to_lowercase().contains("usage"),
@@ -182,9 +174,9 @@ mod tests {
     #[tokio::test]
     async fn a_broken_config_is_reported_with_the_stderr() {
         // 不変ルール 4 の趣旨。ssh が断った理由を握りつぶさない。
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config = ssh_config(&dir, "Host gh-work\n  NoSuchKeyword yes\n");
-        let err = resolve(&config, "gh-work").await.unwrap_err();
+        let err = resolve("Host gh-work\n  NoSuchKeyword yes\n", "gh-work")
+            .await
+            .unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains("nosuchkeyword") || message.contains("NoSuchKeyword"),

@@ -332,15 +332,6 @@ pub fn resolve_config_path(xdg_config_home: Option<&Path>, home: Option<&Path>) 
 mod tests {
     use super::*;
 
-    /// 一時ディレクトリに `config.toml` を書く。`TempDir` は drop されると消えるので
-    /// 呼び出し側で束縛し続けること。
-    fn write_config(text: &str) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, text).unwrap();
-        (dir, path)
-    }
-
     #[test]
     fn empty_input_gives_documented_defaults() {
         let (config, warnings) = Config::from_toml_str("");
@@ -482,7 +473,7 @@ mod tests {
 
     #[test]
     fn load_from_reads_the_file() {
-        let (_dir, path) = write_config("[graph]\npage_size = 42\n");
+        let (_dir, path) = crate::test_util::temp_file("config.toml", "[graph]\npage_size = 42\n");
         let (config, warnings) = Config::load_from(&path);
         assert!(warnings.is_empty());
         assert_eq!(config.graph.page_size, 42);
@@ -490,7 +481,7 @@ mod tests {
 
     #[test]
     fn parse_warning_carries_the_file_path() {
-        let (_dir, path) = write_config("[graph\n");
+        let (_dir, path) = crate::test_util::temp_file("config.toml", "[graph\n");
         let (_, warnings) = Config::load_from(&path);
 
         assert_eq!(warnings.len(), 1);

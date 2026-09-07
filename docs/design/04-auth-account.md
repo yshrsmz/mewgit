@@ -65,10 +65,18 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
 `ssh -G -oProxyCommand=...` になり、**ホスト名ではなくオプションとして解釈される**。
 2 段で塞ぐ。
 
-- パーサが `-` で始まる `host_raw` を `InvalidRemoteUrl` で拒む（git 自身と同じ判断）
-- `resolve_ssh_host` は `ssh -G -- <alias>` と `--` を置く。**`--` の有無で結果が変わる** —
-  無ければ ssh は usage を出して落ち、有れば「ホスト名として不正」で落ちる。公開関数なので
-  パーサを通らない呼び出しもありうる
+- パーサが `-` で始まる `host_raw` を `InvalidRemoteUrl` で拒む。第一にホスト名の構文
+  として受けないから（`https://-4/a/b` もこれで落ちる）、第二に `RemoteUrl` が `user@` を
+  捨てるから
+- `resolve_ssh_host` は `ssh -G -- <alias>` と `--` を置く（03 の「argv への変換」と同じ
+  数え方）。**`--` の有無で結果が変わる** — 無ければ ssh は usage を出して落ち、有れば
+  「ホスト名として不正」で落ちる（この拒否は OpenSSH 7.6 以降）
+
+**git と同じ判断ではない。** git 2.55 が拒むのは `user@host` **全体**が `-` で始まるとき
+だけで、`git@-4:a/b.git` も `git@-oProxyCommand=id:a/b.git` も素通りする（`core.sshCommand`
+で argv をダンプして確認）。git が安全なのは `git@-4` を 1 語のまま ssh に渡すからで、
+`user@` を捨てる mewgit だけが裸の `-4` を作る。**受け継いだ危険ではなく、こちらが作った
+危険**なので、git に合わせて緩めない。
 
 「危ない引数を渡していないか」ではなく「危ない解釈をされる余地があるか」で数える
 （`git branch --move` の `to` と同じ形）。

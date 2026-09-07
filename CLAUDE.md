@@ -158,6 +158,9 @@ env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/d
 - `Path` 同士の `assert_eq!` は末尾の区切りを無視するので、パスの正規化はテストできない。
   git2 の `workdir()` / `path()` は `/…/repo/` と末尾を付けて返すため、正規化を確かめる
   ときは `to_string_lossy()` で文字列に直して見る
+- **`auth` のテストは実物の `ssh` を叩く。** `-F` に一時ファイルの ssh_config を渡すと
+  `/etc/ssh/ssh_config` ごと無視するので、実行環境から切り離せる（stub は要らない）。
+  設定ファイルを 1 枚書くだけのヘルパは `test_util::temp_file`
 - `graph` は固定のコミット列に対する `cells` の期待値テストを必ず追加する
 - GitHub API は `wiremock` でモック。実 API は叩かない
 - `git_exec::to_argv` は純粋関数なのでユニットテストで全 `GitOp` をカバーする

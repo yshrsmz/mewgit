@@ -20,8 +20,8 @@ use anyhow::{bail, Result};
 use mewgit_core::app::NoticeLevel;
 use mewgit_core::config::Config;
 use ratatui::crossterm::event::{
-    EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, EnableBracketedPaste, EventStream, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 
@@ -38,9 +38,15 @@ async fn main() -> Result<()> {
     // raw mode / 代替画面 / パニックフックは ratatui が持っている。
     let mut terminal = ratatui::try_init()?;
     push_keyboard_enhancement();
+    // **貼り付けを 1 つの `Msg` で受け取る。** 要求しないと、貼り付けた文字が 1 文字
+    // ずつキーとして届き、コミットメッセージを貼ると最初の改行で確定して、残りが
+    // ペインのキーとして解釈される（`x` で discard の確認が開き、あとから来た `y` が
+    // それを実行する）。
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
 
     let result = runtime::run(&mut terminal, EventStream::new(), &mut state, reader).await;
 
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     // restore は () を返すので、ループのエラーを後始末のエラーで踏み潰さない。
     ratatui::restore();

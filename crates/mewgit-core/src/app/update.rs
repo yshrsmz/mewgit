@@ -75,6 +75,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
             // 窓が広がって残りが 1 画面を切ることがある。
             load_more(state)
         }
+        Msg::Paste(text) => paste(state, &text),
         Msg::Tick => Cmd::None,
 
         Msg::LogLoaded { restart, result } => log_loaded(state, restart, result),
@@ -131,6 +132,18 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         // 入っていないので、いまここには来ない。
         Pane::Branches | Pane::Stash | Pane::Prs => Cmd::None,
     }
+}
+
+/// 端末からの貼り付け。
+///
+/// **受けるのは編集中のモーダルだけで、それ以外では捨てる。** ペインには貼り付けの
+/// 行き先が無く、`Msg::Key` に割り直すと bracketed paste を有効にした意味が消える
+/// （01 の「コミットメッセージの編集」）。
+fn paste(state: &mut AppState, text: &str) -> Cmd {
+    if let Some(Modal::CommitMessage { buf, .. }) = state.modal.as_mut() {
+        buf.insert_text(text);
+    }
+    Cmd::None
 }
 
 /// フォーカスを移し、見えるようになった diff が要るなら頼む。
@@ -465,11 +478,13 @@ fn log_loaded(state: &mut AppState, restart: bool, result: Result<LogPage, GitRe
         }
     };
 
-    // **読み直しを待っているあいだに届いた「続き」は捨てる。** 積んでも直後の
-    // 読み直しで捨てるだけで、そのあいだ古い行に新しい行が継ぎ足された状態が
-    // 画面に出る（01 の「ログの読み直し」）。ここまで来ていれば `jobs.finish` の
-    // あとなので、頼み直しは必ず出せる。
-    if state.graph.reload_pending && !restart {
+    // **読み直しを待っているあいだに届いたページは、続きでも読み直しでも捨てる。**
+    // 印が立つのは「読み直しを頼めなかった」ときで、そのとき飛んでいたページは
+    // 必ず印を立てた書き込みより前に頼まれたもの。`restart` かどうかで分けると、
+    // **1 つ前の書き込みの読み直しが届いたときに印だけ落ちて、新しい書き込みが
+    // 二度とグラフに出ない**（続けて 2 回コミットすると踏む）。ここまで来ていれば
+    // `jobs.finish` のあとなので、頼み直しは必ず出せる（01 の「ログの読み直し」）。
+    if state.graph.reload_pending {
         state.graph.reload_pending = false;
         return reload_log(state);
     }
@@ -515,11 +530,13 @@ fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
 
 /// `c`。staged を新しいコミットにする。
 ///
-/// **staged が空でも、届く予定の一覧があるなら断らない。** 書き込み直後の一覧は古く、
-/// それを根拠に「変更がありません」と言うと、実際には stage されているのに拒否する
+/// **staged が空でも、いま持っている一覧を信じられないなら断らない。** 書き込み直後の
+/// 一覧は古く（`stale`）、一度も読めていない一覧は空と区別が付かない（`loaded`）。
+/// どちらも「変更がありません」の根拠にすると、実際には stage されているのに拒否する
 /// （01 の「commit」）。そのときは開いて git の側に判定を任せる。
 fn commit(state: &mut AppState) -> Cmd {
-    if !state.worktree.stale && state.worktree.snapshot.staged.is_empty() {
+    let trusted = state.worktree.loaded && !state.worktree.stale;
+    if trusted && state.worktree.snapshot.staged.is_empty() {
         state.push_notice(
             NoticeLevel::Warn,
             "stage された変更がありません".to_string(),
@@ -603,8 +620,21 @@ fn commit_submit(state: &mut AppState) -> Cmd {
         message: buf.text(),
         amend: *amend,
     };
-    // 先に閉じてから返す（`confirm_key` と同じ。閉じずに返すと、`Cmd` が `issue` に
-    // 落とされたときにモーダルだけが画面に残る）。
+
+    // **`Cmd::Exec` が落とされるなら閉じない。** `confirm_key` は先に閉じてから返すが、
+    // あちらのモーダルはユーザーが打ったものを持っていない。ここで同じことをすると、
+    // 前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
+    // 「ほかの git 実行が終わるまで待ってください」と出て**本文ごと消える**。
+    // 判定は `issue` と同じ `jobs.is_running`（`load_diff` が `Freshness::Asked` を
+    // 決めるのと同じ形）。
+    if state.jobs.is_running(JobKind::Exec) {
+        if let Some(message) = JobKind::Exec.drop_notice() {
+            state.push_notice(NoticeLevel::Warn, message.to_string(), None);
+        }
+        return Cmd::None;
+    }
+
+    // 閉じずに返すと、`Cmd` が落とされたときにモーダルだけが画面に残る。
     state.modal = None;
     Cmd::Exec(op)
 }
@@ -919,6 +949,8 @@ fn status_loaded(state: &mut AppState, result: Result<WorktreeSnapshot, GitReadE
     match result {
         Ok(snapshot) => {
             state.worktree.snapshot = snapshot;
+            // 以後、空の一覧は「変更が無い」と読んでよい。
+            state.worktree.loaded = true;
             // 選んでいたファイルは別の区画へ移る（stage / unstage）か消えている
             // （discard）。選べる行へ寄せ直す。
             state.worktree.clamp();
@@ -964,11 +996,7 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     // がまだで、いま選ばれているファイルが読み直しの対象になるとは限らない。01）。
     state.diff.freshness = Freshness::Stale;
 
-    // **成否は問わない。** 失敗しても index が途中まで動いていることがあり、rebase の
-    // ように途中まで ref を動かして落ちるものもある。「失敗したなら ref は元のまま」と
-    // 言える操作の表をもう 1 本持つこともできるが、余分に読むのは無駄なだけなのに対し、
-    // 読み落とすとグラフが黙って古くなる。
-    match Reload::after(&done.op) {
+    match Reload::after(&done.op, done.result.is_ok()) {
         Reload::Nothing => Cmd::LoadStatus,
         Reload::Refs => Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo]),
         Reload::RefsAndLog => {
@@ -980,7 +1008,7 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     }
 }
 
-/// 書き込みのあとに読み直すもの。
+/// 書き込みのあとに読み直すもの。`ok` は git が成功したか。
 ///
 /// **`git_exec` ではなく `app` に置く。** 「どの ref をグラフが辿るか」を知っているのは
 /// こちらで、`GitOp` の隣に `moves_refs` のような名前で置くと、git の事実を約束しながら
@@ -1002,7 +1030,7 @@ enum Reload {
 }
 
 impl Reload {
-    fn after(op: &GitOp) -> Self {
+    fn after(op: &GitOp, ok: bool) -> Self {
         match op {
             // index / ワークツリーだけ。ref も HEAD も動かない。
             GitOp::Stage(_)
@@ -1036,12 +1064,10 @@ impl Reload {
             | GitOp::StashPop(_)
             | GitOp::StashDrop(_) => Reload::Nothing,
 
-            // walk に入るコミットの集合が変わる。新しいコミットが増えるか、
-            // ref が消える / 巻き戻ってコミットが辿れなくなる。
-            GitOp::Commit { .. }
-            | GitOp::BranchDelete { .. }
-            | GitOp::Push { force: true, .. }
-            | GitOp::Fetch { .. }
+            // walk に入るコミットの集合が変わる。**失敗しても途中まで ref が
+            // 動いていることがある**ので成否を見ない。fetch / pull は一部の ref だけ
+            // 更新して落ちうるし、rebase / cherry-pick / revert は途中で止まる。
+            GitOp::Fetch { .. }
             | GitOp::Pull { .. }
             | GitOp::RebaseInteractive { .. }
             | GitOp::RebaseContinue
@@ -1053,6 +1079,17 @@ impl Reload {
             | GitOp::Revert { .. }
             | GitOp::RevertContinue
             | GitOp::RevertAbort => Reload::RefsAndLog,
+
+            // 同じく walk が変わるが、**1 回で決まるので失敗したなら ref は元のまま**。
+            // そこで読み直すと `GraphState::restart` がカーソルとスクロールを先頭に
+            // 戻すので、pre-commit hook に弾かれただけでグラフの位置を失う。
+            GitOp::Commit { .. } | GitOp::BranchDelete { .. } | GitOp::Push { force: true, .. } => {
+                if ok {
+                    Reload::RefsAndLog
+                } else {
+                    Reload::Refs
+                }
+            }
         }
     }
 }
@@ -2892,6 +2929,40 @@ mod tests {
     }
 
     #[test]
+    fn c_is_not_refused_before_the_first_status_has_arrived() {
+        // 空の一覧には「変更が無い」と「まだ読めていない」の 2 つの意味がある。
+        // 後者を根拠に断ると、実際には stage されているのに拒否する。`stale` では
+        // 区別できない（あれは書き込みでしか立たない）。
+        let mut state = state();
+        state.focus = Pane::Worktree;
+
+        let _ = press(&mut state, 'c');
+
+        assert!(state.modal.is_some());
+    }
+
+    #[test]
+    fn a_commit_while_another_git_run_is_going_keeps_the_message() {
+        // **`Cmd::Exec` が落とされるなら閉じない。** 閉じてから返すと、
+        // 「ほかの git 実行が終わるまで待ってください」と出て本文ごと消える。
+        let mut state = only_staged();
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+        let _ = press(&mut state, 'c');
+        for c in "fix".chars() {
+            let _ = press(&mut state, c);
+        }
+
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+
+        assert_eq!(buffer(&state).unwrap().text(), "fix");
+        assert!(
+            state.notices.back().unwrap().message.contains("git 実行"),
+            "{:?}",
+            state.notices.back()
+        );
+    }
+
+    #[test]
     fn c_is_not_refused_while_the_status_is_older_than_the_last_write() {
         // 書き込み直後の一覧は届いていない。古い「空の staged」を根拠に断ると、
         // 実際には stage されているのに拒否する（01 の「commit」）。
@@ -2914,6 +2985,27 @@ mod tests {
 
         // `q` はモーダル表示中は入力文字（01 の「終了経路」）。脱出口は `Ctrl-C`。
         assert_eq!(buffer(&state).unwrap().text(), "fix: q");
+    }
+
+    #[test]
+    fn a_paste_goes_into_the_message_and_is_ignored_elsewhere() {
+        let mut state = only_staged();
+        let _ = press(&mut state, 'c');
+        let _ = press(&mut state, 'f');
+
+        let cmd = update(&mut state, Msg::Paste("ix: 直す\n\n本文".to_string()));
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(buffer(&state).unwrap().text(), "fix: 直す\n\n本文");
+
+        // モーダルが無いときは捨てる。ペインには貼り付けの行き先が無い。
+        let mut state = only_staged();
+        let before = state.worktree.snapshot.clone();
+        let cmd = update(&mut state, Msg::Paste("sux".to_string()));
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.modal.is_none());
+        assert_eq!(state.worktree.snapshot, before);
     }
 
     #[test]
@@ -3144,34 +3236,70 @@ mod tests {
         // ラベルと HEAD はグラフの行に焼き込まず `GraphState.refs` から引く（07）ので、
         // 既にあるコミットを指すだけの操作は `LoadRepoInfo` で足りる。読み直しは
         // `LogSession` の作り直しで履歴全体のコストが掛かる（02）。
-        assert_eq!(Reload::after(&commit_op()), Reload::RefsAndLog);
-        assert_eq!(Reload::after(&GitOp::RebaseAbort), Reload::RefsAndLog);
+        assert_eq!(Reload::after(&commit_op(), true), Reload::RefsAndLog);
         assert_eq!(
-            Reload::after(&GitOp::BranchDelete {
-                name: "x".into(),
-                force: true,
-            }),
+            Reload::after(
+                &GitOp::BranchDelete {
+                    name: "x".into(),
+                    force: true,
+                },
+                true
+            ),
             Reload::RefsAndLog
         );
 
-        assert_eq!(Reload::after(&GitOp::Checkout("main".into())), Reload::Refs);
-        assert_eq!(Reload::after(&push(false)), Reload::Refs);
+        assert_eq!(
+            Reload::after(&GitOp::Checkout("main".into()), true),
+            Reload::Refs
+        );
+        assert_eq!(Reload::after(&push(false), true), Reload::Refs);
         // force push は `origin/x` が巻き戻り、そこからしか辿れないコミットが落ちる。
-        assert_eq!(Reload::after(&push(true)), Reload::RefsAndLog);
+        assert_eq!(Reload::after(&push(true), true), Reload::RefsAndLog);
 
         assert_eq!(
-            Reload::after(&GitOp::Stage(vec!["a.txt".into()])),
+            Reload::after(&GitOp::Stage(vec!["a.txt".into()]), true),
             Reload::Nothing
         );
         assert_eq!(
-            Reload::after(&GitOp::StageHunk {
-                path: "a.txt".into(),
-                patch: Vec::new(),
-            }),
+            Reload::after(
+                &GitOp::StageHunk {
+                    path: "a.txt".into(),
+                    patch: Vec::new(),
+                },
+                true
+            ),
             Reload::Nothing
         );
         // stash は `refs/stash` しか動かさず、グラフはそれを walk に押していない。
-        assert_eq!(Reload::after(&GitOp::StashPop(0)), Reload::Nothing);
+        assert_eq!(Reload::after(&GitOp::StashPop(0), true), Reload::Nothing);
+    }
+
+    #[test]
+    fn a_failed_write_reloads_the_log_only_when_it_could_have_moved_refs_anyway() {
+        // 読み直しは `GraphState::restart` でカーソルとスクロールを先頭に戻す。
+        // 1 回で決まる操作は、失敗したなら ref が動いていないので位置を捨てない。
+        assert_eq!(Reload::after(&commit_op(), false), Reload::Refs);
+        assert_eq!(Reload::after(&push(true), false), Reload::Refs);
+
+        // fetch / pull は一部の ref だけ更新して落ちうるし、rebase 系は途中で止まる。
+        assert_eq!(
+            Reload::after(
+                &GitOp::Fetch {
+                    remote: None,
+                    prune: false,
+                },
+                false
+            ),
+            Reload::RefsAndLog
+        );
+        assert_eq!(
+            Reload::after(&GitOp::RebaseContinue, false),
+            Reload::RefsAndLog
+        );
+        assert_eq!(
+            Reload::after(&GitOp::RebaseAbort, false),
+            Reload::RefsAndLog
+        );
     }
 
     fn push(force: bool) -> GitOp {
@@ -3194,6 +3322,38 @@ mod tests {
 
         assert_eq!(cmd, Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo]));
         assert!(!state.graph.reload_pending);
+    }
+
+    #[test]
+    fn a_second_write_while_the_reload_is_in_flight_is_not_lost() {
+        // 1 回目のコミット。読み直しが飛ぶ。
+        let mut state = state_with_commits(3);
+        let _ = state.issue(Cmd::Exec(commit_op()));
+        let _ = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
+        assert!(state.jobs.is_running(JobKind::LoadLog));
+
+        // 2 回目。読み直しは飛んでいるぶんに落とされる。
+        let _ = state.issue(Cmd::Exec(commit_op()));
+        let _ = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
+        assert!(state.graph.reload_pending);
+
+        // **1 回目の読み直しが届いても採らない。** 2 回目より前に頼まれたページなので、
+        // 採ると 2 回目のコミットが二度とグラフに出ない。`restart` かどうかで捨てるかを
+        // 決めると、ここで印だけ落ちて読み直しが止まる。
+        let page = LogPage {
+            commits: vec![commit(1)],
+            done: true,
+        };
+        let cmd = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: true,
+                result: Ok(page),
+            },
+        );
+
+        assert_eq!(cmd, reload(&state));
+        assert_eq!(state.graph.lines.len(), 3);
     }
 
     #[test]

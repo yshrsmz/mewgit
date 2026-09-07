@@ -367,6 +367,14 @@ pub struct WorktreeState {
     /// 時点で頼み直すための印（01 の「ワーキングツリー」）。立てるのは
     /// `exec_finished`、落とすのは `status_loaded`。
     pub stale: bool,
+    /// 一度でも status を読めた。
+    ///
+    /// **空の `snapshot` には 2 つの意味がある** — 「変更が無い」と「まだ読めていない」。
+    /// 起動直後や `Cmd::LoadStatus` が失敗したあとは後者で、`stale` では区別できない
+    /// （あれは書き込みでしか立たない）。commit の「stage された変更がありません」を
+    /// この 2 つ目で出すと、実際には stage されているのに断ることになる
+    /// （01 の「commit」）。
+    pub loaded: bool,
 }
 
 impl WorktreeState {
@@ -896,6 +904,25 @@ impl TextBuffer {
         self.cursor.1 = col + 1;
     }
 
+    /// 文字列をカーソル位置に入れる。改行は行を割る。
+    ///
+    /// 貼り付けの入口。**1 文字ずつ [`TextBuffer::insert_char`] を呼ぶ形にしない**の
+    /// は、改行と制御文字の扱いをここで 1 回だけ決めるため。
+    ///
+    /// **制御文字は落とす**（`\r` を含む）。CRLF のまま入れると行末に制御文字が残り、
+    /// タブは `ui` が数える桁とずれてカーソルの位置が合わなくなる（07 の
+    /// 「CommitMessage モーダル」は折り返さない代わりに桁を自分で出している）。
+    pub fn insert_text(&mut self, text: &str) {
+        for (n, line) in text.split('\n').enumerate() {
+            if n > 0 {
+                self.insert_newline();
+            }
+            for c in line.chars().filter(|c| !c.is_control()) {
+                self.insert_char(c);
+            }
+        }
+    }
+
     /// カーソル位置で行を割る。
     pub fn insert_newline(&mut self) {
         let (row, col) = self.cursor;
@@ -1093,6 +1120,38 @@ mod tests {
         assert_eq!(buf.cursor, (1, 2));
         buf.move_cursor(Motion::Home);
         assert_eq!(buf.cursor, (1, 0));
+    }
+
+    #[test]
+    fn pasted_text_goes_in_whole_with_its_line_breaks() {
+        // **貼り付けは 1 つの `Msg` で来る。** キーに割り直すと、最初の改行で確定して
+        // しまい、残りがペインのキーとして解釈される。
+        let mut buf = TextBuffer::from_text("fix: ");
+        buf.insert_text("直す\n\n本文 1\n本文 2");
+
+        assert_eq!(buf.text(), "fix: 直す\n\n本文 1\n本文 2");
+        // カーソルは貼り付けた末尾。
+        assert_eq!(buf.cursor, (3, 4));
+    }
+
+    #[test]
+    fn pasted_control_characters_are_dropped() {
+        // CRLF のまま入れると行末に制御文字が残り、タブは `ui` が数える桁とずれて
+        // カーソルの位置が合わなくなる（07 の「CommitMessage モーダル」）。
+        let mut buf = TextBuffer::default();
+        buf.insert_text("a\r\nb\tc");
+
+        assert_eq!(buf.text(), "a\nbc");
+    }
+
+    #[test]
+    fn pasting_in_the_middle_of_a_line_splits_it() {
+        let mut buf = TextBuffer::from_text("ab");
+        buf.cursor = (0, 1);
+        buf.insert_text("X\nY");
+
+        assert_eq!(buf.lines, vec!["aX".to_string(), "Yb".to_string()]);
+        assert_eq!(buf.cursor, (1, 1));
     }
 
     #[test]

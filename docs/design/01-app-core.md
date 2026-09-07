@@ -139,6 +139,7 @@ impl TextBuffer {
     pub fn from_text(text: &str) -> Self;
     pub fn text(&self) -> String;
     pub fn insert_char(&mut self, c: char);
+    pub fn insert_text(&mut self, text: &str);   // 貼り付け。改行で行を割り、制御文字は落とす
     pub fn insert_newline(&mut self);
     pub fn backspace(&mut self);
     pub fn delete(&mut self);
@@ -202,6 +203,18 @@ impl TextBuffer {
 - **空のメッセージは `update` が断る。** `git commit --message ""` に任せない。git が
   落ちる時点でモーダルは閉じていて、書いた本文が戻らない。空白だけの行も同じ
   （`trim` して空なら断る）
+- **`Cmd::Exec` が `issue` に落とされるなら、モーダルを閉じない。** `Confirm` は先に
+  閉じてから `on_yes` を返すが、あちらはユーザーが打ったものを持っていない。同じ形に
+  すると、前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
+  「ほかの git 実行が終わるまで待ってください」だけが出て**本文ごと消える**。判定は
+  `jobs.is_running(JobKind::Exec)`（`load_diff` が `Freshness::Asked` を決めるのと同じ形）
+- **貼り付けは `Msg::Paste` で 1 通で受ける。** 端末に bracketed paste を要求しないと、
+  貼り付けた文字は 1 文字ずつ `Msg::Key` として届く。**コミットメッセージを貼ると
+  最初の改行で確定し、残りがペインのキーとして解釈される**（`x` で discard の確認が
+  開き、あとから来た `y` がそれを実行する）。要求するのは `main.rs`、バッファへ入れる
+  のは `TextBuffer::insert_text`。**受けるのは編集中のモーダルだけ**で、それ以外では
+  捨てる（ペインには行き先が無く、`Msg::Key` に割り直すと有効にした意味が消える）。
+  制御文字は落とす（CR は CRLF、タブは `ui` が数える桁とずれてカーソルが合わなくなる）
 - `amend` は `Modal::CommitMessage` が持つ。`GitOp::Commit { message, amend }` に
   そのまま渡す
 
@@ -209,9 +222,12 @@ impl TextBuffer {
 
 `c` と `C` はワーキングツリーペインで受ける（07 のキーバインド）。
 
-- **`c` は staged が空なら断る。** ただし `WorktreeState.stale` が立っているあいだは
-  断らない。書き込み直後の一覧は古く、それを根拠に「変更がありません」と言うと
-  実際には stage されているのに拒否する。古いときは開いて git の側に判定を任せる
+- **`c` は staged が空なら断る。** ただし**いま持っている一覧を信じられるときだけ**。
+  書き込み直後の一覧は古く（`WorktreeState.stale`）、一度も読めていない一覧は空と
+  区別が付かない（`WorktreeState.loaded`）。どちらを根拠にしても「変更がありません」は
+  嘘になりうるので、そのときは開いて git の側に判定を任せる。**空の `snapshot` には
+  2 つの意味がある** — 「変更が無い」と「まだ読めていない」。`stale` では後者を
+  表せない（あれは書き込みでしか立たない）
 - **`C`（amend）は staged が空でも通す。** reword だけの amend は正当な操作
 - **amend の初期値は `Cmd::LoadHeadMessage` で読む。** `RepoInfo.head` からは取らない。
   あれは起動時に 1 回読んだきりで、1 回コミットした時点で古い（`Cmd::LoadRepoInfo` が
@@ -316,10 +332,11 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   「`refs/stash` をグラフの walk に押していない」からで、git は ref を動かしている。
   git の事実を約束する名前で UI の方針を返すと、Stash ペインが入ったときに黙って
   嘘になる。**どの ref を辿るかを知っているのは `app` 側**
-- **成否は問わない。** 失敗しても index が途中まで動いていることがあり、rebase の
-  ように途中まで ref を動かして落ちるものもある。「失敗したなら ref は元のまま」と
-  言える操作の表をもう 1 本持つこともできるが、余分に読むのは無駄なだけなのに対し、
-  読み落とすとグラフが黙って古くなる
+- **失敗した書き込みで読み直すのは、途中まで ref が動きうる操作だけ。** fetch / pull は
+  一部の ref だけ更新して落ちうるし、rebase / cherry-pick / revert は途中で止まる。
+  commit / branch 削除 / force push は 1 回で決まるので、失敗したなら ref は元のまま。
+  **読み直しは行を捨てるだけでなく `GraphState::restart` がカーソルとスクロールを
+  先頭に戻す**ので、pre-commit hook に弾かれただけでグラフの位置を失う
 - **新しい `Cmd` の変種にせず `LoadLog` のフィールドにする。** `job_kind` が
   `JobKind::LoadLog` と必ず同じになり、続きの読み込みと読み直しが同時に走らない。
   別変種にすると `job_kind` を揃えるのは手書きの約束になる
@@ -339,8 +356,12 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 （`jobs.is_running(LoadLog)`）。「常に立てて届いたら落とす」形にすると、同じ形だと
 書いてある 2 つが別のことを指す。
 
-- **印が立っているあいだに届いた「続き」のページは捨てる。** 積んでも直後の読み直しで
-  捨てるだけで、そのあいだ古い行に新しい行が継ぎ足された状態が画面に出る
+- **印が立っているあいだに届いたページは、続きでも読み直しでも捨てる。** 印が立つのは
+  「読み直しを頼めなかった」ときで、そのとき飛んでいたページは必ず印を立てた書き込みより
+  前に頼まれたもの。積んでも直後の読み直しで捨てるだけで、そのあいだ古い行に新しい行が
+  継ぎ足された状態が画面に出る。**`restart` かどうかで分けてはいけない** — 1 つ前の
+  書き込みの読み直しが届いたときに印だけ落ちて、新しい書き込みが二度とグラフに出なく
+  なる（続けて 2 回コミットすると踏む）
 - **印が立っているあいだは必ず `JobKind::LoadLog` が走っている**（落とした相手が
   それ）。だから `load_more` に印を見る分岐は要らない — 続きを出しても `issue` が
   落とす。**見る形にすると、テストで踏めない分岐が残る**
@@ -716,6 +737,7 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 pub enum Msg {
     Key(Key), Resize { term: TermSize }, Layout { graph_rows: usize }, Tick,
     // git_read
+    Paste(String),                     // bracketed paste。編集中のモーダルだけが受ける
     LogLoaded { restart: bool, result: Result<LogPage, GitReadError> },
     CommitDetailLoaded { oid: Oid, result: Box<Result<CommitDetail, GitReadError>> },
     HeadMessageLoaded(Result<Option<String>, GitReadError>),  // amend の初期値。None は unborn

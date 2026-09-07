@@ -35,6 +35,13 @@ pub enum Msg {
     Layout {
         graph_rows: usize,
     },
+    /// 端末からの貼り付け（bracketed paste）。
+    ///
+    /// **これが無いと、貼り付けた文字は 1 文字ずつ [`Msg::Key`] として届く。**
+    /// コミットメッセージを貼ると最初の改行で確定してしまい、残りがペインのキーとして
+    /// 解釈される（`x` で discard の確認が開き、あとから来た `y` がそれを実行する）。
+    /// 端末に bracketed paste を要求するのは `main.rs`。
+    Paste(String),
     /// 250ms 周期。スピナー更新と外部変更検知に使う。
     Tick,
 

@@ -84,6 +84,6 @@ pub enum GithubError {
 
 ## PR チェックアウト
 
-1. `pr.head` が同一リポジトリなら `Fetch { remote: Some("origin") }` → `BranchCreate { name: <branch>, start: Some("origin/<branch>"), checkout: true }`（= `switch --create <branch> origin/<branch>`）。**`--track` は要らない** — 起点がリモート追跡ブランチなら `branch.<b>.remote` / `.merge` が自動で入る（git 2.55 で確認）
+1. `pr.head` が同一リポジトリなら `Fetch { remote: Some("origin") }` → `BranchCreate { name: <branch>, start: Some("origin/<branch>"), checkout: true }`（= `switch --create <branch> origin/<branch>`）。追跡設定は `branch.autoSetupMerge` が既定なら自動で入るが、**`false` にしている環境では入らない**（git 2.55 で確認。`--track` を付ければ入る）。上流の無いブランチができると Branches ペインに ahead/behind が出ず、push でも `-u` が要る。`GitOp::BranchCreate` に `track` を足すかは**このタスクで決める**
 2. fork なら `git fetch origin pull/<n>/head:<branch>` でローカルブランチを作り、`.git/config` に `branch.<b>.remote/merge` を書いて後の push 先を明示する
 3. いずれも `GitOp` として `git_exec` に渡す

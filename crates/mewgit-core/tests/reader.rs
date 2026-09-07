@@ -7,7 +7,9 @@
 //! `GitReadError::ReaderGone` はテストしていない。スレッドを外から落とす手段が無く
 //! （ハンドルが送信側を持つ限りループは終わらない）、公開 API から到達できないため。
 
-use mewgit_core::git_read::{DiffTarget, FileStatus, GitReadError, HeadInfo, ReaderHandle};
+use mewgit_core::git_read::{
+    DiffTarget, FileStatus, GitReadError, HeadInfo, LogPage, ReaderHandle,
+};
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
 /// テストリポジトリに対してリーダースレッドを起こす。
@@ -90,7 +92,7 @@ async fn head_message_is_read_on_the_reader_thread() {
 }
 
 /// ページの summary。
-fn summaries(page: &mewgit_core::git_read::LogPage) -> Vec<&str> {
+fn summaries(page: &LogPage) -> Vec<&str> {
     page.commits.iter().map(|c| c.summary.as_str()).collect()
 }
 
@@ -107,15 +109,11 @@ async fn log_page_continues_where_the_previous_page_ended() {
     let third = reader.log_page(2, false).await.unwrap();
 
     // セッションはスレッド側が持ち回る。呼ぶたびに先頭から読み直さない。
-    let summaries: Vec<&str> = first
-        .commits
-        .iter()
-        .chain(&second.commits)
-        .chain(&third.commits)
-        .map(|c| c.summary.as_str())
-        .collect();
+    let mut all = summaries(&first);
+    all.extend(summaries(&second));
+    all.extend(summaries(&third));
     assert_eq!(
-        summaries,
+        all,
         ["commit 4", "commit 3", "commit 2", "commit 1", "commit 0"]
     );
     assert!(!first.done);

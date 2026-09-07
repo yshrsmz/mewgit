@@ -415,15 +415,12 @@ fn load_more(state: &AppState) -> Cmd {
     }
 }
 
-/// 先頭からの読み直しが要るなら頼む。
+/// 先頭から読み直す。
 ///
-/// `issue` に落とされたら `reload_pending` が立ったままになり、走っていたページが
-/// 届いた時点で `log_loaded` がここをもう一度通る（01 の「ログの読み直し」）。
+/// 出すかどうかはここでは決めない。呼び出し元は 2 つあり、どちらも出すと決めた
+/// あとで呼ぶ（`exec_finished` と、落とされたぶんを頼み直す `log_loaded`）。
+/// 判断を置くと、テストで踏めない偽の腕が残る。
 fn reload_log(state: &AppState) -> Cmd {
-    if !state.graph.reload_pending {
-        return Cmd::None;
-    }
-
     Cmd::LoadLog {
         count: state.config.graph.page_size,
         restart: true,
@@ -464,23 +461,21 @@ fn log_loaded(state: &mut AppState, restart: bool, result: Result<LogPage, GitRe
             // 積んだ行を残すと同じコミットが二重に並ぶ。
             state.graph.restart();
             state.graph.load_failed = true;
-            // 次の読み込みはユーザーの操作から始めるので、頼んでいない読み直しの
-            // 印も落とす。残すと、この失敗のあと `load_more` が永久に黙る。
-            state.graph.reload_pending = false;
             return Cmd::None;
         }
     };
 
     // **読み直しを待っているあいだに届いた「続き」は捨てる。** 積んでも直後の
     // 読み直しで捨てるだけで、そのあいだ古い行に新しい行が継ぎ足された状態が
-    // 画面に出る（01 の「ログの読み直し」）。
+    // 画面に出る（01 の「ログの読み直し」）。ここまで来ていれば `jobs.finish` の
+    // あとなので、頼み直しは必ず出せる。
     if state.graph.reload_pending && !restart {
+        state.graph.reload_pending = false;
         return reload_log(state);
     }
 
     if restart {
         state.graph.restart();
-        state.graph.reload_pending = false;
     }
 
     // レーンの割り当ては `graph` の担当。`app` は返ってきた行を並べるだけ。
@@ -969,20 +964,97 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     // がまだで、いま選ばれているファイルが読み直しの対象になるとは限らない。01）。
     state.diff.freshness = Freshness::Stale;
 
-    // **ref が動く操作なら、積んだログとラベルも古い。** 続きを読む経路では直せない
-    // （新しいコミットは末尾ではなく先頭に付く）ので、先頭から読み直す。
-    // index やワークツリーしか触らない操作では出さない。読み直しは `LogSession` の
-    // 作り直しで履歴全体のコストが掛かるので、stage のたびには払えない
-    // （01 の「ログの読み直し」）。
-    //
-    // 成否は問わない。失敗しても index が途中まで動いていることがあり、rebase の
-    // ように途中まで ref を動かして落ちるものもある。
-    if done.op.moves_refs() {
-        state.graph.reload_pending = true;
-        return Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, reload_log(state)]);
+    // **成否は問わない。** 失敗しても index が途中まで動いていることがあり、rebase の
+    // ように途中まで ref を動かして落ちるものもある。「失敗したなら ref は元のまま」と
+    // 言える操作の表をもう 1 本持つこともできるが、余分に読むのは無駄なだけなのに対し、
+    // 読み落とすとグラフが黙って古くなる。
+    match Reload::after(&done.op) {
+        Reload::Nothing => Cmd::LoadStatus,
+        Reload::Refs => Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo]),
+        Reload::RefsAndLog => {
+            // 落とされたぶんは印を付け、走っていたページが届いた時点で頼み直す
+            // （`WorktreeState.stale` と同じ形。01 の「ログの読み直し」）。
+            state.graph.reload_pending = state.jobs.is_running(JobKind::LoadLog);
+            Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, reload_log(state)])
+        }
     }
+}
 
-    Cmd::LoadStatus
+/// 書き込みのあとに読み直すもの。
+///
+/// **`git_exec` ではなく `app` に置く。** 「どの ref をグラフが辿るか」を知っているのは
+/// こちらで、`GitOp` の隣に `moves_refs` のような名前で置くと、git の事実を約束しながら
+/// 中身は UI の方針という形になる（stash が偽なのは「`refs/stash` を walk に押して
+/// いない」からで、git は ref を動かしている）。Stash ペインが入ったときに黙って
+/// 嘘になる。
+///
+/// 網羅 `match` にしているのは、`GitOp` に変種を足したときにどれなのかを選ばせるため
+/// （`to_command` と同じ）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reload {
+    /// index / ワークツリーだけ。`Cmd::LoadStatus` は常に出すので、ここでは何も足さない。
+    Nothing,
+    /// ref の索引（ラベルと HEAD）。**walk に入るコミットの集合は変わらない**ので、
+    /// 積んだログはそのままでよい。
+    Refs,
+    /// 索引と、積んだログの両方。
+    RefsAndLog,
+}
+
+impl Reload {
+    fn after(op: &GitOp) -> Self {
+        match op {
+            // index / ワークツリーだけ。ref も HEAD も動かない。
+            GitOp::Stage(_)
+            | GitOp::Unstage(_)
+            | GitOp::StageHunk { .. }
+            | GitOp::UnstageHunk { .. }
+            | GitOp::DiscardHunk { .. }
+            | GitOp::Discard(_)
+            | GitOp::DiscardUntracked(_)
+            | GitOp::DiscardAdded(_) => Reload::Nothing,
+
+            // **ラベルと HEAD は動くが、行は動かない。** グラフのラベルは行に焼き込まず
+            // `GraphState.refs` から引く（07）ので、`Cmd::LoadRepoInfo` だけで足りる。
+            // ログの読み直しは `LogSession` の作り直しで履歴全体のコストが掛かる（02 の
+            // 「セッションは作り直さず使い回す」）ので、要らないところでは払わない。
+            //
+            // どれも「既にある、どこかの ref から辿れるコミット」を指すだけ。
+            // `Push` が非 force なら `origin/x` はローカルの先端へ早送りされるので、
+            // 行はもう並んでいる。
+            GitOp::Checkout(_)
+            | GitOp::BranchCreate { .. }
+            | GitOp::BranchRename { .. }
+            | GitOp::Push { force: false, .. } => Reload::Refs,
+
+            // stash は `refs/stash` しか動かさず、グラフはそれを walk に押していない
+            // （02 の「ログ列挙」）。ワークツリーの変化は `Cmd::LoadStatus` が拾う。
+            // **ここが `app` に置く理由。** グラフが `refs/stash` を押すようになったら
+            // この腕が動く。
+            GitOp::StashPush { .. }
+            | GitOp::StashApply(_)
+            | GitOp::StashPop(_)
+            | GitOp::StashDrop(_) => Reload::Nothing,
+
+            // walk に入るコミットの集合が変わる。新しいコミットが増えるか、
+            // ref が消える / 巻き戻ってコミットが辿れなくなる。
+            GitOp::Commit { .. }
+            | GitOp::BranchDelete { .. }
+            | GitOp::Push { force: true, .. }
+            | GitOp::Fetch { .. }
+            | GitOp::Pull { .. }
+            | GitOp::RebaseInteractive { .. }
+            | GitOp::RebaseContinue
+            | GitOp::RebaseSkip
+            | GitOp::RebaseAbort
+            | GitOp::CherryPick(_)
+            | GitOp::CherryPickContinue
+            | GitOp::CherryPickAbort
+            | GitOp::Revert { .. }
+            | GitOp::RevertContinue
+            | GitOp::RevertAbort => Reload::RefsAndLog,
+        }
+    }
 }
 
 /// 通知に添える詳細。実行した argv と stderr を握りつぶさない（不変ルール 4）。
@@ -1037,14 +1109,13 @@ mod tests {
             commits: (0..n).map(commit).collect(),
             done,
         };
-        let _ = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Ok(page),
-            },
-        );
+        let _ = update(&mut state, page_loaded(Ok(page)));
         state
+    }
+
+    /// staged に 1 ファイルだけある状態。worktree ペインの Staged を選んでいる。
+    fn only_staged() -> AppState {
+        worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged)
     }
 
     /// worktree ペインにフォーカスし、その区画の先頭を選んだ状態。
@@ -1055,6 +1126,30 @@ mod tests {
         state.worktree.section = section;
         state.worktree.cursor = 0;
         state
+    }
+
+    /// 続きのページが届いた。
+    fn page_loaded(result: Result<LogPage, GitReadError>) -> Msg {
+        Msg::LogLoaded {
+            restart: false,
+            result,
+        }
+    }
+
+    /// 続きを頼む `Cmd`。
+    fn more(state: &AppState) -> Cmd {
+        Cmd::LoadLog {
+            count: state.config.graph.page_size,
+            restart: false,
+        }
+    }
+
+    /// 先頭から読み直す `Cmd`。
+    fn reload(state: &AppState) -> Cmd {
+        Cmd::LoadLog {
+            count: state.config.graph.page_size,
+            restart: true,
+        }
     }
 
     fn press(state: &mut AppState, c: char) -> Cmd {
@@ -1131,8 +1226,7 @@ mod tests {
     #[test]
     fn a_staged_row_is_diffed_against_head() {
         // 同じファイルでも区画で対象が変わる。パスだけでは決まらない。
-        let mut state =
-            worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
+        let mut state = only_staged();
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
@@ -1729,8 +1823,7 @@ mod tests {
 
     #[test]
     fn status_loaded_keeps_the_previous_list_when_it_fails() {
-        let mut state =
-            worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
+        let mut state = only_staged();
         let _ = state.issue(Cmd::LoadStatus);
 
         let cmd = update(
@@ -1848,8 +1941,7 @@ mod tests {
     fn x_on_a_file_that_is_not_in_head_uses_rm_instead_of_restore() {
         // `restore --source=HEAD` はコミットが 1 つも無いと解決できずに落ちる。
         // `Added` なら HEAD の有無に依らず `rm --force` が同じ結果になる（03）。
-        let mut state =
-            worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged);
+        let mut state = only_staged();
         state.worktree.snapshot.staged[0].status = FileStatus::Added;
 
         let _ = press(&mut state, 'x');
@@ -2077,14 +2169,7 @@ mod tests {
 
         assert_eq!(
             cmd,
-            Cmd::Batch(vec![
-                Cmd::LoadRepoInfo,
-                Cmd::LoadLog {
-                    count: state.config.graph.page_size,
-                    restart: false
-                },
-                Cmd::LoadStatus,
-            ])
+            Cmd::Batch(vec![Cmd::LoadRepoInfo, more(&state), Cmd::LoadStatus,])
         );
         assert!(state.jobs.is_running(JobKind::LoadLog));
         assert!(state.jobs.is_running(JobKind::LoadRepoInfo));
@@ -2177,16 +2262,7 @@ mod tests {
             commits: vec![commit(1), commit(2)],
             done: true,
         };
-        assert_eq!(
-            update(
-                &mut state,
-                Msg::LogLoaded {
-                    restart: false,
-                    result: Ok(page)
-                }
-            ),
-            Cmd::None
-        );
+        assert_eq!(update(&mut state, page_loaded(Ok(page))), Cmd::None);
 
         let summaries: Vec<&str> = state
             .graph
@@ -2210,19 +2286,7 @@ mod tests {
             done: false,
         };
 
-        assert_eq!(
-            update(
-                &mut state,
-                Msg::LogLoaded {
-                    restart: false,
-                    result: Ok(page)
-                }
-            ),
-            Cmd::LoadLog {
-                count: state.config.graph.page_size,
-                restart: false
-            }
-        );
+        assert_eq!(update(&mut state, page_loaded(Ok(page))), more(&state));
     }
 
     #[test]
@@ -2242,25 +2306,13 @@ mod tests {
             commits: vec![fake_commit_with_parents(1, &[2], "commit 1")],
             done: false,
         };
-        let _ = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Ok(first),
-            },
-        );
+        let _ = update(&mut state, page_loaded(Ok(first)));
 
         let second = LogPage {
             commits: vec![fake_commit_with_parents(2, &[], "commit 2")],
             done: true,
         };
-        let _ = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Ok(second),
-            },
-        );
+        let _ = update(&mut state, page_loaded(Ok(second)));
 
         assert_eq!(state.graph.lines[1].row.lane, state.graph.lines[0].row.lane);
         assert_eq!(
@@ -2279,13 +2331,7 @@ mod tests {
         let mut state = state_with_commits(3);
         let _ = init(&mut state);
 
-        let cmd = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Err(GitReadError::NonUtf8Head),
-            },
-        );
+        let cmd = update(&mut state, page_loaded(Err(GitReadError::NonUtf8Head)));
 
         // ここから読み直しを頼まない。行を捨てて `cursor` を 0 に戻した直後なので、
         // 出すとリーダーが壊れているあいだ「失敗 → 再読込 → 失敗」を回し続ける。
@@ -2479,10 +2525,7 @@ mod tests {
         // 1 行も積んでいないので、窓を知った時点で次のページを頼む。
         assert_eq!(
             update(&mut state, Msg::Layout { graph_rows: 36 }),
-            Cmd::LoadLog {
-                count: state.config.graph.page_size,
-                restart: false
-            }
+            more(&state)
         );
         assert_eq!(state.graph.viewport, 36);
     }
@@ -2499,10 +2542,7 @@ mod tests {
 
         assert_eq!(
             update(&mut state, Msg::Layout { graph_rows: 35 }),
-            Cmd::LoadLog {
-                count: state.config.graph.page_size,
-                restart: false
-            }
+            more(&state)
         );
     }
 
@@ -2514,13 +2554,7 @@ mod tests {
         let mut state = state_with_page(ROWS + 2, false);
 
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
-        assert_eq!(
-            update(&mut state, Msg::Key(Key::char('j'))),
-            Cmd::LoadLog {
-                count: state.config.graph.page_size,
-                restart: false
-            }
-        );
+        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), more(&state));
     }
 
     #[test]
@@ -2718,13 +2752,7 @@ mod tests {
             commits: vec![commit(1)],
             done: true,
         };
-        let cmd = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Ok(page),
-            },
-        );
+        let cmd = update(&mut state, page_loaded(Ok(page)));
 
         assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
     }
@@ -2735,13 +2763,7 @@ mod tests {
         let mut state = expanded_with_detail(3);
         let _ = init(&mut state);
 
-        let _ = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Err(GitReadError::NonUtf8Head),
-            },
-        );
+        let _ = update(&mut state, page_loaded(Err(GitReadError::NonUtf8Head)));
 
         assert!(state.graph.detail.is_none());
     }
@@ -2787,13 +2809,7 @@ mod tests {
         // 以後のレイアウト変化のたびに読み直しを出す。
         let mut state = state_with_page(3, false);
         let _ = init(&mut state);
-        let _ = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Err(GitReadError::NonUtf8Head),
-            },
-        );
+        let _ = update(&mut state, page_loaded(Err(GitReadError::NonUtf8Head)));
 
         assert_eq!(
             update(&mut state, Msg::Layout { graph_rows: 10 }),
@@ -2807,57 +2823,28 @@ mod tests {
         // 自動では出さないが、ユーザーの操作からは始める。
         let mut state = state_with_page(3, false);
         let _ = init(&mut state);
-        let _ = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Err(GitReadError::NonUtf8Head),
-            },
-        );
+        let _ = update(&mut state, page_loaded(Err(GitReadError::NonUtf8Head)));
 
-        assert_eq!(
-            update(&mut state, Msg::Key(Key::char('j'))),
-            Cmd::LoadLog {
-                count: state.config.graph.page_size,
-                restart: false
-            }
-        );
+        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), more(&state));
     }
 
     #[test]
     fn a_successful_page_clears_the_failure() {
         let mut state = state_with_page(3, false);
         let _ = init(&mut state);
-        let _ = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Err(GitReadError::NonUtf8Head),
-            },
-        );
+        let _ = update(&mut state, page_loaded(Err(GitReadError::NonUtf8Head)));
         assert!(state.graph.load_failed);
 
         let page = LogPage {
             commits: vec![commit(1)],
             done: false,
         };
-        let _ = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Ok(page),
-            },
-        );
+        let _ = update(&mut state, page_loaded(Ok(page)));
 
         assert!(!state.graph.load_failed);
     }
 
     // ---- commit / amend ----
-
-    /// staged にファイルがあり、worktree にフォーカスした状態。
-    fn ready_to_commit() -> AppState {
-        worktree_state(fake_snapshot(&["a.txt"], &[], &[]), WorktreeSection::Staged)
-    }
 
     /// `Enter` に修飾を付けた打鍵。`Alt+Enter` は `ESC CR` として届く。
     fn enter_with(mods: Modifiers) -> Msg {
@@ -2874,7 +2861,7 @@ mod tests {
 
     #[test]
     fn c_opens_the_commit_message_modal() {
-        let mut state = ready_to_commit();
+        let mut state = only_staged();
 
         assert_eq!(press(&mut state, 'c'), Cmd::None);
 
@@ -2918,7 +2905,7 @@ mod tests {
 
     #[test]
     fn typing_goes_into_the_buffer_and_q_does_not_quit() {
-        let mut state = ready_to_commit();
+        let mut state = only_staged();
         let _ = press(&mut state, 'c');
 
         for c in "fix: q".chars() {
@@ -2931,7 +2918,7 @@ mod tests {
 
     #[test]
     fn enter_commits_what_was_typed() {
-        let mut state = ready_to_commit();
+        let mut state = only_staged();
         let _ = press(&mut state, 'c');
         for c in "fix".chars() {
             let _ = press(&mut state, c);
@@ -2966,7 +2953,7 @@ mod tests {
         };
 
         for newline in [enter_with(alt), enter_with(shift), Msg::Key(Key::ctrl('j'))] {
-            let mut state = ready_to_commit();
+            let mut state = only_staged();
             let _ = press(&mut state, 'c');
             let _ = press(&mut state, 'a');
 
@@ -2981,7 +2968,7 @@ mod tests {
     fn an_empty_message_is_refused_instead_of_being_handed_to_git() {
         // `git commit --message ""` に任せると、落ちる時点でモーダルは閉じていて
         // 書いた本文が戻らない（01）。空白だけの本文も同じ。
-        let mut state = ready_to_commit();
+        let mut state = only_staged();
         let _ = press(&mut state, 'c');
         let _ = press(&mut state, ' ');
 
@@ -2997,7 +2984,7 @@ mod tests {
 
     #[test]
     fn esc_throws_the_message_away_without_running_git() {
-        let mut state = ready_to_commit();
+        let mut state = only_staged();
         let _ = press(&mut state, 'c');
         let _ = press(&mut state, 'x');
 
@@ -3010,7 +2997,7 @@ mod tests {
     fn amend_reads_the_head_message_before_opening() {
         // **`RepoInfo.head` からは取らない。** 起動時に 1 回読んだきりで、1 回
         // コミットした時点で古い（01 の「commit」）。
-        let mut state = ready_to_commit();
+        let mut state = only_staged();
 
         assert_eq!(press(&mut state, 'C'), Cmd::LoadHeadMessage);
         assert!(state.modal.is_none());
@@ -3032,7 +3019,7 @@ mod tests {
 
     #[test]
     fn amend_commits_with_the_amend_flag() {
-        let mut state = ready_to_commit();
+        let mut state = only_staged();
         let _ = press(&mut state, 'C');
         let _ = update(
             &mut state,
@@ -3052,7 +3039,7 @@ mod tests {
     fn amend_on_a_repository_without_commits_says_so() {
         // `Ok(None)` は unborn HEAD。「読めなかった」とは案内が違うので `Err` に
         // 畳まない（02 の `head_message`）。
-        let mut state = ready_to_commit();
+        let mut state = only_staged();
         let _ = press(&mut state, 'C');
 
         let _ = update(&mut state, Msg::HeadMessageLoaded(Ok(None)));
@@ -3069,7 +3056,7 @@ mod tests {
     fn a_head_message_that_arrives_after_another_modal_opened_is_dropped() {
         // 頼んでから届くまでのあいだに `x` の確認が開いていることがある。無条件に
         // 上書きすると、確認モーダルが編集画面に化ける（01 の「commit」）。
-        let mut state = ready_to_commit();
+        let mut state = only_staged();
         let _ = press(&mut state, 'C');
         let confirm = Modal::Confirm {
             title: "変更を破棄".to_string(),
@@ -3087,14 +3074,6 @@ mod tests {
     }
 
     // ---- ログの読み直し ----
-
-    /// 読み直しの `Cmd`。既定の 1 ページを先頭から。
-    fn reload(state: &AppState) -> Cmd {
-        Cmd::LoadLog {
-            count: state.config.graph.page_size,
-            restart: true,
-        }
-    }
 
     fn commit_op() -> GitOp {
         GitOp::Commit {
@@ -3152,17 +3131,69 @@ mod tests {
             commits: vec![commit(9)],
             done: false,
         };
-        let cmd = update(
-            &mut state,
-            Msg::LogLoaded {
-                restart: false,
-                result: Ok(page),
-            },
-        );
+        let cmd = update(&mut state, page_loaded(Ok(page)));
 
         assert_eq!(state.graph.lines.len(), 3);
         assert_eq!(cmd, reload(&state));
-        assert!(state.graph.reload_pending);
+        // 頼み直せたので借りは消える。`jobs.finish` のあとなので必ず出せる。
+        assert!(!state.graph.reload_pending);
+    }
+
+    #[test]
+    fn only_the_operations_that_change_the_walk_reload_the_log() {
+        // ラベルと HEAD はグラフの行に焼き込まず `GraphState.refs` から引く（07）ので、
+        // 既にあるコミットを指すだけの操作は `LoadRepoInfo` で足りる。読み直しは
+        // `LogSession` の作り直しで履歴全体のコストが掛かる（02）。
+        assert_eq!(Reload::after(&commit_op()), Reload::RefsAndLog);
+        assert_eq!(Reload::after(&GitOp::RebaseAbort), Reload::RefsAndLog);
+        assert_eq!(
+            Reload::after(&GitOp::BranchDelete {
+                name: "x".into(),
+                force: true,
+            }),
+            Reload::RefsAndLog
+        );
+
+        assert_eq!(Reload::after(&GitOp::Checkout("main".into())), Reload::Refs);
+        assert_eq!(Reload::after(&push(false)), Reload::Refs);
+        // force push は `origin/x` が巻き戻り、そこからしか辿れないコミットが落ちる。
+        assert_eq!(Reload::after(&push(true)), Reload::RefsAndLog);
+
+        assert_eq!(
+            Reload::after(&GitOp::Stage(vec!["a.txt".into()])),
+            Reload::Nothing
+        );
+        assert_eq!(
+            Reload::after(&GitOp::StageHunk {
+                path: "a.txt".into(),
+                patch: Vec::new(),
+            }),
+            Reload::Nothing
+        );
+        // stash は `refs/stash` しか動かさず、グラフはそれを walk に押していない。
+        assert_eq!(Reload::after(&GitOp::StashPop(0)), Reload::Nothing);
+    }
+
+    fn push(force: bool) -> GitOp {
+        GitOp::Push {
+            remote: "origin".into(),
+            branch: "main".into(),
+            set_upstream: false,
+            force,
+            expected: None,
+        }
+    }
+
+    #[test]
+    fn an_operation_that_only_moves_labels_does_not_reload_the_log() {
+        let mut state = state_with_commits(3);
+        let op = GitOp::Checkout("main".into());
+        let _ = state.issue(Cmd::Exec(op.clone()));
+
+        let cmd = update(&mut state, exec_done_of(op, Ok(fake_output())));
+
+        assert_eq!(cmd, Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo]));
+        assert!(!state.graph.reload_pending);
     }
 
     #[test]

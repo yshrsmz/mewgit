@@ -132,57 +132,6 @@ pub enum GitOp {
     StashDrop(usize),
 }
 
-impl GitOp {
-    /// この操作で ref が動きうるか。
-    ///
-    /// 真なら、上位は積んだログと ref のラベルを読み直す（01 の「ログの読み直し」）。
-    /// **index やワークツリーしか触らない操作まで真にしない。** ログの読み直しは
-    /// `LogSession` を作り直すので履歴全体のコストが掛かる（02 の「セッションは
-    /// 作り直さず使い回す」）。stage のたびにそれを払うことになる。
-    ///
-    /// 網羅 `match` にしているのは、`GitOp` に変種を足したときにどちらなのかを
-    /// 選ばせるため（[`to_command`] と同じ）。
-    pub fn moves_refs(&self) -> bool {
-        match self {
-            // index / ワークツリーだけ。HEAD もブランチも動かない。
-            GitOp::Stage(_)
-            | GitOp::Unstage(_)
-            | GitOp::StageHunk { .. }
-            | GitOp::UnstageHunk { .. }
-            | GitOp::DiscardHunk { .. }
-            | GitOp::Discard(_)
-            | GitOp::DiscardUntracked(_)
-            | GitOp::DiscardAdded(_) => false,
-            // stash は `refs/stash` しか動かさず、グラフはそれを walk に押していない
-            // （02 の「ログ列挙」）。ワークツリーの変化は `LoadStatus` が拾う。
-            GitOp::StashPush { .. }
-            | GitOp::StashApply(_)
-            | GitOp::StashPop(_)
-            | GitOp::StashDrop(_) => false,
-            // HEAD かブランチか remote-tracking ref が動く。`Push` は `origin/main` の
-            // ラベルが動くので、ローカルが変わらなくても読み直しが要る。
-            GitOp::Commit { .. }
-            | GitOp::BranchCreate { .. }
-            | GitOp::Checkout(_)
-            | GitOp::BranchDelete { .. }
-            | GitOp::BranchRename { .. }
-            | GitOp::Fetch { .. }
-            | GitOp::Pull { .. }
-            | GitOp::Push { .. }
-            | GitOp::RebaseInteractive { .. }
-            | GitOp::RebaseContinue
-            | GitOp::RebaseSkip
-            | GitOp::RebaseAbort
-            | GitOp::CherryPick(_)
-            | GitOp::CherryPickContinue
-            | GitOp::CherryPickAbort
-            | GitOp::Revert { .. }
-            | GitOp::RevertContinue
-            | GitOp::RevertAbort => true,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PullMode {
     Merge,
@@ -284,40 +233,6 @@ pub enum ExecErrorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_the_operations_that_touch_refs_ask_for_a_log_reload() {
-        // 真だと上位が積んだログを捨てて先頭から読み直す。読み直しは `LogSession` の
-        // 作り直しで履歴全体のコストが掛かる（02）ので、index やワークツリーしか
-        // 触らない操作で真にすると、stage のたびにそれを払う。
-        assert!(GitOp::Commit {
-            message: "fix".into(),
-            amend: false,
-        }
-        .moves_refs());
-        assert!(GitOp::Checkout("main".into()).moves_refs());
-        assert!(GitOp::RebaseAbort.moves_refs());
-        // `Push` はローカルが動かなくても `origin/main` のラベルが動く。
-        assert!(GitOp::Push {
-            remote: "origin".into(),
-            branch: "main".into(),
-            set_upstream: false,
-            force: false,
-            expected: None,
-        }
-        .moves_refs());
-
-        assert!(!GitOp::Stage(vec!["a.txt".into()]).moves_refs());
-        assert!(!GitOp::Unstage(vec!["a.txt".into()]).moves_refs());
-        assert!(!GitOp::Discard(vec!["a.txt".into()]).moves_refs());
-        assert!(!GitOp::StageHunk {
-            path: "a.txt".into(),
-            patch: Vec::new(),
-        }
-        .moves_refs());
-        // stash は `refs/stash` しか動かさず、グラフはそれを walk に押していない。
-        assert!(!GitOp::StashPop(0).moves_refs());
-    }
 
     #[test]
     fn display_of_a_failed_run_shows_the_argv() {

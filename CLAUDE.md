@@ -62,7 +62,10 @@ python3 scripts/screen.py out.txt 80 24
 解釈して仮想画面に描き直し、終了直前の 1 枚を出す。幅・高さは `stty` に与えた値と
 同じにする。
 
-キーは `printf` で送る。raw mode では Enter は `\r`（`\n` ではない）。
+キーは `printf` で送る。raw mode では Enter は `\r`（`\n` ではない）。**修飾付きも
+同じように送れる** — `Alt+Enter` は `\033\r`（ESC CR）、`Ctrl-J` は `\012`。貼り付け
+（bracketed paste）は本文を `printf '\033[200~<本文>\033[201~'` で囲む。実端末を
+使わずに、モーダルの入力経路をひととおり踏める。
 
 **確認用の一時リポジトリは `env -i` で環境を切って作る。** `GIT_CONFIG_NOSYSTEM` などの
 ために `HOME` をそのリポジトリに向けたまま python などを走らせると、macOS が
@@ -154,6 +157,10 @@ env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/d
 - ブランチ: `feat/<topic>`、`fix/<topic>`。`github:git-workflow` スキルは `<type>-<subject>` を指示するが、こちらを優先する。main へは PR 経由
 - コミットメッセージ: Conventional Commits（`feat(graph): ...`、`fix(git_exec): ...`）。scope はモジュール名
 - `docs/plan.md` のタスクを完了したらチェックを付けて同じコミットに含める
+- **1 つのタスクを複数の PR に割ると決めたら、その割り方を `docs/plan.md` に反映し、
+  なぜそう割るかを設計書に書く。** 会話の中だけで決めると、次のセッションは plan.md の
+  元の粒度を読んで再び 1 本にまとめる。割った理由が設計書にある制約から来ているなら
+  （「この 2 つは同じタスクでないと片方が宙に浮く」など）、そこにも書いて突き合わせる
 
 ### PR を作る前に
 

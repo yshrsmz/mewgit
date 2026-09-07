@@ -6,7 +6,7 @@ pub mod commit_message;
 pub mod confirm;
 
 use mewgit_core::app::Modal;
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -96,14 +96,15 @@ fn probe(area: Rect, want: u16) -> Rect {
 
 /// 画面の中央に `width` x `height` を取る。画面が小さければそのぶん縮める。
 ///
-/// 中央寄せの算術は書かず ratatui の [`Flex::Center`] に任せる。`Max` にしているのは、
-/// 端末が小さいときに縮めるため（`Length` だとはみ出す）。
+/// 中央寄せの算術は書かず ratatui の [`Rect::centered`] に任せる。ratatui 0.30 で
+/// 入った API で、中身は `Layout::…flex(Flex::Center)` を横と縦に掛ける、ここに
+/// 書いてあったのと同じ合成。
+///
+/// **`Max` と `Length` で結果は変わらない。** ここには「`Length` だとはみ出す」と
+/// 書いてあったが、実際に両方を通すとどちらも領域に丸められた（10x5 の領域に
+/// 60x12 を頼むと両方とも 10x5）。ソルバが領域を超える解を出さないため。`Max` を
+/// 残すのは「これ以下」という意図がそのまま読めるからで、はみ出しを防ぐためでは
+/// ない。差が無いので、この 2 つを見分けるテストは書けない。
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let [area] = Layout::horizontal([Constraint::Max(width)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([Constraint::Max(height)])
-        .flex(Flex::Center)
-        .areas(area);
-    area
+    area.centered(Constraint::Max(width), Constraint::Max(height))
 }

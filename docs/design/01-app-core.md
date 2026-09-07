@@ -61,7 +61,9 @@ pub struct DiffView {
 
 `Vec<Hunk>` に平坦化しない。`GitOp::StageHunk { path, patch }` に渡す `path` を
 復元できなくなるうえ、`DiffTarget` の `path` は全変種で `Option` なので複数ファイルに
-またがる diff（コミット詳細）が普通に起きる。
+またがる diff を表せる形になっている。**いま `app` が出す対象はすべて `path` で 1 ファイルに
+絞ってある**（コミットの diff も一覧で選んだ 1 件。下の「diff の遅延取得」）ので、複数
+ファイルが届く経路は無い。`Range` や stash を出すときに戻ってくる。
 
 ## 通知
 
@@ -99,8 +101,10 @@ pub enum Modal {
 
 巡回に入れるのは実装済みで、**かついま画面に出ているペインだけ**（07）。一覧は定数では
 なく `AppState::focus_candidates()` が状態から返す。グラフが WIP 行を選んでいれば
-`[Graph, Worktree, Diff]`、コミットを選んでいれば `[Graph, CommitDetail]`。並びは
-`Pane` の宣言順。
+`[Graph, Worktree, Diff]`、コミットを選んでいれば `[Graph, CommitDetail, Diff]`。並びは
+`Pane` の宣言順。**どちらの選択でも `Diff` が入るが、出る diff は違う**（ワーキング
+ツリーのファイルか、コミットのファイルか）。決めるのは `AppState::wanted_diff()` の
+1 つで、`focus` と選択の両方を見る（下の「diff の遅延取得」）。
 
 **選択と右ペインの対応は `GraphSelection::right_pane()` の 1 つ。** `Enter` の行き先
 （グラフの `Enter` は右ペインへ移る）と巡回の候補が別々に決めると、画面はコミット詳細
@@ -270,7 +274,16 @@ pub struct GraphState {
     pub cursor: usize,          // 表示行の添字。0 は WIP 行、1.. が `lines`
     pub scroll: usize,          // 画面最上部に出す行
     pub detail: Option<CommitDetail>,  // 遅延取得した選択コミットの詳細（02）
+    pub files: Option<CommitFiles>,    // 同じく遅延取得したファイル一覧（下）
+    pub detail_failed: Option<Oid>,    // 直前に詳細の読み込みが失敗したコミット
+    pub files_failed: Option<Oid>,     // 同じくファイル一覧（下の「失敗の記憶」）
     pub loaded_all: bool,
+}
+
+pub struct CommitFiles {
+    pub oid: Oid,                 // どのコミットのものか。`detail.oid` と同じ役目
+    pub entries: Vec<FileEntry>,  // 02 の commit_files() の戻り値そのまま
+    pub cursor: usize,            // 一覧の選択位置。左の Diff の対象を決める
 }
 
 pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
@@ -456,14 +469,51 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   戻ってきたときにカーソルが別のところにいることはある（動いて戻ってきたときなど）。
   無条件に上書きすると、正しいものが出ている画面が「読み込み中」に戻り、同じものを
   もう 1 回読みに行く
-- **`Err` からは、失敗したのがいま見ているコミットなら再発行しない。** 通知を出して
-  ジョブを畳むだけにする。出すと、リポジトリが壊れているあいだ「失敗 → 再読込 → 失敗」を
-  回し続ける（`LoadLog` と同じ）。次の読み込みはユーザーの操作から始める。逆に、
-  失敗したのが別のコミットなら、いま見ているものはまだ一度も試していないので頼む。
-  ここを一律に止めると「一度も試していないコミット」が
-  「詳細を読み込めませんでした」のまま残る
+- **`Err` は失敗した相手を `GraphState.detail_failed` に覚えて、同じコミットには
+  再発行しない。** 出すと、リポジトリが壊れているあいだ「失敗 → 再読込 → 失敗」を
+  回し続ける（`LoadLog` と同じ）。逆に、失敗したのが別のコミットなら、いま見ている
+  ものはまだ一度も試していないので頼む。一律に止めると「一度も試していないコミット」が
+  「詳細を読み込めませんでした」のまま残る。**印は `Option<Oid>`**（下の
+  「失敗の記憶」）で、`bool` にすると別のコミットの失敗が今のコミットまで塞ぐ
 - ログの読み込みが失敗して積んだ行を捨てるときは `detail` も捨てる。`lines` に無い
   コミットの詳細を残さない
+
+### コミットのファイル一覧
+
+コミット詳細と同じペインに、そのコミットが変更したファイルを並べる（07 の
+「CommitDetail ペイン」）。カーソルがコミットの行に乗るたびに `Cmd::LoadCommitFiles(oid)` を
+出し、取れた値は `GraphState.files` に入れる。**詳細と同じ形**（oid で鮮度を見る・
+届いたものは今見ているコミットのものだけ採る・`Err` は同じコミットなら再発行しない）
+なので、ここには違うところだけを書く。
+
+- **`Cmd` を詳細と分ける。** 一覧はツリー同士の比較で、本文の読み出しより重い（02）。
+  1 通にまとめると、行から行へカーソルを送るあいだ、本文しか見えていない時点でも
+  一覧のコストを払う。分けておけば、詳細が先に出て一覧が後から埋まる
+- **読むのは 1 つの関数から。** 詳細と一覧は同じ「カーソルがコミットに乗った」で
+  要るので、`load_detail` / `load_files` を別々に呼び出し側へ配らず、両方を出す
+  1 つの関数を `scrolled` / `log_loaded` / `commit_detail_loaded` /
+  `commit_files_loaded` / `Msg::Layout` が呼ぶ。片方だけ書き足す事故を無くすため
+- **一覧が届いたら `load_diff` も通す。** 左が Diff に差し替わっていても、一覧が
+  届くまでは選んでいるファイルが決まらない（`wanted_diff()` が `None`）。`Enter` や
+  `Tab` で先に `Pane::Diff` へ移れるので、届いた時点で頼み直す経路が無いと
+  **Diff ペインが「読み込めませんでした」のまま残る**。ワーキングツリー側で
+  `status_loaded` が `clamp` のあとに `load_diff` を呼ぶのと同じ形
+- **一覧のカーソルを動かしたら `DiffState.failed` を落とす。** 対象が変わるので、
+  一度失敗したファイルにも戻ってくれば 1 回だけ試し直せる（ワーキングツリーの
+  `moved` と同じ形。下の「diff の遅延取得」）
+- **空の `entries` と「まだ読めていない」を区別する。** `--allow-empty` のコミットは
+  変更を 1 つも持たない。`Option<CommitFiles>` の `None` が「届いていない」、
+  `Some` で `entries` が空が「変更なし」。`Vec` 1 本にすると、読み込み中と空の
+  コミットが同じ見た目になる（`WorktreeState.loaded` と同じ理由）
+- ログを積み直すとき（`GraphState::restart`）は `detail` と一緒に捨てる。`lines` に
+  無いコミットの一覧を残さない
+- **速くスクロールしているあいだ、一覧は読まれて捨てられる。** カーソル移動が
+  「オブジェクト 1 個の読み出し」から「ツリー比較 + rename 検出」を伴うものになった。
+  `JobTracker` は同時 1 本に絞るだけなので、捨てるぶんの計算自体は走り、その要求は
+  `LoadLog` の次ページと同じ順番待ちに並ぶ。**詳細が届いてから一覧を頼む**形にすれば
+  通り過ぎたコミットの一覧は最初から要求されないが、それは「詳細と一覧は 1 つの関数から
+  頼む」（片方だけ書き足す事故を防ぐ）を崩す。**いまは素直な側を採っている。**
+  実際に待たされるのが見えたら、02 の pathspec による絞り込みと一緒に測り直す
 
 ## ワーキングツリー
 
@@ -539,9 +589,17 @@ pub struct WorktreeState {
 
 | 選んでいる行 | DiffTarget |
 |---|---|
-| Staged | `HeadVsIndex(Some(path))` |
-| Unstaged / Untracked | `IndexVsWorktree(Some(path))` |
-| Conflicted / 選択なし / Diff を見せていない | `None` |
+| WIP 行 › Staged | `HeadVsIndex(Some(path))` |
+| WIP 行 › Unstaged / Untracked | `IndexVsWorktree(Some(path))` |
+| コミット › ファイル一覧の 1 件 | `Commit { oid, path: Some(path) }` |
+| Conflicted / 選択なし / 一覧がまだ届いていない / Diff を見せていない | `None` |
+
+**グラフが WIP 行を選んでいるかコミットを選んでいるかで、見る一覧が変わる**
+（`GraphSelection`）。`focus == Pane::Diff` のゲートは両方に効く。コミット側の `path` は
+右ペインのファイル一覧のカーソルから取る。**`path: None`（コミット全体）は出さない** —
+一覧を出すためだけに全ファイルのハンクを組むことになり、`focus` のゲートも
+「見せているあいだだけ読む」も崩れる（一覧はフォーカスが左にあるあいだも要る）。
+一覧は `Cmd::LoadCommitFiles` の担当（上の「コミットのファイル一覧」）。
 
 core（次に何を読むか）と `ui`（中身を描くか、読み込み中と出すか）が同じものを使う。
 
@@ -561,6 +619,11 @@ core（次に何を読むか）と `ui`（中身を描くか、読み込み中�
 「読み込み中」と「読み込めなかった」の出し分けも `DiffState::has_failed(wanted)` で
 直接見る。`jobs.is_running(LoadDiff)` の否定から消去法で導くと、`Cmd` の発行経路を
 変えたときに片方だけ直してもコンパイルもテストも通る。
+
+**書き込みの鮮度（`Freshness`）はコミットの diff にも同じように効く。** コミットの
+diff は書き込みで変わらないので、書き込み直後に 1 通だけ捨てて読み直すのは無駄では
+あるが、**単位ごとに例外を作らない**（`Freshness` は対象を持たない。持たせる話は
+下の「diff のキャッシュと鮮度」）。捨てるのは 1 通で、読み直しは同じ出口から出る。
 
 **カーソルを動かすのも `fresh_view_mut` を通す。** 濾さずに動かすと、画面に出て
 いない `view`（読み込み中・失敗中に残っているもの）のカーソルが黙って動く。
@@ -651,6 +714,35 @@ fetch で入れる**（下の「実行中ジョブ › 世代」）。`Freshness
 - 文言は「待っています」ではなく「最新の差分をまだ読めていません」。`Asked` の
   読み直しが失敗すると `Stale` に戻り、そこからは何も来ない
 
+### 失敗の記憶
+
+読み取りは失敗しうるので、**「一度試して失敗した」を状態に持つ。** 持たないと、
+失敗のたびに再発行して「失敗 → 再読込 → 失敗」を回す。4 つあり、どれも同じ形
+（何に対して失敗したかを覚え、対象が変わるか成功したら落とす）。
+
+| 印 | 何の失敗か | 落とすところ |
+|---|---|---|
+| `GraphState.load_failed` | ログのページ | カーソル移動（`scrolled`）、読み込みの成功 |
+| `GraphState.detail_failed` | コミット詳細 | 同上 |
+| `GraphState.files_failed` | ファイル一覧 | 同上 |
+| `DiffState.failed` | diff | ワーキングツリーとファイル一覧のカーソル移動、成功 |
+
+- **対象を持つものは `Option<T>` にする**（`detail_failed` / `files_failed` は `Oid`、
+  `DiffState.failed` は `DiffTarget`）。`bool` にすると、別の対象の失敗のあとに来た
+  「一度も試していない対象」まで塞ぐ。`load_failed` だけが `bool` なのは、ログの
+  ページに対象が無いため（位置は `LogSession` が持つ）
+- **落とすのはユーザーの操作から。** 自動で落とすと、失敗が自分で読み直しを引く。
+  移動して戻ってくれば 1 回だけ試し直せる
+- **`ui` は印を直接読む**（`GraphState::has_detail_failed` / `has_files_failed` /
+  `DiffState::has_failed`）。`jobs.is_running` の否定から消去法で導かない。`Cmd` の
+  発行経路を変えたときに、片方だけ直してもコンパイルもテストも通ってしまう
+- **詳細と一覧は別の印。** 片方だけが失敗することがあり（一覧はツリーの比較で、
+  本文の読み出しとは別の失敗をする）、1 本にすると成功したほうまで塞ぐ
+
+**4 つとも冪等になったので、読み込みの発行は `update` の出口で導出できる形になった。**
+いまは呼び出し箇所に散っている（下の `update_inner` の doc）。畳むかどうかは M3 で
+`JobTracker` に世代を入れるときに決める（そこで `Freshness` と `stale` も一緒に見る）。
+
 ## 実行中ジョブ
 
 `JobKind` は `Cmd` の変種と 1 対 1 なので、列挙を二重に持たず `Cmd` を単一の真実にする。
@@ -714,8 +806,8 @@ impl JobTracker {
 `WorktreeState.stale`（`status_loaded` での比較 1 本になる）。`DiffView` は読めた
 世代を持つ。
 
-**畳めないもの**: `DiffState.failed` と `GraphState.load_failed` は「失敗の記憶」で
-鮮度ではない。`Msg::CommitDetailLoaded` が Oid を運ぶ形も残す。**値そのものが鍵を
+**畳めないもの**: 「失敗の記憶」の 4 つ（`load_failed` / `detail_failed` /
+`files_failed` / `DiffState.failed`。上の節）は鮮度ではない。`Msg::CommitDetailLoaded` が Oid を運ぶ形も残す。**値そのものが鍵を
 持っているなら、そちらのほうが強い**（世代は「リポジトリが変わった」しか言えず、
 「選択が動いた」を言えない）。
 
@@ -784,6 +876,7 @@ pub enum Msg {
     Paste(String),                     // bracketed paste。編集中のモーダルだけが受ける
     LogLoaded { restart: bool, result: Result<LogPage, GitReadError> },
     CommitDetailLoaded { oid: Oid, result: Box<Result<CommitDetail, GitReadError>> },
+    CommitFilesLoaded { oid: Oid, result: Box<Result<Vec<FileEntry>, GitReadError>> },
     HeadMessageLoaded(Result<Option<String>, GitReadError>),  // amend の初期値。None は unborn
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
@@ -839,7 +932,12 @@ pub enum Msg {
 「どの対象が失敗したか」を知る手掛かりがこれしかない。加えて `Ok` でも、届いた
 diff がいま選んでいるファイルのものかを判定するのに要る。
 
-`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` と `StatusLoaded` と `DiffLoaded` は payload を `Box` に入れる。入れないと `Msg` が
+`CommitFilesLoaded` は `CommitDetailLoaded` と同じ形（`Result` + 要求した Oid）。
+理由も同じなので繰り返さない。**別の `Msg` にするのは `Cmd` を分けているから**で、
+1 通にまとめると本文だけ見えていれば足りる時点でも一覧を待つことになる
+（上の「コミットのファイル一覧」）。
+
+`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` と `CommitFilesLoaded` と `StatusLoaded` と `DiffLoaded` は payload を `Box` に入れる。入れないと `Msg` が
 数百バイトになり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。
 これらを Box すると 96 バイトに収まる。上限は `msg.rs` のテスト（128 バイト）で見張る。
 
@@ -850,6 +948,7 @@ pub enum Cmd {
     None, Batch(Vec<Cmd>),
     LoadLog { count: usize, restart: bool },  // 位置は LogSession が持つ。restart で捨てる（02）
     LoadCommitDetail(Oid),             // 選択コミットのメッセージ全文など（02）
+    LoadCommitFiles(Oid),              // 同じコミットのファイル一覧（02）。詳細より重いので別
     LoadHeadMessage,                   // amend の初期値。HEAD の解決ごとリーダーで行う
     LoadStatus, LoadDiff(DiffTarget),
     LoadRepoInfo,                      // remotes / head / refs。起動時と ref 変更後（M3）

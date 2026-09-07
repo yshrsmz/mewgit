@@ -91,7 +91,7 @@ struct View<'a> {
 /// ステータスバーに出るが、次の通知で上書きされる。
 fn empty_message(state: &AppState) -> &'static str {
     if state.jobs.is_running(JobKind::LoadLog) {
-        "読み込み中…"
+        ui::LOADING
     } else if state.graph.load_failed {
         "コミットを読み込めませんでした"
     } else {

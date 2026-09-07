@@ -34,6 +34,11 @@ pub enum Cmd {
     },
     /// 選択コミットの詳細（メッセージ全文・committer・日時）を読む（02）。
     LoadCommitDetail(Oid),
+    /// 選択コミットが変更したファイルの一覧を読む（02 の「コミットのファイル一覧」）。
+    ///
+    /// **詳細と別の `Cmd` にする。** 一覧はツリー同士の比較で本文の読み出しより重く、
+    /// 1 通にまとめると本文しか見えていない時点でも一覧のコストを払う（01）。
+    LoadCommitFiles(Oid),
     /// amend の初期値にする HEAD のメッセージ全文（02 の `head_message`）。
     ///
     /// `RepoInfo.head` からは取らない。起動時に 1 回読んだきりなので、1 回コミット
@@ -81,6 +86,7 @@ impl Cmd {
             Cmd::None | Cmd::Batch(_) | Cmd::Quit => None,
             Cmd::LoadLog { .. } => Some(JobKind::LoadLog),
             Cmd::LoadCommitDetail(_) => Some(JobKind::LoadCommitDetail),
+            Cmd::LoadCommitFiles(_) => Some(JobKind::LoadCommitFiles),
             Cmd::LoadHeadMessage => Some(JobKind::LoadHeadMessage),
             Cmd::LoadStatus => Some(JobKind::LoadStatus),
             Cmd::LoadRepoInfo => Some(JobKind::LoadRepoInfo),

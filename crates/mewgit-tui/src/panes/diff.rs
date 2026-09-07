@@ -79,7 +79,7 @@ fn pending_message(diff: &DiffState, wanted: Option<&DiffTarget>) -> &'static st
     } else if diff.has_failed(wanted) {
         "差分を読み込めませんでした"
     } else {
-        "読み込み中…"
+        ui::LOADING
     }
 }
 
@@ -205,11 +205,10 @@ fn marked(mark: char, content: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, row_of, state_at, terminal_with};
+    use crate::test_util::{draw, row_is_reversed, row_of, state_at};
     use mewgit_core::app::{update, Cmd, Key, KeyCode, Msg, TermSize};
     use mewgit_core::git_read::{FileDiff, WorktreeSnapshot};
     use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk};
-    use ratatui::style::Modifier;
 
     /// 既定の 80x24。左は 46 桁になるので、テストはその幅で読める内容にする。
     const SIZE: TermSize = TermSize {
@@ -310,14 +309,8 @@ mod tests {
         // `j` で 2 つ目のハンクへ。
         let _ = update(&mut state, Msg::Key(Key::char('j')));
 
-        let terminal = terminal_with(&state, SIZE);
-        let buffer = terminal.backend().buffer();
-        let lines = draw(&state, SIZE);
-        let reversed =
-            |y: u16| (0..SIZE.width).any(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED));
-
-        assert!(reversed(row_of(&lines, "second")));
-        assert!(!reversed(row_of(&lines, "first")));
+        assert!(row_is_reversed(&state, SIZE, "second"));
+        assert!(!row_is_reversed(&state, SIZE, "first"));
     }
 
     #[test]

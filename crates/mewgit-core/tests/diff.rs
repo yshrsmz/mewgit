@@ -6,7 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use mewgit_core::git_read::{
     DiffTarget, FileDiff, FileEntry, FileStatus, Hunk, LineOrigin, RepoReader,
 };
-use mewgit_core::test_util::TestRepo;
+use mewgit_core::test_util::{fake_oid, TestRepo};
 
 /// ファイルの並びを `(path, old_path, status)` にする。
 fn files(diffs: &[FileDiff]) -> Vec<(&str, Option<&str>, FileStatus)> {
@@ -174,8 +174,11 @@ fn index_vs_worktree_agrees_with_status_on_a_worktree_rename() {
     assert_eq!(files(&diff), rows(&status.unstaged));
 }
 
-#[test]
-fn commit_diffs_against_the_first_parent() {
+/// `main` に `topic` を `--no-ff` でマージしたリポジトリと、そのマージコミット。
+///
+/// **第一親（main）側の変更は `main.txt`、第二親（topic）側は `topic.txt`。**
+/// 第一親と比べていれば `topic.txt` だけが出る。
+fn merged_repo() -> (TestRepo, mewgit_core::git_read::Oid) {
     let repo = TestRepo::init();
     repo.commit_file("base.txt", "base");
     repo.git(&["checkout", "-q", "-b", "topic"]);
@@ -184,6 +187,12 @@ fn commit_diffs_against_the_first_parent() {
     repo.commit_file("main.txt", "main");
     repo.git(&["merge", "-q", "--no-ff", "-m", "merge topic", "topic"]);
     let merge = repo.head_oid();
+    (repo, merge)
+}
+
+#[test]
+fn commit_diffs_against_the_first_parent() {
+    let (repo, merge) = merged_repo();
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let diff = reader
@@ -482,4 +491,118 @@ fn a_deleted_file_keeps_its_path() {
         lines(&diff[0].hunks[0]),
         [(LineOrigin::Deletion, "gone".to_string())]
     );
+}
+
+// --- commit_files（02 の「コミットのファイル一覧」）------------------------------
+
+#[test]
+fn commit_files_lists_what_the_commit_changed() {
+    let repo = TestRepo::init();
+    repo.commit_file("a.txt", "a");
+    repo.write_worktree_file("a.txt", b"a2\n");
+    repo.write_worktree_file("b.txt", b"b\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "second"]);
+    let second = repo.head_oid();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let entries = reader.commit_files(second).unwrap();
+
+    assert_eq!(
+        rows(&entries),
+        [
+            ("a.txt", None, FileStatus::Modified),
+            ("b.txt", None, FileStatus::Added),
+        ]
+    );
+}
+
+#[test]
+fn commit_files_pairs_a_rename_like_the_diff_does() {
+    // **`find_similar` の設定を `diff` と共有していないと 2 行になる**（Deleted +
+    // Added）。一覧の行と diff の対象が食い違う形（02）。
+    let repo = TestRepo::init();
+    repo.commit_file("old.txt", &twenty_lines());
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo.git(&["commit", "-q", "-m", "rename"]);
+    let renamed = repo.head_oid();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let entries = reader.commit_files(renamed).unwrap();
+
+    assert_eq!(
+        rows(&entries),
+        [("new.txt", Some("old.txt"), FileStatus::Renamed)]
+    );
+}
+
+#[test]
+fn commit_files_uses_the_first_parent_of_a_merge() {
+    let (repo, merge) = merged_repo();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let entries = reader.commit_files(merge).unwrap();
+
+    // 第一親（main）との差なので、topic 側で足したファイルだけが出る。
+    assert_eq!(rows(&entries), [("topic.txt", None, FileStatus::Added)]);
+}
+
+#[test]
+fn commit_files_lists_the_root_commit_against_an_empty_tree() {
+    let repo = TestRepo::init();
+    let root = repo.commit_file("file.txt", "first");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let entries = reader.commit_files(root).unwrap();
+
+    assert_eq!(rows(&entries), [("file.txt", None, FileStatus::Added)]);
+}
+
+#[test]
+fn an_empty_commit_has_no_files() {
+    // `--allow-empty` のコミットは変更を 1 つも持たない。**「まだ読めていない」と
+    // 同じ見た目にしないのは `app` の仕事**で、こちらは空の `Vec` を返す（02）。
+    let repo = TestRepo::init();
+    repo.commit_file("file.txt", "first");
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "empty"]);
+    let empty = repo.head_oid();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert!(reader.commit_files(empty).unwrap().is_empty());
+}
+
+#[test]
+fn commit_files_and_the_commit_diff_see_the_same_files() {
+    // **入口（比べる 2 つのツリーと `find_similar` の設定）が 2 本あれば結果はずれる。**
+    // 出口（`file_entry`）だけを共有しても揃わない（02、#18 と同じ形）。ずれは
+    // 「一覧に出ているファイルを選んだのに diff が空」という形で出るので、
+    // 両方を同じリポジトリで突き合わせる。
+    let repo = TestRepo::init();
+    repo.commit_file("old.txt", &twenty_lines());
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo.write_worktree_file("added.txt", b"added\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "rename and add"]);
+    let commit = repo.head_oid();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let entries = reader.commit_files(commit).unwrap();
+    let diff = reader
+        .diff(DiffTarget::Commit {
+            oid: commit,
+            path: None,
+        })
+        .unwrap();
+
+    assert_eq!(rows(&entries), files(&diff));
+}
+
+#[test]
+fn commit_files_reports_a_missing_commit() {
+    let repo = TestRepo::init();
+    repo.commit_file("file.txt", "first");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    // `fake_oid` は実リポジトリの Oid と重ならない（`test_util`）。
+    assert!(reader.commit_files(fake_oid(7)).is_err());
 }

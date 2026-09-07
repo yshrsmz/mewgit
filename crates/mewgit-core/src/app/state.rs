@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::auth::{AccountState, GhLogin, RepoTarget};
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
-    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp,
+    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
     RefIndex, Remote, StashEntry, WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{Check, PullRequest};
@@ -174,6 +174,25 @@ impl AppState {
             return None;
         }
 
+        // **見る一覧はグラフの選択で変わる。** WIP 行ならワーキングツリー、コミット
+        // なら右ペインのファイル一覧（01 の「diff の遅延取得」）。
+        match self.graph.selection() {
+            GraphSelection::Wip => self.wanted_worktree_diff(),
+            GraphSelection::Commit(line) => {
+                // **`path: None`（コミット全体）は出さない。** 一覧を出すためだけに
+                // 全ファイルのハンクを組むことになる。一覧は `Cmd::LoadCommitFiles`
+                // の担当（01 の「コミットのファイル一覧」）。
+                let path = Some(self.graph.selected_file()?.path.clone());
+                Some(DiffTarget::Commit {
+                    oid: line.commit.oid,
+                    path,
+                })
+            }
+        }
+    }
+
+    /// ワーキングツリーで選んでいる行の diff の対象。
+    fn wanted_worktree_diff(&self) -> Option<DiffTarget> {
         let (section, entry) = self.worktree.selected()?;
         // rename は新しい名前で絞る。`git_read` が `old_path` の側でも一致を見るので、
         // 片方だけ渡せば rename の行は落ちない（02）。
@@ -241,11 +260,13 @@ impl Pane {
 
     /// コミットを選んでいるあいだの巡回先。右は [`GraphSelection::right_pane`] が決める。
     ///
-    /// **`Worktree` と `Diff` を入れない。** 入れると、コミットを選んだまま
+    /// **`Worktree` を入れない。** 入れると、コミットを選んだまま
     /// `focus == Pane::Worktree` でいられてしまい、`s` / `u` / `x` が画面に出ていない
-    /// ファイルを stage する（01 の「Pane と Modal」）。`Diff` が戻ってくるのは
-    /// コミットのファイル一覧を入れるタスク。
-    const COMMIT_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::CommitDetail];
+    /// ファイルを stage する（01 の「Pane と Modal」）。
+    ///
+    /// **`Diff` は両方に入るが、出る diff は違う。** ワーキングツリーのファイルか、
+    /// コミットのファイルか。決めるのは [`AppState::wanted_diff`] の 1 つ。
+    const COMMIT_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::CommitDetail, Pane::Diff];
 
     /// `panes` の並びのうち `delta` 個先。端では反対側に回る。
     ///
@@ -317,6 +338,27 @@ pub struct GraphState {
     /// カーソルの指すコミットと食い違っていれば、まだ届いていないか失敗したという
     /// こと。「読み込み中」のフラグを別に持たない（01 の「コミット詳細の遅延取得」）。
     pub detail: Option<CommitDetail>,
+    /// 遅延取得したファイル一覧（02 の「コミットのファイル一覧」）。
+    ///
+    /// **`Option` で持つ。** `Vec` 1 本にすると、まだ届いていないのと
+    /// `--allow-empty` のコミット（変更が 1 つも無い）が同じ見た目になる
+    /// （`WorktreeState::loaded` と同じ理由。01 の「コミットのファイル一覧」）。
+    pub files: Option<CommitFiles>,
+    /// 直前に詳細の読み込みが失敗したコミット。**同じコミットには出し直さない。**
+    ///
+    /// 出すと、リポジトリが壊れているあいだ「失敗 → 再読込 → 失敗」を回す。
+    /// **`Option<Oid>` なのは、対象が違えば一度も試していないから**（`bool` にすると、
+    /// 別のコミットの失敗のあとに乗ったコミットまで塞ぐ）。`DiffState::failed` と
+    /// 同じ形。落とすのは読み込みの成功とカーソル移動（`scrolled`）で、
+    /// **移動して戻ってくれば 1 回だけ試し直せる**。
+    pub detail_failed: Option<Oid>,
+    /// 直前にファイル一覧の読み込みが失敗したコミット。[`detail_failed`] と同じ形。
+    ///
+    /// **詳細と別に持つ。** 片方だけが失敗することがあり（一覧はツリーの比較で、
+    /// 本文の読み出しとは別の失敗をする）、1 本にすると成功したほうまで塞ぐ。
+    ///
+    /// [`detail_failed`]: Self::detail_failed
+    pub files_failed: Option<Oid>,
     /// これ以上読むコミットが無い。
     pub loaded_all: bool,
     /// 直近のログ読み込みが失敗した。
@@ -360,6 +402,9 @@ impl GraphState {
         // もう `lines` に無いコミットを指したままにしない。
         self.lanes = LaneState::default();
         self.detail = None;
+        self.files = None;
+        self.detail_failed = None;
+        self.files_failed = None;
         self.cursor = 0;
         self.scroll = 0;
         self.loaded_all = false;
@@ -413,6 +458,54 @@ impl GraphState {
         self.detail.as_ref().filter(|detail| detail.oid == oid)
     }
 
+    /// カーソルの指すコミットのファイル一覧。別のコミットのものしか無ければ `None`。
+    ///
+    /// [`fresh_detail`](Self::fresh_detail) と同じ形。`update`（次に何を読むか）と
+    /// `ui`（何を描くか）が同じものを使う。
+    pub fn fresh_files(&self) -> Option<&CommitFiles> {
+        let oid = self.cursor_commit()?.oid;
+        self.files.as_ref().filter(|files| files.oid == oid)
+    }
+
+    /// [`fresh_files`](Self::fresh_files) の可変版。カーソルを動かすのに使う。
+    ///
+    /// **見えていない一覧のカーソルを動かさない。** 描くのも `wanted_diff` が対象を
+    /// 決めるのも `fresh_files` を通したものだけなので、濾さずに動かすと画面に出て
+    /// いない一覧のカーソルが黙って動く（[`DiffState::fresh_view_mut`] と同じ形）。
+    pub fn fresh_files_mut(&mut self) -> Option<&mut CommitFiles> {
+        let oid = self.cursor_commit()?.oid;
+        self.files.as_mut().filter(|files| files.oid == oid)
+    }
+
+    /// カーソルの指すコミットの詳細を読みに行って失敗したままか。
+    ///
+    /// 「読み込み中」と「読み込めなかった」の出し分けに使う。**`ui` は
+    /// `jobs.is_running` の否定から消去法で導かない。** `Cmd` の発行経路を変えた
+    /// ときに片方だけ直しても通ってしまう（[`DiffState::has_failed`] と同じ形）。
+    pub fn has_detail_failed(&self) -> bool {
+        self.failed_here(self.detail_failed)
+    }
+
+    /// カーソルの指すコミットのファイル一覧を読みに行って失敗したままか。
+    /// [`has_detail_failed`](Self::has_detail_failed) と同じ形。
+    pub fn has_files_failed(&self) -> bool {
+        self.failed_here(self.files_failed)
+    }
+
+    /// 失敗の印がカーソルの指すコミットのものか。
+    fn failed_here(&self, failed: Option<Oid>) -> bool {
+        failed.is_some() && self.cursor_commit().map(|commit| commit.oid) == failed
+    }
+
+    /// カーソルの指すコミットの一覧で選んでいるファイル。
+    ///
+    /// 一覧がまだ届いていないときと、変更が 1 つも無いコミットのときは `None`。
+    /// [`AppState::wanted_diff`] と `ui` の反転がここを通る。
+    pub fn selected_file(&self) -> Option<&FileEntry> {
+        let files = self.fresh_files()?;
+        files.entries.get(files.cursor)
+    }
+
     /// カーソルを `delta` 行動かす。端では止まる。
     pub fn move_cursor(&mut self, delta: isize) {
         // 行が 1 つも積まれていなくても WIP 行はあるので、`rows()` は 1 以上。
@@ -437,6 +530,31 @@ impl GraphState {
         } else if self.cursor >= self.scroll + self.viewport {
             self.scroll = self.cursor - self.viewport + 1;
         }
+    }
+}
+
+/// 遅延取得したコミットのファイル一覧と、その中の選択位置。
+///
+/// どのコミットのものかは `oid` で判る（`CommitDetail` と同じ形）。「読み込み中」の
+/// フラグを別に持たない（01 の「コミットのファイル一覧」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitFiles {
+    pub oid: Oid,
+    /// 02 の `commit_files()` の戻り値そのまま。空なら変更の無いコミット。
+    pub entries: Vec<FileEntry>,
+    /// 一覧の選択位置。左の Diff ペインの対象を決める。
+    pub cursor: usize,
+}
+
+impl CommitFiles {
+    /// カーソルを `delta` 行動かす。端では止まる。
+    ///
+    /// 行が 1 つも無ければ据え置く（選べるものが無い）。
+    pub fn move_cursor(&mut self, delta: isize) {
+        let Some(last) = self.entries.len().checked_sub(1) else {
+            return;
+        };
+        self.cursor = self.cursor.saturating_add_signed(delta).min(last);
     }
 }
 
@@ -704,10 +822,16 @@ impl DiffView {
 
 /// `positions` の中で `current` から `delta` 個進んだ位置。端では止まる。
 ///
-/// **端の扱いはここ 1 箇所。** [`WorktreeState::move_cursor`] と
-/// [`DiffView::move_cursor`] が同じ規則を使う。並べる中身は違っても「進めて端で
-/// 止める」は 1 つ。要素が無ければ `None` を返し、そのときどうするかは呼び出し側が決める
-/// （Worktree は何も選べない位置に戻し、Diff は据え置く）。
+/// **「選べる位置の並び」を持つカーソルの端の扱いはここ 1 箇所。**
+/// [`WorktreeState::move_cursor`] と [`DiffView::move_cursor`] が同じ規則を使う。
+/// 並べる中身は違っても「進めて端で止める」は 1 つ。要素が無ければ `None` を返し、
+/// そのときどうするかは呼び出し側が決める（Worktree は何も選べない位置に戻し、
+/// Diff は据え置く）。
+///
+/// **平坦な添字のカーソルはここを通らない。** [`GraphState::move_cursor`] と
+/// [`CommitFiles::move_cursor`] は `0..len` が全部選べるので並びを組む必要が無く、
+/// `saturating_add_signed(delta).min(last)` の 2 行で済む。並びを組ませると、
+/// カーソルを 1 行動かすたびに `Vec` を確保することになる。
 fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Option<T> {
     let index = positions
         .iter()
@@ -801,6 +925,7 @@ pub struct Job {
 pub enum JobKind {
     LoadLog,
     LoadCommitDetail,
+    LoadCommitFiles,
     LoadHeadMessage,
     LoadRepoInfo,
     LoadStatus,
@@ -824,6 +949,7 @@ impl JobKind {
             JobKind::Exec => Some("ほかの git 実行が終わるまで待ってください"),
             JobKind::LoadLog
             | JobKind::LoadCommitDetail
+            | JobKind::LoadCommitFiles
             | JobKind::LoadHeadMessage
             | JobKind::LoadRepoInfo
             | JobKind::LoadStatus
@@ -843,6 +969,7 @@ impl JobKind {
         match self {
             JobKind::LoadLog => "log",
             JobKind::LoadCommitDetail => "commit",
+            JobKind::LoadCommitFiles => "files",
             JobKind::LoadHeadMessage => "head",
             JobKind::LoadRepoInfo => "repo",
             JobKind::LoadStatus => "status",
@@ -1423,8 +1550,9 @@ mod tests {
         state.graph.cursor = 1;
 
         assert!(!state.focus_candidates().contains(&Pane::Worktree));
-        assert!(!state.focus_candidates().contains(&Pane::Diff));
         assert!(state.focus_candidates().contains(&Pane::CommitDetail));
+        // `Diff` は残る。コミットのファイル一覧で選んだ 1 件を左に出すため。
+        assert!(state.focus_candidates().contains(&Pane::Diff));
     }
 
     #[test]

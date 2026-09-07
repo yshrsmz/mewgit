@@ -206,6 +206,16 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
+            Cmd::LoadCommitFiles(oid) => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = Box::new(reader.commit_files(oid).await);
+                    let _ = tx.send(Msg::CommitFilesLoaded { oid, result });
+                });
+                ControlFlow::Continue(())
+            }
+
             Cmd::LoadRepoInfo => {
                 let reader = self.reader.clone();
                 let tx = self.tx.clone();

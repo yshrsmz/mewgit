@@ -16,7 +16,7 @@ use std::path::Path;
 
 use crate::{modals, panes};
 use mewgit_core::app::{AppState, GraphSelection, Pane, TermSize};
-use mewgit_core::git_read::Oid;
+use mewgit_core::git_read::{FileEntry, FileStatus, Oid};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -149,6 +149,43 @@ pub fn path_label(path: &Path, old_path: Option<&Path>) -> String {
     }
 }
 
+/// 非同期の読み取りを待っているあいだの文言。
+///
+/// **ペインごとに書かない。** グラフ・ワーキングツリー・diff・コミット詳細・
+/// ファイル一覧が同じ状態を出すので、散らすと文言を変えたときに揃わなくなる。
+/// 何を読んでいるかは枠のタイトルが示す。
+pub const LOADING: &str = "読み込み中…";
+
+/// 変更が 1 つも無いときの文言。ワーキングツリーとコミットのファイル一覧が使う。
+pub const NO_CHANGES: &str = "変更はありません";
+
+/// ファイル一覧の 1 行。`M src/main.rs`、rename は `R old.txt -> new.txt`。
+///
+/// **Worktree ペインとコミット詳細のファイル一覧が同じものを使う**（07）。区画の
+/// 見出しを挟むかどうかはペインごとに違うが、行そのものが 2 本あると種別の字だけが
+/// 片方で古くなる。
+pub fn file_row(entry: &FileEntry) -> String {
+    format!(
+        " {} {}",
+        mark(entry.status),
+        path_label(&entry.path, entry.old_path.as_deref())
+    )
+}
+
+/// 変更種別の 1 文字。`git status --short` と同じ字を使う。
+fn mark(status: FileStatus) -> char {
+    match status {
+        FileStatus::Added => 'A',
+        FileStatus::Modified => 'M',
+        FileStatus::Deleted => 'D',
+        FileStatus::Renamed => 'R',
+        FileStatus::Copied => 'C',
+        FileStatus::Typechange => 'T',
+        FileStatus::Untracked => '?',
+        FileStatus::Conflicted => 'U',
+    }
+}
+
 /// 画面をヘッダ / 本文 / ステータスバーに割る。
 fn split(area: Rect) -> [Rect; 3] {
     Layout::vertical([
@@ -249,12 +286,35 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{short_oid, split, split_body, window, wrapped, SHORT_OID};
+    use super::{file_row, short_oid, split, split_body, window, wrapped, SHORT_OID};
     use crate::test_util::{draw, state_at, terminal_with};
     use mewgit_core::app::{NoticeLevel, Pane, TermSize};
     use mewgit_core::git_read::Oid;
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
+
+    #[test]
+    fn a_file_row_puts_the_status_letter_before_the_path() {
+        // **書式の見張りはここ 1 本。** 2 つのペインが同じ関数を通るので、ペインの
+        // 側でそれぞれ字を見ると、種別を足したときにどちらのテストも通ってしまう。
+        use mewgit_core::git_read::FileStatus;
+        use mewgit_core::test_util::fake_entry;
+
+        let row = |status| file_row(&fake_entry("a.txt", status));
+
+        assert_eq!(row(FileStatus::Added), " A a.txt");
+        assert_eq!(row(FileStatus::Modified), " M a.txt");
+        assert_eq!(row(FileStatus::Deleted), " D a.txt");
+        assert_eq!(row(FileStatus::Copied), " C a.txt");
+        assert_eq!(row(FileStatus::Typechange), " T a.txt");
+        assert_eq!(row(FileStatus::Untracked), " ? a.txt");
+        assert_eq!(row(FileStatus::Conflicted), " U a.txt");
+
+        // rename は元の名前も出す（`path_label`）。
+        let mut renamed = fake_entry("new.txt", FileStatus::Renamed);
+        renamed.old_path = Some("old.txt".into());
+        assert_eq!(file_row(&renamed), " R old.txt -> new.txt");
+    }
 
     #[test]
     fn wrapped_counts_the_line_that_word_wrapping_adds() {

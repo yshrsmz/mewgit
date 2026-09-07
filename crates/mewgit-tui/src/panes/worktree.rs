@@ -3,7 +3,7 @@
 //! 1 行は `<種別 1 文字> <パス>`。区画の見出しと、その中のファイルを並べる。
 
 use mewgit_core::app::{AppState, JobKind, Pane, WorktreeState};
-use mewgit_core::git_read::{FileStatus, WorktreeSection};
+use mewgit_core::git_read::WorktreeSection;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -36,9 +36,9 @@ fn title(state: &AppState) -> String {
 /// （グラフの空表示と同じ形）。
 fn empty_message(state: &AppState) -> &'static str {
     if state.jobs.is_running(JobKind::LoadStatus) {
-        "読み込み中…"
+        ui::LOADING
     } else {
-        "変更はありません"
+        ui::NO_CHANGES
     }
 }
 
@@ -62,11 +62,7 @@ fn lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
         lines.push(Line::from(Span::styled(heading(section), theme::muted())));
 
         for (index, entry) in entries.iter().enumerate() {
-            let line = Line::raw(format!(
-                " {} {}",
-                mark(entry.status),
-                ui::path_label(&entry.path, entry.old_path.as_deref())
-            ));
+            let line = Line::raw(ui::file_row(entry));
             if state.worktree.section == section && state.worktree.cursor == index {
                 cursor = lines.len();
                 lines.push(line.style(theme::selected()));
@@ -88,28 +84,13 @@ fn heading(section: WorktreeSection) -> &'static str {
     }
 }
 
-/// 変更種別の 1 文字。`git status --short` と同じ字を使う。
-fn mark(status: FileStatus) -> char {
-    match status {
-        FileStatus::Added => 'A',
-        FileStatus::Modified => 'M',
-        FileStatus::Deleted => 'D',
-        FileStatus::Renamed => 'R',
-        FileStatus::Copied => 'C',
-        FileStatus::Typechange => 'T',
-        FileStatus::Untracked => '?',
-        FileStatus::Conflicted => 'U',
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, row_of, state_at, terminal_with};
+    use crate::test_util::{draw, row_is_reversed, state_at};
     use mewgit_core::app::{update, Msg, TermSize};
-    use mewgit_core::git_read::WorktreeSnapshot;
+    use mewgit_core::git_read::{FileStatus, WorktreeSnapshot};
     use mewgit_core::test_util::fake_entry;
-    use ratatui::style::Modifier;
 
     /// 既定の 80x24。右ペインは 32 桁になるので、テストはその幅で読める内容にする。
     const SIZE: TermSize = TermSize {
@@ -171,16 +152,9 @@ mod tests {
         });
         state.worktree.move_cursor(1);
 
-        let terminal = terminal_with(&state, SIZE);
-        let buffer = terminal.backend().buffer();
-        let lines = draw(&state, SIZE);
-        // 反転しているセルがあるか。行の右側は余白なのでスタイルが付かない。
-        let reversed =
-            |y: u16| (0..SIZE.width).any(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED));
-
-        assert!(reversed(row_of(&lines, "b.txt")));
+        assert!(row_is_reversed(&state, SIZE, "b.txt"));
         // 反転するのはカーソル行だけ。
-        assert!(!reversed(row_of(&lines, "a.txt")));
+        assert!(!row_is_reversed(&state, SIZE, "a.txt"));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! グラフでコミットを選んでいるあいだ、右の領域に Working tree と差し替えで描く。
 //! どちらを描くかは `focus` ではなくグラフの選択で決まる（`ui::render`）。
 
-use mewgit_core::app::{AppState, JobKind, Pane};
+use mewgit_core::app::{AppState, Pane};
 use mewgit_core::git_read::{Commit, CommitDetail, Signature, Timestamp};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -20,6 +20,14 @@ use crate::ui::{self, theme, time};
 /// メッセージの領域を取り、足りないときは見出しのほうを切る。
 const MIN_MESSAGE_ROWS: u16 = 3;
 
+/// ファイル一覧に割ける高さの上限（内側の高さに対する割合の分母）。
+///
+/// 一覧は必要なぶんだけ取り、それが内側の半分を超えたらここで頭打ちにする。上限が
+/// 無いと、ファイルの多いコミットで**メッセージが 1 行も見えなくなる**（見出しに
+/// `MIN_MESSAGE_ROWS` を確保しているのと同じ理由）。逆に固定で割かないのは、
+/// メッセージが 1 行の summary で終わるコミットのほうが多いため（07）。
+const FILES_SHARE: u16 = 2;
+
 /// コミット詳細ペインを描く。
 ///
 /// **選んでいるコミットを引数で受ける。** `state` から引き直すと「選んでいないのに
@@ -33,18 +41,37 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // **一覧は先に組んでから高さを決める。** 行数を別に数えると、見出しや文言の
+    // 行数を変えたときに片方だけ直しても通り、枠からはみ出すか余白が残る
+    // （`panes::worktree::lines` と同じ理由）。残りを詳細に使う。
+    let (files, files_cursor) = files_lines(state);
+    let files_rows = u16::try_from(files.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height / FILES_SHARE);
+    let [top, files_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(files_rows)]).areas(inner);
+
+    // **詳細と一覧は別々に届くので、片方だけで描く。** 詳細が無いからと一覧ごと
+    // 落とすと、`app` は一覧を「画面に出ている」として扱う（`fresh_files_mut` が
+    // カーソルを動かし、`Enter` が `DiffTarget::Commit` を開く）のに、ユーザーは
+    // その行を一度も見ていないことになる。
+    render_detail(frame, top, state);
+    ui::render_rows(frame, files_area, files, files_cursor..files_cursor + 1);
+}
+
+/// 見出しとメッセージを描く。届いていなければ理由を出す。
+fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
     let Some(detail) = state.graph.fresh_detail() else {
-        // カーソルの指すコミットのものが無い。届いていないのか失敗したのかは
-        // `JobTracker` が知っている（07 の「CommitDetail ペイン」）。
-        frame.render_widget(Paragraph::new(placeholder(state)), inner);
+        // カーソルの指すコミットのものが無い（07 の「CommitDetail ペイン」）。
+        frame.render_widget(Paragraph::new(placeholder(state)), area);
         return;
     };
 
     // 見出しの高さは折り返し後の行数から出し、メッセージのぶんは必ず残す。
-    let (head, head_rows) = ui::wrapped(head_lines(detail), inner.width);
-    let head_rows = head_rows.min(inner.height.saturating_sub(MIN_MESSAGE_ROWS));
+    let (head, head_rows) = ui::wrapped(head_lines(detail), area.width);
+    let head_rows = head_rows.min(area.height.saturating_sub(MIN_MESSAGE_ROWS));
     let [head_area, message_area] =
-        Layout::vertical([Constraint::Length(head_rows), Constraint::Min(0)]).areas(inner);
+        Layout::vertical([Constraint::Length(head_rows), Constraint::Min(0)]).areas(area);
 
     frame.render_widget(head, head_area);
     frame.render_widget(
@@ -54,12 +81,66 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) 
     );
 }
 
-/// 詳細がまだ無いときの文言。空のグラフの出し分けと同じ形。
-fn placeholder(state: &AppState) -> &'static str {
-    if state.jobs.is_running(JobKind::LoadCommitDetail) {
-        "読み込み中…"
+/// ファイル一覧の行と、カーソルが何行目か。
+///
+/// 一覧が出せないときは文言 1 行（カーソルはその行）。**行を組むのはここ 1 本**で、
+/// 割く高さもこの行数から出す。行番号を別に数えると、見出しを何行入れるかの規則が
+/// 2 本になり、反転する行と窓の基準行が静かにずれる
+/// （`panes::worktree::lines` と同じ）。
+fn files_lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
+    // **空の一覧と「まだ届いていない」を出し分ける**（01 の「コミットのファイル
+    // 一覧」）。`--allow-empty` のコミットは変更を持たない。
+    let Some(files) = state
+        .graph
+        .fresh_files()
+        .filter(|files| !files.entries.is_empty())
+    else {
+        return (vec![Line::raw(files_placeholder(state))], 0);
+    };
+
+    let mut lines = Vec::with_capacity(files.entries.len() + 1);
+    lines.push(Line::from(Span::styled(
+        format!("Files ({})", files.entries.len()),
+        theme::muted(),
+    )));
+    let mut cursor = 0;
+    for (index, entry) in files.entries.iter().enumerate() {
+        let line = Line::raw(ui::file_row(entry));
+        if index == files.cursor {
+            cursor = lines.len();
+            lines.push(line.style(theme::selected()));
+        } else {
+            lines.push(line);
+        }
+    }
+    (lines, cursor)
+}
+
+/// 一覧が出せないときの文言。
+fn files_placeholder(state: &AppState) -> &'static str {
+    if state.graph.fresh_files().is_some() {
+        // 届いていて空。`--allow-empty` のコミット。
+        ui::NO_CHANGES
+    } else if state.graph.has_files_failed() {
+        "ファイル一覧を読み込めませんでした"
     } else {
+        ui::LOADING
+    }
+}
+
+/// 詳細がまだ無いときの文言。
+///
+/// **「失敗した」は状態から見る**（[`GraphState::has_detail_failed`]）。
+/// `jobs.is_running` の否定から消去法で導くと、`Cmd` の発行経路を変えたときに
+/// 片方だけ直してもコンパイルもテストも通る（01 の「diff の遅延取得」。
+/// `DiffState::has_failed` と同じ形）。
+///
+/// [`GraphState::has_detail_failed`]: mewgit_core::app::GraphState::has_detail_failed
+fn placeholder(state: &AppState) -> &'static str {
+    if state.graph.has_detail_failed() {
         "詳細を読み込めませんでした"
+    } else {
+        ui::LOADING
     }
 }
 
@@ -104,11 +185,11 @@ fn who(label: &str, sig: &Signature, time: Timestamp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, state_on_first_commit};
+    use crate::test_util::{draw, row_is_reversed, state_on_first_commit};
     use crate::ui;
     use mewgit_core::app::{update, AppState, JobKind, Key, Msg, TermSize};
-    use mewgit_core::git_read::CommitDetail;
-    use mewgit_core::test_util::{fake_detail, fake_oid};
+    use mewgit_core::git_read::{CommitDetail, FileEntry, FileStatus, GitReadError, Oid};
+    use mewgit_core::test_util::{fake_detail, fake_entry, fake_oid};
 
     /// 1 件目のコミットを選び、その詳細が届いた状態。
     ///
@@ -208,11 +289,166 @@ mod tests {
         assert!(text.contains("詳細を読み込めませんでした"), "{text}");
     }
 
+    /// ファイル一覧の返信を届ける。**成功も失敗もここを通す。**
+    fn with_files(state: &mut AppState, oid: Oid, result: Result<Vec<FileEntry>, GitReadError>) {
+        let _ = update(
+            state,
+            Msg::CommitFilesLoaded {
+                oid,
+                result: Box::new(result),
+            },
+        );
+    }
+
+    /// 詳細と一覧の両方が届いた状態。
+    fn with_detail_and_files(entries: Vec<FileEntry>) -> AppState {
+        let mut state = with_detail(&["subject"], fake_detail(0, "subject"));
+        with_files(&mut state, fake_oid(0), Ok(entries));
+        state
+    }
+
+    #[test]
+    fn the_file_list_shows_what_the_commit_changed() {
+        // 80x24 のまま見る。右ペインは 32 桁（07）。
+        let state = with_detail_and_files(vec![
+            fake_entry("a.txt", FileStatus::Modified),
+            fake_entry("b.txt", FileStatus::Added),
+        ]);
+
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(text.contains("Files (2)"), "{text}");
+        assert!(text.contains("M a.txt"), "{text}");
+        assert!(text.contains("A b.txt"), "{text}");
+    }
+
+    #[test]
+    fn the_selected_file_is_highlighted() {
+        // どのファイルの diff が左に出るかを、左のタイトルと合わせて 2 箇所から
+        // 辿れるようにする（07）。
+        let mut state = with_detail_and_files(vec![
+            fake_entry("a.txt", FileStatus::Modified),
+            fake_entry("b.txt", FileStatus::Added),
+        ]);
+        state.focus = mewgit_core::app::Pane::CommitDetail;
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
+
+        let size = TermSize::default();
+
+        assert!(row_is_reversed(&state, size, "b.txt"));
+        assert!(!row_is_reversed(&state, size, "a.txt"));
+    }
+
+    #[test]
+    fn a_commit_without_changes_says_so() {
+        // `--allow-empty` のコミット。**「読み込み中」と同じ見た目にしない**（01）。
+        let state = with_detail_and_files(Vec::new());
+
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(text.contains("変更はありません"), "{text}");
+        assert!(!text.contains("読み込み中"), "{text}");
+    }
+
+    #[test]
+    fn a_pending_file_list_reads_as_loading() {
+        // 詳細と一覧は別々に届く。メッセージが出ていて一覧だけ「読み込み中…」に
+        // なる時点が普通にある（07）。
+        let state = with_detail(&["subject"], fake_detail(0, "subject"));
+
+        let text = draw(&state, WIDE).join("\n");
+
+        assert!(state.jobs.is_running(JobKind::LoadCommitFiles));
+        assert!(text.contains("subject"), "{text}");
+        assert!(text.contains("読み込み中"), "{text}");
+    }
+
+    #[test]
+    fn a_file_list_that_failed_says_so_instead_of_loading() {
+        let mut state = with_detail(&["subject"], fake_detail(0, "subject"));
+        with_files(&mut state, fake_oid(0), Err(GitReadError::NonUtf8Head));
+
+        let text = draw(&state, WIDE).join("\n");
+
+        assert!(
+            text.contains("ファイル一覧を読み込めませんでした"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_long_file_list_leaves_the_message_visible() {
+        // 一覧は必要なぶんだけ取るが、内側の半分で頭打ちにする。上限が無いと
+        // ファイルの多いコミットでメッセージが 1 行も見えなくなる（07）。
+        let entries = (0..40)
+            .map(|n| fake_entry(&format!("file{n}.txt"), FileStatus::Modified))
+            .collect();
+        let mut state = with_detail(
+            &["subject line"],
+            fake_detail(0, "subject line\n\nbody line"),
+        );
+        with_files(&mut state, fake_oid(0), Ok(entries));
+
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(text.contains("subject line"), "{text}");
+        assert!(text.contains("body line"), "{text}");
+        assert!(text.contains("Files (40)"), "{text}");
+    }
+
+    #[test]
+    fn the_file_list_shows_even_when_the_detail_failed() {
+        // 詳細と一覧は別々に届く。詳細が無いからと一覧ごと落とすと、`app` は一覧を
+        // 「画面に出ている」として扱う（カーソルが動き、`Enter` が diff を開く）のに、
+        // ユーザーはその行を一度も見ていないことになる。
+        let mut state = state_on_first_commit(&["subject"]);
+        let oid = state.graph.cursor_commit().unwrap().oid;
+        let _ = update(
+            &mut state,
+            Msg::CommitDetailLoaded {
+                oid,
+                result: Box::new(Err(GitReadError::NonUtf8Head)),
+            },
+        );
+        with_files(
+            &mut state,
+            oid,
+            Ok(vec![fake_entry("a.txt", FileStatus::Modified)]),
+        );
+
+        let text = draw(&state, WIDE).join("\n");
+
+        assert!(text.contains("詳細を読み込めませんでした"), "{text}");
+        assert!(text.contains("M a.txt"), "{text}");
+    }
+
+    #[test]
+    fn a_detail_for_another_commit_hides_the_file_list_too() {
+        // 一覧も oid の一致で濾す。前のコミットのファイルを出したままにしない。
+        let mut state = with_detail(&["first", "second"], fake_detail(0, "first"));
+        with_files(
+            &mut state,
+            fake_oid(0),
+            Ok(vec![fake_entry("a.txt", FileStatus::Modified)]),
+        );
+        // 2 件目へ。1 件目の一覧しか持っていない。
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
+
+        let text = draw(&state, WIDE).join("\n");
+
+        assert!(!text.contains("a.txt"), "{text}");
+    }
+
     #[test]
     fn a_tiny_terminal_does_not_panic() {
         // リサイズの途中では枠より小さい端末が来る。
         for (width, height) in [(1, 1), (10, 3), (20, 5)] {
-            let state = with_detail(&["subject"], fake_detail(0, "subject\n\nbody"));
+            let mut state = with_detail(&["subject"], fake_detail(0, "subject\n\nbody"));
+            with_files(
+                &mut state,
+                fake_oid(0),
+                Ok(vec![fake_entry("a.txt", FileStatus::Modified)]),
+            );
             let lines = draw(&state, TermSize { width, height });
             assert_eq!(lines.len(), height as usize);
         }

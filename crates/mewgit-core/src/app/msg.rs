@@ -3,8 +3,8 @@
 use crate::auth::AccountState;
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
-    CommitDetail, DiffTarget, FileDiff, GitReadError, HeadInfo, InProgressOp, LogPage, Oid,
-    RefIndex, Remote, WorktreeSnapshot,
+    CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp, LogPage,
+    Oid, RefIndex, Remote, WorktreeSnapshot,
 };
 use crate::github::{Check, GithubError, PullRequest};
 
@@ -67,6 +67,14 @@ pub enum Msg {
     CommitDetailLoaded {
         oid: Oid,
         result: Box<Result<CommitDetail, GitReadError>>,
+    },
+    /// 選択コミットが変更したファイルの一覧。`CommitDetailLoaded` と同じ形
+    /// （`Result` + 要求した Oid）で、理由も同じ。**別の `Msg` なのは `Cmd` を
+    /// 分けているから**で、1 通にまとめると本文だけ見えていれば足りる時点でも
+    /// 一覧を待つことになる（01 の「コミットのファイル一覧」）。
+    CommitFilesLoaded {
+        oid: Oid,
+        result: Box<Result<Vec<FileEntry>, GitReadError>>,
     },
     /// amend の初期値にする HEAD のメッセージ全文。`Ok(None)` はコミットが 1 つも
     /// 無い（unborn HEAD）。「読めなかった」と「amend する相手がいない」で案内が

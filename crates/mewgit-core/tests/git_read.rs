@@ -322,6 +322,55 @@ fn head_reports_an_unborn_branch() {
     );
 }
 
+/// 本文付きのメッセージを持つコミットが 1 つあるリポジトリ。
+///
+/// `TestRepo::commit` は summary しか付けられないので amend で書き換える。
+/// メッセージ全文を読む 2 つのテスト（`commit_detail` と `head_message`）で使う。
+fn repo_with_a_body() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit("subject");
+    repo.git(&["commit", "--amend", "-q", "-m", WHOLE_MESSAGE]);
+    repo
+}
+
+/// `repo_with_a_body` が作るメッセージ全文。
+const WHOLE_MESSAGE: &str = "subject\n\nbody 1\nbody 2";
+
+#[test]
+fn head_message_reports_the_whole_message_of_head() {
+    // amend の初期値に使う。summary だけだと、本文のあるコミットを amend したときに
+    // 本文が消える（01 の「commit」）。
+    let repo = repo_with_a_body();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert_eq!(
+        reader.head_message().unwrap().as_deref(),
+        Some(WHOLE_MESSAGE)
+    );
+}
+
+#[test]
+fn head_message_follows_head_instead_of_a_branch_name() {
+    // detached でも読める。ブランチ名を経由すると detached で読めなくなる。
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    repo.commit("second");
+    repo.git(&["checkout", "-q", &first.to_string()]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert_eq!(reader.head_message().unwrap().as_deref(), Some("first"));
+}
+
+#[test]
+fn head_message_is_none_without_any_commit() {
+    // 「読めなかった」と「amend する相手がいない」は上位の案内が違うので、
+    // unborn を `Err` に畳まない（02 の「スレッド」）。
+    let repo = TestRepo::init();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert_eq!(reader.head_message().unwrap(), None);
+}
+
 // ---- ログ列挙 ----
 
 /// ページの Oid だけを取り出す。
@@ -562,11 +611,8 @@ fn log_orders_by_committer_time_while_reporting_author_time() {
 
 #[test]
 fn commit_detail_reports_the_whole_message() {
-    let repo = TestRepo::init();
-    repo.commit("subject");
-    // 本文付きのメッセージに書き換える。グラフの行が持つのは summary だけなので、
-    // 詳細ではここが読めることが要る。
-    repo.git(&["commit", "--amend", "-q", "-m", "subject\n\nbody 1\nbody 2"]);
+    // グラフの行が持つのは summary だけなので、詳細では本文まで読めることが要る。
+    let repo = repo_with_a_body();
     let oid = repo.head_oid();
     let reader = RepoReader::open(repo.path()).unwrap();
 
@@ -574,7 +620,7 @@ fn commit_detail_reports_the_whole_message() {
 
     assert_eq!(detail.oid, oid);
     // 末尾に git が付ける改行は落とす。残すと詳細の最後に空行が出る。
-    assert_eq!(detail.message, "subject\n\nbody 1\nbody 2");
+    assert_eq!(detail.message, WHOLE_MESSAGE);
 }
 
 #[test]

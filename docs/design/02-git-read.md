@@ -153,6 +153,9 @@ pub struct LogPage {
 - `LogSession<'repo>` は `RepoReader` を借りる。`Repository` と同じ構造体には入れられない
   （自己参照になる）ので、リーダースレッドではループのローカル変数として
   `RepoReader` の隣に置く（状態の持ち方は「スレッド」を参照）
+- **先頭から読み直す経路は `LogSession` を捨てることで表す。** セッションを持ったまま
+  巻き戻す API は作らない（`Revwalk::reset` は push した ref も落とすので、結局
+  作り直しと同じコストになる）。上位から見える形は `log_page` の `restart`（「スレッド」）
 - `next_page` が `Err` を返したらセッションを捨てる。そのページのために walk から取り出した
   Oid は失われており、同じセッションで読み直すとその分がどのページにも現れない。グラフには
   親の見つからない行が残り、2 回目は成功するので UI にも異常が出ない
@@ -370,8 +373,9 @@ pub struct ReaderHandle { /* mpsc::UnboundedSender<Request>, workdir: PathBuf */
 impl ReaderHandle {
     pub fn spawn(path: &Path) -> Result<Self, GitReadError>;
     pub fn workdir(&self) -> &Path;
-    pub async fn log_page(&self, count: usize) -> Result<LogPage, GitReadError>;
+    pub async fn log_page(&self, count: usize, restart: bool) -> Result<LogPage, GitReadError>;
     pub async fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;
+    pub async fn head_message(&self) -> Result<Option<String>, GitReadError>;
     pub async fn refs(&self) -> Result<RefIndex, GitReadError>;
     pub async fn head(&self) -> Result<HeadInfo, GitReadError>;
     pub async fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;
@@ -405,6 +409,16 @@ impl ReaderHandle {
   受け側が消える窓が残る）ので、ランタイム側の規約にする。**ログ読み込みのタスクは abort
   しない。** M3 のキャンセルは `Cmd::Exec` に効かせる。状態を持たない `refs` / `head` /
   `remotes` / `status` / `diff` は drop されても捨ててよい
+- **`log_page(count, restart)` の `restart` はセッションを捨ててから読む。** commit や
+  fetch で HEAD が動くと積んだ行が丸ごと古くなり、続きを読む経路では直せない（新しい
+  コミットは末尾ではなく先頭に付く）。`Live` も `Exhausted` も `Idle` に落としてから
+  読むので、先頭の 1 ページが返る。**別のメソッドに分けず引数にする。** 分けると
+  「セッションを取り出して成功したときだけ戻す」契約を 2 箇所で守ることになる
+- **`head_message` は HEAD の解決とメッセージの取得をスレッドの中で 1 回で行う。**
+  amend の初期値に使う（01 の「commit」）。`head()` と `commit_detail()` の 2 回に
+  分けると、そのあいだに HEAD が動く隙ができ、**1 つ前のコミットのメッセージで HEAD を
+  上書きする**ことになる。コミットが 1 つも無い（unborn）ときは `Ok(None)`。
+  「読めなかった」と「amend する相手がいない」は上位の出し分けが違う
 - `ReaderHandle` は `Clone`。ランタイムは `Cmd` ごとに tokio タスクを起こし、その中から呼ぶ。
   スレッドは 1 本なので要求は直列に処理される
 - 送信側・受信側のどちらのチャネルが切れても `ReaderGone` にする。ハンドルが全部 drop されたら

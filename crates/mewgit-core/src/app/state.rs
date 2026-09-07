@@ -124,6 +124,44 @@ impl AppState {
         }
     }
 
+    /// `Tab` / `Shift+Tab` の巡回に入るペイン。
+    ///
+    /// **並びは定数でも、どの並びを使うかはグラフの選択で変わる**（01 の
+    /// 「Pane と Modal」）。右ペインの中身は選択で決まるので、候補を固定にすると
+    /// `focus` と画面の中身が食い違う状態（コミットを見ているのにキーは Working tree が
+    /// 受ける）を表現できてしまう。
+    pub fn focus_candidates(&self) -> &'static [Pane] {
+        match self.graph.selection() {
+            GraphSelection::Wip => Pane::WIP_FOCUS,
+            GraphSelection::Commit(_) => Pane::COMMIT_FOCUS,
+        }
+    }
+
+    /// 巡回の次。末尾からは先頭に戻る。
+    pub fn next_focus(&self) -> Pane {
+        self.focus.cycle(self.focus_candidates(), 1)
+    }
+
+    /// 巡回の前。先頭からは末尾に戻る。
+    pub fn prev_focus(&self) -> Pane {
+        self.focus.cycle(self.focus_candidates(), -1)
+    }
+
+    /// 候補から外れた `focus` を [`Pane::Graph`] に座り直させる。
+    ///
+    /// グラフのカーソルが WIP 行を出入りすると候補が入れ替わる。戻す先を `Graph` に
+    /// するのは、どちらの選択でも候補にある唯一のペインだから。
+    ///
+    /// **フォーカスを動かすキーが通る `update::focus` は経由しない。** あちらは
+    /// 「見えるようになった diff を頼む」ためのもので、ここが移す先は必ず `Graph`
+    /// （`wanted_diff()` が `None` になる側）なので頼むものが無い。通しても必ず
+    /// `Cmd::None` が返る腕が 1 つ増えるだけになる。
+    pub fn reseat_focus(&mut self) {
+        if !self.focus_candidates().contains(&self.focus) {
+            self.focus = Pane::Graph;
+        }
+    }
+
     /// いま出すべき diff の対象。出すものが無ければ `None`（01 の「diff の遅延取得」）。
     ///
     /// **判定はここ 1 つ。** 次に何を読むかを決める `update` と、中身を描くか
@@ -190,34 +228,66 @@ pub enum Pane {
     Stash,
     Prs,
     Worktree,
+    CommitDetail,
     Diff,
 }
 
 impl Pane {
-    /// `Tab` / `Shift+Tab` の巡回に入るペイン。
+    /// WIP 行を選んでいるあいだの巡回先。右は [`GraphSelection::right_pane`] が決める。
     ///
     /// **まだ実装していないペインは入れない**（07）。移れてしまうと、キーを受ける先の
-    /// 無い画面に入り込む。ペインを実装したらここに足す。並びは表示順。
-    pub const FOCUSABLE: &'static [Pane] = &[Pane::Graph, Pane::Worktree, Pane::Diff];
+    /// 無い画面に入り込む。ペインを実装したらここに足す。並びは `Pane` の宣言順。
+    const WIP_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::Worktree, Pane::Diff];
 
-    /// 巡回の次。末尾からは先頭に戻る。
-    pub fn next(self) -> Pane {
-        self.cycle(1)
-    }
+    /// コミットを選んでいるあいだの巡回先。右は [`GraphSelection::right_pane`] が決める。
+    ///
+    /// **`Worktree` と `Diff` を入れない。** 入れると、コミットを選んだまま
+    /// `focus == Pane::Worktree` でいられてしまい、`s` / `u` / `x` が画面に出ていない
+    /// ファイルを stage する（01 の「Pane と Modal」）。`Diff` が戻ってくるのは
+    /// コミットのファイル一覧を入れるタスク。
+    const COMMIT_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::CommitDetail];
 
-    /// 巡回の前。先頭からは末尾に戻る。
-    pub fn prev(self) -> Pane {
-        self.cycle(-1)
-    }
-
-    /// 巡回を `delta` 個進める。一覧に無いペイン（実装前のものが `focus` に
-    /// 入っている場合）は先頭から数え直す。
-    fn cycle(self, delta: isize) -> Pane {
-        let panes = Pane::FOCUSABLE;
+    /// `panes` の並びのうち `delta` 個先。端では反対側に回る。
+    ///
+    /// **一覧に無いペインは先頭から数え直すが、そこへ来る経路は無い。**
+    /// [`AppState::reseat_focus`] が `update` の出口で候補から外れた `focus` を潰すので、
+    /// ここに入る `self` は必ず `panes` にいる。`unwrap_or(0)` はその保険で、
+    /// 座り直す先を変えたときにここも直す必要はない（先頭は常に `Graph`）。
+    fn cycle(self, panes: &[Pane], delta: isize) -> Pane {
         let current = panes.iter().position(|&pane| pane == self).unwrap_or(0);
         let len = panes.len() as isize;
         let next = (current as isize + delta).rem_euclid(len) as usize;
         panes[next]
+    }
+}
+
+/// グラフの表示行が指しているもの。
+///
+/// **先頭の WIP 行はコミットではない**ので `GraphState::lines` に入れず、表示行の
+/// 添字を解くここで場合分けする（01 の「グラフの行」）。
+///
+/// コミット側が [`GraphLine`]（コミット + 罫線）なのは、`ui` が罫線を描くのに要るため。
+/// [`GraphState::cursor_commit`] がコミットだけを取り出す薄い包み。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphSelection<'a> {
+    /// ワーキングツリーの変更（グラフ先頭の `◇ WIP` 行）。
+    Wip,
+    Commit(&'a GraphLine),
+}
+
+impl GraphSelection<'_> {
+    /// 右の領域に出るペイン。
+    ///
+    /// **選択とペインの対応はここ 1 つ。** `Enter` の行き先（`update::graph_key`）と
+    /// 巡回の候補（[`AppState::focus_candidates`]）が別々に決めると、画面はコミット詳細
+    /// なのにキーは Working tree が受ける状態を作れてしまう。`ui::render` だけは
+    /// 中身（`&GraphLine`）を取り出す必要があるので変種で分岐するが、そちらが
+    /// この対応と食い違っていないことはテストで見張る。
+    pub fn right_pane(self) -> Pane {
+        match self {
+            GraphSelection::Wip => Pane::Worktree,
+            GraphSelection::Commit(_) => Pane::CommitDetail,
+        }
     }
 }
 
@@ -232,6 +302,10 @@ pub struct GraphState {
     /// 行の右に並べる ref ラベル（02）。引くのはグラフペインだけなのでここに置く。
     /// fetch 後の読み直しは M3 で決める。
     pub refs: RefIndex,
+    /// カーソルが指す**表示行**の添字。`0` は先頭の WIP 行、`1..` が `lines`。
+    ///
+    /// 解くのは [`GraphState::selection`] の 1 つ。各所で `lines.get(cursor - 1)` と
+    /// 書くと、`- 1` の書き忘れが 1 行ずれとして静かに通る（01 の「グラフの行」）。
     pub cursor: usize,
     /// 画面最上部に出す行の添字。カーソルだけからは決まらない（カーソルを上に
     /// 動かしたとき、見えているうちは view を動かさない）ので状態として持つ。
@@ -239,8 +313,6 @@ pub struct GraphState {
     /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Layout`] で運んでくる
     /// （`crate::app::Msg::Layout`）。core はヘッダや枠の高さを知らない。
     pub viewport: usize,
-    /// 選択コミットの詳細を展開しているか。
-    pub expanded: bool,
     /// 遅延取得した詳細（02）。どのコミットのものかは `detail.oid` で判る。
     /// カーソルの指すコミットと食い違っていれば、まだ届いていないか失敗したという
     /// こと。「読み込み中」のフラグを別に持たない（01 の「コミット詳細の遅延取得」）。
@@ -254,12 +326,80 @@ pub struct GraphState {
     /// 読み直しを出してしまう。次の読み込みはユーザーの操作から始める
     /// （01 の「追加ページの読み込み」）。
     pub load_failed: bool,
+    /// 頼んだ読み直しが [`AppState::issue`] に落とされた。
+    ///
+    /// 書き込みで ref が動くと積んだ行が丸ごと古くなるが、そのとき続きの読み込みが
+    /// 走っていると同種の読み直しは落ちる。落ちたぶんをここに覚えておき、走っていた
+    /// ページが届いた時点で頼み直す。**[`WorktreeState::stale`] と同じ形**で、立てるのも
+    /// 同じ「書き込みの時点で読み取りが走っていたか」（01 の「ログの読み直し」）。
+    ///
+    /// 読む場所は 2 つ（届いたページを採るか・頼み直すか）で、**どちらも「読み直しが
+    /// 落とされたまま」という同じ時点を見ている**ので `bool` で足りる。
+    /// [`DiffState::freshness`] が 3 状態なのは、「短絡してよいか」と「パッチを組んで
+    /// よいか」で見る時点が違ったため。
+    ///
+    /// **立っているあいだは必ず `JobKind::LoadLog` が走っている**（落とした相手が
+    /// それ）。続きの読み込みをここで止める必要が無いのはこの不変条件による。
+    ///
+    /// [`DiffState::freshness`]: DiffState
+    pub reload_pending: bool,
 }
 
 impl GraphState {
-    /// カーソルが指しているコミット。行が無ければ `None`。
+    /// 積んだ行を捨てて、先頭から読み直せる状態にする。
+    ///
+    /// ログ読み込みの失敗（02 の契約により、失敗したセッションは捨てられ次は先頭から
+    /// 来る）と、commit のあとの読み直しで同じことをする。**1 本にまとめてあるのは、
+    /// 片方に足し忘れると `lines` に無いコミットの詳細やレーンの状態が残るため。**
+    /// `load_failed` はここでは触らない（呼び出し元で値が違う。失敗の側だけが立てる）。
+    /// `reload_pending` は落とす。どちらの呼び出し元でも「先頭から積み直したので
+    /// 借りは無い」で一致し、**足し忘れると届かない読み直しを待ち続ける**。
+    pub fn restart(&mut self) {
+        self.reload_pending = false;
+        self.lines.clear();
+        // もう `lines` に無いコミットを指したままにしない。
+        self.lanes = LaneState::default();
+        self.detail = None;
+        self.cursor = 0;
+        self.scroll = 0;
+        self.loaded_all = false;
+    }
+
+    /// 表示行の数。先頭の WIP 行を含むので必ず 1 以上。
+    ///
+    /// **WIP 行は変更が無くても出す**（07 の「Graph ペイン」）。件数で出し入れすると
+    /// status が届くたびに表示行数が変わり、カーソルが指すコミットを oid で座り直させる
+    /// 必要が出る。常に 1 行あるなら `1 + lines.len()` の定数関係で済む。
+    pub fn rows(&self) -> usize {
+        self.lines.len() + 1
+    }
+
+    /// `index` 番目の表示行。[`rows`](Self::rows) の外なら `None`。
+    ///
+    /// **表示行から `lines` の添字への変換はここだけ。** `ui` が窓を切り出すときも
+    /// ここを通す。各所で `lines.get(index - 1)` と書くと、`- 1` の書き忘れが 1 行ずれ
+    /// として静かに通り、反転する行と右ペインの中身が食い違う（01 の「グラフの行」）。
+    pub fn row(&self, index: usize) -> Option<GraphSelection<'_>> {
+        match index.checked_sub(1) {
+            Some(at) => self.lines.get(at).map(GraphSelection::Commit),
+            None => Some(GraphSelection::Wip),
+        }
+    }
+
+    /// カーソルが指しているもの。
+    ///
+    /// カーソルは常に表示行の中にいる（[`move_cursor`](Self::move_cursor) が丸める）ので
+    /// `Wip` に落ちるのは本当に WIP 行を指しているときだけ。
+    pub fn selection(&self) -> GraphSelection<'_> {
+        self.row(self.cursor).unwrap_or(GraphSelection::Wip)
+    }
+
+    /// カーソルが指しているコミット。WIP 行を指していれば `None`。
     pub fn cursor_commit(&self) -> Option<&Commit> {
-        self.lines.get(self.cursor).map(|line| &line.commit)
+        match self.selection() {
+            GraphSelection::Commit(line) => Some(&line.commit),
+            GraphSelection::Wip => None,
+        }
     }
 
     /// カーソルの指すコミットの詳細。別のコミットのものしか無ければ `None`。
@@ -275,13 +415,8 @@ impl GraphState {
 
     /// カーソルを `delta` 行動かす。端では止まる。
     pub fn move_cursor(&mut self, delta: isize) {
-        if self.lines.is_empty() {
-            self.cursor = 0;
-            self.scroll = 0;
-            return;
-        }
-
-        let last = self.lines.len() - 1;
+        // 行が 1 つも積まれていなくても WIP 行はあるので、`rows()` は 1 以上。
+        let last = self.rows() - 1;
         self.cursor = self.cursor.saturating_add_signed(delta).min(last);
         self.scroll_into_view();
     }
@@ -296,9 +431,7 @@ impl GraphState {
         }
         // 窓が広がったときに先に詰める。末尾に貼り付いたまま端末を大きくすると、
         // カーソルは窓の中にいるので下の分岐が動かず、上に行があるのに空白が残る。
-        self.scroll = self
-            .scroll
-            .min(self.lines.len().saturating_sub(self.viewport));
+        self.scroll = self.scroll.min(self.rows().saturating_sub(self.viewport));
         if self.cursor < self.scroll {
             self.scroll = self.cursor;
         } else if self.cursor >= self.scroll + self.viewport {
@@ -331,6 +464,14 @@ pub struct WorktreeState {
     /// 時点で頼み直すための印（01 の「ワーキングツリー」）。立てるのは
     /// `exec_finished`、落とすのは `status_loaded`。
     pub stale: bool,
+    /// 一度でも status を読めた。
+    ///
+    /// **空の `snapshot` には 2 つの意味がある** — 「変更が無い」と「まだ読めていない」。
+    /// 起動直後や `Cmd::LoadStatus` が失敗したあとは後者で、`stale` では区別できない
+    /// （あれは書き込みでしか立たない）。commit の「stage された変更がありません」を
+    /// この 2 つ目で出すと、実際には stage されているのに断ることになる
+    /// （01 の「commit」）。
+    pub loaded: bool,
 }
 
 impl WorktreeState {
@@ -660,6 +801,7 @@ pub struct Job {
 pub enum JobKind {
     LoadLog,
     LoadCommitDetail,
+    LoadHeadMessage,
     LoadRepoInfo,
     LoadStatus,
     LoadDiff,
@@ -682,6 +824,7 @@ impl JobKind {
             JobKind::Exec => Some("ほかの git 実行が終わるまで待ってください"),
             JobKind::LoadLog
             | JobKind::LoadCommitDetail
+            | JobKind::LoadHeadMessage
             | JobKind::LoadRepoInfo
             | JobKind::LoadStatus
             | JobKind::LoadDiff
@@ -700,6 +843,7 @@ impl JobKind {
         match self {
             JobKind::LoadLog => "log",
             JobKind::LoadCommitDetail => "commit",
+            JobKind::LoadHeadMessage => "head",
             JobKind::LoadRepoInfo => "repo",
             JobKind::LoadStatus => "status",
             JobKind::LoadDiff => "diff",
@@ -803,6 +947,19 @@ impl Default for TextBuffer {
     }
 }
 
+/// [`TextBuffer::move_cursor`] に渡す移動。
+///
+/// `KeyCode` をそのまま渡さないのは、文字キーまで移動として受けられる形になるため。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
 impl TextBuffer {
     /// 文字列から作る。改行で分割する。
     pub fn from_text(text: &str) -> Self {
@@ -819,12 +976,133 @@ impl TextBuffer {
     pub fn text(&self) -> String {
         self.lines.join("\n")
     }
+
+    /// カーソルのいる行の、カーソルより左。
+    ///
+    /// 描画側がカーソルの桁を出すのに使う。**列からバイト位置への変換をここで済ませる**
+    /// ため、`ui` は「列は文字数」という約束を知らずに済む。2 箇所で解くと、単位を
+    /// 変えたときに core だけ直して端末のカーソルが黙ってずれる。
+    pub fn before_cursor(&self) -> &str {
+        let (row, col) = self.cursor;
+        &self.lines[row][..byte_at(&self.lines[row], col)]
+    }
+
+    /// 空白しか無いか。コミットメッセージを断る判定に使う（01 の
+    /// 「コミットメッセージの編集」）。
+    pub fn is_blank(&self) -> bool {
+        self.lines.iter().all(|line| line.trim().is_empty())
+    }
+
+    /// カーソル位置に 1 文字入れる。
+    pub fn insert_char(&mut self, c: char) {
+        let (row, col) = self.cursor;
+        let at = byte_at(&self.lines[row], col);
+        self.lines[row].insert(at, c);
+        self.cursor.1 = col + 1;
+    }
+
+    /// 文字列をカーソル位置に入れる。改行は行を割る。
+    ///
+    /// 貼り付けの入口。**1 文字ずつ [`TextBuffer::insert_char`] を呼ぶ形にしない**の
+    /// は、改行と制御文字の扱いをここで 1 回だけ決めるため。
+    ///
+    /// **制御文字は落とす**（`\r` を含む）。CRLF のまま入れると行末に制御文字が残り、
+    /// タブは `ui` が数える桁とずれてカーソルの位置が合わなくなる（07 の
+    /// 「CommitMessage モーダル」は折り返さない代わりに桁を自分で出している）。
+    pub fn insert_text(&mut self, text: &str) {
+        for (n, line) in text.split('\n').enumerate() {
+            if n > 0 {
+                self.insert_newline();
+            }
+            for c in line.chars().filter(|c| !c.is_control()) {
+                self.insert_char(c);
+            }
+        }
+    }
+
+    /// カーソル位置で行を割る。
+    pub fn insert_newline(&mut self) {
+        let (row, col) = self.cursor;
+        let at = byte_at(&self.lines[row], col);
+        let tail = self.lines[row].split_off(at);
+        self.lines.insert(row + 1, tail);
+        self.cursor = (row + 1, 0);
+    }
+
+    /// カーソルの左を 1 文字消す。行頭なら前の行とつなぐ。
+    ///
+    /// **最後の 1 行は消さない。** `lines` が空になると `cursor` の指す行が無くなる。
+    pub fn backspace(&mut self) {
+        let (row, col) = self.cursor;
+        if col > 0 {
+            let at = byte_at(&self.lines[row], col - 1);
+            self.lines[row].remove(at);
+            self.cursor.1 = col - 1;
+        } else if row > 0 {
+            let tail = self.lines.remove(row);
+            let joined_at = self.len(row - 1);
+            self.lines[row - 1].push_str(&tail);
+            self.cursor = (row - 1, joined_at);
+        }
+    }
+
+    /// カーソルの位置を 1 文字消す。行末なら次の行をつなぐ。
+    pub fn delete(&mut self) {
+        let (row, col) = self.cursor;
+        if col < self.len(row) {
+            let at = byte_at(&self.lines[row], col);
+            self.lines[row].remove(at);
+        } else if row + 1 < self.lines.len() {
+            let next = self.lines.remove(row + 1);
+            self.lines[row].push_str(&next);
+        }
+    }
+
+    /// カーソルを動かす。
+    ///
+    /// **行末より右・最終行より下へは出ない。** 上下移動で短い行に移ったときは行末へ
+    /// 寄せる。「元の桁を覚えて長い行で戻す」形にはしない（覚えた桁は状態が増える
+    /// うえ、編集で無効になる時点を決められない）。左右は行をまたぐ。
+    pub fn move_cursor(&mut self, to: Motion) {
+        let (row, col) = self.cursor;
+        let last = self.lines.len() - 1;
+        self.cursor = match to {
+            Motion::Left if col > 0 => (row, col - 1),
+            Motion::Left if row > 0 => (row - 1, self.len(row - 1)),
+            Motion::Right if col < self.len(row) => (row, col + 1),
+            Motion::Right if row < last => (row + 1, 0),
+            Motion::Up if row > 0 => (row - 1, col.min(self.len(row - 1))),
+            Motion::Down if row < last => (row + 1, col.min(self.len(row + 1))),
+            Motion::Home => (row, 0),
+            Motion::End => (row, self.len(row)),
+            // 端では動かない。
+            Motion::Left | Motion::Right | Motion::Up | Motion::Down => (row, col),
+        };
+    }
+
+    /// `row` 行目の長さ（文字数）。
+    fn len(&self, row: usize) -> usize {
+        self.lines[row].chars().count()
+    }
+}
+
+/// 文字数で数えた `col` を、`line` のバイト位置に直す。
+///
+/// **列を文字数で持つのは、非 ASCII の 1 文字を消すのに何バイト戻るかを呼び出し側に
+/// 知らせないため**（01 の `TextBuffer`）。変換はここ 1 箇所で行う。行末の次は
+/// `line.len()`。
+fn byte_at(line: &str, col: usize) -> usize {
+    line.char_indices()
+        .nth(col)
+        .map_or(line.len(), |(at, _)| at)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::app::Msg;
+    use crate::git_read::LogPage;
     use crate::test_util::fake_snapshot;
 
     /// 指定した区画にファイルを並べ、staged の先頭を選んだ状態。
@@ -841,6 +1119,147 @@ mod tests {
         worktree
             .selected()
             .map(|(_, entry)| entry.path.display().to_string())
+    }
+
+    #[test]
+    fn typing_inserts_at_the_cursor_and_keeps_multibyte_characters_whole() {
+        // 列は文字数で数える。バイト位置に直すのを間違えると、非 ASCII の途中に
+        // 文字を差し込んで文字列が壊れる。
+        let mut buf = TextBuffer::from_text("あい");
+        buf.move_cursor(Motion::Left);
+        buf.insert_char('X');
+
+        assert_eq!(buf.text(), "あXい");
+        assert_eq!(buf.cursor, (0, 2));
+    }
+
+    #[test]
+    fn enter_splits_the_line_at_the_cursor() {
+        let mut buf = TextBuffer::from_text("summary body");
+        buf.cursor = (0, 7);
+        buf.insert_newline();
+
+        assert_eq!(buf.lines, vec!["summary".to_string(), " body".to_string()]);
+        assert_eq!(buf.cursor, (1, 0));
+    }
+
+    #[test]
+    fn backspace_at_the_start_of_a_line_joins_it_to_the_one_above() {
+        let mut buf = TextBuffer::from_text("あい\nう");
+        buf.cursor = (1, 0);
+        buf.backspace();
+
+        assert_eq!(buf.text(), "あいう");
+        // つないだ位置に来る。バイト長で数えると全角のぶんずれる。
+        assert_eq!(buf.cursor, (0, 2));
+    }
+
+    #[test]
+    fn backspace_never_removes_the_last_line() {
+        // `lines` が空になると `cursor` の指す行が無くなる。
+        let mut buf = TextBuffer::default();
+        buf.backspace();
+
+        assert_eq!(buf.lines, vec![String::new()]);
+        assert_eq!(buf.cursor, (0, 0));
+    }
+
+    #[test]
+    fn delete_at_the_end_of_a_line_pulls_up_the_next_one() {
+        let mut buf = TextBuffer::from_text("a\nb");
+        buf.cursor = (0, 1);
+        buf.delete();
+
+        assert_eq!(buf.text(), "ab");
+
+        // 最終行の末尾では何も起きない。
+        buf.cursor = (0, 2);
+        buf.delete();
+        assert_eq!(buf.text(), "ab");
+    }
+
+    #[test]
+    fn moving_down_to_a_shorter_line_clamps_the_column() {
+        let mut buf = TextBuffer::from_text("long line\nab");
+        buf.cursor = (0, 9);
+        buf.move_cursor(Motion::Down);
+
+        assert_eq!(buf.cursor, (1, 2));
+
+        // **戻しても桁は覚えていない。** 覚える形にすると、編集でその桁が無効に
+        // なる時点を決められない。
+        buf.move_cursor(Motion::Up);
+        assert_eq!(buf.cursor, (0, 2));
+    }
+
+    #[test]
+    fn the_cursor_stops_at_the_ends_and_crosses_lines_sideways() {
+        let mut buf = TextBuffer::from_text("ab\ncd");
+        buf.cursor = (0, 0);
+
+        // 先頭より前へは出ない。
+        buf.move_cursor(Motion::Left);
+        assert_eq!(buf.cursor, (0, 0));
+        buf.move_cursor(Motion::Up);
+        assert_eq!(buf.cursor, (0, 0));
+
+        // 行末から右は次の行の先頭へ。
+        buf.move_cursor(Motion::End);
+        buf.move_cursor(Motion::Right);
+        assert_eq!(buf.cursor, (1, 0));
+        // 行頭から左は前の行の末尾へ。
+        buf.move_cursor(Motion::Left);
+        assert_eq!(buf.cursor, (0, 2));
+
+        // 末尾より後ろへは出ない。
+        buf.cursor = (1, 2);
+        buf.move_cursor(Motion::Right);
+        assert_eq!(buf.cursor, (1, 2));
+        buf.move_cursor(Motion::Down);
+        assert_eq!(buf.cursor, (1, 2));
+        buf.move_cursor(Motion::Home);
+        assert_eq!(buf.cursor, (1, 0));
+    }
+
+    #[test]
+    fn pasted_text_goes_in_whole_with_its_line_breaks() {
+        // **貼り付けは 1 つの `Msg` で来る。** キーに割り直すと、最初の改行で確定して
+        // しまい、残りがペインのキーとして解釈される。
+        let mut buf = TextBuffer::from_text("fix: ");
+        buf.insert_text("直す\n\n本文 1\n本文 2");
+
+        assert_eq!(buf.text(), "fix: 直す\n\n本文 1\n本文 2");
+        // カーソルは貼り付けた末尾。
+        assert_eq!(buf.cursor, (3, 4));
+    }
+
+    #[test]
+    fn pasted_control_characters_are_dropped() {
+        // CRLF のまま入れると行末に制御文字が残り、タブは `ui` が数える桁とずれて
+        // カーソルの位置が合わなくなる（07 の「CommitMessage モーダル」）。
+        let mut buf = TextBuffer::default();
+        buf.insert_text("a\r\nb\tc");
+
+        assert_eq!(buf.text(), "a\nbc");
+    }
+
+    #[test]
+    fn pasting_in_the_middle_of_a_line_splits_it() {
+        let mut buf = TextBuffer::from_text("ab");
+        buf.cursor = (0, 1);
+        buf.insert_text("X\nY");
+
+        assert_eq!(buf.lines, vec!["aX".to_string(), "Yb".to_string()]);
+        assert_eq!(buf.cursor, (1, 1));
+    }
+
+    #[test]
+    fn a_buffer_of_only_whitespace_counts_as_blank() {
+        // 空メッセージを断る判定に使う。`text()` が空かどうかでは、空行と空白だけの
+        // 行を通してしまう。
+        assert!(TextBuffer::default().is_blank());
+        assert!(TextBuffer::from_text("  \n\t\n").is_blank());
+        assert!(!TextBuffer::from_text("\n\nfix").is_blank());
     }
 
     #[test]
@@ -930,23 +1349,144 @@ mod tests {
         assert_eq!(selected(&worktree), None);
     }
 
-    #[test]
-    fn tab_cycles_only_through_the_implemented_panes() {
-        // 未実装のペインに移れると、キーを受ける先の無い画面に入り込む。
-        let mut pane = Pane::default();
-        for _ in 0..Pane::FOCUSABLE.len() {
-            assert!(Pane::FOCUSABLE.contains(&pane), "{pane:?}");
-            pane = pane.next();
-        }
-        // 一周して戻る。
-        assert_eq!(pane, Pane::default());
-        assert_eq!(Pane::Graph.prev(), *Pane::FOCUSABLE.last().unwrap());
+    /// コミットを 1 件積んだ状態。カーソルは WIP 行のまま。
+    ///
+    /// **`GraphLine` を手で組まない。** `LaneState::extend` を通らない `GraphRow` は
+    /// `lane` も `cells` も実際には出てこない値になり、レーンや色を見るテストを
+    /// 足した瞬間に「通るが現実と違う」状態になる。
+    fn state_with_a_commit() -> AppState {
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        let page = LogPage {
+            commits: vec![crate::test_util::fake_commit(1, "summary")],
+            done: true,
+        };
+        let _ = crate::app::update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: false,
+                result: Ok(page),
+            },
+        );
+        state
     }
 
     #[test]
-    fn a_pane_outside_the_cycle_falls_back_to_the_first() {
-        // 実装前のペインが `focus` に入っていても、`Tab` で巡回に戻れる。
-        assert_eq!(Pane::Prs.next(), Pane::FOCUSABLE[1]);
+    fn tab_cycles_only_through_the_implemented_panes() {
+        // 未実装のペインに移れると、キーを受ける先の無い画面に入り込む。
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        let candidates = state.focus_candidates();
+        for _ in 0..candidates.len() {
+            assert!(candidates.contains(&state.focus), "{:?}", state.focus);
+            state.focus = state.next_focus();
+        }
+        // 一周して戻る。
+        assert_eq!(state.focus, Pane::default());
+        assert_eq!(state.prev_focus(), *candidates.last().unwrap());
+    }
+
+    #[test]
+    fn the_right_pane_is_always_one_of_the_candidates() {
+        // 候補は 2 本の定数、右ペインは `GraphSelection::right_pane` が決める。
+        // 食い違うと、画面に出ているペインへ `Tab` で行けない（またはその逆）。
+        let mut state = state_with_a_commit();
+        for cursor in [0, 1] {
+            state.graph.cursor = cursor;
+            let right = state.graph.selection().right_pane();
+            assert!(
+                state.focus_candidates().contains(&right),
+                "cursor={cursor} right={right:?} candidates={:?}",
+                state.focus_candidates()
+            );
+        }
+    }
+
+    #[test]
+    fn a_display_row_past_the_end_is_none() {
+        // 窓の切り出し（`panes::graph`）が末尾を跨ぐので、範囲外は `None` で返す。
+        let state = state_with_a_commit();
+
+        assert_eq!(state.graph.row(0), Some(GraphSelection::Wip));
+        assert!(matches!(
+            state.graph.row(1),
+            Some(GraphSelection::Commit(_))
+        ));
+        assert_eq!(state.graph.row(2), None);
+    }
+
+    #[test]
+    fn selecting_a_commit_takes_the_worktree_panes_out_of_the_cycle() {
+        // コミットを選んだまま `focus == Pane::Worktree` でいられると、`s` / `u` / `x` が
+        // 画面に出ていないファイルを stage する（01 の「Pane と Modal」）。
+        let mut state = state_with_a_commit();
+        assert!(state.focus_candidates().contains(&Pane::Worktree));
+
+        state.graph.cursor = 1;
+
+        assert!(!state.focus_candidates().contains(&Pane::Worktree));
+        assert!(!state.focus_candidates().contains(&Pane::Diff));
+        assert!(state.focus_candidates().contains(&Pane::CommitDetail));
+    }
+
+    #[test]
+    fn a_focus_that_leaves_the_cycle_is_reseated_on_the_graph() {
+        let mut state = state_with_a_commit();
+        state.focus = Pane::Worktree;
+
+        state.graph.cursor = 1;
+        state.reseat_focus();
+
+        assert_eq!(state.focus, Pane::Graph);
+    }
+
+    #[test]
+    fn a_focus_that_is_still_a_candidate_is_left_alone() {
+        // WIP 行に戻るだけで右ペインのフォーカスを奪わない。
+        let mut state = state_with_a_commit();
+        state.focus = Pane::Worktree;
+
+        state.reseat_focus();
+
+        assert_eq!(state.focus, Pane::Worktree);
+    }
+
+    #[test]
+    fn the_wip_row_is_a_display_row_of_its_own() {
+        // 表示行 0 は WIP 行、1.. が `lines`（01 の「グラフの行」）。
+        let mut state = state_with_a_commit();
+        assert_eq!(state.graph.rows(), 2);
+        assert_eq!(state.graph.selection(), GraphSelection::Wip);
+        assert!(state.graph.cursor_commit().is_none());
+
+        state.graph.cursor = 1;
+
+        let commit = state
+            .graph
+            .cursor_commit()
+            .expect("コミットを指していません");
+        assert_eq!(commit.summary, "summary");
+    }
+
+    #[test]
+    fn the_cursor_stops_at_the_wip_row_and_at_the_last_commit() {
+        let mut state = state_with_a_commit();
+
+        state.graph.move_cursor(-1);
+        assert_eq!(state.graph.cursor, 0);
+
+        state.graph.move_cursor(5);
+        assert_eq!(state.graph.cursor, 1);
+    }
+
+    #[test]
+    fn an_empty_graph_still_has_the_wip_row() {
+        // 行が 1 つも無くても WIP 行は選べる（07 の「Graph ペイン」）。
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        assert_eq!(state.graph.rows(), 1);
+
+        state.graph.move_cursor(3);
+
+        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.selection(), GraphSelection::Wip);
     }
 
     #[test]

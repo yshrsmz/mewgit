@@ -1,7 +1,7 @@
 //! テスト用のヘルパ。`mewgit-tui` は 1 つのバイナリクレートなので、単体テストは
 //! すべて同じコンパイル単位に入る。feature で切り分ける必要はない。
 
-use mewgit_core::app::{update, AppState, Msg, RepoInfo, TermSize};
+use mewgit_core::app::{update, AppState, Key, Modal, Msg, RepoInfo, TermSize};
 use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, LogPage};
 use mewgit_core::test_util::{fake_commit, fake_commit_with_parents};
@@ -66,7 +66,7 @@ pub fn terminal_with(state: &AppState, size: TermSize) -> Terminal<TestBackend> 
 /// ランタイムのループを回さないテストが `viewport` を用意するのに使う。判定を
 /// 手で書くと、レイアウトの決め方が変わったときにテストだけ古い値を持つ。
 pub fn graph_rows(state: &AppState) -> usize {
-    ui::graph_rows(state.term, crate::panes::graph::shows_detail(&state.graph))
+    ui::graph_rows(state.term)
 }
 
 /// パスだけ入った状態。
@@ -88,6 +88,25 @@ pub fn state_with_commits(summaries: &[&str]) -> AppState {
         .map(|(index, summary)| fake_commit(index as u8, summary))
         .collect();
     state_with_log(commits)
+}
+
+/// 1 件目のコミットを選んだ状態。詳細はまだ届いていない。
+///
+/// 起動直後のカーソルは WIP 行なので、`j` を 1 回打って乗せる。**`cursor = 1` を
+/// 直に書かない。** 表示行の構成（先頭が WIP 行）を知る場所を増やすと、構成を
+/// 変えたときに片方だけ古くなる。`update` を通すので `JobTracker` も本番と同じ。
+pub fn state_on_first_commit(summaries: &[&str]) -> AppState {
+    let mut state = state_with_commits(summaries);
+    let _ = update(&mut state, Msg::Key(Key::char('j')));
+    state
+}
+
+/// モーダルを出した状態。下に何か描かれていること（覆いのテスト）が要るので、
+/// コミットを 2 件積んである。
+pub fn state_with_modal(modal: Modal) -> AppState {
+    let mut state = state_with_commits(&["first", "second"]);
+    state.modal = Some(modal);
+    state
 }
 
 /// `(索引, 親の索引)` の並びからコミットを組んで積んだ状態。並びは新しい順。
@@ -113,7 +132,13 @@ fn state_with_log(commits: Vec<Commit>) -> AppState {
         commits,
         done: true,
     };
-    let _ = update(&mut state, Msg::LogLoaded(Ok(page)));
+    let _ = update(
+        &mut state,
+        Msg::LogLoaded {
+            restart: false,
+            result: Ok(page),
+        },
+    );
     state
 }
 
@@ -129,8 +154,9 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        assert!(!lines[2].contains('"'), "{:?}", lines[2]);
-        assert!(!lines[2].contains("Hidden by"), "{:?}", lines[2]);
-        assert!(lines[2].contains("日本語のコミットメッセージ"));
+        // 枠の中の 1 行目は WIP 行なので、コミットはその 1 つ下（07）。
+        assert!(!lines[3].contains('"'), "{:?}", lines[3]);
+        assert!(!lines[3].contains("Hidden by"), "{:?}", lines[3]);
+        assert!(lines[3].contains("日本語のコミットメッセージ"));
     }
 }

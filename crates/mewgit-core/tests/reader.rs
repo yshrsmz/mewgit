@@ -7,7 +7,9 @@
 //! `GitReadError::ReaderGone` はテストしていない。スレッドを外から落とす手段が無く
 //! （ハンドルが送信側を持つ限りループは終わらない）、公開 API から到達できないため。
 
-use mewgit_core::git_read::{DiffTarget, FileStatus, GitReadError, HeadInfo, ReaderHandle};
+use mewgit_core::git_read::{
+    DiffTarget, FileStatus, GitReadError, HeadInfo, LogPage, ReaderHandle,
+};
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
 /// テストリポジトリに対してリーダースレッドを起こす。
@@ -42,6 +44,59 @@ fn spawn_fails_without_starting_the_thread() {
 }
 
 #[tokio::test]
+async fn log_page_starts_over_when_asked_to_restart() {
+    // commit で HEAD が動くと積んだ行が丸ごと古くなる。続きを読む経路では直せない
+    // （新しいコミットは末尾ではなく先頭に付く。01 の「ログの読み直し」）。
+    let repo = TestRepo::init();
+    for i in 0..3 {
+        repo.commit(&format!("commit {i}"));
+    }
+    let reader = spawn(&repo);
+
+    let first = reader.log_page(2, false).await.unwrap();
+    assert_eq!(summaries(&first), ["commit 2", "commit 1"]);
+
+    // セッションを持ったままだと続きが返る。
+    repo.commit("commit 3");
+    let restarted = reader.log_page(2, true).await.unwrap();
+
+    assert_eq!(summaries(&restarted), ["commit 3", "commit 2"]);
+}
+
+#[tokio::test]
+async fn a_restart_reopens_a_session_that_was_already_read_to_the_end() {
+    // 読み切ったセッションは `Exhausted` として持たれ、空のページを返し続ける。
+    // 読み直しはそこからも先頭に戻れること。
+    let repo = TestRepo::init();
+    repo.commit("only");
+    let reader = spawn(&repo);
+
+    assert!(reader.log_page(10, false).await.unwrap().done);
+    assert!(reader.log_page(10, false).await.unwrap().commits.is_empty());
+
+    let restarted = reader.log_page(10, true).await.unwrap();
+
+    assert_eq!(summaries(&restarted), ["only"]);
+}
+
+#[tokio::test]
+async fn head_message_is_read_on_the_reader_thread() {
+    let repo = TestRepo::init();
+    repo.commit("subject");
+    let reader = spawn(&repo);
+
+    assert_eq!(
+        reader.head_message().await.unwrap().as_deref(),
+        Some("subject")
+    );
+}
+
+/// ページの summary。
+fn summaries(page: &LogPage) -> Vec<&str> {
+    page.commits.iter().map(|c| c.summary.as_str()).collect()
+}
+
+#[tokio::test]
 async fn log_page_continues_where_the_previous_page_ended() {
     let repo = TestRepo::init();
     for i in 0..5 {
@@ -49,20 +104,16 @@ async fn log_page_continues_where_the_previous_page_ended() {
     }
     let reader = spawn(&repo);
 
-    let first = reader.log_page(2).await.unwrap();
-    let second = reader.log_page(2).await.unwrap();
-    let third = reader.log_page(2).await.unwrap();
+    let first = reader.log_page(2, false).await.unwrap();
+    let second = reader.log_page(2, false).await.unwrap();
+    let third = reader.log_page(2, false).await.unwrap();
 
     // セッションはスレッド側が持ち回る。呼ぶたびに先頭から読み直さない。
-    let summaries: Vec<&str> = first
-        .commits
-        .iter()
-        .chain(&second.commits)
-        .chain(&third.commits)
-        .map(|c| c.summary.as_str())
-        .collect();
+    let mut all = summaries(&first);
+    all.extend(summaries(&second));
+    all.extend(summaries(&third));
     assert_eq!(
-        summaries,
+        all,
         ["commit 4", "commit 3", "commit 2", "commit 1", "commit 0"]
     );
     assert!(!first.done);
@@ -77,8 +128,8 @@ async fn log_page_after_the_last_page_stays_done() {
     repo.commit("first");
     let reader = spawn(&repo);
 
-    let first = reader.log_page(10).await.unwrap();
-    let second = reader.log_page(10).await.unwrap();
+    let first = reader.log_page(10, false).await.unwrap();
+    let second = reader.log_page(10, false).await.unwrap();
 
     assert_eq!(first.commits.len(), 1);
     assert!(first.done);
@@ -91,7 +142,7 @@ async fn log_page_on_an_empty_repository_is_done_immediately() {
     let repo = TestRepo::init();
     let reader = spawn(&repo);
 
-    let page = reader.log_page(10).await.unwrap();
+    let page = reader.log_page(10, false).await.unwrap();
 
     assert!(page.commits.is_empty());
     assert!(page.done);
@@ -144,12 +195,12 @@ async fn commit_detail_does_not_disturb_the_log_session() {
     let second = repo.commit("second");
     let reader = spawn(&repo);
 
-    let page = reader.log_page(1).await.unwrap();
+    let page = reader.log_page(1, false).await.unwrap();
     assert_eq!(page.commits[0].oid, second);
 
     let _ = reader.commit_detail(second).await.unwrap();
 
-    let page = reader.log_page(1).await.unwrap();
+    let page = reader.log_page(1, false).await.unwrap();
     assert_eq!(page.commits[0].oid, first);
 }
 
@@ -167,7 +218,7 @@ async fn concurrent_requests_from_clones_lose_nothing() {
     let mut pages = Vec::new();
     for _ in 0..4 {
         let reader = reader.clone();
-        pages.push(tokio::spawn(async move { reader.log_page(1).await }));
+        pages.push(tokio::spawn(async move { reader.log_page(1, false).await }));
     }
 
     let mut summaries = Vec::new();

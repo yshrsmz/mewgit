@@ -149,6 +149,33 @@ async fn commit_runs_hooks() {
 }
 
 #[tokio::test]
+async fn a_commit_message_keeps_its_body() {
+    // モーダルは改行の打てる複数行バッファなので、`--message` に本文ごと渡る
+    // （01 の「コミットメッセージの編集」）。1 行に潰れると要約しか残らない。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.write_worktree_file("file.txt", b"second\n");
+    let runner = repo.runner();
+    runner
+        .run(&GitOp::Stage(vec!["file.txt".into()]))
+        .await
+        .expect("stage できませんでした");
+
+    runner
+        .run(&GitOp::Commit {
+            message: "subject\n\nbody 1\nbody 2".into(),
+            amend: false,
+        })
+        .await
+        .expect("commit できませんでした");
+
+    assert_eq!(
+        repo.git(&["log", "-1", "--pretty=%B"]),
+        "subject\n\nbody 1\nbody 2"
+    );
+}
+
+#[tokio::test]
 async fn amend_replaces_the_last_commit() {
     let repo = TestRepo::init();
     repo.commit("first");

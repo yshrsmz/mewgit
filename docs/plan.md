@@ -31,11 +31,17 @@
 - [x] ハンク単位の stage / unstage / discard — `GitOp::DiscardHunk`、ハンク → パッチの
       組み立て（`git apply` への round-trip テスト）、`view` のキャッシュと
       `Freshness`（01）
-- [ ] `Modal::CommitMessage` と commit / amend。グラフ先頭の WIP 行と、そこを選んだ
-      ときの右ペイン（staging）も一緒に入れる（07 の「どこまで実装したか」）
-- [ ] コミット詳細を右ペインへ移す。グラフ下の展開を廃止し、`shows_detail` /
+- [ ] `Modal::CommitMessage` と commit / amend。`TextBuffer` の編集操作、Worktree の
+      `c` / `C`、`GitOp::Commit` の配線。**commit したあとログを読み直す経路も
+      ここで入れる**（`Cmd::LoadLog { restart }` と `GraphState.reload_pending`。01 の
+      「ログの読み直し」）。無いと commit しても左のグラフが古い先頭のまま動かない
+- [ ] コミット詳細を右ペインへ移す。**グラフ先頭の WIP 行と、そこを選んだときの
+      右ペイン（staging）も一緒に入れる。** グラフ下の展開を廃止し、`shows_detail` /
       `graph_rows` / `Msg::Layout` を単純にする。コミットに含まれるファイル一覧を
-      右に並べ、選ぶと左が `DiffTarget::Commit` の diff に差し替わる（07）
+      右に並べ、選ぶと左が `DiffTarget::Commit` の diff に差し替わる（07）。
+      **WIP 行を commit のタスクに入れない。** 右ペインが「WIP かコミットか」で
+      中身を変えるので、コミット詳細の移設と同じタスクでないと、コミットを選んだ
+      ときに詳細を出す先が無くなる（07 の「どこまで実装したか」）
 - [ ] `ui::panes::branches` — 一覧、作成 / 切替 / 削除 / リネーム、`Modal::Confirm`
 
 ## M3: リモート
@@ -43,10 +49,11 @@
 - [ ] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト
 - [ ] fetch / pull / push の `GitOp`、`-u` 提案、force push 確認（`expected` の受け渡し）、
       ssh のパスフレーズで固まる件の扱い（`BatchMode` と `core.sshCommand`。03 参照）
-- [ ] `JobTracker` に世代を持たせ、`DiffState.freshness` と `WorktreeState.stale` を
-      畳む。fetch で ref が変わったあとのログの読み直しも同じ経路に乗せる
-      （01 の「実行中ジョブ › 世代」）。**カウンタを 1 本にするとログまで毎回
-      読み直すことになるので、領域ごとに分けるかはここで決める**
+- [ ] `JobTracker` に世代を持たせ、`DiffState.freshness` と `WorktreeState.stale` と
+      `GraphState.reload_pending` を畳む。fetch で ref が変わったあとのログの読み直しは
+      M2 で入れた `Cmd::LoadLog { restart }` に乗せる（01 の「実行中ジョブ › 世代」）。
+      **カウンタを 1 本にするとログまで毎回読み直すことになるので、領域ごとに
+      分けるかはここで決める**
 - [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文
 - [ ] 実行中ジョブのスピナーとキャンセル
 

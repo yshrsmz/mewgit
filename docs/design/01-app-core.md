@@ -173,6 +173,7 @@ impl TextBuffer {
     pub fn text(&self) -> String;
     pub fn insert_char(&mut self, c: char);
     pub fn insert_text(&mut self, text: &str);   // 貼り付け。改行で行を割り、制御文字は落とす
+    pub fn insert_line(&mut self, text: &str);   // 行を増やさずに入れる（改行も制御文字として落ちる）
     pub fn insert_newline(&mut self);
     pub fn backspace(&mut self);
     pub fn delete(&mut self);
@@ -297,9 +298,11 @@ impl TextBuffer {
   修飾付きの文字キーは入力にしない規則（`CommitMessage` と同じ）に沿う
 - **`lines` が 1 本のままであることをテストで見張る。** 改行のキーと貼り付けの
   どちらからも増やせないので、増えたときに気付ける腕がここにしか無い
-- **貼り付け（`Msg::Paste`）は改行を除いて 1 行につなぐ。** 落とすと「末尾に改行が
-  付いただけ」の正当な 1 行貼り付けまで拒むことになり、1 行目だけを採ると残りが
-  黙って消える。**2 つの名前を貼れば連結された 1 つの名前になる**が、それは入力欄に
+- **貼り付け（`Msg::Paste`）は改行を除いて 1 行につなぐ。** 除くのは
+  `TextBuffer::insert_line`（改行も制御文字として落ちる）で、**`paste` の側で
+  `replace` してから `insert_text` に渡さない** — 改行をどう扱うかの判断が 2 箇所に
+  割れる。落とすと「末尾に改行が付いただけ」の正当な 1 行貼り付けまで拒むことになり、
+  1 行目だけを採ると残りが黙って消える。**2 つの名前を貼れば連結された 1 つの名前になる**が、それは入力欄に
   そのまま出ていて、`Enter` を押すまで git は走らない。**`Msg::Paste` を受ける
   モーダルが 2 つ目になる** — `paste` が `CommitMessage` にしか腕を持たないままだと、
   貼り付けた文字が 1 文字ずつ `Msg::Key` として届く形に戻り、最初の改行で確定して

@@ -66,7 +66,7 @@ pub fn terminal_with(state: &AppState, size: TermSize) -> Terminal<TestBackend> 
 /// ランタイムのループを回さないテストが `viewport` を用意するのに使う。判定を
 /// 手で書くと、レイアウトの決め方が変わったときにテストだけ古い値を持つ。
 pub fn graph_rows(state: &AppState) -> usize {
-    ui::graph_rows(state.term, crate::panes::graph::shows_detail(&state.graph))
+    ui::graph_rows(state.term)
 }
 
 /// パスだけ入った状態。
@@ -143,8 +143,9 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        assert!(!lines[2].contains('"'), "{:?}", lines[2]);
-        assert!(!lines[2].contains("Hidden by"), "{:?}", lines[2]);
-        assert!(lines[2].contains("日本語のコミットメッセージ"));
+        // 枠の中の 1 行目は WIP 行なので、コミットはその 1 つ下（07）。
+        assert!(!lines[3].contains('"'), "{:?}", lines[3]);
+        assert!(!lines[3].contains("Hidden by"), "{:?}", lines[3]);
+        assert!(lines[3].contains("日本語のコミットメッセージ"));
     }
 }

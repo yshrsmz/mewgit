@@ -15,8 +15,8 @@ use crate::git_read::{
 };
 
 use super::{
-    AppState, Cmd, DiffCursor, DiffView, ExecDone, Freshness, GraphLine, JobKind, Key, KeyCode,
-    Modal, Motion, Msg, NoticeLevel, Pane, RepoSnapshot, TextBuffer,
+    AppState, Cmd, DiffCursor, DiffView, ExecDone, Freshness, GraphLine, GraphSelection, JobKind,
+    Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, RepoSnapshot, TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -42,12 +42,19 @@ pub fn init(state: &mut AppState) -> Cmd {
 /// 発行しないため（01 の「update の原則」）。
 pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
     let cmd = update_inner(state, msg);
+    // **候補から外れた `focus` はここで座り直させる**（01 の「Pane と Modal」）。
+    // グラフの選択が変わる経路はカーソルの移動だけではない。commit のあとの読み直しは
+    // `GraphState::restart` でカーソルを WIP 行に戻すので、コミット詳細を見たまま
+    // 候補から外れる。経路ごとに書くと足し忘れが静かに通るので、`issue` と同じく
+    // 出口 1 箇所で診る。
+    state.reseat_focus();
     state.issue(cmd)
 }
 
-/// **続きを頼む判断は 9 箇所にある。** `update` の出口にまとめて「毎回導き直す」形には
+/// **続きを頼む判断は 8 箇所にある。** `update` の出口にまとめて「毎回導き直す」形には
 /// できない。導出は「一度試して失敗した」を表せないので、失敗のたびに再発行して
-/// 「失敗 → 再読込 → 失敗」を回してしまう。
+/// 「失敗 → 再読込 → 失敗」を回してしまう（`focus` の座り直しは導出で足りるので
+/// 出口にある。あちらは失敗を持たない）。
 ///
 /// ログとコミット詳細（01 の「追加ページの読み込み」「コミット詳細の遅延取得」）:
 /// `scrolled`（カーソル移動）、`log_loaded` の成功、`commit_detail_loaded` の成功、
@@ -119,17 +126,18 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
     // ペインが `Tab` を受けずに閉じ込められる。`Shift+Tab` は `BackTab`（修飾なし）に
     // 正規化されている（01 の「キー入力」）。
     match key.code() {
-        KeyCode::Tab => return focus(state, state.focus.next()),
-        KeyCode::BackTab => return focus(state, state.focus.prev()),
+        KeyCode::Tab => return focus(state, state.next_focus()),
+        KeyCode::BackTab => return focus(state, state.prev_focus()),
         _ => {}
     }
 
     match state.focus {
         Pane::Graph => graph_key(state, key),
         Pane::Worktree => worktree_key(state, key),
+        Pane::CommitDetail => commit_detail_key(state, key),
         Pane::Diff => diff_key(state, key),
-        // 各ペインのキー処理は対応するマイルストーンで足す。`Pane::FOCUSABLE` に
-        // 入っていないので、いまここには来ない。
+        // 各ペインのキー処理は対応するマイルストーンで足す。巡回の候補
+        // （`AppState::focus_candidates`）に入っていないので、いまここには来ない。
         Pane::Branches | Pane::Stash | Pane::Prs => Cmd::None,
     }
 }
@@ -320,13 +328,35 @@ fn confirm_key(state: &mut AppState, key: Key) -> Cmd {
 
 /// グラフペインのキー処理。
 ///
-/// いまは上下移動、下端に近づいたときの追加読み込み、`Enter` の詳細展開。
+/// いまは上下移動、下端に近づいたときの追加読み込み、`Enter` で右ペインへ移る。
 /// `g` / `G` は別のタスクで足す。
 fn graph_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         KeyCode::Char('j') | KeyCode::Down => scrolled(state, 1),
         KeyCode::Char('k') | KeyCode::Up => scrolled(state, -1),
-        KeyCode::Enter => toggle_detail(state),
+        KeyCode::Enter => focus(state, right_pane(state)),
+        _ => Cmd::None,
+    }
+}
+
+/// いま右の領域に出ているペイン。
+///
+/// **`focus` では決めない**（07 の「ペインとフォーカス」）。右ペインは左で選んで
+/// いるものの中身なので、フォーカスが左にあるあいだも選択に追随する。
+fn right_pane(state: &AppState) -> Pane {
+    match state.graph.selection() {
+        GraphSelection::Wip => Pane::Worktree,
+        GraphSelection::Commit(_) => Pane::CommitDetail,
+    }
+}
+
+/// コミット詳細ペインのキー処理。
+///
+/// カーソルを持たないので、いまは `Esc` で戻るだけ。`j` / `k` でファイル一覧を選ぶのは
+/// 次のタスク（07 の「CommitDetail ペイン」）。
+fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
+    match key.code() {
+        KeyCode::Esc => focus(state, Pane::Graph),
         _ => Cmd::None,
     }
 }
@@ -344,21 +374,12 @@ fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
     Cmd::batch([load_more(state), load_detail(state)])
 }
 
-/// 詳細の開閉。開くときは、まだ持っていない詳細を頼む。
-///
-/// 閉じるときに `detail` は捨てない。同じコミットをもう一度開いたときに読み直さない
-/// ようにするため（01 の「コミット詳細の遅延取得」）。
-fn toggle_detail(state: &mut AppState) -> Cmd {
-    state.graph.expanded = !state.graph.expanded;
-    load_detail(state)
-}
-
 /// カーソルの指すコミットの詳細が要るなら頼む。
 ///
-/// 畳んでいるあいだは読まない（見えないものを読んでもリーダーを塞ぐだけ）。既に
-/// 同じ oid の詳細を持っていれば出さない。
+/// WIP 行を指しているあいだは読むものが無い。既に同じ oid の詳細を持っていれば
+/// 出さない（01 の「コミット詳細の遅延取得」）。
 fn load_detail(state: &AppState) -> Cmd {
-    if !state.graph.expanded || state.graph.fresh_detail().is_some() {
+    if state.graph.fresh_detail().is_some() {
         return Cmd::None;
     }
     match state.graph.cursor_commit() {
@@ -414,7 +435,7 @@ fn commit_detail_loaded(
 /// 相手が走っているため。落とすのも `log_loaded` の出口で必ず出し直す）ので、ここで
 /// 続きを出しても `issue` が落とす。見る形にすると、テストで踏めない分岐が残る。
 fn load_more(state: &AppState) -> Cmd {
-    let remaining = state.graph.lines.len().saturating_sub(state.graph.cursor);
+    let remaining = state.graph.rows().saturating_sub(state.graph.cursor);
     // 失敗したあとは行が空なので「残りが 1 画面以下」が必ず真になる。見ないと、
     // 以後のレイアウト変化のたびに読み直しを出す（失敗自体がレイアウトを変える。
     // 行が消えると詳細の領域も消えるため）。
@@ -503,9 +524,13 @@ fn log_loaded(state: &mut AppState, restart: bool, result: Result<LogPage, GitRe
     );
     state.graph.loaded_all = page.done;
     state.graph.load_failed = false;
-    // 1 ページが窓より短いことがある。埋まるまで続けて読む。1 ページ目が届くまでは
-    // カーソルの指すコミットが無いので、展開したままの詳細もここで頼み直す。
-    Cmd::batch([load_more(state), load_detail(state)])
+    // 1 ページが窓より短いことがある。埋まるまで続けて読む。
+    //
+    // **詳細はここから頼まない。** カーソルはページを積んでも動かず、動かすのは
+    // `scrolled`（そこで頼む）か `restart`（WIP 行に戻るので頼むものが無い）だけ。
+    // ここで頼むと、`commit_detail_loaded` が「同じコミットの失敗からは頼み直さない」
+    // と決めたものを、次のページが届いた拍子に頼み直してしまう。
+    load_more(state)
 }
 
 /// ワーキングツリーペインのキー処理。
@@ -1825,13 +1850,15 @@ mod tests {
         state.worktree.snapshot = fake_snapshot(&[], &["a.txt", "b.txt"], &[]);
         let _ = press(&mut state, 'j');
         assert_eq!(state.graph.cursor, 1);
+        // WIP 行に戻す。コミットを選んでいるあいだ Worktree は巡回に入らない（01）。
+        let _ = press(&mut state, 'k');
 
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
         assert_eq!(state.focus, Pane::Worktree);
 
         // 同じ `j` が worktree のカーソルに効く。グラフは動かない。
         let _ = press(&mut state, 'j');
-        assert_eq!(state.graph.cursor, 1);
+        assert_eq!(state.graph.cursor, 0);
         assert_eq!(state.worktree.cursor, 1);
 
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::BackTab)));
@@ -2400,6 +2427,7 @@ mod tests {
 
     #[test]
     fn the_cursor_stops_at_both_ends() {
+        // 表示行は WIP 行 + コミット 2 件の 3 行。上端は WIP 行。
         let mut state = state_with_commits(2);
 
         let _ = update(&mut state, Msg::Key(Key::char('k')));
@@ -2408,7 +2436,7 @@ mod tests {
         for _ in 0..5 {
             let _ = update(&mut state, Msg::Key(Key::char('j')));
         }
-        assert_eq!(state.graph.cursor, 1);
+        assert_eq!(state.graph.cursor, 2);
     }
 
     #[test]
@@ -2447,7 +2475,8 @@ mod tests {
         state.graph.viewport = 25;
         state.graph.scroll_into_view();
 
-        assert_eq!(state.graph.scroll, 5);
+        // 表示行は WIP 行を含めて 31。窓が 25 行なら先頭は 6 行目まで下がれる。
+        assert_eq!(state.graph.scroll, 6);
     }
 
     #[test]
@@ -2587,9 +2616,15 @@ mod tests {
     fn moving_the_cursor_towards_the_end_asks_for_the_next_page() {
         // 残りが 1 画面を切ったら読む。カーソルが下端に着いてからだと、
         // 読み込みのあいだ動けなくなる。
-        // 22 行あって窓は 20 行。カーソルが 2 行目に来た時点で残りが 20 になる。
+        // 表示行は WIP 行を含めて 23、窓は 20 行。カーソルが 3 行目に来た時点で
+        // 残りが 20 になる。カーソルがコミットに乗ると詳細も一緒に頼む。
         let mut state = state_with_page(ROWS + 2, false);
 
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::char('j'))),
+            Cmd::LoadCommitDetail(cursor(&state))
+        );
+        // 2 回目の詳細は `JobTracker` に落ちる。続きはまだ出さない。
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), more(&state));
     }
@@ -2605,13 +2640,20 @@ mod tests {
         });
 
         // 下端に着いても `JobTracker` が落とす。`update` を通さないと見えない。
-        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+        // 残るのは新しいカーソルの詳細だけ。
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::char('j'))),
+            Cmd::LoadCommitDetail(cursor(&state))
+        );
     }
 
     #[test]
     fn nothing_more_is_asked_for_once_the_log_is_exhausted() {
         let mut state = state_with_commits(3);
-        state.graph.cursor = 2;
+        // 最終行（3 件目のコミット）に置き、その詳細も届けておく。頼み直しが
+        // 混ざると、出なかったのが続きなのか詳細なのか判らなくなる。
+        state.graph.cursor = 3;
+        let _ = update(&mut state, detail_ok(2));
 
         assert!(state.graph.loaded_all);
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
@@ -2620,7 +2662,6 @@ mod tests {
     #[test]
     fn a_smaller_viewport_pulls_the_cursor_back_into_view() {
         // 縮んだ窓でカーソルが外に残ると、選択行が見えないまま操作することになる。
-        // 端末を縮めたときと、詳細を展開してグラフが縮んだときの両方で起きる。
         let mut state = state_with_commits(30);
         for _ in 0..25 {
             let _ = update(&mut state, Msg::Key(Key::char('j')));
@@ -2647,10 +2688,12 @@ mod tests {
             .oid
     }
 
-    /// `n` 件を積んで詳細を展開し、先頭コミットの詳細が届いた状態。
-    fn expanded_with_detail(n: usize) -> AppState {
+    /// `n` 件を積み、1 件目のコミットにカーソルを乗せて詳細が届いた状態。
+    ///
+    /// 起動直後のカーソルは WIP 行なので、`j` を 1 回打って乗せる。
+    fn on_first_commit(n: usize) -> AppState {
         let mut state = state_with_commits(n);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
         let _ = update(&mut state, detail_ok(0));
         state
     }
@@ -2673,42 +2716,42 @@ mod tests {
     }
 
     #[test]
-    fn enter_expands_and_asks_for_the_detail() {
+    fn moving_onto_a_commit_asks_for_its_detail() {
         let mut state = state_with_commits(3);
+        // 起動直後は WIP 行。詳細は右ペインに出るので、乗った時点で読む。
+        assert!(state.graph.cursor_commit().is_none());
 
-        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let cmd = update(&mut state, Msg::Key(Key::char('j')));
 
-        assert!(state.graph.expanded);
         assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
         assert!(state.jobs.is_running(JobKind::LoadCommitDetail));
     }
 
     #[test]
-    fn enter_again_collapses_without_asking_for_anything() {
-        let mut state = expanded_with_detail(3);
+    fn moving_back_to_the_wip_row_asks_for_nothing_and_keeps_the_detail() {
+        let mut state = on_first_commit(3);
 
-        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let cmd = update(&mut state, Msg::Key(Key::char('k')));
 
-        assert!(!state.graph.expanded);
+        assert_eq!(state.graph.selection(), GraphSelection::Wip);
         assert_eq!(cmd, Cmd::None);
-        // 畳んでも捨てない。同じコミットを開き直したときに読み直さないため。
+        // WIP 行を通り過ぎるたびに読み直さない（01 の「コミット詳細の遅延取得」）。
         assert!(state.graph.detail.is_some());
     }
 
     #[test]
-    fn reopening_the_same_commit_does_not_ask_again() {
-        let mut state = expanded_with_detail(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+    fn coming_back_to_the_same_commit_does_not_ask_again() {
+        let mut state = on_first_commit(3);
+        let _ = update(&mut state, Msg::Key(Key::char('k')));
 
-        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let cmd = update(&mut state, Msg::Key(Key::char('j')));
 
-        assert!(state.graph.expanded);
         assert_eq!(cmd, Cmd::None);
     }
 
     #[test]
-    fn the_detail_follows_the_cursor_while_expanded() {
-        let mut state = expanded_with_detail(3);
+    fn the_detail_follows_the_cursor() {
+        let mut state = on_first_commit(3);
 
         let cmd = update(&mut state, Msg::Key(Key::char('j')));
 
@@ -2716,12 +2759,71 @@ mod tests {
     }
 
     #[test]
-    fn moving_the_cursor_while_collapsed_asks_for_nothing() {
-        // 見えないものを読んでもリーダーを塞ぐだけ。
+    fn enter_on_a_commit_moves_to_the_commit_detail_pane() {
+        let mut state = on_first_commit(3);
+
+        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        assert_eq!(state.focus, Pane::CommitDetail);
+        assert_eq!(cmd, Cmd::None);
+    }
+
+    #[test]
+    fn enter_on_the_wip_row_moves_to_the_worktree_pane() {
+        // 右ペインの中身は選択で決まるので、`Enter` の行き先も選択で決まる（07）。
         let mut state = state_with_commits(3);
 
-        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
-        assert!(state.graph.detail.is_none());
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        assert_eq!(state.focus, Pane::Worktree);
+    }
+
+    #[test]
+    fn esc_leaves_the_commit_detail_for_the_graph() {
+        let mut state = on_first_commit(3);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+
+        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Esc)));
+
+        assert_eq!(state.focus, Pane::Graph);
+        assert_eq!(cmd, Cmd::None);
+    }
+
+    #[test]
+    fn tab_does_not_reach_the_worktree_while_a_commit_is_selected() {
+        // コミットを選んだまま Working tree にフォーカスできると、`s` / `u` / `x` が
+        // 画面に出ていないファイルを stage する（01 の「Pane と Modal」）。
+        let mut state = on_first_commit(3);
+
+        for _ in 0..4 {
+            let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
+            assert_ne!(state.focus, Pane::Worktree, "{:?}", state.focus);
+            assert_ne!(state.focus, Pane::Diff, "{:?}", state.focus);
+        }
+    }
+
+    #[test]
+    fn a_reload_that_returns_to_the_wip_row_takes_the_focus_off_the_detail() {
+        // 選択が変わる経路はカーソルの移動だけではない。commit のあとの読み直しは
+        // 先頭から積み直すのでカーソルが WIP 行に戻る（01 の「Pane と Modal」）。
+        let mut state = on_first_commit(3);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        assert_eq!(state.focus, Pane::CommitDetail);
+
+        let page = LogPage {
+            commits: vec![commit(9)],
+            done: true,
+        };
+        let _ = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: true,
+                result: Ok(page),
+            },
+        );
+
+        assert_eq!(state.graph.selection(), GraphSelection::Wip);
+        assert_eq!(state.focus, Pane::Graph);
     }
 
     #[test]
@@ -2729,7 +2831,7 @@ mod tests {
         // 要求が飛んでいるあいだのカーソル移動は `JobTracker` に落とされる。
         // 追いつきはここで行う（01 の「コミット詳細の遅延取得」）。
         let mut state = state_with_commits(5);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
         // 読み込み中に 2 行動く。この 2 回は落とされる。
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
@@ -2742,7 +2844,7 @@ mod tests {
     #[test]
     fn a_detail_for_the_current_commit_settles() {
         let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
 
         let cmd = update(&mut state, detail_ok(0));
 
@@ -2755,7 +2857,7 @@ mod tests {
     fn a_failed_detail_notices_without_asking_again() {
         // 出すと、リポジトリが壊れているあいだ「失敗 → 再読込 → 失敗」を回し続ける。
         let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
 
         let cmd = update(&mut state, detail_err(0));
 
@@ -2766,38 +2868,38 @@ mod tests {
     }
 
     #[test]
-    fn expanding_an_empty_graph_asks_for_nothing() {
-        let mut state = state();
-
-        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-
-        assert!(state.graph.expanded);
-        assert_eq!(cmd, Cmd::None);
-    }
-
-    #[test]
-    fn the_first_page_brings_the_detail_for_an_already_expanded_graph() {
-        // 起動直後に展開すると、まだ 1 行も無いのでカーソルの指すコミットが無い。
-        // ページが届いたところで頼み直す。
-        let mut state = state();
-        assert_eq!(
-            update(&mut state, Msg::Key(Key::new(KeyCode::Enter))),
-            Cmd::None
-        );
+    fn a_page_that_arrives_after_a_failed_detail_does_not_ask_for_it_again() {
+        // ページを積んでもカーソルは動かない。ここから頼み直すと、
+        // 「同じコミットの失敗からは頼み直さない」の判断が次のページで崩れる。
+        let mut state = state_with_page(3, false);
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let _ = update(&mut state, detail_err(0));
 
         let page = LogPage {
-            commits: vec![commit(1)],
+            commits: vec![commit(7)],
             done: true,
         };
         let cmd = update(&mut state, page_loaded(Ok(page)));
 
-        assert_eq!(cmd, Cmd::LoadCommitDetail(cursor(&state)));
+        assert_eq!(cmd, Cmd::None);
+        assert!(!state.jobs.is_running(JobKind::LoadCommitDetail));
+    }
+
+    #[test]
+    fn the_wip_row_of_an_empty_graph_asks_for_no_detail() {
+        // 行が 1 つも無くても WIP 行は選べる。読むものは無い。
+        let mut state = state();
+
+        let cmd = update(&mut state, Msg::Key(Key::char('j')));
+
+        assert_eq!(cmd, more(&state));
+        assert!(!state.jobs.is_running(JobKind::LoadCommitDetail));
     }
 
     #[test]
     fn a_failed_page_drops_the_detail_with_the_lines() {
         // `lines` に無いコミットの詳細を残さない。
-        let mut state = expanded_with_detail(3);
+        let mut state = on_first_commit(3);
         let _ = init(&mut state);
 
         let _ = update(&mut state, page_loaded(Err(GitReadError::NonUtf8Head)));
@@ -2810,7 +2912,7 @@ mod tests {
         // カーソルが動いて戻ってくると、飛んでいる要求の返りは古いものになる。
         // 上書きすると、正しいものが出ている画面が「読み込み中」に戻り、
         // 同じものをもう 1 回読みに行く。
-        let mut state = expanded_with_detail(3);
+        let mut state = on_first_commit(3);
         // 2 件目を頼んだ直後に戻る。戻りは `JobTracker` に落とされる。
         assert_eq!(
             update(&mut state, Msg::Key(Key::char('j'))),
@@ -2830,7 +2932,7 @@ mod tests {
         // コミットはまだ一度も試していないので、放っておくと
         // 「詳細を読み込めませんでした」のまま止まる。
         let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
         // 読み込み中に 1 行動く。この移動は `JobTracker` に落とされる。
         assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
 

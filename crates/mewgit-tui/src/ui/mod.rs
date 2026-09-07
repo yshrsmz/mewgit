@@ -14,7 +14,8 @@ use std::ops::Range;
 use std::path::Path;
 
 use crate::{modals, panes};
-use mewgit_core::app::{AppState, Pane, TermSize};
+use mewgit_core::app::{AppState, GraphSelection, Pane, TermSize};
+use mewgit_core::git_read::Oid;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -35,7 +36,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     } else {
         panes::graph::render(frame, left, state);
     }
-    panes::worktree::render(frame, right, state);
+    // **右は Working tree とコミット詳細の差し替え。** どちらを描くかはグラフの
+    // 選択だけで決まる（07）。`focus` で決めると、Graph にフォーカスした瞬間に
+    // 右が消える。
+    match state.graph.selection() {
+        GraphSelection::Wip => panes::worktree::render(frame, right, state),
+        GraphSelection::Commit(commit) => panes::commit::render(frame, right, state, commit),
+    }
     frame.render_widget(status_line(state), status);
 
     // モーダルは最後。下のペインを覆って描く（07）。
@@ -154,14 +161,27 @@ fn split(area: Rect) -> [Rect; 3] {
 /// `app` がスクロール位置を決めるのに要る（01 の「グラフの行」）。core にレイアウトを
 /// 知らせないよう、実際に描くのと同じ `split` と枠から出して `Msg::Layout` で渡す。
 ///
-/// 引数は端末サイズと「詳細を出すか」の 2 つだけ。`&AppState` を丸ごと受けると、
-/// あとから詳細の中身（メッセージの行数など）を見る余地が残る。そうすると詳細が
-/// 届いた瞬間に行数が変わってグラフが跳ねる（07）。判定は
-/// [`panes::graph::shows_detail`]。
-pub fn graph_rows(term: TermSize, shows_detail: bool) -> usize {
+/// **引数は端末サイズだけ。** `&AppState` を丸ごと受けると、あとから状態を見る余地が
+/// 残る。M1 ではコミット詳細をグラフの下部に展開していたので「詳細を出すか」も
+/// 引数にあり、`Enter` を押すだけで行数が変わっていた。詳細を右ペインへ移して
+/// この依存は消えている（07 の「CommitDetail ペイン」）。
+pub fn graph_rows(term: TermSize) -> usize {
     let [_, body, _] = split(Rect::new(0, 0, term.width, term.height));
     let [left, _] = split_body(body);
-    panes::graph::areas(left, shows_detail).0.height as usize
+    panes::graph::area(left).height as usize
+}
+
+/// 短縮 Oid の桁数。`git log --oneline` と同じ。
+pub const SHORT_OID: usize = 7;
+
+/// 先頭 [`SHORT_OID`] 桁。
+///
+/// グラフの行と、コミット詳細の親の一覧で同じものを使う。2 本に分けると、桁数を
+/// 変えたときに片方だけ古いままになる（`path_label` と同じ理由）。
+pub fn short_oid(oid: &Oid) -> String {
+    let mut text = oid.to_string();
+    text.truncate(SHORT_OID);
+    text
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
@@ -265,7 +285,7 @@ mod tests {
         let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
         let [left, right] = split_body(body);
         let area = match pane {
-            Pane::Worktree => right,
+            Pane::Worktree | Pane::CommitDetail => right,
             _ => left,
         };
         (area.x, area.y)
@@ -275,13 +295,15 @@ mod tests {
     fn the_focused_pane_is_the_only_one_with_a_bold_border() {
         // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
         let size = TermSize::default();
-        for &focus in Pane::FOCUSABLE {
+        // 巡回の候補はグラフの選択で変わる（01）。`state_at` は行が無いので WIP 側。
+        let candidates = state_at("/repo").focus_candidates();
+        for &focus in candidates {
             let mut state = state_at("/repo");
             state.focus = focus;
             let terminal = terminal_with(&state, size);
             let buffer = terminal.backend().buffer();
 
-            for &pane in Pane::FOCUSABLE {
+            for &pane in candidates {
                 let bold = buffer[corner(pane, size)].modifier.contains(Modifier::BOLD);
                 // **`pane == focus` では見られない。** Graph と Diff は同じ領域なので、
                 // Diff にフォーカスがあるとき「Graph の枠」の座標には Diff の枠が
@@ -307,6 +329,33 @@ mod tests {
         // **右のワーキングツリーは出したまま。** どのファイルを見ているかが一覧の側でも
         // 判るようにする（07）。
         assert!(text.contains("Working tree"), "{text}");
+    }
+
+    #[test]
+    fn the_right_area_swaps_between_the_worktree_and_the_commit_detail() {
+        // 右ペインの中身はグラフの選択だけで決まる。`focus` では決めない（07）。
+        let mut state = crate::test_util::state_with_commits(&["first"]);
+        let text = draw(&state, TermSize::default()).join("\n");
+        assert!(text.contains("Working tree"), "{text}");
+        assert!(!text.contains("Commit "), "{text}");
+
+        state.graph.cursor = 1;
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(!text.contains("Working tree"), "{text}");
+        assert!(text.contains("Commit "), "{text}");
+    }
+
+    #[test]
+    fn the_right_area_follows_the_selection_even_while_the_graph_has_focus() {
+        // `focus` で決めると、Graph にフォーカスした瞬間に右が消える（07）。
+        let mut state = crate::test_util::state_with_commits(&["first"]);
+        state.graph.cursor = 1;
+        state.focus = Pane::Graph;
+
+        let text = draw(&state, TermSize::default()).join("\n");
+
+        assert!(text.contains("Commit "), "{text}");
     }
 
     #[test]

@@ -1,106 +1,48 @@
 //! グラフペインの描画。設計は `docs/design/07-ui.md` と `docs/design/06-graph.md`。
 //!
-//! 1 行は `罫線  短縮 Oid  ラベル  summary`。罫線のセルを文字と色に写すのは
-//! `ui::lanes`。
+//! 1 行は `罫線  短縮 Oid  ラベル  summary`。先頭にワーキングツリーを表す WIP 行が
+//! 1 つ入る。罫線のセルを文字と色に写すのは `ui::lanes`。
+//!
+//! **コミットの詳細はここに描かない。** 右ペインに出す（`panes::commit`）。M1 では
+//! `Enter` でペインの下部に展開していたので、グラフの高さが `expanded` で変わり、
+//! `ui::graph_rows` と `Msg::Layout` が「詳細を出すか」を運んでいた。差し替えではなく
+//! 分割だったのが原因で、右へ移すとその引数ごと消えた（07 の「CommitDetail ペイン」）。
 
-use mewgit_core::app::{AppState, GraphLine, GraphState, JobKind, Pane};
-use mewgit_core::git_read::{CommitDetail, Oid, RefLabel, Signature, Timestamp};
-use ratatui::layout::{Constraint, Layout, Rect};
+use mewgit_core::app::{AppState, GraphLine, JobKind, Pane};
+use mewgit_core::git_read::RefLabel;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::ui::{self, lanes, theme, time};
-
-/// 短縮 Oid の桁数。`git log --oneline` と同じ。
-const SHORT_OID: usize = 7;
-
-/// 展開した詳細に割く行数（区切り線を含む）。
-const DETAIL_ROWS: u16 = 10;
-
-/// 詳細を出していてもグラフに残す行数。端末を縮めたときに詳細だけが残って
-/// グラフが消えないようにする。
-const MIN_GRAPH_ROWS: u16 = 3;
-
-/// 詳細の領域を取るのに要る行数。区切り線 1 行 + 見出し 3 行。これを割るなら
-/// 出さない。1 行だけ取ると区切り線で埋まり、グラフの行を 1 つ失って何も出ない。
-const MIN_DETAIL_ROWS: u16 = 4;
-
-/// 詳細のうち、メッセージに必ず残す行数。
-///
-/// 見出しは幅が狭いと折り返して伸びる（80 桁ではグラフペインが 46 桁になり、
-/// `Author: 名前 <メール>  日時` が 3 行になる）。1 つの `Paragraph` にまとめると、
-/// 伸びたぶんメッセージが下から押し出されて**本文が 1 行も見えなくなる**。先に
-/// メッセージの領域を取り、足りないときは見出しのほうを切る。
-const MIN_MESSAGE_ROWS: u16 = 3;
+use crate::ui::{self, lanes, theme};
 
 /// ペインの枠。`focused` はフォーカスの強調だけに効き、内側の大きさは変えない。
 fn block(focused: bool) -> Block<'static> {
     ui::pane_block("Graph".to_string(), focused)
 }
 
-/// 詳細の領域を取るか。
+/// 行を描ける領域。`ui::graph_rows` が行数を出すのに使う。
 ///
-/// 展開していても行が 1 つも無ければ出すものが無いので取らない。**判定はこの 1 つ。**
-/// `ui::graph_rows` と [`render`] が別々に決めると、`app` に渡した行数と実際に描く
-/// 行数がずれ、スクロール位置の計算が静かに狂う。
-pub fn shows_detail(graph: &GraphState) -> bool {
-    graph.expanded && !graph.lines.is_empty()
-}
-
-/// 枠の内側をコミットの行と詳細に割る。詳細を出さないときは 2 つ目が `None`。
-///
-/// `ui::graph_rows` が行数を出すのに使う。
-pub fn areas(area: Rect, shows_detail: bool) -> (Rect, Option<Rect>) {
-    split(block(false).inner(area), shows_detail)
-}
-
-/// 枠の内側を割る。`Layout` に任せず自分で計算するのは、レイアウトの解に幅を
-/// 持たせないため。
-fn split(inner: Rect, shows_detail: bool) -> (Rect, Option<Rect>) {
-    let detail = if shows_detail {
-        DETAIL_ROWS.min(inner.height.saturating_sub(MIN_GRAPH_ROWS))
-    } else {
-        0
-    };
-    if detail < MIN_DETAIL_ROWS {
-        return (inner, None);
-    }
-
-    let rows = Rect {
-        height: inner.height - detail,
-        ..inner
-    };
-    let detail = Rect {
-        y: inner.y + rows.height,
-        height: detail,
-        ..inner
-    };
-    (rows, Some(detail))
+/// **枠の内側そのまま。** 高さは端末サイズだけで決まる（07 の「CommitDetail ペイン」）。
+pub fn area(area: Rect) -> Rect {
+    block(false).inner(area)
 }
 
 /// グラフペインを描く。
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
+pub fn render(frame: &mut Frame, outer: Rect, state: &AppState) {
     let block = block(state.focus == Pane::Graph);
     // `block()` はタイトルを確保するので 1 フレームに 1 回だけ作る。
-    let (rows, detail) = split(block.inner(area), shows_detail(&state.graph));
-    frame.render_widget(block, area);
+    let rows = block.inner(outer);
+    frame.render_widget(block, outer);
 
-    if state.graph.lines.is_empty() {
-        // 行が無ければ詳細も無い（`shows_detail`）ので、`rows` が枠の内側そのまま。
-        frame.render_widget(Paragraph::new(empty_message(state)), rows);
-        return;
-    }
-
-    if let Some(detail) = detail {
-        render_detail(frame, detail, state);
-    }
-
-    // 見えている行だけを切り出す。添字は `scroll` からの相対で戻せる。
-    let start = state.graph.scroll.min(state.graph.lines.len());
-    let end = (start + rows.height as usize).min(state.graph.lines.len());
-    let visible = &state.graph.lines[start..end];
+    let graph = &state.graph;
+    // 見えている表示行だけを切り出す。表示行 0 は WIP 行なので、コミットの行は
+    // 1 つずらして取る（`GraphState::selection` と同じ対応）。
+    let start = graph.scroll.min(graph.rows());
+    let end = (start + rows.height as usize).min(graph.rows());
+    let visible = &graph.lines[start.saturating_sub(1)..end.saturating_sub(1)];
 
     let view = View {
         state,
@@ -115,88 +57,28 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         palette: lanes::palette(&state.config.graph.colors),
     };
 
-    let lines: Vec<Line> = visible
-        .iter()
-        .enumerate()
-        .map(|(offset, line)| view.commit_line(start + offset, line))
-        .collect();
+    let mut lines: Vec<Line> = Vec::with_capacity(end.saturating_sub(start) + 1);
+    if start == 0 {
+        lines.push(view.wip_line());
+        // コミットが 1 つも無いときは、読み込み中なのか本当に空なのかを WIP 行の下に
+        // 出す。ペインごと差し替えないのは、WIP 行だけは常に選べるため。
+        if graph.lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                empty_message(state),
+                theme::muted(),
+            )));
+        }
+    }
+    // 先頭が WIP 行なので、コミットの表示行は 1 から始まる。
+    let first = start.max(1);
+    lines.extend(
+        visible
+            .iter()
+            .enumerate()
+            .map(|(offset, line)| view.commit_line(first + offset, line)),
+    );
 
     frame.render_widget(Paragraph::new(lines), rows);
-}
-
-/// 選択コミットの詳細。上辺の罫線でグラフと分ける。
-fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
-    let block = Block::default().borders(Borders::TOP);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let Some(detail) = state.graph.fresh_detail() else {
-        // カーソルの指すコミットのものが無い。届いていないのか失敗したのかは
-        // `JobTracker` が知っている（07 の「詳細の展開」）。
-        frame.render_widget(Paragraph::new(detail_placeholder(state)), inner);
-        return;
-    };
-
-    // 見出しの高さは折り返し後の行数から出し、メッセージのぶんは必ず残す。
-    let (head, head_rows) = ui::wrapped(head_lines(detail), inner.width);
-    let head_rows = head_rows.min(inner.height.saturating_sub(MIN_MESSAGE_ROWS));
-    let [head_area, message_area] =
-        Layout::vertical([Constraint::Length(head_rows), Constraint::Min(0)]).areas(inner);
-
-    frame.render_widget(head, head_area);
-    frame.render_widget(
-        Paragraph::new(message_lines(detail, message_area.height as usize))
-            .wrap(Wrap { trim: false }),
-        message_area,
-    );
-}
-
-/// 詳細がまだ無いときの文言。空のグラフの出し分けと同じ形。
-fn detail_placeholder(state: &AppState) -> &'static str {
-    if state.jobs.is_running(JobKind::LoadCommitDetail) {
-        "読み込み中…"
-    } else {
-        "詳細を読み込めませんでした"
-    }
-}
-
-/// 詳細の見出し。`git show` の並びに近づける。
-fn head_lines(detail: &CommitDetail) -> Vec<Line<'_>> {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!("commit {}", detail.oid),
-            theme::muted(),
-        )),
-        Line::raw(who("Author", &detail.author, detail.author_time)),
-        Line::raw(who("Commit", &detail.committer, detail.committer_time)),
-    ];
-
-    if !detail.parents.is_empty() {
-        let parents: Vec<String> = detail.parents.iter().map(short).collect();
-        lines.push(Line::raw(format!("Parent: {}", parents.join(" "))));
-    }
-
-    lines.push(Line::raw(""));
-    lines
-}
-
-/// メッセージ全文。`rows` は描ける行数で、そこまでで打ち切る。
-///
-/// 1 行が折り返しで 2 行以上になることはあっても 0 行になることはないので、見える行を
-/// 落とすことはない。マージや revert の本文は数百行になることがあり、全部組むと毎
-/// フレームその数だけ `Line` を作ることになる。
-fn message_lines(detail: &CommitDetail, rows: usize) -> Vec<Line<'_>> {
-    detail.message.lines().take(rows).map(Line::raw).collect()
-}
-
-/// `Author: name <mail>  2026-09-06 15:35:55 +0900`。
-fn who(label: &str, sig: &Signature, time: Timestamp) -> String {
-    format!(
-        "{label}: {} <{}>  {}",
-        sig.name,
-        sig.email,
-        time::format(time)
-    )
 }
 
 /// 1 フレームのあいだ変わらない描画条件。行ごとに引き回す値をまとめる。
@@ -209,7 +91,7 @@ struct View<'a> {
     palette: Vec<Color>,
 }
 
-/// 行が 1 つも無いときに出す文言。
+/// コミットが 1 つも無いときに出す文言。
 ///
 /// 読み込みが失敗したときに「読み込み中…」のままにしない。エラーの通知は
 /// ステータスバーに出るが、次の通知で上書きされる。
@@ -224,7 +106,29 @@ fn empty_message(state: &AppState) -> &'static str {
 }
 
 impl<'a> View<'a> {
-    /// 1 行分。`罫線  短縮 Oid  ラベル  summary`。
+    /// 先頭の WIP 行。`◇  WIP (n)`。
+    ///
+    /// **罫線を繋がない**（06 の「責務」）。`◇` を罫線の桁の先頭に置き、残りは空白で
+    /// 埋める。埋める幅に短縮 Oid のぶんも含めるのは、`WIP (n)` を下の行の summary と
+    /// 同じ桁に揃えるため。
+    fn wip_line(&self) -> Line<'static> {
+        let ascii = self.state.config.graph.ascii;
+        let glyph = lanes::wip_glyph(ascii);
+        let pad = lanes::width(self.lanes) + ui::SHORT_OID + 1 - glyph.chars().count();
+
+        let line = Line::from(vec![
+            Span::raw(glyph),
+            Span::raw(" ".repeat(pad)),
+            Span::raw(format!("WIP ({})", self.state.worktree.len())),
+        ]);
+        if self.state.graph.cursor == 0 {
+            line.style(theme::selected())
+        } else {
+            line
+        }
+    }
+
+    /// 1 行分。`罫線  短縮 Oid  ラベル  summary`。`index` は表示行の添字。
     fn commit_line(&self, index: usize, line: &'a GraphLine) -> Line<'a> {
         // `&self` より長い借用が要る。ラベルは `state` から借りて行に載せるため。
         let state = self.state;
@@ -239,7 +143,10 @@ impl<'a> View<'a> {
         );
         spans.reserve(3 + labels.len() * 4);
 
-        spans.push(Span::styled(short(&line.commit.oid), theme::muted()));
+        spans.push(Span::styled(
+            ui::short_oid(&line.commit.oid),
+            theme::muted(),
+        ));
         spans.push(Span::raw(" "));
 
         for label in labels {
@@ -282,24 +189,23 @@ fn label_style(label: &RefLabel, head_style: Style) -> Style {
     }
 }
 
-/// 先頭 [`SHORT_OID`] 桁。
-fn short(oid: &Oid) -> String {
-    let mut text = oid.to_string();
-    text.truncate(SHORT_OID);
-    text
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::{
         draw, graph_rows, state_at, state_with_commits, state_with_history, terminal_with,
     };
-    use mewgit_core::app::{init, update, JobKind, Key, KeyCode, Msg, TermSize};
+    use mewgit_core::app::{init, update, GraphSelection, Msg, TermSize};
     use mewgit_core::git_read::{GitReadError, Oid, RefIndex, RefLabel};
-    use mewgit_core::test_util::{fake_commit, fake_detail, fake_oid};
+    use mewgit_core::test_util::fake_commit;
     use ratatui::buffer::Buffer;
     use ratatui::style::Modifier;
+
+    /// WIP 行が出る画面の行。ヘッダ 1 行 + ペインの枠の上辺 1 行。
+    const WIP_ROW: usize = 2;
+
+    /// 1 件目のコミットが出る画面の行。WIP 行の 1 つ下（07 の「Graph ペイン」）。
+    const FIRST_ROW: usize = WIP_ROW + 1;
 
     /// その行で最初に `symbol` が出る桁。
     ///
@@ -315,20 +221,85 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        // 枠の中の 1 行目が 1 件目。行の並びは `git_read` が決めた順のまま。
-        assert!(lines[2].contains("newest"), "{:?}", lines[2]);
-        assert!(lines[3].contains("oldest"), "{:?}", lines[3]);
+        // 枠の中の 1 行目は WIP 行。コミットはその下から、`git_read` が決めた順のまま。
+        assert!(
+            lines[FIRST_ROW].contains("newest"),
+            "{:?}",
+            lines[FIRST_ROW]
+        );
+        assert!(lines[FIRST_ROW + 1].contains("oldest"), "{:?}", lines[3]);
         let oid = state.graph.lines[0].commit.oid.to_string();
         assert!(
-            lines[2].contains(&format!("{} newest", &oid[..SHORT_OID])),
+            lines[FIRST_ROW].contains(&format!("{} newest", &oid[..ui::SHORT_OID])),
             "短縮 Oid が summary の前にありません: {:?}",
-            lines[2]
+            lines[FIRST_ROW]
         );
         assert!(
-            !lines[2].contains(&oid[..SHORT_OID + 1]),
+            !lines[FIRST_ROW].contains(&oid[..ui::SHORT_OID + 1]),
             "Oid を切り詰めていません: {:?}",
-            lines[2]
+            lines[FIRST_ROW]
         );
+    }
+
+    #[test]
+    fn the_first_row_is_the_wip_row_and_counts_the_changes() {
+        let mut state = state_with_commits(&["first"]);
+        state.worktree.snapshot =
+            mewgit_core::test_util::fake_snapshot(&["a.txt"], &["b.txt"], &[]);
+
+        let lines = draw(&state, TermSize::default());
+
+        assert!(lines[WIP_ROW].contains("◇"), "{:?}", lines[WIP_ROW]);
+        assert!(lines[WIP_ROW].contains("WIP (2)"), "{:?}", lines[WIP_ROW]);
+    }
+
+    #[test]
+    fn the_wip_row_is_there_even_with_no_changes_and_no_commits() {
+        // 件数で出し入れすると status が届くたびに表示行数が変わり、カーソルの
+        // 座り直しが要る（01 の「グラフの行」）。空のリポジトリでも 1 行目は WIP。
+        let state = state_with_commits(&[]);
+
+        let lines = draw(&state, TermSize::default());
+
+        assert!(lines[WIP_ROW].contains("WIP (0)"), "{:?}", lines[WIP_ROW]);
+    }
+
+    #[test]
+    fn the_wip_row_has_no_lane_art_but_lines_up_with_the_summaries() {
+        // 罫線は繋がない（06 の「責務」）。それでも本文の桁は下の行と揃える。
+        let state = state_with_history(MERGE);
+
+        let lines = draw(&state, TermSize::default());
+
+        assert_eq!(art(&lines, WIP_ROW), "◇   ");
+        // 桁で比べる。`str::find` はバイト位置を返すので、`◇` や枠の `│` のぶんずれる。
+        let summary = lines[FIRST_ROW]
+            .chars()
+            .position(|c| c.is_ascii_hexdigit())
+            .expect("Oid がありません")
+            + ui::SHORT_OID
+            + 1;
+        let wip = lines[WIP_ROW]
+            .chars()
+            .position(|c| c == 'W')
+            .expect("WIP 行がありません");
+        assert_eq!(
+            wip, summary,
+            "{:?} / {:?}",
+            lines[WIP_ROW], lines[FIRST_ROW]
+        );
+    }
+
+    #[test]
+    fn ascii_replaces_the_wip_glyph_too() {
+        // `◇` は罫線と同じ East Asian Ambiguous 幅。逃げ道は罫線と同じ `ascii`（06）。
+        let mut state = state_with_commits(&["first"]);
+        state.config.graph.ascii = true;
+
+        let lines = draw(&state, TermSize::default());
+
+        assert!(!lines[WIP_ROW].contains("◇"), "{:?}", lines[WIP_ROW]);
+        assert!(lines[WIP_ROW].contains("@ "), "{:?}", lines[WIP_ROW]);
     }
 
     #[test]
@@ -367,9 +338,9 @@ mod tests {
 
         // 種別ごとの飾りは 06 の「ラベル」。並びは Local → Remote → Tag。
         assert!(
-            lines[2].contains("[main] {origin/main} <v1.0>"),
+            lines[FIRST_ROW].contains("[main] {origin/main} <v1.0>"),
             "{:?}",
-            lines[2]
+            lines[FIRST_ROW]
         );
     }
 
@@ -389,8 +360,9 @@ mod tests {
         let terminal = terminal_with(&state, TermSize::default());
         let buffer = terminal.backend().buffer();
 
-        let x = column_of(buffer, 2, "[").expect("ラベルが描かれていません");
-        assert!(buffer[(x, 2)].modifier.contains(Modifier::BOLD));
+        let y = FIRST_ROW as u16;
+        let x = column_of(buffer, y, "[").expect("ラベルが描かれていません");
+        assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -407,21 +379,39 @@ mod tests {
         let terminal = terminal_with(&state, TermSize::default());
         let buffer = terminal.backend().buffer();
 
-        let x = column_of(buffer, 2, "{").expect("ラベルが描かれていません");
-        assert!(!buffer[(x, 2)].modifier.contains(Modifier::BOLD));
+        let y = FIRST_ROW as u16;
+        let x = column_of(buffer, y, "{").expect("ラベルが描かれていません");
+        assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD));
     }
 
     #[test]
     fn the_cursor_line_is_highlighted() {
+        // `cursor` は表示行の添字。`1` は WIP 行の 1 つ下、つまり 1 件目のコミット。
         let mut state = state_with_commits(&["first", "second"]);
         state.graph.cursor = 1;
 
         let terminal = terminal_with(&state, TermSize::default());
         let buffer = terminal.backend().buffer();
 
-        // 枠の中は y=2 から。カーソルは 2 行目（y=3）。
-        assert!(!buffer[(1, 2)].modifier.contains(Modifier::REVERSED));
-        assert!(buffer[(1, 3)].modifier.contains(Modifier::REVERSED));
+        assert!(!buffer[(1, WIP_ROW as u16)]
+            .modifier
+            .contains(Modifier::REVERSED));
+        assert!(buffer[(1, FIRST_ROW as u16)]
+            .modifier
+            .contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn the_wip_row_is_highlighted_when_it_is_selected() {
+        // 既定のカーソルは WIP 行（`cursor == 0`）。
+        let state = state_with_commits(&["first"]);
+
+        let terminal = terminal_with(&state, TermSize::default());
+        let buffer = terminal.backend().buffer();
+
+        assert!(buffer[(1, WIP_ROW as u16)]
+            .modifier
+            .contains(Modifier::REVERSED));
     }
 
     #[test]
@@ -433,8 +423,10 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        assert!(lines[2].contains("commit 2"), "{:?}", lines[2]);
+        // 表示行 0 は WIP 行なので、2 行スクロールすると `lines[1]` が先頭に来る。
+        assert!(lines[WIP_ROW].contains("commit 1"), "{:?}", lines[WIP_ROW]);
         assert!(!lines.iter().any(|line| line.contains("commit 0 ")));
+        assert!(!lines.iter().any(|line| line.contains("WIP")));
     }
 
     #[test]
@@ -447,17 +439,36 @@ mod tests {
 
         let drawn = lines.iter().filter(|line| line.contains("commit ")).count();
         // `ui::graph_rows` が `app` に渡す行数と、実際に描く行数は同じでなければならない。
-        // ずれるとカーソルが画面の外に出る。
-        assert_eq!(drawn, graph_rows(&state));
+        // ずれるとカーソルが画面の外に出る。先頭の WIP 行は "commit " を含まないので
+        // 1 を足して比べる。
+        assert_eq!(drawn + 1, graph_rows(&state));
     }
 
     #[test]
-    fn an_empty_repository_says_so_instead_of_showing_nothing() {
+    fn the_graph_height_does_not_depend_on_what_is_selected() {
+        // コミット詳細は右ペインに出るので、選択が変わってもグラフの高さは動かない
+        // （07 の「CommitDetail ペイン」）。動くと `Msg::Layout` が毎回流れる。
+        let mut state = state_with_commits(&["first", "second"]);
+        assert_eq!(state.graph.selection(), GraphSelection::Wip);
+        let on_wip = graph_rows(&state);
+
+        state.graph.cursor = 1;
+        assert!(matches!(state.graph.selection(), GraphSelection::Commit(_)));
+
+        assert_eq!(graph_rows(&state), on_wip);
+    }
+
+    #[test]
+    fn an_empty_repository_says_so_under_the_wip_row() {
         let state = state_with_commits(&[]);
 
         let lines = draw(&state, TermSize::default());
 
-        assert!(lines[2].contains("コミットがありません"), "{:?}", lines[2]);
+        assert!(
+            lines[FIRST_ROW].contains("コミットがありません"),
+            "{:?}",
+            lines[FIRST_ROW]
+        );
     }
 
     #[test]
@@ -467,7 +478,11 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        assert!(lines[2].contains("読み込み中"), "{:?}", lines[2]);
+        assert!(
+            lines[FIRST_ROW].contains("読み込み中"),
+            "{:?}",
+            lines[FIRST_ROW]
+        );
     }
 
     #[test]
@@ -486,7 +501,11 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        assert!(lines[2].contains("読み込めませんでした"), "{:?}", lines[2]);
+        assert!(
+            lines[FIRST_ROW].contains("読み込めませんでした"),
+            "{:?}",
+            lines[FIRST_ROW]
+        );
     }
 
     #[test]
@@ -496,9 +515,9 @@ mod tests {
         let lines = draw(&state, TermSize::default());
 
         assert!(
-            lines[2].contains("日本語のコミットメッセージ"),
+            lines[FIRST_ROW].contains("日本語のコミットメッセージ"),
             "{:?}",
-            lines[2]
+            lines[FIRST_ROW]
         );
     }
 
@@ -529,10 +548,10 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        assert_eq!(art(&lines, 2), "○─╮ ");
-        assert_eq!(art(&lines, 3), "● │ ");
-        assert_eq!(art(&lines, 4), "│ ● ");
-        assert_eq!(art(&lines, 5), "●─╯ ");
+        assert_eq!(art(&lines, FIRST_ROW), "○─╮ ");
+        assert_eq!(art(&lines, FIRST_ROW + 1), "● │ ");
+        assert_eq!(art(&lines, FIRST_ROW + 2), "│ ● ");
+        assert_eq!(art(&lines, FIRST_ROW + 3), "●─╯ ");
     }
 
     #[test]
@@ -544,10 +563,10 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        assert_eq!(art(&lines, 2), "●   ");
-        assert_eq!(art(&lines, 3), "├─○ ");
-        assert_eq!(art(&lines, 4), "│ ● ");
-        assert_eq!(art(&lines, 5), "●─╯ ");
+        assert_eq!(art(&lines, FIRST_ROW), "●   ");
+        assert_eq!(art(&lines, FIRST_ROW + 1), "├─○ ");
+        assert_eq!(art(&lines, FIRST_ROW + 2), "│ ● ");
+        assert_eq!(art(&lines, FIRST_ROW + 3), "●─╯ ");
     }
 
     #[test]
@@ -557,9 +576,9 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        assert_eq!(art(&lines, 2), "o-\\ ");
-        assert_eq!(art(&lines, 3), "* | ");
-        assert_eq!(art(&lines, 5), "*-/ ");
+        assert_eq!(art(&lines, FIRST_ROW), "o-\\ ");
+        assert_eq!(art(&lines, FIRST_ROW + 1), "* | ");
+        assert_eq!(art(&lines, FIRST_ROW + 3), "*-/ ");
     }
 
     #[test]
@@ -571,10 +590,11 @@ mod tests {
 
         // 既定の palette は blue, magenta, …（08）。第 1 親のレーンは 0 番、
         // 第 2 親に開いたレーンは 1 番。
-        assert_eq!(buffer[(1, 2)].symbol(), "○");
-        assert_eq!(buffer[(1, 2)].fg, Color::Blue);
-        assert_eq!(buffer[(3, 2)].symbol(), "╮");
-        assert_eq!(buffer[(3, 2)].fg, Color::Magenta);
+        let y = FIRST_ROW as u16;
+        assert_eq!(buffer[(1, y)].symbol(), "○");
+        assert_eq!(buffer[(1, y)].fg, Color::Blue);
+        assert_eq!(buffer[(3, y)].symbol(), "╮");
+        assert_eq!(buffer[(3, y)].fg, Color::Magenta);
     }
 
     #[test]
@@ -586,8 +606,9 @@ mod tests {
         let terminal = terminal_with(&state, TermSize::default());
         let buffer = terminal.backend().buffer();
 
-        assert_eq!(buffer[(1, 2)].symbol(), "○");
-        assert_eq!(buffer[(1, 2)].fg, Color::Reset);
+        let y = FIRST_ROW as u16;
+        assert_eq!(buffer[(1, y)].symbol(), "○");
+        assert_eq!(buffer[(1, y)].fg, Color::Reset);
     }
 
     #[test]
@@ -600,8 +621,9 @@ mod tests {
         let terminal = terminal_with(&state, TermSize::default());
         let buffer = terminal.backend().buffer();
 
-        assert_eq!(buffer[(1, 2)].fg, Color::Reset);
-        assert_eq!(buffer[(3, 2)].fg, Color::Red);
+        let y = FIRST_ROW as u16;
+        assert_eq!(buffer[(1, y)].fg, Color::Reset);
+        assert_eq!(buffer[(3, y)].fg, Color::Red);
     }
 
     #[test]
@@ -612,7 +634,7 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
-        let starts: Vec<Option<usize>> = (2..6)
+        let starts: Vec<Option<usize>> = (FIRST_ROW..FIRST_ROW + 4)
             .map(|row| lines[row].chars().position(|c| c.is_ascii_hexdigit()))
             .collect();
         assert_eq!(starts, vec![Some(TEXT_COLUMN); 4], "{starts:?}");
@@ -625,182 +647,5 @@ mod tests {
         assert_ne!(other, Oid::zero());
 
         assert!(state.graph.refs.labels(other).is_empty());
-    }
-
-    /// 詳細を展開し、届いた状態にする。`update` を通すので `viewport` も本番と同じ。
-    fn expanded_with(summaries: &[&str], detail: mewgit_core::git_read::CommitDetail) -> AppState {
-        let mut state = state_with_commits(summaries);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-        // 展開でグラフが縮む。ランタイムなら `Msg::Layout` が入れる値（01）。
-        state.graph.viewport = graph_rows(&state);
-        let _ = update(
-            &mut state,
-            Msg::CommitDetailLoaded {
-                oid: detail.oid,
-                result: Box::new(Ok(detail)),
-            },
-        );
-        state
-    }
-
-    #[test]
-    fn expanding_takes_rows_away_from_the_graph() {
-        let mut state = state_with_commits(&["first"]);
-        let collapsed = graph_rows(&state);
-
-        state.graph.expanded = true;
-        let expanded = graph_rows(&state);
-
-        assert!(
-            expanded < collapsed,
-            "詳細を出しても行数が減っていません: {collapsed} -> {expanded}"
-        );
-        assert_eq!(collapsed - expanded, DETAIL_ROWS as usize);
-    }
-
-    #[test]
-    fn the_message_survives_a_narrow_pane() {
-        // 80 桁だとグラフペインは 46 桁で、見出しが折り返して 10 行を埋める。
-        // 1 つの Paragraph にまとめていると本文が 1 行も見えなくなる。
-        let detail = fake_detail(0, "subject line\n\nbody line");
-        let state = expanded_with(&["subject line"], detail);
-
-        let text = draw(&state, TermSize::default()).join("\n");
-
-        assert!(text.contains("subject line"), "{text}");
-        assert!(text.contains("body line"), "{text}");
-    }
-
-    #[test]
-    fn the_detail_shows_the_message_signatures_and_parents() {
-        let mut detail = fake_detail(0, "subject\n\nbody line");
-        detail.parents = vec![fake_oid(1)];
-        let state = expanded_with(&["subject"], detail);
-
-        // 80 桁だと右ペインのぶんグラフが 46 桁になり、見出しが折り返して
-        // メッセージが詳細の高さから押し出される。中身を見るテストは広い端末で描く
-        // （狭いレイアウトは M6）。
-        let lines = draw(
-            &state,
-            TermSize {
-                width: 120,
-                height: 24,
-            },
-        );
-        let text = lines.join("\n");
-
-        assert!(text.contains("subject"), "{text}");
-        assert!(text.contains("body line"), "{text}");
-        assert!(text.contains("Author: mewgit test"), "{text}");
-        assert!(text.contains("Commit: mewgit test"), "{text}");
-        // 日時はコミットのタイムゾーンで出す（`fake_detail` は epoch の +0000）。
-        assert!(text.contains("1970-01-01 00:00:00 +0000"), "{text}");
-        assert!(
-            text.contains(&format!(
-                "Parent: {}",
-                &fake_oid(1).to_string()[..SHORT_OID]
-            )),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn the_graph_rows_are_still_drawn_under_the_detail() {
-        let state = expanded_with(&["first", "second"], fake_detail(0, "first"));
-
-        let lines = draw(&state, TermSize::default());
-
-        assert!(lines[2].contains("first"), "{:?}", lines[2]);
-        assert!(lines[3].contains("second"), "{:?}", lines[3]);
-    }
-
-    #[test]
-    fn a_detail_for_another_commit_says_it_is_loading() {
-        // カーソルを動かした直後は、まだ前のコミットの詳細しか無い。
-        let mut state = expanded_with(&["first", "second"], fake_detail(0, "first"));
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
-        assert!(state.jobs.is_running(JobKind::LoadCommitDetail));
-
-        let text = draw(&state, TermSize::default()).join("\n");
-
-        assert!(text.contains("読み込み中"), "{text}");
-        // 前のコミットの本文を出したままにしない。
-        assert!(!text.contains("Author: mewgit test"), "{text}");
-    }
-
-    #[test]
-    fn a_detail_that_failed_says_so_instead_of_loading() {
-        let mut state = expanded_with(&["first", "second"], fake_detail(0, "first"));
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
-        let oid = state.graph.cursor_commit().unwrap().oid;
-        let _ = update(
-            &mut state,
-            Msg::CommitDetailLoaded {
-                oid,
-                result: Box::new(Err(GitReadError::NonUtf8Head)),
-            },
-        );
-
-        let text = draw(&state, TermSize::default()).join("\n");
-
-        assert!(text.contains("詳細を読み込めませんでした"), "{text}");
-    }
-
-    #[test]
-    fn an_empty_graph_uses_the_whole_pane_even_when_expanded() {
-        // 行が 1 つも無ければ詳細に出すものも無い。描く高さと `graph_rows` が
-        // 返す行数は、この場合も一致していなければならない。
-        let mut state = state_with_commits(&[]);
-        state.graph.expanded = true;
-
-        let lines = draw(&state, TermSize::default());
-
-        assert!(lines[2].contains("コミットがありません"), "{:?}", lines[2]);
-        assert!(!lines.join("\n").contains("読み込み中"));
-        // 描く高さと `graph_rows` が返す行数は、この場合も一致していること。
-        let expanded = graph_rows(&state);
-        state.graph.expanded = false;
-        assert_eq!(expanded, graph_rows(&state));
-    }
-
-    #[test]
-    fn a_detail_that_would_be_only_a_border_is_not_opened() {
-        // 1 行しか取れないと区切り線で埋まる。グラフの行を 1 つ失って何も出ない
-        // という状態を作らない。
-        let mut state = state_with_commits(&["first"]);
-
-        for height in 3..24u16 {
-            state.term = TermSize { width: 80, height };
-            state.graph.expanded = false;
-            let collapsed = graph_rows(&state);
-            state.graph.expanded = true;
-            let expanded = graph_rows(&state);
-
-            let detail = collapsed - expanded;
-            assert!(
-                detail == 0 || detail >= MIN_DETAIL_ROWS as usize,
-                "height {height}: 詳細に {detail} 行しか取れていません"
-            );
-        }
-    }
-
-    #[test]
-    fn a_short_pane_keeps_the_graph_visible() {
-        // 端末を縮めても、詳細だけが残ってグラフが消えることはない。詳細に割けるのは
-        // グラフに `MIN_GRAPH_ROWS` 行を残せる範囲だけで、それも取れなければ出さない。
-        let mut state = state_with_commits(&["first"]);
-
-        for height in 3..16u16 {
-            state.term = TermSize { width: 80, height };
-            state.graph.expanded = false;
-            let collapsed = graph_rows(&state);
-            state.graph.expanded = true;
-            let expanded = graph_rows(&state);
-
-            assert!(
-                expanded >= collapsed.min(MIN_GRAPH_ROWS as usize),
-                "height {height}: 展開すると {collapsed} 行が {expanded} 行になります"
-            );
-        }
     }
 }

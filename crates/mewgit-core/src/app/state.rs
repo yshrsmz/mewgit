@@ -124,6 +124,44 @@ impl AppState {
         }
     }
 
+    /// `Tab` / `Shift+Tab` の巡回に入るペイン。
+    ///
+    /// **並びは定数でも、どの並びを使うかはグラフの選択で変わる**（01 の
+    /// 「Pane と Modal」）。右ペインの中身は選択で決まるので、候補を固定にすると
+    /// `focus` と画面の中身が食い違う状態（コミットを見ているのにキーは Working tree が
+    /// 受ける）を表現できてしまう。
+    pub fn focus_candidates(&self) -> &'static [Pane] {
+        match self.graph.selection() {
+            GraphSelection::Wip => Pane::WIP_FOCUS,
+            GraphSelection::Commit(_) => Pane::COMMIT_FOCUS,
+        }
+    }
+
+    /// 巡回の次。末尾からは先頭に戻る。
+    pub fn next_focus(&self) -> Pane {
+        self.focus.cycle(self.focus_candidates(), 1)
+    }
+
+    /// 巡回の前。先頭からは末尾に戻る。
+    pub fn prev_focus(&self) -> Pane {
+        self.focus.cycle(self.focus_candidates(), -1)
+    }
+
+    /// 候補から外れた `focus` を [`Pane::Graph`] に座り直させる。
+    ///
+    /// グラフのカーソルが WIP 行を出入りすると候補が入れ替わる。戻す先を `Graph` に
+    /// するのは、どちらの選択でも候補にある唯一のペインだから。
+    ///
+    /// **フォーカスを動かすキーが通る `update::focus` は経由しない。** あちらは
+    /// 「見えるようになった diff を頼む」ためのもので、ここが移す先は必ず `Graph`
+    /// （`wanted_diff()` が `None` になる側）なので頼むものが無い。通しても必ず
+    /// `Cmd::None` が返る腕が 1 つ増えるだけになる。
+    pub fn reseat_focus(&mut self) {
+        if !self.focus_candidates().contains(&self.focus) {
+            self.focus = Pane::Graph;
+        }
+    }
+
     /// いま出すべき diff の対象。出すものが無ければ `None`（01 の「diff の遅延取得」）。
     ///
     /// **判定はここ 1 つ。** 次に何を読むかを決める `update` と、中身を描くか
@@ -190,35 +228,45 @@ pub enum Pane {
     Stash,
     Prs,
     Worktree,
+    CommitDetail,
     Diff,
 }
 
 impl Pane {
-    /// `Tab` / `Shift+Tab` の巡回に入るペイン。
+    /// WIP 行を選んでいるあいだの巡回先。右は Working tree。
     ///
     /// **まだ実装していないペインは入れない**（07）。移れてしまうと、キーを受ける先の
-    /// 無い画面に入り込む。ペインを実装したらここに足す。並びは表示順。
-    pub const FOCUSABLE: &'static [Pane] = &[Pane::Graph, Pane::Worktree, Pane::Diff];
+    /// 無い画面に入り込む。ペインを実装したらここに足す。並びは `Pane` の宣言順。
+    const WIP_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::Worktree, Pane::Diff];
 
-    /// 巡回の次。末尾からは先頭に戻る。
-    pub fn next(self) -> Pane {
-        self.cycle(1)
-    }
+    /// コミットを選んでいるあいだの巡回先。右はコミット詳細。
+    ///
+    /// **`Worktree` と `Diff` を入れない。** 入れると、コミットを選んだまま
+    /// `focus == Pane::Worktree` でいられてしまい、`s` / `u` / `x` が画面に出ていない
+    /// ファイルを stage する（01 の「Pane と Modal」）。`Diff` が戻ってくるのは
+    /// コミットのファイル一覧を入れるタスク。
+    const COMMIT_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::CommitDetail];
 
-    /// 巡回の前。先頭からは末尾に戻る。
-    pub fn prev(self) -> Pane {
-        self.cycle(-1)
-    }
-
-    /// 巡回を `delta` 個進める。一覧に無いペイン（実装前のものが `focus` に
-    /// 入っている場合）は先頭から数え直す。
-    fn cycle(self, delta: isize) -> Pane {
-        let panes = Pane::FOCUSABLE;
+    /// `panes` の並びのうち `delta` 個先。端では反対側に回る。
+    ///
+    /// 一覧に無いペイン（選択が変わって候補から外れた直後など）は先頭から数え直す。
+    fn cycle(self, panes: &[Pane], delta: isize) -> Pane {
         let current = panes.iter().position(|&pane| pane == self).unwrap_or(0);
         let len = panes.len() as isize;
         let next = (current as isize + delta).rem_euclid(len) as usize;
         panes[next]
     }
+}
+
+/// グラフのカーソルが指しているもの。
+///
+/// **先頭の WIP 行はコミットではない**ので `GraphState::lines` に入れず、カーソルの
+/// 添字を解くここで場合分けする（01 の「グラフの行」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphSelection<'a> {
+    /// ワーキングツリーの変更（グラフ先頭の `◇ WIP` 行）。
+    Wip,
+    Commit(&'a Commit),
 }
 
 /// グラフペインの状態。
@@ -232,6 +280,10 @@ pub struct GraphState {
     /// 行の右に並べる ref ラベル（02）。引くのはグラフペインだけなのでここに置く。
     /// fetch 後の読み直しは M3 で決める。
     pub refs: RefIndex,
+    /// カーソルが指す**表示行**の添字。`0` は先頭の WIP 行、`1..` が `lines`。
+    ///
+    /// 解くのは [`GraphState::selection`] の 1 つ。各所で `lines.get(cursor - 1)` と
+    /// 書くと、`- 1` の書き忘れが 1 行ずれとして静かに通る（01 の「グラフの行」）。
     pub cursor: usize,
     /// 画面最上部に出す行の添字。カーソルだけからは決まらない（カーソルを上に
     /// 動かしたとき、見えているうちは view を動かさない）ので状態として持つ。
@@ -239,8 +291,6 @@ pub struct GraphState {
     /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Layout`] で運んでくる
     /// （`crate::app::Msg::Layout`）。core はヘッダや枠の高さを知らない。
     pub viewport: usize,
-    /// 選択コミットの詳細を展開しているか。
-    pub expanded: bool,
     /// 遅延取得した詳細（02）。どのコミットのものかは `detail.oid` で判る。
     /// カーソルの指すコミットと食い違っていれば、まだ届いていないか失敗したという
     /// こと。「読み込み中」のフラグを別に持たない（01 の「コミット詳細の遅延取得」）。
@@ -293,9 +343,29 @@ impl GraphState {
         self.loaded_all = false;
     }
 
-    /// カーソルが指しているコミット。行が無ければ `None`。
+    /// 表示行の数。先頭の WIP 行を含むので必ず 1 以上。
+    ///
+    /// **WIP 行は変更が無くても出す**（07 の「Graph ペイン」）。件数で出し入れすると
+    /// status が届くたびに表示行数が変わり、カーソルが指すコミットを oid で座り直させる
+    /// 必要が出る。常に 1 行あるなら `1 + lines.len()` の定数関係で済む。
+    pub fn rows(&self) -> usize {
+        self.lines.len() + 1
+    }
+
+    /// カーソルが指しているもの。
+    pub fn selection(&self) -> GraphSelection<'_> {
+        match self.cursor.checked_sub(1).and_then(|at| self.lines.get(at)) {
+            Some(line) => GraphSelection::Commit(&line.commit),
+            None => GraphSelection::Wip,
+        }
+    }
+
+    /// カーソルが指しているコミット。WIP 行を指していれば `None`。
     pub fn cursor_commit(&self) -> Option<&Commit> {
-        self.lines.get(self.cursor).map(|line| &line.commit)
+        match self.selection() {
+            GraphSelection::Commit(commit) => Some(commit),
+            GraphSelection::Wip => None,
+        }
     }
 
     /// カーソルの指すコミットの詳細。別のコミットのものしか無ければ `None`。
@@ -311,13 +381,8 @@ impl GraphState {
 
     /// カーソルを `delta` 行動かす。端では止まる。
     pub fn move_cursor(&mut self, delta: isize) {
-        if self.lines.is_empty() {
-            self.cursor = 0;
-            self.scroll = 0;
-            return;
-        }
-
-        let last = self.lines.len() - 1;
+        // 行が 1 つも積まれていなくても WIP 行はあるので、`rows()` は 1 以上。
+        let last = self.rows() - 1;
         self.cursor = self.cursor.saturating_add_signed(delta).min(last);
         self.scroll_into_view();
     }
@@ -332,9 +397,7 @@ impl GraphState {
         }
         // 窓が広がったときに先に詰める。末尾に貼り付いたまま端末を大きくすると、
         // カーソルは窓の中にいるので下の分岐が動かず、上に行があるのに空白が残る。
-        self.scroll = self
-            .scroll
-            .min(self.lines.len().saturating_sub(self.viewport));
+        self.scroll = self.scroll.min(self.rows().saturating_sub(self.viewport));
         if self.cursor < self.scroll {
             self.scroll = self.cursor;
         } else if self.cursor >= self.scroll + self.viewport {
@@ -1250,23 +1313,116 @@ mod tests {
         assert_eq!(selected(&worktree), None);
     }
 
+    /// コミットを 1 件積んだ状態。カーソルは WIP 行のまま。
+    fn state_with_a_commit() -> AppState {
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        let commit = crate::test_util::fake_commit(1, "summary");
+        let row = GraphRow {
+            oid: commit.oid,
+            lane: 0,
+            cells: Vec::new(),
+            color: crate::graph::ColorId(0),
+        };
+        state.graph.lines.push(GraphLine { commit, row });
+        state
+    }
+
     #[test]
     fn tab_cycles_only_through_the_implemented_panes() {
         // 未実装のペインに移れると、キーを受ける先の無い画面に入り込む。
-        let mut pane = Pane::default();
-        for _ in 0..Pane::FOCUSABLE.len() {
-            assert!(Pane::FOCUSABLE.contains(&pane), "{pane:?}");
-            pane = pane.next();
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        let candidates = state.focus_candidates();
+        for _ in 0..candidates.len() {
+            assert!(candidates.contains(&state.focus), "{:?}", state.focus);
+            state.focus = state.next_focus();
         }
         // 一周して戻る。
-        assert_eq!(pane, Pane::default());
-        assert_eq!(Pane::Graph.prev(), *Pane::FOCUSABLE.last().unwrap());
+        assert_eq!(state.focus, Pane::default());
+        assert_eq!(state.prev_focus(), *candidates.last().unwrap());
     }
 
     #[test]
     fn a_pane_outside_the_cycle_falls_back_to_the_first() {
         // 実装前のペインが `focus` に入っていても、`Tab` で巡回に戻れる。
-        assert_eq!(Pane::Prs.next(), Pane::FOCUSABLE[1]);
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        state.focus = Pane::Prs;
+        assert_eq!(state.next_focus(), state.focus_candidates()[1]);
+    }
+
+    #[test]
+    fn selecting_a_commit_takes_the_worktree_panes_out_of_the_cycle() {
+        // コミットを選んだまま `focus == Pane::Worktree` でいられると、`s` / `u` / `x` が
+        // 画面に出ていないファイルを stage する（01 の「Pane と Modal」）。
+        let mut state = state_with_a_commit();
+        assert!(state.focus_candidates().contains(&Pane::Worktree));
+
+        state.graph.cursor = 1;
+
+        assert!(!state.focus_candidates().contains(&Pane::Worktree));
+        assert!(!state.focus_candidates().contains(&Pane::Diff));
+        assert!(state.focus_candidates().contains(&Pane::CommitDetail));
+    }
+
+    #[test]
+    fn a_focus_that_leaves_the_cycle_is_reseated_on_the_graph() {
+        let mut state = state_with_a_commit();
+        state.focus = Pane::Worktree;
+
+        state.graph.cursor = 1;
+        state.reseat_focus();
+
+        assert_eq!(state.focus, Pane::Graph);
+    }
+
+    #[test]
+    fn a_focus_that_is_still_a_candidate_is_left_alone() {
+        // WIP 行に戻るだけで右ペインのフォーカスを奪わない。
+        let mut state = state_with_a_commit();
+        state.focus = Pane::Worktree;
+
+        state.reseat_focus();
+
+        assert_eq!(state.focus, Pane::Worktree);
+    }
+
+    #[test]
+    fn the_wip_row_is_a_display_row_of_its_own() {
+        // 表示行 0 は WIP 行、1.. が `lines`（01 の「グラフの行」）。
+        let mut state = state_with_a_commit();
+        assert_eq!(state.graph.rows(), 2);
+        assert_eq!(state.graph.selection(), GraphSelection::Wip);
+        assert!(state.graph.cursor_commit().is_none());
+
+        state.graph.cursor = 1;
+
+        let commit = state
+            .graph
+            .cursor_commit()
+            .expect("コミットを指していません");
+        assert_eq!(commit.summary, "summary");
+    }
+
+    #[test]
+    fn the_cursor_stops_at_the_wip_row_and_at_the_last_commit() {
+        let mut state = state_with_a_commit();
+
+        state.graph.move_cursor(-1);
+        assert_eq!(state.graph.cursor, 0);
+
+        state.graph.move_cursor(5);
+        assert_eq!(state.graph.cursor, 1);
+    }
+
+    #[test]
+    fn an_empty_graph_still_has_the_wip_row() {
+        // 行が 1 つも無くても WIP 行は選べる（07 の「Graph ペイン」）。
+        let mut state = AppState::new(RepoInfo::default(), Config::default());
+        assert_eq!(state.graph.rows(), 1);
+
+        state.graph.move_cursor(3);
+
+        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.selection(), GraphSelection::Wip);
     }
 
     #[test]

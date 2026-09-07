@@ -77,6 +77,12 @@ pub enum GitOp {
         start: Option<String>,
         checkout: bool,
     },
+    /// ブランチに切り替える（`switch <name>`）。
+    ///
+    /// **受けるのはブランチ名だけ。** commit を detached で取り出すには
+    /// `switch --detach` が要るので、そのときは別の変種を足す（M5 の cherry-pick /
+    /// revert で「このコミットを取り出す」が要るならそこで決める）。ここに Oid を
+    /// 渡すと `fatal: invalid reference` で落ちる（git 2.55 で確認）。
     Checkout(String),
     BranchDelete {
         name: String,

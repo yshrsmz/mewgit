@@ -84,6 +84,6 @@ pub enum GithubError {
 
 ## PR チェックアウト
 
-1. `pr.head` が同一リポジトリなら `git fetch origin <branch>` → `git checkout -b <branch> --track origin/<branch>`
+1. `pr.head` が同一リポジトリなら `git fetch origin <branch>` → `git switch --create <branch> --track origin/<branch>`（切替は `checkout` を使わない。03 の argv の表）
 2. fork なら `git fetch origin pull/<n>/head:<branch>` でローカルブランチを作り、`.git/config` に `branch.<b>.remote/merge` を書いて後の push 先を明示する
 3. いずれも `GitOp` として `git_exec` に渡す

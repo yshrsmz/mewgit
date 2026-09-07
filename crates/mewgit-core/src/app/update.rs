@@ -372,8 +372,8 @@ fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
 
 /// Branches ペインのキー処理。
 ///
-/// **`Enter`（切替）と `n` / `d` / `D` / `r` は次のタスク**（07 の「どこまで実装したか」）。
-/// ここでは移動と出口だけを受ける。
+/// **`n`（作成）と `r`（リネーム）は次のタスク**（07 の「どこまで実装したか」）。
+/// `Modal::Input` の最初の利用者になるので、モーダルごと別の PR にしてある。
 fn branches_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         KeyCode::Char('j') | KeyCode::Down => {
@@ -384,11 +384,67 @@ fn branches_key(state: &mut AppState, key: Key) -> Cmd {
             state.branches.move_cursor(-1);
             Cmd::None
         }
+        KeyCode::Enter => switch_branch(state),
+        KeyCode::Char('d') => delete_branch(state, false),
+        KeyCode::Char('D') => delete_branch(state, true),
         // **`Tab` でしか入れないペインにも出口を用意する**（07）。戻り先を
         // `right_pane()` にしないのは、このペインが左の選択と無関係だから。
         KeyCode::Esc => focus(state, Pane::Graph),
         _ => Cmd::None,
     }
+}
+
+/// `Enter`。カーソルの指すブランチに切り替える。
+///
+/// **押せるかを手前で判定しない**（不変ルール 4）。HEAD のブランチなら
+/// `git switch` は `Already on 'main'` で成功し、ワークツリーの変更が衝突すれば
+/// git が断って stderr がそのまま案内になる（どちらも git 2.55 で確認）。手前で弾くと、
+/// 同じ判定を mewgit と git の 2 箇所に置くことになる。
+///
+/// **フォーカスは Branches に残す。** 切り替えたあと続けて別のブランチを選べる。
+/// 一覧の読み直しは `update::Reload` が出す（`Checkout` は `Reload::Refs`）。
+fn switch_branch(state: &AppState) -> Cmd {
+    // 一覧が空（読み込み中・失敗・コミットが 1 つも無いリポジトリ）。カーソル行が
+    // 描かれていないので、通知を出す相手もいない。
+    let Some(branch) = state.branches.selected() else {
+        return Cmd::None;
+    };
+    Cmd::Exec(GitOp::Checkout(branch.name.clone()))
+}
+
+/// `d` / `D`。カーソルの指すブランチを消す。破壊的なので確認モーダルを通す
+/// （不変ルール 5）。
+///
+/// `force` が `D`（`branch --delete --force`）。**未マージかを手前で判定しない** —
+/// `--delete` は git が `the branch 'x' is not fully merged` で断り、`-D` を使えという
+/// ヒントまで出す。HEAD のブランチも git が
+/// `cannot delete branch 'main' used by worktree at ...` で断る（どちらも git 2.55 で
+/// 確認）。
+///
+/// **本文は `force` で変える。** 同じ文言だと、どちらのキーで開いた確認なのかが画面から
+/// 判らない（ハンクとファイルの discard で本文を分けたのと同じ理由）。
+fn delete_branch(state: &mut AppState, force: bool) -> Cmd {
+    let Some(branch) = state.branches.selected() else {
+        return Cmd::None;
+    };
+    let name = branch.name.clone();
+    // **本文に「ブランチ」を重ねない。** 枠のタイトルが言っているうえ、80 桁の端末で
+    // 名前の直後に折り返し、「ブランチ topic」「を削除します。…」と割れる（#22 の
+    // 「幅を変える変更は既定サイズのままで見えるものを確かめる」）。
+    let (title, body) = if force {
+        (
+            "ブランチを強制削除",
+            format!("{name} を削除します。未マージのコミットも失われます。"),
+        )
+    } else {
+        ("ブランチを削除", format!("{name} を削除します。"))
+    };
+    state.modal = Some(Modal::Confirm {
+        title: title.to_string(),
+        body,
+        on_yes: Cmd::Exec(GitOp::BranchDelete { name, force }),
+    });
+    Cmd::None
 }
 
 /// ファイル一覧のカーソルを `delta` 行動かす。
@@ -2116,6 +2172,93 @@ mod tests {
         let _ = press_code(&mut state, KeyCode::Esc);
 
         assert_eq!(state.focus, Pane::Graph);
+    }
+
+    #[test]
+    fn enter_switches_to_the_branch_under_the_cursor() {
+        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        let _ = press(&mut state, 'k');
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::Exec(GitOp::Checkout("another".to_string())));
+        // 切り替えたあと続けて別のブランチを選べる。確認モーダルも通さない。
+        assert_eq!(state.focus, Pane::Branches);
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn enter_on_the_head_branch_still_asks_git() {
+        // **押せるかを手前で判定しない**（不変ルール 4）。`git switch main` は
+        // `Already on 'main'` で成功するので、弾く理由が無い。同じ判定を mewgit と
+        // git の 2 箇所に置かないため。
+        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        assert!(state.branches.selected().expect("空です").is_head);
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::Exec(GitOp::Checkout("main".to_string())));
+    }
+
+    #[test]
+    fn d_and_shift_d_confirm_before_deleting_and_say_which_one_is_open() {
+        let mut state = state_on_branches(&[("topic", false)]);
+
+        let cmd = press(&mut state, 'd');
+
+        assert_eq!(cmd, Cmd::None);
+        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
+            panic!("確認モーダルが開いていません: {:?}", state.modal);
+        };
+        assert!(body.contains("topic"), "{body}");
+        assert_eq!(
+            on_yes,
+            &Cmd::Exec(GitOp::BranchDelete {
+                name: "topic".to_string(),
+                force: false,
+            })
+        );
+        let plain = body.clone();
+
+        // 確認を通って初めて git が走る（不変ルール 5）。
+        let cmd = press(&mut state, 'y');
+        assert_eq!(
+            cmd,
+            Cmd::Exec(GitOp::BranchDelete {
+                name: "topic".to_string(),
+                force: false,
+            })
+        );
+        assert_eq!(state.modal, None);
+
+        let _ = press(&mut state, 'D');
+
+        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
+            panic!("確認モーダルが開いていません: {:?}", state.modal);
+        };
+        assert_eq!(
+            on_yes,
+            &Cmd::Exec(GitOp::BranchDelete {
+                name: "topic".to_string(),
+                force: true,
+            })
+        );
+        // **同じ本文にしない。** どちらのキーで開いた確認なのかが画面から判らなくなる。
+        assert_ne!(body, &plain, "d と D の本文が同じです");
+    }
+
+    #[test]
+    fn the_branch_keys_do_nothing_while_the_list_is_empty() {
+        // 読み込み中・失敗・コミットが 1 つも無いリポジトリ。カーソル行が描かれて
+        // いないので、`branches[cursor]` を書くと添字が外れる。
+        let mut state = state_with_commits(2);
+        state.focus = Pane::Branches;
+        assert_eq!(state.branches.load(), BranchLoad::Pending);
+
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+        assert_eq!(press(&mut state, 'd'), Cmd::None);
+        assert_eq!(press(&mut state, 'D'), Cmd::None);
+        assert_eq!(state.modal, None);
     }
 
     #[test]

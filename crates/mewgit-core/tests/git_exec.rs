@@ -267,10 +267,15 @@ async fn discard_untracked_deletes_the_file() {
 }
 
 #[tokio::test]
-async fn checkout_reads_the_target_as_a_revision() {
-    // 末尾の `--` が無いと、`git checkout topic` は「topic というファイルを index から
-    // 取り出す」と解釈され、ワークツリーの変更を黙って捨てる。ブランチが無いのだから
-    // 失敗しなければならない。
+async fn checkout_never_takes_the_target_as_a_path() {
+    // `git checkout topic` は「topic というファイルを index から取り出す」と解釈され、
+    // ワークツリーの変更を黙って捨てる。`switch` は pathspec を取らないので
+    // `fatal: invalid reference: topic` で止まる（git 2.55 で確認）。ブランチが無いの
+    // だから失敗しなければならない。
+    //
+    // **`switch` を使っていること自体はここでは見張れない。** `checkout <target> --`
+    // に戻しても同じ結果になる（`--` が付いていれば revision として読む）。argv の
+    // 単体テスト（`git_exec::argv`）がそちらを見ている。
     let repo = TestRepo::init();
     repo.commit_file("topic", "add a file named topic");
     repo.write_worktree_file("topic", b"work in progress\n");
@@ -594,7 +599,7 @@ async fn a_failing_command_carries_argv_and_stderr() {
     else {
         panic!("git が走っていません: {err:?}");
     };
-    assert_eq!(argv, &["checkout", "no-such-branch", "--"]);
+    assert_eq!(argv, &["switch", "no-such-branch"]);
     assert_eq!(*code, Some(128));
     assert!(stderr.contains("no-such-branch"), "stderr: {stderr}");
 }

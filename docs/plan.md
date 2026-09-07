@@ -50,10 +50,11 @@
 - [x] `ui::panes::branches` の一覧 — `git_read::branches`、`Cmd::LoadBranches`、
       右列を Branches と（Working tree / コミット詳細）の上下に割る、`Tab` の巡回に
       `Pane::Branches` を足す。**読み取りだけ。** 書き込みは下の 2 本
-- [ ] ブランチの切替と削除 — `Enter` で `GitOp::Checkout`、`d` / `D` で
-      `GitOp::BranchDelete`（`Modal::Confirm` を通す）、`update::Reload` に
-      ブランチ一覧の読み直しを足す。**`Checkout` の argv を `switch <target>` に直す**
-      （03 は既に `switch` / `restore` 前提で、`checkout <target> --` だけが残っていた）
+- [x] ブランチの切替と削除 — `Enter` で `GitOp::Checkout`、`d` / `D` で
+      `GitOp::BranchDelete`（`Modal::Confirm` を通す）。**`Checkout` の argv を
+      `switch <target>` に直す**（03 は既に `switch` / `restore` 前提で、
+      `checkout <target> --` だけが残っていた）。`update::Reload` のブランチ一覧の
+      読み直しは #40 で入っているので追加はなし
 - [ ] ブランチの作成とリネーム — `n` / `r` で `Modal::Input`（`InputIntent`）、
       `GitOp::BranchCreate { checkout: true }` / `GitOp::BranchRename`。
       **`Modal::Input` の最初の利用者**なので `modals/input.rs` と、1 行入力での

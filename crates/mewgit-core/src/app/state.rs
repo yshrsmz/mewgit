@@ -925,6 +925,15 @@ impl BranchState {
         self.load
     }
 
+    /// カーソルの指すブランチ。一覧が空なら `None`。
+    ///
+    /// **切替・削除の対象はここからしか取らない。** `branches[cursor]` を呼び出し側で
+    /// 書くと、一覧が空のとき（読み込み中・失敗・`git init` の直後）に添字が外れる腕が
+    /// 増える。
+    pub fn selected(&self) -> Option<&Branch> {
+        self.branches.get(self.cursor)
+    }
+
     /// カーソルを `delta` 行動かす。端では止まる。
     ///
     /// 行が 1 つも無ければ据え置く（[`stepped_index`]）。
@@ -1621,13 +1630,9 @@ mod tests {
         }
     }
 
-    /// カーソルの指すブランチ名。**`BranchState` に `selected()` は持たせない** —
-    /// 使うのは切替と削除のタスクなので、そこで足す（07 の「どこまで実装したか」）。
+    /// カーソルの指すブランチ名。
     fn cursor_name(branches: &BranchState) -> Option<&str> {
-        branches
-            .branches
-            .get(branches.cursor)
-            .map(|branch| branch.name.as_str())
+        branches.selected().map(|branch| branch.name.as_str())
     }
 
     #[test]

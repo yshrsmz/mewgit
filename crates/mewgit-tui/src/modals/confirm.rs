@@ -1,11 +1,9 @@
 //! 確認モーダルの描画。設計は `docs/design/07-ui.md` の「モーダル」。
 
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::layout::Rect;
 use ratatui::Frame;
 
+use crate::modals;
 use crate::ui;
 
 /// キーの案内。`update::confirm_key` が受けるキーと揃える。
@@ -14,65 +12,20 @@ const HINT: &str = "[y] 実行   [n] やめる";
 /// モーダルの幅。狭い端末では画面の幅まで縮む。
 const WIDTH: u16 = 60;
 
-/// 本文とキーの案内のあいだに空ける行数。
-const GAP_ROWS: u16 = 1;
-
-/// キーの案内に取る行数。高さの見積もりと `Layout` で同じものを使う。
-const HINT_ROWS: u16 = 1;
-
 /// 破壊的操作の確認を描く。
-///
-/// 下のペインを `Clear` で消してから描く。覆わずに重ねると下の文字が透けて読めなくなる。
 pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
-    let width = WIDTH.min(area.width);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title.to_string())
-        .border_style(Style::default().add_modifier(Modifier::BOLD));
+    let block = modals::block(title);
+    // **折り返してからでないと高さが決まらない。** `桁数 / 幅` の切り上げで見積もると
+    // 単語境界で折れて増えたぶんを数え落とし、本文の末尾が黙って切れる（07）。
+    let (text, body_rows) = ui::wrapped(body, modals::inner_width(area, WIDTH, &block));
 
-    // **枠が食う幅と行数は `Block` 自身から出す。** `- 2` / `+ 2` と手で書くと、
-    // あとで `Padding` を足したときに折り返し幅だけが古いまま残り、本文の末尾が
-    // 黙って切れる（`contains` を見るテストは通ってしまう）。高さはこれから
-    // 決めるので、幅だけ本物の当て木で測る。
-    let probe = Rect::new(0, 0, width, u16::MAX);
-    let probe_inner = block.inner(probe);
-    let border_rows = probe.height - probe_inner.height;
-
-    let (text, body_rows) = ui::wrapped(body, probe_inner.width);
-    // 本文 + 空行 + キーの案内 + 枠。画面に収まらない分は `centered` が削る。
-    let height = body_rows.saturating_add(GAP_ROWS + HINT_ROWS + border_rows);
-    let area = centered(area, width, height);
-    let inner = block.inner(area);
-
-    frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
-
-    // **キーの案内は本文とは別に、最下行へ描く。** 1 つの `Paragraph` にまとめると、
-    // 折り返しで本文が伸びたときに案内だけが枠の外へ押し出される。
-    let [body_area, hint_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(HINT_ROWS)]).areas(inner);
-
+    let body_area = modals::place(frame, area, block, WIDTH, body_rows, HINT);
     frame.render_widget(text, body_area);
-    frame.render_widget(Paragraph::new(Line::from(HINT)), hint_area);
-}
-
-/// 画面の中央に `width` x `height` を取る。画面が小さければそのぶん縮める。
-///
-/// 中央寄せの算術は書かず ratatui の [`Flex::Center`] に任せる。`Max` にしているのは、
-/// 端末が小さいときに縮めるため（`Length` だとはみ出す）。
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let [area] = Layout::horizontal([Constraint::Max(width)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([Constraint::Max(height)])
-        .flex(Flex::Center)
-        .areas(area);
-    area
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, row_of, state_with_commits};
+    use crate::test_util::{draw, row_of, state_with_modal};
     use mewgit_core::app::{Cmd, Modal, TermSize};
     use mewgit_core::git_exec::GitOp;
 
@@ -84,19 +37,16 @@ mod tests {
 
     /// 確認モーダルを出した状態。
     fn state_with_confirm(title: &str, body: &str) -> mewgit_core::app::AppState {
-        let mut state = state_with_commits(&["first", "second"]);
-        state.modal = Some(Modal::Confirm {
+        state_with_modal(Modal::Confirm {
             title: title.to_string(),
             body: body.to_string(),
             on_yes: Cmd::None,
-        });
-        state
+        })
     }
 
     #[test]
     fn the_confirmation_shows_the_title_body_and_keys() {
-        let mut state = state_with_commits(&["first", "second"]);
-        state.modal = Some(Modal::Confirm {
+        let state = state_with_modal(Modal::Confirm {
             title: "変更を破棄".to_string(),
             body: "a.txt を HEAD の状態に戻します。".to_string(),
             on_yes: Cmd::Exec(GitOp::Discard(vec!["a.txt".into()])),

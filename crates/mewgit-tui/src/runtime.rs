@@ -167,14 +167,26 @@ impl Runtime {
             }
             Cmd::Quit => ControlFlow::Break(()),
 
-            Cmd::LoadLog { count } => {
+            Cmd::LoadLog { count, restart } => {
                 let reader = self.reader.clone();
                 let tx = self.tx.clone();
                 // このタスクは abort しない。`log_page` の future を途中で捨てると、
                 // リーダースレッドは walk を進めたあとで返り先を失い、そのページの
                 // コミットがどのページにも現れなくなる（02 の「スレッド」）。
                 tokio::spawn(async move {
-                    let _ = tx.send(Msg::LogLoaded(reader.log_page(count).await));
+                    // 要求した `restart` をそのまま返す。届いたページが先頭からの
+                    // ものか続きかは `LogPage` からは判らない（01）。
+                    let result = reader.log_page(count, restart).await;
+                    let _ = tx.send(Msg::LogLoaded { restart, result });
+                });
+                ControlFlow::Continue(())
+            }
+
+            Cmd::LoadHeadMessage => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::HeadMessageLoaded(reader.head_message().await));
                 });
                 ControlFlow::Continue(())
             }
@@ -645,7 +657,10 @@ mod tests {
 
         // 行が無いとカーソルの指すコミットが決まらず、届いた詳細は捨てられる。
         // 先に 1 ページ積む。
-        let cmd = state.issue(Cmd::LoadLog { count: 10 });
+        let cmd = state.issue(Cmd::LoadLog {
+            count: 10,
+            restart: false,
+        });
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
         let msg = msgs.recv().await.expect("Msg が返りませんでした");
         let _ = update(&mut state, msg);

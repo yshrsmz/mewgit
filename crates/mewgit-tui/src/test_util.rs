@@ -1,7 +1,7 @@
 //! テスト用のヘルパ。`mewgit-tui` は 1 つのバイナリクレートなので、単体テストは
 //! すべて同じコンパイル単位に入る。feature で切り分ける必要はない。
 
-use mewgit_core::app::{update, AppState, Msg, RepoInfo, TermSize};
+use mewgit_core::app::{update, AppState, Modal, Msg, RepoInfo, TermSize};
 use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, LogPage};
 use mewgit_core::test_util::{fake_commit, fake_commit_with_parents};
@@ -90,6 +90,14 @@ pub fn state_with_commits(summaries: &[&str]) -> AppState {
     state_with_log(commits)
 }
 
+/// モーダルを出した状態。下に何か描かれていること（覆いのテスト）が要るので、
+/// コミットを 2 件積んである。
+pub fn state_with_modal(modal: Modal) -> AppState {
+    let mut state = state_with_commits(&["first", "second"]);
+    state.modal = Some(modal);
+    state
+}
+
 /// `(索引, 親の索引)` の並びからコミットを組んで積んだ状態。並びは新しい順。
 ///
 /// レーンのある行を描くのに使う。oid は索引から作る（`fake_oid`）。
@@ -113,7 +121,13 @@ fn state_with_log(commits: Vec<Commit>) -> AppState {
         commits,
         done: true,
     };
-    let _ = update(&mut state, Msg::LogLoaded(Ok(page)));
+    let _ = update(
+        &mut state,
+        Msg::LogLoaded {
+            restart: false,
+            result: Ok(page),
+        },
+    );
     state
 }
 

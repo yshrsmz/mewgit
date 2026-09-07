@@ -16,14 +16,17 @@ use ratatui::crossterm::event::{
 
 /// 端末イベントを [`Msg`] にする。対応する `Msg` が無いイベントは `None`。
 ///
-/// マウス・フォーカス・ペーストは今のところ使わないので落とす。
+/// マウスとフォーカスは今のところ使わないので落とす。
 pub fn event_to_msg(event: Event) -> Option<Msg> {
     match event {
         Event::Key(key) => key_event_to_key(key).map(Msg::Key),
+        // 落とさない。落とすと、貼り付けた文字が 1 文字ずつ `Msg::Key` として届く
+        // 端末（bracketed paste を要求していない状態）と同じことになる。
+        Event::Paste(text) => Some(Msg::Paste(text)),
         Event::Resize(width, height) => Some(Msg::Resize {
             term: TermSize { width, height },
         }),
-        Event::FocusGained | Event::FocusLost | Event::Mouse(_) | Event::Paste(_) => None,
+        Event::FocusGained | Event::FocusLost | Event::Mouse(_) => None,
     }
 }
 
@@ -155,6 +158,17 @@ mod tests {
     fn events_without_a_msg_are_dropped() {
         assert!(event_to_msg(Event::FocusGained).is_none());
         assert!(event_to_msg(Event::FocusLost).is_none());
-        assert!(event_to_msg(Event::Paste("text".to_string())).is_none());
+    }
+
+    #[test]
+    fn a_paste_comes_through_as_one_msg() {
+        // 落とすと、貼り付けた文字が 1 文字ずつキーとして届くのと同じことになる。
+        // コミットメッセージを貼ると最初の改行で確定し、残りがペインのキーになる。
+        let msg = event_to_msg(Event::Paste("fix: 直す\n\n本文".to_string()));
+
+        let Some(Msg::Paste(text)) = msg else {
+            panic!("Paste になっていません: {msg:?}");
+        };
+        assert_eq!(text, "fix: 直す\n\n本文");
     }
 }

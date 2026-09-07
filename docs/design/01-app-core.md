@@ -130,11 +130,114 @@ pub enum InputIntent {
 `PartialEq` を保て、モーダル遷移のテストが書ける。
 
 `TextBuffer` は複数行の編集バッファ。ratatui のウィジェットや `tui-textarea` は
-使わない（core が UI に依存してしまうため）。編集操作の実装は M2 の commit タスクで行う。
+使わない（core が UI に依存してしまうため）。
 
 ```rust
 pub struct TextBuffer { pub lines: Vec<String>, pub cursor: (usize, usize) }  // (行, 列)
+
+impl TextBuffer {
+    pub fn from_text(text: &str) -> Self;
+    pub fn text(&self) -> String;
+    pub fn insert_char(&mut self, c: char);
+    pub fn insert_text(&mut self, text: &str);   // 貼り付け。改行で行を割り、制御文字は落とす
+    pub fn insert_newline(&mut self);
+    pub fn backspace(&mut self);
+    pub fn delete(&mut self);
+    pub fn move_cursor(&mut self, to: Motion);   // Left | Right | Up | Down | Home | End
+}
 ```
+
+- **`cursor` の列は「文字数」で数える。** バイト位置にすると非 ASCII の 1 文字を
+  消すのに何バイト戻るかを呼び出し側が知ることになり、UI が桁を出すときにも
+  変換が要る。挿入・削除の中でだけ文字位置をバイト位置に直す
+- **`lines` は必ず 1 行以上**（空のバッファも `[""]`）。`cursor` の指す行が常に
+  存在するようにするため。`backspace` で最後の行を消さない
+- **行末より右・最終行より下へは出ない。** 上下移動で短い行に移ったときは行末へ
+  寄せる。「元の桁を覚えて長い行で戻す」形にはしない（覚えた桁は状態が増えるうえ、
+  編集で無効になる時点を決められない）
+- **`Motion` は core の enum。** `KeyCode` をそのまま渡すと、文字キーまで移動として
+  受けられる形になる
+
+### コミットメッセージの編集
+
+`Modal::CommitMessage` のキーは他のモーダルと違い、**文字キーがすべて入力になる**。
+
+| キー | 動作 |
+|---|---|
+| 文字 | 挿入 |
+| `Enter`（修飾なし） | 確定（`Cmd::Exec(GitOp::Commit)`） |
+| `Alt+Enter` / `Shift+Enter` / `Ctrl-J` | 改行 |
+| `Backspace` / `Delete` | 削除 |
+| `←` `→` `↑` `↓` `Home` `End` | カーソル移動 |
+| `Esc` | 取り消し |
+| `Ctrl-C` | 終了（`update_key` がモーダルより先に見る） |
+
+**改行のキーを 3 つ受けるのは、1 つでは全端末を覆えないため。** 素の端末は
+`Shift+Enter` を `Enter` と同じ `\r` で送り、修飾情報を載せない。そこで Claude Code が
+採っている形（`/terminal-setup` が書き込む設定を実際に読んで確かめた）に合わせる。
+
+| キー | 届き方 | 効く端末 |
+|---|---|---|
+| `Alt+Enter` | `ESC CR`。crossterm が `Enter` + `ALT` に直す | `Shift+Enter` に `\u001b\r` を割り当てた端末（VS Code / Zed / Alacritty の設定）と、Option を Meta にした Terminal.app の `Option+Enter` |
+| `Shift+Enter` | `CSI 13;2u` | kitty keyboard protocol を有効にした端末（Ghostty / kitty / WezTerm / foot など） |
+| `Ctrl-J` | `0x0A`。raw mode では `\n` が `Ctrl+j` として届く | すべて |
+
+- **`Enter` の意味は端末によらず確定。** kitty protocol が効いていてもいなくても
+  変わらない。**増えるのは受けられる改行キーだけ**にする。「対応端末では `Enter` が
+  改行、非対応端末では確定」のように割ると、tmux を挟んだだけで同じキーの結果が
+  変わり、改行のつもりの打鍵がコミットになる
+- kitty protocol の有効化は `main.rs`（端末の初期化。テストを書かない配線）で行う。
+  押す旗は `DISAMBIGUATE_ESCAPE_CODES` だけにする。`REPORT_EVENT_TYPES` まで押すと
+  離鍵も届き、1 打鍵が 2 つの `Msg::Key` になる
+- **対応するかを端末に問い合わせない。** `crossterm::terminal::supports_keyboard_enhancement`
+  は `CSI ?u` を投げて応答を待ち、**応答しない端末では 2 秒待ってから諦める**
+  （crossterm 0.28.1 の `terminal/sys/unix.rs`）。pty で測ると起動が 0.82 秒 →
+  2.04 秒になった。対応しない端末ほど黒い画面を長く見ることになる。`CSI > 1 u` は
+  private な CSI なので、解さない端末は読み飛ばす。押せたかを知る必要も無い
+  （`Enter` の意味はどちらでも変わらず、増えるのは受けられる改行キーだけ）
+- **`Ctrl-Enter` は使えない。** 端末が `Enter` と区別して送らない
+- **`Esc` の取り消しに確認を挟まない。** `AppState.modal` は 1 つしか持てず、確認を
+  重ねるにはモーダルのスタックが要る。不変ルール 5 が確認を求めるのは git の破壊的
+  操作で、編集中バッファの取り消しは含まれない。`Ctrl-C` も同じ（そちらは終了なので
+  なおさら挟めない）。**押した本文が消えるのは事実なので、キーの案内に `Esc` を出す**
+- **空のメッセージは `update` が断る。** `git commit --message ""` に任せない。git が
+  落ちる時点でモーダルは閉じていて、書いた本文が戻らない。空白だけの行も同じ
+  （`trim` して空なら断る）
+- **`Cmd::Exec` が `issue` に落とされるなら、モーダルを閉じない。** `Confirm` は先に
+  閉じてから `on_yes` を返すが、あちらはユーザーが打ったものを持っていない。同じ形に
+  すると、前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
+  「ほかの git 実行が終わるまで待ってください」だけが出て**本文ごと消える**。判定は
+  `jobs.is_running(JobKind::Exec)`（`load_diff` が `Freshness::Asked` を決めるのと同じ形）
+- **貼り付けは `Msg::Paste` で 1 通で受ける。** 端末に bracketed paste を要求しないと、
+  貼り付けた文字は 1 文字ずつ `Msg::Key` として届く。**コミットメッセージを貼ると
+  最初の改行で確定し、残りがペインのキーとして解釈される**（`x` で discard の確認が
+  開き、あとから来た `y` がそれを実行する）。要求するのは `main.rs`、バッファへ入れる
+  のは `TextBuffer::insert_text`。**受けるのは編集中のモーダルだけ**で、それ以外では
+  捨てる（ペインには行き先が無く、`Msg::Key` に割り直すと有効にした意味が消える）。
+  制御文字は落とす（CR は CRLF、タブは `ui` が数える桁とずれてカーソルが合わなくなる）
+- `amend` は `Modal::CommitMessage` が持つ。`GitOp::Commit { message, amend }` に
+  そのまま渡す
+
+### commit
+
+`c` と `C` はワーキングツリーペインで受ける（07 のキーバインド）。
+
+- **`c` は staged が空なら断る。** ただし**いま持っている一覧を信じられるときだけ**。
+  書き込み直後の一覧は古く（`WorktreeState.stale`）、一度も読めていない一覧は空と
+  区別が付かない（`WorktreeState.loaded`）。どちらを根拠にしても「変更がありません」は
+  嘘になりうるので、そのときは開いて git の側に判定を任せる。**空の `snapshot` には
+  2 つの意味がある** — 「変更が無い」と「まだ読めていない」。`stale` では後者を
+  表せない（あれは書き込みでしか立たない）
+- **`C`（amend）は staged が空でも通す。** reword だけの amend は正当な操作
+- **amend の初期値は `Cmd::LoadHeadMessage` で読む。** `RepoInfo.head` からは取らない。
+  あれは起動時に 1 回読んだきりで、1 回コミットした時点で古い（`Cmd::LoadRepoInfo` が
+  `issue` に落とされていれば commit のあとも古いまま）。**古い初期値は「1 つ前の
+  コミットのメッセージで HEAD を上書きする」になる。** HEAD の解決と本文の取得は
+  リーダースレッドの中で 1 回で行い、途中で HEAD が動く隙を作らない
+- **届いた本文でモーダルを開くのは `modal` が空のときだけ。** `C` を押してから届く
+  までのあいだに別のモーダル（`x` の確認など）が開いていることがある。無条件に
+  上書きすると、確認モーダルが編集画面に化ける
+- コミットが 1 つも無い（unborn HEAD）ときは `Ok(None)` が返る。通知を出して開かない
 
 ## グラフの行
 
@@ -201,6 +304,77 @@ pub struct GraphLine { pub commit: Commit, pub row: GraphRow }
 `Msg::Layout` も読み直しを出してしまう。失敗そのものがレイアウトを変えるので
 （行が消えると詳細の領域も消える）、失敗が自分で読み直しを引く形になる。
 フラグを落とすのはカーソルを動かしたとき（`scrolled`）と、読み込みが成功したとき。
+
+### ログの読み直し
+
+commit は HEAD を動かすので、積んだ行が丸ごと古くなる。**続きを読む経路では直せない**
+（新しいコミットは末尾ではなく先頭に付く）。`Cmd::LoadLog` に `restart` を足し、
+リーダースレッドの `LogSession` を捨てて先頭から読み直す。
+
+```rust
+Cmd::LoadLog { count: usize, restart: bool }
+Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
+```
+
+**出すかどうかは `update::Reload` が決める。** `app` に置く。
+
+| | 出す `Cmd` | 例 |
+|---|---|---|
+| `Nothing` | `LoadStatus` | stage / unstage / discard、stash |
+| `Refs` | `+ LoadRepoInfo` | checkout、branch 作成 / リネーム、非 force push |
+| `RefsAndLog` | `+ LoadLog { restart }` | commit、fetch / pull、force push、branch 削除、rebase / cherry-pick / revert |
+
+- **`Refs` と `RefsAndLog` を分ける。** グラフのラベルと HEAD は行に焼き込まず
+  `GraphState.refs` から引く（07）ので、**既にあるコミットを指し直すだけの操作では
+  行は 1 つも動かない**。ログの読み直しは `LogSession` の作り直しで履歴全体のコストが
+  掛かる（02 の「セッションは作り直さず使い回す」）ので、要らないところでは払わない
+- **`git_exec` に `GitOp::moves_refs()` として置かない。** stash が `Nothing` なのは
+  「`refs/stash` をグラフの walk に押していない」からで、git は ref を動かしている。
+  git の事実を約束する名前で UI の方針を返すと、Stash ペインが入ったときに黙って
+  嘘になる。**どの ref を辿るかを知っているのは `app` 側**
+- **失敗した書き込みで読み直すのは、途中まで ref が動きうる操作だけ。** fetch / pull は
+  一部の ref だけ更新して落ちうるし、rebase / cherry-pick / revert は途中で止まる。
+  commit / branch 削除 / force push は 1 回で決まるので、失敗したなら ref は元のまま。
+  **読み直しは行を捨てるだけでなく `GraphState::restart` がカーソルとスクロールを
+  先頭に戻す**ので、pre-commit hook に弾かれただけでグラフの位置を失う
+- **新しい `Cmd` の変種にせず `LoadLog` のフィールドにする。** `job_kind` が
+  `JobKind::LoadLog` と必ず同じになり、続きの読み込みと読み直しが同時に走らない。
+  別変種にすると `job_kind` を揃えるのは手書きの約束になる
+- **`Msg::LogLoaded` は `restart` を運ぶ。** 届いたページが「続き」か「先頭から」かは
+  中身からは判らない（`LogPage` に位置が無い）。`CommitDetailLoaded` の `oid` と
+  `DiffLoaded` の `target` と同じで、**要求した内容を返信に載せる**
+- **読み直すのは先頭 1 ページ（`graph.page_size`）だけ。** 積んでいたぶんを全部
+  読み直すと、履歴を深く辿ったあとの commit が高くつく。commit の直後に見たいのは
+  新しい先頭なので、カーソルとスクロールは 0 に戻す
+- 行を捨てて積み直す処理は**ログ読み込みの失敗と同じ**（02 の契約により、失敗した
+  セッションも先頭から読み直しになる）。`GraphState::restart()` の 1 本にまとめ、
+  `lines` / `lanes` / `detail` / `cursor` / `scroll` / `loaded_all` を揃って戻す
+
+**読み直しは `issue` に落とされうる。** 続きの読み込みが走っているあいだに commit すると
+同種なので落ちる。落ちたぶんは `GraphState.reload_pending` に印を付け、走っていた
+ページが届いた時点で頼み直す。**立てる条件まで `WorktreeState.stale` と同じ**にする
+（`jobs.is_running(LoadLog)`）。「常に立てて届いたら落とす」形にすると、同じ形だと
+書いてある 2 つが別のことを指す。
+
+- **印が立っているあいだに届いたページは、続きでも読み直しでも捨てる。** 印が立つのは
+  「読み直しを頼めなかった」ときで、そのとき飛んでいたページは必ず印を立てた書き込みより
+  前に頼まれたもの。積んでも直後の読み直しで捨てるだけで、そのあいだ古い行に新しい行が
+  継ぎ足された状態が画面に出る。**`restart` かどうかで分けてはいけない** — 1 つ前の
+  書き込みの読み直しが届いたときに印だけ落ちて、新しい書き込みが二度とグラフに出なく
+  なる（続けて 2 回コミットすると踏む）
+- **印が立っているあいだは必ず `JobKind::LoadLog` が走っている**（落とした相手が
+  それ）。だから `load_more` に印を見る分岐は要らない — 続きを出しても `issue` が
+  落とす。**見る形にすると、テストで踏めない分岐が残る**
+- **読み直しを組む関数にも「出すか」の判断を置かない。** 呼び出し元は 2 つあり、
+  どちらも出すと決めたあとで呼ぶ。置くと、やはり踏めない偽の腕が残る
+- 印を落とすのは `restart: true` のページが届いたときと、ログ読み込みが失敗したとき。
+  **3 状態は要らない。** `DiffState.freshness` が 3 つ要ったのは「短絡してよいか」と
+  「パッチを組んでよいか」で見る時点が違ったため。ここは読む 2 箇所（読み直しを
+  出すか・届いたページを採るか）がどちらも「読み直しが欠けている」という同じ時点を
+  見ている
+- **`Cmd::LoadRepoInfo` も一緒に出す。** ref のラベル（`main` が新しいコミットへ動く）と
+  `RepoInfo.head` が古くなるため。こちらが `issue` に落ちたときの追いつきは持たない。
+  発行元が起動時とここの 2 つしかなく、重なる窓が実質無い。M3 の世代で畳む
 
 `update` が返した `Cmd` は必ず `runtime` が dispatch する。捨てると `issue` が
 `JobTracker` に登録したまま実行されず、以後その種類の `Cmd` が黙って落ち続ける。
@@ -501,12 +675,23 @@ impl JobTracker {
 持っているなら、そちらのほうが強い**（世代は「リポジトリが変わった」しか言えず、
 「選択が動いた」を言えない）。
 
-**M2 では入れない。** 消費者が 2 つしか無く、畳んでも機能は増えない。M3 の fetch で
-3 人目（ref が変わったあとのログの読み直し）が出て、そこで初めて決められる判断が
-ある — **カウンタを 1 本にすると、どの書き込みも全部を無効化する。** diff は
-`status` と同じ規模なので毎回読み直してよいが、**ログはページングしているので全部
-読み直すと高い。**「世代を領域ごとに分けるか」「ログだけ別の方針にするか」は、
-fetch の実装で値段が見えてから決める。いま決めると推測になる。
+**3 人目は M2 で出た。** 元はここに「M3 の fetch で 3 人目（ref が変わったあとの
+ログの読み直し）が出る」と書いていたが、commit のタスクで先に出た
+（`GraphState.reload_pending`）。同じタスクで 4 人目の穴も見えている — 書き込みの
+あとに出す `Cmd::LoadRepoInfo` は `issue` に落とされうるのに追いつきを持たない。
+発行元が起動時とここの 2 つしかなく重なる窓が実質無いので、いまは塞いでいない。
+
+**それでも M2 では入れない。** ここで待っていた材料のうち、片方は揃った —
+上の `update::Reload` が「どの書き込みがどの領域を無効化するか」の判別子で、
+**カウンタを 1 本にするとログまで毎回無効化して高い**という懸念には
+「領域ごとに分ける」という答えが出せる。揃っていないのはもう片方で、fetch は
+
+- 落ちた要求の追いつき（(a)）を**世代では解けない**まま残す
+- ref が変わったあとのログの読み直しを、この `restart` に乗せる（plan.md の M3）
+
+の 2 つを同時に持ち込む。**3 人目を数え終わってから畳むほうが、畳む形を 2 回
+変えずに済む。** M3 の世代のタスクで、`DiffState.freshness` / `WorktreeState.stale` /
+`GraphState.reload_pending` と `LoadRepoInfo` の穴をまとめて見る。
 
 ## キー入力
 
@@ -552,8 +737,10 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 pub enum Msg {
     Key(Key), Resize { term: TermSize }, Layout { graph_rows: usize }, Tick,
     // git_read
-    LogLoaded(Result<LogPage, GitReadError>),
+    Paste(String),                     // bracketed paste。編集中のモーダルだけが受ける
+    LogLoaded { restart: bool, result: Result<LogPage, GitReadError> },
     CommitDetailLoaded { oid: Oid, result: Box<Result<CommitDetail, GitReadError>> },
+    HeadMessageLoaded(Result<Option<String>, GitReadError>),  // amend の初期値。None は unborn
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
     DiffLoaded { target: DiffTarget, result: Box<Result<Vec<FileDiff>, GitReadError>> },
@@ -575,8 +762,11 @@ pub enum Msg {
 新しい状態を持っても意味が無いため。失敗しても通知だけで続ける（ラベルもリモートも
 無いままグラフは出せる）。
 
-`LogLoaded` は `Result` を運ぶ。失敗の通り道が無いと `JobKind::LoadLog` が走ったまま
-残り、以後の `Cmd::LoadLog` が `JobTracker` に黙って落とされて二度と読めなくなる。
+`LogLoaded` は `Result` と、要求した `restart` を運ぶ。`Result` にするのは、失敗の
+通り道が無いと `JobKind::LoadLog` が走ったまま残り、以後の `Cmd::LoadLog` が
+`JobTracker` に黙って落とされて二度と読めなくなるため。`restart` を運ぶのは、
+届いたページが先頭からのものか続きかを `LogPage` から導けないため（上の
+「ログの読み直し」）。
 受けたら成功・失敗を問わず `jobs.finish(LoadLog)` する。失敗のときは積んだ行も捨てる。
 失敗したセッションは捨てられ、次の読み込みは履歴の先頭から来る（02）ので、残すと
 同じコミットが二重に並ぶ。
@@ -614,8 +804,9 @@ diff がいま選んでいるファイルのものかを判定するのに要る
 ```rust
 pub enum Cmd {
     None, Batch(Vec<Cmd>),
-    LoadLog { count: usize },           // 読む位置は git_read の LogSession が持つ（02）
+    LoadLog { count: usize, restart: bool },  // 位置は LogSession が持つ。restart で捨てる（02）
     LoadCommitDetail(Oid),             // 選択コミットのメッセージ全文など（02）
+    LoadHeadMessage,                   // amend の初期値。HEAD の解決ごとリーダーで行う
     LoadStatus, LoadDiff(DiffTarget),
     LoadRepoInfo,                      // remotes / head / refs。起動時と ref 変更後（M3）
     Exec(GitOp),                       // git CLI 実行（03 参照）
@@ -633,8 +824,9 @@ pub fn init(state: &mut AppState) -> Cmd;
 
 `runtime::run` がループに入る前に 1 回呼ぶ。`main.rs` から呼ぶと、テストを書かない
 配線の側に処理が出てしまう。いまは `LoadRepoInfo` と
-`LoadLog { count: config.graph.page_size }` と `LoadStatus` の 3 つで、`ResolveAccount` は
-そのタスクでここに足す。
+`LoadLog { count: config.graph.page_size, restart: false }` と `LoadStatus` の 3 つで、
+`ResolveAccount` はそのタスクでここに足す。起動時はまだ何も読んでいないので
+`restart` は偽でよい（`LogSession` が無ければ `restart` の有無に関わらず先頭から開く）。
 
 ## update の原則
 
@@ -732,4 +924,5 @@ loop {
   なる（M2 の `CommitMessage`）ため、常に効く脱出口が要る。モーダルより先に判定する
 - M3 で実行中ジョブのキャンセルを入れるときは、ジョブがあれば `Ctrl-C` はキャンセルを
   優先し、無いときだけ終了する
-- 編集中のモーダルを `Ctrl-C` で捨てる際の確認は M2 の commit タスクで判断する
+- 編集中のモーダルを `Ctrl-C` で捨てる際も確認は挟まない。`modal` は 1 つしか持てず、
+  確認を重ねるにはモーダルのスタックが要る（上の「コミットメッセージの編集」）

@@ -254,9 +254,45 @@ pub struct GraphState {
     /// 読み直しを出してしまう。次の読み込みはユーザーの操作から始める
     /// （01 の「追加ページの読み込み」）。
     pub load_failed: bool,
+    /// 頼んだ読み直しが [`AppState::issue`] に落とされた。
+    ///
+    /// 書き込みで ref が動くと積んだ行が丸ごと古くなるが、そのとき続きの読み込みが
+    /// 走っていると同種の読み直しは落ちる。落ちたぶんをここに覚えておき、走っていた
+    /// ページが届いた時点で頼み直す。**[`WorktreeState::stale`] と同じ形**で、立てるのも
+    /// 同じ「書き込みの時点で読み取りが走っていたか」（01 の「ログの読み直し」）。
+    ///
+    /// 読む場所は 2 つ（届いたページを採るか・頼み直すか）で、**どちらも「読み直しが
+    /// 落とされたまま」という同じ時点を見ている**ので `bool` で足りる。
+    /// [`DiffState::freshness`] が 3 状態なのは、「短絡してよいか」と「パッチを組んで
+    /// よいか」で見る時点が違ったため。
+    ///
+    /// **立っているあいだは必ず `JobKind::LoadLog` が走っている**（落とした相手が
+    /// それ）。続きの読み込みをここで止める必要が無いのはこの不変条件による。
+    ///
+    /// [`DiffState::freshness`]: DiffState
+    pub reload_pending: bool,
 }
 
 impl GraphState {
+    /// 積んだ行を捨てて、先頭から読み直せる状態にする。
+    ///
+    /// ログ読み込みの失敗（02 の契約により、失敗したセッションは捨てられ次は先頭から
+    /// 来る）と、commit のあとの読み直しで同じことをする。**1 本にまとめてあるのは、
+    /// 片方に足し忘れると `lines` に無いコミットの詳細やレーンの状態が残るため。**
+    /// `load_failed` はここでは触らない（呼び出し元で値が違う。失敗の側だけが立てる）。
+    /// `reload_pending` は落とす。どちらの呼び出し元でも「先頭から積み直したので
+    /// 借りは無い」で一致し、**足し忘れると届かない読み直しを待ち続ける**。
+    pub fn restart(&mut self) {
+        self.reload_pending = false;
+        self.lines.clear();
+        // もう `lines` に無いコミットを指したままにしない。
+        self.lanes = LaneState::default();
+        self.detail = None;
+        self.cursor = 0;
+        self.scroll = 0;
+        self.loaded_all = false;
+    }
+
     /// カーソルが指しているコミット。行が無ければ `None`。
     pub fn cursor_commit(&self) -> Option<&Commit> {
         self.lines.get(self.cursor).map(|line| &line.commit)
@@ -331,6 +367,14 @@ pub struct WorktreeState {
     /// 時点で頼み直すための印（01 の「ワーキングツリー」）。立てるのは
     /// `exec_finished`、落とすのは `status_loaded`。
     pub stale: bool,
+    /// 一度でも status を読めた。
+    ///
+    /// **空の `snapshot` には 2 つの意味がある** — 「変更が無い」と「まだ読めていない」。
+    /// 起動直後や `Cmd::LoadStatus` が失敗したあとは後者で、`stale` では区別できない
+    /// （あれは書き込みでしか立たない）。commit の「stage された変更がありません」を
+    /// この 2 つ目で出すと、実際には stage されているのに断ることになる
+    /// （01 の「commit」）。
+    pub loaded: bool,
 }
 
 impl WorktreeState {
@@ -660,6 +704,7 @@ pub struct Job {
 pub enum JobKind {
     LoadLog,
     LoadCommitDetail,
+    LoadHeadMessage,
     LoadRepoInfo,
     LoadStatus,
     LoadDiff,
@@ -682,6 +727,7 @@ impl JobKind {
             JobKind::Exec => Some("ほかの git 実行が終わるまで待ってください"),
             JobKind::LoadLog
             | JobKind::LoadCommitDetail
+            | JobKind::LoadHeadMessage
             | JobKind::LoadRepoInfo
             | JobKind::LoadStatus
             | JobKind::LoadDiff
@@ -700,6 +746,7 @@ impl JobKind {
         match self {
             JobKind::LoadLog => "log",
             JobKind::LoadCommitDetail => "commit",
+            JobKind::LoadHeadMessage => "head",
             JobKind::LoadRepoInfo => "repo",
             JobKind::LoadStatus => "status",
             JobKind::LoadDiff => "diff",
@@ -803,6 +850,19 @@ impl Default for TextBuffer {
     }
 }
 
+/// [`TextBuffer::move_cursor`] に渡す移動。
+///
+/// `KeyCode` をそのまま渡さないのは、文字キーまで移動として受けられる形になるため。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
 impl TextBuffer {
     /// 文字列から作る。改行で分割する。
     pub fn from_text(text: &str) -> Self {
@@ -819,6 +879,125 @@ impl TextBuffer {
     pub fn text(&self) -> String {
         self.lines.join("\n")
     }
+
+    /// カーソルのいる行の、カーソルより左。
+    ///
+    /// 描画側がカーソルの桁を出すのに使う。**列からバイト位置への変換をここで済ませる**
+    /// ため、`ui` は「列は文字数」という約束を知らずに済む。2 箇所で解くと、単位を
+    /// 変えたときに core だけ直して端末のカーソルが黙ってずれる。
+    pub fn before_cursor(&self) -> &str {
+        let (row, col) = self.cursor;
+        &self.lines[row][..byte_at(&self.lines[row], col)]
+    }
+
+    /// 空白しか無いか。コミットメッセージを断る判定に使う（01 の
+    /// 「コミットメッセージの編集」）。
+    pub fn is_blank(&self) -> bool {
+        self.lines.iter().all(|line| line.trim().is_empty())
+    }
+
+    /// カーソル位置に 1 文字入れる。
+    pub fn insert_char(&mut self, c: char) {
+        let (row, col) = self.cursor;
+        let at = byte_at(&self.lines[row], col);
+        self.lines[row].insert(at, c);
+        self.cursor.1 = col + 1;
+    }
+
+    /// 文字列をカーソル位置に入れる。改行は行を割る。
+    ///
+    /// 貼り付けの入口。**1 文字ずつ [`TextBuffer::insert_char`] を呼ぶ形にしない**の
+    /// は、改行と制御文字の扱いをここで 1 回だけ決めるため。
+    ///
+    /// **制御文字は落とす**（`\r` を含む）。CRLF のまま入れると行末に制御文字が残り、
+    /// タブは `ui` が数える桁とずれてカーソルの位置が合わなくなる（07 の
+    /// 「CommitMessage モーダル」は折り返さない代わりに桁を自分で出している）。
+    pub fn insert_text(&mut self, text: &str) {
+        for (n, line) in text.split('\n').enumerate() {
+            if n > 0 {
+                self.insert_newline();
+            }
+            for c in line.chars().filter(|c| !c.is_control()) {
+                self.insert_char(c);
+            }
+        }
+    }
+
+    /// カーソル位置で行を割る。
+    pub fn insert_newline(&mut self) {
+        let (row, col) = self.cursor;
+        let at = byte_at(&self.lines[row], col);
+        let tail = self.lines[row].split_off(at);
+        self.lines.insert(row + 1, tail);
+        self.cursor = (row + 1, 0);
+    }
+
+    /// カーソルの左を 1 文字消す。行頭なら前の行とつなぐ。
+    ///
+    /// **最後の 1 行は消さない。** `lines` が空になると `cursor` の指す行が無くなる。
+    pub fn backspace(&mut self) {
+        let (row, col) = self.cursor;
+        if col > 0 {
+            let at = byte_at(&self.lines[row], col - 1);
+            self.lines[row].remove(at);
+            self.cursor.1 = col - 1;
+        } else if row > 0 {
+            let tail = self.lines.remove(row);
+            let joined_at = self.len(row - 1);
+            self.lines[row - 1].push_str(&tail);
+            self.cursor = (row - 1, joined_at);
+        }
+    }
+
+    /// カーソルの位置を 1 文字消す。行末なら次の行をつなぐ。
+    pub fn delete(&mut self) {
+        let (row, col) = self.cursor;
+        if col < self.len(row) {
+            let at = byte_at(&self.lines[row], col);
+            self.lines[row].remove(at);
+        } else if row + 1 < self.lines.len() {
+            let next = self.lines.remove(row + 1);
+            self.lines[row].push_str(&next);
+        }
+    }
+
+    /// カーソルを動かす。
+    ///
+    /// **行末より右・最終行より下へは出ない。** 上下移動で短い行に移ったときは行末へ
+    /// 寄せる。「元の桁を覚えて長い行で戻す」形にはしない（覚えた桁は状態が増える
+    /// うえ、編集で無効になる時点を決められない）。左右は行をまたぐ。
+    pub fn move_cursor(&mut self, to: Motion) {
+        let (row, col) = self.cursor;
+        let last = self.lines.len() - 1;
+        self.cursor = match to {
+            Motion::Left if col > 0 => (row, col - 1),
+            Motion::Left if row > 0 => (row - 1, self.len(row - 1)),
+            Motion::Right if col < self.len(row) => (row, col + 1),
+            Motion::Right if row < last => (row + 1, 0),
+            Motion::Up if row > 0 => (row - 1, col.min(self.len(row - 1))),
+            Motion::Down if row < last => (row + 1, col.min(self.len(row + 1))),
+            Motion::Home => (row, 0),
+            Motion::End => (row, self.len(row)),
+            // 端では動かない。
+            Motion::Left | Motion::Right | Motion::Up | Motion::Down => (row, col),
+        };
+    }
+
+    /// `row` 行目の長さ（文字数）。
+    fn len(&self, row: usize) -> usize {
+        self.lines[row].chars().count()
+    }
+}
+
+/// 文字数で数えた `col` を、`line` のバイト位置に直す。
+///
+/// **列を文字数で持つのは、非 ASCII の 1 文字を消すのに何バイト戻るかを呼び出し側に
+/// 知らせないため**（01 の `TextBuffer`）。変換はここ 1 箇所で行う。行末の次は
+/// `line.len()`。
+fn byte_at(line: &str, col: usize) -> usize {
+    line.char_indices()
+        .nth(col)
+        .map_or(line.len(), |(at, _)| at)
 }
 
 #[cfg(test)]
@@ -841,6 +1020,147 @@ mod tests {
         worktree
             .selected()
             .map(|(_, entry)| entry.path.display().to_string())
+    }
+
+    #[test]
+    fn typing_inserts_at_the_cursor_and_keeps_multibyte_characters_whole() {
+        // 列は文字数で数える。バイト位置に直すのを間違えると、非 ASCII の途中に
+        // 文字を差し込んで文字列が壊れる。
+        let mut buf = TextBuffer::from_text("あい");
+        buf.move_cursor(Motion::Left);
+        buf.insert_char('X');
+
+        assert_eq!(buf.text(), "あXい");
+        assert_eq!(buf.cursor, (0, 2));
+    }
+
+    #[test]
+    fn enter_splits_the_line_at_the_cursor() {
+        let mut buf = TextBuffer::from_text("summary body");
+        buf.cursor = (0, 7);
+        buf.insert_newline();
+
+        assert_eq!(buf.lines, vec!["summary".to_string(), " body".to_string()]);
+        assert_eq!(buf.cursor, (1, 0));
+    }
+
+    #[test]
+    fn backspace_at_the_start_of_a_line_joins_it_to_the_one_above() {
+        let mut buf = TextBuffer::from_text("あい\nう");
+        buf.cursor = (1, 0);
+        buf.backspace();
+
+        assert_eq!(buf.text(), "あいう");
+        // つないだ位置に来る。バイト長で数えると全角のぶんずれる。
+        assert_eq!(buf.cursor, (0, 2));
+    }
+
+    #[test]
+    fn backspace_never_removes_the_last_line() {
+        // `lines` が空になると `cursor` の指す行が無くなる。
+        let mut buf = TextBuffer::default();
+        buf.backspace();
+
+        assert_eq!(buf.lines, vec![String::new()]);
+        assert_eq!(buf.cursor, (0, 0));
+    }
+
+    #[test]
+    fn delete_at_the_end_of_a_line_pulls_up_the_next_one() {
+        let mut buf = TextBuffer::from_text("a\nb");
+        buf.cursor = (0, 1);
+        buf.delete();
+
+        assert_eq!(buf.text(), "ab");
+
+        // 最終行の末尾では何も起きない。
+        buf.cursor = (0, 2);
+        buf.delete();
+        assert_eq!(buf.text(), "ab");
+    }
+
+    #[test]
+    fn moving_down_to_a_shorter_line_clamps_the_column() {
+        let mut buf = TextBuffer::from_text("long line\nab");
+        buf.cursor = (0, 9);
+        buf.move_cursor(Motion::Down);
+
+        assert_eq!(buf.cursor, (1, 2));
+
+        // **戻しても桁は覚えていない。** 覚える形にすると、編集でその桁が無効に
+        // なる時点を決められない。
+        buf.move_cursor(Motion::Up);
+        assert_eq!(buf.cursor, (0, 2));
+    }
+
+    #[test]
+    fn the_cursor_stops_at_the_ends_and_crosses_lines_sideways() {
+        let mut buf = TextBuffer::from_text("ab\ncd");
+        buf.cursor = (0, 0);
+
+        // 先頭より前へは出ない。
+        buf.move_cursor(Motion::Left);
+        assert_eq!(buf.cursor, (0, 0));
+        buf.move_cursor(Motion::Up);
+        assert_eq!(buf.cursor, (0, 0));
+
+        // 行末から右は次の行の先頭へ。
+        buf.move_cursor(Motion::End);
+        buf.move_cursor(Motion::Right);
+        assert_eq!(buf.cursor, (1, 0));
+        // 行頭から左は前の行の末尾へ。
+        buf.move_cursor(Motion::Left);
+        assert_eq!(buf.cursor, (0, 2));
+
+        // 末尾より後ろへは出ない。
+        buf.cursor = (1, 2);
+        buf.move_cursor(Motion::Right);
+        assert_eq!(buf.cursor, (1, 2));
+        buf.move_cursor(Motion::Down);
+        assert_eq!(buf.cursor, (1, 2));
+        buf.move_cursor(Motion::Home);
+        assert_eq!(buf.cursor, (1, 0));
+    }
+
+    #[test]
+    fn pasted_text_goes_in_whole_with_its_line_breaks() {
+        // **貼り付けは 1 つの `Msg` で来る。** キーに割り直すと、最初の改行で確定して
+        // しまい、残りがペインのキーとして解釈される。
+        let mut buf = TextBuffer::from_text("fix: ");
+        buf.insert_text("直す\n\n本文 1\n本文 2");
+
+        assert_eq!(buf.text(), "fix: 直す\n\n本文 1\n本文 2");
+        // カーソルは貼り付けた末尾。
+        assert_eq!(buf.cursor, (3, 4));
+    }
+
+    #[test]
+    fn pasted_control_characters_are_dropped() {
+        // CRLF のまま入れると行末に制御文字が残り、タブは `ui` が数える桁とずれて
+        // カーソルの位置が合わなくなる（07 の「CommitMessage モーダル」）。
+        let mut buf = TextBuffer::default();
+        buf.insert_text("a\r\nb\tc");
+
+        assert_eq!(buf.text(), "a\nbc");
+    }
+
+    #[test]
+    fn pasting_in_the_middle_of_a_line_splits_it() {
+        let mut buf = TextBuffer::from_text("ab");
+        buf.cursor = (0, 1);
+        buf.insert_text("X\nY");
+
+        assert_eq!(buf.lines, vec!["aX".to_string(), "Yb".to_string()]);
+        assert_eq!(buf.cursor, (1, 1));
+    }
+
+    #[test]
+    fn a_buffer_of_only_whitespace_counts_as_blank() {
+        // 空メッセージを断る判定に使う。`text()` が空かどうかでは、空行と空白だけの
+        // 行を通してしまう。
+        assert!(TextBuffer::default().is_blank());
+        assert!(TextBuffer::from_text("  \n\t\n").is_blank());
+        assert!(!TextBuffer::from_text("\n\nfix").is_blank());
     }
 
     #[test]

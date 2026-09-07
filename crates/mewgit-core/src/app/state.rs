@@ -1137,9 +1137,8 @@ pub enum Modal {
 pub enum InputIntent {
     /// ブランチを作る。作ったら切り替える（`switch --create`）。
     ///
-    /// **`GitOp::BranchCreate` の `switch: bool` はここに持たない。** UI からの作成は
-    /// 常に切り替えるので `false` を組む経路が無く、持たせるとどのテストからも
-    /// 踏めない腕が 1 つ増える（03）。
+    /// **`GitOp::BranchCreate` の `switch: bool` はここに持たない**（03 の
+    /// 「argv への変換」に理由がある）。
     BranchCreate {
         /// 起点。`None` が HEAD（Branches ペインの `n`）、`Some` がグラフで選んで
         /// いるコミットの Oid（Graph ペインの `n`）。
@@ -1237,9 +1236,19 @@ impl TextBuffer {
             if n > 0 {
                 self.insert_newline();
             }
-            for c in line.chars().filter(|c| !c.is_control()) {
-                self.insert_char(c);
-            }
+            self.insert_line(line);
+        }
+    }
+
+    /// カーソル位置に**行を増やさずに**入れる。
+    ///
+    /// 制御文字を落とすので改行も消える。1 行入力（`Modal::Input`）の貼り付けが
+    /// これを呼ぶ（01 の「1 行入力」）。**呼び出し側で改行を除いてから
+    /// [`TextBuffer::insert_text`] に渡さない** — 改行をどう扱うかの判断が 2 箇所に
+    /// 割れるうえ、貼り付け全体のコピーを 1 本余計に確保することになる。
+    pub fn insert_line(&mut self, text: &str) {
+        for c in text.chars().filter(|c| !c.is_control()) {
+            self.insert_char(c);
         }
     }
 

@@ -3,7 +3,9 @@
 //! git2 による読み取り専用の層。書き込みは一切行わない（不変ルール 1）。
 //!
 //! ここには層をまたいで受け渡す値型を置き、読み取りの実装は `repo` などの
-//! サブモジュールに置く。
+//! サブモジュールに置く。**その値型を読む側で表示に直す関数も置く**（`lossy` /
+//! [`short_oid`]）。`ui` だけが読み手だったころは `ui` にあったが、`app` が
+//! モーダルの文言を組むようになって 2 人目が出た（01 の「1 行入力」）。
 
 mod diff;
 mod log;
@@ -31,14 +33,23 @@ pub const SHORT_OID: usize = 7;
 ///
 /// **`Oid::to_string()` を切り詰めない。** あちらは 40 桁を組んでから 33 桁を捨てる。
 /// グラフは可視行ぶんを毎フレーム作るので、そのぶんの確保がまるごと無駄になる。
+///
+/// **同じ理由で、ここでも余分な桁を組んでから切らない。** バイト単位に回して
+/// `truncate` する形は、奇数桁（7）だと 8 桁目を push した時点で 7 バイトの確保を
+/// 使い切って伸長が走る（`with_capacity(7)` に 8 文字入れると容量が 14 になり、
+/// `truncate` しても戻らない。rustc 1.90 で実測）。ニブル単位に回せば確保は 1 回。
 pub fn short_oid(oid: &Oid) -> String {
+    let bytes = oid.as_bytes();
     let mut text = String::with_capacity(SHORT_OID);
-    // 1 バイトが 2 桁。桁数が奇数なら 1 桁多く組んでから切る。
-    for byte in &oid.as_bytes()[..SHORT_OID.div_ceil(2)] {
-        text.push(hex(byte >> 4));
-        text.push(hex(byte & 0x0f));
+    // 1 バイトが 2 桁。偶数桁が上位ニブル、奇数桁が下位ニブル。
+    for digit in 0..SHORT_OID {
+        let byte = bytes[digit / 2];
+        text.push(hex(if digit % 2 == 0 {
+            byte >> 4
+        } else {
+            byte & 0x0f
+        }));
     }
-    text.truncate(SHORT_OID);
     text
 }
 

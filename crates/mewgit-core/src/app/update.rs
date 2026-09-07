@@ -165,8 +165,9 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
         // **1 行入力では改行を除いて 1 行につなぐ**（01 の「1 行入力」）。落とすと
         // 「末尾に改行が付いただけ」の正当な貼り付けまで拒み、1 行目だけを採ると
         // 残りが黙って消える。つないだ結果は入力欄にそのまま出ていて、`Enter` を
-        // 押すまで git は走らない。
-        Some(Modal::Input { buf, .. }) => buf.insert_text(&text.replace('\n', "")),
+        // 押すまで git は走らない。**改行を落とすのは `insert_line` の担当**で、
+        // ここで `replace` すると同じ判断が 2 箇所に割れる。
+        Some(Modal::Input { buf, .. }) => buf.insert_line(text),
         _ => {}
     }
     Cmd::None
@@ -385,8 +386,6 @@ fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
 }
 
 /// Branches ペインのキー処理。
-///
-/// **`n`（作成）と `r`（リネーム）は次のタスク**（07 の「どこまで実装したか」）。
 /// `Modal::Input` の最初の利用者になるので、モーダルごと別の PR にしてある。
 fn branches_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
@@ -506,8 +505,9 @@ fn rename_branch(state: &mut AppState) -> Cmd {
 
 /// 入力モーダルを開く。
 ///
-/// **`Modal::Input` を組むのはここ 1 本**（[`confirm`] と同じ理由。2 箇所で組むと、
-/// フィールドが増えたときに片方だけ直した状態が生まれる）。
+/// **`Modal::Input` を組むのはここ 1 本**（[`confirm`] と同じ形）。フィールドを足せば
+/// リテラルは全部コンパイルエラーになるので、揃えたいのは**開き方**のほう —
+/// 「`Cmd` を返さずに `modal` へ置くだけ」を各キーの腕に散らさない。
 fn input(
     state: &mut AppState,
     title: String,
@@ -876,20 +876,35 @@ fn commit_message_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         // ここに来る `Enter` は修飾付き（`Alt+Enter` = `ESC CR`、`Shift+Enter`）。
         KeyCode::Enter => buf.insert_newline(),
+        // 行が複数あるモーダルにしか要らない。残りは `edit_key` が受ける。
+        KeyCode::Up => buf.move_cursor(Motion::Up),
+        KeyCode::Down => buf.move_cursor(Motion::Down),
+        _ => {
+            let _ = edit_key(buf, key);
+        }
+    }
+    Cmd::None
+}
+
+/// 編集中のモーダルで共通のキー。扱えたら `true`。
+///
+/// **`CommitMessage` と `Input` で腕を写さない。** 「修飾付きの文字は入力にしない」を
+/// 変えるときに片方だけ古くなり、**どちらのテストも自分のモーダルしか踏まないので
+/// 通ってしまう**。行の上下移動と改行はここに入れない — 行が 1 本か複数かで違い、
+/// それがこの 2 つのモーダルの唯一の差だから（01 の「1 行入力」）。
+fn edit_key(buf: &mut TextBuffer, key: Key) -> bool {
+    match key.code() {
         KeyCode::Backspace => buf.backspace(),
         KeyCode::Delete => buf.delete(),
         KeyCode::Left => buf.move_cursor(Motion::Left),
         KeyCode::Right => buf.move_cursor(Motion::Right),
-        KeyCode::Up => buf.move_cursor(Motion::Up),
-        KeyCode::Down => buf.move_cursor(Motion::Down),
         KeyCode::Home => buf.move_cursor(Motion::Home),
         KeyCode::End => buf.move_cursor(Motion::End),
-        // 修飾付きの文字は入力にしない。`Ctrl-J` は上で拾っており、残りは
-        // まだ割り当てが無いので落とす（`Ctrl-C` は `update_key` が先に見る）。
+        // 修飾付きの文字は入力にしない（`Ctrl-C` は `update_key` が先に見る）。
         KeyCode::Char(c) if !key.mods().ctrl && !key.mods().alt => buf.insert_char(c),
-        _ => {}
+        _ => return false,
     }
-    Cmd::None
+    true
 }
 
 /// コミットメッセージを確定する。
@@ -963,19 +978,9 @@ fn input_key(state: &mut AppState, key: Key) -> Cmd {
         return Cmd::None;
     };
 
-    match key.code() {
-        KeyCode::Backspace => buf.backspace(),
-        KeyCode::Delete => buf.delete(),
-        KeyCode::Left => buf.move_cursor(Motion::Left),
-        KeyCode::Right => buf.move_cursor(Motion::Right),
-        KeyCode::Home => buf.move_cursor(Motion::Home),
-        KeyCode::End => buf.move_cursor(Motion::End),
-        // `↑` `↓` は落とす。行が 1 本しか無く、動かす先が無い。
-        //
-        // 修飾付きの文字は入力にしない（`Ctrl-C` は `update_key` が先に見る）。
-        KeyCode::Char(c) if !key.mods().ctrl && !key.mods().alt => buf.insert_char(c),
-        _ => {}
-    }
+    // `↑` `↓` と `Ctrl-J` は `edit_key` が受けないので落ちる。行が 1 本しか無く、
+    // 動かす先も割る先も無い。
+    let _ = edit_key(buf, key);
     Cmd::None
 }
 
@@ -997,8 +1002,6 @@ fn input_submit(state: &mut AppState) -> Cmd {
 
     let name = buf.text();
     let op = match intent {
-        // **`switch: true` を組むのはここ。** UI からの作成は常に切り替えるので
-        // `InputIntent` は真偽値を持たない（03）。
         InputIntent::BranchCreate { start } => GitOp::BranchCreate {
             name,
             start: start.clone(),
@@ -1619,6 +1622,13 @@ mod tests {
 
     fn press_code(state: &mut AppState, code: KeyCode) -> Cmd {
         update(state, Msg::Key(Key::new(code)))
+    }
+
+    /// 文字を 1 つずつ打つ。**貼り付け（`Msg::Paste`）ではない。**
+    fn type_text(state: &mut AppState, text: &str) {
+        for c in text.chars() {
+            let _ = press(state, c);
+        }
     }
 
     /// ワーキングツリー側の diff の対象。`assert_eq!` を短くするため。
@@ -2533,9 +2543,7 @@ mod tests {
     fn enter_creates_the_branch_and_switches_to_it() {
         let mut state = state_on_branches(&[("main", true)]);
         let _ = press(&mut state, 'n');
-        for c in "feat/x".chars() {
-            let _ = press(&mut state, c);
-        }
+        type_text(&mut state, "feat/x");
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
@@ -2556,9 +2564,7 @@ mod tests {
         let mut state = state_on_branches(&[("topic", false)]);
         let _ = press(&mut state, 'r');
         // 末尾に足す（初期値がそのまま残っている）。
-        for c in "-2".chars() {
-            let _ = press(&mut state, c);
-        }
+        type_text(&mut state, "-2");
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
@@ -2598,9 +2604,7 @@ mod tests {
         let mut state = state_on_branches(&[("main", true)]);
         let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
         let _ = press(&mut state, 'n');
-        for c in "feat/x".chars() {
-            let _ = press(&mut state, c);
-        }
+        type_text(&mut state, "feat/x");
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
@@ -2644,14 +2648,13 @@ mod tests {
             )),
         );
 
-        assert_eq!(
-            cmd,
-            Cmd::Exec(GitOp::BranchCreate {
-                name: "x".to_string(),
-                start: None,
-                switch: true,
-            })
+        // 見たいのは「修飾付きでも確定するか」だけ。組む `GitOp` の中身は
+        // `enter_creates_the_branch_and_switches_to_it` が見張っている。
+        assert!(
+            matches!(cmd, Cmd::Exec(GitOp::BranchCreate { .. })),
+            "{cmd:?}"
         );
+        assert_eq!(state.modal, None);
     }
 
     #[test]
@@ -4284,9 +4287,7 @@ feat/b
         let mut state = only_staged();
         let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
         let _ = press(&mut state, 'c');
-        for c in "fix".chars() {
-            let _ = press(&mut state, c);
-        }
+        type_text(&mut state, "fix");
 
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
 
@@ -4348,9 +4349,7 @@ feat/b
     fn enter_commits_what_was_typed() {
         let mut state = only_staged();
         let _ = press(&mut state, 'c');
-        for c in "fix".chars() {
-            let _ = press(&mut state, c);
-        }
+        type_text(&mut state, "fix");
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 

@@ -59,7 +59,7 @@ pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool) {
     // 窓が 0 行（潰れた端末）のときは置かない。
     if shown.contains(&row) {
         frame.set_cursor_position(Position {
-            x: body_area.x + cursor_col - scroll_x,
+            x: body_area.x + cursor_col,
             y: body_area.y + u16::try_from(row - shown.start).unwrap_or(u16::MAX),
         });
     }
@@ -67,9 +67,8 @@ pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool) {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, row_of, state_with_modal, terminal_with};
+    use crate::test_util::{cursor, draw, row_of, state_with_modal};
     use mewgit_core::app::{AppState, Modal, TermSize, TextBuffer};
-    use ratatui::layout::Position;
     use ratatui::text::Line;
 
     /// 既定の 80x24。
@@ -84,13 +83,6 @@ mod tests {
             buf: TextBuffer::from_text(text),
             amend,
         })
-    }
-
-    /// 端末カーソルの位置。
-    fn cursor(state: &AppState) -> Position {
-        terminal_with(state, SIZE)
-            .get_cursor_position()
-            .expect("カーソル位置を取れませんでした")
     }
 
     #[test]
@@ -159,7 +151,7 @@ mod tests {
         let text = lines.join("\n");
 
         assert!(text.contains("line 39"), "{text}");
-        assert_eq!(cursor(&state).y, row_of(&lines, "line 39"));
+        assert_eq!(cursor(&state, SIZE).y, row_of(&lines, "line 39"));
     }
 
     #[test]
@@ -169,7 +161,7 @@ mod tests {
         let state = state_with_message("あいう", false);
 
         let lines = draw(&state, SIZE);
-        let x = cursor(&state).x;
+        let x = cursor(&state, SIZE).x;
         let row = &lines[row_of(&lines, "あいう") as usize];
 
         // 「あいう」の直後。**バイト位置ではなく桁で測る**（枠の `│` は 3 バイト）。
@@ -191,14 +183,15 @@ mod tests {
         let text = lines.join("\n");
 
         assert!(text.contains("END"), "{text}");
-        assert_eq!(cursor(&state).y, row_of(&lines, "END"));
+        assert_eq!(cursor(&state, SIZE).y, row_of(&lines, "END"));
     }
 
     #[test]
     fn a_tiny_terminal_does_not_panic() {
-        // リサイズの途中では枠より小さい端末が来る。**このモーダルだけで見る。**
-        // 窓が 0 行になったときにカーソルを置かない分岐は、ここにしか無い
-        // （下を覆うことと中央寄せは `modals::place` の担当で、`confirm` が見ている）。
+        // リサイズの途中では枠より小さい端末が来る。**編集中のモーダルごとに
+        // 1 本ずつ見る。** 窓が 0 行になったときにカーソルを置かない分岐は
+        // モーダルごとに形が違い（こちらは窓が空か、`Input` は入力欄の高さが 0 か）、
+        // 下を覆うことと中央寄せだけが `modals::place` の担当（`confirm` が見ている）。
         for (width, height) in [(1, 1), (10, 3), (20, 5)] {
             let state = state_with_message("本文\n2 行目", false);
             let lines = draw(&state, TermSize { width, height });

@@ -271,7 +271,6 @@ pub fn graph_rows(term: TermSize) -> usize {
     panes::graph::area(left).height as usize
 }
 
-/// 短縮 Oid の桁数。`git log --oneline` と同じ。
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
 fn header_line(state: &AppState) -> Paragraph<'_> {
     let mut spans = vec![Span::styled(

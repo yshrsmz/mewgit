@@ -15,11 +15,6 @@ use crate::ui;
 /// に案内の文言まで持たせると同じことを 2 箇所で言い、片方だけ直った状態が生まれる（07）。
 const HINT: &str = "[Enter] 決定   [Esc] やめる";
 
-/// モーダルの幅。狭い端末では画面の幅まで縮む。
-///
-/// `Confirm` と同じ。ブランチ名はコミットメッセージより短く、広く取る理由が無い。
-const WIDTH: u16 = 60;
-
 /// 入力欄に取る行数。1 行しか打てない（01 の「1 行入力」）。
 const INPUT_ROWS: u16 = 1;
 
@@ -28,13 +23,14 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, prompt: &str, buf: &Te
     let block = modals::block(title);
     // **prompt は折り返してから行数を数える**（`Confirm` の本文と同じ）。`桁数 / 幅` の
     // 切り上げで見積もると、単語境界で折れて増えたぶんを数え落として末尾が切れる。
-    let (prompt_text, prompt_rows) = ui::wrapped(prompt, modals::inner_width(area, WIDTH, &block));
+    let (prompt_text, prompt_rows) =
+        ui::wrapped(prompt, modals::inner_width(area, modals::WIDTH, &block));
 
     let body_area = modals::place(
         frame,
         area,
         block,
-        WIDTH,
+        modals::WIDTH,
         prompt_rows.saturating_add(INPUT_ROWS),
         HINT,
     );
@@ -55,7 +51,7 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, prompt: &str, buf: &Te
     // 入力欄の行が残らないので置かない。
     if input_area.height > 0 {
         frame.set_cursor_position(Position {
-            x: input_area.x + cursor_col - scroll_x,
+            x: input_area.x + cursor_col,
             y: input_area.y,
         });
     }
@@ -63,9 +59,8 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, prompt: &str, buf: &Te
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, row_of, state_with_modal, terminal_with};
+    use crate::test_util::{cursor, draw, row_of, state_with_modal};
     use mewgit_core::app::{AppState, InputIntent, Modal, TermSize, TextBuffer};
-    use ratatui::layout::Position;
     use ratatui::text::Line;
 
     /// 既定の 80x24。
@@ -82,13 +77,6 @@ mod tests {
             buf: TextBuffer::from_text(text),
             intent: InputIntent::BranchCreate { start: None },
         })
-    }
-
-    /// 端末カーソルの位置。
-    fn cursor(state: &AppState) -> Position {
-        terminal_with(state, SIZE)
-            .get_cursor_position()
-            .expect("カーソル位置を取れませんでした")
     }
 
     #[test]
@@ -115,7 +103,7 @@ mod tests {
         let lines = draw(&state, SIZE);
 
         assert!(
-            row_of(&lines, "main の新しい名前") < cursor(&state).y,
+            row_of(&lines, "main の新しい名前") < cursor(&state, SIZE).y,
             "{lines:?}"
         );
     }
@@ -127,7 +115,7 @@ mod tests {
         let state = state_with_input("ブランチを作成", "名前", "あいう");
 
         let lines = draw(&state, SIZE);
-        let x = cursor(&state).x;
+        let x = cursor(&state, SIZE).x;
         let row = &lines[row_of(&lines, "あいう") as usize];
 
         // 「あいう」の直後。**バイト位置ではなく桁で測る**（枠の `│` は 3 バイト）。
@@ -149,7 +137,7 @@ mod tests {
         let text = lines.join("\n");
 
         assert!(text.contains("END"), "{text}");
-        assert_eq!(cursor(&state).y, row_of(&lines, "END"));
+        assert_eq!(cursor(&state, SIZE).y, row_of(&lines, "END"));
     }
 
     #[test]

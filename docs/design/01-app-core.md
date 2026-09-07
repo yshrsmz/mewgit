@@ -159,9 +159,8 @@ pub enum InputIntent {
   選んでいるコミットの Oid（Graph ペインの `n`）。**どちらも UI から踏める**ので
   `Option` を持つ。タグを起点にしたいときは、そのタグのラベルが乗った行を
   グラフで選ぶ（タグ一覧のペインは無い。07 の「Graph ペイン」）
-- **`GitOp::BranchCreate` の `switch: bool` は `InputIntent` に持たせない**（03）。
-  UI からの作成は常に切り替えるので `switch: false` を組む経路が無く、持たせると
-  どのテストからも踏めない腕が 1 つ増える
+- **`GitOp::BranchCreate` の `switch: bool` は `InputIntent` に持たせない。**
+  UI からの作成は常に切り替える（理由は 03 の「argv への変換」に置いた）
 
 `TextBuffer` は複数行の編集バッファ。ratatui のウィジェットや `tui-textarea` は
 使わない（core が UI に依存してしまうため）。

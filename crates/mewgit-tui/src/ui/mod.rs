@@ -544,6 +544,36 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_of_72_cells_fits_beside_the_hint() {
+        // **案内文の 72 セルという予算はここから来る**（01 の「失敗の案内文」）。
+        // `q:quit` と空白 2 で 8 セル取るので、80 桁では通知に 72 セル残る。
+        // `contains` を見るテストは切れても通るので、**収まることを直に見る**。
+        let size = TermSize::default();
+        assert_eq!(size.width, 80, "予算の前提（80 桁）が変わっています");
+
+        let last_line = |message: String| {
+            let mut state = state_at("/repo");
+            state.push_notice(NoticeLevel::Error, message, None);
+            draw(&state, size)[size.height as usize - 1].clone()
+        };
+
+        let fits = "あ".repeat(36);
+        let last = last_line(fits.clone());
+        assert!(last.contains(&fits), "status: {last:?}");
+        assert!(last.contains("q:quit"), "status: {last:?}");
+
+        // 1 文字増やすと 74 セルになり、ヒントと合わせて 80 桁に入らない。**どちらが
+        // 切られるかは見ない** —— 07 は通知を切ると決めていて、いまの実装は末尾
+        // （ヒント）を落とす。直すのは M6 のステータスバーのタスク。
+        let over = "あ".repeat(37);
+        let last = last_line(over.clone());
+        assert!(
+            !(last.contains(&over) && last.contains("q:quit")),
+            "status: {last:?}"
+        );
+    }
+
+    #[test]
     fn repo_label_falls_back_to_the_path_when_there_is_no_file_name() {
         // "." や "/" は file_name() が None。空ヘッダにしない。
         let lines = draw(&state_at("."), TermSize::default());

@@ -78,6 +78,9 @@ impl AppState {
 - 上限は 100 件。`ui` は最新の 1 件しか読まないが、履歴表示（M6）まで残しておく
 - ステータスバーは**最新の通知とキーヒントの両方**を出す（07）。通知で置き換えると、
   起動時の設定警告 1 件でヒントが二度と戻らなくなる
+- **`message` は「次に何をすればよいか」、`detail` は証拠**（argv と stderr）。
+  ステータスバーが描くのは `message` の 1 行目だけなので、そこを証拠で埋めると
+  案内が画面から消える（下の「失敗の案内文」）
 - 明示的な dismiss と期限切れは M6 のステータスバーのタスクで決める
 
 ## Pane と Modal
@@ -987,6 +990,49 @@ pub struct PushRejection {
 
 確認モーダルには remote / 行き先 / lease の短縮 Oid を出す。**`y` を押した時点で
 読み直さない**（上の「確認モーダルを組む時点の値を `GitOp` に閉じ込める」）。
+
+### 失敗の案内文
+
+`git` の失敗は `exec_finished` が通知に積む。**`message` に入れるのは案内文**
+（`ExecErrorKind` と `GitOp` から決める純粋関数 `exec_advice`）で、案内が無い kind では
+`ExecError` の `Display`（`git の実行に失敗しました: git <argv>`）に落ちる。
+`detail` は今までどおり argv + stderr。
+
+**置き場所は `app`。** 答えるのが「mewgit のどのキーを押すか」で、`f` / `p` / `P` を
+知っているのは `app` だけ（`git_exec` に置くと `moves_refs()` と同じ、層をまたぐ述語に
+なる）。分類そのものは `git_exec` のまま（03 のエラー分類）。
+
+| kind / op | 案内 |
+|---|---|
+| `SamlSsoRequired` | GitHub で鍵を Authorize する |
+| `SshAuthFailed` | ssh-agent と鍵の登録を確認する |
+| `HttpsAuthFailed` | `gh auth setup-git` を実行する |
+| `NonFastForward` + `Push { lease: Some }` | `f` で取得してから `P` を押し直す |
+| `NonFastForward` + `Push { set_upstream: true }` | `r` で改名して push する |
+| `NonFastForward` + `Push { .. }` | `p` で取り込むか `P` をもう一度 |
+| `NonFastForward` + `Pull` | 履歴が分かれている（merge / rebase は M5） |
+| それ以外 | 無し（`Display` に落とす） |
+
+- **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
+  `stale info` で断られた形は fetch を勧める側（lease は fetch してからでないと通らない。
+  上の「force push」）、`-u` の提案から入った形は force に上げる経路が無い側（force は
+  `PushPlan::Tracked` にしか無い）。kind だけで文を選ぶと、どちらかに嘘を言う
+- **通常の push には「`P` をもう一度」とだけ書く。** 次の `P` が force の確認を出すかは
+  `push_plan` が決めていて（`ahead == 0` と追跡 ref の有無で断る）、ここで先読みすると
+  **同じ判定が 2 箇所に割れる**。押した結果が断りでも、出るのは `PushPlan::Refused` の
+  正しい文言なので、案内が嘘にはならない
+- **`-u` の経路は mewgit の中で行き止まり。** 追跡設定が無いので `p` も通らず
+  （`git pull` が「どのブランチか」を決められない）、force にも上げられない。**唯一
+  残る出口が `r`**（改名すればリモートに同名の ref が無くなり、`-u` の push が通る）。
+  「できません」で終える案内は、踏める手が実際に 1 つも無いことを数えてから書く
+- **72 セルに収める。** ステータスバーは 1 行で、右端の `q:quit` と空白 2 で 8 セル
+  取る（07）。溢れると `Paragraph` が黙って切るのは**行の末尾**、つまり案内の
+  「どうすればよいか」の側から消える。**見張りは 80 桁で描いて、案内の末尾と
+  `q:quit` の両方が見えることを見る**（`contains` だけでは切れても通る）
+- **argv は画面から退く。** これまでステータスバーに出ていた `git <argv>` は
+  `detail` の 1 行目に移り、履歴表示（M6）まで見えない。**案内とヒントで 80 桁が
+  埋まるので、証拠を同じ行に並べる余地は無い**（07 の「通知とヒントが取り合うときは
+  通知を切る」と同じ優先順）
 
 ## 実行中ジョブ
 

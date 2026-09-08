@@ -188,8 +188,16 @@ fn lossy(bytes: Vec<u8>) -> String {
 /// `! [remote rejected] main -> main (pre-receive hook declined)` と書く（git 2.55 で
 /// 確認）。これを `NonFastForward` にすると、`app` が「次の `P` は force push」と
 /// 憶えてしまい（01 の「force push」）、履歴と関係の無い拒否に対して「リモートを
-/// 上書きします」という確認が出る。git が非 FF を表す語は 3 つ ——
-/// `(non-fast-forward)` / `(fetch first)` / `(stale info)`（lease が古い）。
+/// 上書きします」という確認が出る。git が非 FF を表す語は 4 つ ——
+/// push が断る `(non-fast-forward)` / `(fetch first)` / `(stale info)`（lease が古い）と、
+/// `pull --ff-only` が断る `Not possible to fast-forward`。
+///
+/// **4 つ目は `rejected` を含まない。** 履歴が分かれた `pull --ff-only` はこの
+/// `fatal:` だけを書き、上の 3 語をどれも出さない（git 2.55 で確認）。拾わないと
+/// `p` の失敗が `Other` に落ち、**案内が要るその場面で案内文の側から消える**
+/// （01 の「失敗の案内文」）。`hint:` の行は `advice.diverging false` で消えるので、
+/// 見るのは `fatal:` の側。**広げても force は arm されない** —— 憶える
+/// `push_rejection` は `GitOp::Push` で門番している（01 の「force push」）。
 fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
     let has = |needle: &str| stderr.contains(needle) || stdout.contains(needle);
 
@@ -201,7 +209,11 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
         ExecErrorKind::HttpsAuthFailed
     } else if has("CONFLICT") || has("could not apply") {
         ExecErrorKind::Conflict
-    } else if has("non-fast-forward") || has("fetch first") || has("stale info") {
+    } else if has("non-fast-forward")
+        || has("fetch first")
+        || has("stale info")
+        || has("Not possible to fast-forward")
+    {
         ExecErrorKind::NonFastForward
     } else {
         ExecErrorKind::Other
@@ -238,6 +250,12 @@ mod tests {
         );
         assert_eq!(
             classify("", " ! [rejected]        main -> main (non-fast-forward)"),
+            ExecErrorKind::NonFastForward
+        );
+        // `pull --ff-only` が履歴の分かれたブランチを断る形。**`rejected` も上の
+        // 3 語も含まない**ので、この行を拾わないと `Other` に落ちる（git 2.55 で確認）。
+        assert_eq!(
+            classify("", "fatal: Not possible to fast-forward, aborting."),
             ExecErrorKind::NonFastForward
         );
         assert_eq!(

@@ -1709,8 +1709,14 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     state.progress = done.progress;
 
     if let Err(err) = &done.result {
+        // **要約行は案内文、証拠は `detail`。** ステータスバーは `message` の 1 行目
+        // しか描かない（07）ので、そこを argv で埋めると案内が画面に出ない
+        // （01 の「失敗の案内文」）。
         let detail = exec_detail(err);
-        state.push_notice(NoticeLevel::Error, err.to_string(), Some(detail));
+        let message = exec_advice(&done.op, err)
+            .map(str::to_string)
+            .unwrap_or_else(|| err.to_string());
+        state.push_notice(NoticeLevel::Error, message, Some(detail));
     }
 
     if let GitOp::Push { src, lease, .. } = &done.op {
@@ -1863,6 +1869,76 @@ fn exec_detail(err: &ExecError) -> String {
         }
     }
     detail
+}
+
+/// 通知の要約行。失敗の種別から「次に何をすればよいか」を出す（01 の「失敗の案内文」）。
+///
+/// `None` は案内が無いということ。呼び出し側は [`ExecError`] の `Display`
+/// （`git の実行に失敗しました: git <argv>`）に落とす。
+///
+/// **`op` まで見るのは非 FF のため。** 同じ `(non-fast-forward)` でも、force push が
+/// lease に断られた形（fetch を勧める）、`-u` の提案から入って force に上げる経路が
+/// 無い形、追跡設定に沿った push が断られた形で押すキーが違う。kind だけで文を選ぶと
+/// どれかに嘘を言う。
+///
+/// **どの文も 72 セルに収める。** ステータスバーは 1 行で、右端の `q:quit` と空白 2 で
+/// 8 セル取る（07）。溢れると `Paragraph` が末尾から黙って切るので、「どうすればよいか」
+/// の側から消える。見張りは `mewgit-tui` 側に置く（80 桁で描いて確かめる）。
+fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
+    // `NoResult` の `reason` は git の stderr ではなく mewgit の文言で、それ自体が
+    // 案内になっている（03）。差し替えると説明が消える。
+    let ExecError::Failed { kind, .. } = err else {
+        return None;
+    };
+    match kind {
+        ExecErrorKind::SamlSsoRequired => {
+            Some("SAML SSO の承認が要ります。GitHub で鍵を Authorize してください")
+        }
+        ExecErrorKind::SshAuthFailed => {
+            // **ホストは入れない。** `ssh -T <host>` を出すには「どのリモートで
+            // 失敗したか」が要るが、`Pull` はリモート名を運ばず、`RemoteUrl` は
+            // `user@` を捨てる（04）。M4 の「既定リモートを決める」へ送った（03）。
+            Some("SSH 鍵で認証できませんでした。ssh-agent と鍵の登録を確認してください")
+        }
+        ExecErrorKind::HttpsAuthFailed => {
+            Some("HTTPS 認証に失敗しました。gh auth setup-git を実行してください")
+        }
+        ExecErrorKind::NonFastForward => non_fast_forward_advice(op),
+        // `Conflict` の案内は進行中モードへの遷移ごと M5（03）。それまでは stderr を
+        // 出すほうが情報が多い。
+        ExecErrorKind::Conflict | ExecErrorKind::Other => None,
+    }
+}
+
+/// 非 FF で断られたときの案内。**押すキーが op で違う**（01 の「失敗の案内文」）。
+fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
+    match op {
+        // force push が lease に断られた形（`stale info`）。**これは守りが効いている**
+        // ので、リモートの位置を見てから押し直す（01 の「force push」）。
+        GitOp::Push { lease: Some(_), .. } => {
+            Some("リモートが動いています。f で取得してから P を押し直してください")
+        }
+        // `-u` の提案から入った形。force に上げられるのは `PushPlan::Tracked` だけ
+        // （lease の値が無い）。**`p` も通らない** —— 追跡設定が無いので `git pull` が
+        // どのブランチを取るか決められない。**mewgit に残る出口は `r` だけ**で、
+        // 改名すればリモートに同名の ref が無くなり `-u` の push が通る。
+        GitOp::Push {
+            set_upstream: true, ..
+        } => Some("追跡先が無いため force push できません。r で改名して push できます"),
+        // 追跡設定に沿った push。**次の `P` が force の確認を出すかは書かない** ——
+        // それを決めるのは `push_plan`（`ahead == 0` と追跡 ref の有無で断る）で、
+        // ここで先読みすると同じ判定が 2 箇所に割れる。断られても出るのは
+        // `PushPlan::Refused` の正しい文言なので、この案内は嘘にならない。
+        GitOp::Push { .. } => {
+            Some("リモートが進んでいます。p で取り込むか、P をもう一度押してください")
+        }
+        // `pull --ff-only` が履歴の分かれたブランチを断った形。merge / rebase は
+        // M5 なので、mewgit の中に踏める手が無いことをそのまま言う。
+        GitOp::Pull { .. } => Some("履歴が分かれています。merge / rebase はまだ実装していません"),
+        // fetch は remote-tracking ref を `+` 付きで更新するので非 FF で断らない
+        // （git 2.55 で確認）。ほかの op も非 FF を出す経路が無い。
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -3948,6 +4024,120 @@ feat/b
         assert!(
             detail.contains("did not match any files"),
             "detail: {detail}"
+        );
+        // 案内の無い kind では要約行が `Display` のまま（01 の「失敗の案内文」）。
+        assert!(
+            notice.message.contains("git add -- a.txt"),
+            "message: {}",
+            notice.message
+        );
+    }
+
+    /// 指定した kind で失敗した実行。stderr は分類済みの値を直に置く（分類そのものは
+    /// `git_exec` のテストが見る）。
+    fn failed_with(kind: ExecErrorKind) -> ExecError {
+        ExecError::Failed {
+            argv: vec!["push".into(), "origin".into(), "main".into()],
+            code: Some(1),
+            stderr: "stderr の中身".to_string(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_failure_puts_the_next_key_on_the_summary_line() {
+        // **ステータスバーが描くのは要約行の 1 行目だけ**（07）。ここが argv だと、
+        // 「次に何を押すか」が画面に出ない（01 の「失敗の案内文」）。
+        let tracked = push_op("origin", "main", false);
+        let cases: [(GitOp, ExecErrorKind, &str); 7] = [
+            (tracked.clone(), ExecErrorKind::SamlSsoRequired, "Authorize"),
+            (tracked.clone(), ExecErrorKind::SshAuthFailed, "ssh-agent"),
+            (
+                tracked.clone(),
+                ExecErrorKind::HttpsAuthFailed,
+                "gh auth setup-git",
+            ),
+            // **同じ kind でも op で押すキーが違う。** kind だけで選ぶとどれかに嘘を言う。
+            (
+                tracked.clone(),
+                ExecErrorKind::NonFastForward,
+                "P をもう一度押してください",
+            ),
+            (
+                push_op("origin", "main", true),
+                ExecErrorKind::NonFastForward,
+                "r で改名して push できます",
+            ),
+            (
+                forced_push_op(fake_oid(7)),
+                ExecErrorKind::NonFastForward,
+                "f で取得してから",
+            ),
+            (
+                GitOp::Pull {
+                    mode: PullMode::FastForwardOnly,
+                },
+                ExecErrorKind::NonFastForward,
+                "merge / rebase はまだ実装していません",
+            ),
+        ];
+
+        for (op, kind, expected) in cases {
+            let mut state = state();
+            finish_exec(&mut state, op.clone(), Err(failed_with(kind)));
+
+            let notice = state.notices.back().expect("通知がありません");
+            assert!(
+                notice.message.contains(expected),
+                "{op:?} / {kind:?}: {}",
+                notice.message
+            );
+            // **案内に差し替えても証拠は捨てない**（不変ルール 4）。argv は `detail`
+            // に残り、履歴表示（M6）から読める。
+            let detail = notice.detail.as_deref().expect("detail がありません");
+            assert!(detail.contains("git push origin main"), "detail: {detail}");
+            // **1 行に収まる幅か。** 超えると末尾から黙って切れ、「どうすればよいか」
+            // の側が消える（01 の「失敗の案内文」）。72 が予算である理由は
+            // `mewgit-tui` の `a_notice_of_72_cells_fits_beside_the_hint` が見る。
+            assert!(
+                cells(&notice.message) <= 72,
+                "{} セル: {}",
+                cells(&notice.message),
+                notice.message
+            );
+        }
+    }
+
+    /// 端末に描いたときの桁数。**案内文は ASCII と日本語だけ**なので、非 ASCII を
+    /// 2 桁と数えれば実際の幅と一致する（合成文字や絵文字を入れたらここが嘘になる）。
+    fn cells(text: &str) -> usize {
+        text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
+    }
+
+    #[test]
+    fn a_diverged_pull_does_not_arm_a_force_push() {
+        // `pull --ff-only` の拒否も `NonFastForward` に落ちる（`classify` の 4 つ目）。
+        // **憶える側は `GitOp::Push` で門番している**ので、ここで force の腕は立たない
+        // （01 の「force push」）。立つと、`p` を押しただけで次の `P` が
+        // 「リモートを上書きします」の確認になる。
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(7))),
+        );
+
+        finish_exec(
+            &mut state,
+            GitOp::Pull {
+                mode: PullMode::FastForwardOnly,
+            },
+            Err(failed_with(ExecErrorKind::NonFastForward)),
+        );
+
+        assert_eq!(state.push_rejected, None);
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "main", false)),
+            "force push の確認が出ています"
         );
     }
 

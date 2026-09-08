@@ -304,8 +304,21 @@ stderr ではなく mewgit の説明文を入れる。
 `! [remote rejected] main -> main (pre-receive hook declined)` と書く（git 2.55 で確認）。
 `NonFastForward` にすると `app` が「次の `P` は force push」と憶える（01 の
 「force push」）ので、履歴と関係の無い拒否に「リモートを上書きします」の確認が出る。
-git が非 FF を表すのは 3 つ —— `(non-fast-forward)`、`(fetch first)`、
-lease が古いときの `(stale info)`。
+git が非 FF を表すのは 4 つ —— push が断る `(non-fast-forward)`、`(fetch first)`、
+lease が古いときの `(stale info)` と、`pull --ff-only` が断る
+`fatal: Not possible to fast-forward, aborting.`。
+
+**4 つ目は `rejected` を含まない。** `pull --ff-only` は履歴が分かれているとこの
+`fatal:` だけを書き、上の 3 語をどれも出さない（git 2.55 で確認）。**拾わないと
+`p` の失敗が `Other` に落ち、案内文の側から消える** —— まさに案内が要る場面なのに
+「git の実行に失敗しました」しか出ない。`hint:` の行は `advice.diverging false` で
+消えるので、見るのは `fatal:` の側。
+
+**広げたので読み手を数え直す。** `NonFastForward` を見るのは 2 人。`push_rejection`
+（force を arm する。01 の「force push」）は `GitOp::Push` で門番しているので
+`Pull` の失敗では立たない。もう 1 人は案内文（01 の「失敗の案内文」）で、そちらも
+op で分けている。**#49 の「分類の読み手が増えたら偽陽性が何を引くかを数える」の
+裏返し** —— 語を増やす側でも同じ数え方が要る。
 
 **見るのは stderr だけではなく stdout も。** `git merge`（`pull --no-rebase` の経路）は
 コンフリクトのとき `CONFLICT (content): ...` と `Automatic merge failed` を **stdout** に
@@ -313,14 +326,25 @@ lease が古いときの `(stale info)`。
 （git 2.55 で確認）。cherry-pick / rebase は `CONFLICT` が stdout、
 `error: could not apply` が stderr と分かれる。
 
-| パターン | kind | UI の案内 |
-|---|---|---|
-| `SAML SSO` / `organization has enabled or enforced SAML` | `SamlSsoRequired` | SSH 鍵の SSO 承認手順 |
-| `Permission denied (publickey)` | `SshAuthFailed` | `ssh -T <host>` での確認を促す |
-| `Authentication failed` | `HttpsAuthFailed` | `gh auth setup-git` を案内 |
-| `CONFLICT` / `could not apply` | `Conflict` | 進行中モードへ遷移 |
-| `non-fast-forward` / `fetch first` / `stale info` | `NonFastForward` | pull または force push の選択 |
-| その他 | `Other` | stderr をそのまま表示 |
+| パターン | kind |
+|---|---|
+| `SAML SSO` / `organization has enabled or enforced SAML` | `SamlSsoRequired` |
+| `Permission denied (publickey)` | `SshAuthFailed` |
+| `Authentication failed` | `HttpsAuthFailed` |
+| `CONFLICT` / `could not apply` | `Conflict` |
+| `non-fast-forward` / `fetch first` / `stale info` / `Not possible to fast-forward` | `NonFastForward` |
+| その他 | `Other` |
+
+**案内文は 01 の「失敗の案内文」が持つ。** ここに文言まで並べると、同じ kind でも
+op で変わる分（非 FF は 4 通り）を表に書けないうえ、「次に何のキーを押すか」は
+`git_exec` が答えられる問いではない（`moves_refs()` を `app` へ移したのと同じ数え方。
+CLAUDE.md の「層をまたぐ述語」）。
+
+**`SshAuthFailed` の案内にホストは入れていない。** `ssh -T <host>` を出すには
+「どのリモートで失敗したか」が要るが、`GitOp::Pull` はリモート名を運ばず、
+`RemoteUrl` は `user@` を捨てる（04）ので `git@` を書き足すと推測になる。
+**`RepoInfo.target` が埋まる M4 の「既定リモートを決める」へ送った** —— fetch が
+無反応になる件（01）と同じ問いで、別々に決めると規則が 2 本並ぶ。
 
 分類するのは git の出力があるとき、つまり `ExecError::Failed` だけ。`NoResult` には
 `kind` が無い（分類関数を通らない）。

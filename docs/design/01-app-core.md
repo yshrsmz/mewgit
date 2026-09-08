@@ -263,6 +263,11 @@ impl TextBuffer {
   根拠にしない。どちらも「変更がありません」が嘘になりうるので、開いて git の側に
   判定を任せる
 - **`C`（amend）は staged が空でも通す。** reword だけの amend は正当な操作
+- **`C` は書き込みが走っているあいだ断る。** 走っている `git` が HEAD を動かせば、
+  読んだ本文は 1 つ前のコミットのものになる。**返信の刻印では捕まえられない** ——
+  git2 の読みは commit（pre-commit hook や署名を含む）より先に返るのが普通で、その
+  時点の刻印は「最新」。断り方は確定時（`submit_exec`）と同じ `JobKind::Exec` の
+  `drop_notice` で、判定は `exec_busy` の 1 箇所
 - **amend の初期値は `Cmd::LoadHeadMessage` で読む。** `RepoInfo.head` からは取らない。
   あれは起動時に 1 回読んだきりで、1 回コミットした時点で古い（`Cmd::LoadRepoInfo` が
   `issue` に落とされていれば commit のあとも古いまま）。**古い初期値は「1 つ前の
@@ -1071,9 +1076,13 @@ impl JobKind {
 
 **塞いだ穴**: `LoadRepoInfo` / `LoadBranches` / `LoadHeadMessage` は書き込みのあとに出る
 のに追いつきを持っていなかった（`issue` に落とされると、`switch` のあともラベルと
-ブランチ一覧が切り替え前のまま残る）。3 つとも `Region::Refs`。`LoadHeadMessage` を
-入れるのは、commit が走っているあいだに `C` を押すと **amend の対象は新しいコミット
-なのに本文だけ 1 つ前のもの**になるため。
+ブランチ一覧が切り替え前のまま残る）。3 つとも `Region::Refs`。
+
+**刻印が拾えるのは「読みが飛んでいるあいだに書き込みが終わった」形だけ。** 逆順
+（書き込みが走っているあいだに読みを頼み、読みのほうが先に返る）は刻印では捕まらない
+—— そのとき世代はまだ進んでいないので、返信は「最新」に見える。`LoadHeadMessage` は
+まさにこの順序になりやすい（git2 の読みは commit の hook や署名より先に返る）ので、
+**押した時点で断る**（下の「commit」の `C`）。
 
 **追いつきを 1 つの関数にはまとめない。** 判じ方（`is_fresh`）は 1 つだが、判じたあとの
 形が 2 通りある —— `status_loaded` / `repo_info_loaded` / `branches_loaded` は**採った

@@ -966,7 +966,11 @@ pub enum Region {
 }
 
 impl Region {
-    /// 世代を持つ領域すべて。配列の添字がそのまま [`JobTracker`] のカウンタの位置。
+    /// 世代を持つ領域すべて。**宣言順に並べる** —— [`JobTracker`] は
+    /// `region as usize` でカウンタを引き、その配列の幅をここの長さで取る。
+    ///
+    /// 腕を足してここに足し忘れると添字が範囲外になるので、`region_all_lists_every_arm`
+    /// が網羅 `match` でコンパイルエラーにする。
     pub const ALL: [Region; 3] = [Region::Worktree, Region::Refs, Region::Log];
 }
 
@@ -2038,6 +2042,30 @@ mod tests {
         assert!(!jobs.is_running(JobKind::LoadLog));
         assert!(jobs.is_empty());
         assert!(jobs.start(job(JobKind::LoadLog)));
+    }
+
+    #[test]
+    fn region_all_lists_every_arm() {
+        // **`JobTracker.epochs` の幅は `Region::ALL` の長さ。** 腕を足してここに
+        // 足し忘れると、その領域の `advance` / `epoch` が添字の範囲外で落ちる。
+        // 網羅 `match` にしてあるので、腕を足すとこの関数がコンパイルエラーになる
+        // （そのとき `ALL` にも足す）。
+        fn listed(region: Region) -> bool {
+            let name = match region {
+                Region::Worktree => "worktree",
+                Region::Refs => "refs",
+                Region::Log => "log",
+            };
+            !name.is_empty()
+        }
+
+        let mut jobs = JobTracker::default();
+        for (index, region) in Region::ALL.into_iter().enumerate() {
+            assert!(listed(region));
+            assert_eq!(region as usize, index, "{region:?} の添字がずれています");
+            jobs.advance(region);
+            assert_eq!(jobs.epoch(region), 1);
+        }
     }
 
     #[test]

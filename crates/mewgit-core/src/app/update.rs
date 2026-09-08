@@ -307,7 +307,13 @@ fn diff_loaded(
             // **採るのは「いま選んでいるファイルのもの」かつ「書き込みより後のもの」
             // だけ。** 対象を見ないと正しく出ている画面が別のファイルの diff に化け、
             // 鮮度を見ないと書き込み前の中身に戻る。
-            if fresh && state.wanted_diff().as_ref() == Some(&target) {
+            //
+            // **刻印は届いた返信のものをそのまま持ち越す。** `Region::Worktree` から
+            // 取り直すと、刻印の出どころが読む側（`diff_is_current` は
+            // `JobKind::LoadDiff` から領域を引く）と 2 本になる。
+            let wanted = state.wanted_diff();
+            let read_at = asked.filter(|_| fresh && wanted.as_ref() == Some(&target));
+            if let Some(read_at) = read_at {
                 // **同じ対象を読み直したときはカーソルを持ち越す。** 書き込みのあとは
                 // 同じファイルの diff がもう一度届く。既定に戻すと、選んでいたハンクが
                 // 先頭へ飛んでから操作が効くことになる。
@@ -321,8 +327,7 @@ fn diff_loaded(
                     target,
                     files,
                     cursor,
-                    // ここまで来ていれば `fresh`。刻印はいまの世代でよい。
-                    epoch: state.jobs.epoch(Region::Worktree),
+                    epoch: read_at,
                 };
                 // 読み直しでハンクが減っていることがある。選べる位置へ寄せ直す。
                 view.move_cursor(0);
@@ -1079,9 +1084,7 @@ fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::Char('u') => act(state, Action::Unstage),
         KeyCode::Char('x') => act(state, Action::Discard),
         KeyCode::Char('c') => commit(state),
-        // **初期値は読んでから開く**（01 の「commit」）。`RepoInfo.head` は起動時に
-        // 1 回読んだきりなので、1 回コミットした時点で古い。
-        KeyCode::Char('C') => Cmd::LoadHeadMessage,
+        KeyCode::Char('C') => amend(state),
         _ => Cmd::None,
     }
 }
@@ -1196,6 +1199,37 @@ fn commit_submit(state: &mut AppState) -> Cmd {
     submit_exec(state, op)
 }
 
+/// `C`。HEAD のメッセージを読んでから amend の入力欄を開く。
+///
+/// **初期値は読んでから開く**（01 の「commit」）。`RepoInfo.head` は起動時に 1 回
+/// 読んだきりなので、1 回コミットした時点で古い。
+///
+/// **書き込みが走っているあいだは断る。** 走っている `git` が HEAD を動かせば、
+/// 読んだ本文は 1 つ前のコミットのものになる。**返信の刻印では捕まえられない** ——
+/// git2 の読みは commit（pre-commit hook や署名を含む）より先に返るのが普通で、
+/// そのときの刻印は「最新」。刻印が拾えるのは「読みが走っているあいだに書き込みが
+/// 終わった」形だけで、ここは順序が逆（01 の「commit」）。
+fn amend(state: &mut AppState) -> Cmd {
+    if exec_busy(state) {
+        return Cmd::None;
+    }
+    Cmd::LoadHeadMessage
+}
+
+/// 書き込みが走っているか。走っていれば理由を通知に出す。
+///
+/// **「押したのに何も起きない」に見せない**（`JobKind::Exec` の `drop_notice`）。
+/// キューに積んで順に流すのは M3（01 の「ランタイム」）。
+fn exec_busy(state: &mut AppState) -> bool {
+    if !state.jobs.is_running(JobKind::Exec) {
+        return false;
+    }
+    if let Some(message) = JobKind::Exec.drop_notice() {
+        state.push_notice(NoticeLevel::Warn, message.to_string(), None);
+    }
+    true
+}
+
 /// 編集中のモーダルを確定して `Cmd::Exec` を返す。
 ///
 /// **`Cmd::Exec` が落とされるなら閉じない。** [`confirm_key`] は先に閉じてから返すが、
@@ -1207,10 +1241,7 @@ fn commit_submit(state: &mut AppState) -> Cmd {
 /// **2 人目（`Modal::Input`）が出た時点でここへ移した。** 写すと、片方だけ
 /// 「閉じてから返す」形に戻ったときに気付けない（01 の「1 行入力」）。
 fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
-    if state.jobs.is_running(JobKind::Exec) {
-        if let Some(message) = JobKind::Exec.drop_notice() {
-            state.push_notice(NoticeLevel::Warn, message.to_string(), None);
-        }
+    if exec_busy(state) {
         return Cmd::None;
     }
 
@@ -4014,6 +4045,26 @@ feat/b
             },
             refs: RefIndex::from_iter([]),
         }
+    }
+
+    #[test]
+    fn c_upper_is_refused_while_a_write_is_running() {
+        // **押した時点で断らないと、刻印では捕まえられない。** git2 の読みは commit
+        // （pre-commit hook や署名を含む）より先に返るのが普通で、そのとき
+        // `Region::Refs` はまだ進んでいないので返信は「最新」に見える。開いた入力欄は
+        // 1 つ前の本文のままで、確定すると新しいコミットを古い本文で amend する。
+        let mut state = only_staged();
+        let _ = state.issue(Cmd::Exec(commit_op()));
+
+        let cmd = press(&mut state, 'C');
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.modal.is_none());
+        assert!(
+            state.notices.back().unwrap().message.contains("git 実行"),
+            "{:?}",
+            state.notices.back()
+        );
     }
 
     #[test]

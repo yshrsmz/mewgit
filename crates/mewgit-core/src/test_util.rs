@@ -19,6 +19,17 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// 一時ディレクトリにテキストファイルを 1 枚書く。
+///
+/// リポジトリを要らない設定ファイル（`config.toml`、`ssh_config`）のためのもの。
+/// **返す `TempDir` は drop されると中身ごと消える**ので、呼び出し側が束縛し続ける。
+pub fn temp_file(name: &str, body: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("一時ディレクトリを作れなかった");
+    let path = dir.path().join(name);
+    fs::write(&path, body).expect("一時ファイルを書けなかった");
+    (dir, path)
+}
+
 /// コミット日時の起点（2023-11-14T22:13:20Z）。`git` を 1 回叩くごとに [`TICK`] 秒進める。
 ///
 /// 実時間を使うと、続けて作ったコミットが同じ秒に落ちて `Sort::TIME` での並びが

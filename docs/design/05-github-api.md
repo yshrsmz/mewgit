@@ -25,6 +25,12 @@ impl GithubClient {
 ```
 
 - ヘッダ: `Authorization: Bearer`、`Accept: application/vnd.github+json`、`X-GitHub-Api-Version`、`User-Agent: mewgit/<ver>`
+- ベース URL は `host` から組むが、**形が 2 つある**。github.com とデータレジデンシー
+  （`*.ghe.com`）は `https://api.{host}`、self-hosted の GHES は `https://{host}/api/v3`
+  （`gh` のバイナリに `https://%s/api/v3/` があるのを `strings` で確認）。
+  加えて **`auth::RemoteUrl` は port を捨てる**ので、非既定ポートの GHES はここに届かない。
+  **どちらも、このクライアントを書くタスクで決める**（04）。パスの形を落として port だけ
+  足すと、self-hosted では全部 404 になる
 
 ### TLS とルート証明書
 

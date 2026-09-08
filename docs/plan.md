@@ -73,7 +73,9 @@
 
 ## M3: リモート
 
-- [ ] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト
+- [x] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト。
+      **どのリモートの URL を見るかは決めない**（`RepoInfo.target` を埋めるのは M4 の
+      `auth::resolve`。04 の「既定リモートを決めるのは M4」）
 - [ ] fetch / pull / push の `GitOp`、`-u` 提案、force push 確認（`expected` の受け渡し）、
       ssh のパスフレーズで固まる件の扱い（`BatchMode` と `core.sshCommand`。03 参照）
 - [ ] `JobTracker` に世代を持たせ、`DiffState.freshness` と `WorktreeState.stale` と

@@ -236,6 +236,9 @@ pub enum ExecError {
   で即座に失敗して分類できるが、ユーザーの `GIT_SSH_COMMAND` や `core.sshCommand` を
   黙って上書きする。**どう避けるかは M3（fetch / pull / push）で決める。**
   それまでこの経路は UI から到達しない
+- **`auth::ssh::resolve_ssh_host` は PATH の `ssh` を叩いている**（04）。`core.sshCommand`
+  を読む方向に倒すなら、**ホスト名を解決する ssh も同じものにするか**を上と同じタスクで
+  決める。別の config を読む ssh に向けている環境では、いまも解決と接続で食い違いうる
 - stdin は閉じる。例外はハンクの 3 操作（`StageHunk` / `UnstageHunk` / `DiscardHunk`）
   だけで、どれも `git apply … -` に patch を stdin で渡す
 - stdout / stderr は表示専用なので lossy で `String` にする

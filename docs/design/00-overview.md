@@ -57,7 +57,7 @@ crates/
     git_read/   repo.rs   log.rs  diff.rs  status.rs
     git_exec/   argv.rs   runner.rs rebase.rs
     github/     client.rs pr.rs   checks.rs
-    auth/       gh.rs     resolve.rs ssh.rs
+    auth/       gh.rs     resolve.rs ssh.rs  url.rs
     config/     mod.rs
   mewgit-tui/src/
     main.rs   runtime.rs  input.rs

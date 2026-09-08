@@ -18,9 +18,9 @@ use crate::git_read::{
 };
 
 use super::{
-    AppState, BranchLoad, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, Freshness, GraphLine,
+    AppState, BranchLoad, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, GraphLine,
     GraphSelection, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
-    PushRejection, RepoSnapshot, TextBuffer,
+    PushRejection, Region, RepoSnapshot, TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -56,13 +56,14 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
     state.issue(cmd)
 }
 
-/// **続きを頼む判断は 10 箇所にある。** いまはそれぞれの経路に置いてある。
+/// **続きを頼む判断は 13 箇所にある。** いまはそれぞれの経路に置いてある。
 ///
-/// **「導出では失敗を表せない」はもう理由にならない。** 4 つの loader はどれも失敗を
-/// 状態に持つようになったので（01 の「失敗の記憶」）、`focus` の座り直しと同じく
-/// `update` の出口で毎回導き直せる形になっている。畳むかどうかは M3 で `JobTracker` に
-/// 世代を入れるときに決める（`Freshness` と `WorktreeState.stale` も同じ判断の材料）。
-/// **それまでは、読む状態を書き換えた経路がここに載っていることを保つ。**
+/// **`update` の出口で導出する形には畳まない**（M3 の世代のタスクで決めた。01 の
+/// 「実行中ジョブ › 世代」）。追いつきの判断材料は**届いた返信の刻印**で、それが読める
+/// のは返信を受ける関数の中だけ。持っている値の刻印から導くと、読み取りが失敗し続けた
+/// ときに「古い → 頼み直す → 失敗」を回す（失敗は値を入れ替えないので刻印が古いまま
+/// になる）。**世代を入れたことで、導出の形は採れなくなった。**
+/// **読む状態を書き換えた経路がここに載っていることを保つ。**
 ///
 /// ログ（01 の「追加ページの読み込み」）: `scrolled`（カーソル移動）、`log_loaded` の
 /// 成功、`Msg::Layout`。
@@ -78,6 +79,12 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 /// `Esc` もここを通る）、`status_loaded` の `clamp` のあと、`diff_loaded` の出口
 /// （対象が違ったときの追いつきと、書き込みより前の diff しか無いときの読み直し）、
 /// `commit_files_loaded` の出口（一覧が届くまで対象が決まらないため）。
+///
+/// 落とされたぶんの追いつき（01 の「実行中ジョブ › 世代」）: `status_loaded`、
+/// `repo_info_loaded`、`branches_loaded`、`head_message_loaded`。**どれも届いた返信の
+/// 刻印がいまの世代と違えば同じ `Cmd` を出し直す**（判定は `JobTracker::is_fresh` の
+/// 1 つ。`head_message_loaded` だけは中身を見る前に返す —— 古い本文で入力欄を開いて
+/// しまうと、あとから届く返信では取り消せない）。
 fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
     match msg {
         Msg::Key(key) => update_key(state, key),
@@ -237,16 +244,14 @@ fn load_diff(state: &mut AppState) -> Cmd {
         return Cmd::None;
     }
     // 書き込みより後の diff を既に持っているなら読み直さない。
-    if state.diff.freshness == Freshness::Fresh && state.diff.fresh_view(Some(&wanted)).is_some() {
+    //
+    // **`LoadDiff` が走っているかは見ない。** 走っていれば `issue` が落とし、いま
+    // 飛んでいる要求は書き込みより前のものなので、その返信は `diff_loaded` で
+    // 捨てられて同じここから頼み直される（01 の「diff のキャッシュと鮮度」）。
+    if state.diff_is_current() {
         return Cmd::None;
     }
 
-    // **`LoadDiff` が走っていれば `issue` に落とされる。** いま飛んでいる要求は
-    // 書き込みより前のものなので `Stale` のままにする。`diff_loaded` の出口が同じ
-    // ここを通るので、届いた時点で頼み直せる（01。`WorktreeState.stale` と同じ形）。
-    if state.diff.freshness == Freshness::Stale && !state.jobs.is_running(JobKind::LoadDiff) {
-        state.diff.freshness = Freshness::Asked;
-    }
     Cmd::LoadDiff(wanted)
 }
 
@@ -291,23 +296,24 @@ fn diff_loaded(
     target: DiffTarget,
     result: Result<Vec<FileDiff>, GitReadError>,
 ) -> Cmd {
-    state.jobs.finish(JobKind::LoadDiff);
-
-    // **この返信が書き込みより後に頼んだものか。** `Freshness::Asked` はいま届いた
-    // 1 通を指している（`Asked` のあいだ `LoadDiff` はちょうど 1 つしか飛ばない）。
-    let asked = state.diff.freshness == Freshness::Asked;
-    let mut stored = false;
+    // **この返信が書き込みより後に頼んだものか。** 見るのは届いた返信の刻印であって、
+    // 持っている `view` の鮮度ではない（01 の「実行中ジョブ › 世代」）。
+    let asked = state.jobs.finish(JobKind::LoadDiff);
+    let fresh = state.jobs.is_fresh(JobKind::LoadDiff, asked);
 
     match result {
         Ok(files) => {
             state.diff.failed = None;
             // **採るのは「いま選んでいるファイルのもの」かつ「書き込みより後のもの」
             // だけ。** 対象を見ないと正しく出ている画面が別のファイルの diff に化け、
-            // 鮮度を見ないと書き込み前の中身に戻る（`Stale` = この返信は書き込みより
-            // 前に頼まれたもの）。
-            if state.diff.freshness != Freshness::Stale
-                && state.wanted_diff().as_ref() == Some(&target)
-            {
+            // 鮮度を見ないと書き込み前の中身に戻る。
+            //
+            // **刻印は届いた返信のものをそのまま持ち越す。** `Region::Worktree` から
+            // 取り直すと、刻印の出どころが読む側（`diff_is_current` は
+            // `JobKind::LoadDiff` から領域を引く）と 2 本になる。
+            let wanted = state.wanted_diff();
+            let read_at = asked.filter(|_| fresh && wanted.as_ref() == Some(&target));
+            if let Some(read_at) = read_at {
                 // **同じ対象を読み直したときはカーソルを持ち越す。** 書き込みのあとは
                 // 同じファイルの diff がもう一度届く。既定に戻すと、選んでいたハンクが
                 // 先頭へ飛んでから操作が効くことになる。
@@ -321,29 +327,17 @@ fn diff_loaded(
                     target,
                     files,
                     cursor,
+                    epoch: read_at,
                 };
                 // 読み直しでハンクが減っていることがある。選べる位置へ寄せ直す。
                 view.move_cursor(0);
                 state.diff.view = Some(view);
-                stored = true;
             }
         }
         Err(err) => {
             state.push_notice(NoticeLevel::Error, err.to_string(), None);
             state.diff.failed = Some(target);
         }
-    }
-
-    // **`Asked` はここで必ず倒す。** 倒さないと、`Esc` で対象が消えたり読み取りが
-    // 失敗したりしたときに「頼んである」まま取り残され、以後の書き込みが
-    // `Stale` を立て直すまで古い diff を新しいものとして扱う。新しくなったと
-    // 言えるのは、実際に採れたときだけ。
-    if asked {
-        state.diff.freshness = if stored {
-            Freshness::Fresh
-        } else {
-            Freshness::Stale
-        };
     }
 
     // **採ったときもここを通る。** 対象が違っていた（選択が動いた / 別の対象が
@@ -961,10 +955,10 @@ fn commit_files_loaded(
 /// [`AppState::issue`] が落とすので、ここでは走っているかを見ない
 /// （見ると 2 箇所で同じことを判断することになる）。
 ///
-/// **`GraphState::reload_pending` も見ない。** 印が立っているあいだは必ず `LoadLog` が
-/// 走っている（立てる `exec_finished` がその場で読み直しを出し、出せなければ落とした
-/// 相手が走っているため。落とすのも `log_loaded` の出口で必ず出し直す）ので、ここで
-/// 続きを出しても `issue` が落とす。見る形にすると、テストで踏めない分岐が残る。
+/// **世代も見ない。** 読み直しが要る状態では必ず `LoadLog` が走っている
+/// （`exec_finished` がその場で読み直しを出し、出せなければ落とした相手が走っている
+/// ため。`log_loaded` の出口でも必ず出し直す）ので、ここで続きを出しても `issue` が
+/// 落とす。見る形にすると、テストで踏めない分岐が残る。
 fn load_more(state: &AppState) -> Cmd {
     let remaining = state.graph.rows().saturating_sub(state.graph.cursor);
     // 失敗したあとは行が空なので「残りが 1 画面以下」が必ず真になる。見ないと、
@@ -998,7 +992,7 @@ fn reload_log(state: &AppState) -> Cmd {
 /// 途中まで新しい状態を持っても意味が無いため。失敗しても通知だけで続ける
 /// （ラベルもリモートも無いままグラフは出せる）。
 fn repo_info_loaded(state: &mut AppState, result: Result<RepoSnapshot, GitReadError>) -> Cmd {
-    state.jobs.finish(JobKind::LoadRepoInfo);
+    let asked = state.jobs.finish(JobKind::LoadRepoInfo);
 
     match result {
         Ok(info) => {
@@ -1008,7 +1002,14 @@ fn repo_info_loaded(state: &mut AppState, result: Result<RepoSnapshot, GitReadEr
         }
         Err(err) => state.push_notice(NoticeLevel::Warn, err.to_string(), None),
     }
-    Cmd::None
+    // 書き込みの直後に頼んだぶんが落とされていたら、ここで頼み直す
+    // （`status_loaded` と同じ形）。**採ったうえで頼み直す** —— 古い索引でも
+    // ラベルは出せるので、届くまで前のものを出したままにする。
+    if state.jobs.is_fresh(JobKind::LoadRepoInfo, asked) {
+        Cmd::None
+    } else {
+        Cmd::LoadRepoInfo
+    }
 }
 
 /// ログのページを積む。
@@ -1016,7 +1017,7 @@ fn repo_info_loaded(state: &mut AppState, result: Result<RepoSnapshot, GitReadEr
 /// `restart` は**要求した内容**で、届いたページが先頭からのものか続きかを表す
 /// （`LogPage` は位置を持たない）。
 fn log_loaded(state: &mut AppState, restart: bool, result: Result<LogPage, GitReadError>) -> Cmd {
-    state.jobs.finish(JobKind::LoadLog);
+    let asked = state.jobs.finish(JobKind::LoadLog);
 
     let page = match result {
         Ok(page) => page,
@@ -1030,14 +1031,16 @@ fn log_loaded(state: &mut AppState, restart: bool, result: Result<LogPage, GitRe
         }
     };
 
-    // **読み直しを待っているあいだに届いたページは、続きでも読み直しでも捨てる。**
-    // 印が立つのは「読み直しを頼めなかった」ときで、そのとき飛んでいたページは
-    // 必ず印を立てた書き込みより前に頼まれたもの。`restart` かどうかで分けると、
-    // **1 つ前の書き込みの読み直しが届いたときに印だけ落ちて、新しい書き込みが
-    // 二度とグラフに出ない**（続けて 2 回コミットすると踏む）。ここまで来ていれば
-    // `jobs.finish` のあとなので、頼み直しは必ず出せる（01 の「ログの読み直し」）。
-    if state.graph.reload_pending {
-        state.graph.reload_pending = false;
+    // **書き込みより前に頼んだページは、続きでも読み直しでも捨てる。** ref が動いた
+    // あとの walk には別のコミットが並ぶので、積むと消えたはずの行が残る。`restart`
+    // かどうかでは分けない —— 分けると、1 つ前の書き込みの読み直しが届いたときに
+    // 借りだけ消えて、新しい書き込みが二度とグラフに出ない（続けて 2 回コミットすると
+    // 踏む）。ここまで来ていれば `jobs.finish` のあとなので、頼み直しは必ず出せる
+    // （01 の「ログの読み直し」）。
+    //
+    // **失敗の処理より後に置く。** 先に置くと、古いページが失敗したときに
+    // `load_failed` を立てないまま読み直しを出し、「失敗 → 再読込 → 失敗」を回す。
+    if !state.jobs.is_fresh(JobKind::LoadLog, asked) {
         return reload_log(state);
     }
 
@@ -1081,9 +1084,7 @@ fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::Char('u') => act(state, Action::Unstage),
         KeyCode::Char('x') => act(state, Action::Discard),
         KeyCode::Char('c') => commit(state),
-        // **初期値は読んでから開く**（01 の「commit」）。`RepoInfo.head` は起動時に
-        // 1 回読んだきりなので、1 回コミットした時点で古い。
-        KeyCode::Char('C') => Cmd::LoadHeadMessage,
+        KeyCode::Char('C') => amend(state),
         _ => Cmd::None,
     }
 }
@@ -1095,7 +1096,7 @@ fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
 /// どちらも「変更がありません」の根拠にすると、実際には stage されているのに拒否する
 /// （01 の「commit」）。そのときは開いて git の側に判定を任せる。
 fn commit(state: &mut AppState) -> Cmd {
-    let trusted = state.worktree.loaded && !state.worktree.stale;
+    let trusted = state.worktree_is_current();
     if trusted && state.worktree.snapshot.staged.is_empty() {
         state.push_notice(
             NoticeLevel::Warn,
@@ -1198,22 +1199,49 @@ fn commit_submit(state: &mut AppState) -> Cmd {
     submit_exec(state, op)
 }
 
+/// `C`。HEAD のメッセージを読んでから amend の入力欄を開く。
+///
+/// **初期値は読んでから開く**（01 の「commit」）。`RepoInfo.head` は起動時に 1 回
+/// 読んだきりなので、1 回コミットした時点で古い。
+///
+/// **書き込みが走っているあいだは断る。** 走っている `git` が HEAD を動かせば、
+/// 読んだ本文は 1 つ前のコミットのものになる。**返信の刻印では捕まえられない** ——
+/// git2 の読みは commit（pre-commit hook や署名を含む）より先に返るのが普通で、
+/// そのときの刻印は「最新」。刻印が拾えるのは「読みが走っているあいだに書き込みが
+/// 終わった」形だけで、ここは順序が逆（01 の「commit」）。
+fn amend(state: &mut AppState) -> Cmd {
+    if exec_busy(state) {
+        return Cmd::None;
+    }
+    Cmd::LoadHeadMessage
+}
+
+/// 書き込みが走っているか。走っていれば理由を通知に出す。
+///
+/// **「押したのに何も起きない」に見せない**（`JobKind::Exec` の `drop_notice`）。
+/// キューに積んで順に流すのは M3（01 の「ランタイム」）。
+fn exec_busy(state: &mut AppState) -> bool {
+    if !state.jobs.is_running(JobKind::Exec) {
+        return false;
+    }
+    if let Some(message) = JobKind::Exec.drop_notice() {
+        state.push_notice(NoticeLevel::Warn, message.to_string(), None);
+    }
+    true
+}
+
 /// 編集中のモーダルを確定して `Cmd::Exec` を返す。
 ///
 /// **`Cmd::Exec` が落とされるなら閉じない。** [`confirm_key`] は先に閉じてから返すが、
 /// あちらのモーダルはユーザーが打ったものを持っていない。ここで同じことをすると、
 /// 前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
 /// 「ほかの git 実行が終わるまで待ってください」と出て**打った文字ごと消える**。
-/// 判定は [`AppState::issue`] と同じ `jobs.is_running`（`load_diff` が
-/// `Freshness::Asked` を決めるのと同じ形）。
+/// 判定は [`AppState::issue`] と同じ `jobs.is_running`。
 ///
 /// **2 人目（`Modal::Input`）が出た時点でここへ移した。** 写すと、片方だけ
 /// 「閉じてから返す」形に戻ったときに気付けない（01 の「1 行入力」）。
 fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
-    if state.jobs.is_running(JobKind::Exec) {
-        if let Some(message) = JobKind::Exec.drop_notice() {
-            state.push_notice(NoticeLevel::Warn, message.to_string(), None);
-        }
+    if exec_busy(state) {
         return Cmd::None;
     }
 
@@ -1284,7 +1312,20 @@ fn input_submit(state: &mut AppState) -> Cmd {
 
 /// amend の初期値が届いた。
 fn head_message_loaded(state: &mut AppState, result: Result<Option<String>, GitReadError>) -> Cmd {
-    state.jobs.finish(JobKind::LoadHeadMessage);
+    let asked = state.jobs.finish(JobKind::LoadHeadMessage);
+
+    // **書き込みより前に読んだ本文で入力欄を埋めない。** commit が走っているあいだに
+    // `C` を押すと、amend の対象は新しいコミットなのに本文だけ 1 つ前のものになる。
+    // 中身を見る前に頼み直す（`Ok(None)` の「amend できるコミットがありません」も、
+    // その時点では正しくない）。**別のモーダルが開いていれば頼み直さない** ——
+    // 下の `modal.is_some()` が届いたものを捨てるので、読むだけ無駄になる。
+    if !state.jobs.is_fresh(JobKind::LoadHeadMessage, asked) {
+        return if state.modal.is_some() {
+            Cmd::None
+        } else {
+            Cmd::LoadHeadMessage
+        };
+    }
 
     let message = match result {
         Ok(Some(message)) => message,
@@ -1430,8 +1471,7 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
     //
     // 見るのは単位であってペインではない。`focus == Pane::Diff` で書くと、ハンクを
     // 出す場所が増えたときにガードだけが外れる。
-    let planned = if matches!(scope, Scope::Hunk { .. }) && state.diff.freshness != Freshness::Fresh
-    {
+    let planned = if matches!(scope, Scope::Hunk { .. }) && !state.diff_is_current() {
         Err(NOT_LATEST.to_string())
     } else {
         plan(action, section, scope)
@@ -1606,7 +1646,7 @@ fn names(paths: &[PathBuf]) -> String {
 /// **成功も失敗も `jobs.finish` を通る。** 通らないと `JobKind::LoadBranches` が走った
 /// まま残り、以後の `Cmd::LoadBranches` が黙って落ちる（`status_loaded` と同じ）。
 fn branches_loaded(state: &mut AppState, result: Result<Vec<Branch>, GitReadError>) -> Cmd {
-    state.jobs.finish(JobKind::LoadBranches);
+    let asked = state.jobs.finish(JobKind::LoadBranches);
 
     match result {
         Ok(branches) => state.branches.loaded(branches),
@@ -1618,18 +1658,25 @@ fn branches_loaded(state: &mut AppState, result: Result<Vec<Branch>, GitReadErro
         }
     }
 
-    Cmd::None
+    // 落とされたぶんの追いつき（`repo_info_loaded` と同じ形）。
+    if state.jobs.is_fresh(JobKind::LoadBranches, asked) {
+        Cmd::None
+    } else {
+        Cmd::LoadBranches
+    }
 }
 
 /// ワーキングツリーの一覧を入れ替える。
 fn status_loaded(state: &mut AppState, result: Result<WorktreeSnapshot, GitReadError>) -> Cmd {
-    state.jobs.finish(JobKind::LoadStatus);
+    let asked = state.jobs.finish(JobKind::LoadStatus);
 
     match result {
         Ok(snapshot) => {
             state.worktree.snapshot = snapshot;
-            // 以後、空の一覧は「変更が無い」と読んでよい。
-            state.worktree.loaded = true;
+            // **いつの一覧かを値に添える。** 以後、空の一覧は「変更が無い」と読んで
+            // よくなり（`None` = まだ読めていない）、書き込みより前のものかも同じ
+            // 1 本から判る（01 の「実行中ジョブ › 世代」）。
+            state.worktree.snapshot_epoch = asked;
             // 選んでいたファイルは別の区画へ移る（stage / unstage）か消えている
             // （discard）。選べる行へ寄せ直す。
             state.worktree.clamp();
@@ -1639,11 +1686,13 @@ fn status_loaded(state: &mut AppState, result: Result<WorktreeSnapshot, GitReadE
         Err(err) => state.push_notice(NoticeLevel::Error, err.to_string(), None),
     }
 
-    // 書き込みの直後に頼んだぶんが落とされていたら、ここで頼み直す。
-    let again = if std::mem::take(&mut state.worktree.stale) {
-        Cmd::LoadStatus
-    } else {
+    // 書き込みの直後に頼んだぶんが落とされていたら、ここで頼み直す。**見るのは
+    // 届いた返信の刻印**（`snapshot_epoch` ではない）。失敗した返信は一覧を入れ替えて
+    // いないので、持っている値で判じると「古い → 頼み直す → 失敗」を回す。
+    let again = if state.jobs.is_fresh(JobKind::LoadStatus, asked) {
         Cmd::None
+    } else {
+        Cmd::LoadStatus
     };
 
     // **`clamp` のあとに見る。** 書き込みで選んでいたファイルが別の区画へ移ると
@@ -1668,33 +1717,30 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         state.push_rejected = push_rejection(state, &done.result, src, lease.is_some());
     }
 
-    // **走っている読み取りは、この書き込みより前に頼まれたものなので届いても古い。**
-    // その場合 `issue` は下の `LoadStatus` を落とすので、届いた時点で頼み直せるよう
-    // 印を付ける（01 の「書き込みのあとの status」）。`CommitDetailLoaded` の
-    // 追いつきとは形が違う。あちらは届いた値の oid から鮮度を導けるが、
-    // `WorktreeSnapshot` には「いつの状態か」を示す鍵が無く、到着時には判定できない。
-    state.worktree.stale = state.jobs.is_running(JobKind::LoadStatus);
-    // **持っている diff は対象が同じでも中身が古い。** ハンク単位で stage すると
-    // `IndexVsWorktree(a.txt)` のまま中身が減る。対象は見ない（この時点では `clamp`
-    // がまだで、いま選ばれているファイルが読み直しの対象になるとは限らない。01）。
-    state.diff.freshness = Freshness::Stale;
+    let reload = Reload::after(&done.op, done.result.is_ok());
 
-    match Reload::after(&done.op, done.result.is_ok()) {
+    // **持っている値と、走っている読み取りが、ここで古くなる。** 走っている読み取りは
+    // この書き込みより前に頼まれたものなので、届いても採ってはいけない。世代を進めて
+    // おくと、下で出す `Cmd` は `issue` で新しい世代で刻まれ、古い返信とは刻印で
+    // 見分けが付く（01 の「実行中ジョブ › 世代」）。
+    //
+    // **`Cmd` を返す前に進める。** `issue` は `update` の出口なので、返してからでは
+    // 遅い。
+    for region in reload.regions() {
+        state.jobs.advance(*region);
+    }
+
+    match reload {
         Reload::Nothing => Cmd::LoadStatus,
         // **ブランチ一覧も ref から導かれる。** commit は `refs/heads/<現在>` を
         // 動かすので、読み直さないと Branches ペインが commit 前の ahead のまま残る。
         Reload::Refs => Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches]),
-        Reload::RefsAndLog => {
-            // 落とされたぶんは印を付け、走っていたページが届いた時点で頼み直す
-            // （`WorktreeState.stale` と同じ形。01 の「ログの読み直し」）。
-            state.graph.reload_pending = state.jobs.is_running(JobKind::LoadLog);
-            Cmd::batch([
-                Cmd::LoadStatus,
-                Cmd::LoadRepoInfo,
-                Cmd::LoadBranches,
-                reload_log(state),
-            ])
-        }
+        Reload::RefsAndLog => Cmd::batch([
+            Cmd::LoadStatus,
+            Cmd::LoadRepoInfo,
+            Cmd::LoadBranches,
+            reload_log(state),
+        ]),
     }
 }
 
@@ -1720,6 +1766,20 @@ enum Reload {
 }
 
 impl Reload {
+    /// この書き込みで古くなる領域。**累積**で、`Refs` は index とワークツリーも含む。
+    ///
+    /// 書き込みは必ず [`Region::Worktree`] を古くする（`switch` も `push` も
+    /// ワークツリーや index を動かしうるし、`Cmd::LoadStatus` は常に出している）。
+    /// 判別子をここに置くのは、`Reload` が「どの書き込みがどこを古くするか」を
+    /// 既に持っているため（01 の「実行中ジョブ › 世代」）。
+    fn regions(self) -> &'static [Region] {
+        match self {
+            Reload::Nothing => &[Region::Worktree],
+            Reload::Refs => &[Region::Worktree, Region::Refs],
+            Reload::RefsAndLog => &[Region::Worktree, Region::Refs, Region::Log],
+        }
+    }
+
     fn after(op: &GitOp, ok: bool) -> Self {
         match op {
             // index / ワークツリーだけ。ref も HEAD も動かない。
@@ -1819,7 +1879,7 @@ mod tests {
     use crate::graph::LaneState;
     use crate::test_util::{
         fake_branch, fake_commit, fake_commit_with_parents, fake_detail, fake_entry,
-        fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_upstream,
+        fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_upstream, reply,
     };
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
@@ -1842,13 +1902,16 @@ mod tests {
     }
 
     /// `n` 件を 1 ページとして積んだ状態。`done` は「これ以上無い」。
+    ///
+    /// 返信は `test_util::reply` で届ける（発行を通さないと刻印が付かない）。
     fn state_with_page(n: usize, done: bool) -> AppState {
         let mut state = state();
+        let first = more(&state);
         let page = LogPage {
             commits: (0..n).map(commit).collect(),
             done,
         };
-        let _ = update(&mut state, page_loaded(Ok(page)));
+        let _ = reply(&mut state, first, page_loaded(Ok(page)));
         state
     }
 
@@ -1860,7 +1923,11 @@ mod tests {
     /// worktree ペインにフォーカスし、その区画の先頭を選んだ状態。
     fn worktree_state(snapshot: WorktreeSnapshot, section: WorktreeSection) -> AppState {
         let mut state = state();
-        let _ = update(&mut state, Msg::StatusLoaded(Box::new(Ok(snapshot))));
+        let _ = reply(
+            &mut state,
+            Cmd::LoadStatus,
+            Msg::StatusLoaded(Box::new(Ok(snapshot))),
+        );
         state.focus = Pane::Worktree;
         state.worktree.section = section;
         state.worktree.cursor = 0;
@@ -2101,8 +2168,9 @@ mod tests {
         // 判定は `clamp` のあとでないと、古い区画で対象を決めてしまう。
         let mut state = diff_state(&["a.txt"], 1);
 
-        let cmd = update(
+        let cmd = reply(
             &mut state,
+            Cmd::LoadStatus,
             Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&["a.txt"], &[], &[])))),
         );
 
@@ -2142,7 +2210,11 @@ mod tests {
 
         // ハンクが 1 つに減って届く。
         let target = unstaged_diff("a.txt");
-        let _ = update(&mut state, diff_ok(target, fake_diff("a.txt", 1)));
+        let _ = reply(
+            &mut state,
+            Cmd::LoadDiff(target.clone()),
+            diff_ok(target, fake_diff("a.txt", 1)),
+        );
 
         assert_eq!(state.diff.view.as_ref().unwrap().cursor.hunk, 0);
     }
@@ -2332,7 +2404,7 @@ mod tests {
         };
         let mut state = diff_pane(WorktreeSection::Unstaged, &["a.png"], vec![binary]);
         let _ = update(&mut state, exec_done(Ok(fake_output())));
-        assert_eq!(state.diff.freshness, Freshness::Stale);
+        assert!(!state.diff_is_current());
 
         assert_eq!(
             press(&mut state, 's'),
@@ -2373,7 +2445,7 @@ mod tests {
             );
             // 書き込みが終わった直後。読み直しはまだ届いていない。
             let _ = update(&mut state, exec_done(Ok(fake_output())));
-            assert_eq!(state.diff.freshness, Freshness::Stale);
+            assert!(!state.diff_is_current(), "{key}");
 
             // 古いハンクから組んだパッチは、同じ内容のハンクが 2 つあると別の場所に当たる。
             assert_eq!(press(&mut state, key), Cmd::None, "{key}");
@@ -2442,7 +2514,7 @@ mod tests {
     #[test]
     fn a_reload_that_fails_leaves_the_shown_diff_marked_as_old() {
         // 頼んだ読み直しが失敗したら、出しているのは書き込み前の diff のまま。
-        // **`Asked` を倒さないと、来ない返信を待つあいだ古い diff を新しい扱いにする。**
+        // **失敗を「新しくなった」と読まない** —— 採れたときだけ刻印が新しくなる。
         let mut state = diff_pane(
             WorktreeSection::Unstaged,
             &["a.txt"],
@@ -2458,7 +2530,7 @@ mod tests {
 
         // 同じ対象には出し直さない（「失敗 → 再読込 → 失敗」を回さない）。
         assert_eq!(cmd, Cmd::None);
-        assert_eq!(state.diff.freshness, Freshness::Stale);
+        assert!(!state.diff_is_current());
         assert_eq!(press(&mut state, 's'), Cmd::None);
     }
 
@@ -2477,7 +2549,7 @@ mod tests {
     #[test]
     fn a_write_makes_the_same_target_be_read_again() {
         // ハンク 1 つを stage しても残りが unstaged なら区画は変わらない。**対象が
-        // 同じままなのでキャッシュが効いてしまう**のを `Freshness` が止める。
+        // 同じままなのでキャッシュが効いてしまう**のを世代が止める。
         let mut state = diff_state(&["a.txt"], 2);
         let _ = update(&mut state, exec_done(Ok(fake_output())));
 
@@ -2487,8 +2559,8 @@ mod tests {
         );
 
         assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
-        // **まだ `Fresh` ではない。** 頼んだだけで、出している diff は書き込みより前。
-        assert_eq!(state.diff.freshness, Freshness::Asked);
+        // **まだ新しくなっていない。** 頼んだだけで、出している diff は書き込みより前。
+        assert!(!state.diff_is_current());
     }
 
     #[test]
@@ -2497,10 +2569,10 @@ mod tests {
         // `Cmd::LoadDiff` は `issue` に落とされる。飛んでいた返信は書き込みより前の
         // ものなので、それを採ったまま黙って終わると古い diff が残る（01）。
         let mut state = diff_state(&["a.txt"], 2);
-        assert!(state.jobs.start(Job {
-            kind: JobKind::LoadDiff,
-            label: JobKind::LoadDiff.label().to_string(),
-        }));
+        assert!(state.jobs.start(Job::new(
+            JobKind::LoadDiff,
+            JobKind::LoadDiff.label().to_string(),
+        )));
 
         let _ = update(&mut state, exec_done(Ok(fake_output())));
         let dropped = update(
@@ -2508,11 +2580,7 @@ mod tests {
             Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
         );
         assert_eq!(dropped, Cmd::None, "走っているので落とされる");
-        assert_eq!(
-            state.diff.freshness,
-            Freshness::Stale,
-            "落とされたので、まだ頼めていない"
-        );
+        assert!(!state.diff_is_current(), "落とされたので、まだ頼めていない");
 
         // 書き込みより前に頼まれていた返信が届く（中身が違うと判るように 5 ハンク）。
         let cmd = update(
@@ -2521,7 +2589,7 @@ mod tests {
         );
 
         assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
-        assert_eq!(state.diff.freshness, Freshness::Asked);
+        assert!(!state.diff_is_current());
         // **書き込みより前の返信は採らない。** 採ると、頼み直しが届くまでのあいだ
         // 書き込み前の中身を新しいものとして出すことになる。
         assert_eq!(state.diff.view.as_ref().unwrap().files[0].hunks.len(), 2);
@@ -3543,8 +3611,9 @@ feat/b
         state.worktree.cursor = 1;
 
         // b.txt を stage した後の状態が届く。
-        let _ = update(
+        let _ = reply(
             &mut state,
+            Cmd::LoadStatus,
             Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&["b.txt"], &["a.txt"], &[])))),
         );
 
@@ -3892,15 +3961,128 @@ feat/b
         let cmd = update(&mut state, exec_done(Ok(fake_output())));
         // 走っているので落とされる。
         assert_eq!(cmd, Cmd::None);
-        assert!(state.worktree.stale);
 
+        // 書き込みより前に頼まれた一覧が届く。出しはするが、いまの世代ではない。
         let cmd = update(
             &mut state,
             Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &[], &[])))),
         );
 
         assert_eq!(cmd, Cmd::LoadStatus);
-        assert!(!state.worktree.stale);
+        assert!(!state.worktree_is_current());
+
+        // 頼み直したぶんが届いて追いつく。
+        let cmd = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &[], &[])))),
+        );
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.worktree_is_current());
+    }
+
+    #[test]
+    fn a_status_that_fails_after_the_write_is_not_asked_again() {
+        // **頼み直すかは届いた返信の刻印で決める。** 持っている一覧の刻印で決めると、
+        // 失敗のあいだ「古い → 頼み直す → 失敗」を回す（01 の「失敗の記憶」）。
+        let mut state = state();
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+        // 書き込みが `Cmd::LoadStatus` を出す（走っているものは無いので通る）。
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+
+        let cmd = update(
+            &mut state,
+            Msg::StatusLoaded(Box::new(Err(GitReadError::ReaderGone))),
+        );
+
+        assert_eq!(cmd, Cmd::None);
+        // 一覧は古いままで、次の読み込みはユーザーの操作から始まる。
+        assert!(!state.worktree_is_current());
+    }
+
+    #[test]
+    fn a_refs_read_dropped_after_a_write_is_asked_again_when_the_older_one_arrives() {
+        // `LoadRepoInfo` と `LoadBranches` は書き込みのあとに必ず出るが、走っていれば
+        // `issue` に落ちる。追いつきが無いと、`switch` のあともラベルとブランチ一覧が
+        // 切り替え前のまま残る（01 の「実行中ジョブ › 世代」）。
+        let op = GitOp::Switch("main".into());
+        let mut state = state();
+        let _ = state.issue(Cmd::LoadRepoInfo);
+        let _ = state.issue(Cmd::LoadBranches);
+        let _ = state.issue(Cmd::Exec(op.clone()));
+
+        let cmd = update(&mut state, exec_done_of(op, Ok(fake_output())));
+        assert!(!issued(&cmd, &Cmd::LoadRepoInfo), "{cmd:?}");
+        assert!(!issued(&cmd, &Cmd::LoadBranches), "{cmd:?}");
+
+        // 書き込みより前に頼まれた返信が届く。**採ったうえで頼み直す**（古い索引でも
+        // ラベルは出せるので、届くまで前のものを出したままにする）。
+        let cmd = update(
+            &mut state,
+            Msg::RepoInfoLoaded(Box::new(Ok(repo_snapshot()))),
+        );
+        assert_eq!(cmd, Cmd::LoadRepoInfo);
+        let cmd = with_branches(&mut state, Ok(vec![fake_branch("main", true)]));
+        assert_eq!(cmd, Cmd::LoadBranches);
+
+        // 頼み直したぶんは書き込みより後に頼んだものなので、そこで止まる。
+        let cmd = update(
+            &mut state,
+            Msg::RepoInfoLoaded(Box::new(Ok(repo_snapshot()))),
+        );
+        assert_eq!(cmd, Cmd::None);
+        let cmd = with_branches(&mut state, Ok(vec![fake_branch("main", true)]));
+        assert_eq!(cmd, Cmd::None);
+    }
+
+    /// ref の索引 1 つぶん。中身は見ないので空でよい。
+    fn repo_snapshot() -> RepoSnapshot {
+        RepoSnapshot {
+            remotes: Vec::new(),
+            head: HeadInfo::Branch {
+                name: "main".to_string(),
+                oid: commit(1).oid,
+            },
+            refs: RefIndex::from_iter([]),
+        }
+    }
+
+    #[test]
+    fn c_upper_is_refused_while_a_write_is_running() {
+        // **押した時点で断らないと、刻印では捕まえられない。** git2 の読みは commit
+        // （pre-commit hook や署名を含む）より先に返るのが普通で、そのとき
+        // `Region::Refs` はまだ進んでいないので返信は「最新」に見える。開いた入力欄は
+        // 1 つ前の本文のままで、確定すると新しいコミットを古い本文で amend する。
+        let mut state = only_staged();
+        let _ = state.issue(Cmd::Exec(commit_op()));
+
+        let cmd = press(&mut state, 'C');
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.modal.is_none());
+        assert!(
+            state.notices.back().unwrap().message.contains("git 実行"),
+            "{:?}",
+            state.notices.back()
+        );
+    }
+
+    #[test]
+    fn a_head_message_read_before_the_write_does_not_fill_the_amend_box() {
+        // commit が走っているあいだに `C` を押すと、amend の対象は新しいコミットなのに
+        // 本文だけ 1 つ前のものになる。中身を見る前に頼み直す。
+        let mut state = only_staged();
+        let _ = state.issue(Cmd::LoadHeadMessage);
+        let _ = state.issue(Cmd::Exec(commit_op()));
+        let _ = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
+
+        let cmd = update(
+            &mut state,
+            Msg::HeadMessageLoaded(Ok(Some("書き込み前の本文".to_string()))),
+        );
+
+        assert_eq!(cmd, Cmd::LoadHeadMessage);
+        assert!(state.modal.is_none(), "古い本文で入力欄を開かない");
     }
 
     #[test]
@@ -4069,7 +4251,8 @@ feat/b
             commits: vec![fake_commit_with_parents(1, &[2], "commit 1")],
             done: false,
         };
-        let _ = update(&mut state, page_loaded(Ok(first)));
+        let cmd = more(&state);
+        let _ = reply(&mut state, cmd, page_loaded(Ok(first)));
 
         let second = LogPage {
             commits: vec![fake_commit_with_parents(2, &[], "commit 2")],
@@ -4907,8 +5090,10 @@ feat/b
             commits: vec![commit(9)],
             done: true,
         };
-        let _ = update(
+        let cmd = reload(&state);
+        let _ = reply(
             &mut state,
+            cmd,
             Msg::LogLoaded {
                 restart: true,
                 result: Ok(page),
@@ -5071,7 +5256,8 @@ feat/b
             commits: vec![commit(1)],
             done: false,
         };
-        let _ = update(&mut state, page_loaded(Ok(page)));
+        let cmd = more(&state);
+        let _ = reply(&mut state, cmd, page_loaded(Ok(page)));
 
         assert!(!state.graph.load_failed);
     }
@@ -5156,11 +5342,32 @@ feat/b
     }
 
     #[test]
+    fn c_is_not_refused_while_the_status_from_before_the_write_is_the_only_one_in_hand() {
+        // **書き込みの時点で `LoadStatus` が走っていなくても、持っている一覧は古い。**
+        // 「落とされたときだけ立てる」旗にしていたときは、この窓が開いたままで、
+        // `s` の直後に `c` を押すと「stage された変更がありません」と誤って断っていた
+        // （01 の「実行中ジョブ › 世代」）。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        assert!(state.worktree_is_current());
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+        let _ = update(&mut state, exec_done(Ok(fake_output())));
+
+        let _ = press(&mut state, 'c');
+
+        assert!(state.modal.is_some(), "判定は git に任せる");
+    }
+
+    #[test]
     fn c_is_not_refused_while_the_status_is_older_than_the_last_write() {
         // 書き込み直後の一覧は届いていない。古い「空の staged」を根拠に断ると、
         // 実際には stage されているのに拒否する（01 の「commit」）。
         let mut state = worktree_state(fake_snapshot(&[], &[], &[]), WorktreeSection::Unstaged);
-        state.worktree.stale = true;
+        // 書き込みが 1 つ終わった。持っている一覧はその前に読んだもの。
+        state.jobs.advance(Region::Worktree);
+        assert!(!state.worktree_is_current());
 
         let _ = press(&mut state, 'c');
 
@@ -5416,11 +5623,16 @@ feat/b
         // index しか触らない操作のたびには払えない。
         let mut state = state_with_commits(3);
         let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+        let before = state.jobs.epoch(Region::Log);
 
         let cmd = update(&mut state, exec_done(Ok(fake_output())));
 
         assert_eq!(cmd, Cmd::LoadStatus);
-        assert!(!state.graph.reload_pending);
+        // **世代が進まないから積んだ行がそのまま使える。** 1 本のカウンタにすると
+        // ここで進み、飛んでいるページも積んだ行も毎回捨てることになる。
+        assert_eq!(state.jobs.epoch(Region::Log), before);
+        // index とワークツリーのほうは古くなる。
+        assert!(!state.worktree_is_current());
     }
 
     #[test]
@@ -5439,7 +5651,6 @@ feat/b
             cmd,
             Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches])
         );
-        assert!(state.graph.reload_pending);
 
         // **走っていたページは積まない。** 積んでも直後の読み直しで捨てるだけで、
         // そのあいだ古い行に新しい行が継ぎ足された状態が画面に出る。
@@ -5451,8 +5662,23 @@ feat/b
 
         assert_eq!(state.graph.lines.len(), 3);
         assert_eq!(cmd, reload(&state));
-        // 頼み直せたので借りは消える。`jobs.finish` のあとなので必ず出せる。
-        assert!(!state.graph.reload_pending);
+
+        // 頼み直したぶんは書き込みより後に頼んだページなので、届けば積める
+        // （**借りが残らない**）。
+        let page = LogPage {
+            commits: vec![commit(9)],
+            done: true,
+        };
+        let cmd = update(
+            &mut state,
+            Msg::LogLoaded {
+                restart: true,
+                result: Ok(page),
+            },
+        );
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.graph.lines.len(), 1);
     }
 
     #[test]
@@ -5540,6 +5766,7 @@ feat/b
         let mut state = state_with_commits(3);
         let op = GitOp::Switch("main".into());
         let _ = state.issue(Cmd::Exec(op.clone()));
+        let before = state.jobs.epoch(Region::Log);
 
         let cmd = update(&mut state, exec_done_of(op, Ok(fake_output())));
 
@@ -5548,7 +5775,7 @@ feat/b
             cmd,
             Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches])
         );
-        assert!(!state.graph.reload_pending);
+        assert_eq!(state.jobs.epoch(Region::Log), before);
     }
 
     #[test]
@@ -5561,8 +5788,11 @@ feat/b
 
         // 2 回目。読み直しは飛んでいるぶんに落とされる。
         let _ = state.issue(Cmd::Exec(commit_op()));
-        let _ = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
-        assert!(state.graph.reload_pending);
+        let cmd = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
+        assert!(
+            !issued(&cmd, &reload(&state)),
+            "飛んでいるぶんに落とされる: {cmd:?}"
+        );
 
         // **1 回目の読み直しが届いても採らない。** 2 回目より前に頼まれたページなので、
         // 採ると 2 回目のコミットが二度とグラフに出ない。`restart` かどうかで捨てるかを
@@ -5608,7 +5838,22 @@ feat/b
         assert_eq!(state.graph.cursor, 0);
         // `lines` に無いコミットの詳細を残さない。
         assert!(state.graph.detail.is_none());
-        assert!(!state.graph.reload_pending);
+    }
+
+    #[test]
+    fn a_page_from_before_the_write_that_fails_is_not_asked_again() {
+        // **古いページでも失敗を先に処理する。** 順序を逆にすると `load_failed` を
+        // 立てないまま読み直しを出し、「失敗 → 再読込 → 失敗」を回す。
+        let mut state = state_with_page(3, false);
+        assert!(state.jobs.is_running(JobKind::LoadLog));
+        let _ = state.issue(Cmd::Exec(commit_op()));
+        let _ = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
+
+        let cmd = update(&mut state, page_loaded(Err(GitReadError::NonUtf8Head)));
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.graph.load_failed);
+        assert!(state.graph.lines.is_empty());
     }
 
     #[test]
@@ -5619,7 +5864,7 @@ feat/b
         let _ = state.issue(Cmd::Exec(commit_op()));
         let _ = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
 
-        let _ = update(
+        let cmd = update(
             &mut state,
             Msg::LogLoaded {
                 restart: true,
@@ -5627,7 +5872,7 @@ feat/b
             },
         );
 
-        assert!(!state.graph.reload_pending);
+        assert_eq!(cmd, Cmd::None);
         assert!(state.graph.load_failed);
         assert!(state.graph.lines.is_empty());
     }

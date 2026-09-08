@@ -173,7 +173,11 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
   ブランチが多いリポジトリでは、ここが `graph_ahead_behind` の walk より重くなる。
   **畳むなら config を 1 回だけ読み、リモートを名前で覚えて refspec 変換を自分でかける**
   ことになるが、`branch.<name>.remote = "."`（ローカル追跡）まで自前で再現することに
-  なるので、**M3 の世代を入れるタスクで決める**（fetch / pull で一覧の読み直しが増える）。
+  なる。**M3 の世代のタスクで「畳まない」と決めた** —— 世代は読み直しの**回数**を
+  変えず（書き込みのあとに読み直す判断は `update::Reload` のまま）、増えたのは
+  落とされたぶんの追いつき 1 通だけ。libgit2 の再実装を先に払う根拠が無い。
+  **払う場面が見えてから決める** —— ブランチが多いリポジトリで一覧の読み込みが
+  体感できたとき（M6 の「端末幅 < 100」と同じ仕上げの並び）。
   **`upstream_config` は config の snapshot をさらに 2 回取る**（`branch_upstream_remote`
   と `branch_upstream_merge`）ので、畳むときはこの 2 本も一緒に数える
 
@@ -321,8 +325,11 @@ pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;
   pathspec の**共通接頭辞**しか枝刈りに使わないので、`old.txt` / `new.txt` のように
   接頭辞を共有しない対では効かない。git2 0.21 / libgit2 1.9 の
   `diff_generate.c` の `diff_prepare_iterator_opts` で確認）。`DiffTarget` の形が変わり
-  01 の `wanted_diff` も一覧の `old_path` を運ぶことになるので、**M3 で fetch の
-  読み直しを入れるときに一緒に決める**（そこで `JobTracker` の世代も見る）
+  01 の `wanted_diff` も一覧の `old_path` を運ぶことになる。**M3 の世代のタスクでは
+  やらないと決めた** —— 世代が変えたのは「持っている diff をいつ捨てるか」で、
+  1 通あたりのコストには触っていない（捨てる通数も変わっていない）。同じ PR に入れると
+  `DiffTarget` の形の変更が混ざる。**M5 でコミットの diff を出す場面が増えるとき**
+  （rebase / cherry-pick の対象を見る）に、そこで決める
 
 ## ステータス
 

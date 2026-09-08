@@ -101,10 +101,7 @@ impl AppState {
             cmd => match cmd.job_kind() {
                 None => cmd,
                 Some(kind) => {
-                    let job = Job {
-                        kind,
-                        label: kind.label().to_string(),
-                    };
+                    let job = Job::new(kind, kind.label().to_string());
                     if self.jobs.start(job) {
                         cmd
                     } else {
@@ -207,6 +204,31 @@ impl AppState {
                 })
             }
         }
+    }
+
+    /// 出している diff を**直近の書き込みより後に**読めているか。
+    ///
+    /// [`DiffState::fresh_view`] が「対象が合っているか」だけを見るのに対し、こちらは
+    /// 鮮度まで見る。**描くのは前者、キャッシュを短絡してよいかとハンクからパッチを
+    /// 組んでよいかは後者**（01 の「diff のキャッシュと鮮度」）。描く側で鮮度まで見ると、
+    /// 読み直しが届くまで「読み込み中…」が挟まる。
+    ///
+    /// **対象では絞らない** —— [`DiffTarget::Commit`] の中身は書き込みで変わらないので
+    /// 1 通ぶん無駄に読むが、単位ごとに例外を作るとその表を保つことになる（01）。
+    pub fn diff_is_current(&self) -> bool {
+        let wanted = self.wanted_diff();
+        self.diff
+            .fresh_view(wanted.as_ref())
+            .is_some_and(|view| self.jobs.is_fresh(JobKind::LoadDiff, Some(view.epoch)))
+    }
+
+    /// 持っている worktree の一覧を**直近の書き込みより後に**読めているか。
+    ///
+    /// 一度も読めていなければ偽（`snapshot_epoch` が `None`）。commit が「stage された
+    /// 変更がありません」を出してよいかの根拠（01 の「commit」）。
+    pub fn worktree_is_current(&self) -> bool {
+        self.jobs
+            .is_fresh(JobKind::LoadStatus, self.worktree.snapshot_epoch)
     }
 
     /// ワーキングツリーで選んでいる行の diff の対象。
@@ -390,23 +412,6 @@ pub struct GraphState {
     /// 読み直しを出してしまう。次の読み込みはユーザーの操作から始める
     /// （01 の「追加ページの読み込み」）。
     pub load_failed: bool,
-    /// 頼んだ読み直しが [`AppState::issue`] に落とされた。
-    ///
-    /// 書き込みで ref が動くと積んだ行が丸ごと古くなるが、そのとき続きの読み込みが
-    /// 走っていると同種の読み直しは落ちる。落ちたぶんをここに覚えておき、走っていた
-    /// ページが届いた時点で頼み直す。**[`WorktreeState::stale`] と同じ形**で、立てるのも
-    /// 同じ「書き込みの時点で読み取りが走っていたか」（01 の「ログの読み直し」）。
-    ///
-    /// 読む場所は 2 つ（届いたページを採るか・頼み直すか）で、**どちらも「読み直しが
-    /// 落とされたまま」という同じ時点を見ている**ので `bool` で足りる。
-    /// [`DiffState::freshness`] が 3 状態なのは、「短絡してよいか」と「パッチを組んで
-    /// よいか」で見る時点が違ったため。
-    ///
-    /// **立っているあいだは必ず `JobKind::LoadLog` が走っている**（落とした相手が
-    /// それ）。続きの読み込みをここで止める必要が無いのはこの不変条件による。
-    ///
-    /// [`DiffState::freshness`]: DiffState
-    pub reload_pending: bool,
 }
 
 impl GraphState {
@@ -416,10 +421,7 @@ impl GraphState {
     /// 来る）と、commit のあとの読み直しで同じことをする。**1 本にまとめてあるのは、
     /// 片方に足し忘れると `lines` に無いコミットの詳細やレーンの状態が残るため。**
     /// `load_failed` はここでは触らない（呼び出し元で値が違う。失敗の側だけが立てる）。
-    /// `reload_pending` は落とす。どちらの呼び出し元でも「先頭から積み直したので
-    /// 借りは無い」で一致し、**足し忘れると届かない読み直しを待ち続ける**。
     pub fn restart(&mut self) {
-        self.reload_pending = false;
         self.lines.clear();
         // もう `lines` に無いコミットを指したままにしない。
         self.lanes = LaneState::default();
@@ -594,21 +596,18 @@ pub struct WorktreeState {
     pub snapshot: WorktreeSnapshot,
     pub section: WorktreeSection,
     pub cursor: usize,
-    /// 届く予定の status が、直近の書き込みより前に頼まれたもの。
+    /// 持っている [`snapshot`](Self::snapshot) を読んだ時点の [`Region::Worktree`] の世代。
     ///
-    /// `JobKind` の粒度は種別単位なので、読み取りが走っているあいだの
-    /// `Cmd::LoadStatus` は [`AppState::issue`] に落とされる。落ちたぶんを届いた
-    /// 時点で頼み直すための印（01 の「ワーキングツリー」）。立てるのは
-    /// `exec_finished`、落とすのは `status_loaded`。
-    pub stale: bool,
-    /// 一度でも status を読めた。
+    /// **旗 2 本（`stale` / `loaded`）を 1 本に畳んだもの**（01 の
+    /// 「実行中ジョブ › 世代」）。`None` は「一度も読めていない」で、
+    /// `Some(e)` は「世代 `e` の時点の一覧」。[`JobTracker::is_fresh`] に通すと
+    /// 「直近の書き込みより後に読んだものか」が出る。
     ///
     /// **空の `snapshot` には 2 つの意味がある** — 「変更が無い」と「まだ読めていない」。
-    /// 起動直後や `Cmd::LoadStatus` が失敗したあとは後者で、`stale` では区別できない
-    /// （あれは書き込みでしか立たない）。commit の「stage された変更がありません」を
-    /// この 2 つ目で出すと、実際には stage されているのに断ることになる
-    /// （01 の「commit」）。
-    pub loaded: bool,
+    /// commit の「stage された変更がありません」を 2 つ目で出すと、実際には stage
+    /// されているのに断ることになる（01 の「commit」）。`None` と `Some` の区別が
+    /// そのまま前者の根拠になる。
+    pub snapshot_epoch: Option<u64>,
 }
 
 impl WorktreeState {
@@ -725,43 +724,6 @@ pub struct DiffState {
     /// 回さないため）。対象が違えば一度も試していないので頼む。落とすのは読み込みの
     /// 成功と、ワーキングツリーのカーソル移動。
     pub failed: Option<DiffTarget>,
-    /// 持っている [`view`](Self::view) と、飛んでいる `LoadDiff` の鮮度。
-    ///
-    /// [`view`](Self::view) をキャッシュに使うための無効化の印（01 の
-    /// 「diff のキャッシュと鮮度」）。対象は変わらないまま中身だけが変わる経路が
-    /// あるため要る（ハンク単位で stage すると `IndexVsWorktree(a.txt)` のまま
-    /// 中身が減る）。
-    pub freshness: Freshness,
-}
-
-/// 持っている [`DiffView`] と、飛んでいる `LoadDiff` の鮮度。
-///
-/// **`bool` では足りない。** キャッシュを短絡してよいか（= 読み直しを**頼んだ**か）と、
-/// 出しているハンクからパッチを組んでよいか（= 読み直しが**届いた**か）は切り替わる
-/// 時点が違う。1 つの `bool` はどちらか片方の時点でしか倒れないので、もう片方が
-/// 「頼んだだけで届いていない diff」を新しいものとして扱う（01 の
-/// 「diff のキャッシュと鮮度」）。
-///
-/// **対象は持たない。** 書き込みの時点では `clamp` がまだで、そのとき選ばれている
-/// ファイルが読み直しの対象になるとは限らない。
-///
-/// `JobTracker` に世代を持たせれば [`WorktreeState::stale`] ごと畳める。**それは
-/// M3 の fetch で入れる**（01 の「実行中ジョブ › 世代」）。ここはその局所版。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum Freshness {
-    /// 書き込みより後の diff を持っている（書き込みがまだ無いときも含む）。
-    #[default]
-    Fresh,
-    /// 書き込みより前の diff しか無く、読み直しをまだ頼めていない。
-    ///
-    /// 書き込みの瞬間と、`LoadDiff` が走っていて `issue` に落とされたときがこれ。
-    Stale,
-    /// 書き込みより前の diff しか無いが、読み直しは頼んである。
-    ///
-    /// **次に届く 1 通が書き込みより後のもの。** 逆に言うと、この状態のあいだは
-    /// `LoadDiff` がちょうど 1 つ飛んでいる。届いた時点で必ず `Fresh` か `Stale` に
-    /// 倒れるので、`Esc` で対象が消えても取り残されない。
-    Asked,
 }
 
 impl DiffState {
@@ -804,6 +766,12 @@ pub struct DiffView {
     /// ファイル単位で持つ。平坦化すると `GitOp::StageHunk` に渡す `path` を失う。
     pub files: Vec<FileDiff>,
     pub cursor: DiffCursor,
+    /// これを読んだ時点の [`Region::Worktree`] の世代（01 の「実行中ジョブ › 世代」）。
+    ///
+    /// **中身は対象が同じままでも古くなる** —— ハンク単位で stage すると
+    /// `IndexVsWorktree(a.txt)` のまま中身が減る。対象では鮮度を判じられないので、
+    /// 読めた世代を値に添える。[`DiffState::is_current`] が判定に使う。
+    pub epoch: u64,
 }
 
 impl DiffView {
@@ -980,10 +948,43 @@ pub struct PrState {
     pub cursor: usize,
 }
 
+/// 世代を数える領域。**書き込みが何を古くするか**で分ける。
+///
+/// **1 本のカウンタにしない。** index だけを触る `stage` でもログの世代が進み、
+/// 飛んでいる `LoadLog` を毎回捨てて `LogSession` の作り直し（履歴全体を辿り直す。
+/// 02 の「セッションは作り直さず使い回す」）を払うことになる。どの書き込みがどこを
+/// 古くするかは `update::Reload` が持っていて、その 3 値がそのままこの 3 領域に写る
+/// （01 の「実行中ジョブ › 世代」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    /// index とワークツリー。[`JobKind::LoadStatus`] と [`JobKind::LoadDiff`]。
+    Worktree,
+    /// ref の索引（ラベル・HEAD・ブランチ一覧・HEAD のメッセージ）。
+    Refs,
+    /// 積んだログの行。[`JobKind::LoadLog`]。
+    Log,
+}
+
+impl Region {
+    /// 世代を持つ領域すべて。**宣言順に並べる** —— [`JobTracker`] は
+    /// `region as usize` でカウンタを引き、その配列の幅をここの長さで取る。
+    ///
+    /// 腕を足してここに足し忘れると添字が範囲外になるので、`region_all_lists_every_arm`
+    /// が網羅 `match` でコンパイルエラーにする。
+    pub const ALL: [Region; 3] = [Region::Worktree, Region::Refs, Region::Log];
+}
+
 /// 実行中の非同期タスク。スピナー表示と `Cmd` の重複発行防止に使う。
+///
+/// **世代（epoch）も持つ。** 走らせた時点の世代をジョブに刻み、[`finish`](Self::finish)
+/// が返すので、届いた返信が直近の書き込みより後に頼まれたものかを受け取り側で判じ
+/// られる（01 の「実行中ジョブ › 世代」）。リーダースレッドには何も足さない
+/// （`Cmd` / `Msg` は世代を運ばない）。
 #[derive(Debug, Default)]
 pub struct JobTracker {
     running: Vec<Job>,
+    /// 領域ごとの世代。添字は [`Region::ALL`] の位置。
+    epochs: [u64; Region::ALL.len()],
 }
 
 impl JobTracker {
@@ -992,18 +993,62 @@ impl JobTracker {
         self.running.iter().any(|job| job.kind == kind)
     }
 
+    /// この領域のいまの世代。持っている値がこれと同じなら最新。
+    pub fn epoch(&self, region: Region) -> u64 {
+        self.epochs[region as usize]
+    }
+
+    /// 書き込みが 1 つ終わり、この領域の値が古くなった。
+    ///
+    /// **[`AppState::issue`] より先に呼ぶ。** 進めたあとに発行した `Cmd` が新しい世代で
+    /// 刻まれる。逆にすると、書き込みの直後に頼んだ読み直しまで「古い要求」になり、
+    /// 届いた時点で捨てて頼み直す往復を延々と繰り返す。
+    ///
+    /// **失敗した書き込みでも進める。** `git apply` が途中で落ちても index は動いて
+    /// いることがある。どこを進めるかは `update::Reload` が成否ごと決める。
+    pub fn advance(&mut self, region: Region) {
+        self.epochs[region as usize] += 1;
+    }
+
     /// 開始を記録する。同種が既に動いていれば何もせず `false` を返す。
-    pub fn start(&mut self, job: Job) -> bool {
+    pub fn start(&mut self, mut job: Job) -> bool {
         if self.is_running(job.kind) {
             return false;
         }
+        job.epoch = job.kind.region().map(|region| self.epoch(region));
         self.running.push(job);
         true
     }
 
-    /// 完了を記録する。
-    pub fn finish(&mut self, kind: JobKind) {
-        self.running.retain(|job| job.kind != kind);
+    /// 完了を記録し、**そのジョブを頼んだ時点の世代**を返す。
+    ///
+    /// 走っていなければ `None`。領域を持たない種別（[`JobKind::region`] が `None`）も
+    /// `None` で、そちらは返り値を読まない。
+    pub fn finish(&mut self, kind: JobKind) -> Option<u64> {
+        let at = self.running.iter().position(|job| job.kind == kind)?;
+        self.running.remove(at).epoch
+    }
+
+    /// `asked` の刻印が、`kind` が読む領域のいまの世代と同じか。
+    ///
+    /// **領域は [`JobKind::region`] から引く。** 呼び出し側に渡させると、
+    /// `finish(LoadStatus)` の刻印を `Region::Log` と比べる形が組めてしまい、
+    /// 常に「古い」になって頼み直しを回す（`CLAUDE.md` の「旗と値を割らない」が
+    /// 1 段上がった形）。
+    ///
+    /// **`None` は「刻印が無い」**（走っていなかった）。領域を持つ種別では「古い」に
+    /// 倒す —— 一度だけ頼み直して、その返信は必ず刻印を持つ。領域を持たない種別は
+    /// 書き込みで古くならないので真。
+    ///
+    /// 引数に取るのは**届いた返信の刻印**か、[`WorktreeState::snapshot_epoch`] のような
+    /// **持っている値の刻印**。追いつき（頼み直すか）を決めるときは前者で判じる ——
+    /// 後者で判じると、読み取りが失敗し続けたときに「古い → 頼み直す → 失敗」を回す
+    /// （失敗は値を入れ替えないので刻印が古いまま残る）。
+    pub fn is_fresh(&self, kind: JobKind, asked: Option<u64>) -> bool {
+        match kind.region() {
+            None => true,
+            Some(region) => asked == Some(self.epoch(region)),
+        }
     }
 
     /// 表示用。実行中のタスクを登録順に返す。
@@ -1023,6 +1068,24 @@ pub struct Job {
     /// ステータスバーに出す短い説明。`Exec` 以外は種別から決まるが、`Exec` だけは
     /// `GitOp` によって変わる（`fetch` / `push` など）ので値として持つ。
     pub label: String,
+    /// 走らせた時点の、この種別の領域の世代。
+    ///
+    /// **非公開で、[`JobTracker::start`] だけが入れる。** 組み立てる側に持たせると、
+    /// 刻む場所が `start` の外に増える（`issue` の外で `Cmd` を発行する経路ができた
+    /// ときに、世代の無いジョブが黙って混ざる）。領域を持たない種別
+    /// （[`JobKind::region`] が `None`）では `None` のまま。
+    epoch: Option<u64>,
+}
+
+impl Job {
+    /// ステータスバーの説明を添えて組む。世代は [`JobTracker::start`] が刻む。
+    pub fn new(kind: JobKind, label: String) -> Self {
+        Self {
+            kind,
+            label,
+            epoch: None,
+        }
+    }
 }
 
 /// タスクの種類。`Cmd` の変種と 1 対 1 で、対応は [`Cmd::job_kind`] が持つ。
@@ -1066,6 +1129,37 @@ impl JobKind {
             | JobKind::LoadStatus
             | JobKind::LoadBranches
             | JobKind::LoadDiff
+            | JobKind::ResolveAccount
+            | JobKind::FetchPr
+            | JobKind::FetchChecks
+            | JobKind::FetchPrList => None,
+        }
+    }
+
+    /// この種別が読む値が、どの領域の世代で古くなるか。
+    ///
+    /// `None` は「書き込みでは古くならない」か、**値そのものが鍵を持っていて世代より
+    /// 強い**もの（01 の「実行中ジョブ › 世代」）。コミットの詳細とファイル一覧は
+    /// `Msg` が運ぶ Oid で追いつくので、世代では判じない（amend で Oid が変わった
+    /// 返信は、鮮度を見るまでもなく別のコミットのものとして捨てられる）。
+    ///
+    /// 網羅 `match` にしているのは、種別を足したときにどの領域なのかを選ばせるため。
+    pub fn region(self) -> Option<Region> {
+        match self {
+            // index とワークツリー。どの書き込みでも古くなる。
+            JobKind::LoadStatus | JobKind::LoadDiff => Some(Region::Worktree),
+            // ref から導かれる値。`LoadHeadMessage` もここ —— commit / amend が
+            // 走っているあいだに `C` を押すと、書き込み前の本文で amend の入力欄が
+            // 埋まる。
+            JobKind::LoadRepoInfo | JobKind::LoadBranches | JobKind::LoadHeadMessage => {
+                Some(Region::Refs)
+            }
+            // 積んだログの行。ref が動いて walk に入る集合が変わったときだけ古くなる。
+            JobKind::LoadLog => Some(Region::Log),
+            // 書き込みそのものと、Oid で追いつくもの、リポジトリの外から来るもの。
+            JobKind::Exec
+            | JobKind::LoadCommitDetail
+            | JobKind::LoadCommitFiles
             | JobKind::ResolveAccount
             | JobKind::FetchPr
             | JobKind::FetchChecks
@@ -1617,8 +1711,13 @@ mod tests {
             commits: vec![crate::test_util::fake_commit(1, "summary")],
             done: true,
         };
-        let _ = crate::app::update(
+        let count = state.config.graph.page_size;
+        let _ = crate::test_util::reply(
             &mut state,
+            Cmd::LoadLog {
+                count,
+                restart: false,
+            },
             Msg::LogLoaded {
                 restart: false,
                 result: Ok(page),
@@ -1911,10 +2010,7 @@ mod tests {
     }
 
     fn job(kind: JobKind) -> Job {
-        Job {
-            kind,
-            label: "test".to_string(),
-        }
+        Job::new(kind, "test".to_string())
     }
 
     #[test]
@@ -1946,6 +2042,42 @@ mod tests {
         assert!(!jobs.is_running(JobKind::LoadLog));
         assert!(jobs.is_empty());
         assert!(jobs.start(job(JobKind::LoadLog)));
+    }
+
+    #[test]
+    fn region_all_lists_every_arm() {
+        // **`JobTracker.epochs` の幅は `Region::ALL` の長さ。** 腕を足してここに
+        // 足し忘れると、その領域の `advance` / `epoch` が添字の範囲外で落ちる。
+        // 網羅 `match` にしてあるので、腕を足すとこの関数がコンパイルエラーになる
+        // （そのとき `ALL` にも足す）。
+        fn listed(region: Region) -> bool {
+            let name = match region {
+                Region::Worktree => "worktree",
+                Region::Refs => "refs",
+                Region::Log => "log",
+            };
+            !name.is_empty()
+        }
+
+        let mut jobs = JobTracker::default();
+        for (index, region) in Region::ALL.into_iter().enumerate() {
+            assert!(listed(region));
+            assert_eq!(region as usize, index, "{region:?} の添字がずれています");
+            jobs.advance(region);
+            assert_eq!(jobs.epoch(region), 1);
+        }
+    }
+
+    #[test]
+    fn a_kind_without_a_region_is_always_fresh() {
+        // `Exec` やコミット詳細は書き込みで古くならない（詳細は Oid で追いつく）。
+        // ここが偽だと、追いつきを持たない種別に頼み直しを回させる腕ができる。
+        let mut jobs = JobTracker::default();
+        assert!(jobs.is_fresh(JobKind::Exec, None));
+        jobs.advance(Region::Worktree);
+        assert!(jobs.is_fresh(JobKind::LoadCommitDetail, None));
+        // 領域を持つ種別は、刻印が無ければ「古い」。
+        assert!(!jobs.is_fresh(JobKind::LoadStatus, None));
     }
 
     #[test]

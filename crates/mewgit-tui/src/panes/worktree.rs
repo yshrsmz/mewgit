@@ -88,9 +88,10 @@ fn heading(section: WorktreeSection) -> &'static str {
 mod tests {
     use super::*;
     use crate::test_util::{draw, pane_text, row_is_reversed, state_at};
-    use mewgit_core::app::{update, Msg, TermSize};
+    use mewgit_core::app::{Cmd, Msg, TermSize};
     use mewgit_core::git_read::{FileStatus, WorktreeSnapshot};
     use mewgit_core::test_util::fake_entry;
+    use mewgit_core::test_util::reply;
 
     /// 既定の 80x24。右ペインは 32 桁になるので、テストはその幅で読める内容にする。
     const SIZE: TermSize = TermSize {
@@ -103,7 +104,13 @@ mod tests {
     /// `AppState` に直接書かない。カーソルの詰め直し（`clamp`）を通した形を描く。
     fn state_with(snapshot: WorktreeSnapshot) -> AppState {
         let mut state = state_at("/repo");
-        let _ = update(&mut state, Msg::StatusLoaded(Box::new(Ok(snapshot))));
+        // **発行してから届ける。** 通さない返信は刻印を持たず、`status_loaded` が
+        // 「書き込みより前に頼まれたもの」として頼み直す（01 の「実行中ジョブ › 世代」）。
+        let _ = reply(
+            &mut state,
+            Cmd::LoadStatus,
+            Msg::StatusLoaded(Box::new(Ok(snapshot))),
+        );
         state
     }
 
@@ -171,7 +178,7 @@ mod tests {
         // 読み込み中と「変更なし」を出し分ける。起動直後に「変更はありません」と
         // 出すと、まだ読んでいないだけなのに読み終えたように見える。
         let mut state = state_at("/repo");
-        let _ = state.issue(mewgit_core::app::Cmd::LoadStatus);
+        let _ = state.issue(Cmd::LoadStatus);
 
         // **このペインの中だけを見る。** 画面全体を見ると、まだ届いていない
         // ブランチ一覧が出した同じ文言で通ってしまう（`ui::LOADING` は共有）。

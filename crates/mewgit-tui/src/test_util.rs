@@ -1,10 +1,10 @@
 //! テスト用のヘルパ。`mewgit-tui` は 1 つのバイナリクレートなので、単体テストは
 //! すべて同じコンパイル単位に入る。feature で切り分ける必要はない。
 
-use mewgit_core::app::{update, AppState, Key, Modal, Msg, Pane, RepoInfo, TermSize};
+use mewgit_core::app::{update, AppState, Cmd, Key, Modal, Msg, Pane, RepoInfo, TermSize};
 use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, LogPage};
-use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents};
+use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents, reply};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Position;
 use ratatui::style::Modifier;
@@ -189,8 +189,13 @@ fn state_with_log(commits: Vec<Commit>) -> AppState {
         commits,
         done: true,
     };
-    let _ = update(
+    let count = state.config.graph.page_size;
+    let _ = reply(
         &mut state,
+        Cmd::LoadLog {
+            count,
+            restart: false,
+        },
         Msg::LogLoaded {
             restart: false,
             result: Ok(page),
@@ -200,8 +205,9 @@ fn state_with_log(commits: Vec<Commit>) -> AppState {
     // リポジトリ」なので、一覧だけ「読み込み中…」で残っていると画面が実際とずれる。
     // （文言が他のペインのテストに当たるのは別の問題で、そちらは `pane_text` が
     // ペインの中だけを見ることで塞いである。）
-    let _ = update(
+    let _ = reply(
         &mut state,
+        Cmd::LoadBranches,
         Msg::BranchesLoaded(Box::new(Ok(vec![fake_branch("main", true)]))),
     );
     state

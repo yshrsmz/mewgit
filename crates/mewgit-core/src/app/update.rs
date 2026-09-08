@@ -8,7 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::git_exec::{hunk_patch, supports_hunk_patch, ExecError, GitOp, PullMode};
+use crate::git_exec::{
+    hunk_patch, push_remote_ref, supports_hunk_patch, ExecError, ExecErrorKind, ExecOutput, GitOp,
+    PullMode,
+};
 use crate::git_read::{
     short_oid, Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError,
     Hunk, LogPage, Oid, WorktreeSection, WorktreeSnapshot,
@@ -17,7 +20,7 @@ use crate::git_read::{
 use super::{
     AppState, BranchLoad, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, Freshness, GraphLine,
     GraphSelection, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
-    RepoSnapshot, TextBuffer,
+    PushRejection, RepoSnapshot, TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -543,11 +546,51 @@ fn rename_branch(state: &mut AppState) -> Cmd {
 fn push(state: &mut AppState) -> Cmd {
     match push_plan(state) {
         PushPlan::Tracked(op) => Cmd::Exec(op),
-        PushPlan::Propose { op, body } => confirm(state, "upstream を設定して push", body, op),
+        PushPlan::Ask { title, body, op } => confirm(state, title, body, op),
         PushPlan::Refused(message) => {
             state.push_notice(NoticeLevel::Warn, message, None);
             Cmd::None
         }
+    }
+}
+
+/// 完了した push を憶えるか（01 の「force push」）。
+///
+/// **憶えるのは非 force の拒否だけ。** lease が古いときの
+/// `! [rejected] ... (stale info)` も `rejected` を含むので `NonFastForward` に落ちる
+/// （git 2.55 で確認）。force の失敗で立て直すと、同じ古い lease で撃ち続ける輪になる。
+/// **それ以外の Push の完了はすべて忘れる**（成功した push、非 FF 以外の失敗）。
+///
+/// **憶えるのは押したブランチ**（`GitOp::Push` の `src`）で、いまの HEAD ではない。
+/// 一覧の読み直しは別のジョブなので、`Switch` の直後に押した push が返るころには
+/// HEAD が別のブランチになっていることがある。そこで HEAD を憶えると、**押して
+/// いないブランチに force push の腕が立つ**。
+///
+/// 位置は一覧から取る。push はローカルの ref を動かさないので、名前で引いた先端は
+/// 押したときのまま（読み直しは `Reload` が別に出す）。一覧に無ければ憶えない。
+fn push_rejection(
+    state: &AppState,
+    result: &Result<ExecOutput, ExecError>,
+    src: &str,
+    forced: bool,
+) -> Option<PushRejection> {
+    if forced {
+        return None;
+    }
+    match result {
+        Err(ExecError::Failed {
+            kind: ExecErrorKind::NonFastForward,
+            ..
+        }) => state
+            .branches
+            .branches
+            .iter()
+            .find(|branch| branch.name == src)
+            .map(|branch| PushRejection {
+                branch: branch.name.clone(),
+                oid: branch.oid,
+            }),
+        _ => None,
     }
 }
 
@@ -556,8 +599,13 @@ fn push(state: &mut AppState) -> Cmd {
 enum PushPlan {
     /// 追跡設定に沿って push する。確認モーダルを通さない。
     Tracked(GitOp),
-    /// 追跡設定が無いので `-u` を提案する。`body` は確認モーダルの本文。
-    Propose { op: GitOp, body: String },
+    /// 確認モーダルを通す。`-u` の提案（行き先を推測している）と force push
+    /// （破壊的。不変ルール 5）の 2 つで、**違うのは文言だけ**なので変種は分けない。
+    Ask {
+        title: &'static str,
+        body: String,
+        op: GitOp,
+    },
     /// 出せない。通知に出す文言。
     Refused(String),
 }
@@ -582,7 +630,7 @@ fn push_plan(state: &AppState) -> PushPlan {
     if branches.load() != BranchLoad::Loaded {
         return PushPlan::Refused("ブランチ一覧をまだ読めていません".to_string());
     }
-    let Some(head) = branches.branches.iter().find(|branch| branch.is_head) else {
+    let Some(head) = branches.head() else {
         return PushPlan::Refused("HEAD がブランチを指していません".to_string());
     };
 
@@ -597,20 +645,62 @@ fn push_plan(state: &AppState) -> PushPlan {
     // **`.` はローカル追跡**（`git branch --set-upstream-to=main topic`）。渡すと
     // `git push . topic:main` になり、**ネットワークに出ないままローカルの `main` を
     // 早送りして exit 0 で返る**（git 2.55 で確認）。素の `git push` は
-    // `push.default = simple` で断る場面で、[`push_refspec`] が組む refspec が
+    // `push.default = simple` で断る場面で、[`push_dst`] が組む refspec が
     // その守りを外している。`-u` の提案にも落とさない —— そちらは
     // `branch.<name>.remote` を上書きするので、ユーザーが書いた `.` が黙って消える。
     if config.remote == "." {
         return PushPlan::Refused("追跡先がローカルです。リモートを設定してください".to_string());
     }
 
-    PushPlan::Tracked(GitOp::Push {
+    // **直前の `P` が断られたときだけ force に上げる**（01 の「force push」）。
+    // 専用のキーを作らないのは、断られていない場面で押せる形にしないため（07）。
+    let rejected = state
+        .push_rejected
+        .as_ref()
+        .is_some_and(|rejected| rejected.branch == head.name && rejected.oid == head.oid);
+    // **lease の値が無いなら force は撃たない。** 値の無い `--force-with-lease` は
+    // remote-tracking ref と比べるだけで守りにならない（03）。`upstream_config` が
+    // あってもここが `None` になるのは `fetch --prune` のあと（02）。**判定を
+    // 1 箇所に畳む** —— 断りと lease を別々に書くと、片方だけ緩めたときに気付けない。
+    let lease = match (rejected, &head.upstream) {
+        (true, None) => {
+            return PushPlan::Refused(
+                "追跡 ref が無いので force push できません。f で取得してください".to_string(),
+            )
+        }
+        // **リモートに無いコミットが 1 つも無いなら、force push は消すだけ。**
+        // `↓n` だけのブランチも非 FF で断られる（git 2.55 で確認）ので、断られた記憶は
+        // 立つ。そこで `f` を踏むと lease がリモートの位置に追いつき、**通ってしまう**
+        // —— 出すものが無いのに他人のコミットを消す（01 の「force push」）。
+        (true, Some(_)) if head.ahead == 0 => {
+            return PushPlan::Refused(
+                "リモートに無いコミットがありません。p で取り込んでください".to_string(),
+            )
+        }
+        (true, Some(upstream)) => Some(upstream.oid),
+        (false, _) => None,
+    };
+
+    let dst = push_dst(&head.name, &config.merge);
+    let body = lease.map(|lease| {
+        format!("{} を {} の {} に force push します。\nリモートが {} から動いていれば git が断ります。上書きした履歴は戻せません。", head.name, config.remote, push_remote_ref(&head.name, dst.as_deref()), short_oid(&lease))
+    });
+    let op = GitOp::Push {
         remote: config.remote.clone(),
-        branch: push_refspec(&head.name, &config.merge),
+        src: head.name.clone(),
+        dst,
         set_upstream: false,
-        force: false,
-        expected: None,
-    })
+        lease,
+    };
+
+    match body {
+        None => PushPlan::Tracked(op),
+        Some(body) => PushPlan::Ask {
+            title: "force push",
+            body,
+            op,
+        },
+    }
 }
 
 /// 追跡設定の無いブランチに `-u` 付きの push を提案する。
@@ -649,33 +739,34 @@ fn propose_upstream(branch: &str, state: &AppState) -> PushPlan {
         }
     };
 
-    PushPlan::Propose {
+    PushPlan::Ask {
+        title: "upstream を設定して push",
+        body: format!("{branch} を {candidate} に push し、追跡先に設定します。"),
         op: GitOp::Push {
             remote: candidate.clone(),
-            branch: branch.to_string(),
+            src: branch.to_string(),
+            dst: None,
             set_upstream: true,
-            force: false,
-            expected: None,
+            lease: None,
         },
-        body: format!("{branch} を {candidate} に push し、追跡先に設定します。"),
     }
 }
 
-/// `push <remote> <ここ>` に載せる ref。`merge` は `branch.<name>.merge`。
+/// `GitOp::Push` の `dst`（リモート側の ref 名）。`merge` は `branch.<name>.merge`。
 ///
-/// **名前が違うときは `<local>:<remote 側>` を渡す。** `push <remote> <local>` が動かすのは
-/// remote 側の**同名**の ref なので、`x` が `refs/heads/y` を追跡している状態では
-/// `origin/x` を新しく作ってしまう（git の `push.default = simple` がこの形を断るのも
-/// 同じ理由）。ブランチ名に `:` は使えないので、普通の名前と読み違えられる余地は無い。
+/// **名前が違うときだけ `Some`。** argv は `<local>:<remote 側>` になる。
+/// `push <remote> <local>` が動かすのは remote 側の**同名**の ref なので、`x` が
+/// `refs/heads/y` を追跡している状態では `origin/x` を新しく作ってしまう（git の
+/// `push.default = simple` がこの形を断るのも同じ理由）。
 ///
 /// **`refs/heads/` の下に無い `merge` は完全な ref のまま渡す。** 短縮できない名前を
 /// 短縮したことにすると、別の ref を動かす。`git push <remote> <local>:refs/…` は
 /// そのまま通る形式。
-fn push_refspec(local: &str, merge: &str) -> String {
+fn push_dst(local: &str, merge: &str) -> Option<String> {
     match merge.strip_prefix("refs/heads/") {
-        Some(short) if short == local => local.to_string(),
-        Some(short) => format!("{local}:{short}"),
-        None => format!("{local}:{merge}"),
+        Some(short) if short == local => None,
+        Some(short) => Some(short.to_string()),
+        None => Some(merge.to_string()),
     }
 }
 
@@ -1573,6 +1664,10 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         state.push_notice(NoticeLevel::Error, err.to_string(), Some(detail));
     }
 
+    if let GitOp::Push { src, lease, .. } = &done.op {
+        state.push_rejected = push_rejection(state, &done.result, src, lease.is_some());
+    }
+
     // **走っている読み取りは、この書き込みより前に頼まれたものなので届いても古い。**
     // その場合 `issue` は下の `LoadStatus` を落とすので、届いた時点で頼み直せるよう
     // 印を付ける（01 の「書き込みのあとの status」）。`CommitDetailLoaded` の
@@ -1654,7 +1749,7 @@ impl Reload {
             GitOp::Switch(_)
             | GitOp::BranchCreate { .. }
             | GitOp::BranchRename { .. }
-            | GitOp::Push { force: false, .. } => Reload::Refs,
+            | GitOp::Push { lease: None, .. } => Reload::Refs,
 
             // stash は `refs/stash` しか動かさず、グラフはそれを walk に押していない
             // （02 の「ログ列挙」）。ワークツリーの変化は `Cmd::LoadStatus` が拾う。
@@ -1684,7 +1779,9 @@ impl Reload {
             // 同じく walk が変わるが、**1 回で決まるので失敗したなら ref は元のまま**。
             // そこで読み直すと `GraphState::restart` がカーソルとスクロールを先頭に
             // 戻すので、pre-commit hook に弾かれただけでグラフの位置を失う。
-            GitOp::Commit { .. } | GitOp::BranchDelete { .. } | GitOp::Push { force: true, .. } => {
+            GitOp::Commit { .. }
+            | GitOp::BranchDelete { .. }
+            | GitOp::Push { lease: Some(_), .. } => {
                 if ok {
                     Reload::RefsAndLog
                 } else {
@@ -1722,7 +1819,7 @@ mod tests {
     use crate::graph::LaneState;
     use crate::test_util::{
         fake_branch, fake_commit, fake_commit_with_parents, fake_detail, fake_entry,
-        fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot,
+        fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_upstream,
     };
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
@@ -2760,21 +2857,32 @@ mod tests {
     fn push_op(remote: &str, branch: &str, set_upstream: bool) -> GitOp {
         GitOp::Push {
             remote: remote.to_string(),
-            branch: branch.to_string(),
+            src: branch.to_string(),
+            dst: None,
             set_upstream,
-            force: false,
-            expected: None,
+            lease: None,
         }
     }
 
-    /// `origin main` への force push。`Reload::after` の腕を踏むためだけに使う。
-    fn forced_push_op() -> GitOp {
+    /// ローカル名と違う行き先への push（argv では `<src>:<dst>`）。
+    fn renamed_push_op(remote: &str, src: &str, dst: &str) -> GitOp {
+        GitOp::Push {
+            remote: remote.to_string(),
+            src: src.to_string(),
+            dst: Some(dst.to_string()),
+            set_upstream: false,
+            lease: None,
+        }
+    }
+
+    /// `origin main` への force push。
+    fn forced_push_op(lease: Oid) -> GitOp {
         GitOp::Push {
             remote: "origin".to_string(),
-            branch: "main".to_string(),
+            src: "main".to_string(),
+            dst: None,
             set_upstream: false,
-            force: true,
-            expected: None,
+            lease: Some(lease),
         }
     }
 
@@ -2900,6 +3008,287 @@ mod tests {
         assert_eq!(state.modal, None, "追跡設定があるのに提案しています");
     }
 
+    /// 追跡 ref も持つブランチ。その位置が force push の lease になる。
+    ///
+    /// **`ahead` は 1。** force push はリモートに無いコミットを出す操作なので、
+    /// 0 のままだと `push_plan` が「出すものが無い」と断る（`↓n` だけのブランチを
+    /// 見る腕は [`a_force_push_is_refused_when_there_is_nothing_to_publish`]）。
+    fn tracked_head(name: &str, remote: &str, merge: &str, upstream_oid: Option<Oid>) -> Branch {
+        Branch {
+            upstream: upstream_oid.map(|oid| fake_upstream(&format!("{remote}/{name}"), oid)),
+            ahead: 1,
+            ..tracking_branch(name, remote, merge)
+        }
+    }
+
+    /// `op` を発行して、その結果を届ける。**返信まで届ける**ので `JobTracker` に
+    /// ジョブが残らない（残すと後続の `Cmd::Exec` を `issue` が黙って落とす。#38）。
+    fn finish_exec(state: &mut AppState, op: GitOp, result: Result<ExecOutput, ExecError>) {
+        let _ = state.issue(Cmd::Exec(op.clone()));
+        let _ = update(state, exec_done_of(op, result));
+    }
+
+    /// git が非 FF で断ったときの失敗。stderr は実測の 1 行（git 2.55）。
+    fn non_fast_forward() -> ExecError {
+        ExecError::Failed {
+            argv: vec!["push".into(), "origin".into(), "main".into()],
+            code: Some(1),
+            stderr: " ! [rejected]        main -> main (non-fast-forward)".to_string(),
+            kind: ExecErrorKind::NonFastForward,
+        }
+    }
+
+    /// 直前の `P` が断られた状態にする。**`exec_finished` を通す** —— 状態を直に
+    /// 置くと、憶える側の条件（非 force・`NonFastForward`）を 1 つも踏まない。
+    fn reject_push(state: &mut AppState, op: GitOp) {
+        finish_exec(state, op, Err(non_fast_forward()));
+    }
+
+    #[test]
+    fn a_rejected_push_turns_the_next_one_into_a_confirmed_force_push() {
+        // **専用のキーは作らない**（07）。断られたあとの再 `P` だけが force になる。
+        let lease = fake_oid(7);
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
+        );
+        reject_push(&mut state, push_op("origin", "main", false));
+
+        assert_eq!(press(&mut state, 'P'), Cmd::None, "確認せずに撃っています");
+        let (body, on_yes) = open_confirm(&state);
+        assert_eq!(on_yes, &Cmd::Exec(forced_push_op(lease)));
+        // 見せた位置がそのまま lease に入る（01 の「確認モーダルを組む時点の値」）。
+        assert!(
+            body.contains(&short_oid(&lease)),
+            "lease の位置が本文にありません: {body}"
+        );
+    }
+
+    #[test]
+    fn the_lease_names_the_remote_side_ref() {
+        // refspec の右辺と lease の refname は同じ名前（03）。`dst` を持たない形に
+        // 畳むと、ここで lease が `topic:other:<oid>` に化ける。
+        let lease = fake_oid(7);
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("topic", "origin", "refs/heads/other", Some(lease)),
+        );
+        reject_push(&mut state, renamed_push_op("origin", "topic", "other"));
+
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        let (_, on_yes) = open_confirm(&state);
+        assert_eq!(
+            on_yes,
+            &Cmd::Exec(GitOp::Push {
+                remote: "origin".to_string(),
+                src: "topic".to_string(),
+                dst: Some("other".to_string()),
+                set_upstream: false,
+                lease: Some(lease),
+            })
+        );
+    }
+
+    #[test]
+    fn a_rejection_expires_when_the_branch_tip_moves() {
+        // **`↓n` だけのブランチも断られる**（git 2.55 で確認）。名前だけで憶えると、
+        // `p` で早送りした直後の `P` に force の確認が出る。
+        let lease = fake_oid(7);
+        let head = tracked_head("main", "origin", HEADS_MAIN, Some(lease));
+        let mut state = state_for_push(&["origin"], head.clone());
+        reject_push(&mut state, push_op("origin", "main", false));
+
+        // pull が通って先端が動いた。
+        let _ = with_branches(
+            &mut state,
+            Ok(vec![Branch {
+                oid: fake_oid(3),
+                ..head
+            }]),
+        );
+
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "main", false))
+        );
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn a_rejection_on_another_branch_does_not_arm_this_one() {
+        let lease = fake_oid(7);
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
+        );
+        reject_push(&mut state, push_op("origin", "main", false));
+        // 別のブランチへ切り替わった（一覧の読み直しで届く形）。
+        let _ = with_branches(
+            &mut state,
+            Ok(vec![tracked_head(
+                "topic",
+                "origin",
+                "refs/heads/topic",
+                Some(lease),
+            )]),
+        );
+
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "topic", false))
+        );
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn a_force_push_is_refused_without_a_tracking_ref() {
+        // 値の無い `--force-with-lease` は守りにならない（03）ので撃たない。
+        // `upstream_config` はあるのに追跡 ref が無いのは `fetch --prune` のあと（02）。
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, None),
+        );
+        reject_push(&mut state, push_op("origin", "main", false));
+
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        assert_eq!(state.modal, None);
+        let notice = state.notices.back().expect("通知が出ていません");
+        assert!(
+            notice.message.contains("force push できません"),
+            "断った理由が出ていません: {}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn a_force_push_is_refused_when_there_is_nothing_to_publish() {
+        // **`↓n` だけのブランチも非 FF で断られる**（git 2.55 で確認）ので、記憶は立つ。
+        // そこで案内どおり `f` を踏むと lease がリモートの位置に追いつき、force が
+        // **通ってしまう** —— 出すものが 1 つも無いのに他人のコミットを消す。
+        let lease = fake_oid(7);
+        let head = Branch {
+            ahead: 0,
+            behind: 2,
+            ..tracked_head("main", "origin", HEADS_MAIN, Some(lease))
+        };
+        let mut state = state_for_push(&["origin"], head);
+        reject_push(&mut state, push_op("origin", "main", false));
+
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        assert_eq!(state.modal, None);
+        let notice = state.notices.back().expect("通知が出ていません");
+        assert!(
+            notice.message.contains("p で取り込んでください"),
+            "pull を勧めていません: {}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn a_rejection_is_remembered_for_the_branch_that_was_pushed() {
+        // **一覧の読み直しは別のジョブ。** `Switch` の直後に押した push が返るころには
+        // HEAD が別のブランチになっていることがある。そこで HEAD を憶えると、押して
+        // いないブランチに force push の腕が立つ。
+        let lease = fake_oid(7);
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
+        );
+        // 押したのは main。返るまでに HEAD が topic へ移った。
+        let _ = with_branches(
+            &mut state,
+            Ok(vec![tracked_head(
+                "topic",
+                "origin",
+                "refs/heads/topic",
+                Some(lease),
+            )]),
+        );
+        reject_push(&mut state, push_op("origin", "main", false));
+
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "topic", false)),
+            "押していない topic に force の腕が立っています"
+        );
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn a_failed_force_push_does_not_arm_the_next_one() {
+        // lease が古いときの `(stale info)` も `NonFastForward` に落ちる（git 2.55 で
+        // 確認）。ここで憶え直すと、同じ古い lease で force を撃ち続ける輪になる。
+        let lease = fake_oid(7);
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
+        );
+        reject_push(&mut state, forced_push_op(lease));
+
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "main", false))
+        );
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn a_fetch_between_the_two_pushes_keeps_the_rejection() {
+        // **本命の回復経路。** 拒否された時点の `origin/x` は他人が進める前なので、
+        // そのまま lease に渡すと `stale info` で落ちる（git 2.55 で確認）。`f` で
+        // 位置を見てから `P` を 1 回押すだけで force に上がる（01 の「force push」）。
+        let stale = fake_oid(7);
+        let fresh = fake_oid(8);
+        let head = tracked_head("main", "origin", HEADS_MAIN, Some(stale));
+        let mut state = state_for_push(&["origin"], head.clone());
+        reject_push(&mut state, push_op("origin", "main", false));
+
+        finish_exec(
+            &mut state,
+            GitOp::Fetch {
+                remote: None,
+                prune: false,
+            },
+            Ok(fake_output()),
+        );
+        // fetch はローカルの先端を動かさないので、記憶は生きたまま。届く一覧では
+        // 追跡 ref だけが進んでいる。
+        let _ = with_branches(
+            &mut state,
+            Ok(vec![tracked_head(
+                "main",
+                "origin",
+                HEADS_MAIN,
+                Some(fresh),
+            )]),
+        );
+
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        let (_, on_yes) = open_confirm(&state);
+        assert_eq!(on_yes, &Cmd::Exec(forced_push_op(fresh)));
+    }
+
+    #[test]
+    fn a_successful_push_forgets_the_rejection() {
+        let lease = fake_oid(7);
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
+        );
+        reject_push(&mut state, push_op("origin", "main", false));
+        finish_exec(
+            &mut state,
+            push_op("origin", "main", false),
+            Ok(fake_output()),
+        );
+
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "main", false))
+        );
+        assert_eq!(state.modal, None);
+    }
+
     #[test]
     fn a_differently_named_upstream_is_pushed_as_a_refspec() {
         // `push origin topic` が動かすのは `origin/topic`。**追跡先が
@@ -2911,7 +3300,7 @@ mod tests {
 
         assert_eq!(
             press(&mut state, 'P'),
-            Cmd::Exec(push_op("origin", "topic:other", false))
+            Cmd::Exec(renamed_push_op("origin", "topic", "other"))
         );
     }
 
@@ -2925,7 +3314,7 @@ mod tests {
 
         assert_eq!(
             press(&mut state, 'P'),
-            Cmd::Exec(push_op("origin", "topic:refs/for/main", false))
+            Cmd::Exec(renamed_push_op("origin", "topic", "refs/for/main"))
         );
     }
 
@@ -3347,6 +3736,21 @@ feat/b
         // ここに通す。片方だけ守っていても `contains` を見るテストは素通りする。
         bodies.push(branch_delete_confirm(false).0);
         bodies.push(branch_delete_confirm(true).0);
+
+        // push の確認は 2 つ（`-u` の提案と force push）。**`\n` を埋めているのは
+        // force push だけ**なので、畳み込みが混ざっても行数では見えない。
+        let lease = fake_oid(7);
+        let mut forced = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
+        );
+        reject_push(&mut forced, push_op("origin", "main", false));
+        let _ = press(&mut forced, 'P');
+        bodies.push(open_confirm(&forced).0.to_string());
+
+        let mut proposed = state_for_push(&["origin"], fake_branch("main", true));
+        let _ = press(&mut proposed, 'P');
+        bodies.push(open_confirm(&proposed).0.to_string());
 
         for body in bodies {
             for line in body.lines() {
@@ -5077,7 +5481,10 @@ feat/b
             Reload::Refs
         );
         // force push は `origin/x` が巻き戻り、そこからしか辿れないコミットが落ちる。
-        assert_eq!(Reload::after(&forced_push_op(), true), Reload::RefsAndLog);
+        assert_eq!(
+            Reload::after(&forced_push_op(fake_oid(9)), true),
+            Reload::RefsAndLog
+        );
 
         assert_eq!(
             Reload::after(&GitOp::Stage(vec!["a.txt".into()]), true),
@@ -5102,7 +5509,10 @@ feat/b
         // 読み直しは `GraphState::restart` でカーソルとスクロールを先頭に戻す。
         // 1 回で決まる操作は、失敗したなら ref が動いていないので位置を捨てない。
         assert_eq!(Reload::after(&commit_op(), false), Reload::Refs);
-        assert_eq!(Reload::after(&forced_push_op(), false), Reload::Refs);
+        assert_eq!(
+            Reload::after(&forced_push_op(fake_oid(9)), false),
+            Reload::Refs
+        );
 
         // fetch / pull は一部の ref だけ更新して落ちうるし、rebase 系は途中で止まる。
         assert_eq!(

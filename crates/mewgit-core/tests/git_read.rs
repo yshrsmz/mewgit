@@ -3,7 +3,7 @@
 use std::fs;
 
 use mewgit_core::git_read::{
-    GitReadError, HeadInfo, LogPage, Oid, RefLabel, RepoReader, UpstreamConfig,
+    GitReadError, HeadInfo, LogPage, Oid, RefLabel, RepoReader, Upstream, UpstreamConfig,
 };
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
@@ -745,7 +745,15 @@ fn branches_reports_the_upstream_and_how_far_it_diverged() {
     let branches = reader.branches().unwrap();
 
     let main = branches.iter().find(|b| b.name == "main").unwrap();
-    assert_eq!(main.upstream.as_deref(), Some("origin/main"));
+    // 名前と、force push の lease に渡す位置。**位置はローカルの先端ではなく
+    // 追跡 ref のもの**（01）。
+    assert_eq!(
+        main.upstream,
+        Some(Upstream {
+            name: "origin/main".to_string(),
+            oid: base.parse().unwrap(),
+        })
+    );
     assert_eq!((main.ahead, main.behind), (2, 0));
     // push の行き先は短縮名ではなく設定から取る（02）。
     assert_eq!(
@@ -772,6 +780,7 @@ fn branches_keeps_a_branch_whose_upstream_ref_is_gone() {
 
     // 一覧ごと `Err` にしない。
     let main = branches.iter().find(|b| b.name == "main").unwrap();
+    // **名前も位置も無い。** 比べる相手を知らないので force push は断る（01）。
     assert_eq!(main.upstream, None);
     assert_eq!((main.ahead, main.behind), (0, 0));
     // **追跡設定のほうは残る。** ここが `None` に落ちると、`fetch --prune` のあとに
@@ -841,6 +850,7 @@ fn branches_survives_a_broken_tracking_ref() {
     assert_eq!(names, ["main", "topic"]);
     // 比べる相手が引けないので ahead / behind は出さない。
     let main = branches.iter().find(|b| b.name == "main").unwrap();
+    // **名前も位置も無い。** 比べる相手を知らないので force push は断る（01）。
     assert_eq!(main.upstream, None);
     assert_eq!((main.ahead, main.behind), (0, 0));
 }

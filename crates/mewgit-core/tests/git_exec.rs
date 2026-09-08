@@ -28,21 +28,21 @@ fn clone_of(remote: &BareRepo) -> TestRepo {
 fn push(set_upstream: bool) -> GitOp {
     GitOp::Push {
         remote: "origin".into(),
-        branch: "main".into(),
+        src: "main".into(),
+        dst: None,
         set_upstream,
-        force: false,
-        expected: None,
+        lease: None,
     }
 }
 
-/// `expected` を主張する force push。
-fn force_push(expected: Option<Oid>) -> GitOp {
+/// `lease` を主張する force push。
+fn force_push(lease: Oid) -> GitOp {
     GitOp::Push {
         remote: "origin".into(),
-        branch: "main".into(),
+        src: "main".into(),
+        dst: None,
         set_upstream: false,
-        force: true,
-        expected,
+        lease: Some(lease),
     }
 }
 
@@ -524,7 +524,7 @@ async fn a_rejected_push_is_classified_as_non_fast_forward() {
 
     // 主張した位置にリモートが居るので force push は通る。
     runner
-        .run(&force_push(Some(pushed)))
+        .run(&force_push(pushed))
         .await
         .expect("force push できませんでした");
     assert_eq!(
@@ -550,7 +550,7 @@ async fn force_with_lease_refuses_when_someone_else_moved_the_remote() {
 
     mine.git(&["commit", "-q", "--amend", "-m", "rewritten"]);
     let err = runner
-        .run(&force_push(Some(pushed)))
+        .run(&force_push(pushed))
         .await
         .expect_err("lease が古いので弾かれるはずです");
 
@@ -595,7 +595,7 @@ async fn the_lease_survives_a_fetch() {
     );
 
     let err = runner
-        .run(&force_push(Some(pushed)))
+        .run(&force_push(pushed))
         .await
         .expect_err("主張した位置と違うので弾かれるはずです");
 

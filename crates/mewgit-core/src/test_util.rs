@@ -43,7 +43,7 @@ use crate::auth::ssh::SshCommand;
 use crate::git_exec::Runner;
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
-    Remote, Signature, Timestamp, WorktreeSnapshot,
+    Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
 };
 use tempfile::TempDir;
 
@@ -385,6 +385,15 @@ pub fn fake_branch(name: &str, is_head: bool) -> Branch {
         ahead: 0,
         behind: 0,
         is_head,
+    }
+}
+
+/// 追跡 ref から読めた値。位置は指定する（force push の lease に渡る値なので、
+/// テストが「どの位置を主張したか」を見られるようにする）。
+pub fn fake_upstream(name: &str, oid: Oid) -> Upstream {
+    Upstream {
+        name: name.to_string(),
+        oid,
     }
 }
 

@@ -153,7 +153,7 @@ mod tests {
     use crate::test_util::{draw, pane_text, row_is_reversed, row_of, state_at};
     use mewgit_core::app::{update, AppState, Key, Msg, Pane, TermSize};
     use mewgit_core::git_read::{Branch, GitReadError};
-    use mewgit_core::test_util::fake_branch;
+    use mewgit_core::test_util::{fake_branch, fake_oid, fake_upstream};
 
     /// 一覧が届いた状態。**`update` を通す**ので `JobTracker` も本番と同じ。
     fn state_with_branches(branches: Vec<Branch>) -> AppState {
@@ -189,13 +189,13 @@ mod tests {
     fn tracking_shows_only_the_side_that_is_not_zero() {
         // 追いついているブランチで `↑0 ↓0` を出しても桁が埋まるだけ（07）。
         let mut ahead = fake_branch("ahead", false);
-        ahead.upstream = Some("origin/ahead".into());
+        ahead.upstream = Some(fake_upstream("origin/ahead", fake_oid(1)));
         ahead.ahead = 2;
         let mut behind = fake_branch("behind", false);
-        behind.upstream = Some("origin/behind".into());
+        behind.upstream = Some(fake_upstream("origin/behind", fake_oid(1)));
         behind.behind = 3;
         let mut synced = fake_branch("synced", true);
-        synced.upstream = Some("origin/synced".into());
+        synced.upstream = Some(fake_upstream("origin/synced", fake_oid(1)));
         let state = state_with_branches(vec![ahead, behind, synced]);
 
         let lines = draw(&state, SIZE);
@@ -211,7 +211,7 @@ mod tests {
     fn the_ascii_setting_swaps_the_arrows() {
         // 罫線だけに効かせると、同じ端末で矢印だけが化ける（07）。
         let mut branch = fake_branch("topic", false);
-        branch.upstream = Some("origin/topic".into());
+        branch.upstream = Some(fake_upstream("origin/topic", fake_oid(1)));
         branch.ahead = 1;
         branch.behind = 2;
         let mut state = state_with_branches(vec![branch]);

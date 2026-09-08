@@ -76,20 +76,24 @@
 - [x] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト。
       **どのリモートの URL を見るかは決めない**（`RepoInfo.target` を埋めるのは M4 の
       `auth::resolve`。04 の「既定リモートを決めるのは M4」）
-- [ ] `f` / `p` / `P` の配線 — `GitOp::Fetch` / `Pull { FastForwardOnly }` / `Push` を
+- [x] `f` / `p` / `P` の配線 — `GitOp::Fetch` / `Pull { FastForwardOnly }` / `Push` を
       共通キーから出す。push の行き先の決定と `-u` 提案（`Modal::Confirm`）、
       ssh のパスフレーズで固まる件（実効 ssh に `-o BatchMode=yes` を重ねる。03 の
       「Runner」）。**`GitOp` と `to_command` は M2 の `git_exec` のタスクで済んでいる**
       ので、ここで足すのは `app` の配線と `Runner` の環境変数だけ
-- [ ] force push — `P` が `NonFastForward` で断られたあとの再 `P` を確認モーダル経由の
+- [x] force push — `P` が `NonFastForward` で断られたあとの再 `P` を確認モーダル経由の
       force push にする。`git_read::Branch` に upstream の Oid を足し、
-      `--force-with-lease=<branch>:<expected>` に渡す（01 の「force push」）
+      `--force-with-lease=<dst>:<lease>` に渡す（01 の「force push」）
 - [ ] `JobTracker` に世代を持たせ、`DiffState.freshness` と `WorktreeState.stale` と
       `GraphState.reload_pending` を畳む。fetch で ref が変わったあとのログの読み直しは
       M2 で入れた `Cmd::LoadLog { restart }` に乗せる（01 の「実行中ジョブ › 世代」）。
       **カウンタを 1 本にするとログまで毎回読み直すことになるので、領域ごとに
       分けるかはここで決める**
-- [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文
+- [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文。
+      **force push が `stale info` で断られた形は `f` を勧める**（lease は fetch して
+      からでないと通らない。01 の「force push」）。**追跡設定の無いブランチが非 FF で
+      断られた形は mewgit の中で抜けられない** —— force に上げるのは `PushPlan::Tracked`
+      だけなので、`-u` の提案から入った経路には案内文が要る
 - [ ] 実行中ジョブのスピナーとキャンセル
 
 fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取りを 1 つも足さず、
@@ -139,6 +143,10 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       **`Notice.detail`（argv と stderr）を出すのもここ。** いまは要約行しか描かないので、
       git が断った理由（`would be overwritten`、未マージのときの `-D` のヒント）が
       画面に出ない。不変ルール 4 が「UI まで届ける」と言っているのはこの詳細のこと
+- [ ] 意図的な巻き戻しの force push（`reset --hard HEAD~1` してから `P`）。**いまは
+      `ahead == 0` でまとめて断っている** —— `↓n` だけのブランチが `f` のあとに force で
+      通ってしまう形と同じ見た目なので、区別するには「巻き戻すつもりだ」を別の入口で
+      受けるしかない（01 の「force push」）
 - [ ] 端末幅 < 100 のレイアウト
 - [ ] ロケール（`LC_ALL` / `LC_CTYPE` / `LANG`）から `graph.ascii` の既定を決める
       （曖昧幅を全角扱いする端末は UTF-8 でもずれる。06 の「ASCII フォールバック」）

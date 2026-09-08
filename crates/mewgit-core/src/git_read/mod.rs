@@ -302,16 +302,16 @@ pub enum HeadInfo {
 pub struct Branch {
     pub name: String,
     pub oid: Oid,
-    /// 追跡先の短縮名（例: `origin/main`）。**表示のための値**（02）。
+    /// 追跡 ref（`refs/remotes/origin/x`）から読んだ名前と位置。
     ///
     /// remote-tracking ref から作るので、`fetch --prune` で ref が消えていれば
     /// 設定が残っていても `None` になる。**push の行き先はここから決めない** —
     /// そちらは [`Branch::upstream_config`]。
-    pub upstream: Option<String>,
+    pub upstream: Option<Upstream>,
     /// `branch.<name>.remote` / `branch.<name>.merge` に書かれた追跡設定。
     ///
-    /// **`upstream` とは `None` になる条件が違う。** こちらは config だけを見るので、
-    /// 追跡 ref が消えていても残る。`upstream` の `None` は 4 つの理由に落ちていて
+    /// **[`Branch::upstream`] とは `None` になる条件が違う。** こちらは config だけを
+    /// 見るので、追跡 ref が消えていても残る。あちらの `None` は 4 つの理由に落ちていて
     /// （02 の「ブランチ一覧」）、そのうち「設定が無い」だけを取り出せない。
     /// **`-u` を付けるかはここで決める**（02）。
     pub upstream_config: Option<UpstreamConfig>,
@@ -319,6 +319,20 @@ pub struct Branch {
     pub ahead: usize,
     pub behind: usize,
     pub is_head: bool,
+}
+
+/// 追跡 ref から読めた値。
+///
+/// **名前と位置を 1 つの `Option` に入れる。** 両方 remote-tracking ref から作るので、
+/// 別々の `Option` にすると「名前はあるが位置は無い」という起こらない形が型で組めて、
+/// 揃っていることを散文で約束することになる（`GitOp::Push` の `lease` と同じ理由。03）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upstream {
+    /// 短縮名（例: `origin/main`）。**表示のための値**（02）。
+    pub name: String,
+    /// 指している位置。force push の `--force-with-lease=<dst>:<lease>` に渡す
+    /// （01 の「force push」）。
+    pub oid: Oid,
 }
 
 /// ブランチの追跡設定。`git_exec` の `GitOp::Push` を組むのに使う。

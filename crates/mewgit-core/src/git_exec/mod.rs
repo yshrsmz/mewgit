@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::git_read::Oid;
 
-pub use argv::{to_command, ArgvError, GitCommand};
+pub use argv::{push_remote_ref, to_command, ArgvError, GitCommand};
 pub use patch::{hunk_patch, supports_hunk_patch};
 pub use runner::Runner;
 
@@ -106,16 +106,25 @@ pub enum GitOp {
     },
     Push {
         remote: String,
-        branch: String,
-        set_upstream: bool,
-        force: bool,
-        /// force push で「リモートはまだここにいるはず」と主張する Oid。UI が確認
-        /// モーダルで見せた位置をそのまま渡す。
+        /// push するローカルの ref 名。refspec の左辺。
+        src: String,
+        /// リモート側の ref 名。**ローカル名と違うときだけ `Some`**（refspec は
+        /// `<src>:<dst>` になる）。`refs/heads/` の下に無い追跡先はここに完全な ref 名が
+        /// 入る（01 の「push の行き先」）。
         ///
-        /// **省くと lease が緩む。** 値の無い `--force-with-lease` は
-        /// remote-tracking ref と比べるだけなので、`git fetch` を挟むと他人が進めた
-        /// 位置がそこに入り、検査を素通りして他人のコミットを消す。
-        expected: Option<Oid>,
+        /// **`src` と 1 本の文字列に畳まない。** refspec は右辺、`--force-with-lease` は
+        /// 先頭に同じ名前を要求するので、畳むと lease が `<src>:<dst>:<oid>` に化ける。
+        dst: Option<String>,
+        set_upstream: bool,
+        /// `Some` なら force push（`--force-with-lease=<dst|src>:<lease>`）。値は
+        /// 「リモートはまだここにいるはず」と主張する Oid で、UI が確認モーダルで
+        /// 見せた位置をそのまま渡す。
+        ///
+        /// **旗と値を割らない。** `force: bool` と別々に持つと `force: true` で値が
+        /// 無い形が組めてしまい、それは値の無い `--force-with-lease` —— remote-tracking
+        /// ref と比べるだけなので、`git fetch` を挟むと他人が進めた位置がそこに入り、
+        /// 検査を素通りして他人のコミットを消す。1 つにすればその形は型として作れない。
+        lease: Option<Oid>,
     },
     RebaseInteractive {
         onto: String,

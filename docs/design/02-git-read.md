@@ -101,11 +101,16 @@ pub enum RefLabel {
 pub struct Branch {
     pub name: String,            // "feat/x"
     pub oid: Oid,
-    pub upstream: Option<String>,  // "origin/feat/x"。表示用
+    pub upstream: Option<Upstream>,  // 追跡 ref から読んだ名前と位置
     pub upstream_config: Option<UpstreamConfig>,  // push の行き先
     pub ahead: usize,            // upstream に対する ahead / behind
     pub behind: usize,
     pub is_head: bool,
+}
+
+pub struct Upstream {
+    pub name: String,  // "origin/feat/x"。表示用
+    pub oid: Oid,      // force push の lease に渡す位置
 }
 
 pub struct UpstreamConfig {
@@ -154,6 +159,14 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
   組む側（01 の「push の行き先」）
 - **ahead / behind は `graph_ahead_behind(local, upstream)`。** upstream があるときだけ
   引く。無いブランチで 0 / 0 を入れると「同期している」と読めてしまう
+- **名前と位置は 1 つの `Option` に入れる**（`Upstream`）。どちらも remote-tracking ref から
+  作り、ref が引けなければ両方無い。別々の `Option` にすると「名前は出せるが位置は無い」と
+  いう起こらない形が型で組めて、揃っていることを散文で約束することになる
+  （`GitOp::Push` の `lease` と同じ理由。03）。位置は force push の
+  `--force-with-lease=<dst>:<lease>` に渡す（01）
+- **`upstream_config` があっても `upstream` が無い形はある**（`fetch --prune` のあと）。
+  そのときは追跡先の位置を知らないので、**force push は断る**（01）。config だけで
+  lease を組むと、比べる相手がいないまま `--force` と同じものを撃つことになる
 - **`upstream()` はブランチ 1 本ごとにリモートを引き直す。** libgit2 1.9.7 の
   `branch.c: git_branch_upstream_name` は、呼ばれるたびに config の snapshot を取り、
   `branch.<name>.remote` が `.` でなければ `git_remote_lookup` する（ソースで確認）。

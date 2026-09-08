@@ -4,7 +4,7 @@
 use mewgit_core::app::{update, AppState, Cmd, Key, Modal, Msg, Pane, RepoInfo, TermSize};
 use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, LogPage};
-use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents};
+use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents, reply};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Position;
 use ratatui::style::Modifier;
@@ -211,16 +211,6 @@ fn state_with_log(commits: Vec<Commit>) -> AppState {
         Msg::BranchesLoaded(Box::new(Ok(vec![fake_branch("main", true)]))),
     );
     state
-}
-
-/// `cmd` を発行してから、その返信を届ける。
-///
-/// **ランタイムでは `Cmd` が必ず `AppState::issue` を通る**（`update` の出口）。
-/// 通さずに返信だけ届けると刻印の無いジョブの返信になり、「書き込みより前に頼まれた
-/// もの」として捨てられる（01 の「実行中ジョブ › 世代」）。
-pub fn reply(state: &mut AppState, cmd: Cmd, msg: Msg) -> Cmd {
-    let _ = state.issue(cmd);
-    update(state, msg)
 }
 
 #[cfg(test)]

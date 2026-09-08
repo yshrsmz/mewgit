@@ -39,6 +39,7 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
+use crate::app::{update, AppState, Cmd, Msg};
 use crate::auth::ssh::SshCommand;
 use crate::git_exec::Runner;
 use crate::git_read::{
@@ -514,4 +515,18 @@ pub fn fake_oid(index: u8) -> Oid {
     let mut bytes = [0u8; 20];
     bytes[19] = index;
     Oid::from_bytes(&bytes).expect("20 バイトなので Oid になる")
+}
+
+/// `cmd` を発行してから、その返信を届ける。
+///
+/// **ランタイムでは `Cmd` が必ず [`AppState::issue`] を通る**（`update` の出口）。
+/// 通さずに返信だけ届けると刻印の無いジョブの返信になり、「書き込みより前に頼まれた
+/// もの」として捨てられる（01 の「実行中ジョブ › 世代」）。書き込みやキー入力から
+/// `Cmd` が出ている経路では、そちらが既に発行しているので要らない。
+///
+/// **`app` のテストヘルパはここが唯一の置き場所。** `mewgit-core` の中の
+/// `mod tests` に書くと `mewgit-tui` から呼べず、同じ理由のコメントごと写すことになる。
+pub fn reply(state: &mut AppState, cmd: Cmd, msg: Msg) -> Cmd {
+    let _ = state.issue(cmd);
+    update(state, msg)
 }

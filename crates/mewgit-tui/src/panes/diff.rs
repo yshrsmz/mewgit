@@ -208,7 +208,7 @@ mod tests {
     use crate::test_util::{draw, pane_text, row_is_reversed, row_of, state_at};
     use mewgit_core::app::{update, Cmd, Key, KeyCode, Msg, TermSize};
     use mewgit_core::git_read::{FileDiff, WorktreeSnapshot};
-    use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk};
+    use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk, reply};
 
     /// 既定の 80x24。左は 46 桁になるので、テストはその幅で読める内容にする。
     const SIZE: TermSize = TermSize {
@@ -230,7 +230,12 @@ mod tests {
     /// 経路で揃った形を描くため。
     fn opened(snapshot: WorktreeSnapshot) -> AppState {
         let mut state = state_at("/repo");
-        let _ = update(&mut state, Msg::StatusLoaded(Box::new(Ok(snapshot))));
+        // 発行してから届ける（`test_util::reply`。通さない返信は刻印を持たない）。
+        let _ = reply(
+            &mut state,
+            Cmd::LoadStatus,
+            Msg::StatusLoaded(Box::new(Ok(snapshot))),
+        );
         state.focus = Pane::Worktree;
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
         state

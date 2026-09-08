@@ -485,7 +485,7 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 - **`Cmd::LoadRepoInfo` も一緒に出す。** ref のラベル（`main` が新しいコミットへ動く）と
   `RepoInfo.head` が古くなるため。こちらが `issue` に落ちたときの追いつきは持たない。
   発行元が起動時とここの 2 つしかなく重なる窓が実質無いので長らく塞いでいなかったが、
-  世代を入れたときに `refs_again` で塞いだ（下の「実行中ジョブ › 世代」）
+  世代を入れたときに塞いだ（下の「実行中ジョブ › 世代」）
 
 `update` が返した `Cmd` は必ず `runtime` が dispatch する。捨てると `issue` が
 `JobTracker` に登録したまま実行されず、以後その種類の `Cmd` が黙って落ち続ける。
@@ -744,7 +744,7 @@ untracked の中身を出すようにしてあるので、これで新規ファ�
 
 **無効化の印は世代**（下の「実行中ジョブ › 世代」）。`DiffView` は読めた時点の
 `Region::Worktree` の世代を持ち、いまの世代と同じなら「書き込みは挟まっていない」。
-判定は `DiffState::is_current`（対象が合っていて、かつ刻印が最新）。
+判定は `AppState::diff_is_current`（対象が合っていて、かつ刻印が最新）。
 
 - **`ExecFinished` は対象を見ずに世代を進める。** 書き込みの時点では `clamp` がまだで、
   そのとき選ばれているファイルが読み直しの対象になるとは限らない。どの `GitOp` が
@@ -1033,8 +1033,8 @@ impl JobTracker {
     pub fn epoch(&self, region: Region) -> u64;
     /// 完了を記録し、**そのジョブを頼んだ時点の世代**を返す（走っていなければ `None`）。
     pub fn finish(&mut self, kind: JobKind) -> Option<u64>;
-    /// `finish` が返した世代が、いまの世代と同じか。
-    pub fn is_fresh(&self, asked: Option<u64>, region: Region) -> bool;
+    /// `asked` の刻印が、`kind` が読む領域のいまの世代と同じか。
+    pub fn is_fresh(&self, kind: JobKind, asked: Option<u64>) -> bool;
 }
 
 impl JobKind {
@@ -1058,7 +1058,11 @@ impl JobKind {
 - **リーダースレッドには何も足さない。** 世代は `Msg` ではなく `JobTracker` が持ち、
   `finish` が返す。`Cmd` / `Msg` の形は変わらない
 - **判じるのは届いた返信の刻印。** 持っている値の刻印で判じると、読み取りが失敗し続けた
-  ときに「古い → 頼み直す → 失敗」を回す
+  ときに「古い → 頼み直す → 失敗」を回す。持っている値の刻印を見るのは「この値を根拠に
+  してよいか」を問うとき（`AppState::diff_is_current` / `worktree_is_current`）だけ
+- **領域は `JobKind::region()` から引く。** `is_fresh` に領域を渡させると、
+  `finish(LoadStatus)` の刻印を `Region::Log` と比べる形が組めてしまい、常に「古い」に
+  なって頼み直しを回す（`CLAUDE.md` の「旗と値を割らない」が 1 段上がった形）
 
 **畳んだもの**: `DiffState.freshness`（→ `DiffView.epoch`)、`WorktreeState.stale` と
 `loaded`（→ `snapshot_epoch: Option<u64>`）、`GraphState.reload_pending`（→ `Region::Log`
@@ -1067,9 +1071,16 @@ impl JobKind {
 
 **塞いだ穴**: `LoadRepoInfo` / `LoadBranches` / `LoadHeadMessage` は書き込みのあとに出る
 のに追いつきを持っていなかった（`issue` に落とされると、`switch` のあともラベルと
-ブランチ一覧が切り替え前のまま残る）。3 つとも `Region::Refs` で、`refs_again` が
-1 箇所で判じる。`LoadHeadMessage` を入れるのは、commit が走っているあいだに `C` を
-押すと **amend の対象は新しいコミットなのに本文だけ 1 つ前のもの**になるため。
+ブランチ一覧が切り替え前のまま残る）。3 つとも `Region::Refs`。`LoadHeadMessage` を
+入れるのは、commit が走っているあいだに `C` を押すと **amend の対象は新しいコミット
+なのに本文だけ 1 つ前のもの**になるため。
+
+**追いつきを 1 つの関数にはまとめない。** 判じ方（`is_fresh`）は 1 つだが、判じたあとの
+形が 2 通りある —— `status_loaded` / `repo_info_loaded` / `branches_loaded` は**採った
+うえで頼み直す**（古い索引でもラベルは出せるので、届くまで前のものを出したままにする）。
+`head_message_loaded` と `log_loaded` は**中身を見る前に返す**（古い本文で入力欄を開くと
+あとから届く返信では取り消せず、古いページは積むと消えたはずの行が残る）。関数 1 本に
+すると、この違いが引数の分岐になって戻ってくる。
 
 **畳まないもの**: 「失敗の記憶」の 5 つ（上の節）は鮮度ではない。`Msg::CommitDetailLoaded`
 が `oid` を、`Msg::DiffLoaded` が `target` を運ぶ形も残す。**値そのものが鍵を持っている

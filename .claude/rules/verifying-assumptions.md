@@ -9,6 +9,7 @@
 |---|---|
 | git の振る舞い | `tempfile` / `env -i` の一時リポジトリで実際に叩く |
 | 端末の振る舞い・起動コスト | pty で流して画面を復元する（`CLAUDE.md` の pty の節）。時間は `time` で測る |
+| git がサブプロセスに何を渡すか | `core.sshCommand` にダンプ用のスクリプトを噛ませて argv を見る（`git -c core.sshCommand='sh dump.sh' ls-remote <url>`） |
 | 手元のツールが内部で何をしているか | バイナリを `strings` に通して grep する（設定ファイルに何を書くか、どのシーケンスを送るかが読める） |
 | 依存クレートの挙動 | `~/.cargo/registry/src/*/<crate>-<version>/` のソースを読む。ドキュメントより実装が正しい |
 

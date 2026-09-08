@@ -23,6 +23,8 @@ pub struct ReaderHandle {
     /// `open` が確定させたワークツリーのルート。スレッドに聞き直さずに済むよう、
     /// 起動時に 1 回だけ受け取って持つ。
     workdir: PathBuf,
+    /// `core.sshCommand` の値。`workdir` と同じく起動時に 1 回だけ読む。
+    ssh_command: Option<String>,
 }
 
 /// スレッドに送る要求。返り先の `oneshot` を各変種が持つ。
@@ -71,6 +73,7 @@ impl ReaderHandle {
     pub fn spawn(path: &Path) -> Result<Self, GitReadError> {
         let reader = RepoReader::open(path)?;
         let workdir = reader.workdir().to_path_buf();
+        let ssh_command = reader.ssh_command();
         let (tx, rx) = mpsc::unbounded_channel();
 
         // スレッドを作れないのはプロセスが立ち上がれない状態なので、`GitReadError` に
@@ -81,12 +84,22 @@ impl ReaderHandle {
             .spawn(move || reader_loop(reader, rx))
             .expect("リーダースレッドを起動できませんでした");
 
-        Ok(Self { tx, workdir })
+        Ok(Self {
+            tx,
+            workdir,
+            ssh_command,
+        })
     }
 
     /// ワークツリーのルート。`open` が確定させた値で、引数に渡したパスとは限らない。
     pub fn workdir(&self) -> &Path {
         &self.workdir
+    }
+
+    /// `core.sshCommand` の値。`Runner` に渡して `BatchMode` を重ねるのに使う
+    /// （03 の「BatchMode の重ね方」）。
+    pub fn ssh_command(&self) -> Option<&str> {
+        self.ssh_command.as_deref()
     }
 
     /// ログの続きを最大 `count` 件読む。

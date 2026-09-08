@@ -96,12 +96,37 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
 「危ない引数を渡していないか」ではなく「危ない解釈をされる余地があるか」で数える
 （`git branch --move` の `to` と同じ形）。
 
+### git が使う ssh と、ここで叩く ssh
+
+`resolve_ssh_host` は PATH の `ssh` を直に起動する。git のほうは
+`GIT_SSH_COMMAND` / `core.sshCommand` に従うので、そこを別の ssh（別の config を読むもの）に
+向けている環境では**解決と接続で食い違う**。
+
+**実効値を求める関数はここ（`auth::ssh`）に置く**（03 の「BatchMode の重ね方」）。
+`git_exec::Runner` はそれを使って `-o BatchMode=yes` を重ねる。`git_exec` から `auth` への
+依存は層の向きに沿う（00）。
+
+**`resolve_ssh_host` をその実効値に向けるのは M4。** いまこれを呼ぶ経路は無く
+（`RepoInfo.target` を埋めるのが下の `auth::resolve`）、実効値はシェル文字列なので
+`Command::new(ssh)` ではなく `sh -c` 経由の起動に変える必要がある。踏めない腕を
+先に入れず、`auth::resolve` を書くタスクで一緒に配線する。
+
 ### 既定リモートを決めるのは M4
 
 `RepoInfo.target` を埋めるには「どのリモートの URL を見るか」を決める必要があるが、
 `origin` を採るのか現在のブランチの upstream の remote を見るのかは、どの設計書にも
 書いていない。**`auth::resolve` を書く M4 のタスクで決める。** それまで `target` は
 `None` のままで、この節が用意するのは `RemoteUrl::parse` と `resolve_ssh_host` だけ。
+
+**同じ問いが M3 から 2 つ送られている**（01 の「リモート操作」）。どちらも「既定の
+リモートはどれか」で、別々に決めると規則が 2 本並ぶ。
+
+- **`f` が無反応になる形。** リモートが複数あって `origin` も `branch.<name>.remote` も
+  無いと、`git fetch` は何もせず exit 0 で返る（git 2.55 で確認）。git が黙るので
+  stderr を通知に出す経路も効かない
+- **`-u` の提案が git の規則の部分集合。** `branch.<name>.pushRemote` と
+  `remote.pushDefault` を読んでいない。読むこと自体は `git_read` にできる
+  （`Branch.upstream_config` と同じ形。02）
 
 ## アカウント解決
 

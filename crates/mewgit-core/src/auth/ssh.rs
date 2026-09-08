@@ -11,14 +11,82 @@ use tokio::process::Command;
 
 use super::AuthError;
 
-/// 実行する ssh。`git_bin` / `gh_bin` と違って設定で差し替えられない。
+/// 何も設定されていないときに git が起動する ssh。[`effective_ssh`] の既定値。
 ///
-/// **揃えるべき相手は設定値ではなく、git が実際に使う ssh。** Git の通信は
+/// **`resolve_ssh_host` はいまこれを直に叩いている。** git の通信は
 /// `core.sshCommand` / `GIT_SSH_COMMAND` に従うので、そこを別の ssh（別の config を
-/// 読むもの）に向けている環境では、PATH の ssh で解決している**いまの形が既に
-/// 食い違う**。それを読むかどうかは、`BatchMode` と一緒に fetch / push のタスクで
-/// 決める（03 の「Runner」）。
+/// 読むもの）に向けている環境では、**解決と接続で食い違う**。寄せ先は
+/// [`effective_ssh`] で決まったが、配線は M4 —— 実効値はシェル文字列なので
+/// `Command::new(ssh)` ではなく `sh -c` 経由の起動に変える必要があり、いま
+/// `resolve_ssh_host` を呼ぶ経路が無い（04 の「git が使う ssh と、ここで叩く ssh」）。
 const SSH_BIN: &str = "ssh";
+
+/// git がリモートとの通信に使う ssh。
+///
+/// 変種で分けるのは、**「オプションを足せるか」が呼び出し側の分岐そのもの**だから
+/// （`Option<String>` の `None` に「触るな」と「既定の ssh」の 2 つの意味を持たせない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SshCommand {
+    /// git がシェル経由で起動する文字列。後ろに引数を足せる。
+    Shell(String),
+    /// `GIT_SSH` が設定されている。**触らない。**
+    ///
+    /// `GIT_SSH` はシェルを通さず argv を直に組むので同じ形でオプションを足せず、
+    /// `GIT_SSH_COMMAND` を置くと git はそちらを優先するので、重ねるつもりが
+    /// 差し替えになる（03 の「BatchMode の重ね方」）。
+    Opaque,
+}
+
+impl Default for SshCommand {
+    /// 何も設定されていない環境で git が起動するもの。
+    fn default() -> Self {
+        Self::Shell(SSH_BIN.to_string())
+    }
+}
+
+/// git が使う ssh を、環境変数と `core.sshCommand` から決める。
+///
+/// 優先順は git と同じで `GIT_SSH_COMMAND` > `core.sshCommand` > `GIT_SSH` > `ssh`
+/// （前の 2 つは環境変数を置くと config が読まれないことを実測。git 2.55）。
+/// **空白だけの値は未設定として扱う。**
+///
+/// `git_exec::Runner` が `-o BatchMode=yes` を重ねるのに使う。`resolve_ssh_host` が
+/// PATH の `ssh` を直に叩いているのをここへ寄せるのは M4（04 の「git が使う ssh と、
+/// ここで叩く ssh」）。
+fn effective_ssh(
+    git_ssh_command: Option<&str>,
+    core_ssh_command: Option<&str>,
+    git_ssh: Option<&str>,
+) -> SshCommand {
+    if let Some(command) = set(git_ssh_command).or_else(|| set(core_ssh_command)) {
+        return SshCommand::Shell(command.to_string());
+    }
+    if set(git_ssh).is_some() {
+        return SshCommand::Opaque;
+    }
+    SshCommand::default()
+}
+
+/// プロセスの環境変数と `core.sshCommand` から実効 ssh を決める。
+///
+/// **環境変数を読むのはここだけ。** [`effective_ssh`] を純粋関数のままにしておくと、
+/// 実行環境に `GIT_SSH_COMMAND` が置かれていてもテストの結果が動かない。
+pub fn effective_ssh_from_env(core_ssh_command: Option<&str>) -> SshCommand {
+    effective_ssh(
+        std::env::var("GIT_SSH_COMMAND").ok().as_deref(),
+        core_ssh_command,
+        std::env::var("GIT_SSH").ok().as_deref(),
+    )
+}
+
+/// 空文字列と空白だけの値を「未設定」に畳む。
+///
+/// `config` の `MEWGIT_GIT_BIN`（08）も同じ判断をしているが、あちらは `trim` しない。
+/// **揃えないのは、こちらの値がシェルに渡るコマンド文字列だから** —— 空白だけの実効値に
+/// `-o BatchMode=yes` を足すと、git は先頭のオプションをコマンド名として起動する。
+fn set(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
 
 /// エイリアスを実ホスト名に正規化する。
 ///
@@ -121,6 +189,63 @@ mod tests {
 
     /// エイリアスが 1 つだけ書かれた ssh_config。
     const GH_WORK: &str = "Host gh-work\n  HostName github.com\n  User git\n";
+
+    #[test]
+    fn the_environment_wins_over_the_config() {
+        // git と同じ優先順（環境変数を置くと `core.sshCommand` は読まれない。
+        // git 2.55 で確認）。
+        assert_eq!(
+            effective_ssh(Some("ssh -i env"), Some("ssh -i config"), None),
+            SshCommand::Shell("ssh -i env".to_string())
+        );
+    }
+
+    #[test]
+    fn the_config_is_used_when_the_environment_is_unset() {
+        assert_eq!(
+            effective_ssh(None, Some("ssh -i config"), None),
+            SshCommand::Shell("ssh -i config".to_string())
+        );
+    }
+
+    #[test]
+    fn git_ssh_alone_is_opaque() {
+        // `GIT_SSH` はシェルを通さないので、同じ形でオプションを足せない。
+        // `GIT_SSH_COMMAND` を置くと git はそちらを優先するので、重ねるつもりが
+        // 差し替えになる。
+        assert_eq!(
+            effective_ssh(None, None, Some("/usr/bin/ssh")),
+            SshCommand::Opaque
+        );
+    }
+
+    #[test]
+    fn git_ssh_is_ignored_when_a_shell_command_is_set() {
+        // git も `GIT_SSH_COMMAND` / `core.sshCommand` を先に見る。
+        assert_eq!(
+            effective_ssh(None, Some("ssh -i config"), Some("/usr/bin/ssh")),
+            SshCommand::Shell("ssh -i config".to_string())
+        );
+    }
+
+    #[test]
+    fn nothing_set_falls_back_to_plain_ssh() {
+        assert_eq!(
+            effective_ssh(None, None, None),
+            SshCommand::Shell("ssh".to_string())
+        );
+    }
+
+    #[test]
+    fn blank_values_count_as_unset() {
+        // `core.sshCommand = ` と書いただけの設定を「そういう名前のコマンド」に
+        // しない。空白だけの実効値に `-o BatchMode=yes` を足すと、git は先頭の
+        // オプションをコマンド名として起動しようとする。
+        assert_eq!(
+            effective_ssh(Some("  "), Some("\t"), Some(" ")),
+            SshCommand::default()
+        );
+    }
 
     #[test]
     fn takes_the_hostname_line_not_the_host_line() {

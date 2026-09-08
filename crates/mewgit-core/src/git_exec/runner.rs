@@ -8,6 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 
 use super::{to_command, ExecError, ExecErrorKind, ExecOutput, GitCommand, GitOp};
+use crate::auth::ssh::SshCommand;
 
 /// `RebaseInteractive` を拒否する理由。
 ///
@@ -17,6 +18,13 @@ use super::{to_command, ExecError, ExecErrorKind, ExecOutput, GitCommand, GitOp}
 const REBASE_INTERACTIVE_UNSUPPORTED: &str =
     "interactive rebase はまだ実装していません（M5）。plan を渡す経路が無いまま実行すると、\
      指定した todo を無視した rebase になります";
+
+/// ssh がパスフレーズを訊きに `/dev/tty` を掴むのを止めるオプション。
+///
+/// 実効 ssh の**後ろ**に足す。ssh は同じ項目を先に現れた値で決めるので、ユーザーが
+/// 自分のコマンドに `BatchMode=no` と書いていればそちらが勝つ（OpenSSH 10.3 で確認）。
+/// **黙って上書きしない方針と向きが揃っている**（03 の「BatchMode の重ね方」）。
+const BATCH_MODE: &str = " -o BatchMode=yes";
 
 /// `GitOp` を `git` サブプロセスとして実行する。
 #[derive(Debug, Clone)]
@@ -29,14 +37,32 @@ pub struct Runner {
     /// 実行時に重ねる環境変数。テストの隔離と、M5 の `GIT_SEQUENCE_EDITOR` /
     /// `GIT_EDITOR` の差し替えに使う。
     env: Vec<(OsString, OsString)>,
+    /// `GIT_SSH_COMMAND` に入れる値。**生の設定値ではなく、実効 ssh に
+    /// [`BATCH_MODE`] を足したもの。** `None` は「触らない」（`GIT_SSH` の環境。
+    /// 03 の「BatchMode の重ね方」）。
+    ///
+    /// 素の `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` を置くと、ユーザーの
+    /// `GIT_SSH_COMMAND` / `core.sshCommand` を捨ててしまう。
+    git_ssh_command: Option<String>,
 }
 
 impl Runner {
-    pub fn new(repo_root: impl Into<PathBuf>, git_bin: impl Into<PathBuf>) -> Self {
+    /// `ssh` は git が実際に使う ssh（`auth::ssh::effective_ssh_from_env`）。
+    /// **`git_bin` と同じくコンストラクタの引数にしている**のは、決めたのに渡し忘れる
+    /// 経路を作らないため。
+    pub fn new(
+        repo_root: impl Into<PathBuf>,
+        git_bin: impl Into<PathBuf>,
+        ssh: SshCommand,
+    ) -> Self {
         Self {
             repo_root: repo_root.into(),
             git_bin: git_bin.into(),
             env: Vec::new(),
+            git_ssh_command: match ssh {
+                SshCommand::Shell(command) => Some(command + BATCH_MODE),
+                SshCommand::Opaque => None,
+            },
         }
     }
 
@@ -129,6 +155,11 @@ impl Runner {
             .stderr(Stdio::piped())
             // 実行中ジョブのキャンセル（M3）で子プロセスを残さないため。
             .kill_on_drop(true);
+        // **`GIT_TERMINAL_PROMPT=0` は ssh に効かない**（ssh は stdin ではなく
+        // `/dev/tty` を直に読む）。
+        if let Some(ssh) = &self.git_ssh_command {
+            cmd.env("GIT_SSH_COMMAND", ssh);
+        }
         cmd.envs(self.env.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())));
 
         cmd.spawn().map_err(|err| ExecError::NoResult {

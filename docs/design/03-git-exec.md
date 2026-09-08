@@ -232,13 +232,46 @@ pub enum ExecError {
 - **`GIT_TERMINAL_PROMPT=0` では ssh のパスフレーズ入力を止められない。** `ssh` は
   stdin ではなく `/dev/tty` を直接読むので、agent に載っていない鍵だと raw mode の画面に
   プロンプトが出てそのまま止まる（タイムアウトは設けない方針、キャンセルは M3）。
-  `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` を既定に置けば `Permission denied (publickey)`
-  で即座に失敗して分類できるが、ユーザーの `GIT_SSH_COMMAND` や `core.sshCommand` を
-  黙って上書きする。**どう避けるかは M3（fetch / pull / push）で決める。**
-  それまでこの経路は UI から到達しない
-- **`auth::ssh::resolve_ssh_host` は PATH の `ssh` を叩いている**（04）。`core.sshCommand`
-  を読む方向に倒すなら、**ホスト名を解決する ssh も同じものにするか**を上と同じタスクで
-  決める。別の config を読む ssh に向けている環境では、いまも解決と接続で食い違いうる
+  **実効 ssh の後ろに `-o BatchMode=yes` を重ねて塞ぐ**（下の「BatchMode の重ね方」）
+
+### BatchMode の重ね方
+
+素の `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` を置くと、ユーザーの
+`GIT_SSH_COMMAND` / `core.sshCommand` を**捨てて**しまう。実効値を先に求めてから、
+その後ろにオプションを足す。
+
+```
+実効 = $GIT_SSH_COMMAND ?? core.sshCommand ?? ($GIT_SSH があれば「触らない」) ?? "ssh"
+GIT_SSH_COMMAND = "<実効> -o BatchMode=yes"
+```
+
+- **git は ssh コマンドをシェル経由で起動し、引数を後ろに足す**ので、末尾に書いた
+  `-o` は host より前に並ぶ。`core.sshCommand='sh dump.sh -o BatchMode=yes'` で argv を
+  ダンプして確認した（git 2.55）。優先順は `GIT_SSH_COMMAND` > `core.sshCommand` で、
+  こちらが環境変数に書けば config 側は読まれない（同じ方法で確認）
+- **`GIT_SSH` だけが設定されている環境では何も足さない。** `GIT_SSH` は引数の渡し方が
+  違い（シェルを通さない）、`GIT_SSH_COMMAND` を置くと git はそちらを優先するので、
+  重ねるつもりが差し替えになる。**その環境では守りが無く、しかもユーザーには何も
+  出ない** —— 止まって初めて分かる。塞ぐのは実行中ジョブのキャンセル（M3 の 4 本目）で、
+  そこまでは「止まったら `Ctrl-C`」しか無い。**通知を出す形にはしない** — 起動時に
+  「あなたの環境は守られていません」と出しても、fetch を押すまで意味が無い
+- **ユーザーが明示した `BatchMode=no` は勝つ。** ssh は同じ項目を**先に現れた値**で
+  決めるので（`ssh -o BatchMode=no -o BatchMode=yes -G` が `batchmode no` を返す。
+  OpenSSH 10.3 で確認）、実効値の中に書かれた設定はこちらの追記より前に来る。
+  **黙って上書きしない方針と向きが揃っている**
+- **`core.sshCommand` を読むのは `git_read`**（不変ルール 1。読み取りは git2）。
+  `ReaderHandle` が `workdir` と同じく起動時に 1 回だけ読む。実行のたびには読み直さない
+  ので、mewgit を起動したまま設定を変えても効かない
+- **`Runner` が受け取るのは実効値（`SshCommand`）で、生の設定値ではない。** 決めたのに
+  渡し忘れる経路を作らないよう `git_bin` と同じくコンストラクタの引数にする。
+  **環境変数を読むのは `auth::ssh::effective_ssh_from_env` の 1 箇所だけ** —
+  実効値を決める `effective_ssh` を純粋関数のままにしておくと、実行環境に
+  `GIT_SSH_COMMAND` が置かれていてもテストの結果が動かない
+- 実効値を決める関数は `auth::ssh` に置く。「git が実際に使う ssh はどれか」は
+  `resolve_ssh_host` と同じ問いで、`git_exec` から `auth` への依存は層の向きに沿う（00）。
+  **`resolve_ssh_host` をその実効値に向けるのは M4。** いまは呼び出す経路が無く
+  （`RepoInfo.target` を埋めるのが M4）、実効値はシェル文字列なので `sh -c` 経由の
+  起動に変える必要がある。踏めない腕を先に入れない（04 の「SSH エイリアスの正規化」）
 - stdin は閉じる。例外はハンクの 3 操作（`StageHunk` / `UnstageHunk` / `DiscardHunk`）
   だけで、どれも `git apply … -` に patch を stdin で渡す
 - stdout / stderr は表示専用なので lossy で `String` にする

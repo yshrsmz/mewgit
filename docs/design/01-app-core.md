@@ -839,6 +839,99 @@ pub struct BranchState {
   （上の `update::Reload`）、カーソルを HEAD に戻すだけだと、別のブランチを見ながら
   commit した人のカーソルが毎回飛ぶ
 
+## リモート操作（fetch / pull / push）
+
+`f` / `p` / `P` はペインに依らない共通キー（07 のキー表）。`update_key` では
+フォーカスの `match` **より先に**見る。`Tab` と同じ位置で、ペインごとの腕に書くと
+あとから足したペインで押せなくなる。
+
+**照合は `Key` 全体で行う**（`q` と同じ形）。`key.code()` で見ると `Ctrl-f` や `Alt-p`
+まで拾い、しかもこの段は全ペインを覆うので、07 が移動に予約している `Ctrl-d` /
+`Ctrl-u` の隣で修飾付きのキーを先に食う。
+
+| キー | 出す `GitOp` |
+|---|---|
+| `f` | `Fetch { remote: None, prune: false }` |
+| `p` | `Pull { mode: FastForwardOnly }` |
+| `P` | `Push { .. }`（下の「push の行き先」） |
+
+- **fetch と pull はリモートを選ばない。** `remote: None` で git に決めさせる。
+  git は `branch.<name>.remote` → `origin` → （それも無く）リモートが 1 本ならそれ、
+  の順に選ぶ。**複数あって `origin` も `branch.<name>.remote` も無いと、何もせず
+  exit 0 で返る**（`remote.pushDefault` は push 専用で fetch には効かない。
+  git 2.55 で確認）。**この形では `f` が無反応になる** —— 通知も出ない。
+  塞ぐには「どのリモートを既定にするか」を決める必要があり、それは 04 の
+  「既定リモートを決めるのは M4」が持っているので、そちらへ送った。
+  こちらで選び直すと、config を読まないまま git の規則を写した 2 本目の実装になる
+- **pull は `--ff-only`。** MVP にコンフリクト解消ビューが無い（requirements）ので、
+  merge / rebase が衝突すると mewgit の中では抜けられない。`--ff-only` は早送りできな
+  ければ何も変えずに終わる。モードを選ばせるのは continue / abort が揃う M5
+- **prune は付けない。** 消えた remote-tracking ref を消す操作で、`f` が黙って ref を
+  消すのは「fetch は読むだけ」という期待と食い違う。出すなら M6 の設定から
+
+### push の行き先
+
+`git push`（引数なし）ではなく `<remote> <branch>` を明示する。force push が
+`--force-with-lease=<branch>:<expected>` に remote 側の名前を要ることと、`-u` の提案が
+行き先を確認モーダルに出すためで、**どちらも「git が選んだもの」では文面を書けない**。
+
+決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る**
+（`RepoInfo.head` は起動時に読んだきりで古くなる。#22 の「キャッシュした状態から
+破壊的操作を選ばない」）。
+
+1. HEAD のブランチが無い（detached / unborn）→ 通知して何も出さない
+2. `Branch.upstream_config`（`branch.<name>.remote` / `.merge`）があるなら、それが
+   行き先。`set_upstream: false` で、**確認モーダルは通さない** —— 行き先はユーザーが
+   書いたもので、推測していない
+   - **`Branch.upstream`（短縮名）では決めない。** あちらは remote-tracking ref から
+     作るので、`fetch --prune` で ref が消えただけのブランチも `None` になる。そこで
+     3 に落ちると、**`P` を押しただけで追跡先が別のリモートへ向け替わる**（02 の
+     「ブランチ一覧」がこの `None` の理由を 4 つ数えている）
+   - **ローカル名と `merge` のブランチ名が違うときは `<local>:<remote 側>` を渡す。**
+     `push <remote> <local>` が動かすのは remote 側の**同名**の ref なので、`x` が
+     `refs/heads/y` を追跡している状態では `origin/x` を新しく作ってしまう。git の
+     `push.default = simple`（既定）がこの形を断るのも同じ理由。ブランチ名に `:` は
+     使えないので、普通のブランチ名と読み違えられる余地は無い
+   - **`refs/heads/` の下に無い `merge` は完全な ref のまま渡す。** 短縮できない名前を
+     短縮したことにすると、別の ref を動かす
+   - **`remote` が `.`（ローカル追跡）なら断る。** `git branch --set-upstream-to=main
+     topic` はこれを書く。渡すと `git push . topic:main` になり、**ネットワークに
+     出ないままローカルの `main` を早送りして exit 0 で返る**（git 2.55 で確認）。
+     素の `git push` が `push.default = simple` で断る場面で、**こちらが組む refspec が
+     その守りを外している** —— 「危ない引数を渡していないか」ではなく「危ない解釈を
+     される余地があるか」（04 と同じ数え方）。**3 の `-u` 提案にも落とさない。**
+     あちらは `branch.<name>.remote` を上書きするので、ユーザーが書いた `.` が黙って消える
+3. 追跡設定が無いなら `-u` を提案する。リモートは 1 本ならそれ、複数なら `origin`、
+   どちらでもなければ通知して断る。**`Modal::Confirm` に行き先を出してから実行する**
+   （不変ルール 5 が求める破壊的操作ではないが、行き先を推測しているのはこの経路だけ）
+
+**3 だけは git の規則そのものではない。** git は `branch.<name>.pushRemote` と
+`remote.pushDefault` も見る。読むこと自体は `git_read` にならできる（`upstream_config`
+と同じ形）が、**上流と同じ判断だとは書かない**（CLAUDE.md）。食い違っても確認モーダルに
+出た行き先を見て `n` で止められるので、危ないのは「見ずに `y`」だけ。**読む判断は
+04 の「既定リモートを決めるのは M4」へ送った** —— fetch が無反応になる件と同じ問いで、
+別々に決めると 2 つの規則が並ぶ。
+
+**拒否の出口は `push_plan` の中に 1 本。** 「一覧がまだ届いていない」を呼び出し側の
+早期 return にすると、同じ「Warn を出して `Cmd::None`」が 2 箇所に割れる。
+
+**「無い」と「まだ届いていない」はブランチ一覧とリモート一覧の両方で区別する。**
+`LoadRepoInfo` と `LoadBranches` は別のジョブなので、一覧だけ先に届いた瞬間がある。
+`BranchState` には `load` があるが `RepoInfo` には印が無いので、リモート側は
+`JobKind::LoadRepoInfo` が走っているかを見る。**空の `Vec` を片方だけ区別すると、
+起動直後の一瞬に押した `P` が「リモートが登録されていません」と嘘を言う。**
+
+### force push
+
+**専用のキーは作らない**（07 のキー表に force push の行が無いのはそのため）。
+通常の `P` が `ExecErrorKind::NonFastForward` で断られたときだけ、次の `P` が確認モーダル
+経由の force push になる。`expected` にはそのとき画面に出した upstream の Oid を渡す
+（上の「確認モーダルを組む時点の値を `GitOp` に閉じ込める」）。
+
+**この経路は次のタスク**（plan.md の M3 2 本目）。`git_read::Branch` は upstream の
+**名前**しか持たず、lease に渡す Oid が無い。読み取りを 1 つ足す変更なので、既にある
+`GitOp` を配線するだけの `f` / `p` / `P` とは別の PR にする。
+
 ## 実行中ジョブ
 
 `JobKind` は `Cmd` の変種と 1 対 1 なので、列挙を二重に持たず `Cmd` を単一の真実にする。

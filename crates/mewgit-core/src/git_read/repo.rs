@@ -7,7 +7,7 @@ use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
     lossy, signature, Branch, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex, RefLabel,
-    Remote, Timestamp,
+    Remote, Timestamp, UpstreamConfig,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -158,12 +158,20 @@ impl RepoReader {
             let Some(name) = reference.shorthand().ok().map(str::to_string) else {
                 continue;
             };
-            let is_head = reference.name().is_ok_and(|full| head_target == Some(full));
+            let full = reference.name().ok();
+            // `full` が無いときに `head_target` も無い（detached / unborn）と、
+            // `None == None` で HEAD になってしまう。名前が引けた行だけを比べる。
+            let is_head = full.is_some_and(|full| head_target == Some(full));
             // 指す先が commit でない ref（ありえないが、壊れたリポジトリでは起きる）は
             // 落とす。`refs` が peel できないタグを落とすのと同じ扱い。
             let Ok(oid) = reference.peel_to_commit().map(|commit| commit.id()) else {
                 continue;
             };
+
+            // **追跡設定は remote-tracking ref とは別に読む。** `upstream()` は ref が
+            // 無ければ引けないが、`branch.<name>.remote` / `.merge` は config に残って
+            // いる。push の `-u` はこちらで決める（02 の「ブランチ一覧」）。
+            let upstream_config = full.and_then(|full| self.upstream_config(full));
 
             let branch = git2::Branch::wrap(reference);
             // **upstream が引けないブランチも一覧に残す。** 未設定なら
@@ -180,6 +188,7 @@ impl RepoReader {
                 name,
                 oid,
                 upstream,
+                upstream_config,
                 ahead,
                 behind,
                 is_head,
@@ -208,6 +217,20 @@ impl RepoReader {
             Ok((ahead, behind)) => (Some(name.to_string()), ahead, behind),
             Err(_) => (None, 0, 0),
         }
+    }
+
+    /// `branch.<name>.remote` / `branch.<name>.merge` を読む。
+    ///
+    /// **どちらか片方でも欠けていれば `None`。** push の行き先は 2 つ揃って初めて
+    /// 決まるので、片方だけ持たせると呼び出し側が組み合わせを数えることになる。
+    /// 非 UTF-8 の値も `None`（argv に載せられない。ブランチ名と同じ扱い）。
+    fn upstream_config(&self, full_ref: &str) -> Option<UpstreamConfig> {
+        let remote = self.repo.branch_upstream_remote(full_ref).ok()?;
+        let merge = self.repo.branch_upstream_merge(full_ref).ok()?;
+        Some(UpstreamConfig {
+            remote: remote.as_str().ok()?.to_string(),
+            merge: merge.as_str().ok()?.to_string(),
+        })
     }
 
     /// コミット 1 件の詳細。グラフの行が持たない値（メッセージ全文・committer・

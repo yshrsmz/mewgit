@@ -37,15 +37,19 @@ pub struct Runner {
     /// 実行時に重ねる環境変数。テストの隔離と、M5 の `GIT_SEQUENCE_EDITOR` /
     /// `GIT_EDITOR` の差し替えに使う。
     env: Vec<(OsString, OsString)>,
-    /// `GIT_SSH_COMMAND` に入れる値。`None` は「触らない」（`GIT_SSH` の環境）。
-    ssh_command: Option<String>,
+    /// `GIT_SSH_COMMAND` に入れる値。**生の設定値ではなく、実効 ssh に
+    /// [`BATCH_MODE`] を足したもの。** `None` は「触らない」（`GIT_SSH` の環境。
+    /// 03 の「BatchMode の重ね方」）。
+    ///
+    /// 素の `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` を置くと、ユーザーの
+    /// `GIT_SSH_COMMAND` / `core.sshCommand` を捨ててしまう。
+    git_ssh_command: Option<String>,
 }
 
 impl Runner {
     /// `ssh` は git が実際に使う ssh（`auth::ssh::effective_ssh_from_env`）。
     /// **`git_bin` と同じくコンストラクタの引数にしている**のは、決めたのに渡し忘れる
-    /// 経路を作らないため。渡した値そのものではなく、`-o BatchMode=yes` を重ねた結果が
-    /// `GIT_SSH_COMMAND` に入る（03 の「BatchMode の重ね方」）。
+    /// 経路を作らないため。
     pub fn new(
         repo_root: impl Into<PathBuf>,
         git_bin: impl Into<PathBuf>,
@@ -55,7 +59,10 @@ impl Runner {
             repo_root: repo_root.into(),
             git_bin: git_bin.into(),
             env: Vec::new(),
-            ssh_command: batch_mode_ssh(ssh),
+            git_ssh_command: match ssh {
+                SshCommand::Shell(command) => Some(command + BATCH_MODE),
+                SshCommand::Opaque => None,
+            },
         }
     }
 
@@ -149,9 +156,8 @@ impl Runner {
             // 実行中ジョブのキャンセル（M3）で子プロセスを残さないため。
             .kill_on_drop(true);
         // **`GIT_TERMINAL_PROMPT=0` は ssh に効かない**（ssh は stdin ではなく
-        // `/dev/tty` を直に読む）。パスフレーズ待ちで raw mode の画面ごと固まるのを
-        // 止める（03 の「BatchMode の重ね方」）。
-        if let Some(ssh) = &self.ssh_command {
+        // `/dev/tty` を直に読む）。
+        if let Some(ssh) = &self.git_ssh_command {
             cmd.env("GIT_SSH_COMMAND", ssh);
         }
         cmd.envs(self.env.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())));
@@ -160,18 +166,6 @@ impl Runner {
             argv: command.argv.clone(),
             reason: format!("{} を起動できませんでした: {err}", self.git_bin.display()),
         })
-    }
-}
-
-/// `GIT_SSH_COMMAND` に入れる値。`None` は「触らない」。
-///
-/// 実効 ssh の後ろに [`BATCH_MODE`] を足す。素の
-/// `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` を置くと、ユーザーの
-/// `GIT_SSH_COMMAND` / `core.sshCommand` を捨ててしまう。
-fn batch_mode_ssh(ssh: SshCommand) -> Option<String> {
-    match ssh {
-        SshCommand::Shell(command) => Some(command + BATCH_MODE),
-        SshCommand::Opaque => None,
     }
 }
 

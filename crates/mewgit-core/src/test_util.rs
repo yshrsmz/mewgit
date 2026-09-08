@@ -43,7 +43,7 @@ use crate::auth::ssh::SshCommand;
 use crate::git_exec::Runner;
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
-    Signature, Timestamp, WorktreeSnapshot,
+    Remote, Signature, Timestamp, WorktreeSnapshot,
 };
 use tempfile::TempDir;
 
@@ -200,8 +200,7 @@ impl TestRepo {
     /// **統合テストごとに書かない。** テストバイナリは別々にコンパイルされるので、
     /// 各 `tests/*.rs` に置くとファイルを足すたびにコピーが増える。
     pub fn runner(&self) -> Runner {
-        Runner::new(self.path(), "git", SshCommand::Shell("ssh".to_string()))
-            .with_env(self.runner_env())
+        Runner::new(self.path(), "git", SshCommand::default()).with_env(self.runner_env())
     }
 
     /// `git` を実行し、成功したかどうかだけを返す。失敗しても panic しない。
@@ -365,6 +364,14 @@ fn shown<S: AsRef<OsStr>>(args: &[S]) -> String {
         .join(" ")
 }
 
+/// リモート 1 件。URL は使う側が見ないので、名前から作った偽物でよい。
+pub fn fake_remote(name: &str) -> Remote {
+    Remote {
+        name: name.to_string(),
+        url: format!("ssh://git@example.invalid/{name}.git"),
+    }
+}
+
 /// ブランチ 1 件。upstream は持たない（要るテストは戻り値のフィールドを足す）。
 ///
 /// oid は [`fake_oid`] の 0 番。ブランチの一覧は名前と印だけで読めるので、
@@ -374,6 +381,7 @@ pub fn fake_branch(name: &str, is_head: bool) -> Branch {
         name: name.to_string(),
         oid: fake_oid(0),
         upstream: None,
+        upstream_config: None,
         ahead: 0,
         behind: 0,
         is_head,

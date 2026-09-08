@@ -302,12 +302,32 @@ pub enum HeadInfo {
 pub struct Branch {
     pub name: String,
     pub oid: Oid,
-    /// 追跡先（例: `origin/main`）。設定されていなければ `None`。
+    /// 追跡先の短縮名（例: `origin/main`）。**表示のための値**（02）。
+    ///
+    /// remote-tracking ref から作るので、`fetch --prune` で ref が消えていれば
+    /// 設定が残っていても `None` になる。**push の行き先はここから決めない** —
+    /// そちらは [`Branch::upstream_config`]。
     pub upstream: Option<String>,
+    /// `branch.<name>.remote` / `branch.<name>.merge` に書かれた追跡設定。
+    ///
+    /// **`upstream` とは `None` になる条件が違う。** こちらは config だけを見るので、
+    /// 追跡 ref が消えていても残る。`upstream` の `None` は 4 つの理由に落ちていて
+    /// （02 の「ブランチ一覧」）、そのうち「設定が無い」だけを取り出せない。
+    /// **`-u` を付けるかはここで決める**（02）。
+    pub upstream_config: Option<UpstreamConfig>,
     /// upstream に対する ahead / behind。
     pub ahead: usize,
     pub behind: usize,
     pub is_head: bool,
+}
+
+/// ブランチの追跡設定。`git_exec` の `GitOp::Push` を組むのに使う。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamConfig {
+    /// `branch.<name>.remote`。ローカル追跡では `"."`。
+    pub remote: String,
+    /// `branch.<name>.merge`。リモート側の**完全な** ref 名（`refs/heads/main`）。
+    pub merge: String,
 }
 
 /// ワーキングツリーの状態。

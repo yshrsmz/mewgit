@@ -37,6 +37,13 @@ pub enum SshCommand {
     Opaque,
 }
 
+impl Default for SshCommand {
+    /// 何も設定されていない環境で git が起動するもの。
+    fn default() -> Self {
+        Self::Shell(SSH_BIN.to_string())
+    }
+}
+
 /// git が使う ssh を、環境変数と `core.sshCommand` から決める。
 ///
 /// 優先順は git と同じで `GIT_SSH_COMMAND` > `core.sshCommand` > `GIT_SSH` > `ssh`
@@ -46,7 +53,7 @@ pub enum SshCommand {
 /// `git_exec::Runner` が `-o BatchMode=yes` を重ねるのに使う。`resolve_ssh_host` が
 /// PATH の `ssh` を直に叩いているのをここへ寄せるのは M4（04 の「git が使う ssh と、
 /// ここで叩く ssh」）。
-pub fn effective_ssh(
+fn effective_ssh(
     git_ssh_command: Option<&str>,
     core_ssh_command: Option<&str>,
     git_ssh: Option<&str>,
@@ -57,7 +64,7 @@ pub fn effective_ssh(
     if set(git_ssh).is_some() {
         return SshCommand::Opaque;
     }
-    SshCommand::Shell(SSH_BIN.to_string())
+    SshCommand::default()
 }
 
 /// プロセスの環境変数と `core.sshCommand` から実効 ssh を決める。
@@ -73,6 +80,10 @@ pub fn effective_ssh_from_env(core_ssh_command: Option<&str>) -> SshCommand {
 }
 
 /// 空文字列と空白だけの値を「未設定」に畳む。
+///
+/// `config` の `MEWGIT_GIT_BIN`（08）も同じ判断をしているが、あちらは `trim` しない。
+/// **揃えないのは、こちらの値がシェルに渡るコマンド文字列だから** —— 空白だけの実効値に
+/// `-o BatchMode=yes` を足すと、git は先頭のオプションをコマンド名として起動する。
 fn set(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
@@ -232,7 +243,7 @@ mod tests {
         // オプションをコマンド名として起動しようとする。
         assert_eq!(
             effective_ssh(Some("  "), Some("\t"), Some(" ")),
-            SshCommand::Shell("ssh".to_string())
+            SshCommand::default()
         );
     }
 

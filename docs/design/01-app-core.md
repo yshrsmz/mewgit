@@ -845,6 +845,10 @@ pub struct BranchState {
 フォーカスの `match` **より先に**見る。`Tab` と同じ位置で、ペインごとの腕に書くと
 あとから足したペインで押せなくなる。
 
+**照合は `Key` 全体で行う**（`q` と同じ形）。`key.code()` で見ると `Ctrl-f` や `Alt-p`
+まで拾い、しかもこの段は全ペインを覆うので、07 が移動に予約している `Ctrl-d` /
+`Ctrl-u` の隣で修飾付きのキーを先に食う。
+
 | キー | 出す `GitOp` |
 |---|---|
 | `f` | `Fetch { remote: None, prune: false }` |
@@ -852,8 +856,12 @@ pub struct BranchState {
 | `P` | `Push { .. }`（下の「push の行き先」） |
 
 - **fetch と pull はリモートを選ばない。** `remote: None` で git に決めさせる。
-  リモートが 1 本ならその名前が `origin` でなくてもそれを使い、複数あれば
-  `remote.pushDefault` / `branch.<name>.remote` / `origin` の順で選ぶ（git 2.55 で確認）。
+  git は `branch.<name>.remote` → `origin` → （それも無く）リモートが 1 本ならそれ、
+  の順に選ぶ。**複数あって `origin` も `branch.<name>.remote` も無いと、何もせず
+  exit 0 で返る**（`remote.pushDefault` は push 専用で fetch には効かない。
+  git 2.55 で確認）。**この形では `f` が無反応になる** —— 通知も出ない。
+  塞ぐには「どのリモートを既定にするか」を決める必要があり、それは 04 の
+  「既定リモートを決めるのは M4」が持っているので、そちらへ送った。
   こちらで選び直すと、config を読まないまま git の規則を写した 2 本目の実装になる
 - **pull は `--ff-only`。** MVP にコンフリクト解消ビューが無い（requirements）ので、
   merge / rebase が衝突すると mewgit の中では抜けられない。`--ff-only` は早送りできな
@@ -872,24 +880,33 @@ pub struct BranchState {
 破壊的操作を選ばない」）。
 
 1. HEAD のブランチが無い（detached / unborn）→ 通知して何も出さない
-2. upstream があるなら `<remote>/<branch>` に分ける。分ける鍵は `RepoInfo.remotes` の
-   名前で、**最長一致**（リモート名にも `/` を入れられる）。どの名前でも始まらなければ
-   通知して断る（リモートが消えている）
-   - `set_upstream: false`。**確認モーダルは通さない。** 行き先はユーザーが設定した
-     ものなので、推測していない
-   - **ローカル名と upstream のブランチ名が違うときは `<local>:<remote>` を渡す。**
+2. `Branch.upstream_config`（`branch.<name>.remote` / `.merge`）があるなら、それが
+   行き先。`set_upstream: false` で、**確認モーダルは通さない** —— 行き先はユーザーが
+   書いたもので、推測していない
+   - **`Branch.upstream`（短縮名）では決めない。** あちらは remote-tracking ref から
+     作るので、`fetch --prune` で ref が消えただけのブランチも `None` になる。そこで
+     3 に落ちると、**`P` を押しただけで追跡先が別のリモートへ向け替わる**（02 の
+     「ブランチ一覧」がこの `None` の理由を 4 つ数えている）
+   - **ローカル名と `merge` のブランチ名が違うときは `<local>:<remote 側>` を渡す。**
      `push <remote> <local>` が動かすのは remote 側の**同名**の ref なので、`x` が
-     `origin/y` を追跡している状態では `origin/x` を新しく作ってしまう。git の
+     `refs/heads/y` を追跡している状態では `origin/x` を新しく作ってしまう。git の
      `push.default = simple`（既定）がこの形を断るのも同じ理由。ブランチ名に `:` は
-     使えないので、この形が普通のブランチ名と読み違えられる余地は無い
-3. upstream が無いなら `-u` を提案する。リモートは 1 本ならそれ、複数なら `origin`、
+     使えないので、普通のブランチ名と読み違えられる余地は無い
+   - **`refs/heads/` の下に無い `merge` は完全な ref のまま渡す。** 短縮できない名前を
+     短縮したことにすると、別の ref を動かす
+3. 追跡設定が無いなら `-u` を提案する。リモートは 1 本ならそれ、複数なら `origin`、
    どちらでもなければ通知して断る。**`Modal::Confirm` に行き先を出してから実行する**
    （不変ルール 5 が求める破壊的操作ではないが、行き先を推測しているのはこの経路だけ）
 
-**これは git の規則そのものではない。** git は `remote.pushDefault` と
-`branch.<name>.remote` も見るが、`update` は同期・純粋で config を読めない。
-**上流と同じ判断だとは書かない**（CLAUDE.md）。食い違ったときに黙って別のリモートへ
-push しないよう、推測した経路にだけ確認モーダルを置いている。
+**3 だけは git の規則そのものではない。** git は `branch.<name>.pushRemote` と
+`remote.pushDefault` も見る。読むこと自体は `git_read` にならできる（`upstream_config`
+と同じ形）が、**上流と同じ判断だとは書かない**（CLAUDE.md）。食い違っても確認モーダルに
+出た行き先を見て `n` で止められるので、危ないのは「見ずに `y`」だけ。**読む判断は
+04 の「既定リモートを決めるのは M4」へ送った** —— fetch が無反応になる件と同じ問いで、
+別々に決めると 2 つの規則が並ぶ。
+
+**拒否の出口は `push_plan` の中に 1 本。** 「一覧がまだ届いていない」を呼び出し側の
+早期 return にすると、同じ「Warn を出して `Cmd::None`」が 2 箇所に割れる。
 
 ### force push
 

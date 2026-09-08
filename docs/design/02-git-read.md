@@ -101,10 +101,16 @@ pub enum RefLabel {
 pub struct Branch {
     pub name: String,            // "feat/x"
     pub oid: Oid,
-    pub upstream: Option<String>,  // "origin/feat/x"。未設定なら None
+    pub upstream: Option<String>,  // "origin/feat/x"。表示用
+    pub upstream_config: Option<UpstreamConfig>,  // push の行き先
     pub ahead: usize,            // upstream に対する ahead / behind
     pub behind: usize,
     pub is_head: bool,
+}
+
+pub struct UpstreamConfig {
+    pub remote: String,  // branch.<name>.remote。ローカル追跡なら "."
+    pub merge: String,   // branch.<name>.merge。完全な ref 名（"refs/heads/main"）
 }
 ```
 
@@ -131,9 +137,21 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
   数えた結果、**この一覧の読み手（Branches ペイン）にとっては 4 つとも同じ**
   ——「ahead / behind を出す相手がいない」。`NotFound` 以外の `Err` はそのまま返す
   （壊れたリポジトリなので `refs()` と同じ扱い）
-- **`Branch.upstream` から push の `-u` を決めない**（M3）。「upstream が無い」と
+- **`Branch.upstream` から push の `-u` を決めない。** 「upstream が無い」と
   「upstream はあるがこの一覧では出せない」が同じ `None` に落ちているので、`-u` を
   付けるかは `branch.<name>.merge` を読んで決める。ここは表示のための値
+- **その読み取りが `upstream_config`**（M3 の `f` / `p` / `P` の配線で入れた）。
+  `git2::Repository::branch_upstream_remote` / `branch_upstream_merge` は config だけを
+  見るので、**追跡 ref が消えていても引ける**。`upstream` が `None` に落ちる 4 つの
+  理由のうち「設定が無い」だけを取り出せる。短縮名で代用すると、**`fetch --prune` の
+  あとに `P` を押しただけで追跡先が別のリモートへ向け替わる**（`git push -u
+  <推測したリモート>` になる）
+- **`remote` と `merge` は 2 つ揃って初めて `Option` を出る。** 片方だけ書かれた設定から
+  push の行き先は決まらないので、揃っていなければ `None`。呼び出し側に組み合わせを
+  数えさせない
+- **`merge` は完全な ref 名のまま持つ**（`refs/heads/main`）。`refs/heads/` の下に無い
+  値も書けるので、短縮を読み取り側で決め打つと別の ref を動かす。短縮するのは argv を
+  組む側（01 の「push の行き先」）
 - **ahead / behind は `graph_ahead_behind(local, upstream)`。** upstream があるときだけ
   引く。無いブランチで 0 / 0 を入れると「同期している」と読めてしまう
 - **`upstream()` はブランチ 1 本ごとにリモートを引き直す。** libgit2 1.9.7 の
@@ -142,7 +160,9 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
   ブランチが多いリポジトリでは、ここが `graph_ahead_behind` の walk より重くなる。
   **畳むなら config を 1 回だけ読み、リモートを名前で覚えて refspec 変換を自分でかける**
   ことになるが、`branch.<name>.remote = "."`（ローカル追跡）まで自前で再現することに
-  なるので、**M3 の fetch / pull のタスクで決める**（あそこで一覧の読み直しが増える）
+  なるので、**M3 の世代を入れるタスクで決める**（fetch / pull で一覧の読み直しが増える）。
+  **`upstream_config` は config の snapshot をさらに 2 回取る**（`branch_upstream_remote`
+  と `branch_upstream_merge`）ので、畳むときはこの 2 本も一緒に数える
 
 **`refs()` / `head` / `remotes` と 1 通にまとめない**（`Cmd::LoadRepoInfo` に乗せない）。
 ブランチの本数だけ upstream の解決と `graph_ahead_behind` の walk が要り、グラフの

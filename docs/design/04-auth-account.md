@@ -118,6 +118,16 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
 書いていない。**`auth::resolve` を書く M4 のタスクで決める。** それまで `target` は
 `None` のままで、この節が用意するのは `RemoteUrl::parse` と `resolve_ssh_host` だけ。
 
+**同じ問いが M3 から 2 つ送られている**（01 の「リモート操作」）。どちらも「既定の
+リモートはどれか」で、別々に決めると規則が 2 本並ぶ。
+
+- **`f` が無反応になる形。** リモートが複数あって `origin` も `branch.<name>.remote` も
+  無いと、`git fetch` は何もせず exit 0 で返る（git 2.55 で確認）。git が黙るので
+  stderr を通知に出す経路も効かない
+- **`-u` の提案が git の規則の部分集合。** `branch.<name>.pushRemote` と
+  `remote.pushDefault` を読んでいない。読むこと自体は `git_read` にできる
+  （`Branch.upstream_config` と同じ形。02）
+
 ## アカウント解決
 
 ```rust

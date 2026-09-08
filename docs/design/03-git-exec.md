@@ -241,7 +241,7 @@ pub enum ExecError {
 その後ろにオプションを足す。
 
 ```
-実効 = $GIT_SSH_COMMAND ?? core.sshCommand ?? "ssh"
+実効 = $GIT_SSH_COMMAND ?? core.sshCommand ?? ($GIT_SSH があれば「触らない」) ?? "ssh"
 GIT_SSH_COMMAND = "<実効> -o BatchMode=yes"
 ```
 

@@ -646,7 +646,7 @@ async fn the_configured_git_binary_is_the_one_that_runs() {
     let err = Runner::new(
         repo.path(),
         repo.path().join("no-such-git"),
-        SshCommand::Shell("ssh".to_string()),
+        SshCommand::default(),
     )
     .with_env(repo.runner_env())
     .run(&GitOp::Switch("main".into()))

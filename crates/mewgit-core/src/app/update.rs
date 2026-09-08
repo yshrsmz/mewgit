@@ -15,9 +15,9 @@ use crate::git_read::{
 };
 
 use super::{
-    AppState, BranchLoad, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, Freshness, GraphLine,
-    GraphSelection, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
-    RepoSnapshot, TextBuffer,
+    AppState, BranchLoad, BranchState, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, Freshness,
+    GraphLine, GraphSelection, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel,
+    Pane, RepoSnapshot, TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -133,38 +133,46 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         return Cmd::Quit;
     }
 
-    // フォーカスの巡回はペインより先に見る。ペインごとに書くと、あとから足した
+    // **リモート操作は共通キー**（07 のキー表）。ペインの `match` より先に見る。
+    // 後ろに置くと、あとから足したペインで押せなくなる（`Tab` と同じ理由）。
+    //
+    // **`Key` 全体で比べる**（`q` と同じ形）。`key.code()` で見ると `Ctrl-f` や
+    // `Alt-p` まで拾い、しかもこの段は全ペインを覆うので、07 が移動に予約している
+    // `Ctrl-d` / `Ctrl-u` の隣で修飾付きのキーを先に食う。
+    //
+    // **リモートを選ばない。** 追跡先（`branch.<name>.remote`）があればそれ、
+    // 無ければ `origin`、それも無くてリモートが 1 本ならそれ。**複数あって
+    // `origin` も追跡先も無いと、git は何もせず exit 0 で返る**（git 2.55 で確認。
+    // `remote.pushDefault` は push 専用で fetch には効かない）。こちらで選び直すと
+    // config を読まないまま git の規則を写すことになるので、既定リモートを決める
+    // タスクへ送った（01 の「リモート操作」）。
+    //
+    // **`--prune` は付けない。** `f` が黙って remote-tracking ref を消すのは
+    // 「fetch は読むだけ」という期待と食い違う（01）。
+    if key == Key::char('f') {
+        return Cmd::Exec(GitOp::Fetch {
+            remote: None,
+            prune: false,
+        });
+    }
+    // **`--ff-only`。** MVP にコンフリクト解消ビューが無いので、merge / rebase が
+    // 衝突すると mewgit の中では抜けられない。モードを選ばせるのは continue /
+    // abort が揃う M5（01）。
+    if key == Key::char('p') {
+        return Cmd::Exec(GitOp::Pull {
+            mode: PullMode::FastForwardOnly,
+        });
+    }
+    if key == Key::char('P') {
+        return push(state);
+    }
+
+    // フォーカスの巡回もペインより先に見る。ペインごとに書くと、あとから足した
     // ペインが `Tab` を受けずに閉じ込められる。`Shift+Tab` は `BackTab`（修飾なし）に
     // 正規化されている（01 の「キー入力」）。
-    //
-    // **リモート操作も同じ理由でここ。** `f` / `p` / `P` はペインに依らない共通キー
-    // （07 のキー表）で、フォーカスの `match` より後ろに置くと、あとから足した
-    // ペインで押せなくなる（01 の「リモート操作」）。
     match key.code() {
         KeyCode::Tab => return focus(state, state.next_focus()),
         KeyCode::BackTab => return focus(state, state.prev_focus()),
-        // **リモートを選ばない。** 1 本ならその名前が `origin` でなくてもそれを使い、
-        // 複数なら `remote.pushDefault` / `branch.<name>.remote` / `origin` の順で
-        // git が選ぶ（git 2.55 で確認）。こちらで選び直すと、config を読まないまま
-        // git の規則を写した 2 本目の実装になる。
-        //
-        // **`--prune` は付けない。** `f` が黙って remote-tracking ref を消すのは
-        // 「fetch は読むだけ」という期待と食い違う（01）。
-        KeyCode::Char('f') => {
-            return Cmd::Exec(GitOp::Fetch {
-                remote: None,
-                prune: false,
-            })
-        }
-        // **`--ff-only`。** MVP にコンフリクト解消ビューが無いので、merge / rebase が
-        // 衝突すると mewgit の中では抜けられない。モードを選ばせるのは continue /
-        // abort が揃う M5（01）。
-        KeyCode::Char('p') => {
-            return Cmd::Exec(GitOp::Pull {
-                mode: PullMode::FastForwardOnly,
-            })
-        }
-        KeyCode::Char('P') => return push(state),
         _ => {}
     }
 
@@ -530,22 +538,10 @@ fn rename_branch(state: &mut AppState) -> Cmd {
 
 /// `P`。HEAD のブランチを push する（01 の「push の行き先」）。
 ///
-/// **行き先を推測したときだけ確認モーダルを通す。** upstream があるなら行き先は
-/// ユーザーが設定したもので、見せて確かめる相手がいない。
+/// **行き先を推測したときだけ確認モーダルを通す。** 追跡設定があるなら行き先は
+/// ユーザーが書いたもので、見せて確かめる相手がいない。
 fn push(state: &mut AppState) -> Cmd {
-    // **一覧が届く前に押されたら断る。** 空の `Vec` は detached / unborn のことも、
-    // まだ読めていないことでもあり、中身からは区別できない（01 の「ブランチ一覧」で
-    // `load` を `bool` 2 つにしなかったのと同じ理由）。
-    if state.branches.load() != BranchLoad::Loaded {
-        state.push_notice(
-            NoticeLevel::Warn,
-            "ブランチ一覧をまだ読めていません".to_string(),
-            None,
-        );
-        return Cmd::None;
-    }
-
-    match push_plan(&state.branches.branches, &state.repo.remotes) {
+    match push_plan(&state.branches, &state.repo.remotes) {
         PushPlan::Tracked(op) => Cmd::Exec(op),
         PushPlan::Propose { op, body } => confirm(state, "upstream を設定して push", body, op),
         PushPlan::Refused(message) => {
@@ -556,11 +552,11 @@ fn push(state: &mut AppState) -> Cmd {
 }
 
 /// `P` が何をするか。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum PushPlan {
-    /// upstream に沿って push する。確認モーダルを通さない。
+    /// 追跡設定に沿って push する。確認モーダルを通さない。
     Tracked(GitOp),
-    /// upstream が無いので `-u` を提案する。`body` は確認モーダルの本文。
+    /// 追跡設定が無いので `-u` を提案する。`body` は確認モーダルの本文。
     Propose { op: GitOp, body: String },
     /// 出せない。通知に出す文言。
     Refused(String),
@@ -573,34 +569,45 @@ enum PushPlan {
 /// 外部で切り替えられると古くなる（#22 の「キャッシュした状態から破壊的操作を
 /// 選ばない」）。一覧は ref を動かす書き込みのたびに読み直される。
 ///
-/// **git の規則そのものではない。** git は `remote.pushDefault` と
-/// `branch.<name>.remote` も見るが、`update` は同期・純粋で config を読めない。
-/// 推測している経路（`-u` の提案）にだけ確認モーダルを置き、行き先を見せてから実行する。
-fn push_plan(branches: &[Branch], remotes: &[Remote]) -> PushPlan {
-    let Some(head) = branches.iter().find(|branch| branch.is_head) else {
+/// **拒否の出口はここ 1 本。** 「一覧が届いていない」だけを呼び出し側の早期 return に
+/// すると、同じ「Warn を出して `Cmd::None`」が 2 箇所に割れる。
+fn push_plan(branches: &BranchState, remotes: &[Remote]) -> PushPlan {
+    // **空の `Vec` からは「まだ届いていない」と detached / unborn を区別できない**
+    // ので `load` を見る（01 の「ブランチ一覧」で `bool` 2 つにしなかったのと同じ）。
+    if branches.load() != BranchLoad::Loaded {
+        return PushPlan::Refused("ブランチ一覧をまだ読めていません".to_string());
+    }
+    let Some(head) = branches.branches.iter().find(|branch| branch.is_head) else {
         return PushPlan::Refused("HEAD がブランチを指していません".to_string());
     };
 
-    let Some(upstream) = head.upstream.as_deref() else {
+    // **`upstream`（短縮名）では決めない。** あちらは remote-tracking ref から作るので、
+    // `fetch --prune` で ref が消えただけのブランチも `None` になる。そこで `-u` を
+    // 提案すると、ユーザーが設定した追跡先を黙って別のリモートへ向け替える（02 の
+    // 「ブランチ一覧」がこの `None` を数えている）。
+    let Some(config) = &head.upstream_config else {
         return propose_upstream(&head.name, remotes);
     };
 
-    let Some((remote, remote_branch)) = split_upstream(upstream, remotes) else {
-        return PushPlan::Refused(format!("追跡先 {upstream} のリモートが見つかりません"));
-    };
     PushPlan::Tracked(GitOp::Push {
-        remote: remote.to_string(),
-        branch: push_refspec(&head.name, remote_branch),
+        remote: config.remote.clone(),
+        branch: push_refspec(&head.name, &config.merge),
         set_upstream: false,
         force: false,
         expected: None,
     })
 }
 
-/// upstream の無いブランチに `-u` 付きの push を提案する。
+/// 追跡設定の無いブランチに `-u` 付きの push を提案する。
 ///
 /// リモートは 1 本ならそれ、複数なら `origin`。**どちらでもなければ選ばない** —
 /// 適当に選ぶと、fork 運用のリポジトリで他人のリポジトリへ push する形になる。
+///
+/// **git の規則そのものではない**（git は `branch.<name>.pushRemote` と
+/// `remote.pushDefault` も見る）。読むこと自体は `git_read` にならできるが、そこまで
+/// 写すのは追跡設定を読む本 PR の範囲を越える。**食い違っても確認モーダルに出た
+/// 行き先を見て `n` で止められる**ので、危ないのは「見ずに `y`」だけ。読む判断は
+/// 01 の「push の行き先」に送り先を書いた。
 fn propose_upstream(branch: &str, remotes: &[Remote]) -> PushPlan {
     let candidate = match remotes {
         [] => return PushPlan::Refused("リモートが登録されていません".to_string()),
@@ -634,33 +641,21 @@ fn propose_upstream(branch: &str, remotes: &[Remote]) -> PushPlan {
     }
 }
 
-/// `origin/main` を `("origin", "main")` に分ける。
+/// `push <remote> <ここ>` に載せる ref。`merge` は `branch.<name>.merge`。
 ///
-/// **鍵は登録済みのリモート名で、最長一致。** 最初の `/` で切ると、リモート名に `/` を
-/// 含む設定（git は許す）で別のリモートへ push することになる。
-fn split_upstream<'a>(upstream: &'a str, remotes: &'a [Remote]) -> Option<(&'a str, &'a str)> {
-    remotes
-        .iter()
-        .filter_map(|remote| {
-            upstream
-                .strip_prefix(&remote.name)?
-                .strip_prefix('/')
-                .map(|branch| (remote.name.as_str(), branch))
-        })
-        .max_by_key(|(remote, _)| remote.len())
-}
-
-/// `push <remote> <ここ>` に載せる ref。
-///
-/// **名前が違うときは `<local>:<remote>` を渡す。** `push <remote> <local>` が動かすのは
-/// remote 側の**同名**の ref なので、`x` が `origin/y` を追跡している状態では
+/// **名前が違うときは `<local>:<remote 側>` を渡す。** `push <remote> <local>` が動かすのは
+/// remote 側の**同名**の ref なので、`x` が `refs/heads/y` を追跡している状態では
 /// `origin/x` を新しく作ってしまう（git の `push.default = simple` がこの形を断るのも
 /// 同じ理由）。ブランチ名に `:` は使えないので、普通の名前と読み違えられる余地は無い。
-fn push_refspec(local: &str, remote_branch: &str) -> String {
-    if local == remote_branch {
-        local.to_string()
-    } else {
-        format!("{local}:{remote_branch}")
+///
+/// **`refs/heads/` の下に無い `merge` は完全な ref のまま渡す。** 短縮できない名前を
+/// 短縮したことにすると、別の ref を動かす。`git push <remote> <local>:refs/…` は
+/// そのまま通る形式。
+fn push_refspec(local: &str, merge: &str) -> String {
+    match merge.strip_prefix("refs/heads/") {
+        Some(short) if short == local => local.to_string(),
+        Some(short) => format!("{local}:{short}"),
+        None => format!("{local}:{merge}"),
     }
 }
 
@@ -1701,11 +1696,13 @@ mod tests {
     };
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
-    use crate::git_read::{Commit, HeadInfo, Hunk, LineOrigin, RefIndex, RefLabel, Remote};
+    use crate::git_read::{
+        Commit, HeadInfo, Hunk, LineOrigin, RefIndex, RefLabel, Remote, UpstreamConfig,
+    };
     use crate::graph::LaneState;
     use crate::test_util::{
         fake_branch, fake_commit, fake_commit_with_parents, fake_detail, fake_entry,
-        fake_file_diff, fake_hunk, fake_oid, fake_snapshot,
+        fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot,
     };
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
@@ -2739,261 +2736,249 @@ mod tests {
         assert_eq!(state.modal, None);
     }
 
-    /// リモートを登録した状態。ブランチは名前 / HEAD / upstream の 3 つ組で渡す。
-    fn state_with_remotes(remotes: &[&str], branches: &[(&str, bool, Option<&str>)]) -> AppState {
+    /// `set_upstream` 付きの非 force な push。
+    fn push_op(remote: &str, branch: &str, set_upstream: bool) -> GitOp {
+        GitOp::Push {
+            remote: remote.to_string(),
+            branch: branch.to_string(),
+            set_upstream,
+            force: false,
+            expected: None,
+        }
+    }
+
+    /// `origin main` への force push。`Reload::after` の腕を踏むためだけに使う。
+    fn forced_push_op() -> GitOp {
+        GitOp::Push {
+            remote: "origin".to_string(),
+            branch: "main".to_string(),
+            set_upstream: false,
+            force: true,
+            expected: None,
+        }
+    }
+
+    /// リモートを登録する。`RepoInfo` は `RepoInfoLoaded` で入る値なので直に置く。
+    fn with_remotes(state: &mut AppState, names: &[&str]) {
+        state.repo.remotes = names.iter().copied().map(fake_remote).collect();
+    }
+
+    /// 追跡設定を持つブランチ。`merge` は `branch.<name>.merge`（完全な ref）。
+    fn tracking_branch(name: &str, remote: &str, merge: &str) -> Branch {
+        Branch {
+            upstream_config: Some(UpstreamConfig {
+                remote: remote.to_string(),
+                merge: merge.to_string(),
+            }),
+            ..fake_branch(name, true)
+        }
+    }
+
+    /// 一覧が届いていて、HEAD が `head` の状態。
+    fn state_for_push(remotes: &[&str], head: Branch) -> AppState {
         let mut state = state_with_commits(2);
-        state.repo.remotes = remotes
-            .iter()
-            .map(|name| Remote {
-                name: (*name).to_string(),
-                url: format!("ssh://git@example.invalid/{name}.git"),
-            })
-            .collect();
-        let list = branches
-            .iter()
-            .map(|(name, is_head, upstream)| Branch {
-                upstream: upstream.map(str::to_string),
-                ..fake_branch(name, *is_head)
-            })
-            .collect();
-        let _ = with_branches(&mut state, Ok(list));
+        with_remotes(&mut state, remotes);
+        let _ = with_branches(&mut state, Ok(vec![head]));
         state
     }
 
-    /// 直近の通知の文言。1 件も無ければ落とす。
-    fn last_notice(state: &AppState) -> &str {
-        let notice = state.notices.back().expect("通知が出ていません");
-        &notice.message
-    }
-
-    #[test]
-    fn f_fetches_without_naming_a_remote() {
-        // **リモートを選ばない**（01 の「リモート操作」）。1 本ならその名前が
-        // `origin` でなくても git がそれを使う。`--prune` も付けない。
-        let mut state = state_with_remotes(&["upstream"], &[("main", true, None)]);
-
-        assert_eq!(
-            press(&mut state, 'f'),
-            Cmd::Exec(GitOp::Fetch {
-                remote: None,
-                prune: false,
-            })
-        );
-    }
-
-    #[test]
-    fn p_pulls_fast_forward_only() {
-        // MVP にコンフリクト解消ビューが無いので、衝突すると mewgit の中では
-        // 抜けられない（01）。
-        let mut state = state_with_remotes(&["origin"], &[("main", true, Some("origin/main"))]);
-
-        assert_eq!(
-            press(&mut state, 'p'),
-            Cmd::Exec(GitOp::Pull {
-                mode: PullMode::FastForwardOnly,
-            })
-        );
+    /// 開いている確認モーダルの本文と `on_yes`。開いていなければ落とす。
+    fn open_confirm(state: &AppState) -> (&str, &Cmd) {
+        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
+            panic!("確認モーダルが開いていません: {:?}", state.modal);
+        };
+        (body, on_yes)
     }
 
     #[test]
     fn the_remote_keys_work_from_every_pane() {
         // **共通キー**（07 のキー表）。フォーカスの `match` より先に見ないと、
         // あとから足したペインで押せなくなる。
-        for pane in [Pane::Graph, Pane::Worktree, Pane::Branches] {
-            let mut state = state_with_remotes(&["origin"], &[("main", true, None)]);
-            state.focus = pane;
-
-            assert_eq!(
-                press(&mut state, 'f'),
+        //
+        // fetch と pull はリモートを選ばず、`--prune` も付けない（01）。
+        let expected = [
+            (
+                'f',
                 Cmd::Exec(GitOp::Fetch {
                     remote: None,
                     prune: false,
                 }),
-                "{pane:?} で f が効いていません"
-            );
+            ),
+            (
+                'p',
+                Cmd::Exec(GitOp::Pull {
+                    mode: PullMode::FastForwardOnly,
+                }),
+            ),
+            ('P', Cmd::Exec(push_op("origin", "main", false))),
+        ];
+
+        for pane in [Pane::Graph, Pane::Worktree, Pane::Branches] {
+            for (key, want) in &expected {
+                // **キーごとに状態を作り直す。** 1 つの状態で続けて押すと、先に出た
+                // `Cmd::Exec` のジョブが走ったままになり、`AppState::issue` が
+                // 2 つ目を黙って落とす（見張りが 2 本死ぬ）。
+                let mut state =
+                    state_for_push(&["origin"], tracking_branch("main", "origin", HEADS_MAIN));
+                state.focus = pane;
+
+                assert_eq!(
+                    &press(&mut state, *key),
+                    want,
+                    "{pane:?} で {key} が効いていません"
+                );
+            }
         }
     }
 
     #[test]
-    fn shift_p_pushes_to_the_upstream_without_asking() {
-        // 行き先はユーザーが設定したもので、推測していない。
-        let mut state = state_with_remotes(
+    fn a_modifier_keeps_the_remote_keys_from_firing() {
+        // **`Ctrl-f` で fetch が走らない。** この段は全ペインを覆うので、`key.code()`
+        // で見ると 07 が移動に予約している `Ctrl-d` / `Ctrl-u` の隣で修飾付きを食う。
+        let mut state = state_for_push(&["origin"], tracking_branch("main", "origin", HEADS_MAIN));
+
+        for c in ['f', 'p', 'P'] {
+            let cmd = update(&mut state, Msg::Key(Key::ctrl(c)));
+            assert_eq!(cmd, Cmd::None, "Ctrl-{c} が効いてしまいました");
+        }
+        assert_eq!(state.modal, None);
+    }
+
+    /// `branch.<name>.merge` の既定の形。
+    const HEADS_MAIN: &str = "refs/heads/main";
+
+    #[test]
+    fn shift_p_pushes_to_the_tracking_config_without_asking() {
+        // 行き先はユーザーが書いたもので、推測していない。
+        let mut state = state_for_push(
             &["origin", "upstream"],
-            &[("main", true, Some("origin/main"))],
+            tracking_branch("main", "origin", HEADS_MAIN),
         );
 
         let cmd = press(&mut state, 'P');
 
-        assert_eq!(
-            cmd,
-            Cmd::Exec(GitOp::Push {
-                remote: "origin".to_string(),
-                branch: "main".to_string(),
-                set_upstream: false,
-                force: false,
-                expected: None,
-            })
-        );
+        assert_eq!(cmd, Cmd::Exec(push_op("origin", "main", false)));
         assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn a_pruned_tracking_ref_still_pushes_to_the_configured_upstream() {
+        // **`upstream`（短縮名）で決めていると、ここで `-u` の提案に落ちる**。
+        // `fetch --prune` のあとに `P` を押しただけで追跡先が別のリモートへ
+        // 向け替わる（02 の「ブランチ一覧」が数えている `None` の 4 つ目）。
+        let mut state = state_for_push(
+            &["origin", "fork"],
+            Branch {
+                upstream: None,
+                ..tracking_branch("main", "fork", HEADS_MAIN)
+            },
+        );
+
+        let cmd = press(&mut state, 'P');
+
+        assert_eq!(cmd, Cmd::Exec(push_op("fork", "main", false)));
+        assert_eq!(state.modal, None, "追跡設定があるのに提案しています");
     }
 
     #[test]
     fn a_differently_named_upstream_is_pushed_as_a_refspec() {
         // `push origin topic` が動かすのは `origin/topic`。**追跡先が
-        // `origin/other` なら、それは別のブランチを新しく作る**（01）。
-        let mut state = state_with_remotes(&["origin"], &[("topic", true, Some("origin/other"))]);
-
-        let cmd = press(&mut state, 'P');
+        // `refs/heads/other` なら、それは別のブランチを新しく作る**（01）。
+        let mut state = state_for_push(
+            &["origin"],
+            tracking_branch("topic", "origin", "refs/heads/other"),
+        );
 
         assert_eq!(
-            cmd,
-            Cmd::Exec(GitOp::Push {
-                remote: "origin".to_string(),
-                branch: "topic:other".to_string(),
-                set_upstream: false,
-                force: false,
-                expected: None,
-            })
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "topic:other", false))
         );
     }
 
     #[test]
-    fn a_remote_name_with_a_slash_is_split_at_the_longest_match() {
-        // 最初の `/` で切ると `gh` へ push することになる。
-        let mut state =
-            state_with_remotes(&["gh", "gh/fork"], &[("main", true, Some("gh/fork/main"))]);
-
-        let cmd = press(&mut state, 'P');
+    fn a_merge_ref_outside_refs_heads_is_passed_whole() {
+        // 短縮できない名前を短縮したことにすると、別の ref を動かす。
+        let mut state = state_for_push(
+            &["origin"],
+            tracking_branch("topic", "origin", "refs/for/main"),
+        );
 
         assert_eq!(
-            cmd,
-            Cmd::Exec(GitOp::Push {
-                remote: "gh/fork".to_string(),
-                branch: "main".to_string(),
-                set_upstream: false,
-                force: false,
-                expected: None,
-            })
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "topic:refs/for/main", false))
         );
     }
 
     #[test]
-    fn a_vanished_upstream_remote_is_refused() {
-        let mut state = state_with_remotes(&["origin"], &[("main", true, Some("gone/main"))]);
-
-        assert_eq!(press(&mut state, 'P'), Cmd::None);
-        assert_eq!(state.modal, None);
-        assert!(
-            last_notice(&state).contains("gone/main"),
-            "{}",
-            last_notice(&state)
-        );
-    }
-
-    #[test]
-    fn a_branch_without_an_upstream_proposes_set_upstream() {
+    fn a_branch_without_a_tracking_config_proposes_set_upstream() {
         // **行き先を推測しているのはこの経路だけ**なので、確認モーダルに出す（01）。
-        let mut state = state_with_remotes(&["upstream"], &[("topic", true, None)]);
+        let mut state = state_for_push(&["upstream"], fake_branch("topic", true));
 
         let cmd = press(&mut state, 'P');
 
         assert_eq!(cmd, Cmd::None, "確認より先に git を走らせています");
-        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
-            panic!("確認モーダルが開いていません: {:?}", state.modal);
-        };
+        let (body, on_yes) = open_confirm(&state);
         // 行き先が本文に出ていないと、推測を見せた意味が無い。
         assert!(
             body.contains("topic") && body.contains("upstream"),
             "{body}"
         );
-        assert_eq!(
-            *on_yes,
-            Cmd::Exec(GitOp::Push {
-                remote: "upstream".to_string(),
-                branch: "topic".to_string(),
-                set_upstream: true,
-                force: false,
-                expected: None,
-            })
-        );
+        assert_eq!(*on_yes, Cmd::Exec(push_op("upstream", "topic", true)));
     }
 
     #[test]
     fn several_remotes_fall_back_to_origin() {
-        let mut state = state_with_remotes(&["fork", "origin"], &[("topic", true, None)]);
+        let mut state = state_for_push(&["fork", "origin"], fake_branch("topic", true));
 
         let _ = press(&mut state, 'P');
 
-        let Some(Modal::Confirm { on_yes, .. }) = &state.modal else {
-            panic!("確認モーダルが開いていません: {:?}", state.modal);
-        };
-        assert_eq!(
-            *on_yes,
-            Cmd::Exec(GitOp::Push {
-                remote: "origin".to_string(),
-                branch: "topic".to_string(),
-                set_upstream: true,
-                force: false,
-                expected: None,
-            })
-        );
+        let (_, on_yes) = open_confirm(&state);
+        assert_eq!(*on_yes, Cmd::Exec(push_op("origin", "topic", true)));
     }
 
-    #[test]
-    fn several_remotes_without_origin_are_refused() {
-        // 適当に選ぶと、fork 運用のリポジトリで他人のリポジトリへ push する形になる。
-        let mut state = state_with_remotes(&["fork", "upstream"], &[("topic", true, None)]);
-
-        assert_eq!(press(&mut state, 'P'), Cmd::None);
-        assert_eq!(state.modal, None);
-        let notice = last_notice(&state);
-        assert!(
-            notice.contains("fork") && notice.contains("upstream"),
-            "{notice}"
-        );
-    }
-
-    #[test]
-    fn pushing_without_any_remote_is_refused() {
-        let mut state = state_with_remotes(&[], &[("topic", true, None)]);
-
-        assert_eq!(press(&mut state, 'P'), Cmd::None);
-        assert_eq!(state.modal, None);
-        assert!(
-            last_notice(&state).contains("リモート"),
-            "{}",
-            last_notice(&state)
-        );
-    }
-
-    #[test]
-    fn pushing_a_detached_head_is_refused() {
-        // 一覧は届いているが、どの行にも印が付いていない（detached / unborn）。
-        let mut state = state_with_remotes(&["origin"], &[("main", false, Some("origin/main"))]);
-
-        assert_eq!(press(&mut state, 'P'), Cmd::None);
-        assert!(
-            last_notice(&state).contains("HEAD"),
-            "{}",
-            last_notice(&state)
-        );
-    }
-
-    #[test]
-    fn pushing_before_the_branch_list_arrives_is_refused() {
-        // **空の `Vec` からは detached と「まだ届いていない」を区別できない。**
-        // `load` を 3 状態にしてあるのはこのため（01 の「ブランチ一覧」）。
+    /// `push_plan` が断った理由。断る腕は 4 つあるので、キーを押す形ではなく
+    /// 純粋関数を直に呼ぶ（`Refused` を返した理由がそのまま読める）。
+    fn refusal(remotes: &[&str], branches: Option<Vec<Branch>>) -> String {
         let mut state = state_with_commits(2);
-        state.repo.remotes = vec![Remote {
-            name: "origin".to_string(),
-            url: "ssh://git@example.invalid/a.git".to_string(),
-        }];
-        assert_eq!(state.branches.load(), BranchLoad::Pending);
+        with_remotes(&mut state, remotes);
+        if let Some(branches) = branches {
+            let _ = with_branches(&mut state, Ok(branches));
+        }
+        match push_plan(&state.branches, &state.repo.remotes) {
+            PushPlan::Refused(message) => message,
+            other => panic!("断られていません: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_is_refused_when_the_destination_cannot_be_named() {
+        // **一覧が届く前**。空の `Vec` からは detached と区別できないので `load` を見る
+        // （01 の「ブランチ一覧」）。
+        assert!(refusal(&["origin"], None).contains("読めていません"));
+        // **detached / unborn**。一覧は届いているが、どの行にも印が付いていない。
+        assert!(refusal(&["origin"], Some(vec![fake_branch("main", false)])).contains("HEAD"));
+        // **リモートが 1 本も無い。**
+        let none = refusal(&[], Some(vec![fake_branch("topic", true)]));
+        assert!(none.contains("リモート"), "{none}");
+        // **複数あって origin が無い。** 適当に選ぶと、fork 運用のリポジトリで
+        // 他人のリポジトリへ push する形になる。名前を出して選ばせる。
+        let many = refusal(
+            &["fork", "upstream"],
+            Some(vec![fake_branch("topic", true)]),
+        );
+        assert!(many.contains("fork") && many.contains("upstream"), "{many}");
+    }
+
+    #[test]
+    fn a_refused_push_opens_no_modal_and_warns() {
+        let mut state = state_for_push(&[], fake_branch("topic", true));
 
         assert_eq!(press(&mut state, 'P'), Cmd::None);
         assert_eq!(state.modal, None);
-        let notice = last_notice(&state);
-        assert!(notice.contains("読めていません"), "{notice}");
+        assert_eq!(
+            state.notices.back().map(|notice| notice.level),
+            Some(NoticeLevel::Warn)
+        );
     }
 
     #[test]
@@ -5038,9 +5023,12 @@ feat/b
             Reload::after(&GitOp::Switch("main".into()), true),
             Reload::Refs
         );
-        assert_eq!(Reload::after(&push(false), true), Reload::Refs);
+        assert_eq!(
+            Reload::after(&push_op("origin", "main", false), true),
+            Reload::Refs
+        );
         // force push は `origin/x` が巻き戻り、そこからしか辿れないコミットが落ちる。
-        assert_eq!(Reload::after(&push(true), true), Reload::RefsAndLog);
+        assert_eq!(Reload::after(&forced_push_op(), true), Reload::RefsAndLog);
 
         assert_eq!(
             Reload::after(&GitOp::Stage(vec!["a.txt".into()]), true),
@@ -5065,7 +5053,7 @@ feat/b
         // 読み直しは `GraphState::restart` でカーソルとスクロールを先頭に戻す。
         // 1 回で決まる操作は、失敗したなら ref が動いていないので位置を捨てない。
         assert_eq!(Reload::after(&commit_op(), false), Reload::Refs);
-        assert_eq!(Reload::after(&push(true), false), Reload::Refs);
+        assert_eq!(Reload::after(&forced_push_op(), false), Reload::Refs);
 
         // fetch / pull は一部の ref だけ更新して落ちうるし、rebase 系は途中で止まる。
         assert_eq!(
@@ -5086,16 +5074,6 @@ feat/b
             Reload::after(&GitOp::RebaseAbort, false),
             Reload::RefsAndLog
         );
-    }
-
-    fn push(force: bool) -> GitOp {
-        GitOp::Push {
-            remote: "origin".into(),
-            branch: "main".into(),
-            set_upstream: false,
-            force,
-            expected: None,
-        }
     }
 
     #[test]

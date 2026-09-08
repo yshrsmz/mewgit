@@ -2,7 +2,9 @@
 
 use std::fs;
 
-use mewgit_core::git_read::{GitReadError, HeadInfo, LogPage, Oid, RefLabel, RepoReader};
+use mewgit_core::git_read::{
+    GitReadError, HeadInfo, LogPage, Oid, RefLabel, RepoReader, UpstreamConfig,
+};
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
 #[test]
@@ -745,6 +747,14 @@ fn branches_reports_the_upstream_and_how_far_it_diverged() {
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     assert_eq!(main.upstream.as_deref(), Some("origin/main"));
     assert_eq!((main.ahead, main.behind), (2, 0));
+    // push の行き先は短縮名ではなく設定から取る（02）。
+    assert_eq!(
+        main.upstream_config,
+        Some(UpstreamConfig {
+            remote: "origin".to_string(),
+            merge: "refs/heads/main".to_string(),
+        })
+    );
 }
 
 #[test]
@@ -764,6 +774,45 @@ fn branches_keeps_a_branch_whose_upstream_ref_is_gone() {
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     assert_eq!(main.upstream, None);
     assert_eq!((main.ahead, main.behind), (0, 0));
+    // **追跡設定のほうは残る。** ここが `None` に落ちると、`fetch --prune` のあとに
+    // `P` を押しただけで「追跡先が無い」と読まれ、別のリモートへ向け替わる（02）。
+    assert_eq!(
+        main.upstream_config,
+        Some(UpstreamConfig {
+            remote: "origin".to_string(),
+            merge: "refs/heads/main".to_string(),
+        })
+    );
+}
+
+#[test]
+fn branches_has_no_upstream_config_when_nothing_is_configured() {
+    // `branch.<name>.remote` も `.merge` も無い。`-u` を提案してよいのはここだけ。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let branches = reader.branches().unwrap();
+
+    let main = branches.iter().find(|b| b.name == "main").unwrap();
+    assert_eq!(main.upstream_config, None);
+}
+
+#[test]
+fn branches_needs_both_halves_of_the_tracking_config() {
+    // 片方だけ書かれた設定から push の行き先は決まらない。組み合わせを呼び出し側に
+    // 数えさせないよう、揃っていなければ `None`（02）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+    repo.git(&["config", "branch.main.remote", "origin"]);
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let branches = reader.branches().unwrap();
+
+    let main = branches.iter().find(|b| b.name == "main").unwrap();
+    assert_eq!(main.upstream_config, None);
 }
 
 #[test]

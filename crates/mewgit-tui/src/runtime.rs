@@ -72,9 +72,7 @@ where
     let mut tick = tokio::time::interval(TICK);
     // `git_bin` は設定から渡す（03 の「Runner」）。cwd はワークツリーのルートで、
     // 引数に渡されたサブディレクトリではない（02 の `workdir`）。
-    // ssh のパスフレーズ待ちで画面ごと固まらないよう、git が使う ssh に
-    // `-o BatchMode=yes` を重ねる（03 の「BatchMode の重ね方」）。環境変数を読むのは
-    // `effective_ssh_from_env` の中だけ。
+    // 実効 ssh は `Runner` が受け取る（03 の「BatchMode の重ね方」）。
     let runner = Runner::new(
         state.repo.path.clone(),
         &state.config.general.git_bin,
@@ -322,7 +320,6 @@ mod tests {
     use super::*;
     use futures::stream;
     use mewgit_core::app::{Pane, TermSize};
-    use mewgit_core::auth::ssh::SshCommand;
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::HeadInfo;
     use mewgit_core::test_util::{BareRepo, TestRepo};
@@ -340,9 +337,7 @@ mod tests {
         repo: &TestRepo,
         reader: ReaderHandle,
     ) -> (Runtime, mpsc::UnboundedReceiver<Msg>) {
-        let runner = Runner::new(repo.path(), "git", SshCommand::Shell("ssh".to_string()))
-            .with_env(repo.runner_env());
-        Runtime::new(reader, runner)
+        Runtime::new(reader, repo.runner())
     }
 
     fn key(code: KeyCode) -> std::io::Result<Event> {

@@ -62,6 +62,19 @@ impl RepoReader {
         &self.workdir
     }
 
+    /// `core.sshCommand` の値。設定されていなければ `None`。
+    ///
+    /// **読むのは起動時の 1 回だけ。** `Runner` がここから受けた値に
+    /// `-o BatchMode=yes` を重ねる（03 の「BatchMode の重ね方」）。実行のたびに
+    /// 読み直さないので、mewgit を起動したまま設定を変えても効かない。
+    ///
+    /// **`Err` を返さない。** config を読めないのは「設定されていない」と区別しても
+    /// 呼び出し側の分岐が同じ（既定の `ssh` を使う）で、起動を止める理由にはならない。
+    pub fn ssh_command(&self) -> Option<String> {
+        let config = self.repo.config().ok()?;
+        config.get_string("core.sshCommand").ok()
+    }
+
     /// リモート一覧。`url` は `.git/config` の生の値で、host / owner / repo の解析は
     /// `auth` の担当（00 の依存の向き）。
     pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError> {

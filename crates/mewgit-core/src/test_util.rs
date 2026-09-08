@@ -39,6 +39,7 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
+use crate::auth::ssh::SshCommand;
 use crate::git_exec::Runner;
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
@@ -199,7 +200,8 @@ impl TestRepo {
     /// **統合テストごとに書かない。** テストバイナリは別々にコンパイルされるので、
     /// 各 `tests/*.rs` に置くとファイルを足すたびにコピーが増える。
     pub fn runner(&self) -> Runner {
-        Runner::new(self.path(), "git").with_env(self.runner_env())
+        Runner::new(self.path(), "git", SshCommand::Shell("ssh".to_string()))
+            .with_env(self.runner_env())
     }
 
     /// `git` を実行し、成功したかどうかだけを返す。失敗しても panic しない。

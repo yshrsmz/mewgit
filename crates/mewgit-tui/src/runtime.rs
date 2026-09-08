@@ -10,6 +10,7 @@ use mewgit_core::app::{
     init, update, AppState, Cmd, ExecDone, JobKind, Msg, NoticeLevel, RepoInfo, RepoSnapshot,
     TermSize,
 };
+use mewgit_core::auth::ssh::effective_ssh_from_env;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
 use mewgit_core::git_read::{GitReadError, ReaderHandle};
@@ -71,7 +72,14 @@ where
     let mut tick = tokio::time::interval(TICK);
     // `git_bin` は設定から渡す（03 の「Runner」）。cwd はワークツリーのルートで、
     // 引数に渡されたサブディレクトリではない（02 の `workdir`）。
-    let runner = Runner::new(state.repo.path.clone(), &state.config.general.git_bin);
+    // ssh のパスフレーズ待ちで画面ごと固まらないよう、git が使う ssh に
+    // `-o BatchMode=yes` を重ねる（03 の「BatchMode の重ね方」）。環境変数を読むのは
+    // `effective_ssh_from_env` の中だけ。
+    let runner = Runner::new(
+        state.repo.path.clone(),
+        &state.config.general.git_bin,
+        effective_ssh_from_env(reader.ssh_command()),
+    );
     let (runtime, mut msgs) = Runtime::new(reader, runner);
 
     // 起動時の読み込み。ループの前に 1 回だけ。**サイズを入れるより先に出す。**
@@ -314,6 +322,7 @@ mod tests {
     use super::*;
     use futures::stream;
     use mewgit_core::app::{Pane, TermSize};
+    use mewgit_core::auth::ssh::SshCommand;
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::HeadInfo;
     use mewgit_core::test_util::{BareRepo, TestRepo};
@@ -331,7 +340,8 @@ mod tests {
         repo: &TestRepo,
         reader: ReaderHandle,
     ) -> (Runtime, mpsc::UnboundedReceiver<Msg>) {
-        let runner = Runner::new(repo.path(), "git").with_env(repo.runner_env());
+        let runner = Runner::new(repo.path(), "git", SshCommand::Shell("ssh".to_string()))
+            .with_env(repo.runner_env());
         Runtime::new(reader, runner)
     }
 

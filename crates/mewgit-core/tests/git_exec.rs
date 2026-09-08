@@ -7,6 +7,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use mewgit_core::auth::ssh::SshCommand;
 use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, Runner};
 use mewgit_core::git_read::Oid;
 use mewgit_core::test_util::{BareRepo, TestRepo};
@@ -53,6 +54,32 @@ fn someone_else_pushes(remote: &BareRepo) -> Oid {
     theirs.commit_file("theirs.txt", "theirs");
     theirs.git(&["push", "-q", "origin", "main"]);
     theirs.head_oid()
+}
+
+/// ダンプ用スクリプトに渡しておく印。ユーザーの指定した引数の代わり。
+const SSH_MARKER: &str = "--mewgit-marker";
+
+/// ssh の代わりに走らせて argv を書き出すスクリプトを置き、その `core.sshCommand`
+/// 相当の文字列と、書き出し先のパスを返す。
+///
+/// `Runner` が実効 ssh の後ろに `-o BatchMode=yes` を足すので、**ここに書いた
+/// スクリプト自身が argv に残っているか**も一緒に見られる（重ねたのか差し替えたのか）。
+fn ssh_dump(repo: &TestRepo) -> (String, PathBuf) {
+    let script = repo.path().join("dump-ssh.sh");
+    let log = repo.path().join("ssh-argv.txt");
+    // 1 行ずつ書くのは、引数の区切りを空白と区別するため。
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> {}; done\nexit 1\n",
+            log.display()
+        ),
+    )
+    .expect("スクリプトを書けませんでした");
+    // **引数を 1 つ足しておく。** 実効 ssh を捨てて `ssh -o BatchMode=yes` を素で
+    // 置く実装ではこのスクリプト自体が起動されず、重ねる順序が逆の実装では
+    // この印より前に `-o` が並ぶ。
+    (format!("sh {} {SSH_MARKER}", script.display()), log)
 }
 
 /// `git` が非 0 で終わったときの分類。それ以外の失敗なら panic する。
@@ -432,6 +459,49 @@ async fn a_conflicting_cherry_pick_is_classified_as_conflict() {
 }
 
 #[tokio::test]
+async fn batch_mode_is_layered_onto_the_user_ssh_command() {
+    // **`GIT_TERMINAL_PROMPT=0` は ssh に効かない**ので、agent に載っていない鍵だと
+    // raw mode の画面ごと止まる。`-o BatchMode=yes` で即失敗させる（03 の
+    // 「BatchMode の重ね方」）。見るのは 2 つ — オプションが ssh まで届いているか、
+    // **ユーザーの設定を捨てずに重ねているか**。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let (ssh_command, log) = ssh_dump(&repo);
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        "ssh://git@example.invalid/a/b.git",
+    ]);
+
+    let runner = Runner::new(repo.path(), "git", SshCommand::Shell(ssh_command.clone()))
+        .with_env(repo.runner_env());
+    let err = runner
+        .run(&GitOp::Fetch {
+            remote: Some("origin".into()),
+            prune: false,
+        })
+        .await
+        .expect_err("ダンプ用のスクリプトは git の通信を通さない");
+    assert!(
+        matches!(err, ExecError::Failed { .. }),
+        "git は走っているはず: {err:?}"
+    );
+
+    // 1 行 1 引数で書き出してある。空白を含む引数と区別するため。
+    let dumped = fs::read_to_string(&log).expect("ssh が起動していません");
+    let args: Vec<&str> = dumped.lines().collect();
+    // **印 → `-o BatchMode=yes` の順**。ユーザーの引数を消していないことと、
+    // 重ねているのが後ろであることを 1 つで見る。後ろでなければ、ユーザーが
+    // 書いた `BatchMode=no` を黙って上書きする側になる（ssh は先に現れた値を採る）。
+    assert_eq!(
+        args.iter().take(3).copied().collect::<Vec<_>>(),
+        vec![SSH_MARKER, "-o", "BatchMode=yes"],
+        "ssh に渡った argv: {args:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_rejected_push_is_classified_as_non_fast_forward() {
     let remote = BareRepo::init();
     let repo = clone_of(&remote);
@@ -573,11 +643,15 @@ async fn the_configured_git_binary_is_the_one_that_runs() {
     let repo = TestRepo::init();
     repo.commit("first");
 
-    let err = Runner::new(repo.path(), repo.path().join("no-such-git"))
-        .with_env(repo.runner_env())
-        .run(&GitOp::Switch("main".into()))
-        .await
-        .expect_err("起動できないはずです");
+    let err = Runner::new(
+        repo.path(),
+        repo.path().join("no-such-git"),
+        SshCommand::Shell("ssh".to_string()),
+    )
+    .with_env(repo.runner_env())
+    .run(&GitOp::Switch("main".into()))
+    .await
+    .expect_err("起動できないはずです");
 
     let ExecError::NoResult { reason, .. } = &err else {
         panic!("git が走ってしまった: {err:?}");

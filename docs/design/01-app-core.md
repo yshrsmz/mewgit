@@ -839,6 +839,69 @@ pub struct BranchState {
   （上の `update::Reload`）、カーソルを HEAD に戻すだけだと、別のブランチを見ながら
   commit した人のカーソルが毎回飛ぶ
 
+## リモート操作（fetch / pull / push）
+
+`f` / `p` / `P` はペインに依らない共通キー（07 のキー表）。`update_key` では
+フォーカスの `match` **より先に**見る。`Tab` と同じ位置で、ペインごとの腕に書くと
+あとから足したペインで押せなくなる。
+
+| キー | 出す `GitOp` |
+|---|---|
+| `f` | `Fetch { remote: None, prune: false }` |
+| `p` | `Pull { mode: FastForwardOnly }` |
+| `P` | `Push { .. }`（下の「push の行き先」） |
+
+- **fetch と pull はリモートを選ばない。** `remote: None` で git に決めさせる。
+  リモートが 1 本ならその名前が `origin` でなくてもそれを使い、複数あれば
+  `remote.pushDefault` / `branch.<name>.remote` / `origin` の順で選ぶ（git 2.55 で確認）。
+  こちらで選び直すと、config を読まないまま git の規則を写した 2 本目の実装になる
+- **pull は `--ff-only`。** MVP にコンフリクト解消ビューが無い（requirements）ので、
+  merge / rebase が衝突すると mewgit の中では抜けられない。`--ff-only` は早送りできな
+  ければ何も変えずに終わる。モードを選ばせるのは continue / abort が揃う M5
+- **prune は付けない。** 消えた remote-tracking ref を消す操作で、`f` が黙って ref を
+  消すのは「fetch は読むだけ」という期待と食い違う。出すなら M6 の設定から
+
+### push の行き先
+
+`git push`（引数なし）ではなく `<remote> <branch>` を明示する。force push が
+`--force-with-lease=<branch>:<expected>` に remote 側の名前を要ることと、`-u` の提案が
+行き先を確認モーダルに出すためで、**どちらも「git が選んだもの」では文面を書けない**。
+
+決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る**
+（`RepoInfo.head` は起動時に読んだきりで古くなる。#22 の「キャッシュした状態から
+破壊的操作を選ばない」）。
+
+1. HEAD のブランチが無い（detached / unborn）→ 通知して何も出さない
+2. upstream があるなら `<remote>/<branch>` に分ける。分ける鍵は `RepoInfo.remotes` の
+   名前で、**最長一致**（リモート名にも `/` を入れられる）。どの名前でも始まらなければ
+   通知して断る（リモートが消えている）
+   - `set_upstream: false`。**確認モーダルは通さない。** 行き先はユーザーが設定した
+     ものなので、推測していない
+   - **ローカル名と upstream のブランチ名が違うときは `<local>:<remote>` を渡す。**
+     `push <remote> <local>` が動かすのは remote 側の**同名**の ref なので、`x` が
+     `origin/y` を追跡している状態では `origin/x` を新しく作ってしまう。git の
+     `push.default = simple`（既定）がこの形を断るのも同じ理由。ブランチ名に `:` は
+     使えないので、この形が普通のブランチ名と読み違えられる余地は無い
+3. upstream が無いなら `-u` を提案する。リモートは 1 本ならそれ、複数なら `origin`、
+   どちらでもなければ通知して断る。**`Modal::Confirm` に行き先を出してから実行する**
+   （不変ルール 5 が求める破壊的操作ではないが、行き先を推測しているのはこの経路だけ）
+
+**これは git の規則そのものではない。** git は `remote.pushDefault` と
+`branch.<name>.remote` も見るが、`update` は同期・純粋で config を読めない。
+**上流と同じ判断だとは書かない**（CLAUDE.md）。食い違ったときに黙って別のリモートへ
+push しないよう、推測した経路にだけ確認モーダルを置いている。
+
+### force push
+
+**専用のキーは作らない**（07 のキー表に force push の行が無いのはそのため）。
+通常の `P` が `ExecErrorKind::NonFastForward` で断られたときだけ、次の `P` が確認モーダル
+経由の force push になる。`expected` にはそのとき画面に出した upstream の Oid を渡す
+（上の「確認モーダルを組む時点の値を `GitOp` に閉じ込める」）。
+
+**この経路は次のタスク**（plan.md の M3 2 本目）。`git_read::Branch` は upstream の
+**名前**しか持たず、lease に渡す Oid が無い。読み取りを 1 つ足す変更なので、既にある
+`GitOp` を配線するだけの `f` / `p` / `P` とは別の PR にする。
+
 ## 実行中ジョブ
 
 `JobKind` は `Cmd` の変種と 1 対 1 なので、列挙を二重に持たず `Cmd` を単一の真実にする。

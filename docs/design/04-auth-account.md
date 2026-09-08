@@ -96,6 +96,21 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
 「危ない引数を渡していないか」ではなく「危ない解釈をされる余地があるか」で数える
 （`git branch --move` の `to` と同じ形）。
 
+### git が使う ssh と、ここで叩く ssh
+
+`resolve_ssh_host` は PATH の `ssh` を直に起動する。git のほうは
+`GIT_SSH_COMMAND` / `core.sshCommand` に従うので、そこを別の ssh（別の config を読むもの）に
+向けている環境では**解決と接続で食い違う**。
+
+**実効値を求める関数はここ（`auth::ssh`）に置く**（03 の「BatchMode の重ね方」）。
+`git_exec::Runner` はそれを使って `-o BatchMode=yes` を重ねる。`git_exec` から `auth` への
+依存は層の向きに沿う（00）。
+
+**`resolve_ssh_host` をその実効値に向けるのは M4。** いまこれを呼ぶ経路は無く
+（`RepoInfo.target` を埋めるのが下の `auth::resolve`）、実効値はシェル文字列なので
+`Command::new(ssh)` ではなく `sh -c` 経由の起動に変える必要がある。踏めない腕を
+先に入れず、`auth::resolve` を書くタスクで一緒に配線する。
+
 ### 既定リモートを決めるのは M4
 
 `RepoInfo.target` を埋めるには「どのリモートの URL を見るか」を決める必要があるが、

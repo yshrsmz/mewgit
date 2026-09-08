@@ -76,8 +76,14 @@
 - [x] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト。
       **どのリモートの URL を見るかは決めない**（`RepoInfo.target` を埋めるのは M4 の
       `auth::resolve`。04 の「既定リモートを決めるのは M4」）
-- [ ] fetch / pull / push の `GitOp`、`-u` 提案、force push 確認（`expected` の受け渡し）、
-      ssh のパスフレーズで固まる件の扱い（`BatchMode` と `core.sshCommand`。03 参照）
+- [ ] `f` / `p` / `P` の配線 — `GitOp::Fetch` / `Pull { FastForwardOnly }` / `Push` を
+      共通キーから出す。push の行き先の決定と `-u` 提案（`Modal::Confirm`）、
+      ssh のパスフレーズで固まる件（実効 ssh に `-o BatchMode=yes` を重ねる。03 の
+      「Runner」）。**`GitOp` と `to_command` は M2 の `git_exec` のタスクで済んでいる**
+      ので、ここで足すのは `app` の配線と `Runner` の環境変数だけ
+- [ ] force push — `P` が `NonFastForward` で断られたあとの再 `P` を確認モーダル経由の
+      force push にする。`git_read::Branch` に upstream の Oid を足し、
+      `--force-with-lease=<branch>:<expected>` に渡す（01 の「force push」）
 - [ ] `JobTracker` に世代を持たせ、`DiffState.freshness` と `WorktreeState.stale` と
       `GraphState.reload_pending` を畳む。fetch で ref が変わったあとのログの読み直しは
       M2 で入れた `Cmd::LoadLog { restart }` に乗せる（01 の「実行中ジョブ › 世代」）。
@@ -85,6 +91,14 @@
       分けるかはここで決める**
 - [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文
 - [ ] 実行中ジョブのスピナーとキャンセル
+
+fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取りを 1 つも足さず、
+既にある `GitOp` を `app` から出すだけで**画面から触れるものが増える**（`f` で
+`origin/x` のラベルと `↓n` が動く）。2 本目は `git_read::Branch` に upstream の Oid を
+足す新しい読み取りと、`NonFastForward` を憶える状態が要る。**BatchMode は 1 本目に
+入れる** — `f` を配線した時点でパスフレーズ待ちの経路が UI から到達するので、
+分けると「fetch を押すと固まる」状態を一度出荷することになる（03 の「Runner」が
+「それまでこの経路は UI から到達しない」と書いていたのは、まさにここまでの話）。
 
 ## M4: GitHub 統合
 

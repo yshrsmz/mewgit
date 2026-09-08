@@ -550,9 +550,18 @@ fn push(state: &mut AppState) -> Cmd {
 
 /// 完了した push を憶えるか（01 の「force push」）。
 ///
-/// **憶えるのは非 force の拒否だけ。** lease が古いときの
-/// `! [rejected] ... (stale info)` も `rejected` を含むので `NonFastForward` に落ちる
-/// （git 2.55 で確認）。force の失敗で立て直すと、同じ古い lease で撃ち続ける輪になる。
+/// **憶えるのは、次を force に上げられる経路の拒否だけ**（`upgradable`）。上げられ
+/// ない経路で憶えても読む側が使えず、`push_plan` が「立っているのに何もできない」印を
+/// 持つことになる。上げられないのは 2 つ。
+///
+/// - force push（`lease: Some`）。lease が古いときの `! [rejected] ... (stale info)`
+///   も `rejected` を含むので `NonFastForward` に落ちる（git 2.55 で確認）。立て直すと
+///   同じ古い lease で撃ち続ける輪になる
+/// - `-u` の提案（`set_upstream: true`）。追跡 ref を持たないので lease の値を作れず、
+///   force に上げられるのは `PushPlan::Tracked` だけ（01 の「force push」）。**憶えると、
+///   あとから追跡設定が外で入ったときに、追跡していない push の拒否を根拠に force の腕が
+///   立つ**
+///
 /// **それ以外の Push の完了はすべて忘れる**（成功した push、非 FF 以外の失敗）。
 ///
 /// **憶えるのは押したブランチ**（`GitOp::Push` の `src`）で、いまの HEAD ではない。
@@ -566,9 +575,9 @@ fn push_rejection(
     state: &AppState,
     result: &Result<ExecOutput, ExecError>,
     src: &str,
-    forced: bool,
+    upgradable: bool,
 ) -> Option<PushRejection> {
-    if forced {
+    if !upgradable {
         return None;
     }
     match result {
@@ -604,15 +613,6 @@ enum PushPlan {
     Refused(String),
 }
 
-/// 追跡設定の無いブランチが非 FF で断られたときの結論（01 の「失敗の案内文」）。
-///
-/// **文言は 1 つ。** 断られた直後の案内と、そのあと `P` を押したときの断りは同じ
-/// ことを言うので、2 つのリテラルに割ると片方だけ古くなる。**mewgit の中で
-/// 抜けられない** —— force に上げられるのは `PushPlan::Tracked` だけ（lease の値が
-/// 無い）で、`p` も追跡設定が無いと git がどのブランチを取るか決められない。
-/// 残る出口は `r` で、改名すればリモートに同名の ref が無くなり `-u` の push が通る。
-const UNTRACKED_NON_FF: &str = "追跡先が無いため force push できません。r で改名して push できます";
-
 /// HEAD のブランチと登録済みのリモートから push の行き先を決める（01 の
 /// 「push の行き先」）。
 ///
@@ -641,20 +641,12 @@ fn push_plan(state: &AppState) -> PushPlan {
     // `fetch --prune` で ref が消えただけのブランチも `None` になる。そこで `-u` を
     // 提案すると、ユーザーが設定した追跡先を黙って別のリモートへ向け替える（02 の
     // 「ブランチ一覧」がこの `None` を数えている）。
-    // **断られた記憶は追跡設定より先に読む。** `-u` の提案から入った push も
-    // `push_rejected` を立てる（憶える側が見るのは `GitOp::Push` だけ）ので、ここで
-    // 読まないと**同じ失敗する push をもう一度提案する**ことになる。
-    let rejected = state
-        .push_rejected
-        .as_ref()
-        .is_some_and(|rejected| rejected.branch == head.name && rejected.oid == head.oid);
-
     let Some(config) = &head.upstream_config else {
-        // 追跡設定を持たないまま断られた形。force に上げる経路が無いので、失敗の
-        // 直後に出した案内と同じ結論をここでも返す（[`UNTRACKED_NON_FF`]）。
-        if rejected {
-            return PushPlan::Refused(UNTRACKED_NON_FF.to_string());
-        }
+        // **ここで記憶を読んで断らない。** 断ると `P` が `Push` を出さなくなり、
+        // 記憶を落とす経路（`exec_finished`）へ二度と入れない。リモート側の同名
+        // ブランチが外で消えても「force push できません」と言い続ける。**`P` は
+        // 押し直せる**ままにして、force に上げられない事実は失敗時の案内で伝える
+        // （01 の「失敗の案内文」）。
         return propose_upstream(&head.name, state);
     };
 
@@ -670,7 +662,10 @@ fn push_plan(state: &AppState) -> PushPlan {
 
     // **直前の `P` が断られたときだけ force に上げる**（01 の「force push」）。
     // 専用のキーを作らないのは、断られていない場面で押せる形にしないため（07）。
-    //
+    let rejected = state
+        .push_rejected
+        .as_ref()
+        .is_some_and(|rejected| rejected.branch == head.name && rejected.oid == head.oid);
     // **lease の値が無いなら force は撃たない。** 値の無い `--force-with-lease` は
     // remote-tracking ref と比べるだけで守りにならない（03）。`upstream_config` が
     // あってもここが `None` になるのは `fetch --prune` のあと（02）。**判定を
@@ -1738,8 +1733,15 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         state.push_notice(NoticeLevel::Error, message, Some(detail));
     }
 
-    if let GitOp::Push { src, lease, .. } = &done.op {
-        state.push_rejected = push_rejection(state, &done.result, src, lease.is_some());
+    if let GitOp::Push {
+        src,
+        lease,
+        set_upstream,
+        ..
+    } = &done.op
+    {
+        let upgradable = lease.is_none() && !set_upstream;
+        state.push_rejected = push_rejection(state, &done.result, src, upgradable);
     }
 
     let reload = Reload::after(&done.op, done.result.is_ok());
@@ -1934,14 +1936,23 @@ fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
     match op {
         // force push が lease に断られた形（`stale info`）。**これは守りが効いている**
         // ので、リモートの位置を見てから押し直す（01 の「force push」）。
+        // **`P` は 2 回。** force の失敗では記憶を落とす（同じ古い lease で撃ち続ける
+        // 輪を作らないため）ので、`f` のあと 1 回目の `P` は素の push になり、もう一度
+        // 非 FF で断られてから force の確認が出る。**「押し直して」と 1 回に読める形で
+        // 書くと、途中で出る別の案内と食い違う。**
         GitOp::Push { lease: Some(_), .. } => {
-            Some("リモートが動いています。f で取得してから P を押し直してください")
+            Some("リモートが動いています。f で取得してから P を 2 回押してください")
         }
-        // `-u` の提案から入った形。**次の `P` も同じ結論を返す**（`push_plan` が
-        // [`UNTRACKED_NON_FF`] で断る）ので、案内と押した結果が食い違わない。
+        // `-u` の提案から入った形。force に上げられるのは `PushPlan::Tracked` だけ
+        // （lease の値が無い）で、`p` も追跡設定が無いと git がどのブランチを取るか
+        // 決められない。**mewgit に残る出口は改名だけ。**
+        //
+        // **キーではなくペインの名前を出す。** `r` が効くのは Branches ペインの中
+        // だけで（07 のキー表）、既定のフォーカスである Graph で押しても何も
+        // 起きない。しかも `r` はカーソル行を改名するので、HEAD とは限らない。
         GitOp::Push {
             set_upstream: true, ..
-        } => Some(UNTRACKED_NON_FF),
+        } => Some("追跡先が無いため force push できません。Branches で改名してください"),
         // 追跡設定に沿った push。**次の `P` が force の確認を出すかは書かない** ——
         // それを決めるのは `push_plan`（`ahead == 0` と追跡 ref の有無で断る）で、
         // ここで先読みすると同じ判定が 2 箇所に割れる。断られても出るのは
@@ -3502,24 +3513,20 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_set_upstream_push_is_not_proposed_again() {
-        // **`-u` の push も `push_rejected` を立てる**（憶える側が見るのは
-        // `GitOp::Push` だけ）。読まないと、案内が「force push できません」と言った
-        // 1 キーあとに、同じ失敗する push をもう一度提案することになる。
+    fn a_rejected_set_upstream_push_is_not_remembered() {
+        // **force に上げられない経路の拒否は憶えない**（01 の「force push」）。憶えると
+        // 読む側が使えない印になり、あとから追跡設定が外で入ったときに、追跡して
+        // いない push の拒否を根拠に force の腕が立つ。
         let mut state = state_for_push(&["origin"], fake_branch("topic", true));
         reject_non_fast_forward(&mut state, push_op("origin", "topic", true));
 
-        assert_eq!(
-            press(&mut state, 'P'),
-            Cmd::None,
-            "同じ push を出しています"
-        );
-        assert_eq!(state.modal, None, "同じ確認をもう一度出しています");
-        // **失敗の直後に出した案内と同じ文言**（`UNTRACKED_NON_FF`）。
-        assert_eq!(
-            state.notices.back().map(|notice| notice.message.as_str()),
-            Some(UNTRACKED_NON_FF)
-        );
+        assert_eq!(state.push_rejected, None);
+        // **`P` は押し直せる。** ここで断ると `Push` が二度と出ず、記憶を落とす経路
+        // （`exec_finished`）へ入れなくなる —— リモート側の同名ブランチが外で消えても
+        // 断り続けることになる。
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        let (_, on_yes) = open_confirm(&state);
+        assert_eq!(*on_yes, Cmd::Exec(push_op("origin", "topic", true)));
     }
 
     #[test]
@@ -4098,12 +4105,12 @@ feat/b
             (
                 push_op("origin", "main", true),
                 ExecErrorKind::NonFastForward,
-                "r で改名して push できます",
+                "Branches で改名してください",
             ),
             (
                 forced_push_op(fake_oid(7)),
                 ExecErrorKind::NonFastForward,
-                "f で取得してから",
+                "f で取得してから P を 2 回",
             ),
             (
                 GitOp::Pull {

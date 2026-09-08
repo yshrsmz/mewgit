@@ -30,10 +30,10 @@
       `path` で絞った diff の rename（02）
 - [x] ハンク単位の stage / unstage / discard — `GitOp::DiscardHunk`、ハンク → パッチの
       組み立て（`git apply` への round-trip テスト）、`view` のキャッシュと
-      `Freshness`（01）
+      鮮度（01 の「diff のキャッシュと鮮度」）
 - [x] `Modal::CommitMessage` と commit / amend。`TextBuffer` の編集操作、Worktree の
       `c` / `C`、`GitOp::Commit` の配線。**commit したあとログを読み直す経路も
-      ここで入れる**（`Cmd::LoadLog { restart }` と `GraphState.reload_pending`。01 の
+      ここで入れる**（`Cmd::LoadLog { restart }` と、落とされたぶんの追いつき。01 の
       「ログの読み直し」）。無いと commit しても左のグラフが古い先頭のまま動かない
 - [x] コミット詳細を右ペインへ移す。**グラフ先頭の WIP 行と、そこを選んだときの
       右ペイン（staging）も一緒に入れる。** グラフ下の展開を廃止し、`shows_detail` /
@@ -84,11 +84,13 @@
 - [x] force push — `P` が `NonFastForward` で断られたあとの再 `P` を確認モーダル経由の
       force push にする。`git_read::Branch` に upstream の Oid を足し、
       `--force-with-lease=<dst>:<lease>` に渡す（01 の「force push」）
-- [ ] `JobTracker` に世代を持たせ、`DiffState.freshness` と `WorktreeState.stale` と
-      `GraphState.reload_pending` を畳む。fetch で ref が変わったあとのログの読み直しは
-      M2 で入れた `Cmd::LoadLog { restart }` に乗せる（01 の「実行中ジョブ › 世代」）。
-      **カウンタを 1 本にするとログまで毎回読み直すことになるので、領域ごとに
-      分けるかはここで決める**
+- [x] `JobTracker` に世代を持たせ、`DiffState.freshness` と `WorktreeState.stale` /
+      `loaded` と `GraphState.reload_pending` を畳む（01 の「実行中ジョブ › 世代」）。
+      **カウンタは領域ごとに 3 本**（`Worktree` / `Refs` / `Log`）。1 本にすると
+      index しか触らない `stage` でもログの世代が進み、`LogSession` の作り直しを
+      毎回払う。**`LoadRepoInfo` / `LoadBranches` / `LoadHeadMessage` の追いつきも
+      ここで塞いだ。** fetch で ref が変わったあとのログの読み直しは #47 で
+      `Reload::RefsAndLog` に乗って済んでいる
 - [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文。
       **force push が `stale info` で断られた形は `f` を勧める**（lease は fetch して
       からでないと通らない。01 の「force push」）。**追跡設定の無いブランチが非 FF で

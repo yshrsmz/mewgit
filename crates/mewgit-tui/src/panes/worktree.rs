@@ -87,8 +87,8 @@ fn heading(section: WorktreeSection) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, pane_text, row_is_reversed, state_at};
-    use mewgit_core::app::{update, Msg, TermSize};
+    use crate::test_util::{draw, pane_text, reply, row_is_reversed, state_at};
+    use mewgit_core::app::{Cmd, Msg, TermSize};
     use mewgit_core::git_read::{FileStatus, WorktreeSnapshot};
     use mewgit_core::test_util::fake_entry;
 
@@ -103,7 +103,13 @@ mod tests {
     /// `AppState` に直接書かない。カーソルの詰め直し（`clamp`）を通した形を描く。
     fn state_with(snapshot: WorktreeSnapshot) -> AppState {
         let mut state = state_at("/repo");
-        let _ = update(&mut state, Msg::StatusLoaded(Box::new(Ok(snapshot))));
+        // **発行してから届ける。** 通さない返信は刻印を持たず、`status_loaded` が
+        // 「書き込みより前に頼まれたもの」として頼み直す（01 の「実行中ジョブ › 世代」）。
+        let _ = reply(
+            &mut state,
+            Cmd::LoadStatus,
+            Msg::StatusLoaded(Box::new(Ok(snapshot))),
+        );
         state
     }
 

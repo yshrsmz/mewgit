@@ -5,7 +5,7 @@
 
 use std::ops::Range;
 
-use mewgit_core::app::{AppState, DiffState, DiffView, Pane};
+use mewgit_core::app::{AppState, DiffView, Pane};
 use mewgit_core::git_read::{DiffTarget, FileStatus, HunkLine, LineOrigin};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -35,7 +35,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(block, area);
 
     let Some(view) = view else {
-        let message = pending_message(&state.diff, wanted.as_ref());
+        let message = pending_message(state, wanted.as_ref());
         frame.render_widget(Paragraph::new(message), inner);
         return;
     };
@@ -60,6 +60,8 @@ fn title(view: Option<&DiffView>, wanted: Option<&DiffTarget>) -> String {
             ui::path_label(&file.path, file.old_path.as_deref())
         ),
         Some(files) if !files.is_empty() => format!("Diff ({} files)", files.len()),
+        // `path` が `None` になるのはコミット全体を指す対象だけ（02）。いまその形を
+        // 組む経路は無いが、組めるようになったら「どのファイルか」は名乗れない。
         _ => match wanted.and_then(DiffTarget::path) {
             Some(path) => format!("Diff: {}", path.display()),
             None => "Diff".to_string(),
@@ -69,14 +71,24 @@ fn title(view: Option<&DiffView>, wanted: Option<&DiffTarget>) -> String {
 
 /// diff がまだ無いときの文言。
 ///
-/// **「読みに行っていない」「失敗した」「待っている」を消去法で導かない。**
-/// conflicted の行を選んでいるときは `wanted_diff` が `None` を返し、失敗したことは
-/// `DiffState.failed` が事実として持っている。`is_running` の否定から導くと、
+/// **「読みに行っていない」「失敗した」「待っている」を消去法で導かない。** 失敗した
+/// ことは `DiffState.failed` が事実として持っている。`is_running` の否定から導くと、
 /// `Cmd` の発行経路を変えたときに片方だけ直しても通ってしまう。
-fn pending_message(diff: &DiffState, wanted: Option<&DiffTarget>) -> &'static str {
+///
+/// **`wanted` が `None` のままここへ来るのはコミット側だけ。** ワーキングツリーの行で
+/// 対象が決まらないとき（変更が無い、conflicted）は `Diff` が巡回の候補から外れ、
+/// `Enter` も断られる（01 の「Pane と Modal」）ので、ペインごと出ない。残るのは
+/// **ファイル一覧を待っているあいだ**と、**ファイルが 0 件のコミット**の 2 つで、
+/// どちらも「行が選ばれていない」ではないので `fresh_files` で出し分ける。
+fn pending_message(state: &AppState, wanted: Option<&DiffTarget>) -> &'static str {
     if wanted.is_none() {
-        "差分を出せる行が選ばれていません"
-    } else if diff.has_failed(wanted) {
+        return match state.graph.fresh_files() {
+            // 一覧はあるのに対象が決まらない = ファイルが 1 つも無いコミット。
+            Some(_) => "このコミットにファイルはありません",
+            None => ui::LOADING,
+        };
+    }
+    if state.diff.has_failed(wanted) {
         "差分を読み込めませんでした"
     } else {
         ui::LOADING
@@ -205,10 +217,13 @@ fn marked(mark: char, content: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, pane_text, row_is_reversed, row_of, state_at};
-    use mewgit_core::app::{update, Cmd, Key, KeyCode, Msg, TermSize};
+    use crate::test_util::{
+        draw, pane_text, row_is_reversed, row_of, state_on_first_commit,
+        state_showing_diff as opened,
+    };
+    use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Msg, TermSize};
     use mewgit_core::git_read::{FileDiff, WorktreeSnapshot};
-    use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk, reply};
+    use mewgit_core::test_util::{fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid};
 
     /// 既定の 80x24。左は 46 桁になるので、テストはその幅で読める内容にする。
     const SIZE: TermSize = TermSize {
@@ -222,23 +237,6 @@ mod tests {
             unstaged: vec![fake_entry("a.txt", FileStatus::Modified)],
             ..WorktreeSnapshot::default()
         }
-    }
-
-    /// ワーキングツリーを読み、Diff ペインを開いた状態。
-    ///
-    /// `AppState` に直に書かず `Enter` を通すのは、`focus` と `wanted_diff` が実際の
-    /// 経路で揃った形を描くため。
-    fn opened(snapshot: WorktreeSnapshot) -> AppState {
-        let mut state = state_at("/repo");
-        // 発行してから届ける（`test_util::reply`。通さない返信は刻印を持たない）。
-        let _ = reply(
-            &mut state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(snapshot))),
-        );
-        state.focus = Pane::Worktree;
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-        state
     }
 
     /// いま選んでいる対象の diff として `files` を届ける。
@@ -546,9 +544,60 @@ mod tests {
         assert!(text.contains("Diff: a.txt"), "{text}");
     }
 
+    /// コミットを選んで詳細を届け、`Enter` を 2 回で Diff ペインまで入った状態。
+    ///
+    /// ファイル一覧は届けない。**コミット側は一覧が届く前でも `Diff` に入れる**
+    /// （届いたら頼み直す経路が別にある。01 の「コミットのファイル一覧」）ので、
+    /// この状態は実物で踏める。
+    fn commit_diff_pending() -> AppState {
+        let mut state = state_on_first_commit(&["subject"]);
+        let detail = fake_detail(0, "subject");
+        let _ = update(
+            &mut state,
+            Msg::CommitDetailLoaded {
+                oid: detail.oid,
+                result: Box::new(Ok(detail)),
+            },
+        );
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        assert_eq!(state.focus, Pane::Diff, "Diff ペインに入れていません");
+        state
+    }
+
     #[test]
-    fn a_conflicted_row_is_not_reported_as_a_failure() {
-        // 読みに行っていないので「読み込めませんでした」ではない。
+    fn a_commit_waiting_for_its_file_list_reads_as_loading() {
+        // **「行が選ばれていません」ではない。** 一覧が届けば対象が決まるので、
+        // 待っているだけ（01 の「コミットのファイル一覧」）。
+        let state = commit_diff_pending();
+
+        let text = pane_text(&state, SIZE, Pane::Diff);
+
+        assert!(text.contains("読み込み中"), "{text}");
+    }
+
+    #[test]
+    fn a_commit_with_no_files_says_so() {
+        // 一覧は届いたのに対象が決まらない = ファイルが 1 つも無いコミット
+        // （`--allow-empty`）。「読み込み中」のまま止めない。
+        let mut state = commit_diff_pending();
+        let _ = update(
+            &mut state,
+            Msg::CommitFilesLoaded {
+                oid: fake_oid(0),
+                result: Box::new(Ok(Vec::new())),
+            },
+        );
+
+        let text = pane_text(&state, SIZE, Pane::Diff);
+
+        assert!(text.contains("ファイルはありません"), "{text}");
+    }
+
+    #[test]
+    fn a_conflicted_row_does_not_swap_the_graph_for_an_empty_diff() {
+        // **conflicted は 2 者の diff で表せない**（02）ので対象が決まらない。`Enter` は
+        // 断られ、左はグラフのまま。以前はここで空の Diff がグラフを覆っていた。
         let state = opened(WorktreeSnapshot {
             conflicted: vec![fake_entry("c.txt", FileStatus::Conflicted)],
             ..WorktreeSnapshot::default()
@@ -556,8 +605,8 @@ mod tests {
 
         let text = draw(&state, SIZE).join("\n");
 
-        assert!(text.contains("選ばれていません"), "{text}");
-        assert!(!text.contains("読み込めませんでした"), "{text}");
+        assert!(text.contains("Graph"), "{text}");
+        assert!(!text.contains("Diff"), "{text}");
     }
 
     #[test]

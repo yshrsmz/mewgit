@@ -1,9 +1,9 @@
 //! テスト用のヘルパ。`mewgit-tui` は 1 つのバイナリクレートなので、単体テストは
 //! すべて同じコンパイル単位に入る。feature で切り分ける必要はない。
 
-use mewgit_core::app::{update, AppState, Cmd, Key, Modal, Msg, Pane, RepoInfo, TermSize};
+use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Modal, Msg, Pane, RepoInfo, TermSize};
 use mewgit_core::config::Config;
-use mewgit_core::git_read::{Commit, LogPage};
+use mewgit_core::git_read::{Commit, LogPage, WorktreeSnapshot};
 use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents, reply};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Position;
@@ -155,6 +155,28 @@ pub fn state_with_commits(summaries: &[&str]) -> AppState {
 pub fn state_on_first_commit(summaries: &[&str]) -> AppState {
     let mut state = state_with_commits(summaries);
     let _ = update(&mut state, Msg::Key(Key::char('j')));
+    state
+}
+
+/// ワーキングツリーを読み、`Enter` で Diff ペインを開いた状態。
+///
+/// **`AppState` に直に書かず `Enter` を通す。** `focus` と `wanted_diff` が実際の経路で
+/// 揃った形を描くため。`focus = Pane::Diff` を直に置くと、対象の無い状態
+/// （`focus_candidates` が候補から外す形。01）を作れてしまい、実物では出ない画面を
+/// 見張ることになる。
+///
+/// **差分で表せない行しか無い `snapshot` では開かない。** `Enter` が断られるので、
+/// 呼び出し側はそのつもりで使う。
+pub fn state_showing_diff(snapshot: WorktreeSnapshot) -> AppState {
+    let mut state = state_at("/repo");
+    // 発行してから届ける（`test_util::reply`。通さない返信は刻印を持たない）。
+    let _ = reply(
+        &mut state,
+        Cmd::LoadStatus,
+        Msg::StatusLoaded(Box::new(Ok(snapshot))),
+    );
+    state.focus = Pane::Worktree;
+    let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
     state
 }
 

@@ -321,8 +321,9 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::{file_row, pane_area, window, wrapped};
-    use crate::test_util::{draw, state_at, terminal_with};
+    use crate::test_util::{draw, state_at, state_showing_diff, terminal_with};
     use mewgit_core::app::{AppState, NoticeLevel, Pane, TermSize};
+    use mewgit_core::test_util::fake_snapshot;
     use ratatui::style::Modifier;
 
     #[test]
@@ -430,11 +431,13 @@ mod tests {
 
     #[test]
     fn the_left_area_swaps_between_the_graph_and_the_diff() {
-        let mut state = state_at("/repo");
+        let state = state_at("/repo");
         let text = draw(&state, TermSize::default()).join("\n");
         assert!(text.contains("Graph"), "{text}");
 
-        state.focus = Pane::Diff;
+        // **`focus` を直に置かない。** 対象の無い `Diff` は候補から外れる（01）ので、
+        // 直に置くと実物では出ない画面を見張ることになる。
+        let state = state_showing_diff(fake_snapshot(&[], &["a.txt"], &[]));
         let text = draw(&state, TermSize::default()).join("\n");
 
         // 差し替えであって分割ではない。両方出すと 80 桁ではどちらも読めない。

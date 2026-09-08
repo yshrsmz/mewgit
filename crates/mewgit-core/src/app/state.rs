@@ -144,9 +144,33 @@ impl AppState {
     /// `focus` と画面の中身が食い違う状態（コミットを見ているのにキーは Working tree が
     /// 受ける）を表現できてしまう。
     pub fn focus_candidates(&self) -> &'static [Pane] {
-        match self.graph.selection() {
+        let panes = match self.graph.selection() {
             GraphSelection::Wip => Pane::WIP_FOCUS,
             GraphSelection::Commit(_) => Pane::COMMIT_FOCUS,
+        };
+        // **差分で表せる行が無いなら `Diff` は候補から外す。** 巡回に入れるのは
+        // 「実装済みで、かついま画面に出ているペインだけ」（07）で、`Diff` は左の領域を
+        // Graph と差し替えて出す。相手がいないまま入れると、**グラフが空のペインに
+        // 差し替わる**（変更の無いワーキングツリー、conflicted だけの区画）。
+        //
+        // **絞るのは WIP 行の側だけ。** コミット側の「対象が無い」はファイル一覧が
+        // 届くまでの一時的なもので、届いた時点で頼み直す経路が別にある（01 の
+        // 「コミットのファイル一覧」）。**ここで外すと、待っているあいだ候補が増減する
+        // うえ、その頼み直しへ入れなくなる。** WIP 行の側が Worktree ペインと同じ
+        // スナップショットを読む（無い状態はペインが既に出している）のに対し、
+        // コミット側は 2 つ目の遅延読み込みを待つ、という違い。
+        //
+        // **`wanted_diff()` では判定できない。** あちらは `focus != Pane::Diff` で
+        // `None` を返すので、入る前は必ず `None`（入れるかを問う相手にならない）。
+        let has_diff = match self.graph.selection() {
+            GraphSelection::Wip => self.wanted_worktree_diff().is_some(),
+            GraphSelection::Commit(_) => true,
+        };
+        if has_diff {
+            panes
+        } else {
+            // **末尾で照合する。** 添字で削ると、並びを変えたときに別のペインが落ちる。
+            panes.strip_suffix(&[Pane::Diff]).unwrap_or(panes)
         }
     }
 
@@ -306,6 +330,9 @@ impl Pane {
     ///
     /// **`Diff` は両方に入るが、出る diff は違う。** ワーキングツリーのファイルか、
     /// コミットのファイルか。決めるのは [`AppState::wanted_diff`] の 1 つ。
+    ///
+    /// **どちらの一覧でも `Diff` は末尾に置く。** WIP 行で差分を出せる行が無いときは
+    /// [`AppState::focus_candidates`] が末尾を落として候補から外す。
     ///
     /// **`Branches` も両方に入る。** 右列の上に常に出ていて、左の選択で中身が
     /// 変わらないため（07 の「レイアウト」）。
@@ -1894,6 +1921,22 @@ mod tests {
         assert!(!state.focus_candidates().contains(&Pane::Worktree));
         assert!(state.focus_candidates().contains(&Pane::CommitDetail));
         // `Diff` は残る。コミットのファイル一覧で選んだ 1 件を左に出すため。
+        assert!(state.focus_candidates().contains(&Pane::Diff));
+    }
+
+    #[test]
+    fn an_unchanged_worktree_takes_the_diff_out_of_the_cycle() {
+        // **報告された形。** 変更が 1 つも無いと差分を出す相手がいないのに `Diff` が
+        // 候補に残っていて、`Tab` でグラフが空の Diff に差し替わっていた。
+        let mut state = state_with_a_commit();
+        state.worktree.snapshot = fake_snapshot(&[], &[], &[]);
+
+        assert!(!state.focus_candidates().contains(&Pane::Diff));
+        // ほかの候補は残る。巡回そのものを止めるわけではない。
+        assert!(state.focus_candidates().contains(&Pane::Worktree));
+
+        // 1 件でも差分で表せる行があれば戻る。
+        state.worktree.snapshot = fake_snapshot(&[], &["a.txt"], &[]);
         assert!(state.focus_candidates().contains(&Pane::Diff));
     }
 

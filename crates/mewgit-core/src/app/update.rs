@@ -410,11 +410,32 @@ fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         KeyCode::Char('j') | KeyCode::Down => move_file(state, 1),
         KeyCode::Char('k') | KeyCode::Up => move_file(state, -1),
-        KeyCode::Enter => focus(state, Pane::Diff),
+        KeyCode::Enter => open_diff(state),
         KeyCode::Esc => focus(state, Pane::Graph),
         _ => Cmd::None,
     }
 }
+
+/// `Enter`。左の領域を Diff に差し替える（07）。
+///
+/// **出す相手がいなければ断る。** `focus` を移しても `update` の出口の
+/// [`AppState::reseat_focus`] が候補外として `Graph` に座り直させるので、押した結果は
+/// どちらでも同じ画面になる。**黙って何も起きないと、キーが効いていないのか対象が
+/// 悪いのか判らない**ので理由を通知に出す（conflicted の `s` / `u` / `x` と同じ形）。
+fn open_diff(state: &mut AppState) -> Cmd {
+    if state.focus_candidates().contains(&Pane::Diff) {
+        return focus(state, Pane::Diff);
+    }
+    state.push_notice(NoticeLevel::Warn, NO_DIFF.to_string(), None);
+    Cmd::None
+}
+
+/// 差分で表せない行に `Enter` を押したときの理由。
+///
+/// conflicted の区画（2 者の diff で表せない）、変更の無いワーキングツリー、コミットの
+/// ファイル一覧がまだ届いていない場合に出る。**`Tab` でも同じ行は候補から外れる**
+/// （[`AppState::focus_candidates`]）ので、入口は両方とも塞がっている。
+const NO_DIFF: &str = "この行の差分は出せません";
 
 /// Branches ペインのキー処理。
 fn branches_key(state: &mut AppState, key: Key) -> Cmd {
@@ -1089,7 +1110,7 @@ fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::Char('j') | KeyCode::Down => moved(state, 1),
         KeyCode::Char('k') | KeyCode::Up => moved(state, -1),
         // 左の領域を Diff に差し替える（07）。読むかどうかは `focus` が決める。
-        KeyCode::Enter => focus(state, Pane::Diff),
+        KeyCode::Enter => open_diff(state),
         // **グラフの `Enter` で入ってきた先なので、`Esc` で戻れる。** 戻り先を
         // 用意しないと、`Enter` の行き先がコミット詳細か Working tree かで出口が
         // 変わる（片方は `Esc`、もう片方は `Tab` を探す）ことになる。
@@ -1444,10 +1465,16 @@ fn act(state: &mut AppState, action: Action) -> Cmd {
     // `Pane::Worktree` を外しているのと同じ事故を、`Pane::Diff` の側で防ぐ。
     //
     // **見るのはグラフの選択で、`wanted_diff()` が `None` かどうかではない。**
-    // あちらの `None` は 3 つのことを指す — 「Diff ペインを見せていない」
-    // 「コミットの一覧がまだ届いていない」「ワーキングツリーの行に diff が無い
-    // （conflicted）」。無いことを根拠にすると、3 つ目で
-    // 「コンフリクトしたファイルは操作できません」がこの文言に化ける。
+    // あちらの `None` は 2 つのことを指す — 「Diff ペインを見せていない」と
+    // 「コミットの一覧がまだ届いていない」。無いことを根拠にすると、**2 つ目で
+    // すり抜ける** —— コミットを選んだまま一覧を待っているあいだ、ワーキングツリーの
+    // 選択行に `s` が効く。
+    //
+    // **3 つ目だった「ワーキングツリーの行に diff が無い（conflicted）」は消えた。**
+    // その行では `Diff` が巡回の候補から外れ、`Enter` も断られる（01 の
+    // 「Pane と Modal」）ので、Diff ペインを見せたまま `None` にはならない。
+    // conflicted の断りは Worktree ペインの側で出る
+    // （[`a_conflicted_row_is_refused_with_a_notice`]）。
     //
     // **`DiffTarget::Range` を Diff ペインに出すときはここを見直す**（stash や比較
     // ビュー、M3 以降）。WIP 行を選んだまま stash の diff を出せるようになると、
@@ -2154,8 +2181,10 @@ mod tests {
     }
 
     #[test]
-    fn a_conflicted_row_has_no_diff() {
-        // 解消ビューは MVP 外。2 者の diff では表せない。
+    fn a_conflicted_row_refuses_to_open_the_diff() {
+        // 解消ビューは MVP 外。2 者の diff では表せない（02）ので対象が決まらない。
+        // **入れてしまうと、左のグラフが空の Diff に差し替わる**（01 の
+        // 「Pane と Modal」）。`Tab` も同じ判定で候補から外す。
         let snapshot = WorktreeSnapshot {
             conflicted: vec![fake_entry("c.txt", FileStatus::Conflicted)],
             ..WorktreeSnapshot::default()
@@ -2164,8 +2193,14 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(state.focus, Pane::Diff);
         assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.focus, Pane::Worktree);
+        assert!(!state.focus_candidates().contains(&Pane::Diff));
+        // 黙って何も起きないと、キーが効いていないのか対象が悪いのか判らない。
+        assert_eq!(
+            state.notices.back().map(|notice| notice.message.as_str()),
+            Some(NO_DIFF)
+        );
     }
 
     #[test]
@@ -5021,29 +5056,6 @@ feat/b
                 "{key}"
             );
         }
-    }
-
-    #[test]
-    fn a_conflicted_row_still_says_it_is_conflicted_in_the_diff_pane() {
-        // **`wanted_diff()` の `None` は 3 つのことを指す。** ここは 3 つ目
-        // （ワーキングツリーの行に diff が無い）で、コミットは 1 つも関わらない。
-        // 「無い」を根拠に断ると、コンフリクトの案内がコミットの文言に化ける。
-        let snapshot = WorktreeSnapshot {
-            conflicted: vec![fake_entry("both.txt", FileStatus::Conflicted)],
-            ..WorktreeSnapshot::default()
-        };
-        let mut state = worktree_state(snapshot, WorktreeSection::Conflicted);
-        let _ = press_code(&mut state, KeyCode::Enter);
-        assert_eq!(state.focus, Pane::Diff);
-        assert_eq!(state.wanted_diff(), None);
-
-        let cmd = press(&mut state, 's');
-
-        assert_eq!(cmd, Cmd::None);
-        assert_eq!(
-            state.notices.back().map(|notice| notice.message.as_str()),
-            Some(CONFLICTED)
-        );
     }
 
     #[test]

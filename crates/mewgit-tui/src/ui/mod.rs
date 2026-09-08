@@ -338,7 +338,7 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::{file_row, pane_area, window, wrapped};
-    use crate::test_util::{draw, state_at, state_showing_diff, terminal_with};
+    use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
     use mewgit_core::app::{AppState, NoticeLevel, Pane, TermSize};
     use mewgit_core::test_util::fake_snapshot;
     use ratatui::style::Modifier;
@@ -414,10 +414,16 @@ mod tests {
     fn the_focused_pane_is_the_only_one_with_a_bold_border() {
         // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
         let size = TermSize::default();
-        // 巡回の候補はグラフの選択で変わる（01）。`state_at` は行が無いので WIP 側。
-        let candidates = state_at("/repo").focus_candidates();
+        // 巡回の候補はグラフの選択で変わる（01）。WIP 側で回す。
+        //
+        // **差分で表せる行を 1 つ置く。** 変更が無いと `Diff` が候補から外れ（01 の
+        // 「Pane と Modal」）、この見張りが**黙って 1 ペインぶん減る** —— 下の
+        // 「Graph と Diff は同じ領域」の腕がまさに踏まれなくなる（#40 と同じ形）。
+        let base = || state_with_status(fake_snapshot(&[], &["a.txt"], &[]));
+        let candidates = base().focus_candidates();
+        assert!(candidates.contains(&Pane::Diff), "{candidates:?}");
         for &focus in candidates {
-            let mut state = state_at("/repo");
+            let mut state = base();
             state.focus = focus;
             let terminal = terminal_with(&state, size);
             let buffer = terminal.backend().buffer();

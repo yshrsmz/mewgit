@@ -182,6 +182,9 @@ pub fn state_showing_diff(snapshot: WorktreeSnapshot) -> AppState {
     let mut state = state_with_status(snapshot);
     state.focus = Pane::Worktree;
     let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+    // **開けたことを確かめる。** `Enter` は差分で表せる行が無ければ断られるので、
+    // 見ないと「Diff を出した状態」を名乗りながら Worktree のままの状態を返しうる。
+    assert_eq!(state.focus, Pane::Diff, "Diff ペインが開いていません");
     state
 }
 

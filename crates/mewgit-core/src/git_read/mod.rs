@@ -315,6 +315,14 @@ pub struct Branch {
     /// （02 の「ブランチ一覧」）、そのうち「設定が無い」だけを取り出せない。
     /// **`-u` を付けるかはここで決める**（02）。
     pub upstream_config: Option<UpstreamConfig>,
+    /// 追跡 ref（`refs/remotes/origin/x`）が指す位置。force push の
+    /// `--force-with-lease=<dst>:<lease>` に渡す（01 の「force push」）。
+    ///
+    /// **[`Branch::upstream`] と同時に `Some` になる。** どちらも remote-tracking ref から
+    /// 作り、ref を引けなければ両方 `None`。**[`Branch::upstream_config`] があっても
+    /// ここが `None` の形はある**（`fetch --prune` のあと）。そのときは比べる相手を
+    /// 知らないので force push は断る —— 値の無い `--force-with-lease` は守りにならない（03）。
+    pub upstream_oid: Option<Oid>,
     /// upstream に対する ahead / behind。
     pub ahead: usize,
     pub behind: usize,

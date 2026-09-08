@@ -31,6 +31,9 @@ pub struct AppState {
     /// ペインで、グラフで選んだコミットの diff もここに入るため。
     pub diff: DiffState,
     pub branches: BranchState,
+    /// 直前の `P` が `NonFastForward` で断られたこと。次の `P` を確認モーダル経由の
+    /// force push に上げる（01 の「force push」）。
+    pub push_rejected: Option<PushRejection>,
     pub stashes: Vec<StashEntry>,
     pub prs: PrState,
     pub progress: Option<InProgressOp>,
@@ -42,6 +45,18 @@ pub struct AppState {
     pub term: TermSize,
     /// 起動時に確定した設定。実行中は再読込しない（08）。
     pub config: Config,
+}
+
+/// push が non-fast-forward で断られたこと（01 の「force push」）。
+///
+/// **ブランチ名と、そのときのローカルの先端を両方持つ。** 名前だけで憶えると、
+/// `↓n` で断られた直後に `p` で早送りしても force の確認が出る（behind だけの
+/// ブランチも `! [rejected] (non-fast-forward)` で断られる。git 2.55 で確認）。
+/// pull / commit / rebase はどれも先端を動かすので、`oid` まで見れば黙って失効する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushRejection {
+    pub branch: String,
+    pub oid: Oid,
 }
 
 /// 保持する通知の上限。超えた分は古いものから捨てる。
@@ -57,6 +72,7 @@ impl AppState {
             worktree: WorktreeState::default(),
             diff: DiffState::default(),
             branches: BranchState::default(),
+            push_rejected: None,
             stashes: Vec::new(),
             prs: PrState::default(),
             progress: None,

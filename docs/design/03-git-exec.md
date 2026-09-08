@@ -16,7 +16,7 @@ pub enum GitOp {
     Switch(String), BranchDelete { name, force }, BranchRename { from, to },
     Fetch { remote: Option<String>, prune: bool },
     Pull { mode: PullMode },
-    Push { remote, branch, set_upstream, force, expected: Option<Oid> },
+    Push { remote, src, dst: Option<String>, set_upstream, lease: Option<Oid> },
     RebaseInteractive { onto: String, plan: RebasePlan },
     RebaseContinue, RebaseSkip, RebaseAbort,
     CherryPick(Vec<Oid>), CherryPickContinue, CherryPickAbort,
@@ -86,7 +86,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `BranchRename { from, to }` | `branch --move -- <from> <to>` |
 | `Fetch { remote, prune }` | `fetch [--prune] [<remote>]` |
 | `Pull { mode }` | `pull --no-rebase` / `--rebase` / `--ff-only` |
-| `Push { .. }` | `push [--force-with-lease[=<branch>:<expected>]] [--set-upstream] <remote> <branch>` |
+| `Push { .. }` | `push [--force-with-lease=<dst\|src>:<lease>] [--set-upstream] <remote> <src>[:<dst>]` |
 | `RebaseInteractive { onto }` | `rebase --interactive <onto>` |
 | `RebaseContinue` / `Skip` / `Abort` | `rebase --continue` / `--skip` / `--abort` |
 | `CherryPick(oids)` | `cherry-pick <oids>` |
@@ -127,11 +127,23 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   常に切り替えるので、`switch: false` を組む経路が無い（`branch <name>` の側は
   `to_command` のテストでだけ踏む）
 - **force push は `--force-with-lease`。`--force` は他人のコミットを消せるので使わない。**
-  **値（`=<branch>:<expected>`）を必ず添える。** 省くと lease は remote-tracking ref
+  **値（`=<dst>:<lease>`）を必ず添える。** 省くと lease は remote-tracking ref
   （`origin/main`）と比べるだけになり、`git fetch` を挟むと他人が進めた位置がそこに入って
   検査を素通りする（git 2.55 で確認）。「push が弾かれた → fetch して中身を見る →
   やはり force する」は UI が普通に通す道なので、素の lease は守りにならない。
-  `expected` には確認モーダルで見せた位置をそのまま渡す
+  `lease` には確認モーダルで見せた位置をそのまま渡す
+- **`force: bool` と `expected: Option<Oid>` に割らず、`lease: Option<Oid>` 1 つで表す。**
+  2 つに割ると `force: true, expected: None` が組めてしまい、それがまさに上で
+  「守りにならない」と書いた裸の `--force-with-lease` になる。**旗と値を 1 つにすれば
+  その組み合わせは型として存在しない。** 前の形は `force` を出す経路が無いあいだだけ
+  安全で、force push を配線した時点で踏める腕になっていた
+- **行き先は `src` と `dst` に割る。** refspec（`<src>[:<dst>]`）と lease の refname は
+  **同じ「リモート側の ref 名」を要求するが、置き場所が違う** —— refspec では右辺、lease
+  では先頭。1 本の文字列に畳むと、`x` が `refs/heads/y` を追跡している形で
+  `--force-with-lease=x:y:<oid>` という壊れた値になる。`dst` が `None`（ローカル名と
+  同じ）なら refspec は `src` だけ、lease の refname も `src`。**lease の refname は
+  短縮名（`main`）でも完全な ref 名（`refs/heads/main`）でも効く**ので、refspec の右辺に
+  渡すのと同じ文字列をそのまま使う（git 2.55 で確認）
 - **pathspec が空の `GitOp` は `ArgvError::EmptyPathspec` で拒否する。** `--` だけを
   置くと git は「指定なし」と読み、対象がリポジトリ全体に広がる。`reset --quiet --` は
   index 全体を戻し、`clean --force --` は untracked を全部消す（git 2.55 で確認）。

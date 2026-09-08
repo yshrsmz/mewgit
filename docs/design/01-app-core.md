@@ -138,7 +138,7 @@ discard、abort 系）はすべて `Cmd::Exec(GitOp)` で表せるので、専�
 `Ctrl-C`）。
 
 **確認モーダルを組む時点の値を `GitOp` に閉じ込める。** force push の
-`GitOp::Push { expected }` がその例で、ユーザーに見せたリモートの位置をそのまま持たせる
+`GitOp::Push { lease }` がその例で、ユーザーに見せたリモートの位置をそのまま持たせる
 （03 の「argv への変換」）。実行時に読み直すと、確認してから実行するまでの間に
 リモートが動いても気付けない。
 
@@ -871,9 +871,11 @@ pub struct BranchState {
 
 ### push の行き先
 
-`git push`（引数なし）ではなく `<remote> <branch>` を明示する。force push が
-`--force-with-lease=<branch>:<expected>` に remote 側の名前を要ることと、`-u` の提案が
+`git push`（引数なし）ではなく `<remote> <src>[:<dst>]` を明示する。force push が
+`--force-with-lease=<dst>:<lease>` に remote 側の名前を要ることと、`-u` の提案が
 行き先を確認モーダルに出すためで、**どちらも「git が選んだもの」では文面を書けない**。
+`src` / `dst` に割って持つ理由は 03 の「argv への変換」（refspec と lease で同じ名前を
+別の位置に置くので、1 本の文字列に畳むと lease が壊れる）。
 
 決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る**
 （`RepoInfo.head` は起動時に読んだきりで古くなる。#22 の「キャッシュした状態から
@@ -887,7 +889,8 @@ pub struct BranchState {
      作るので、`fetch --prune` で ref が消えただけのブランチも `None` になる。そこで
      3 に落ちると、**`P` を押しただけで追跡先が別のリモートへ向け替わる**（02 の
      「ブランチ一覧」がこの `None` の理由を 4 つ数えている）
-   - **ローカル名と `merge` のブランチ名が違うときは `<local>:<remote 側>` を渡す。**
+   - **ローカル名と `merge` のブランチ名が違うときだけ `dst` を埋める**（argv は
+     `<local>:<remote 側>`）。
      `push <remote> <local>` が動かすのは remote 側の**同名**の ref なので、`x` が
      `refs/heads/y` を追跡している状態では `origin/x` を新しく作ってしまう。git の
      `push.default = simple`（既定）がこの形を断るのも同じ理由。ブランチ名に `:` は
@@ -925,12 +928,43 @@ pub struct BranchState {
 
 **専用のキーは作らない**（07 のキー表に force push の行が無いのはそのため）。
 通常の `P` が `ExecErrorKind::NonFastForward` で断られたときだけ、次の `P` が確認モーダル
-経由の force push になる。`expected` にはそのとき画面に出した upstream の Oid を渡す
-（上の「確認モーダルを組む時点の値を `GitOp` に閉じ込める」）。
+経由の force push になる。
 
-**この経路は次のタスク**（plan.md の M3 2 本目）。`git_read::Branch` は upstream の
-**名前**しか持たず、lease に渡す Oid が無い。読み取りを 1 つ足す変更なので、既にある
-`GitOp` を配線するだけの `f` / `p` / `P` とは別の PR にする。
+憶えるのは `AppState.push_rejected` 1 つ。
+
+```rust
+pub struct PushRejection {
+    pub branch: String,  // 断られたときの HEAD のブランチ名
+    pub oid: Oid,        // そのときのローカルの先端
+}
+```
+
+- **立てるのは `exec_finished` の 1 箇所**、`GitOp::Push { lease: None, .. }` が
+  `NonFastForward` で落ちたときだけ。**force push（`lease: Some`）の失敗では立てない**
+  —— lease が古いときの `! [rejected] ... (stale info)` も `rejected` を含むので
+  `NonFastForward` に落ち（git 2.55 で確認）、立て直すと同じ古い `lease` で force を
+  撃ち続ける輪になる。落とすのは、それ以外の `GitOp::Push` の完了すべて
+- **読むのは `P` の 1 箇所。** ブランチ名**と** `oid` の両方がいまの HEAD と一致した
+  ときだけ force に上げる。**名前だけで憶えると、`↓n` で断られた直後に `p` で早送り
+  しても force の確認が出る**（behind だけのブランチも `! [rejected] (non-fast-forward)`
+  で断られる。git 2.55 で確認）。pull / commit / rebase はどれもローカルの先端を動かすので、
+  `oid` まで見れば黙って失効する
+- **上げるのは追跡設定がある経路（`PushPlan::Tracked`）だけ。** `-u` を提案する経路は
+  追跡 ref を持たないので lease の値が無く、そちらで force を出すと「素の
+  `--force-with-lease`」（03 が禁じた形）しか組めない
+
+`lease` に渡すのは `Branch.upstream_oid`（02）。**追跡 ref が無ければ force push は断る**
+—— 値を作れないなら撃たない。`fetch --prune` のあとがこの形。
+
+**force push は fetch を挟まないと lease に断られる。** 断られた時点の `origin/x` は
+他人が進める前の位置なので、そのまま lease に渡すと `stale info` で落ちる（git 2.55 で
+確認）。**これは守りが効いている形**で、ユーザーは `f` でリモートの位置を見てから
+`P` → `P` と踏む。**手前で fetch を代行しない** —— `f` が別のキーとして在り、fetch は
+ラベルとログを動かす（`Reload::RefsAndLog`）ので、`P` の中で黙って走らせると
+画面が押した覚えのない形で作り替わる。
+
+確認モーダルには remote / 行き先 / lease の短縮 Oid を出す。**`y` を押した時点で
+読み直さない**（上の「確認モーダルを組む時点の値を `GitOp` に閉じ込める」）。
 
 ## 実行中ジョブ
 

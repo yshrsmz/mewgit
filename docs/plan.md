@@ -76,14 +76,14 @@
 - [x] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト。
       **どのリモートの URL を見るかは決めない**（`RepoInfo.target` を埋めるのは M4 の
       `auth::resolve`。04 の「既定リモートを決めるのは M4」）
-- [ ] `f` / `p` / `P` の配線 — `GitOp::Fetch` / `Pull { FastForwardOnly }` / `Push` を
+- [x] `f` / `p` / `P` の配線 — `GitOp::Fetch` / `Pull { FastForwardOnly }` / `Push` を
       共通キーから出す。push の行き先の決定と `-u` 提案（`Modal::Confirm`）、
       ssh のパスフレーズで固まる件（実効 ssh に `-o BatchMode=yes` を重ねる。03 の
       「Runner」）。**`GitOp` と `to_command` は M2 の `git_exec` のタスクで済んでいる**
       ので、ここで足すのは `app` の配線と `Runner` の環境変数だけ
-- [ ] force push — `P` が `NonFastForward` で断られたあとの再 `P` を確認モーダル経由の
+- [x] force push — `P` が `NonFastForward` で断られたあとの再 `P` を確認モーダル経由の
       force push にする。`git_read::Branch` に upstream の Oid を足し、
-      `--force-with-lease=<branch>:<expected>` に渡す（01 の「force push」）
+      `--force-with-lease=<dst>:<lease>` に渡す（01 の「force push」）
 - [ ] `JobTracker` に世代を持たせ、`DiffState.freshness` と `WorktreeState.stale` と
       `GraphState.reload_pending` を畳む。fetch で ref が変わったあとのログの読み直しは
       M2 で入れた `Cmd::LoadLog { restart }` に乗せる（01 の「実行中ジョブ › 世代」）。

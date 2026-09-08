@@ -163,27 +163,33 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
             ]);
         }
         // force は `--force-with-lease`。`--force` は他人のコミットを消せるので
-        // 使わない。**`expected` を必ず添えたい。** 値を省くと lease は
-        // remote-tracking ref（`origin/main`）と比べるだけになり、`git fetch` の後は
-        // 他人が進めた位置がそこに入って検査を素通りする（git 2.55 で確認）。
+        // 使わない。**値は必ず添わる** —— `lease` が `Some` のときだけ force になるので、
+        // 値の無い `--force-with-lease`（remote-tracking ref と比べるだけになり、
+        // `git fetch` の後は他人が進めた位置がそこに入って検査を素通りする。
+        // git 2.55 で確認）はここでは組めない。
+        //
+        // **lease の refname は refspec の右辺と同じ文字列。** 短縮名でも完全な ref 名でも
+        // 効く（git 2.55 で確認）ので、`dst` をそのまま使う。
         GitOp::Push {
             remote,
-            branch,
+            src,
+            dst,
             set_upstream,
-            force,
-            expected,
+            lease,
         } => {
             argv.push("push".into());
-            if *force {
-                argv.push(match expected {
-                    Some(oid) => format!("--force-with-lease={branch}:{oid}"),
-                    None => "--force-with-lease".into(),
-                });
+            if let Some(oid) = lease {
+                let refname = dst.as_ref().unwrap_or(src);
+                argv.push(format!("--force-with-lease={refname}:{oid}"));
             }
             if *set_upstream {
                 argv.push("--set-upstream".into());
             }
-            argv.extend([remote.clone(), branch.clone()]);
+            let refspec = match dst {
+                Some(dst) => format!("{src}:{dst}"),
+                None => src.clone(),
+            };
+            argv.extend([remote.clone(), refspec]);
         }
         // `plan` は argv に載らない。todo の差し替えは M5（`Runner` はそれまで
         // このオペを実行せずに拒否する）。
@@ -476,10 +482,10 @@ mod tests {
             (
                 GitOp::Push {
                     remote: "origin".into(),
-                    branch: "main".into(),
+                    src: "main".into(),
+                    dst: None,
                     set_upstream: true,
-                    force: true,
-                    expected: Some(fake_oid(4)),
+                    lease: Some(fake_oid(4)),
                 },
                 vec![
                     "push",
@@ -492,10 +498,10 @@ mod tests {
             (
                 GitOp::Push {
                     remote: "origin".into(),
-                    branch: "main".into(),
+                    src: "main".into(),
+                    dst: None,
                     set_upstream: false,
-                    force: false,
-                    expected: None,
+                    lease: None,
                 },
                 vec!["push", "origin", "main"],
             ),
@@ -665,19 +671,41 @@ mod tests {
     }
 
     #[test]
-    fn force_push_without_an_expected_oid_uses_the_weaker_lease() {
+    fn a_renamed_destination_lands_in_both_the_refspec_and_the_lease() {
+        // **同じ「リモート側の ref 名」が 2 箇所に要る。** refspec では右辺、lease では
+        // 先頭。1 本の文字列に畳んでいた頃は lease が `x:main:<oid>` に化けていた。
         let command = to_command(&GitOp::Push {
             remote: "origin".into(),
-            branch: "main".into(),
+            src: "x".into(),
+            dst: Some("main".into()),
             set_upstream: false,
-            force: true,
-            expected: None,
+            lease: Some(fake_oid(4)),
         })
         .expect("argv を組めませんでした");
         assert_eq!(
             command.argv,
-            ["push", "--force-with-lease", "origin", "main"]
+            [
+                "push",
+                "--force-with-lease=main:0000000000000000000000000000000000000004",
+                "origin",
+                "x:main",
+            ]
         );
+    }
+
+    #[test]
+    fn a_full_ref_destination_is_passed_through() {
+        // `refs/heads/` の下に無い追跡先は短縮できない（01）。lease の refname も
+        // 同じ文字列でよい（完全な ref 名でも効く。git 2.55 で確認）。
+        let command = to_command(&GitOp::Push {
+            remote: "origin".into(),
+            src: "x".into(),
+            dst: Some("refs/for/main".into()),
+            set_upstream: false,
+            lease: None,
+        })
+        .expect("argv を組めませんでした");
+        assert_eq!(command.argv, ["push", "origin", "x:refs/for/main"]);
     }
 
     #[test]

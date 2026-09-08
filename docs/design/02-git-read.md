@@ -103,6 +103,7 @@ pub struct Branch {
     pub oid: Oid,
     pub upstream: Option<String>,  // "origin/feat/x"。表示用
     pub upstream_config: Option<UpstreamConfig>,  // push の行き先
+    pub upstream_oid: Option<Oid>,  // 追跡 ref が指す位置。force push の lease
     pub ahead: usize,            // upstream に対する ahead / behind
     pub behind: usize,
     pub is_head: bool,
@@ -154,6 +155,14 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
   組む側（01 の「push の行き先」）
 - **ahead / behind は `graph_ahead_behind(local, upstream)`。** upstream があるときだけ
   引く。無いブランチで 0 / 0 を入れると「同期している」と読めてしまう
+- **`upstream_oid` は追跡 ref が指す位置**（`refs/remotes/origin/x` の値）。force push の
+  `--force-with-lease=<dst>:<lease>` に渡す（01 の「force push」）。**`upstream`（短縮名）と
+  同じ `Option` の中に入れる** —— どちらも remote-tracking ref から作り、ref が引けなければ
+  両方 `None` になる。「名前は出せるが位置は無い」は起きない（`tracking` が名前を出す条件が
+  `get().target()` を引けることを含んでいる）
+- **`upstream_config` があっても `upstream_oid` が無い形はある**（`fetch --prune` のあと）。
+  そのときは追跡先の位置を知らないので、**force push は断る**（01）。config だけで
+  lease を組むと、比べる相手がいないまま `--force` と同じものを撃つことになる
 - **`upstream()` はブランチ 1 本ごとにリモートを引き直す。** libgit2 1.9.7 の
   `branch.c: git_branch_upstream_name` は、呼ばれるたびに config の snapshot を取り、
   `branch.<name>.remote` が `.` でなければ `git_remote_lookup` する（ソースで確認）。

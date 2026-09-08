@@ -382,6 +382,7 @@ pub fn fake_branch(name: &str, is_head: bool) -> Branch {
         oid: fake_oid(0),
         upstream: None,
         upstream_config: None,
+        upstream_oid: None,
         ahead: 0,
         behind: 0,
         is_head,

@@ -550,9 +550,18 @@ fn push(state: &mut AppState) -> Cmd {
 
 /// 完了した push を憶えるか（01 の「force push」）。
 ///
-/// **憶えるのは非 force の拒否だけ。** lease が古いときの
-/// `! [rejected] ... (stale info)` も `rejected` を含むので `NonFastForward` に落ちる
-/// （git 2.55 で確認）。force の失敗で立て直すと、同じ古い lease で撃ち続ける輪になる。
+/// **憶えるのは、次を force に上げられる経路の拒否だけ**（`upgradable`）。上げられ
+/// ない経路で憶えても読む側が使えず、`push_plan` が「立っているのに何もできない」印を
+/// 持つことになる。上げられないのは 2 つ。
+///
+/// - force push（`lease: Some`）。lease が古いときの `! [rejected] ... (stale info)`
+///   も `rejected` を含むので `NonFastForward` に落ちる（git 2.55 で確認）。立て直すと
+///   同じ古い lease で撃ち続ける輪になる
+/// - `-u` の提案（`set_upstream: true`）。追跡 ref を持たないので lease の値を作れず、
+///   force に上げられるのは `PushPlan::Tracked` だけ（01 の「force push」）。**憶えると、
+///   あとから追跡設定が外で入ったときに、追跡していない push の拒否を根拠に force の腕が
+///   立つ**
+///
 /// **それ以外の Push の完了はすべて忘れる**（成功した push、非 FF 以外の失敗）。
 ///
 /// **憶えるのは押したブランチ**（`GitOp::Push` の `src`）で、いまの HEAD ではない。
@@ -566,9 +575,9 @@ fn push_rejection(
     state: &AppState,
     result: &Result<ExecOutput, ExecError>,
     src: &str,
-    forced: bool,
+    upgradable: bool,
 ) -> Option<PushRejection> {
-    if forced {
+    if !upgradable {
         return None;
     }
     match result {
@@ -633,6 +642,11 @@ fn push_plan(state: &AppState) -> PushPlan {
     // 提案すると、ユーザーが設定した追跡先を黙って別のリモートへ向け替える（02 の
     // 「ブランチ一覧」がこの `None` を数えている）。
     let Some(config) = &head.upstream_config else {
+        // **ここで記憶を読んで断らない。** 断ると `P` が `Push` を出さなくなり、
+        // 記憶を落とす経路（`exec_finished`）へ二度と入れない。リモート側の同名
+        // ブランチが外で消えても「force push できません」と言い続ける。**`P` は
+        // 押し直せる**ままにして、force に上げられない事実は失敗時の案内で伝える
+        // （01 の「失敗の案内文」）。
         return propose_upstream(&head.name, state);
     };
 
@@ -1709,12 +1723,25 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     state.progress = done.progress;
 
     if let Err(err) = &done.result {
+        // **要約行は案内文、証拠は `detail`。** ステータスバーは `message` の 1 行目
+        // しか描かない（07）ので、そこを argv で埋めると案内が画面に出ない
+        // （01 の「失敗の案内文」）。
         let detail = exec_detail(err);
-        state.push_notice(NoticeLevel::Error, err.to_string(), Some(detail));
+        let message = exec_advice(&done.op, err)
+            .map(str::to_string)
+            .unwrap_or_else(|| err.to_string());
+        state.push_notice(NoticeLevel::Error, message, Some(detail));
     }
 
-    if let GitOp::Push { src, lease, .. } = &done.op {
-        state.push_rejected = push_rejection(state, &done.result, src, lease.is_some());
+    if let GitOp::Push {
+        src,
+        lease,
+        set_upstream,
+        ..
+    } = &done.op
+    {
+        let upgradable = lease.is_none() && !set_upstream;
+        state.push_rejected = push_rejection(state, &done.result, src, upgradable);
     }
 
     let reload = Reload::after(&done.op, done.result.is_ok());
@@ -1863,6 +1890,83 @@ fn exec_detail(err: &ExecError) -> String {
         }
     }
     detail
+}
+
+/// 通知の要約行。失敗の種別から「次に何をすればよいか」を出す（01 の「失敗の案内文」）。
+///
+/// `None` は案内が無いということ。呼び出し側は [`ExecError`] の `Display`
+/// （`git の実行に失敗しました: git <argv>`）に落とす。
+///
+/// **`op` まで見るのは非 FF のため。** 同じ `(non-fast-forward)` でも、force push が
+/// lease に断られた形（fetch を勧める）、`-u` の提案から入って force に上げる経路が
+/// 無い形、追跡設定に沿った push が断られた形で押すキーが違う。kind だけで文を選ぶと
+/// どれかに嘘を言う。
+///
+/// **どの文も 72 セルに収める。** ステータスバーは 1 行で、右端の `q:quit` と空白 2 で
+/// 8 セル取る（07）。溢れると `Paragraph` が末尾から黙って切るので、「どうすればよいか」
+/// の側から消える。見張りは `mewgit-tui` 側に置く（80 桁で描いて確かめる）。
+fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
+    // `NoResult` の `reason` は git の stderr ではなく mewgit の文言で、それ自体が
+    // 案内になっている（03）。差し替えると説明が消える。
+    let ExecError::Failed { kind, .. } = err else {
+        return None;
+    };
+    match kind {
+        ExecErrorKind::SamlSsoRequired => {
+            Some("SAML SSO の承認が要ります。GitHub で鍵を Authorize してください")
+        }
+        ExecErrorKind::SshAuthFailed => {
+            // **ホストは入れない。** `ssh -T <host>` を出すには「どのリモートで
+            // 失敗したか」が要るが、`Pull` はリモート名を運ばず、`RemoteUrl` は
+            // `user@` を捨てる（04）。M4 の「既定リモートを決める」へ送った（03）。
+            Some("SSH 鍵で認証できませんでした。ssh-agent と鍵の登録を確認してください")
+        }
+        ExecErrorKind::HttpsAuthFailed => {
+            Some("HTTPS 認証に失敗しました。gh auth setup-git を実行してください")
+        }
+        ExecErrorKind::NonFastForward => non_fast_forward_advice(op),
+        // `Conflict` の案内は進行中モードへの遷移ごと M5（03）。それまでは stderr を
+        // 出すほうが情報が多い。
+        ExecErrorKind::Conflict | ExecErrorKind::Other => None,
+    }
+}
+
+/// 非 FF で断られたときの案内。**押すキーが op で違う**（01 の「失敗の案内文」）。
+fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
+    match op {
+        // force push が lease に断られた形（`stale info`）。**これは守りが効いている**
+        // ので、リモートの位置を見てから押し直す（01 の「force push」）。
+        // **`P` は 2 回。** force の失敗では記憶を落とす（同じ古い lease で撃ち続ける
+        // 輪を作らないため）ので、`f` のあと 1 回目の `P` は素の push になり、もう一度
+        // 非 FF で断られてから force の確認が出る。**「押し直して」と 1 回に読める形で
+        // 書くと、途中で出る別の案内と食い違う。**
+        GitOp::Push { lease: Some(_), .. } => {
+            Some("リモートが動いています。f で取得してから P を 2 回押してください")
+        }
+        // `-u` の提案から入った形。force に上げられるのは `PushPlan::Tracked` だけ
+        // （lease の値が無い）で、`p` も追跡設定が無いと git がどのブランチを取るか
+        // 決められない。**mewgit に残る出口は改名だけ。**
+        //
+        // **キーではなくペインの名前を出す。** `r` が効くのは Branches ペインの中
+        // だけで（07 のキー表）、既定のフォーカスである Graph で押しても何も
+        // 起きない。しかも `r` はカーソル行を改名するので、HEAD とは限らない。
+        GitOp::Push {
+            set_upstream: true, ..
+        } => Some("追跡先が無いため force push できません。Branches で改名してください"),
+        // 追跡設定に沿った push。**次の `P` が force の確認を出すかは書かない** ——
+        // それを決めるのは `push_plan`（`ahead == 0` と追跡 ref の有無で断る）で、
+        // ここで先読みすると同じ判定が 2 箇所に割れる。断られても出るのは
+        // `PushPlan::Refused` の正しい文言なので、この案内は嘘にならない。
+        GitOp::Push { .. } => {
+            Some("リモートが進んでいます。p で取り込むか、P をもう一度押してください")
+        }
+        // `pull --ff-only` が履歴の分かれたブランチを断った形。merge / rebase は
+        // M5 なので、mewgit の中に踏める手が無いことをそのまま言う。
+        GitOp::Pull { .. } => Some("履歴が分かれています。merge / rebase はまだ実装していません"),
+        // fetch は remote-tracking ref を `+` 付きで更新するので非 FF で断らない
+        // （git 2.55 で確認）。ほかの op も非 FF を出す経路が無い。
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -3096,20 +3200,25 @@ mod tests {
         let _ = update(state, exec_done_of(op, result));
     }
 
-    /// git が非 FF で断ったときの失敗。stderr は実測の 1 行（git 2.55）。
-    fn non_fast_forward() -> ExecError {
+    /// 指定した kind で失敗した実行。**分類は済んでいる前提**なので stderr は見ない
+    /// （実測のパターンは `git_exec` の `classifies_by_pattern` が固定している）。
+    fn failed_with(kind: ExecErrorKind) -> ExecError {
         ExecError::Failed {
             argv: vec!["push".into(), "origin".into(), "main".into()],
             code: Some(1),
-            stderr: " ! [rejected]        main -> main (non-fast-forward)".to_string(),
-            kind: ExecErrorKind::NonFastForward,
+            stderr: "stderr の中身".to_string(),
+            kind,
         }
     }
 
-    /// 直前の `P` が断られた状態にする。**`exec_finished` を通す** —— 状態を直に
+    /// `op` が非 FF で断られた状態にする。**`exec_finished` を通す** —— 状態を直に
     /// 置くと、憶える側の条件（非 force・`NonFastForward`）を 1 つも踏まない。
-    fn reject_push(state: &mut AppState, op: GitOp) {
-        finish_exec(state, op, Err(non_fast_forward()));
+    ///
+    /// **`op` を取るのは push 以外も断られるため。** `pull --ff-only` の拒否も
+    /// `NonFastForward` に落ちる（03 のエラー分類）ので、名前を push に寄せると
+    /// 呼び出し側で嘘になる。
+    fn reject_non_fast_forward(state: &mut AppState, op: GitOp) {
+        finish_exec(state, op, Err(failed_with(ExecErrorKind::NonFastForward)));
     }
 
     #[test]
@@ -3120,7 +3229,7 @@ mod tests {
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         assert_eq!(press(&mut state, 'P'), Cmd::None, "確認せずに撃っています");
         let (body, on_yes) = open_confirm(&state);
@@ -3141,7 +3250,7 @@ mod tests {
             &["origin"],
             tracked_head("topic", "origin", "refs/heads/other", Some(lease)),
         );
-        reject_push(&mut state, renamed_push_op("origin", "topic", "other"));
+        reject_non_fast_forward(&mut state, renamed_push_op("origin", "topic", "other"));
 
         assert_eq!(press(&mut state, 'P'), Cmd::None);
         let (_, on_yes) = open_confirm(&state);
@@ -3164,7 +3273,7 @@ mod tests {
         let lease = fake_oid(7);
         let head = tracked_head("main", "origin", HEADS_MAIN, Some(lease));
         let mut state = state_for_push(&["origin"], head.clone());
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         // pull が通って先端が動いた。
         let _ = with_branches(
@@ -3189,7 +3298,7 @@ mod tests {
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
         // 別のブランチへ切り替わった（一覧の読み直しで届く形）。
         let _ = with_branches(
             &mut state,
@@ -3216,7 +3325,7 @@ mod tests {
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, None),
         );
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         assert_eq!(press(&mut state, 'P'), Cmd::None);
         assert_eq!(state.modal, None);
@@ -3240,7 +3349,7 @@ mod tests {
             ..tracked_head("main", "origin", HEADS_MAIN, Some(lease))
         };
         let mut state = state_for_push(&["origin"], head);
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         assert_eq!(press(&mut state, 'P'), Cmd::None);
         assert_eq!(state.modal, None);
@@ -3272,7 +3381,7 @@ mod tests {
                 Some(lease),
             )]),
         );
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         assert_eq!(
             press(&mut state, 'P'),
@@ -3291,7 +3400,7 @@ mod tests {
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
-        reject_push(&mut state, forced_push_op(lease));
+        reject_non_fast_forward(&mut state, forced_push_op(lease));
 
         assert_eq!(
             press(&mut state, 'P'),
@@ -3309,7 +3418,7 @@ mod tests {
         let fresh = fake_oid(8);
         let head = tracked_head("main", "origin", HEADS_MAIN, Some(stale));
         let mut state = state_for_push(&["origin"], head.clone());
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         finish_exec(
             &mut state,
@@ -3343,7 +3452,7 @@ mod tests {
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
         finish_exec(
             &mut state,
             push_op("origin", "main", false),
@@ -3401,6 +3510,23 @@ mod tests {
             "{body}"
         );
         assert_eq!(*on_yes, Cmd::Exec(push_op("upstream", "topic", true)));
+    }
+
+    #[test]
+    fn a_rejected_set_upstream_push_is_not_remembered() {
+        // **force に上げられない経路の拒否は憶えない**（01 の「force push」）。憶えると
+        // 読む側が使えない印になり、あとから追跡設定が外で入ったときに、追跡して
+        // いない push の拒否を根拠に force の腕が立つ。
+        let mut state = state_for_push(&["origin"], fake_branch("topic", true));
+        reject_non_fast_forward(&mut state, push_op("origin", "topic", true));
+
+        assert_eq!(state.push_rejected, None);
+        // **`P` は押し直せる。** ここで断ると `Push` が二度と出ず、記憶を落とす経路
+        // （`exec_finished`）へ入れなくなる —— リモート側の同名ブランチが外で消えても
+        // 断り続けることになる。
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        let (_, on_yes) = open_confirm(&state);
+        assert_eq!(*on_yes, Cmd::Exec(push_op("origin", "topic", true)));
     }
 
     #[test]
@@ -3813,7 +3939,7 @@ feat/b
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
-        reject_push(&mut forced, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut forced, push_op("origin", "main", false));
         let _ = press(&mut forced, 'P');
         bodies.push(open_confirm(&forced).0.to_string());
 
@@ -3948,6 +4074,108 @@ feat/b
         assert!(
             detail.contains("did not match any files"),
             "detail: {detail}"
+        );
+        // 案内の無い kind では要約行が `Display` のまま（01 の「失敗の案内文」）。
+        assert!(
+            notice.message.contains("git add -- a.txt"),
+            "message: {}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn a_failure_puts_the_next_key_on_the_summary_line() {
+        // **ステータスバーが描くのは要約行の 1 行目だけ**（07）。ここが argv だと、
+        // 「次に何を押すか」が画面に出ない（01 の「失敗の案内文」）。
+        let tracked = push_op("origin", "main", false);
+        let cases: [(GitOp, ExecErrorKind, &str); 7] = [
+            (tracked.clone(), ExecErrorKind::SamlSsoRequired, "Authorize"),
+            (tracked.clone(), ExecErrorKind::SshAuthFailed, "ssh-agent"),
+            (
+                tracked.clone(),
+                ExecErrorKind::HttpsAuthFailed,
+                "gh auth setup-git",
+            ),
+            // **同じ kind でも op で押すキーが違う。** kind だけで選ぶとどれかに嘘を言う。
+            (
+                tracked.clone(),
+                ExecErrorKind::NonFastForward,
+                "P をもう一度押してください",
+            ),
+            (
+                push_op("origin", "main", true),
+                ExecErrorKind::NonFastForward,
+                "Branches で改名してください",
+            ),
+            (
+                forced_push_op(fake_oid(7)),
+                ExecErrorKind::NonFastForward,
+                "f で取得してから P を 2 回",
+            ),
+            (
+                GitOp::Pull {
+                    mode: PullMode::FastForwardOnly,
+                },
+                ExecErrorKind::NonFastForward,
+                "merge / rebase はまだ実装していません",
+            ),
+        ];
+
+        for (op, kind, expected) in cases {
+            let mut state = state();
+            finish_exec(&mut state, op.clone(), Err(failed_with(kind)));
+
+            let notice = state.notices.back().expect("通知がありません");
+            assert!(
+                notice.message.contains(expected),
+                "{op:?} / {kind:?}: {}",
+                notice.message
+            );
+            // **案内に差し替えても証拠は捨てない**（不変ルール 4）。argv は `detail`
+            // に残り、履歴表示（M6）から読める。
+            let detail = notice.detail.as_deref().expect("detail がありません");
+            assert!(detail.contains("git push origin main"), "detail: {detail}");
+            // **1 行に収まる幅か。** 超えると末尾から黙って切れ、「どうすればよいか」
+            // の側が消える（01 の「失敗の案内文」）。72 が予算である理由は
+            // `mewgit-tui` の `a_notice_of_72_cells_fits_beside_the_hint` が見る。
+            assert!(
+                cells(&notice.message) <= 72,
+                "{} セル: {}",
+                cells(&notice.message),
+                notice.message
+            );
+        }
+    }
+
+    /// 端末に描いたときの桁数。**案内文は ASCII と日本語だけ**なので、非 ASCII を
+    /// 2 桁と数えれば実際の幅と一致する（合成文字や絵文字を入れたらここが嘘になる）。
+    fn cells(text: &str) -> usize {
+        text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
+    }
+
+    #[test]
+    fn a_diverged_pull_does_not_arm_a_force_push() {
+        // `pull --ff-only` の拒否も `NonFastForward` に落ちる（`classify` の 4 つ目）。
+        // **憶える側は `GitOp::Push` で門番している**ので、ここで force の腕は立たない
+        // （01 の「force push」）。立つと、`p` を押しただけで次の `P` が
+        // 「リモートを上書きします」の確認になる。
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(7))),
+        );
+
+        reject_non_fast_forward(
+            &mut state,
+            GitOp::Pull {
+                mode: PullMode::FastForwardOnly,
+            },
+        );
+
+        assert_eq!(state.push_rejected, None);
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "main", false)),
+            "force push の確認が出ています"
         );
     }
 

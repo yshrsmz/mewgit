@@ -85,7 +85,10 @@ def put(line: list[str], col: int, char: str, wide: bool) -> None:
     （「詳細」の上に別の文字が来て「詳S細a」のようになる）。
     """
     # 全角の 2 桁目に書き込むなら、残った 1 桁目は文字として成り立たないので空ける。
-    if line[col] == WIDE_TAIL and col > 0:
+    # **左隣も 2 桁目なら消さない。** そこは直前に書いた全角の 2 桁目で、`line[col]` に
+    # 残っているのは前のフレームの印。消すと、いま書いたばかりの全角が半分になる
+    # （部分再描画で 1 文字おきに空白が入る）。
+    if line[col] == WIDE_TAIL and col > 0 and line[col - 1] != WIDE_TAIL:
         line[col - 1] = " "
 
     line[col] = char

@@ -477,11 +477,24 @@ mod tests {
         assert!(lines[0].contains("mewgit"), "header: {:?}", lines[0]);
     }
 
+    /// 描いたステータスバー（最下行）。
+    ///
+    /// **取り出しはここ 1 本。** ステータスバーの置き場所が変わる（M6）と、各テストが
+    /// 持っている `height - 1` が一斉に嘘になる。
+    fn status_bar(state: &AppState, size: TermSize) -> String {
+        draw(state, size)[size.height as usize - 1].clone()
+    }
+
+    /// 通知を 1 件だけ積んで描いたステータスバー。既定サイズ（80x24）で見る。
+    fn status_bar_with(message: &str) -> String {
+        let mut state = state_at("/repo");
+        state.push_notice(NoticeLevel::Error, message.to_string(), None);
+        status_bar(&state, TermSize::default())
+    }
+
     #[test]
     fn status_bar_shows_the_quit_hint_when_there_is_no_notice() {
-        let size = TermSize::default();
-        let lines = draw(&state_at("/repo"), size);
-        let last = &lines[size.height as usize - 1];
+        let last = status_bar(&state_at("/repo"), TermSize::default());
         assert!(last.contains("q:quit"), "status: {last:?}");
     }
 
@@ -491,9 +504,7 @@ mod tests {
         state.push_notice(NoticeLevel::Warn, "古い通知".to_string(), None);
         state.push_notice(NoticeLevel::Error, "新しい通知".to_string(), None);
 
-        let size = TermSize::default();
-        let lines = draw(&state, size);
-        let last = &lines[size.height as usize - 1];
+        let last = status_bar(&state, TermSize::default());
 
         assert!(last.contains("新しい通知"), "status: {last:?}");
         assert!(!last.contains("古い通知"), "status: {last:?}");
@@ -520,20 +531,12 @@ mod tests {
     #[test]
     fn status_bar_shows_only_the_first_line_of_a_notice() {
         // toml のパースエラーは複数行。そのまま流すと改行が消えて読めなくなる。
-        let mut state = state_at("/repo");
-        state.push_notice(
-            NoticeLevel::Warn,
+        let last = status_bar_with(
             "設定ファイルの構文エラー
   |
 2 | ascii = 
-  | ^"
-            .to_string(),
-            None,
+  | ^",
         );
-
-        let size = TermSize::default();
-        let lines = draw(&state, size);
-        let last = &lines[size.height as usize - 1];
 
         assert!(
             last.contains("設定ファイルの構文エラー"),
@@ -541,6 +544,34 @@ mod tests {
         );
         assert!(!last.contains('|'), "status: {last:?}");
         assert!(last.contains("q:quit"), "status: {last:?}");
+    }
+
+    #[test]
+    fn a_notice_of_72_cells_fits_beside_the_hint() {
+        // **案内文の 72 セルという予算はここから来る**（01 の「失敗の案内文」）。
+        // `q:quit` と空白 2 で 8 セル取るので、80 桁では通知に 72 セル残る。
+        // `contains` を見るテストは切れても通るので、**収まることを直に見る**。
+        //
+        // **36 と 37 はリテラルのまま置く。** `HINT` から算出すると、M6 で `?:help` が
+        // 付いて予算が下がったときにこのテストが黙って追随し、`app` 側の「72 セルに
+        // 収める」だけが古くなる（`a_failure_puts_the_next_key_on_the_summary_line`）。
+        // **リテラルであること自体が、2 つの見張りを噛み合わせている** —— 予算が
+        // 変わればここが赤くなり、案内文の側も数え直すことになる。
+
+        let fits = "あ".repeat(36);
+        let last = status_bar_with(&fits);
+        assert!(last.contains(&fits), "status: {last:?}");
+        assert!(last.contains("q:quit"), "status: {last:?}");
+
+        // 1 文字増やすと 74 セルになり、ヒントと合わせて 80 桁に入らない。**どちらが
+        // 切られるかは見ない** —— 07 は通知を切ると決めていて、いまの実装は末尾
+        // （ヒント）を落とす。直すのは M6 のステータスバーのタスク。
+        let over = "あ".repeat(37);
+        let last = status_bar_with(&over);
+        assert!(
+            !(last.contains(&over) && last.contains("q:quit")),
+            "status: {last:?}"
+        );
     }
 
     #[test]
@@ -554,11 +585,12 @@ mod tests {
     fn renders_at_other_terminal_sizes() {
         // リサイズ後のサイズでも落ちないこと。
         for (width, height) in [(120, 40), (40, 10)] {
-            let lines = draw(&state_at("/repo"), TermSize { width, height });
+            let size = TermSize { width, height };
+            let lines = draw(&state_at("/repo"), size);
             assert_eq!(lines.len(), height as usize);
             assert!(lines[0].contains("repo"), "header: {:?}", lines[0]);
 
-            let last = &lines[height as usize - 1];
+            let last = status_bar(&state_at("/repo"), size);
             assert!(last.contains("q:quit"), "status: {last:?}");
         }
     }

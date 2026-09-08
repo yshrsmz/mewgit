@@ -91,11 +91,14 @@
       毎回払う。**`LoadRepoInfo` / `LoadBranches` / `LoadHeadMessage` の追いつきも
       ここで塞いだ。** fetch で ref が変わったあとのログの読み直しは #47 で
       `Reload::RefsAndLog` に乗って済んでいる
-- [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文。
+- [x] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文。
       **force push が `stale info` で断られた形は `f` を勧める**（lease は fetch して
       からでないと通らない。01 の「force push」）。**追跡設定の無いブランチが非 FF で
       断られた形は mewgit の中で抜けられない** —— force に上げるのは `PushPlan::Tracked`
-      だけなので、`-u` の提案から入った経路には案内文が要る
+      だけなので、`-u` の提案から入った経路には案内文が要る。
+      **`pull --ff-only` の拒否も分類に足した** —— `Not possible to fast-forward` は
+      `rejected` も他の 3 語も含まないので `Other` に落ちていた（01 の
+      「失敗の案内文」、03 のエラー分類）
 - [ ] 実行中ジョブのスピナーとキャンセル
 
 fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取りを 1 つも足さず、

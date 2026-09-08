@@ -144,33 +144,27 @@ impl AppState {
     /// `focus` と画面の中身が食い違う状態（コミットを見ているのにキーは Working tree が
     /// 受ける）を表現できてしまう。
     pub fn focus_candidates(&self) -> &'static [Pane] {
-        let panes = match self.graph.selection() {
-            GraphSelection::Wip => Pane::WIP_FOCUS,
+        match self.graph.selection() {
+            // **絞るのはここだけ。** コミット側の「対象が無い」はファイル一覧が届くまでの
+            // 一時的なもので、届いた時点で頼み直す経路が別にある（01 の「コミットの
+            // ファイル一覧」）。**外すと、待っているあいだ候補が増減するうえ、その
+            // 頼み直しへ入れなくなる。** WIP 行の側が Worktree ペインと同じ
+            // スナップショットを読む（無い状態はペインが既に出している）のに対し、
+            // コミット側は 2 つ目の遅延読み込みを待つ、という違い。
             GraphSelection::Commit(_) => Pane::COMMIT_FOCUS,
-        };
-        // **差分で表せる行が無いなら `Diff` は候補から外す。** 巡回に入れるのは
-        // 「実装済みで、かついま画面に出ているペインだけ」（07）で、`Diff` は左の領域を
-        // Graph と差し替えて出す。相手がいないまま入れると、**グラフが空のペインに
-        // 差し替わる**（変更の無いワーキングツリー、conflicted だけの区画）。
-        //
-        // **絞るのは WIP 行の側だけ。** コミット側の「対象が無い」はファイル一覧が
-        // 届くまでの一時的なもので、届いた時点で頼み直す経路が別にある（01 の
-        // 「コミットのファイル一覧」）。**ここで外すと、待っているあいだ候補が増減する
-        // うえ、その頼み直しへ入れなくなる。** WIP 行の側が Worktree ペインと同じ
-        // スナップショットを読む（無い状態はペインが既に出している）のに対し、
-        // コミット側は 2 つ目の遅延読み込みを待つ、という違い。
-        //
-        // **`wanted_diff()` では判定できない。** あちらは `focus != Pane::Diff` で
-        // `None` を返すので、入る前は必ず `None`（入れるかを問う相手にならない）。
-        let has_diff = match self.graph.selection() {
-            GraphSelection::Wip => self.wanted_worktree_diff().is_some(),
-            GraphSelection::Commit(_) => true,
-        };
-        if has_diff {
-            panes
-        } else {
+            // **差分で表せる行が無いなら `Diff` は候補から外す。** 巡回に入れるのは
+            // 「実装済みで、かついま画面に出ているペインだけ」（07）で、`Diff` は左の
+            // 領域を Graph と差し替えて出す。相手がいないまま入れると、**グラフが空の
+            // ペインに差し替わる**（変更の無いワーキングツリー、conflicted だけの区画）。
+            //
+            // **`wanted_diff()` では判定できない。** あちらは `focus != Pane::Diff` で
+            // `None` を返すので、入る前は必ず `None`（入れるかを問う相手にならない）。
+            //
             // **末尾で照合する。** 添字で削ると、並びを変えたときに別のペインが落ちる。
-            panes.strip_suffix(&[Pane::Diff]).unwrap_or(panes)
+            GraphSelection::Wip if self.wanted_worktree_diff().is_none() => Pane::WIP_FOCUS
+                .strip_suffix(&[Pane::Diff])
+                .unwrap_or(Pane::WIP_FOCUS),
+            GraphSelection::Wip => Pane::WIP_FOCUS,
         }
     }
 
@@ -331,8 +325,9 @@ impl Pane {
     /// **`Diff` は両方に入るが、出る diff は違う。** ワーキングツリーのファイルか、
     /// コミットのファイルか。決めるのは [`AppState::wanted_diff`] の 1 つ。
     ///
-    /// **どちらの一覧でも `Diff` は末尾に置く。** WIP 行で差分を出せる行が無いときは
-    /// [`AppState::focus_candidates`] が末尾を落として候補から外す。
+    /// **`WIP_FOCUS` は `Diff` を末尾に置く。** 差分を出せる行が無いときに
+    /// [`AppState::focus_candidates`] が末尾を落として候補から外すため。こちらの
+    /// 一覧は落とさないので、並びの制約は無い。
     ///
     /// **`Branches` も両方に入る。** 右列の上に常に出ていて、左の選択で中身が
     /// 変わらないため（07 の「レイアウト」）。

@@ -219,6 +219,23 @@ pub const LOADING: &str = "読み込み中…";
 /// 変更が 1 つも無いときの文言。ワーキングツリーとコミットのファイル一覧が使う。
 pub const NO_CHANGES: &str = "変更はありません";
 
+/// コミットのファイル一覧が出せないときの文言。
+///
+/// **読み手は 2 つ。** CommitDetail ペイン（一覧そのもの）と Diff ペイン（一覧が
+/// 決まらないと対象が決まらない）。分けて書くと、届く前・失敗・空の 3 通りのうち
+/// どれかが片方だけ古くなる —— 実際、Diff 側に書き直したときに失敗の腕が落ちて、
+/// **一覧の読み込みに失敗すると Diff ペインが永久に「読み込み中…」を出していた**。
+pub fn files_placeholder(state: &AppState) -> &'static str {
+    if state.graph.fresh_files().is_some() {
+        // 届いていて空。`--allow-empty` のコミット。
+        NO_CHANGES
+    } else if state.graph.has_files_failed() {
+        "ファイル一覧を読み込めませんでした"
+    } else {
+        LOADING
+    }
+}
+
 /// ファイル一覧の 1 行。`M src/main.rs`、rename は `R old.txt -> new.txt`。
 ///
 /// **Worktree ペインとコミット詳細のファイル一覧が同じものを使う**（07）。区画の

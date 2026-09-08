@@ -77,16 +77,12 @@ fn title(view: Option<&DiffView>, wanted: Option<&DiffTarget>) -> String {
 ///
 /// **`wanted` が `None` のままここへ来るのはコミット側だけ。** ワーキングツリーの行で
 /// 対象が決まらないとき（変更が無い、conflicted）は `Diff` が巡回の候補から外れ、
-/// `Enter` も断られる（01 の「Pane と Modal」）ので、ペインごと出ない。残るのは
-/// **ファイル一覧を待っているあいだ**と、**ファイルが 0 件のコミット**の 2 つで、
-/// どちらも「行が選ばれていない」ではないので `fresh_files` で出し分ける。
+/// `Enter` も断られる（01 の「Pane と Modal」）ので、ペインごと出ない。**残るのは
+/// ファイル一覧が決まらない形だけ**なので、理由は一覧の側が持っている文言
+/// （[`ui::files_placeholder`]）をそのまま使う。書き直すと 3 通りのどれかが落ちる。
 fn pending_message(state: &AppState, wanted: Option<&DiffTarget>) -> &'static str {
     if wanted.is_none() {
-        return match state.graph.fresh_files() {
-            // 一覧はあるのに対象が決まらない = ファイルが 1 つも無いコミット。
-            Some(_) => "このコミットにファイルはありません",
-            None => ui::LOADING,
-        };
+        return ui::files_placeholder(state);
     }
     if state.diff.has_failed(wanted) {
         "差分を読み込めませんでした"
@@ -218,12 +214,12 @@ fn marked(mark: char, content: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::test_util::{
-        draw, pane_text, row_is_reversed, row_of, state_on_first_commit,
-        state_showing_diff as opened,
+        deliver_commit_files, draw, pane_text, row_is_reversed, row_of, state_on_first_commit,
+        state_showing_diff, state_with_status,
     };
     use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Msg, TermSize};
-    use mewgit_core::git_read::{FileDiff, WorktreeSnapshot};
-    use mewgit_core::test_util::{fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid};
+    use mewgit_core::git_read::{FileDiff, GitReadError, WorktreeSnapshot};
+    use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk};
 
     /// 既定の 80x24。左は 46 桁になるので、テストはその幅で読める内容にする。
     const SIZE: TermSize = TermSize {
@@ -253,7 +249,7 @@ mod tests {
 
     /// `a.txt` を選び、`files` が届いた状態。
     fn state_with_diff(files: Vec<FileDiff>) -> AppState {
-        let mut state = opened(one_file());
+        let mut state = state_showing_diff(one_file());
         deliver(&mut state, files);
         state
     }
@@ -367,7 +363,7 @@ mod tests {
             ],
             ..WorktreeSnapshot::default()
         };
-        let mut state = opened(snapshot);
+        let mut state = state_showing_diff(snapshot);
         deliver(
             &mut state,
             one_hunk("a.txt", "@@ AAA @@", &[(LineOrigin::Addition, "AAALINE")]),
@@ -533,7 +529,7 @@ mod tests {
     fn a_pending_diff_reads_as_loading() {
         // 起動直後に「読み込めませんでした」と出すと、まだ読んでいないだけなのに
         // 失敗したように見える。
-        let state = opened(one_file());
+        let state = state_showing_diff(one_file());
 
         // **このペインの中だけを見る。** 画面全体を見ると、まだ届いていない
         // ブランチ一覧が出した同じ文言で通ってしまう（`ui::LOADING` は共有）。
@@ -544,21 +540,13 @@ mod tests {
         assert!(text.contains("Diff: a.txt"), "{text}");
     }
 
-    /// コミットを選んで詳細を届け、`Enter` を 2 回で Diff ペインまで入った状態。
+    /// コミットを選び、`Enter` を 2 回で Diff ペインまで入った状態。
     ///
-    /// ファイル一覧は届けない。**コミット側は一覧が届く前でも `Diff` に入れる**
-    /// （届いたら頼み直す経路が別にある。01 の「コミットのファイル一覧」）ので、
-    /// この状態は実物で踏める。
+    /// **詳細もファイル一覧も届けない。** グラフの `Enter` は `right_pane()` へ移るだけ
+    /// で詳細を待たないし、**コミット側は一覧が届く前でも `Diff` に入れる**（届いたら
+    /// 頼み直す経路が別にある。01 の「コミットのファイル一覧」）。この状態は実物で踏める。
     fn commit_diff_pending() -> AppState {
         let mut state = state_on_first_commit(&["subject"]);
-        let detail = fake_detail(0, "subject");
-        let _ = update(
-            &mut state,
-            Msg::CommitDetailLoaded {
-                oid: detail.oid,
-                result: Box::new(Ok(detail)),
-            },
-        );
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
         assert_eq!(state.focus, Pane::Diff, "Diff ペインに入れていません");
@@ -577,31 +565,40 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_with_no_files_says_so() {
-        // 一覧は届いたのに対象が決まらない = ファイルが 1 つも無いコミット
-        // （`--allow-empty`）。「読み込み中」のまま止めない。
-        let mut state = commit_diff_pending();
-        let _ = update(
-            &mut state,
-            Msg::CommitFilesLoaded {
-                oid: fake_oid(0),
-                result: Box::new(Ok(Vec::new())),
-            },
-        );
+    fn a_commit_without_files_uses_the_same_words_as_the_list() {
+        // **一覧が決まらない理由は一覧の側が持っている**（`ui::files_placeholder`）。
+        // 空（`--allow-empty`）と失敗を「読み込み中」に丸めない。
+        for (result, expected) in [
+            (Ok(Vec::new()), ui::NO_CHANGES),
+            (
+                Err(GitReadError::NonUtf8Head),
+                "ファイル一覧を読み込めませんでした",
+            ),
+        ] {
+            let mut state = commit_diff_pending();
+            deliver_commit_files(&mut state, result);
 
-        let text = pane_text(&state, SIZE, Pane::Diff);
+            // **このペインの中だけを見る。** 文言は CommitDetail ペインも出すので、
+            // 画面全体で見ると隣のペインが出した字で通る（#40）。
+            let text = pane_text(&state, SIZE, Pane::Diff);
 
-        assert!(text.contains("ファイルはありません"), "{text}");
+            assert!(text.contains(expected), "{text}");
+        }
     }
 
     #[test]
     fn a_conflicted_row_does_not_swap_the_graph_for_an_empty_diff() {
         // **conflicted は 2 者の diff で表せない**（02）ので対象が決まらない。`Enter` は
         // 断られ、左はグラフのまま。以前はここで空の Diff がグラフを覆っていた。
-        let state = opened(WorktreeSnapshot {
+        //
+        // **`state_showing_diff` は使わない。** 押した結果が「開かない」ことを見る
+        // テストなので、開いた状態を名乗るヘルパを通すと名前が中身と逆になる。
+        let mut state = state_with_status(WorktreeSnapshot {
             conflicted: vec![fake_entry("c.txt", FileStatus::Conflicted)],
             ..WorktreeSnapshot::default()
         });
+        state.focus = Pane::Worktree;
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
 
         let text = draw(&state, SIZE).join("\n");
 
@@ -611,7 +608,7 @@ mod tests {
 
     #[test]
     fn a_failed_diff_says_so() {
-        let mut state = opened(one_file());
+        let mut state = state_showing_diff(one_file());
         let target = state.wanted_diff().unwrap();
         let cmd = update(
             &mut state,

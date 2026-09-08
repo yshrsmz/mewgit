@@ -432,9 +432,11 @@ fn open_diff(state: &mut AppState) -> Cmd {
 
 /// 差分で表せない行に `Enter` を押したときの理由。
 ///
-/// conflicted の区画（2 者の diff で表せない）、変更の無いワーキングツリー、コミットの
-/// ファイル一覧がまだ届いていない場合に出る。**`Tab` でも同じ行は候補から外れる**
-/// （[`AppState::focus_candidates`]）ので、入口は両方とも塞がっている。
+/// **出るのは Worktree ペインからだけ。** conflicted の区画（2 者の diff で表せない）と、
+/// 変更の無いワーキングツリーの 2 つ。コミット詳細からの `Enter` も同じ入口を通るが、
+/// あちらは候補から外さないので断りに落ちない（01 の「Pane と Modal」）。
+/// **`Tab` でも同じ行は候補から外れる**（[`AppState::focus_candidates`]）ので、
+/// 入口は両方とも塞がっている。
 const NO_DIFF: &str = "この行の差分は出せません";
 
 /// Branches ペインのキー処理。

@@ -604,6 +604,15 @@ enum PushPlan {
     Refused(String),
 }
 
+/// 追跡設定の無いブランチが非 FF で断られたときの結論（01 の「失敗の案内文」）。
+///
+/// **文言は 1 つ。** 断られた直後の案内と、そのあと `P` を押したときの断りは同じ
+/// ことを言うので、2 つのリテラルに割ると片方だけ古くなる。**mewgit の中で
+/// 抜けられない** —— force に上げられるのは `PushPlan::Tracked` だけ（lease の値が
+/// 無い）で、`p` も追跡設定が無いと git がどのブランチを取るか決められない。
+/// 残る出口は `r` で、改名すればリモートに同名の ref が無くなり `-u` の push が通る。
+const UNTRACKED_NON_FF: &str = "追跡先が無いため force push できません。r で改名して push できます";
+
 /// HEAD のブランチと登録済みのリモートから push の行き先を決める（01 の
 /// 「push の行き先」）。
 ///
@@ -632,7 +641,20 @@ fn push_plan(state: &AppState) -> PushPlan {
     // `fetch --prune` で ref が消えただけのブランチも `None` になる。そこで `-u` を
     // 提案すると、ユーザーが設定した追跡先を黙って別のリモートへ向け替える（02 の
     // 「ブランチ一覧」がこの `None` を数えている）。
+    // **断られた記憶は追跡設定より先に読む。** `-u` の提案から入った push も
+    // `push_rejected` を立てる（憶える側が見るのは `GitOp::Push` だけ）ので、ここで
+    // 読まないと**同じ失敗する push をもう一度提案する**ことになる。
+    let rejected = state
+        .push_rejected
+        .as_ref()
+        .is_some_and(|rejected| rejected.branch == head.name && rejected.oid == head.oid);
+
     let Some(config) = &head.upstream_config else {
+        // 追跡設定を持たないまま断られた形。force に上げる経路が無いので、失敗の
+        // 直後に出した案内と同じ結論をここでも返す（[`UNTRACKED_NON_FF`]）。
+        if rejected {
+            return PushPlan::Refused(UNTRACKED_NON_FF.to_string());
+        }
         return propose_upstream(&head.name, state);
     };
 
@@ -648,10 +670,7 @@ fn push_plan(state: &AppState) -> PushPlan {
 
     // **直前の `P` が断られたときだけ force に上げる**（01 の「force push」）。
     // 専用のキーを作らないのは、断られていない場面で押せる形にしないため（07）。
-    let rejected = state
-        .push_rejected
-        .as_ref()
-        .is_some_and(|rejected| rejected.branch == head.name && rejected.oid == head.oid);
+    //
     // **lease の値が無いなら force は撃たない。** 値の無い `--force-with-lease` は
     // remote-tracking ref と比べるだけで守りにならない（03）。`upstream_config` が
     // あってもここが `None` になるのは `fetch --prune` のあと（02）。**判定を
@@ -1918,13 +1937,11 @@ fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
         GitOp::Push { lease: Some(_), .. } => {
             Some("リモートが動いています。f で取得してから P を押し直してください")
         }
-        // `-u` の提案から入った形。force に上げられるのは `PushPlan::Tracked` だけ
-        // （lease の値が無い）。**`p` も通らない** —— 追跡設定が無いので `git pull` が
-        // どのブランチを取るか決められない。**mewgit に残る出口は `r` だけ**で、
-        // 改名すればリモートに同名の ref が無くなり `-u` の push が通る。
+        // `-u` の提案から入った形。**次の `P` も同じ結論を返す**（`push_plan` が
+        // [`UNTRACKED_NON_FF`] で断る）ので、案内と押した結果が食い違わない。
         GitOp::Push {
             set_upstream: true, ..
-        } => Some("追跡先が無いため force push できません。r で改名して push できます"),
+        } => Some(UNTRACKED_NON_FF),
         // 追跡設定に沿った push。**次の `P` が force の確認を出すかは書かない** ——
         // それを決めるのは `push_plan`（`ahead == 0` と追跡 ref の有無で断る）で、
         // ここで先読みすると同じ判定が 2 箇所に割れる。断られても出るのは
@@ -3172,20 +3189,25 @@ mod tests {
         let _ = update(state, exec_done_of(op, result));
     }
 
-    /// git が非 FF で断ったときの失敗。stderr は実測の 1 行（git 2.55）。
-    fn non_fast_forward() -> ExecError {
+    /// 指定した kind で失敗した実行。**分類は済んでいる前提**なので stderr は見ない
+    /// （実測のパターンは `git_exec` の `classifies_by_pattern` が固定している）。
+    fn failed_with(kind: ExecErrorKind) -> ExecError {
         ExecError::Failed {
             argv: vec!["push".into(), "origin".into(), "main".into()],
             code: Some(1),
-            stderr: " ! [rejected]        main -> main (non-fast-forward)".to_string(),
-            kind: ExecErrorKind::NonFastForward,
+            stderr: "stderr の中身".to_string(),
+            kind,
         }
     }
 
-    /// 直前の `P` が断られた状態にする。**`exec_finished` を通す** —— 状態を直に
+    /// `op` が非 FF で断られた状態にする。**`exec_finished` を通す** —— 状態を直に
     /// 置くと、憶える側の条件（非 force・`NonFastForward`）を 1 つも踏まない。
-    fn reject_push(state: &mut AppState, op: GitOp) {
-        finish_exec(state, op, Err(non_fast_forward()));
+    ///
+    /// **`op` を取るのは push 以外も断られるため。** `pull --ff-only` の拒否も
+    /// `NonFastForward` に落ちる（03 のエラー分類）ので、名前を push に寄せると
+    /// 呼び出し側で嘘になる。
+    fn reject_non_fast_forward(state: &mut AppState, op: GitOp) {
+        finish_exec(state, op, Err(failed_with(ExecErrorKind::NonFastForward)));
     }
 
     #[test]
@@ -3196,7 +3218,7 @@ mod tests {
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         assert_eq!(press(&mut state, 'P'), Cmd::None, "確認せずに撃っています");
         let (body, on_yes) = open_confirm(&state);
@@ -3217,7 +3239,7 @@ mod tests {
             &["origin"],
             tracked_head("topic", "origin", "refs/heads/other", Some(lease)),
         );
-        reject_push(&mut state, renamed_push_op("origin", "topic", "other"));
+        reject_non_fast_forward(&mut state, renamed_push_op("origin", "topic", "other"));
 
         assert_eq!(press(&mut state, 'P'), Cmd::None);
         let (_, on_yes) = open_confirm(&state);
@@ -3240,7 +3262,7 @@ mod tests {
         let lease = fake_oid(7);
         let head = tracked_head("main", "origin", HEADS_MAIN, Some(lease));
         let mut state = state_for_push(&["origin"], head.clone());
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         // pull が通って先端が動いた。
         let _ = with_branches(
@@ -3265,7 +3287,7 @@ mod tests {
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
         // 別のブランチへ切り替わった（一覧の読み直しで届く形）。
         let _ = with_branches(
             &mut state,
@@ -3292,7 +3314,7 @@ mod tests {
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, None),
         );
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         assert_eq!(press(&mut state, 'P'), Cmd::None);
         assert_eq!(state.modal, None);
@@ -3316,7 +3338,7 @@ mod tests {
             ..tracked_head("main", "origin", HEADS_MAIN, Some(lease))
         };
         let mut state = state_for_push(&["origin"], head);
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         assert_eq!(press(&mut state, 'P'), Cmd::None);
         assert_eq!(state.modal, None);
@@ -3348,7 +3370,7 @@ mod tests {
                 Some(lease),
             )]),
         );
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         assert_eq!(
             press(&mut state, 'P'),
@@ -3367,7 +3389,7 @@ mod tests {
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
-        reject_push(&mut state, forced_push_op(lease));
+        reject_non_fast_forward(&mut state, forced_push_op(lease));
 
         assert_eq!(
             press(&mut state, 'P'),
@@ -3385,7 +3407,7 @@ mod tests {
         let fresh = fake_oid(8);
         let head = tracked_head("main", "origin", HEADS_MAIN, Some(stale));
         let mut state = state_for_push(&["origin"], head.clone());
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         finish_exec(
             &mut state,
@@ -3419,7 +3441,7 @@ mod tests {
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
-        reject_push(&mut state, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
         finish_exec(
             &mut state,
             push_op("origin", "main", false),
@@ -3477,6 +3499,27 @@ mod tests {
             "{body}"
         );
         assert_eq!(*on_yes, Cmd::Exec(push_op("upstream", "topic", true)));
+    }
+
+    #[test]
+    fn a_rejected_set_upstream_push_is_not_proposed_again() {
+        // **`-u` の push も `push_rejected` を立てる**（憶える側が見るのは
+        // `GitOp::Push` だけ）。読まないと、案内が「force push できません」と言った
+        // 1 キーあとに、同じ失敗する push をもう一度提案することになる。
+        let mut state = state_for_push(&["origin"], fake_branch("topic", true));
+        reject_non_fast_forward(&mut state, push_op("origin", "topic", true));
+
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::None,
+            "同じ push を出しています"
+        );
+        assert_eq!(state.modal, None, "同じ確認をもう一度出しています");
+        // **失敗の直後に出した案内と同じ文言**（`UNTRACKED_NON_FF`）。
+        assert_eq!(
+            state.notices.back().map(|notice| notice.message.as_str()),
+            Some(UNTRACKED_NON_FF)
+        );
     }
 
     #[test]
@@ -3889,7 +3932,7 @@ feat/b
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
-        reject_push(&mut forced, push_op("origin", "main", false));
+        reject_non_fast_forward(&mut forced, push_op("origin", "main", false));
         let _ = press(&mut forced, 'P');
         bodies.push(open_confirm(&forced).0.to_string());
 
@@ -4033,17 +4076,6 @@ feat/b
         );
     }
 
-    /// 指定した kind で失敗した実行。stderr は分類済みの値を直に置く（分類そのものは
-    /// `git_exec` のテストが見る）。
-    fn failed_with(kind: ExecErrorKind) -> ExecError {
-        ExecError::Failed {
-            argv: vec!["push".into(), "origin".into(), "main".into()],
-            code: Some(1),
-            stderr: "stderr の中身".to_string(),
-            kind,
-        }
-    }
-
     #[test]
     fn a_failure_puts_the_next_key_on_the_summary_line() {
         // **ステータスバーが描くのは要約行の 1 行目だけ**（07）。ここが argv だと、
@@ -4125,12 +4157,11 @@ feat/b
             tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(7))),
         );
 
-        finish_exec(
+        reject_non_fast_forward(
             &mut state,
             GitOp::Pull {
                 mode: PullMode::FastForwardOnly,
             },
-            Err(failed_with(ExecErrorKind::NonFastForward)),
         );
 
         assert_eq!(state.push_rejected, None);

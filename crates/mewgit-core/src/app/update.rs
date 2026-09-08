@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 use crate::git_exec::{hunk_patch, supports_hunk_patch, ExecError, GitOp, PullMode};
 use crate::git_read::{
     short_oid, Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError,
-    Hunk, LogPage, Oid, Remote, WorktreeSection, WorktreeSnapshot,
+    Hunk, LogPage, Oid, WorktreeSection, WorktreeSnapshot,
 };
 
 use super::{
-    AppState, BranchLoad, BranchState, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, Freshness,
-    GraphLine, GraphSelection, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel,
-    Pane, RepoSnapshot, TextBuffer,
+    AppState, BranchLoad, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, Freshness, GraphLine,
+    GraphSelection, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
+    RepoSnapshot, TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -541,7 +541,7 @@ fn rename_branch(state: &mut AppState) -> Cmd {
 /// **行き先を推測したときだけ確認モーダルを通す。** 追跡設定があるなら行き先は
 /// ユーザーが書いたもので、見せて確かめる相手がいない。
 fn push(state: &mut AppState) -> Cmd {
-    match push_plan(&state.branches, &state.repo.remotes) {
+    match push_plan(state) {
         PushPlan::Tracked(op) => Cmd::Exec(op),
         PushPlan::Propose { op, body } => confirm(state, "upstream を設定して push", body, op),
         PushPlan::Refused(message) => {
@@ -571,7 +571,12 @@ enum PushPlan {
 ///
 /// **拒否の出口はここ 1 本。** 「一覧が届いていない」だけを呼び出し側の早期 return に
 /// すると、同じ「Warn を出して `Cmd::None`」が 2 箇所に割れる。
-fn push_plan(branches: &BranchState, remotes: &[Remote]) -> PushPlan {
+///
+/// `&AppState` を丸ごと取るのは、**空の `Vec` が「無い」なのか「まだ届いていない」なのか
+/// を、ブランチ一覧とリモート一覧の両方で区別する**ため。片方だけ区別すると、起動直後の
+/// 一瞬に押した `P` が「リモートが登録されていません」と嘘を言う。
+fn push_plan(state: &AppState) -> PushPlan {
+    let branches = &state.branches;
     // **空の `Vec` からは「まだ届いていない」と detached / unborn を区別できない**
     // ので `load` を見る（01 の「ブランチ一覧」で `bool` 2 つにしなかったのと同じ）。
     if branches.load() != BranchLoad::Loaded {
@@ -586,8 +591,18 @@ fn push_plan(branches: &BranchState, remotes: &[Remote]) -> PushPlan {
     // 提案すると、ユーザーが設定した追跡先を黙って別のリモートへ向け替える（02 の
     // 「ブランチ一覧」がこの `None` を数えている）。
     let Some(config) = &head.upstream_config else {
-        return propose_upstream(&head.name, remotes);
+        return propose_upstream(&head.name, state);
     };
+
+    // **`.` はローカル追跡**（`git branch --set-upstream-to=main topic`）。渡すと
+    // `git push . topic:main` になり、**ネットワークに出ないままローカルの `main` を
+    // 早送りして exit 0 で返る**（git 2.55 で確認）。素の `git push` は
+    // `push.default = simple` で断る場面で、[`push_refspec`] が組む refspec が
+    // その守りを外している。`-u` の提案にも落とさない —— そちらは
+    // `branch.<name>.remote` を上書きするので、ユーザーが書いた `.` が黙って消える。
+    if config.remote == "." {
+        return PushPlan::Refused("追跡先がローカルです。リモートを設定してください".to_string());
+    }
 
     PushPlan::Tracked(GitOp::Push {
         remote: config.remote.clone(),
@@ -608,8 +623,13 @@ fn push_plan(branches: &BranchState, remotes: &[Remote]) -> PushPlan {
 /// 写すのは追跡設定を読む本 PR の範囲を越える。**食い違っても確認モーダルに出た
 /// 行き先を見て `n` で止められる**ので、危ないのは「見ずに `y`」だけ。読む判断は
 /// 01 の「push の行き先」に送り先を書いた。
-fn propose_upstream(branch: &str, remotes: &[Remote]) -> PushPlan {
-    let candidate = match remotes {
+fn propose_upstream(branch: &str, state: &AppState) -> PushPlan {
+    let candidate = match state.repo.remotes.as_slice() {
+        // **`RepoInfo` にも「届いたか」の印は無い。** `LoadRepoInfo` と `LoadBranches` は
+        // 別のジョブなので、一覧だけ先に届いた瞬間がある。走っているなら待たせる。
+        [] if state.jobs.is_running(JobKind::LoadRepoInfo) => {
+            return PushPlan::Refused("リモート一覧をまだ読めていません".to_string())
+        }
         [] => return PushPlan::Refused("リモートが登録されていません".to_string()),
         [only] => &only.name,
         many => {
@@ -2944,10 +2964,39 @@ mod tests {
         if let Some(branches) = branches {
             let _ = with_branches(&mut state, Ok(branches));
         }
-        match push_plan(&state.branches, &state.repo.remotes) {
+        match push_plan(&state) {
             PushPlan::Refused(message) => message,
             other => panic!("断られていません: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_locally_tracking_branch_is_refused() {
+        // `branch.topic.remote = "."`（`git branch --set-upstream-to=main topic`）。
+        // **渡すと `git push . topic:main` になり、ネットワークに出ないまま
+        // ローカルの `main` を早送りして exit 0 で返る**（git 2.55 で確認）。
+        let mut state = state_for_push(&["origin"], tracking_branch("topic", ".", HEADS_MAIN));
+
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        // **`-u` の提案にも落とさない。** そちらは `branch.<name>.remote` を
+        // 上書きするので、ユーザーが書いた `.` が黙って消える。
+        assert_eq!(state.modal, None);
+        let notice = state.notices.back().expect("通知が出ていません");
+        assert!(notice.message.contains("ローカル"), "{}", notice.message);
+    }
+
+    #[test]
+    fn remotes_that_have_not_arrived_are_not_reported_as_missing() {
+        // `LoadRepoInfo` と `LoadBranches` は別のジョブなので、一覧だけ先に届いた
+        // 瞬間がある。そこで「リモートが登録されていません」と言うと嘘になる。
+        let mut state = state_with_commits(2);
+        let _ = state.issue(Cmd::LoadRepoInfo);
+        let _ = with_branches(&mut state, Ok(vec![fake_branch("topic", true)]));
+
+        let PushPlan::Refused(message) = push_plan(&state) else {
+            panic!("断られていません");
+        };
+        assert!(message.contains("読めていません"), "{message}");
     }
 
     #[test]

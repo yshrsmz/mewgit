@@ -7,7 +7,7 @@ use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
     lossy, signature, Branch, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex, RefLabel,
-    Remote, Timestamp, UpstreamConfig,
+    Remote, Timestamp, Upstream, UpstreamConfig,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -34,12 +34,11 @@ impl std::fmt::Debug for RepoReader {
 
 /// [`RepoReader::tracking`] の戻り値。
 ///
-/// **4 つを 1 つの値にまとめる。** どれも同じ「追跡 ref が引けたか」で決まり、
+/// **3 つを 1 つの値にまとめる。** どれも同じ「追跡 ref が引けたか」で決まり、
 /// タプルで返すと呼び出し側が並び順を覚えることになる。既定は「比べる相手がいない」。
 #[derive(Default)]
 struct Tracking {
-    upstream: Option<String>,
-    upstream_oid: Option<Oid>,
+    upstream: Option<Upstream>,
     ahead: usize,
     behind: usize,
 }
@@ -201,7 +200,6 @@ impl RepoReader {
                 oid,
                 upstream: tracking.upstream,
                 upstream_config,
-                upstream_oid: tracking.upstream_oid,
                 ahead: tracking.ahead,
                 behind: tracking.behind,
                 is_head,
@@ -213,7 +211,7 @@ impl RepoReader {
         Ok(branches)
     }
 
-    /// upstream の短縮名と位置、それに対する ahead / behind。
+    /// 追跡 ref から読めた値と、それに対する ahead / behind。
     ///
     /// **出せないときは [`Tracking::default`]。`Err` を返さない。** 追跡 ref が壊れている
     /// （中断した fetch のあとなど）ブランチが 1 本あるだけで一覧全体が消えると、
@@ -227,8 +225,10 @@ impl RepoReader {
         };
         match self.repo.graph_ahead_behind(local, oid) {
             Ok((ahead, behind)) => Tracking {
-                upstream: Some(name.to_string()),
-                upstream_oid: Some(oid),
+                upstream: Some(Upstream {
+                    name: name.to_string(),
+                    oid,
+                }),
                 ahead,
                 behind,
             },

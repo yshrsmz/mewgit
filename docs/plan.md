@@ -89,7 +89,11 @@
       M2 で入れた `Cmd::LoadLog { restart }` に乗せる（01 の「実行中ジョブ › 世代」）。
       **カウンタを 1 本にするとログまで毎回読み直すことになるので、領域ごとに
       分けるかはここで決める**
-- [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文
+- [ ] `SamlSsoRequired` / `SshAuthFailed` / `NonFastForward` の検出と案内文。
+      **force push が `stale info` で断られた形は `f` を勧める**（lease は fetch して
+      からでないと通らない。01 の「force push」）。**追跡設定の無いブランチが非 FF で
+      断られた形は mewgit の中で抜けられない** —— force に上げるのは `PushPlan::Tracked`
+      だけなので、`-u` の提案から入った経路には案内文が要る
 - [ ] 実行中ジョブのスピナーとキャンセル
 
 fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取りを 1 つも足さず、

@@ -950,6 +950,15 @@ impl BranchState {
         self.branches.get(self.cursor)
     }
 
+    /// HEAD が指しているブランチ。detached / unborn では `None`。
+    ///
+    /// **push の行き先も、断られたことの記憶も、HEAD はここからしか取らない。**
+    /// `RepoInfo.head` は起動時に読んだきりで古くなる（#22 の「キャッシュした状態から
+    /// 破壊的操作を選ばない」）。一覧は ref を動かす書き込みのたびに読み直される。
+    pub fn head(&self) -> Option<&Branch> {
+        self.branches.iter().find(|branch| branch.is_head)
+    }
+
     /// カーソルを `delta` 行動かす。端では止まる。
     ///
     /// 行が 1 つも無ければ据え置く（[`stepped_index`]）。

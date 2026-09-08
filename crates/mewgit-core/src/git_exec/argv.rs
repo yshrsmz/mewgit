@@ -179,7 +179,7 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
         } => {
             argv.push("push".into());
             if let Some(oid) = lease {
-                let refname = dst.as_ref().unwrap_or(src);
+                let refname = push_remote_ref(src, dst.as_deref());
                 argv.push(format!("--force-with-lease={refname}:{oid}"));
             }
             if *set_upstream {
@@ -247,6 +247,16 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
 /// 読み、対象がリポジトリ全体に広がる。`git reset --quiet --` は index 全体を戻し、
 /// `git clean --force --` は untracked を全部消す（git 2.55 で確認）。「0 件を
 /// discard します」と確認して「全部 discard」が走ることになる。
+/// `GitOp::Push` が動かすリモート側の ref 名。
+///
+/// `dst` が `None` なら「ローカルと同じ名前」（01 の「push の行き先」）。**refspec の
+/// 右辺と `--force-with-lease` の refname は同じ文字列**なので、確認モーダルの文面を
+/// 組む `app` もここを通す —— 2 箇所で `unwrap_or` を書くと、片方だけ直したときに
+/// 「見せた行き先」と「動かす ref」がずれる。
+pub fn push_remote_ref<'a>(src: &'a str, dst: Option<&'a str>) -> &'a str {
+    dst.unwrap_or(src)
+}
+
 fn push_paths(argv: &mut Vec<String>, paths: &[PathBuf]) -> Result<(), ArgvError> {
     if paths.is_empty() {
         return Err(ArgvError::EmptyPathspec {

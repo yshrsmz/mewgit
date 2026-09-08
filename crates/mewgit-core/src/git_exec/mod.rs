@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::git_read::Oid;
 
-pub use argv::{to_command, ArgvError, GitCommand};
+pub use argv::{push_remote_ref, to_command, ArgvError, GitCommand};
 pub use patch::{hunk_patch, supports_hunk_patch};
 pub use runner::Runner;
 

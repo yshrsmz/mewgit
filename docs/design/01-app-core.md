@@ -949,17 +949,17 @@ pub struct PushRejection {
   しても force の確認が出る**（behind だけのブランチも `! [rejected] (non-fast-forward)`
   で断られる。git 2.55 で確認）。pull / commit / rebase はどれもローカルの先端を動かすので、
   `oid` まで見れば黙って失効する
-- **上げるのは追跡設定がある経路（`PushPlan::Tracked`）だけ。** `-u` を提案する経路は
+- **上げるのは追跡設定を読めた経路だけ。** `-u` を提案する経路（`propose_upstream`）は
   追跡 ref を持たないので lease の値が無く、そちらで force を出すと「素の
   `--force-with-lease`」（03 が禁じた形）しか組めない
 
-`lease` に渡すのは `Branch.upstream_oid`（02）。**追跡 ref が無ければ force push は断る**
+`lease` に渡すのは `Branch.upstream` の位置（02）。**追跡 ref が無ければ force push は断る**
 —— 値を作れないなら撃たない。`fetch --prune` のあとがこの形。
 
 **force push は fetch を挟まないと lease に断られる。** 断られた時点の `origin/x` は
 他人が進める前の位置なので、そのまま lease に渡すと `stale info` で落ちる（git 2.55 で
-確認）。**これは守りが効いている形**で、ユーザーは `f` でリモートの位置を見てから
-`P` → `P` と踏む。**手前で fetch を代行しない** —— `f` が別のキーとして在り、fetch は
+確認）。**これは守りが効いている形**で、ユーザーは `f` でリモートの位置を見てから `P` を
+押す（**fetch はローカルの先端を動かさないので記憶は生きたまま**。`P` は 1 回でよい）。**手前で fetch を代行しない** —— `f` が別のキーとして在り、fetch は
 ラベルとログを動かす（`Reload::RefsAndLog`）ので、`P` の中で黙って走らせると
 画面が押した覚えのない形で作り替わる。
 

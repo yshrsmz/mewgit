@@ -9,7 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::git_exec::{
-    hunk_patch, supports_hunk_patch, ExecError, ExecErrorKind, ExecOutput, GitOp, PullMode,
+    hunk_patch, push_remote_ref, supports_hunk_patch, ExecError, ExecErrorKind, ExecOutput, GitOp,
+    PullMode,
 };
 use crate::git_read::{
     short_oid, Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError,
@@ -574,15 +575,10 @@ fn push_rejection(
         Err(ExecError::Failed {
             kind: ExecErrorKind::NonFastForward,
             ..
-        }) => state
-            .branches
-            .branches
-            .iter()
-            .find(|branch| branch.is_head)
-            .map(|head| PushRejection {
-                branch: head.name.clone(),
-                oid: head.oid,
-            }),
+        }) => state.branches.head().map(|head| PushRejection {
+            branch: head.name.clone(),
+            oid: head.oid,
+        }),
         _ => None,
     }
 }
@@ -623,7 +619,7 @@ fn push_plan(state: &AppState) -> PushPlan {
     if branches.load() != BranchLoad::Loaded {
         return PushPlan::Refused("ブランチ一覧をまだ読めていません".to_string());
     }
-    let Some(head) = branches.branches.iter().find(|branch| branch.is_head) else {
+    let Some(head) = branches.head() else {
         return PushPlan::Refused("HEAD がブランチを指していません".to_string());
     };
 
@@ -638,7 +634,7 @@ fn push_plan(state: &AppState) -> PushPlan {
     // **`.` はローカル追跡**（`git branch --set-upstream-to=main topic`）。渡すと
     // `git push . topic:main` になり、**ネットワークに出ないままローカルの `main` を
     // 早送りして exit 0 で返る**（git 2.55 で確認）。素の `git push` は
-    // `push.default = simple` で断る場面で、[`push_refspec`] が組む refspec が
+    // `push.default = simple` で断る場面で、[`push_dst`] が組む refspec が
     // その守りを外している。`-u` の提案にも落とさない —— そちらは
     // `branch.<name>.remote` を上書きするので、ユーザーが書いた `.` が黙って消える。
     if config.remote == "." {
@@ -653,16 +649,22 @@ fn push_plan(state: &AppState) -> PushPlan {
         .is_some_and(|rejected| rejected.branch == head.name && rejected.oid == head.oid);
     // **lease の値が無いなら force は撃たない。** 値の無い `--force-with-lease` は
     // remote-tracking ref と比べるだけで守りにならない（03）。`upstream_config` が
-    // あってもここが `None` になるのは `fetch --prune` のあと（02）。
-    if rejected && head.upstream_oid.is_none() {
-        return PushPlan::Refused(
-            "追跡 ref が無いので force push できません。f で取得してください".to_string(),
-        );
-    }
-    let lease = rejected.then_some(head.upstream_oid).flatten();
+    // あってもここが `None` になるのは `fetch --prune` のあと（02）。**判定を
+    // 1 箇所に畳む** —— 断りと lease を別々に書くと、片方だけ緩めたときに気付けない。
+    let lease = match (rejected, &head.upstream) {
+        (true, None) => {
+            return PushPlan::Refused(
+                "追跡 ref が無いので force push できません。f で取得してください".to_string(),
+            )
+        }
+        (true, Some(upstream)) => Some(upstream.oid),
+        (false, _) => None,
+    };
 
     let dst = push_dst(&head.name, &config.merge);
-    let target = dst.clone().unwrap_or_else(|| head.name.clone());
+    let body = lease.map(|lease| {
+        format!("{} を {} の {} に force push します。\nリモートが {} から動いていれば git が断ります。上書きした履歴は戻せません。", head.name, config.remote, push_remote_ref(&head.name, dst.as_deref()), short_oid(&lease))
+    });
     let op = GitOp::Push {
         remote: config.remote.clone(),
         src: head.name.clone(),
@@ -671,11 +673,11 @@ fn push_plan(state: &AppState) -> PushPlan {
         lease,
     };
 
-    match lease {
+    match body {
         None => PushPlan::Tracked(op),
-        Some(lease) => PushPlan::Ask {
+        Some(body) => PushPlan::Ask {
             title: "force push",
-            body: format!("{} を {} の {target} に force push します。\nリモートが {} から動いていれば git が断ります。上書きした履歴は戻せません。", head.name, config.remote, short_oid(&lease)),
+            body,
             op,
         },
     }
@@ -1797,7 +1799,7 @@ mod tests {
     use crate::graph::LaneState;
     use crate::test_util::{
         fake_branch, fake_commit, fake_commit_with_parents, fake_detail, fake_entry,
-        fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot,
+        fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_upstream,
     };
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
@@ -2986,31 +2988,35 @@ mod tests {
         assert_eq!(state.modal, None, "追跡設定があるのに提案しています");
     }
 
-    /// 追跡 ref も持つブランチ。`upstream_oid` は force push の lease になる。
+    /// 追跡 ref も持つブランチ。その位置が force push の lease になる。
     fn tracked_head(name: &str, remote: &str, merge: &str, upstream_oid: Option<Oid>) -> Branch {
         Branch {
-            upstream: upstream_oid.map(|_| format!("{remote}/{name}")),
-            upstream_oid,
+            upstream: upstream_oid.map(|oid| fake_upstream(&format!("{remote}/{name}"), oid)),
             ..tracking_branch(name, remote, merge)
+        }
+    }
+
+    /// `op` を発行して、その結果を届ける。**返信まで届ける**ので `JobTracker` に
+    /// ジョブが残らない（残すと後続の `Cmd::Exec` を `issue` が黙って落とす。#38）。
+    fn finish_exec(state: &mut AppState, op: GitOp, result: Result<ExecOutput, ExecError>) {
+        let _ = state.issue(Cmd::Exec(op.clone()));
+        let _ = update(state, exec_done_of(op, result));
+    }
+
+    /// git が非 FF で断ったときの失敗。stderr は実測の 1 行（git 2.55）。
+    fn non_fast_forward() -> ExecError {
+        ExecError::Failed {
+            argv: vec!["push".into(), "origin".into(), "main".into()],
+            code: Some(1),
+            stderr: " ! [rejected]        main -> main (non-fast-forward)".to_string(),
+            kind: ExecErrorKind::NonFastForward,
         }
     }
 
     /// 直前の `P` が断られた状態にする。**`exec_finished` を通す** —— 状態を直に
     /// 置くと、憶える側の条件（非 force・`NonFastForward`）を 1 つも踏まない。
     fn reject_push(state: &mut AppState, op: GitOp) {
-        let _ = state.issue(Cmd::Exec(op.clone()));
-        let _ = update(
-            state,
-            exec_done_of(
-                op,
-                Err(ExecError::Failed {
-                    argv: vec!["push".into(), "origin".into(), "main".into()],
-                    code: Some(1),
-                    stderr: " ! [rejected]        main -> main (non-fast-forward)".to_string(),
-                    kind: ExecErrorKind::NonFastForward,
-                }),
-            ),
-        );
+        finish_exec(state, op, Err(non_fast_forward()));
     }
 
     #[test]
@@ -3148,6 +3154,42 @@ mod tests {
     }
 
     #[test]
+    fn a_fetch_between_the_two_pushes_keeps_the_rejection() {
+        // **本命の回復経路。** 拒否された時点の `origin/x` は他人が進める前なので、
+        // そのまま lease に渡すと `stale info` で落ちる（git 2.55 で確認）。`f` で
+        // 位置を見てから `P` を 1 回押すだけで force に上がる（01 の「force push」）。
+        let stale = fake_oid(7);
+        let fresh = fake_oid(8);
+        let head = tracked_head("main", "origin", HEADS_MAIN, Some(stale));
+        let mut state = state_for_push(&["origin"], head.clone());
+        reject_push(&mut state, push_op("origin", "main", false));
+
+        finish_exec(
+            &mut state,
+            GitOp::Fetch {
+                remote: None,
+                prune: false,
+            },
+            Ok(fake_output()),
+        );
+        // fetch はローカルの先端を動かさないので、記憶は生きたまま。届く一覧では
+        // 追跡 ref だけが進んでいる。
+        let _ = with_branches(
+            &mut state,
+            Ok(vec![tracked_head(
+                "main",
+                "origin",
+                HEADS_MAIN,
+                Some(fresh),
+            )]),
+        );
+
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        let (_, on_yes) = open_confirm(&state);
+        assert_eq!(on_yes, &Cmd::Exec(forced_push_op(fresh)));
+    }
+
+    #[test]
     fn a_successful_push_forgets_the_rejection() {
         let lease = fake_oid(7);
         let mut state = state_for_push(
@@ -3155,9 +3197,11 @@ mod tests {
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
         reject_push(&mut state, push_op("origin", "main", false));
-        let op = push_op("origin", "main", false);
-        let _ = state.issue(Cmd::Exec(op.clone()));
-        let _ = update(&mut state, exec_done_of(op, Ok(fake_output())));
+        finish_exec(
+            &mut state,
+            push_op("origin", "main", false),
+            Ok(fake_output()),
+        );
 
         assert_eq!(
             press(&mut state, 'P'),
@@ -3613,6 +3657,21 @@ feat/b
         // ここに通す。片方だけ守っていても `contains` を見るテストは素通りする。
         bodies.push(branch_delete_confirm(false).0);
         bodies.push(branch_delete_confirm(true).0);
+
+        // push の確認は 2 つ（`-u` の提案と force push）。**`\n` を埋めているのは
+        // force push だけ**なので、畳み込みが混ざっても行数では見えない。
+        let lease = fake_oid(7);
+        let mut forced = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
+        );
+        reject_push(&mut forced, push_op("origin", "main", false));
+        let _ = press(&mut forced, 'P');
+        bodies.push(open_confirm(&forced).0.to_string());
+
+        let mut proposed = state_for_push(&["origin"], fake_branch("main", true));
+        let _ = press(&mut proposed, 'P');
+        bodies.push(open_confirm(&proposed).0.to_string());
 
         for body in bodies {
             for line in body.lines() {

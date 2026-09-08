@@ -940,7 +940,9 @@ pub struct PushRejection {
 ```
 
 - **立てるのは `exec_finished` の 1 箇所**、`GitOp::Push { lease: None, .. }` が
-  `NonFastForward` で落ちたときだけ。**force push（`lease: Some`）の失敗では立てない**
+  `NonFastForward` で落ちたときだけ。**`NonFastForward` は git が非 FF を表す 3 つの語
+  （`(non-fast-forward)` / `(fetch first)` / `(stale info)`）でしか立たない**（03）——
+  `rejected` を広く拾うと、hook や保護ブランチの拒否まで force の確認を出す。**force push（`lease: Some`）の失敗では立てない**
   —— lease が古いときの `! [rejected] ... (stale info)` も `rejected` を含むので
   `NonFastForward` に落ち（git 2.55 で確認）、立て直すと同じ古い `lease` で force を
   撃ち続ける輪になる。落とすのは、それ以外の `GitOp::Push` の完了すべて
@@ -952,6 +954,15 @@ pub struct PushRejection {
 - **上げるのは追跡設定を読めた経路だけ。** `-u` を提案する経路（`propose_upstream`）は
   追跡 ref を持たないので lease の値が無く、そちらで force を出すと「素の
   `--force-with-lease`」（03 が禁じた形）しか組めない
+- **`ahead == 0` なら force に上げず pull を勧める。** `↓n` だけのブランチも
+  非 FF で断られる（git 2.55 で確認）ので記憶は立つ。そこで `f` を踏むと lease が
+  リモートの位置に追いつき、**force が通ってしまう** —— 出すものが 1 つも無いのに
+  他人のコミットを消す。**lease は「リモートが動いていないこと」しか守らない**ので、
+  fetch のあとは守りにならない。意図的な巻き戻し（`reset --hard HEAD~1` してから
+  force）もここで断るが、その経路は M6 の設定へ送る
+- **憶えるのは押したブランチ**（`GitOp::Push` の `src`）。一覧の読み直しは別のジョブ
+  なので、`Switch` の直後に押した push が返るころには HEAD が別のブランチになって
+  いることがある。HEAD で憶えると、押していないブランチに force の腕が立つ
 
 `lease` に渡すのは `Branch.upstream` の位置（02）。**追跡 ref が無ければ force push は断る**
 —— 値を作れないなら撃たない。`fetch --prune` のあとがこの形。

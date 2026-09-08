@@ -183,6 +183,13 @@ fn lossy(bytes: Vec<u8>) -> String {
 ///
 /// stdout も見るのは、`git merge`（`pull --no-rebase` の経路）がコンフリクトを
 /// stdout にしか書かないため。stderr だけだと `Other` に落ちる。
+///
+/// **`rejected` だけでは広すぎる。** hook や保護ブランチが断った push も
+/// `! [remote rejected] main -> main (pre-receive hook declined)` と書く（git 2.55 で
+/// 確認）。これを `NonFastForward` にすると、`app` が「次の `P` は force push」と
+/// 憶えてしまい（01 の「force push」）、履歴と関係の無い拒否に対して「リモートを
+/// 上書きします」という確認が出る。git が非 FF を表す語は 3 つ ——
+/// `(non-fast-forward)` / `(fetch first)` / `(stale info)`（lease が古い）。
 fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
     let has = |needle: &str| stderr.contains(needle) || stdout.contains(needle);
 
@@ -194,7 +201,7 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
         ExecErrorKind::HttpsAuthFailed
     } else if has("CONFLICT") || has("could not apply") {
         ExecErrorKind::Conflict
-    } else if has("non-fast-forward") || has("rejected") {
+    } else if has("non-fast-forward") || has("fetch first") || has("stale info") {
         ExecErrorKind::NonFastForward
     } else {
         ExecErrorKind::Other
@@ -291,12 +298,22 @@ mod tests {
     }
 
     #[test]
-    fn auth_patterns_win_over_rejected() {
-        // push の失敗は `rejected` を含みがちなので、順序を変えると認証の失敗まで
+    fn a_hook_rejection_is_not_a_non_fast_forward() {
+        // **`rejected` だけを見ていた頃はここが `NonFastForward` に落ちていた。**
+        // そうなると次の `P` が force push の確認になる（01）が、履歴とは関係の無い
+        // 拒否なので force しても同じ hook に断られる。git 2.55 の実測の 1 行。
+        let stderr = " ! [remote rejected] main -> main (pre-receive hook declined)\n\
+                      error: failed to push some refs to '../remote.git'";
+        assert_eq!(classify("", stderr), ExecErrorKind::Other);
+    }
+
+    #[test]
+    fn auth_patterns_win_over_a_non_fast_forward() {
+        // push の失敗は非 FF の語を含みがちなので、順序を変えると認証の失敗まで
         // NonFastForward に落ちる。
         let stderr = "git@github.com: Permission denied (publickey).\n\
                       fatal: Could not read from remote repository.\n\
-                      error: failed to push some refs (rejected)";
+                      error: failed to push some refs (non-fast-forward)";
         assert_eq!(classify("", stderr), ExecErrorKind::SshAuthFailed);
 
         let saml = "ERROR: The `acme' organization has enabled or enforced SAML SSO. \

@@ -561,11 +561,17 @@ fn push(state: &mut AppState) -> Cmd {
 /// （git 2.55 で確認）。force の失敗で立て直すと、同じ古い lease で撃ち続ける輪になる。
 /// **それ以外の Push の完了はすべて忘れる**（成功した push、非 FF 以外の失敗）。
 ///
-/// 位置は一覧から取る。push はローカルの ref を動かさないので、この時点の先端は
-/// 押したときのまま（読み直しは `Reload` が別に出す）。
+/// **憶えるのは押したブランチ**（`GitOp::Push` の `src`）で、いまの HEAD ではない。
+/// 一覧の読み直しは別のジョブなので、`Switch` の直後に押した push が返るころには
+/// HEAD が別のブランチになっていることがある。そこで HEAD を憶えると、**押して
+/// いないブランチに force push の腕が立つ**。
+///
+/// 位置は一覧から取る。push はローカルの ref を動かさないので、名前で引いた先端は
+/// 押したときのまま（読み直しは `Reload` が別に出す）。一覧に無ければ憶えない。
 fn push_rejection(
     state: &AppState,
     result: &Result<ExecOutput, ExecError>,
+    src: &str,
     forced: bool,
 ) -> Option<PushRejection> {
     if forced {
@@ -575,10 +581,15 @@ fn push_rejection(
         Err(ExecError::Failed {
             kind: ExecErrorKind::NonFastForward,
             ..
-        }) => state.branches.head().map(|head| PushRejection {
-            branch: head.name.clone(),
-            oid: head.oid,
-        }),
+        }) => state
+            .branches
+            .branches
+            .iter()
+            .find(|branch| branch.name == src)
+            .map(|branch| PushRejection {
+                branch: branch.name.clone(),
+                oid: branch.oid,
+            }),
         _ => None,
     }
 }
@@ -655,6 +666,15 @@ fn push_plan(state: &AppState) -> PushPlan {
         (true, None) => {
             return PushPlan::Refused(
                 "追跡 ref が無いので force push できません。f で取得してください".to_string(),
+            )
+        }
+        // **リモートに無いコミットが 1 つも無いなら、force push は消すだけ。**
+        // `↓n` だけのブランチも非 FF で断られる（git 2.55 で確認）ので、断られた記憶は
+        // 立つ。そこで `f` を踏むと lease がリモートの位置に追いつき、**通ってしまう**
+        // —— 出すものが無いのに他人のコミットを消す（01 の「force push」）。
+        (true, Some(_)) if head.ahead == 0 => {
+            return PushPlan::Refused(
+                "リモートに無いコミットがありません。p で取り込んでください".to_string(),
             )
         }
         (true, Some(upstream)) => Some(upstream.oid),
@@ -1644,8 +1664,8 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         state.push_notice(NoticeLevel::Error, err.to_string(), Some(detail));
     }
 
-    if let GitOp::Push { lease, .. } = &done.op {
-        state.push_rejected = push_rejection(state, &done.result, lease.is_some());
+    if let GitOp::Push { src, lease, .. } = &done.op {
+        state.push_rejected = push_rejection(state, &done.result, src, lease.is_some());
     }
 
     // **走っている読み取りは、この書き込みより前に頼まれたものなので届いても古い。**
@@ -2989,9 +3009,14 @@ mod tests {
     }
 
     /// 追跡 ref も持つブランチ。その位置が force push の lease になる。
+    ///
+    /// **`ahead` は 1。** force push はリモートに無いコミットを出す操作なので、
+    /// 0 のままだと `push_plan` が「出すものが無い」と断る（`↓n` だけのブランチを
+    /// 見る腕は [`a_force_push_is_refused_when_there_is_nothing_to_publish`]）。
     fn tracked_head(name: &str, remote: &str, merge: &str, upstream_oid: Option<Oid>) -> Branch {
         Branch {
             upstream: upstream_oid.map(|oid| fake_upstream(&format!("{remote}/{name}"), oid)),
+            ahead: 1,
             ..tracking_branch(name, remote, merge)
         }
     }
@@ -3133,6 +3158,60 @@ mod tests {
             "断った理由が出ていません: {}",
             notice.message
         );
+    }
+
+    #[test]
+    fn a_force_push_is_refused_when_there_is_nothing_to_publish() {
+        // **`↓n` だけのブランチも非 FF で断られる**（git 2.55 で確認）ので、記憶は立つ。
+        // そこで案内どおり `f` を踏むと lease がリモートの位置に追いつき、force が
+        // **通ってしまう** —— 出すものが 1 つも無いのに他人のコミットを消す。
+        let lease = fake_oid(7);
+        let head = Branch {
+            ahead: 0,
+            behind: 2,
+            ..tracked_head("main", "origin", HEADS_MAIN, Some(lease))
+        };
+        let mut state = state_for_push(&["origin"], head);
+        reject_push(&mut state, push_op("origin", "main", false));
+
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        assert_eq!(state.modal, None);
+        let notice = state.notices.back().expect("通知が出ていません");
+        assert!(
+            notice.message.contains("p で取り込んでください"),
+            "pull を勧めていません: {}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn a_rejection_is_remembered_for_the_branch_that_was_pushed() {
+        // **一覧の読み直しは別のジョブ。** `Switch` の直後に押した push が返るころには
+        // HEAD が別のブランチになっていることがある。そこで HEAD を憶えると、押して
+        // いないブランチに force push の腕が立つ。
+        let lease = fake_oid(7);
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
+        );
+        // 押したのは main。返るまでに HEAD が topic へ移った。
+        let _ = with_branches(
+            &mut state,
+            Ok(vec![tracked_head(
+                "topic",
+                "origin",
+                "refs/heads/topic",
+                Some(lease),
+            )]),
+        );
+        reject_push(&mut state, push_op("origin", "main", false));
+
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "topic", false)),
+            "押していない topic に force の腕が立っています"
+        );
+        assert_eq!(state.modal, None);
     }
 
     #[test]

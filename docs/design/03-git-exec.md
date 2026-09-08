@@ -298,7 +298,14 @@ stderr ではなく mewgit の説明文を入れる。
 ## エラー分類（ExecErrorKind）
 
 出力のパターンで分類し、UI が案内文を出せるようにする。**判定は上から順**で、
-先に当たったものを採る。`rejected` は広いので、認証系より後ろに置く。
+先に当たったものを採る。非 FF は語が広くなりやすいので、認証系より後ろに置く。
+
+**`rejected` だけで非 FF と読まない。** hook や保護ブランチが断った push も
+`! [remote rejected] main -> main (pre-receive hook declined)` と書く（git 2.55 で確認）。
+`NonFastForward` にすると `app` が「次の `P` は force push」と憶える（01 の
+「force push」）ので、履歴と関係の無い拒否に「リモートを上書きします」の確認が出る。
+git が非 FF を表すのは 3 つ —— `(non-fast-forward)`、`(fetch first)`、
+lease が古いときの `(stale info)`。
 
 **見るのは stderr だけではなく stdout も。** `git merge`（`pull --no-rebase` の経路）は
 コンフリクトのとき `CONFLICT (content): ...` と `Automatic merge failed` を **stdout** に
@@ -312,7 +319,7 @@ stderr ではなく mewgit の説明文を入れる。
 | `Permission denied (publickey)` | `SshAuthFailed` | `ssh -T <host>` での確認を促す |
 | `Authentication failed` | `HttpsAuthFailed` | `gh auth setup-git` を案内 |
 | `CONFLICT` / `could not apply` | `Conflict` | 進行中モードへ遷移 |
-| `non-fast-forward` / `rejected` | `NonFastForward` | pull または force push の選択 |
+| `non-fast-forward` / `fetch first` / `stale info` | `NonFastForward` | pull または force push の選択 |
 | その他 | `Other` | stderr をそのまま表示 |
 
 分類するのは git の出力があるとき、つまり `ExecError::Failed` だけ。`NoResult` には

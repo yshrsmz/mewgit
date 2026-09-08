@@ -238,15 +238,6 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
     Ok(GitCommand { argv, stdin })
 }
 
-/// pathspec を `--` の後ろに積む。
-///
-/// `--` は必ず置く。`-n` や `HEAD` という名前のファイルが、オプションや revision
-/// として解釈されるのを防ぐため。
-///
-/// **空の `paths` は拒否する。** `--` だけを置くと git は「pathspec の指定なし」と
-/// 読み、対象がリポジトリ全体に広がる。`git reset --quiet --` は index 全体を戻し、
-/// `git clean --force --` は untracked を全部消す（git 2.55 で確認）。「0 件を
-/// discard します」と確認して「全部 discard」が走ることになる。
 /// `GitOp::Push` が動かすリモート側の ref 名。
 ///
 /// `dst` が `None` なら「ローカルと同じ名前」（01 の「push の行き先」）。**refspec の
@@ -257,6 +248,15 @@ pub fn push_remote_ref<'a>(src: &'a str, dst: Option<&'a str>) -> &'a str {
     dst.unwrap_or(src)
 }
 
+/// pathspec を `--` の後ろに積む。
+///
+/// `--` は必ず置く。`-n` や `HEAD` という名前のファイルが、オプションや revision
+/// として解釈されるのを防ぐため。
+///
+/// **空の `paths` は拒否する。** `--` だけを置くと git は「pathspec の指定なし」と
+/// 読み、対象がリポジトリ全体に広がる。`git reset --quiet --` は index 全体を戻し、
+/// `git clean --force --` は untracked を全部消す（git 2.55 で確認）。「0 件を
+/// discard します」と確認して「全部 discard」が走ることになる。
 fn push_paths(argv: &mut Vec<String>, paths: &[PathBuf]) -> Result<(), ArgvError> {
     if paths.is_empty() {
         return Err(ArgvError::EmptyPathspec {

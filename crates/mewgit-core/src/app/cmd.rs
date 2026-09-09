@@ -3,6 +3,7 @@
 //! `Cmd` 自体は何もしない。ランタイム（`mewgit-tui`）がこれを tokio タスクに変換し、
 //! 結果を [`Msg`](crate::app::Msg) として返す。
 
+use crate::auth::url::RemoteUrl;
 use crate::git_exec::GitOp;
 use crate::git_read::{DiffTarget, Oid};
 
@@ -72,6 +73,16 @@ pub enum Cmd {
     /// **どの `Exec` かは持たない。** 書き込みは同時に 1 つだけなので
     /// （`AppState::issue` が 2 本目を落とす）、走っているものは常に 1 つに定まる。
     CancelExec,
+    /// 既定リモートの URL からホストを正規化して [`RepoTarget`](crate::auth::RepoTarget) を組む（01 の
+    /// 「`RepoInfo.target` を埋める」）。ssh なら `ssh -G`、https ならそのまま。
+    ///
+    /// **運ぶのは解析済みの [`RemoteUrl`] で、生の URL ではない。** 解析は純粋関数
+    /// なので `update` の中で済み、読めない URL のときは `Cmd` を出さずに済む。
+    ///
+    /// **https でもこの `Cmd` を通す。** `ssh -G` が要らないぶん往復は無駄だが、
+    /// [`RepoInfo::target`](super::RepoInfo::target) を書く場所を 1 つに保つほうが
+    /// 強い（2 本にすると、片方だけ通知を出す・片方だけ検査する、が起きる。#18）。
+    ResolveTarget(RemoteUrl),
     ResolveAccount,
     FetchPr,
     FetchChecks,
@@ -129,6 +140,7 @@ impl Cmd {
             // **`Exec` だけは走らせる `GitOp` で説明が変わる**（`fetch` / `push`）。
             // `verb()` は `to_command` の `argv[0]` と同じ語を返す（03）。
             Cmd::Exec(op) => Some((JobKind::Exec, op.verb())),
+            Cmd::ResolveTarget(_) => Some((JobKind::ResolveTarget, "remote")),
             Cmd::ResolveAccount => Some((JobKind::ResolveAccount, "account")),
             Cmd::FetchPr => Some((JobKind::FetchPr, "pr")),
             Cmd::FetchChecks => Some((JobKind::FetchChecks, "checks")),

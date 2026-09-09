@@ -103,30 +103,47 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
   query / fragment になる。英数と `.` `-` `_` だけを受け、`.` と `..` は拒む
 - **`InvalidRemoteUrl` に載せる URL は資格情報を伏せる。** `https://x-access-token:<PAT>@host/…`
   は CI の checkout が書く形で、解析に失敗した URL は通知にもログにも出る（不変ルール 3）
-- port は捨てる。`RemoteUrl` は host / owner / repo しか持たない。**非既定ポートの
-  GHES では API のベース URL が違う**が、ベース URL を組むのは `github`（05）。
-  **パスの形（`api.{host}` / `{host}/api/v3`）は 05 で実装済みで、port だけが残って
-  いる。** 足すのは `RemoteUrl` に `port` を持たせるのと同じ PR、つまり下の
-  「既定リモートを決めるのは M4」（`auth::resolve`）のタスク —— 片方だけ入れても
-  `RepoInfo.target` に運ぶ経路が無く宙に浮く。`github::GithubClient::new` は
-  port 付きのホストを [`GithubError::InvalidHost`] で拒む
+- **port は scheme に畳む。** `RemoteScheme::Ssh` / `RemoteScheme::Https { port }` の
+  形にして、**ssh の port が API のベース URL に届く組み合わせを型で消す**（#49 の
+  「旗と値を割らない」と同じ数え方）。`ssh://git@ghe.example.com:2222/o/r` の 2222 は
+  **ssh の port であって API の port ではない** —— GHES を非既定の ssh port で運んで
+  いても、API は `https://ghe.example.com/api/v3/` のままなので、平らな
+  `port: Option<u16>` を持つと `https://ghe.example.com:2222/api/v3/` という
+  **動くが違う場所を指す**ベースが組める（`base_url` が `foo/bar.ghe.com` で
+  作りかけたのと同じ形）
+- **既定ポートは `None` に畳む。** https の 443 と ssh の 22 は書いてあっても
+  書いていないのと同じなので、`https://github.com:443/o/r` が `api.github.com:443` に
+  ならないようにする。port が u16 として読めない形（`https://h:x/o/r`）は
+  `InvalidRemoteUrl` で拒む —— ベース URL を組めないうえ、git 側でも動かない
+- ベース URL を組むのは `github`（05）で、`GithubClient::new(host, port, token)` が
+  port を受ける。**`api.{host}` の形（github.com と `*.ghe.com`）に port が付く形は
+  確かめていない** —— どちらも SaaS で 443 固定なので実物を用意できない。書かれて
+  いれば素直に載せる（`https://api.foo.ghe.com:8443/`）
 - scheme が ssh のときのみ `ssh -G` を実行し、`hostname` 行を実ホストとする
 - 結果は `app` が `RepoInfo.target.host` として保持する（例: `github.com`、`acme.ghe.com`）
 - `ssh` が無い、または解決失敗なら `host_raw` をそのまま使い、通知に出す
-- **`resolve_ssh_host` の戻り値は `valid_host` を通っていない。** いまは
-  `github::client::base_url` が同じ述語（`auth::url::valid_host`）を呼んで塞いでいる
-  が、**より深い形は産出側で検査すること** —— `hostname_from_dump` の結果に
-  `valid_host` を掛ければ、上の「解決失敗なら `host_raw` を使って通知に出す」経路に
-  そのまま乗り、`github` 側の検査が要らなくなる。採るなら `Err` になる条件の数
-  （下の「ssh -G の実測」の 3 つ）と `hostname_from_dump` の「`None` の理由を 1 つに
-  保つ」を同じコミットで数え直す。**このタスク（`auth::resolve`）で決める。**
+- **`resolve_ssh_host` の戻り値を `valid_host` に通す**（産出側で検査する）。
+  `hostname_from_dump` が拾った値をそのまま返すと、不正なホストが
+  `RepoTarget.host` まで進み、`GithubClient::new` が `InvalidHost` で落として
+  **「GitHub 機能が使えない」だけが残る**。産出側で落とせば上の「解決失敗なら
+  `host_raw` を使って通知に出す」経路にそのまま乗り、**degraded ではなく
+  正規化だけを諦める**形になる。`Err` の条件はこれで **4 つ**（下の「ssh -G の実測」）
+- **`github::client::base_url` の検査は残す。** 04 は当初「産出側でやれば `github` 側の
+  検査が要らなくなる」と書いていたが、**2 つは別の問いに答えている** —— 産出側は
+  「正規化が成功したか」（失敗しても `host_raw` で続けられる**回復可能な**判断）、
+  `base_url` は「`pub fn GithubClient::new` に渡された任意のホストを補間してよいか」
+  （回復先の無い**入口の守り**）。消すと、`https://api.foo/bar.ghe.com/` という
+  **動くが違う場所を指す**ベースを作る経路が `new` の呼び出し側の数だけ開く。
+  述語は 1 本（`auth::url::valid_host`）のままなので、「同じ判定を 2 箇所に書かない」
+  には触れない —— 呼ぶ場所が 2 つあるだけで、規則は 1 本
 
 ### ssh -G の実測（OpenSSH 10.3p1）
 
 - **未定義の alias でも exit 0** で `hostname <alias>` を返す。「エイリアスが無かった」は
-  エラーではなく「正規化しても同じだった」。`Err` にするのは 3 つ — spawn 失敗、非 0 終了、
-  出力に `hostname` の行が無いこと（ssh が形を変えたときにしか起きないが、正規化して
-  いない値を正規化済みとして下流に渡さないために落とす）
+  エラーではなく「正規化しても同じだった」。`Err` にするのは **4 つ** — spawn 失敗、
+  非 0 終了、出力に `hostname` の行が無いこと（ssh が形を変えたときにしか起きないが、
+  正規化していない値を正規化済みとして下流に渡さないために落とす）、**その値が
+  `valid_host` を通らないこと**（上の「産出側で検査する」）
 - 出力は `host <alias>` の行が `hostname <実ホスト>` の行より先に来る。**`hostname ` の
   完全一致**で拾う（`host` の prefix で見ると最初の行を取ってしまう）
 - `HostName %h.example.com` のトークンは `-G` の時点で展開済みの値が出る
@@ -168,37 +185,106 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
 
 ### git が使う ssh と、ここで叩く ssh
 
-`resolve_ssh_host` は PATH の `ssh` を直に起動する。git のほうは
-`GIT_SSH_COMMAND` / `core.sshCommand` に従うので、そこを別の ssh（別の config を読むもの）に
-向けている環境では**解決と接続で食い違う**。
+`resolve_ssh_host` は **git が実際に使う ssh** を起動する。PATH の素の `ssh` を叩くと、
+`GIT_SSH_COMMAND` / `core.sshCommand` を別の ssh（別の config を読むもの）に向けている
+環境で**解決と接続が食い違う**。
 
 **実効値を求める関数はここ（`auth::ssh`）に置く**（03 の「BatchMode の重ね方」）。
 `git_exec::Runner` はそれを使って `-o BatchMode=yes` を重ねる。`git_exec` から `auth` への
 依存は層の向きに沿う（00）。
 
-**`resolve_ssh_host` をその実効値に向けるのは M4。** いまこれを呼ぶ経路は無く
-（`RepoInfo.target` を埋めるのが下の `auth::resolve`）、実効値はシェル文字列なので
-`Command::new(ssh)` ではなく `sh -c` 経由の起動に変える必要がある。踏めない腕を
-先に入れず、`auth::resolve` を書くタスクで一緒に配線する。
+**`resolve_ssh_host` は実効値に向けた**（`RepoInfo.target` を埋める PR）。実効値は
+シェル文字列なので `Command::new(ssh)` では起動できず、次の形で叩く。
 
-### 既定リモートを決めるのは M4
+```
+sh -c '<実効 ssh> "$@"' ssh -G -- <alias>
+```
 
-`RepoInfo.target` を埋めるには「どのリモートの URL を見るか」を決める必要があるが、
-`origin` を採るのか現在のブランチの upstream の remote を見るのかは、どの設計書にも
-書いていない。**`auth::resolve` を書く M4 のタスクで決める。** それまで `target` は
-`None` のままで、この節が用意するのは `RemoteUrl::parse` と `resolve_ssh_host` だけ。
+**`alias` を `sh` の文字列に埋めない。** `"$@"` の位置引数に載せるので、シェルは
+その中身を再解釈しない（`$(touch PWNED)` を alias に渡してもファイルは作られず、
+ssh が `hostname contains invalid characters` で落ちる。実測）。`sh -c` の直後の
+`ssh` は `$0` に入るだけの捨て値で、起動されるのは実効値のほう。
 
-**同じ問いが M3 から 2 つ送られている**（01 の「リモート操作」）。どちらも「既定の
-リモートはどれか」で、別々に決めると規則が 2 本並ぶ。
+| 形 | 叩くもの |
+|---|---|
+| `SshCommand::Shell(cmd)` | `sh -c '<cmd> "$@"' ssh -G -- <alias>` |
+| `SshCommand::Opaque`（`GIT_SSH`） | `ssh -G -- <alias>`（PATH の素の ssh） |
 
-- **`f` が無反応になる形。** リモートが複数あって `origin` も `branch.<name>.remote` も
-  無いと、`git fetch` は何もせず exit 0 で返る（git 2.55 で確認）。git が黙るので
-  stderr を通知に出す経路も効かない
-- **`-u` の提案が git の規則の部分集合。** `branch.<name>.pushRemote` と
-  `remote.pushDefault` を読んでいない。読むこと自体は `git_read` にできる
-  （`Branch.upstream_config` と同じ形。02）
+**`Opaque` で `$GIT_SSH` を叩かない。** `GIT_SSH` はシェルを通さず
+`<prog> [-p port] [user@]host <command>` の argv で呼ばれる規約なので、**`-G` を
+解する保証が無い**（`-G` を無視するラッパがそのあと何をするかは確かめていない。
+接続に行くなら `ssh -G` は接続しないから速い、という前提が消える）。素の `ssh` に
+落とすと、その環境では正規化が食い違いうるが、**食い違っても `host_raw` を使うのと
+同じ結果に落ちる**。03 が `Opaque` を「触らない」と決めたのと同じ数え方。
+
+### 既定リモート
+
+**問いは 1 つではない。** `app` に関数が 2 本ある（01 の「既定リモート」）。
+`auth` に置かないのは、材料が `git_read::Remote` と `Branch.upstream_config` で、
+どちらも `auth` の**上段**の型だから（00）。
+
+| 関数 | 答える問い | 読み手 |
+|---|---|---|
+| `update::default_remote` | `git fetch`（引数なし）はどれを取るか | `f` |
+| `update::conventional_remote` | 名前の慣習だけで選ぶならどれか | `default_remote` の 2 段目、`-u` の提案、`RepoInfo.target` |
+
+```
+default_remote      = branch.<HEAD>.remote → conventional_remote
+conventional_remote = リモートが 1 本ならそれ → origin → 決まらない
+```
+
+**`RepoInfo.target` は `default_remote` を呼ばない。** ブランチの追跡設定を混ぜると、
+`Msg::BranchesLoaded` と `Msg::RepoInfoLoaded` の**どちらが先に届くかで答えが割れる**
+——`init` が両方を別々のジョブとして出すので順序は決まらず、しかも `target` は
+1 回きり決めて latch するので二度と直らない。`CLAUDE.md` が「ループテストは非同期の
+返信の順序に依存できない」と書いている、その順序に production が乗ってしまう。
+**ブランチを切り替えても `target` は変わらない**という事実とも噛み合わない。
+`/simplify` の altitude が拾った。
+
+git 2.55 で実測した（`env -i` の一時リポジトリ）。
+
+| 状態 | `git fetch` |
+|---|---|
+| 単一リモート `upstream`（`origin` 無し、`branch.*.remote` 無し） | **その 1 本を fetch する**（`refs/remotes/upstream/main` ができる） |
+| リモート 2 本、どちらも `origin` でない、`branch.*.remote` 無し | **何もせず exit 0**（ref が 1 つも増えない） |
+
+「1 本ならそれ → 複数なら `origin`」と「`origin` があればそれ → 無ければ 1 本のとき
+だけ」は**同じ結果**になる（食い違うのは「単一かつ `origin` でない」場合だけで、
+どちらもその 1 本を選ぶ）。既にある `propose_upstream` が前者の順で書かれているので
+そちらに合わせる。**これが `conventional_remote`。**
+
+**`branch.<HEAD>.remote` が `.`（ローカル追跡）や、存在しないリモートを指すときは
+決まらない**（`None`）。`.` は 01 の push が既に断っている形で、存在しない名前は
+git 自身も fetch でエラーにする。
+
+送られていた 2 つのうち、片方だけを引き受ける。
+
+- **`f` が無反応になる形 → 直した。** `default_remote` が決まらないときに
+  `GitOp::Fetch` を出さず、**リモート名を並べた通知**で断る。決まるなら
+  `remote: Some(name)` を渡す。git が黙る経路（stderr が空のまま exit 0）へ
+  そもそも入らない
+- **`-u` の提案が git の規則の部分集合 → 引き受けない。** これは**別の規則**で、
+  git 自身が fetch と push で違う規則を持っている（push は
+  `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則）。
+  `default_remote` に畳むと、**fetch の既定へ push する**という git がしない挙動に
+  なる。「規則が 2 本並ぶ」を避けたいのは *target* の規則が 2 本になることで、
+  fetch と push を 1 本にすることではない。push 側を git に揃えるのは M6 へ送る
+  （`Branch.pushRemote` の読み取りが要る。02）
 
 ## アカウント解決
+
+**タスクを 2 本に割った**（plan.md も割ってある）。1 本目が `RepoInfo.target` を
+埋めるところまで、2 本目が `resolve` 本体。
+
+- **1 本目**（`RepoInfo.target`）— 上の「既定リモート」「port は scheme に畳む」
+  「産出側で `valid_host`」「実効 ssh」。**port と target 埋めは同じ PR でないと
+  片方が宙に浮く**（`RemoteUrl` に port を持たせても運ぶ先が無い）ので、この 4 つが
+  最小の単位になる
+- **2 本目**（`resolve`）— 下の手順 1〜4 と `Backend`。**1 本目が終わるまで
+  `RepoTarget` が作れない**ので順序は入れ替えられない
+
+`RepoTarget` は port を運ぶ。`RemoteUrl` から作るときに **https の port だけ**を
+載せる（ssh の port は API の port ではない。上の「port は scheme に畳む」）。
 
 ```rust
 pub enum AccountState {
@@ -207,7 +293,13 @@ pub enum AccountState {
     Degraded(DegradedReason),          // GhMissing | GhTooOld | NotLoggedIn(host) | NoAccess | Ambiguous(Vec<GhLogin>)
 }
 
-pub struct RepoTarget { pub host: String, pub owner: String, pub repo: String }
+pub struct RepoTarget {
+    pub host: String,
+    /// https の非既定ポート。既定（443）は `None`。**ssh の port は入らない。**
+    pub port: Option<u16>,
+    pub owner: String,
+    pub repo: String,
+}
 
 pub async fn resolve(
     target: &RepoTarget,
@@ -230,14 +322,25 @@ pub async fn resolve(
    渡す」も、同じ理由で不可。** 成立するのは、probe を `auth` の外へ出す
    （`app` が候補ごとに `github::repo` を叩き、結果だけ `resolve` に渡す）か、
    `auth` 側が `github` の型を名指ししない狭い結果型で受けるか、の 2 つ。
-2. **トークンが 1 本。** `GithubClient` はトークンを抱える（05。`new(host, token)`）
+2. **トークンが 1 本。** `GithubClient` はトークンを抱える（05。`new(host, port, token)`）
    ので、手順 4 の「各トークンで `GET /repos/{owner}/{repo}` を並列に試す」を
    1 つのクライアントでは回せない。**`reqwest::Client` のほうは共有される**
    （`github` がプロセスで 1 つ持つ）ので、候補ごとに `GithubClient` を作っても
    トラストストアの読み直しは起きない。
 
-`GithubClient::new` は `Result`（ベース URL を組めないホストがある）なので、
-組む場所によって `Degraded` の理由が 1 つ増えるかどうかが変わる。そこまで含めて決める。
+`GithubClient::new` は `Result` なので、組む場所によって `Degraded` の理由が 1 つ
+増えるかどうかが変わる。**`InvalidHost` のほうは 1 本目で届かなくなった**（`ssh -G` の
+結果を産出側で検査したので、`RepoTarget.host` は必ず `valid_host` を通っている）が、
+**`shared_http()` の失敗は残る** —— TLS バックエンドを初期化できない、という
+プロセス全体の条件なので、host を先に検査しても消えない（05）。そこまで含めて決める。
+
+**`&GhCli` を `resolve` の引数にするとテストできない**（1 本目で数えた）。#61 の
+テストは JSON を解析する純粋関数を直に叩いており、`GhCli::auth_status` の非同期経路は
+**空 config（0 件）しか通していない** —— 偽トークンを置いた `GH_CONFIG_DIR` では
+`gh` が実ホストへ検証に出るので、Single / Probe / Ambiguous を実 `gh` では踏めない。
+「テストが書きにくい設計になっていたらテストを省くのではなく設計を直す」に当たるので、
+**上の 2 案のうち後者（`auth` が `github` の型を名指ししない狭い trait）を採り、
+`gh` 側も同じ trait に載せる。** 実装は 2 本目。
 
 手順:
 

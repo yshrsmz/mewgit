@@ -45,15 +45,22 @@ const MAX_PAGES: usize = 10;
 /// - self-hosted の GHES は `https://{host}/api/v3`
 ///   （`gh` のバイナリに `https://%s/api/v3/` があるのを `strings` で確認。05）
 ///
-/// **port は受けない。** `auth::RemoteUrl` が port を捨てるのでここへ運ぶ経路が無く、
-/// 足すなら `RemoteUrl` に持たせるのと同じ PR（`auth::resolve`）でないと片方が宙に浮く。
-/// 05 が「パスの形を落として port だけ足すと self-hosted では全部 404 になる」と
-/// 警告していたのは、**パスの形をここで入れたことで解けている**。
+/// **port はパスの形と直交する。** `{host}/api/v3` 側なら
+/// `https://ghe.example.com:8443/api/v3/`、`api.{host}` 側なら
+/// `https://api.foo.ghe.com:8443/`。後者は確かめていない（github.com も `*.ghe.com` も
+/// SaaS で 443 固定なので実物を用意できない）。**既定の 443 は
+/// [`auth::url::RemoteUrl`](crate::auth::url::RemoteUrl) が `None` に畳んでいる**ので、
+/// `:443` がここへ来ることはない。05 が「パスの形を落として port だけ足すと
+/// self-hosted では全部 404 になる」と警告していたのは、**パスの形を先に入れたことで
+/// 解けている**。
+///
+/// **分類に port を混ぜない。** `.ghe.com` で終わるかを見るのは port を外した
+/// `host` のほうで、これは下の「分類より先にホスト名だけか」と同じ順序の話。
 ///
 /// ホストの大小は**比較のときだけ**無視する。組んだ URL の小文字化は
 /// [`Url`] が行う（WHATWG URL の host 正規化）ので、ここでは触らない
 /// —— 二重に正規化すると出どころが 2 本になる。
-fn base_url(host: &str) -> Result<Url, GithubError> {
+fn base_url(host: &str, port: Option<u16>) -> Result<Url, GithubError> {
     let invalid = || GithubError::InvalidHost {
         host: host.to_string(),
     };
@@ -69,10 +76,18 @@ fn base_url(host: &str) -> Result<Url, GithubError> {
     if !valid_host(&lower) {
         return Err(invalid());
     }
-    let raw = if lower == "github.com" || lower.ends_with(".ghe.com") {
-        format!("https://api.{lower}/")
+    // **分類は port を外したホストで済ませる。** ここで先に決めておくと、下の
+    // authority を組むときに `lower` を move できる（`clone` は「あとで要る」と読める
+    // ので、要らないなら置かない）。
+    let api_subdomain = lower == "github.com" || lower.ends_with(".ghe.com");
+    let authority = match port {
+        Some(port) => format!("{lower}:{port}"),
+        None => lower,
+    };
+    let raw = if api_subdomain {
+        format!("https://api.{authority}/")
     } else {
-        format!("https://{lower}/api/v3/")
+        format!("https://{authority}/api/v3/")
     };
     Url::parse(&raw).map_err(|_| invalid())
 }
@@ -127,8 +142,11 @@ fn shared_http() -> Result<reqwest::Client, GithubError> {
 
 impl GithubClient {
     /// ホスト名からクライアントを作る。
-    pub fn new(host: &str, token: SecretString) -> Result<Self, GithubError> {
-        Self::with_base_url(base_url(host)?, token)
+    ///
+    /// `port` は **https の非既定ポート**（`auth::RepoTarget::port`）。ssh の port は
+    /// ここへ来ない（04 の「port は scheme に畳む」）。
+    pub fn new(host: &str, port: Option<u16>, token: SecretString) -> Result<Self, GithubError> {
+        Self::with_base_url(base_url(host, port)?, token)
     }
 
     /// ベース URL を直に与える。テストがモックサーバを指すための seam。
@@ -461,14 +479,19 @@ mod tests {
 
     // ---- ベース URL ----
 
+    /// port の無いふつうの形。port を見るテストだけが [`base_url`] を直に呼ぶ。
+    fn base(host: &str) -> Result<Url, GithubError> {
+        base_url(host, None)
+    }
+
     #[test]
     fn github_com_and_data_residency_use_the_api_subdomain() {
         assert_eq!(
-            base_url("github.com").unwrap().as_str(),
+            base("github.com").unwrap().as_str(),
             "https://api.github.com/"
         );
         assert_eq!(
-            base_url("acme.ghe.com").unwrap().as_str(),
+            base("acme.ghe.com").unwrap().as_str(),
             "https://api.acme.ghe.com/"
         );
     }
@@ -476,7 +499,7 @@ mod tests {
     #[test]
     fn self_hosted_uses_the_api_v3_path() {
         assert_eq!(
-            base_url("ghe.example.com").unwrap().as_str(),
+            base("ghe.example.com").unwrap().as_str(),
             "https://ghe.example.com/api/v3/"
         );
     }
@@ -485,7 +508,7 @@ mod tests {
     fn host_matching_ignores_case_and_the_url_lowercases_it() {
         // 比較は case-insensitive。組んだ URL の小文字化は `Url` に任せる。
         assert_eq!(
-            base_url("GitHub.com").unwrap().as_str(),
+            base("GitHub.com").unwrap().as_str(),
             "https://api.github.com/"
         );
     }
@@ -494,14 +517,11 @@ mod tests {
     fn lookalike_hosts_are_treated_as_self_hosted() {
         // `github.com` を含むだけの別ホストを `api.` 側に落とさない。
         assert_eq!(
-            base_url("github.com.evil.example").unwrap().as_str(),
+            base("github.com.evil.example").unwrap().as_str(),
             "https://github.com.evil.example/api/v3/"
         );
         // `.ghe.com` で終わらない `ghe.com` 単体も self-hosted 扱い。
-        assert_eq!(
-            base_url("ghe.com").unwrap().as_str(),
-            "https://ghe.com/api/v3/"
-        );
+        assert_eq!(base("ghe.com").unwrap().as_str(), "https://ghe.com/api/v3/");
     }
 
     #[test]
@@ -509,7 +529,7 @@ mod tests {
         // ホスト名が `api.` で始まるだけの self-hosted を、`api.` を剥がして
         // 突き合わせない。剥がすと自分自身と一致せず、拒んでしまう。
         assert_eq!(
-            base_url("api.internal.example").unwrap().as_str(),
+            base("api.internal.example").unwrap().as_str(),
             "https://api.internal.example/api/v3/"
         );
     }
@@ -519,14 +539,43 @@ mod tests {
         // 分類を先にすると `foo/bar.ghe.com` が `.ghe.com` で終わって真になり、
         // `https://api.foo/bar.ghe.com/` という「動くが違う場所」を指すベースになる。
         assert!(matches!(
-            base_url("foo/bar.ghe.com"),
+            base("foo/bar.ghe.com"),
             Err(GithubError::InvalidHost { .. })
         ));
     }
 
     #[test]
+    fn a_non_default_port_rides_on_both_shapes() {
+        // self-hosted は `{host}:{port}/api/v3`。非既定ポートの GHES がこれ。
+        assert_eq!(
+            base_url("ghe.example.com", Some(8443)).unwrap().as_str(),
+            "https://ghe.example.com:8443/api/v3/"
+        );
+        // `api.{host}` 側は**実物を用意できないので確かめていない**（github.com も
+        // `*.ghe.com` も SaaS で 443 固定）。書かれていれば素直に載せる、という
+        // こちらの判断を固定しておく（05）。
+        assert_eq!(
+            base_url("acme.ghe.com", Some(8443)).unwrap().as_str(),
+            "https://api.acme.ghe.com:8443/"
+        );
+    }
+
+    #[test]
+    fn the_port_does_not_join_the_classification() {
+        // `.ghe.com` で終わるかを見るのは port を外したホスト。混ぜると
+        // `ghe.example.com:443` のような値が分類を変えうる。
+        assert_eq!(
+            base_url("github.com", Some(8443)).unwrap().as_str(),
+            "https://api.github.com:8443/"
+        );
+    }
+
+    #[test]
     fn hosts_that_are_not_bare_hostnames_are_rejected() {
-        // `RemoteUrl` の検査を通らない `ssh -G` の `hostname` がここへ届く。
+        // **mewgit の中の経路からはもう届かない** —— `RemoteUrl` は host を検査し、
+        // `ssh -G` の `hostname` も産出側（`auth::ssh`）で `valid_host` を通る（04）。
+        // それでも残すのは、`GithubClient::new` が `pub` で、ここが**回復先の無い
+        // 最後の関門**だから（05 の `InvalidHost`）。
         for host in [
             "ghe.example.com:8443",
             "ghe.example.com/extra",
@@ -540,7 +589,7 @@ mod tests {
             "[::1]",
         ] {
             assert!(
-                matches!(base_url(host), Err(GithubError::InvalidHost { .. })),
+                matches!(base(host), Err(GithubError::InvalidHost { .. })),
                 "{host} は拒むべき"
             );
         }
@@ -548,7 +597,7 @@ mod tests {
 
     #[test]
     fn debug_does_not_leak_the_token() {
-        let c = GithubClient::new("github.com", SecretString::from("s3cret")).unwrap();
+        let c = GithubClient::new("github.com", None, SecretString::from("s3cret")).unwrap();
         let shown = format!("{c:?}");
         assert!(
             !shown.contains("s3cret"),

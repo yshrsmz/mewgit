@@ -149,6 +149,7 @@ impl AppState {
             | JobKind::LoadStatus
             | JobKind::LoadBranches
             | JobKind::LoadDiff
+            | JobKind::ResolveTarget
             | JobKind::ResolveAccount
             | JobKind::FetchPr
             | JobKind::FetchChecks
@@ -317,8 +318,50 @@ pub struct RepoInfo {
     pub path: PathBuf,
     pub remotes: Vec<Remote>,
     pub head: Option<HeadInfo>,
-    /// 既定リモートから解析・正規化した host / owner / repo。未解決なら `None`。
-    pub target: Option<RepoTarget>,
+    /// 既定リモートから解析・正規化した host / port / owner / repo。
+    pub target: TargetState,
+}
+
+/// [`RepoInfo::target`] の状態。
+///
+/// **`Option<RepoTarget>` にしない。** 「まだ頼んでいない」と「決められなかった」を
+/// 同じ `None` にすると、[`Msg::RepoInfoLoaded`](super::Msg::RepoInfoLoaded) が届く
+/// たびに `ssh -G` を頼み直す —— あれは ref を動かす書き込みのたびに走るので、
+/// commit / checkout / fetch のたびにサブプロセスが 1 つ増える。#31 の
+/// 「`None` が 2 つのことを指していた」と同じ数え方。
+///
+/// **`Asked` を持たない。** 返事待ちは [`JobTracker`] が [`JobKind::ResolveTarget`] で
+/// 持っており、`AppState::issue` が走っているあいだの 2 本目を落とす。ここに置くと
+/// 同じ時点を 2 人が見ることになる（#31 の `DiffState.stale`）。
+///
+/// **リモートは起動中に変わらない前提。** mewgit に remote を足すキーが無いので、
+/// 外で `git remote add` したぶんは再起動まで効かない（`core.sshCommand` を起動時に
+/// 1 回だけ読むのと同じ判断。02）。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum TargetState {
+    /// まだ既定リモートを見ていない。
+    #[default]
+    Unasked,
+    Resolved(RepoTarget),
+    /// 既定リモートが決まらなかったか、その URL が GitHub のものではなかった。
+    /// **頼み直さない。**
+    ///
+    /// **理由は持たない。** 出す先がまだ無く（ヘッダの degraded 表示は M4 の別タスク）、
+    /// 持たせても読む腕が無い。表示を入れるときに [`DegradedReason`] へ畳むかを決める
+    /// （04）。
+    ///
+    /// [`DegradedReason`]: crate::auth::DegradedReason
+    Unavailable,
+}
+
+impl TargetState {
+    /// 決まっているなら中身。`github` を叩く経路はこれを通す。
+    pub fn resolved(&self) -> Option<&RepoTarget> {
+        match self {
+            TargetState::Resolved(target) => Some(target),
+            TargetState::Unasked | TargetState::Unavailable => None,
+        }
+    }
 }
 
 /// 端末サイズ。幅でレイアウトを分岐する（幅 < 100 で右ペインを隠す）。
@@ -1205,6 +1248,7 @@ pub enum JobKind {
     LoadBranches,
     LoadDiff,
     Exec,
+    ResolveTarget,
     ResolveAccount,
     FetchPr,
     FetchChecks,
@@ -1236,6 +1280,9 @@ impl JobKind {
             JobKind::Exec
             | JobKind::LoadCommitDetail
             | JobKind::LoadCommitFiles
+            // `ssh -G` はリポジトリの ref を読まない。読むのは `.git/config` の
+            // リモート URL と `~/.ssh/config` で、どちらも git の書き込みで動かない。
+            | JobKind::ResolveTarget
             | JobKind::ResolveAccount
             | JobKind::FetchPr
             | JobKind::FetchChecks

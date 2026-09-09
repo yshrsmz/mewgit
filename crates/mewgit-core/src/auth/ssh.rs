@@ -4,20 +4,19 @@
 //! `.git/config` のリモート URL に書かれたホストは `~/.ssh/config` のエイリアス
 //! （`gh-work` など）のことがある。`ssh -G` に解決させて実ホスト名にする。
 
-use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::path::Path;
 
 use super::AuthError;
 
 /// 何も設定されていないときに git が起動する ssh。[`effective_ssh`] の既定値。
 ///
-/// **`resolve_ssh_host` はいまこれを直に叩いている。** git の通信は
-/// `core.sshCommand` / `GIT_SSH_COMMAND` に従うので、そこを別の ssh（別の config を
-/// 読むもの）に向けている環境では、**解決と接続で食い違う**。寄せ先は
-/// [`effective_ssh`] で決まったが、配線は M4 —— 実効値はシェル文字列なので
-/// `Command::new(ssh)` ではなく `sh -c` 経由の起動に変える必要があり、いま
-/// `resolve_ssh_host` を呼ぶ経路が無い（04 の「git が使う ssh と、ここで叩く ssh」）。
+/// [`SshCommand::Opaque`] のときに [`resolve_ssh_host`] が落ちる先でもある
+/// （04 の「git が使う ssh と、ここで叩く ssh」の表）。
 const SSH_BIN: &str = "ssh";
+
+/// [`SshCommand::Shell`] を起動するシェル。git が `core.sshCommand` を渡すのと同じ。
+const SHELL_BIN: &str = "sh";
 
 /// git がリモートとの通信に使う ssh。
 ///
@@ -48,9 +47,8 @@ impl Default for SshCommand {
 /// （前の 2 つは環境変数を置くと config が読まれないことを実測。git 2.55）。
 /// **空白だけの値は未設定として扱う。**
 ///
-/// `git_exec::Runner` が `-o BatchMode=yes` を重ねるのに使う。`resolve_ssh_host` が
-/// PATH の `ssh` を直に叩いているのをここへ寄せるのは M4（04 の「git が使う ssh と、
-/// ここで叩く ssh」）。
+/// `git_exec::Runner` が `-o BatchMode=yes` を重ねるのに使い、[`resolve_ssh_host`] は
+/// これを `sh -c` 経由で起動する（04 の「git が使う ssh と、ここで叩く ssh」）。
 fn effective_ssh(
     git_ssh_command: Option<&str>,
     core_ssh_command: Option<&str>,
@@ -88,14 +86,23 @@ fn set(value: Option<&str>) -> Option<&str> {
 
 /// エイリアスを実ホスト名に正規化する。
 ///
+/// `ssh` は **git が実際に使う ssh**（[`effective_ssh_from_env`]）。PATH の素の `ssh`
+/// を叩くと、`core.sshCommand` / `GIT_SSH_COMMAND` を別の config を読む ssh に向けて
+/// いる環境で**解決と接続が食い違う**（04）。
+///
 /// **`ssh -G` は未定義のエイリアスでも exit 0 で引数をそのまま返す**（04 の実測）。
-/// つまり「エイリアスが無かった」は成功。`Err` になるのは 3 つ — ssh を起動できな
-/// かったとき、ssh が非 0 で終了したとき、出力に `hostname` の行が無かったとき。
-/// 3 つ目は ssh が出力の形を変えたときにしか起きないが、**黙って別の値を返すより
-/// 落ちたほうがいい**（正規化していない値を正規化済みとして下流に渡さない）。
-/// 呼び出し側は `Err` のときに `host_raw` をそのまま使い、理由を通知に出す。
-pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError> {
-    resolve_with(Path::new(SSH_BIN), None, alias).await
+/// つまり「エイリアスが無かった」は成功。`Err` になるのは 4 つ — ssh を起動できな
+/// かったとき、ssh が非 0 で終了したとき、出力に `hostname` の行が無かったとき、
+/// その値が [`valid_host`](super::url::valid_host) を通らなかったとき。後ろの 2 つは
+/// ssh が出力の形を変えたときにしか起きないが、**黙って別の値を返すより落ちたほうが
+/// いい**（正規化していない値を正規化済みとして下流に渡さない）。呼び出し側は `Err` の
+/// ときに `host_raw` をそのまま使い、理由を通知に出す。
+///
+/// **`-o BatchMode=yes` は重ねない。** `ssh -G` は設定を書き出すだけで接続しないので、
+/// パスフレーズや `known_hosts` のプロンプトが出る経路が無い（`Runner` が重ねるのは
+/// 実際に繋ぐから。03）。
+pub async fn resolve_ssh_host(ssh: &SshCommand, alias: &str) -> Result<String, AuthError> {
+    resolve_with(ssh, None, alias).await
 }
 
 /// `ssh -G` を実行して `hostname` の値を返す。
@@ -103,7 +110,7 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError> {
 /// `config_file` は `-F` に渡す ssh_config。**テストを実行環境から切り離すためだけに
 /// あり**、本番は `None` で `~/.ssh/config` と `/etc/ssh/ssh_config` をそのまま使う。
 async fn resolve_with(
-    ssh_bin: &Path,
+    ssh: &SshCommand,
     config_file: Option<&Path>,
     alias: &str,
 ) -> Result<String, AuthError> {
@@ -114,23 +121,56 @@ async fn resolve_with(
 
     // **`alias` は positional に載る**ので `--` を置く（03 の「argv への変換」と
     // 同じ数え方）。`.git/config` の URL は clone してきた値がそのまま入り、
-    // `RemoteUrl` の `host_of` が `user@` を捨てるので、`git@-oProxyCommand=...`
-    // は裸の `-oProxyCommand=...` になってここへ来る（04）。
-    let mut args: Vec<&OsStr> = Vec::new();
+    // `RemoteUrl` の `split_authority` が `user@` を捨てるので、
+    // `git@-oProxyCommand=...` は裸の `-oProxyCommand=...` になってここへ来る（04）。
+    let mut args: Vec<OsString> = Vec::new();
     if let Some(path) = config_file {
-        args.push(OsStr::new("-F"));
-        args.push(path.as_os_str());
+        args.push(OsString::from("-F"));
+        args.push(path.into());
     }
-    args.extend([OsStr::new("-G"), OsStr::new("--"), OsStr::new(alias)]);
+    args.extend([
+        OsString::from("-G"),
+        OsString::from("--"),
+        OsString::from(alias),
+    ]);
+
+    // `GIT_SSH` はシェルを通さない argv 規約なので `-G` を解する保証が無く、叩かない。
+    // 落とし先は素の `ssh` = [`SshCommand::default`] と同じ（04 の表）。
+    let command = match ssh {
+        SshCommand::Shell(command) => command.as_str(),
+        SshCommand::Opaque => SSH_BIN,
+    };
+    // `sh -c '<実効 ssh> "$@"' ssh -G -- <alias>`。**alias をシェルの文字列に埋めない**
+    // —— `"$@"` の位置引数に載せるので、`$(touch x)` を渡してもシェルは展開せず、
+    // ssh が「hostname として不正」で落ちる（04 の実測）。`-c` の次の `ssh` は `$0` に
+    // 入るだけの捨て値で、起動されるのは実効値のほう。
+    //
+    // **`Opaque` を直起動する腕は置かない。** 落とし先が `Shell("ssh")` と同じ値なので、
+    // 分けても**どちらの腕を通ったかを観測できるテストが書けない**（「テストで踏めない
+    // 状態をコードに入れない」）。
+    let mut shell = vec![
+        OsString::from("-c"),
+        OsString::from(format!("{command} \"$@\"")),
+        OsString::from(SSH_BIN),
+    ];
+    shell.extend(args);
 
     // 起動の形は `gh` と共有している（`probe`）。**数え直した結果はそこの doc に
     // ある** — `git_exec::Runner::spawn` は前提が違うので入っていない。
-    let stdout = super::probe::output(ssh_bin, args, &[])
+    let stdout = super::probe::output(Path::new(SHELL_BIN), shell, &[])
         .await
         .map_err(|err| failed(err.describe()))?;
-    hostname_from_dump(&stdout)
-        .map(str::to_string)
-        .ok_or_else(|| failed("ssh -G の出力に hostname の行がありませんでした".to_string()))
+    let host = hostname_from_dump(&stdout)
+        .ok_or_else(|| failed("ssh -G の出力に hostname の行がありませんでした".to_string()))?;
+    // **産出側で検査する。** 通してしまうと不正なホストが `RepoTarget.host` まで
+    // 進み、`GithubClient::new` が `InvalidHost` で落として「GitHub 機能が使えない」
+    // だけが残る。ここで落とせば呼び出し側は `host_raw` で続けられる（04）。
+    if !super::url::valid_host(host) {
+        return Err(failed(format!(
+            "ssh -G が返した hostname をホスト名として読めませんでした: {host}"
+        )));
+    }
+    Ok(host.to_string())
 }
 
 /// `ssh -G` の出力から `hostname` の値を取る。
@@ -148,6 +188,7 @@ fn hostname_from_dump(dump: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::fake_ssh_host;
 
     /// `-F` に渡す ssh_config を書いて、そこで `ssh -G` を回す。
     ///
@@ -155,7 +196,7 @@ mod tests {
     /// 「`TempDir` を束縛し続ける」注意書きが人数分に増える。
     async fn resolve(ssh_config: &str, alias: &str) -> Result<String, AuthError> {
         let (_dir, path) = crate::test_util::temp_file("config", ssh_config);
-        resolve_with(Path::new(SSH_BIN), Some(&path), alias).await
+        resolve_with(&SshCommand::default(), Some(&path), alias).await
     }
 
     /// エイリアスが 1 つだけ書かれた ssh_config。
@@ -283,10 +324,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_ssh_is_reported() {
-        let err = resolve_with(Path::new("/nonexistent/ssh"), None, "gh-work")
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("起動できませんでした"), "{err}");
+    async fn a_missing_ssh_is_reported_with_its_path() {
+        // **`sh -c` 経由なので `ProbeError::Spawn` には落ちない** —— 起動に失敗するのは
+        // `sh` のほうで、実効値が見つからないことは `sh` が exit 127 と stderr で言う。
+        // 案内にパスが残っていることだけを見る（不変ルール 4 の趣旨）。
+        let ssh = SshCommand::Shell("/nonexistent/ssh".to_string());
+        let err = resolve_with(&ssh, None, "gh-work").await.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("/nonexistent/ssh"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn the_effective_ssh_is_the_one_that_runs() {
+        // **これが「実効値に向けた」の見張り。** PATH の素の `ssh` を叩いていたら
+        // `gh-work` はそのまま返ってくるので、偽物の hostname は出ない。
+        let (_dir, ssh) = fake_ssh_host("fake.example.com");
+        assert_eq!(
+            resolve_with(&ssh, None, "gh-work").await.unwrap(),
+            "fake.example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn options_in_the_effective_ssh_reach_ssh() {
+        // 実効値は「コマンド + オプション」の文字列で、後ろに `-G -- <alias>` が付く。
+        // `-F` を実効値の側に書いても効くことを見る（`sh -c '<cmd> "$@"'` の形）。
+        let (_dir, path) = crate::test_util::temp_file("config", GH_WORK);
+        let ssh = SshCommand::Shell(format!("ssh -F {}", path.display()));
+        assert_eq!(
+            resolve_with(&ssh, None, "gh-work").await.unwrap(),
+            "github.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_alias_is_not_reinterpreted_by_the_shell() {
+        // **`sh -c` を通すようになったので数え直した腕。** alias を実効値の文字列に
+        // 埋めると `$(...)` がシェルに展開される。`"$@"` の位置引数に載せているので
+        // 展開されず、ssh が「ホスト名として不正」で落ちる（04 の実測）。
+        let (dir, ssh) = fake_ssh_host("github.com");
+        let canary = dir.path().join("PWNED");
+        let alias = format!("$(touch {})", canary.display());
+        // 偽物は何を渡されても同じ hostname を返すので、見るのは canary の有無だけ。
+        let _ = resolve_with(&ssh, None, &alias).await;
+        assert!(!canary.exists(), "alias がシェルに展開された");
+    }
+
+    #[tokio::test]
+    async fn a_hostname_that_is_not_a_host_is_refused() {
+        // **産出側の検査**（04）。`-4` を通すと `RepoTarget.host` まで進み、
+        // `GithubClient::new` が `InvalidHost` で落として degraded だけが残る。
+        let (_dir, ssh) = fake_ssh_host("-4");
+        let err = resolve_with(&ssh, None, "gh-work").await.unwrap_err();
+        assert!(err.to_string().contains("-4"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn git_ssh_falls_back_to_plain_ssh() {
+        // `Opaque` は値を持たない単位ヴァリアントなので、落とし先は素の `ssh`（04 の表）。
+        // **見張れるのは「素の ssh と同じ結果になる」ことだけ** —— 分岐を残しても
+        // どちらのランチャを通ったかは観測できないので、腕ごと畳んである。
+        let (_dir, path) = crate::test_util::temp_file("config", GH_WORK);
+        assert_eq!(
+            resolve_with(&SshCommand::Opaque, Some(&path), "gh-work")
+                .await
+                .unwrap(),
+            resolve_with(&SshCommand::default(), Some(&path), "gh-work")
+                .await
+                .unwrap(),
+        );
     }
 }

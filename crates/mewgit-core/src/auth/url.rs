@@ -7,20 +7,34 @@
 
 use super::AuthError;
 
+/// https の既定ポート。書いてあっても書いていないのと同じなので `None` に畳む。
+const HTTPS_PORT: u16 = 443;
+
 /// リモート URL の種別。GitHub に繋がる形だけを受ける。
+///
+/// **port はここに畳んである。** 平らな `port: Option<u16>` を [`RemoteUrl`] に
+/// 持たせると、**ssh の port が API のベース URL に届く組み合わせが型で組める**
+/// （`ssh://git@ghe.example.com:2222/o/r` の 2222 は ssh の port で、API は
+/// `https://ghe.example.com/api/v3/` のまま）。#49 の `--force-with-lease` が
+/// `force: bool` と `expected: Option<Oid>` に割れていたのと同じ形なので、
+/// 1 つに畳んでその組み合わせを消す（04 の「port は scheme に畳む」）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteScheme {
     /// `git@host:owner/repo.git` と `ssh://git@host/owner/repo`。
+    ///
+    /// **port は持たない。捨てる。** 使い道が無く、持たせると上の組み合わせが戻る。
     Ssh,
-    /// `https://host/owner/repo`。
-    Https,
+    /// `https://host[:port]/owner/repo`。
+    Https {
+        /// 非既定ポート。443 と省略はどちらも `None`。
+        port: Option<u16>,
+    },
 }
 
 /// 解析済みのリモート URL。
 ///
-/// user と port は捨てる。どちらも host / owner / repo を決めるのに要らず、
-/// port が要るのは非既定ポートの GHES で API のベース URL を組むときだけなので、
-/// そちらは `github` のタスクへ送った（04 / 05）。
+/// user は捨てる（host / owner / repo を決めるのに要らない）。port は
+/// [`RemoteScheme`] の中にあり、**https のときだけ値を持つ**。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteUrl {
     pub scheme: RemoteScheme,
@@ -44,7 +58,7 @@ impl RemoteUrl {
 }
 
 fn parse_inner(url: &str) -> Option<RemoteUrl> {
-    let (authority, path, scheme) = if let Some(rest) = url
+    let (authority, path, is_https) = if let Some(rest) = url
         .strip_prefix("ssh://")
         // `git+ssh://` は git が ssh 経路に流す（`core.sshCommand` で argv をダンプして
         // 確認）。大文字の `SSH://` は git 自身が `remote-SSH` ヘルパを探して落ちるので
@@ -52,10 +66,10 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
         .or_else(|| url.strip_prefix("git+ssh://"))
     {
         let (authority, path) = rest.split_once('/')?;
-        (authority, path, RemoteScheme::Ssh)
+        (authority, path, false)
     } else if let Some(rest) = url.strip_prefix("https://") {
         let (authority, path) = rest.split_once('/')?;
-        (authority, path, RemoteScheme::Https)
+        (authority, path, true)
     } else if url.contains("://") {
         // `git://` は認証が効かず、`http://` は平文、`file://` と `rsync://` は
         // GitHub のリモートではない。scp 形式と誤って読まないよう、ここで落とす。
@@ -65,16 +79,29 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
         // **最初の `/` より前に `:` があるもの**だけが scp 形式。
         let (authority, path) = url.split_once(':')?;
         // authority に `/` があればローカルパス（`~/repos/x@host:a/b.git` など）。
-        // **`valid_host` では落ちない** — `host_of` が最後の `@` から後ろだけを見るので、
+        // **`valid_host` では落ちない** — `split_authority` が最後の `@` から後ろだけを見るので、
         // `/` を含む部分がそこで消える。
         if authority.contains('/') {
             return None;
         }
-        (authority, path, RemoteScheme::Ssh)
+        // scp 形式に port は書けない。**最初の `:` はパスの区切りとして使い切って
+        // いる**ので、`git@host:2222/o/r` の `2222` はパスの 1 段目になり、
+        // 3 段のパスとして下の `split_owner_repo` が落とす（git も同じ読み方をする）。
+        (authority, path, false)
+    };
+
+    let (host, port) = split_authority(authority)?;
+    // **既定ポートを畳むのはここだけ。** どのポートを受けるかは `split_authority` が
+    // 1 箇所で答えており、scheme で変わるのはこの畳み方だけ。
+    let scheme = if is_https {
+        RemoteScheme::Https {
+            port: port.filter(|port| *port != HTTPS_PORT),
+        }
+    } else {
+        RemoteScheme::Ssh
     };
 
     // 確保はここ 1 か所。読めない URL では 1 つも作らない。
-    let host = host_of(authority)?;
     let (owner, repo) = split_owner_repo(path)?;
     Some(RemoteUrl {
         scheme,
@@ -84,22 +111,36 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
     })
 }
 
-/// `[user@]host[:port]` からホストだけを取る。
-fn host_of(authority: &str) -> Option<&str> {
+/// `[user@]host[:port]` を host と port に割る。
+///
+/// **port の構文はどちらの scheme でも確かめる。** 値を使うのは https だけだが
+/// （[`RemoteScheme`]）、読めない port を「port が無い」と同じに扱うと、git が動かない
+/// URL を解析できたことにしてしまう。`0` はポート番号ではないので落とす。
+///
+/// **数字だけを受ける。** `u16::from_str` は先頭の `+` を通すので、`parse` に任せると
+/// `https://h:+8443/a/b` が port 8443 として通る —— git は取りに行けない URL なのに、
+/// こちらだけが読めたことにする（`/code-review` が拾った）。
+fn split_authority(authority: &str) -> Option<(&str, Option<u16>)> {
     // user 名に `@` が入ることがあるので、最後の `@` で割る。
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
-    // port を落とす。IPv6 リテラル（`[::1]:22`）は `[` を含むので下の検査で落ちる。
-    let host = host.split_once(':').map_or(host, |(host, _port)| host);
-    valid_host(host).then_some(host)
+    // IPv6 リテラル（`[::1]:22`）は `[` を含むので `valid_host` で落ちる。
+    let (host, port) = match host.split_once(':') {
+        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => {
+            (host, Some(port.parse::<u16>().ok().filter(|p| *p != 0)?))
+        }
+        Some(_) => return None,
+        None => (host, None),
+    };
+    valid_host(host).then_some((host, port))
 }
 
 /// ホスト名として受ける文字だけでできているか。
 ///
 /// **`-` 始まりを弾くのが眼目。** 理由は 2 つある。第一に、ホスト名の構文として
 /// `-` 始まりは受けない（`https://-4/a/b` を拒むのはこちらの理由）。第二に、
-/// [`host_of`] が `user@` を捨てるので、通すと**裸の** `-4` が `ssh -G` の positional
+/// [`split_authority`] が `user@` を捨てるので、通すと**裸の** `-4` が `ssh -G` の positional
 /// に載る（04 の「alias は argv の positional に載る」）。
 ///
 /// **git と同じ判断ではない。** git 2.55 が拒むのは `user@host` 全体が `-` で始まる
@@ -190,8 +231,12 @@ mod tests {
     }
 
     fn https(host: &str, owner: &str, repo: &str) -> RemoteUrl {
+        https_port(host, None, owner, repo)
+    }
+
+    fn https_port(host: &str, port: Option<u16>, owner: &str, repo: &str) -> RemoteUrl {
         RemoteUrl {
-            scheme: RemoteScheme::Https,
+            scheme: RemoteScheme::Https { port },
             ..ssh(host, owner, repo)
         }
     }
@@ -227,7 +272,8 @@ mod tests {
             parsed("ssh://git@github.com/yshrsmz/mewgit.git"),
             ssh("github.com", "yshrsmz", "mewgit")
         );
-        // port は捨てる（04）。
+        // **ssh の port は捨てる。** API の port ではないので、`RemoteScheme::Ssh` に
+        // 置き場所が無い（04 の「port は scheme に畳む」）。
         assert_eq!(
             parsed("ssh://git@acme.ghe.com:2222/acme/tools"),
             ssh("acme.ghe.com", "acme", "tools")
@@ -245,11 +291,41 @@ mod tests {
             parsed("https://github.com/yshrsmz/mewgit.git"),
             https("github.com", "yshrsmz", "mewgit")
         );
-        // 末尾の `/` と、URL に埋め込まれた user。
+        // 末尾の `/` と、URL に埋め込まれた user。**https の port は運ぶ** ——
+        // 非既定ポートの GHES では API のベース URL が変わる（05）。
         assert_eq!(
             parsed("https://token@acme.ghe.com:8443/acme/tools/"),
-            https("acme.ghe.com", "acme", "tools")
+            https_port("acme.ghe.com", Some(8443), "acme", "tools")
         );
+    }
+
+    #[test]
+    fn the_default_https_port_is_the_same_as_writing_none() {
+        // 書いてあっても書いていないのと同じ。畳まないと `api.github.com:443` が
+        // 組まれる（05 のベース URL）。
+        assert_eq!(
+            parsed("https://github.com:443/a/b.git"),
+            https("github.com", "a", "b")
+        );
+    }
+
+    #[test]
+    fn rejects_a_port_that_is_not_a_port() {
+        // **ssh 側も落とす。** 値は使わないが、読めない port を「port が無い」と
+        // 同じに扱うと、git が動かない URL を解析できたことにしてしまう。
+        for url in [
+            "https://github.com:x/a/b",
+            "https://github.com:/a/b",
+            "https://github.com:99999/a/b",
+            "https://github.com:0/a/b",
+            // `u16::from_str` は先頭の `+` を通すが、git はこの URL を取りに行けない。
+            "https://github.com:+8443/a/b",
+            "https://github.com: 443/a/b",
+            "ssh://git@github.com:x/a/b",
+            "ssh://git@github.com:0/a/b",
+        ] {
+            rejected(url);
+        }
     }
 
     #[test]
@@ -272,7 +348,7 @@ mod tests {
             "/srv/repos/b.git",
             "../sibling",
             // `:` はあるが、その手前に `/` があるローカルパス。**`valid_host` では
-            // 落ちない** — `host_of` が最後の `@` から後ろだけを見るので、
+            // 落ちない** — `split_authority` が最後の `@` から後ろだけを見るので、
             // `~/repos/x` の部分が消えて `host` だけが残る。
             "~/repos/x@host:a/b.git",
             // owner か repo が足りない / 多い。
@@ -323,7 +399,7 @@ mod tests {
     #[test]
     fn rejects_option_like_host() {
         // `-` 始まりは 2 つの理由で受けない。ホスト名の構文として不正であること
-        // （`https://-4/a/b` はこちら）と、`host_of` が `user@` を捨てるので裸の値が
+        // （`https://-4/a/b` はこちら）と、`split_authority` が `user@` を捨てるので裸の値が
         // `ssh -G` の positional に載ること（04）。**git は `git@-4:a/b.git` を通す**
         // ので、git に合わせると後者が塞げない（`valid_host` の doc に実測がある）。
         for url in [

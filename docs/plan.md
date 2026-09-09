@@ -75,7 +75,7 @@
 
 - [x] `auth::ssh::resolve_ssh_host`（`ssh -G`）と `RemoteUrl` パーサ + テスト。
       **どのリモートの URL を見るかは決めない**（`RepoInfo.target` を埋めるのは M4 の
-      `auth::resolve`。04 の「既定リモートを決めるのは M4」）
+      「`RepoInfo.target` を埋める」。04 の「既定リモート」）
 - [x] `f` / `p` / `P` の配線 — `GitOp::Fetch` / `Pull { FastForwardOnly }` / `Push` を
       共通キーから出す。push の行き先の決定と `-u` 提案（`Modal::Confirm`）、
       ssh のパスフレーズで固まる件（実効 ssh に `-o BatchMode=yes` を重ねる。03 の
@@ -124,7 +124,14 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       と決めた（gh 2.81.0 未満は `GhTooOld` で degraded。04 の「最低版は gh 2.81.0」に
       理由）
 - [x] `github::GithubClient` — `repo` / `pr_for_branch` / `checks` / `reviews` + wiremock テスト
-- [ ] `auth::resolve` — 明示設定 → 単一 → probe → Ambiguous の流れ + テスト
+- [x] `RepoInfo.target` を埋める — 既定リモートの規則（`f` の無反応もここで塞ぐ）、
+      `RemoteUrl` の port を `RemoteScheme::Https { port }` に畳む、`GithubClient::new`
+      が port を受ける、`ssh -G` の結果を産出側で `valid_host`、`resolve_ssh_host` を
+      実効 ssh（`sh -c`）に向ける。**`auth::resolve` から割った 1 本目**（04 の
+      「タスクを 2 本に割った」）。port と target 埋めは同じ PR でないと片方が宙に浮く
+- [ ] `auth::resolve` — 明示設定 → 単一 → probe → Ambiguous の流れ + テスト。
+      **2 本目。** `auth` が `github` を名指ししない狭い trait で probe を受ける
+      （`api: &GithubClient` は 00 のレイヤー則で不可。04）
 - [ ] `Modal::AccountPicker` と `.git/config` への保存
 - [ ] ヘッダの `[acct: login @ host]` 表示と Degraded 表示
 - [ ] `ui::panes::prs` — 現ブランチ PR、チェック一覧、一覧タブ、ブラウザで開く
@@ -154,6 +161,10 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       **`Notice.detail`（argv と stderr）を出すのもここ。** いまは要約行しか描かないので、
       git が断った理由（`would be overwritten`、未マージのときの `-D` のヒント）が
       画面に出ない。不変ルール 4 が「UI まで届ける」と言っているのはこの詳細のこと
+- [ ] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
+      （`update::default_remote`）とは別の規則**で、git は
+      `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。
+      `git_read` に `Branch.push_remote` の読み取りが要る（04 の「既定リモート」、02）
 - [ ] 意図的な巻き戻しの force push（`reset --hard HEAD~1` してから `P`）。**いまは
       `ahead == 0` でまとめて断っている** —— `↓n` だけのブランチが `f` のあとに force で
       通ってしまう形と同じ見た目なので、区別するには「巻き戻すつもりだ」を別の入口で

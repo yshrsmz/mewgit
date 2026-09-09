@@ -30,6 +30,26 @@ pub fn temp_file(name: &str, body: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
+/// `ssh` の代わりに走らせる偽物と、それを指す [`SshCommand`]。
+///
+/// **`sh <script>` を実効値にするので実行権限が要らない**（実効 ssh はシェル文字列
+/// なので、そのまま `sh -c` に載る）。`body` は `-G -- <alias>` を引数に受けるが、
+/// 無視して好きな dump を書き出してよい。
+///
+/// **返す `TempDir` は drop されると中身ごと消える**ので、呼び出し側が束縛し続ける。
+pub fn fake_ssh(body: &str) -> (tempfile::TempDir, SshCommand) {
+    let (dir, path) = temp_file("fake-ssh", body);
+    (dir, SshCommand::Shell(format!("sh {}", path.display())))
+}
+
+/// `hostname <host>` の 1 行だけを返す偽 ssh。[`fake_ssh`] の 4 人めまでの使い道。
+///
+/// **`host <alias>` の行は入れない。** 「`host` ではなく `hostname` を拾う」の見張りは
+/// `hostname_from_dump` のユニットテストが持っており、こちらで重ねても踏む腕は増えない。
+pub fn fake_ssh_host(host: &str) -> (tempfile::TempDir, SshCommand) {
+    fake_ssh(&format!("echo 'hostname {host}'\n"))
+}
+
 /// コミット日時の起点（2023-11-14T22:13:20Z）。`git` を 1 回叩くごとに [`TICK`] 秒進める。
 ///
 /// 実時間を使うと、続けて作ったコミットが同じ秒に落ちて `Sort::TIME` での並びが

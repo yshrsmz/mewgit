@@ -54,10 +54,18 @@ path を突き合わせる形も書けるが、それは `-4` も `-oProxyComman
 （WHATWG URL の host 正規化）ので、こちらでは触らない —— 二重に正規化すると
 出どころが 2 本になる。`RemoteUrl` は host を小文字化していない。
 
-**port はここでは受けない。** `auth::RemoteUrl` が port を捨てるので運ぶ経路が無く、
-足すなら `RemoteUrl` に持たせるのと同じ PR、つまり `auth::resolve` のタスクでないと
-片方が宙に浮く。**「パスの形を落として port だけ足すと self-hosted では全部 404」
-という警告は、パスの形をここで入れたことで解けている。**
+**port は `new(host, port, token)` で受ける。** `auth::RemoteUrl` が
+`RemoteScheme::Https { port }` として運ぶようになった（04）。**受け取るのは
+https の port だけ** —— ssh の port は API の port ではないので、`RemoteUrl` の
+段階で型から消してある。`Option<u16>` の `None` は「既定（443）」で、
+`RemoteUrl` が 443 を `None` に畳んでいるので `:443` が URL に出ることはない。
+
+port はパスの形と直交する。`{host}/api/v3` の側に付ければ
+`https://ghe.example.com:8443/api/v3/`、`api.{host}` の側なら
+`https://api.foo.ghe.com:8443/` になる。**後者は確かめていない**（github.com も
+`*.ghe.com` も SaaS で 443 固定なので実物を用意できない）。**「パスの形を落として
+port だけ足すと self-hosted では全部 404」という警告は、パスの形を先に入れた
+ことで解けている。**
 
 ### TLS とルート証明書
 
@@ -183,8 +191,12 @@ pub enum GithubError {
 付いていない。**どちらも無いときは `None`。0 で埋めない** —— 1970 年になり、
 表示側は「もう明けている」と読んで即座に叩き直し、制限を踏み直す。
 
-**`InvalidHost` は `ssh -G` の `hostname` から届く。** `RemoteUrl` は host を検査
-するが、`ssh -G` が返す値は検査を通っていない（04）。
+**`InvalidHost` は入口の守りとして残す。** `ssh -G` の `hostname` は産出側
+（`auth::ssh`）で `valid_host` を通すようになったので、**mewgit の中の経路からは
+もう届かない**（04）。それでも消さないのは、`GithubClient::new` が `pub` で、
+ここが**回復先の無い最後の関門**だから —— 消すと `https://api.foo/bar.ghe.com/` を
+組む経路が呼び出し側の数だけ開く。産出側の検査は「正規化が成功したか」（失敗しても
+`host_raw` で続けられる）を答えており、**同じ述語で別の問いに答えている**。
 
 **`body_head` は文字数で切る。** バイトで切ると多バイト文字の途中で落ちて panic する。
 

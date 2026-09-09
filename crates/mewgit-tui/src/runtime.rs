@@ -10,7 +10,8 @@ use mewgit_core::app::{
     init, update, AppState, Cmd, ExecDone, JobKind, Msg, NoticeLevel, RepoInfo, RepoSnapshot,
     TermSize,
 };
-use mewgit_core::auth::ssh::effective_ssh_from_env;
+use mewgit_core::auth::ssh::{effective_ssh_from_env, SshCommand};
+use mewgit_core::auth::RepoTarget;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
 use mewgit_core::git_read::{GitReadError, ReaderHandle};
@@ -45,6 +46,11 @@ pub struct Runtime {
     /// 送り手が残ることはあるが、`Exec` が走っていなければ `update` が
     /// [`Cmd::CancelExec`] を出さないので撃たれない。
     cancel: Option<oneshot::Sender<()>>,
+    /// git が実際に使う ssh（04）。[`Cmd::ResolveTarget`] が `ssh -G` をこれで叩く。
+    ///
+    /// **`Runner` と同じ値を持つ。** `Runner::new` が受け取るのは
+    /// `-o BatchMode=yes` を重ねたあとの文字列なので、そこからは取り出せない。
+    ssh: SshCommand,
 }
 
 /// リポジトリを開いて初期状態を作る。
@@ -84,12 +90,13 @@ where
     // `git_bin` は設定から渡す（03 の「Runner」）。cwd はワークツリーのルートで、
     // 引数に渡されたサブディレクトリではない（02 の `workdir`）。
     // 実効 ssh は `Runner` が受け取る（03 の「BatchMode の重ね方」）。
+    let ssh = effective_ssh_from_env(reader.ssh_command());
     let runner = Runner::new(
         state.repo.path.clone(),
         &state.config.general.git_bin,
-        effective_ssh_from_env(reader.ssh_command()),
+        ssh.clone(),
     );
-    let (mut runtime, mut msgs) = Runtime::new(reader, runner);
+    let (mut runtime, mut msgs) = Runtime::new(reader, runner, ssh);
 
     // 起動時の読み込み。ループの前に 1 回だけ。**サイズを入れるより先に出す。**
     // 逆にすると、サイズを知った時点で `load_more` が 1 ページ目を頼み、`init` の
@@ -163,7 +170,11 @@ fn layout(state: &mut AppState) -> Cmd {
 }
 
 impl Runtime {
-    fn new(reader: ReaderHandle, runner: Runner) -> (Self, mpsc::UnboundedReceiver<Msg>) {
+    fn new(
+        reader: ReaderHandle,
+        runner: Runner,
+        ssh: SshCommand,
+    ) -> (Self, mpsc::UnboundedReceiver<Msg>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (
             Self {
@@ -171,6 +182,7 @@ impl Runtime {
                 runner,
                 tx,
                 cancel: None,
+                ssh,
             },
             rx,
         )
@@ -319,6 +331,18 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
+            // `ssh -G` は `auth` が起動する。ここは待ってその結果を `Msg` にするだけ
+            // （01 の「`RepoInfo.target` を埋める」）。
+            Cmd::ResolveTarget(url) => {
+                let ssh = self.ssh.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let resolved = RepoTarget::resolve(&ssh, url).await;
+                    let _ = tx.send(Msg::TargetResolved(Box::new(resolved)));
+                });
+                ControlFlow::Continue(())
+            }
+
             // M4 以降で実装する。
             Cmd::ResolveAccount => {
                 not_implemented(state, JobKind::ResolveAccount, "ResolveAccount")
@@ -379,7 +403,7 @@ mod tests {
         repo: &TestRepo,
         reader: ReaderHandle,
     ) -> (Runtime, mpsc::UnboundedReceiver<Msg>) {
-        Runtime::new(reader, repo.runner())
+        Runtime::new(reader, repo.runner(), SshCommand::default())
     }
 
     fn key(code: KeyCode) -> std::io::Result<Event> {

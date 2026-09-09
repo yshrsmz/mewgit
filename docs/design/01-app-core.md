@@ -1090,8 +1090,10 @@ pub struct PushRejection {
 
 ```rust
 impl Cmd {
-    /// この `Cmd` が生む非同期ジョブの種別。`None` / `Batch` / `Quit` は `None`。
-    pub fn job_kind(&self) -> Option<JobKind>;
+    /// この `Cmd` が生む非同期ジョブ —— 種別と、スピナーに添える説明。
+    /// 副作用の無い `Cmd`（`None` / `Batch` / `Quit` / `CancelExec`）は `None`。
+    pub fn job(&self) -> Option<(JobKind, &'static str)>;
+    pub fn job_kind(&self) -> Option<JobKind>;   // job() の前半
 }
 
 impl AppState {
@@ -1115,8 +1117,10 @@ impl AppState {
 - **時刻ではなく回数を持つ。** `ui` は `AppState` を描くだけ（不変ルール 2）なので、
   駒を時刻から決めると描画のたびに時計を読むことになり、`TestBackend` で「回った」ことを
   見張れない
-- **説明は `Job.label`。** `Exec` 以外は種別から決まる（`JobKind::label`）が、`Exec` だけは
-  走らせる `GitOp` で変わるので `AppState::issue` が `GitOp::verb()` を入れる。
+- **説明は種別と一緒に `Cmd::job()` が返す。** `Exec` だけは走らせる `GitOp` で変わり
+  （`GitOp::verb()`）、ほかは変種ごとの固定語。**1 つの網羅 `match` から出す** ——
+  別々の関数に割ると、ペイロードで説明が変わる変種を足したときに説明の側だけ足りない形が
+  組める（受け皿の `_` があるとコンパイルも通り、スピナーが静的な語のまま黙る）。
   `verb()` は `to_command` の `argv[0]` と同じ語を返す（見張りは `git_exec::argv` の
   `verb_matches_the_argv`）—— スピナーに `git` とだけ出しても、何が走っているかは判らない
 - **ステータスバーではなくヘッダに出す。** 07 は当初こちらをステータスバーに置いて
@@ -1142,10 +1146,14 @@ impl AppState {
   頼んでいないことが壊れたように読める
 - **中断した push は force を arm しない。** 憶えるのは git が非 FF で断ったときだけ
   （上の「force push」）で、中断は git の判断ではない
-- **1 回目で終わらなければ 2 回目の `Ctrl-C` は終了になる。** `Exec` が畳まれるのは
-  `Msg::ExecFinished` が届いたときなので、git が SIGTERM で素直に終われば 2 回目は終了に
-  落ちる。終われないときは合図を撃ち直す形になり、そこはランタイムが「git の終了を
-  待っています」と通知する
+- **中断を頼んだかどうかは `app` が持つ**（`JobTracker::request_cancel`。刻みは `Job` に
+  付き、ジョブが畳まれると一緒に消える）。**走っているかどうかで決めない** —— git が
+  SIGTERM で死なないあいだ `Ctrl-C` が中断を返し続け、**モーダルを開いていると脱出口が
+  1 つも無くなる**（`q` は入力文字）。2 回目の `Ctrl-C` は終了になる
+- **頼んだ時点で「2 回目が何をするか」を通知に出す。** 頼んだ直後は画面が何も変わらない
+  ので、出さないと効いていないように見える（上の「失敗の案内文」と同じ方針）
+- ランタイムの `Cmd::CancelExec` は**合図を撃つだけ**。方針を持つのは `app` の側で、
+  `dispatch` は `AppState` に何も書かない
 
 ### 世代
 

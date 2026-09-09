@@ -643,21 +643,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canceling_without_a_running_task_says_it_is_still_waiting() {
-        // 合図を使い切ったあとの 2 回目。**黙らない** —— `Ctrl-C` を押したのに
-        // 画面が変わらないのと同じに見える。
-        let repo = TestRepo::init();
-        repo.commit("first");
-        let (mut state, reader) = opened(&repo);
-        let (mut runtime, _msgs) = runtime_for(&repo, reader);
-
-        assert!(runtime.dispatch(&mut state, Cmd::CancelExec).is_continue());
-
-        let notice = state.notices.back().expect("通知がありません");
-        assert!(notice.message.contains("待っています"), "{notice:?}");
-    }
-
-    #[tokio::test]
     async fn a_failed_exec_reaches_the_notices_with_its_argv_and_stderr() {
         // Git CLI のエラーは握りつぶさない（不変ルール 4）。
         let repo = TestRepo::init();

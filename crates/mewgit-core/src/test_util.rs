@@ -359,33 +359,38 @@ impl TestRepo {
     }
 }
 
+/// 条件が満たされるまで待つ。**待ち時間の予算はここ 1 本。**
+///
+/// 別々に書くと刻みと上限が散り、片方だけ延ばしたときに実機の遅さで落ちるのが
+/// もう片方だけ、という形になる。上限は 5 秒（10ms × 500）。
+async fn poll_for<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+    for _ in 0..500 {
+        if let Some(value) = probe() {
+            return Some(value);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    None
+}
+
 /// [`TestRepo::slow_stage`] のフィルタが起動して pid を書くまで待つ。
 ///
 /// 書かれなければ panic する。**ここを待たずに中断すると、git がまだ lock を
 /// 握る前に殺すことがあり、見張りが何も見ていない状態で緑になる。**
 pub async fn wait_for_pid(path: &Path) -> i32 {
-    for _ in 0..500 {
-        if let Ok(Ok(pid)) = fs::read_to_string(path).map(|text| text.trim().parse()) {
-            return pid;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("フィルタが起動しませんでした: {}", path.display());
+    poll_for(|| fs::read_to_string(path).ok()?.trim().parse().ok())
+        .await
+        .unwrap_or_else(|| panic!("フィルタが起動しませんでした: {}", path.display()))
 }
 
 /// そのプロセスが消えるまで待つ。消えなければ `false`。
 ///
 /// 孤児は init に引き取られてから消えるので、即座には居なくならない。
 pub async fn wait_until_gone(pid: i32) -> bool {
-    for _ in 0..500 {
-        // SAFETY: signal 0 は「送れるかどうか」を見るだけで、相手にも自分にも
-        // 触らない。
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            return true;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    false
+    // SAFETY: signal 0 は「送れるかどうか」を見るだけで、相手にも自分にも触らない。
+    poll_for(|| (unsafe { libc::kill(pid, 0) } != 0).then_some(()))
+        .await
+        .is_some()
 }
 
 /// bare な一時リポジトリ。

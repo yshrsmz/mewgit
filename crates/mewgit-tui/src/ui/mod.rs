@@ -323,8 +323,14 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
     // 駒は `Tick` の回数で選ぶ。`jobs` の中身では選ばない —— 走っているものが
     // 変わらないあいだ止まって見える。
     let frame = SPINNER[(state.tick % SPINNER.len() as u64) as usize];
-    let labels: Vec<&str> = state.jobs.iter().map(|job| job.label.as_str()).collect();
-    Some(Line::from(format!("{frame} {}", labels.join(" "))))
+    // 説明は `&'static str` なので、組むのは `Vec<Span>` 1 本だけ。描画は入力が
+    // 無くても `Tick` で回る（1 秒に 4 回）ので、中間の `String` を作らない。
+    let mut spans = vec![Span::raw(frame)];
+    for job in state.jobs.iter() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(job.label));
+    }
+    Some(Line::from(spans))
 }
 
 /// ステータスバー。直近の通知とキーヒントの両方を出す。
@@ -525,11 +531,19 @@ mod tests {
 
     #[test]
     fn header_shows_the_repository_name() {
-        let lines = draw(&state_at("/home/user/mewgit"), TermSize::default());
-        assert!(lines[0].contains("mewgit"), "header: {:?}", lines[0]);
+        let line = header(&state_at("/home/user/mewgit"), TermSize::default());
+        assert!(line.contains("mewgit"), "header: {line:?}");
     }
 
-    /// ジョブを 1 つ走らせた状態で描いたヘッダ（最上行）。
+    /// 描いたヘッダ（最上行）。
+    ///
+    /// **取り出しはここ 1 本。** `status_bar` と同じ理由で、ヘッダの位置や高さが
+    /// 変わる（M6 の狭いレイアウト）と、各テストが持っている `[0]` が一斉に嘘になる。
+    fn header(state: &AppState, size: TermSize) -> String {
+        draw(state, size)[0].clone()
+    }
+
+    /// ジョブを 1 つ走らせた状態で描いたヘッダ。
     fn header_while_fetching(tick: u64) -> String {
         let mut state = state_at("/repo");
         let _ = state.issue(Cmd::Exec(GitOp::Fetch {
@@ -537,14 +551,14 @@ mod tests {
             prune: false,
         }));
         state.tick = tick;
-        draw(&state, TermSize::default())[0].clone()
+        header(&state, TermSize::default())
     }
 
     #[test]
     fn the_header_spins_while_a_job_runs() {
         // 走っているものが無ければ出さない。出しっぱなしだと「何か動いている」の
         // 意味が消える。
-        let idle = draw(&state_at("/repo"), TermSize::default())[0].clone();
+        let idle = header(&state_at("/repo"), TermSize::default());
         assert!(!idle.contains('⠋'), "header: {idle:?}");
 
         let header = header_while_fetching(0);
@@ -663,8 +677,8 @@ mod tests {
     #[test]
     fn repo_label_falls_back_to_the_path_when_there_is_no_file_name() {
         // "." や "/" は file_name() が None。空ヘッダにしない。
-        let lines = draw(&state_at("."), TermSize::default());
-        assert!(lines[0].contains('.'), "header: {:?}", lines[0]);
+        let line = header(&state_at("."), TermSize::default());
+        assert!(line.contains('.'), "header: {line:?}");
     }
 
     #[test]
@@ -674,7 +688,11 @@ mod tests {
             let size = TermSize { width, height };
             let lines = draw(&state_at("/repo"), size);
             assert_eq!(lines.len(), height as usize);
-            assert!(lines[0].contains("repo"), "header: {:?}", lines[0]);
+            assert!(
+                header(&state_at("/repo"), size).contains("repo"),
+                "header: {:?}",
+                lines[0]
+            );
 
             let last = status_bar(&state_at("/repo"), size);
             assert!(last.contains("q:quit"), "status: {last:?}");

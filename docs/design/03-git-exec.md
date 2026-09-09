@@ -279,7 +279,9 @@ pub async fn run_cancelable(&self, op: &GitOp, cancel: oneshot::Receiver<()>)
   呼び出し側が次の書き込みを出せてしまう
 - **中断は失敗と型で分ける**（`ExecError::Canceled { argv }`）。git の exit code と stderr は
   signal で落としたことの言い換えにしかならず、`ExecErrorKind` の分類表にも載らない。
-  UI は「押した本人が止めた」ものとして扱う（01 の「キャンセル」）
+  UI は「押した本人が止めた」ものとして扱う（01 の「キャンセル」）。**出力は読まずに
+  捨てる** —— fetch は progress を数十 KB 吐いてから殺されるので、使わないものを UTF-8
+  検証に通さない
 - **合図が届いたあとでも、git が成功していれば `Ok` を返す。** signal より先に終わって
   いた形で、書き込みの結果はリポジトリに残っている。`Canceled` にすると、済んだ commit を
   「中断した」と案内したうえに読み直しの経路まで変わる（`update::Reload` は成否で分かれる）

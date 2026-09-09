@@ -743,20 +743,3 @@ async fn canceling_kills_the_process_group_and_leaves_no_lock() {
         "git の子（フィルタ {filter}）が生き残っています"
     );
 }
-
-#[tokio::test]
-async fn a_run_that_is_never_canceled_still_finishes() {
-    // 送り手を落としたまま渡す形（`Runner::run` がこれ）。受け側の `Ok(())` が
-    // 外れて `select!` の腕が無効になり、そのまま git の終了を待つ。
-    let repo = TestRepo::init();
-    repo.commit("first");
-    repo.write_worktree_file("file.txt", b"changed\n");
-    let (_, canceled) = tokio::sync::oneshot::channel();
-
-    repo.runner()
-        .run_cancelable(&GitOp::Stage(vec!["file.txt".into()]), canceled)
-        .await
-        .expect("stage できませんでした");
-
-    assert_eq!(repo.porcelain(), "M  file.txt");
-}

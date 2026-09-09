@@ -139,10 +139,18 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         // 瞬間ができる。そもそも中断できるのは `Cmd::Exec` だけで、読み取りの
         // future は途中で捨てられない（02 の「スレッド」）。
         //
-        // **1 回目で終わらなかったら 2 回目は終了になる。** `Exec` が畳まれるのは
-        // `Msg::ExecFinished` が届いたときなので、git が SIGTERM で素直に終われば
-        // 2 回目の `Ctrl-C` は終了に落ちる。終われないときだけ中断を送り直す。
-        if state.jobs.is_running(JobKind::Exec) {
+        // **しかも「まだ頼んでいない」ときだけ。** 走っているかどうかで決めると、
+        // SIGTERM で死なない git のあいだ `Ctrl-C` が中断を返し続け、モーダルを
+        // 開いていると脱出口が 1 つも無くなる（`q` は入力文字）。この関数の先頭が
+        // 「常に効く脱出口が要る」と言っているのは、まさにその形を作らないため。
+        if state.jobs.request_cancel(JobKind::Exec) {
+            // **2 回目が何をするかを書く。** 頼んだ直後は画面が何も変わらないので、
+            // 出さないと「効いていない」と読める（01 の「失敗の案内文」と同じ方針）。
+            state.push_notice(
+                NoticeLevel::Info,
+                "中断を頼みました。終わらなければもう一度 Ctrl-C で終了します".to_string(),
+                None,
+            );
             return Cmd::CancelExec;
         }
         return Cmd::Quit;
@@ -2737,10 +2745,7 @@ mod tests {
         // `Cmd::LoadDiff` は `issue` に落とされる。飛んでいた返信は書き込みより前の
         // ものなので、それを採ったまま黙って終わると古い diff が残る（01）。
         let mut state = diff_state(&["a.txt"], 2);
-        assert!(state.jobs.start(Job::new(
-            JobKind::LoadDiff,
-            JobKind::LoadDiff.label().to_string(),
-        )));
+        assert!(state.jobs.start(Job::new(JobKind::LoadDiff, "diff",)));
 
         let _ = update(&mut state, exec_done(Ok(fake_output())));
         let dropped = update(
@@ -4699,6 +4704,55 @@ feat/b
     }
 
     #[test]
+    fn ctrl_c_quits_when_the_cancel_did_not_take() {
+        // **git が SIGTERM で死なないときの脱出口。** 走っているかどうかだけで
+        // 決めると、`Ctrl-C` が中断を返し続けて終われなくなる（モーダルを開いて
+        // いれば `q` は入力文字なので、ほかに出口が無い）。
+        let mut state = state();
+        let _ = state.issue(Cmd::Exec(GitOp::Fetch {
+            remote: None,
+            prune: false,
+        }));
+
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::ctrl('c'))),
+            Cmd::CancelExec
+        );
+        // 2 回目。`Exec` はまだ走っている（`Msg::ExecFinished` が来ていない）。
+        assert!(state.jobs.is_running(JobKind::Exec));
+        assert_eq!(update(&mut state, Msg::Key(Key::ctrl('c'))), Cmd::Quit);
+    }
+
+    #[test]
+    fn a_new_write_can_be_canceled_again() {
+        // 刻みはジョブと一緒に消える。落ちないと、1 度中断したあとの書き込みが
+        // 二度と中断できなくなる。
+        let mut state = state();
+        let fetch = GitOp::Fetch {
+            remote: None,
+            prune: false,
+        };
+        let _ = state.issue(Cmd::Exec(fetch.clone()));
+        let _ = update(&mut state, Msg::Key(Key::ctrl('c')));
+        let _ = update(
+            &mut state,
+            exec_done_of(
+                fetch.clone(),
+                Err(ExecError::Canceled {
+                    argv: vec!["fetch".into()],
+                }),
+            ),
+        );
+
+        let _ = state.issue(Cmd::Exec(fetch));
+
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::ctrl('c'))),
+            Cmd::CancelExec
+        );
+    }
+
+    #[test]
     fn ctrl_c_cancels_a_running_git_before_it_quits() {
         // 走っている書き込みがあるあいだ、`Ctrl-C` は中断が先（01 の「実行中ジョブの
         // キャンセル」）。**終了できなくなるわけではない** —— 中断した `Exec` は
@@ -4812,7 +4866,7 @@ feat/b
             prune: false,
         }));
 
-        let labels: Vec<&str> = state.jobs.iter().map(|job| job.label.as_str()).collect();
+        let labels: Vec<&str> = state.jobs.iter().map(|job| job.label).collect();
         assert_eq!(labels, ["fetch"]);
     }
 

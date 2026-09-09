@@ -142,19 +142,16 @@ impl Runner {
         // `select!` を抜けたところで `&mut run` の借用が切れるので、中断した側は
         // このあと同じ future を待ち直せる。**待ち直すために `Option` に受ける** ——
         // 腕の中で `run.await` すると借用が重なる。
+        // **「中断した」を別の旗で持たない。** 持つと「殺したのに待ち直さない」という
+        // 組み合わせが型で書ける。
         let mut finished = None;
-        let canceled = tokio::select! {
-            waited = &mut run => {
-                finished = Some(waited);
-                false
-            }
+        tokio::select! {
+            waited = &mut run => finished = Some(waited),
             // 送り手が落ちた（キャンセルできない呼び方）ときはパターンが外れ、
             // `select!` がこの腕を無効にする。
-            Ok(()) = cancel => true,
-        };
-        if canceled {
-            terminate(pid);
+            Ok(()) = cancel => terminate(pid),
         }
+        let canceled = finished.is_none();
         let waited = match finished {
             Some(waited) => waited,
             None => run.await,
@@ -165,23 +162,27 @@ impl Runner {
             reason: format!("git の終了を待てませんでした: {err}"),
         })?;
 
+        // **中断した出力は読まない。** stderr と exit code は signal で落ちたことの
+        // 言い換えにしかならず、案内は「中断した」で足りる。fetch は progress を
+        // 数十 KB 吐いてから殺されるので、捨てるものを UTF-8 検証に通さない。
+        //
+        // **中断を頼んだあとでも、成功していれば成功として返す。** signal が届く前に
+        // git が終わっていた形で、書き込みの結果はリポジトリに残っている。`Canceled` に
+        // すると、済んだ commit を「中断した」と案内したうえに読み直しの経路まで
+        // 変わる（`update::Reload` は成否で分かれる）。
+        if canceled && !output.status.success() {
+            return Err(ExecError::Canceled { argv: command.argv });
+        }
+
         let stdout = lossy(output.stdout);
         let stderr = lossy(output.stderr);
 
         if output.status.success() {
-            // **中断を頼んだあとでも、成功していれば成功として返す。** signal が
-            // 届く前に git が終わっていた形で、書き込みの結果はリポジトリに残って
-            // いる。`Canceled` にすると、済んだ commit を「中断した」と案内した
-            // うえに読み直しの経路まで変わる（`update::Reload` は成否で分かれる）。
             Ok(ExecOutput {
                 argv: command.argv,
                 stdout,
                 stderr,
             })
-        } else if canceled {
-            // 中断した git の stderr と exit code は見せない。signal で落ちた
-            // ことの言い換えにしかならず、案内は「中断した」で足りる。
-            Err(ExecError::Canceled { argv: command.argv })
         } else {
             Err(ExecError::Failed {
                 argv: command.argv,

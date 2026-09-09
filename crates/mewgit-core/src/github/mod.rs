@@ -125,10 +125,19 @@ pub enum GithubError {
     RateLimited {
         /// 回復時刻。Unix epoch からの秒数。生の epoch を出しても読めないので
         /// `Display` には含めない。表示用の整形は `ui` が行う。
-        reset_at: i64,
+        ///
+        /// **`None` は「いつ戻るか判らない」。** 0 を入れると 1970 年になり、
+        /// 表示側は「もう明けている」と読んで即座に叩き直す。二次レート制限
+        /// （`retry-after` だけが付き `x-ratelimit-reset` が無い）で実際に起きる。
+        reset_at: Option<i64>,
     },
     #[error("GitHub API: 通信に失敗しました: {message}")]
     Network { message: String },
+    /// 応答を型に落とせなかった。**`Network` と分ける** —— GHES の版差で
+    /// フィールドが欠けた形がここに来るので、「通信に失敗」と出すと
+    /// サーバ互換性の問題を回線の問題として調べさせることになる。
+    #[error("GitHub API: 応答を解釈できませんでした: {message}")]
+    Decode { message: String },
     #[error("GitHub API: {status}: {body_head}")]
     Api { status: u16, body_head: String },
 }

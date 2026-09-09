@@ -5,6 +5,7 @@ use reqwest::{Response, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::auth::url::valid_host;
 
@@ -22,6 +23,18 @@ const PER_PAGE: &str = "100";
 /// エラー本文として残す長さ。**文字数で切る** —— バイトで切ると多バイト文字の
 /// 途中で落ちて panic する。
 const BODY_HEAD_CHARS: usize = 200;
+
+/// 1 リクエストの上限。**reqwest の既定は無制限**なので、GHES が固まると
+/// OS の TCP タイムアウトまで（分単位）回り続ける。#56 のスピナーは出るが、
+/// `Ctrl-C` が止められるのは `Cmd::Exec`（git）だけで HTTP は止まらない。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 接続確立の上限。TLS ハンドシェイクが返らない相手を長く待たない。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 辿るページ数の上限。`Link` が輪を作っても止まるようにする。
+/// 1 ページ 100 件なので 1000 件。
+const MAX_PAGES: usize = 10;
 
 /// API のベース URL を組む。
 ///
@@ -103,6 +116,8 @@ fn shared_http() -> Result<reqwest::Client, GithubError> {
         );
         reqwest::Client::builder()
             .default_headers(headers)
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(network)
     })
@@ -148,7 +163,7 @@ impl GithubClient {
         let url = self.endpoint(&["repos", owner, repo, "pulls"]);
         let head = format!("{head_owner}:{branch}");
         let wire: Vec<WirePull> = self
-            .get(
+            .get_paged(
                 url,
                 &[
                     ("head", head.as_str()),
@@ -157,6 +172,7 @@ impl GithubClient {
                     ("direction", "desc"),
                     ("per_page", PER_PAGE),
                 ],
+                |page: Vec<WirePull>| page,
             )
             .await?;
         // **選んでから変換する。** 全件を値型にすると、採らない PR の `String` まで
@@ -183,15 +199,19 @@ impl GithubClient {
         let status_url = self.endpoint(&["repos", owner, repo, "commits", sha, "status"]);
         // **2 本は独立なので並べる。** 順に待つと RTT がそのまま倍になる。
         // 同時 2 本は 05 の上限（4）の内側なので、`Semaphore` はまだ要らない。
-        let (runs, combined): (WireCheckRuns, WireCombinedStatus) = tokio::try_join!(
-            self.get(runs_url, &[("per_page", PER_PAGE)]),
-            self.get(status_url, &[("per_page", PER_PAGE)]),
+        let (runs, statuses) = tokio::try_join!(
+            self.get_paged(runs_url, &[("per_page", PER_PAGE)], |p: WireCheckRuns| p
+                .check_runs),
+            self.get_paged(
+                status_url,
+                &[("per_page", PER_PAGE)],
+                |p: WireCombinedStatus| p.statuses
+            ),
         )?;
         Ok(runs
-            .check_runs
             .into_iter()
             .map(Check::from)
-            .chain(combined.statuses.into_iter().map(Check::from))
+            .chain(statuses.into_iter().map(Check::from))
             .collect())
     }
 
@@ -210,7 +230,9 @@ impl GithubClient {
             &number.to_string(),
             "reviews",
         ]);
-        let wire: Vec<WireReview> = self.get(url, &[("per_page", PER_PAGE)]).await?;
+        let wire: Vec<WireReview> = self
+            .get_paged(url, &[("per_page", PER_PAGE)], |page: Vec<WireReview>| page)
+            .await?;
         Ok(summarize_reviews(wire))
     }
 
@@ -233,6 +255,50 @@ impl GithubClient {
         url: Url,
         query: &[(&str, &str)],
     ) -> Result<T, GithubError> {
+        let (body, _) = self.get_page(url, query).await?;
+        serde_json::from_str(&body).map_err(decode)
+    }
+
+    /// `Link` の `rel="next"` を辿って全ページを集める。
+    ///
+    /// **1 ページ目で止めない。** GitHub の一覧は既定 30 件、`per_page` を効かせても
+    /// 100 件で切れる。切り捨てが**答えを変える**ものがある —— `reviews` の配列は
+    /// 古い順なので、1 ページ目だけ見ると「変更要求のあと承認した人」を
+    /// `changes_requested` と数える。check-runs もマトリクスビルドが 100 を超えると、
+    /// 2 ページ目の失敗が見えないまま緑に見える。
+    ///
+    /// `take` は 1 ページぶんの応答から項目を取り出す。裸の配列を返す API と、
+    /// `{ check_runs: [...] }` のように包む API があるため。
+    async fn get_paged<Page, Item>(
+        &self,
+        url: Url,
+        query: &[(&str, &str)],
+        take: impl Fn(Page) -> Vec<Item>,
+    ) -> Result<Vec<Item>, GithubError>
+    where
+        Page: DeserializeOwned,
+    {
+        let mut items = Vec::new();
+        let mut next = Some(url);
+        // クエリを載せるのは 1 ページ目だけ。`Link` の URL が全部持っている。
+        let mut query = query;
+        for _ in 0..MAX_PAGES {
+            let Some(url) = next.take() else { break };
+            let (body, link) = self.get_page(url, query).await?;
+            query = &[];
+            let page: Page = serde_json::from_str(&body).map_err(decode)?;
+            items.extend(take(page));
+            next = link.as_deref().and_then(next_page);
+        }
+        Ok(items)
+    }
+
+    /// 1 リクエスト送って、本文と `Link` ヘッダを返す。
+    async fn get_page(
+        &self,
+        url: Url,
+        query: &[(&str, &str)],
+    ) -> Result<(String, Option<String>), GithubError> {
         let response = self
             .http
             .get(url)
@@ -242,7 +308,29 @@ impl GithubClient {
             .await
             .map_err(network)?;
         let response = check_status(response).await?;
-        response.json().await.map_err(network)
+        let link = header_str(&response, "link").map(str::to_string);
+        let body = response.text().await.map_err(network)?;
+        Ok((body, link))
+    }
+}
+
+/// `Link` ヘッダから `rel="next"` の URL を取る。
+///
+/// 形は `<https://…?page=2>; rel="next", <https://…?page=9>; rel="last"`。
+fn next_page(link: &str) -> Option<Url> {
+    link.split(',').find_map(|part| {
+        let (target, params) = part.split_once(';')?;
+        if !params.contains("rel=\"next\"") {
+            return None;
+        }
+        let target = target.trim().strip_prefix('<')?.strip_suffix('>')?;
+        Url::parse(target).ok()
+    })
+}
+
+fn decode(err: serde_json::Error) -> GithubError {
+    GithubError::Decode {
+        message: err.to_string(),
     }
 }
 
@@ -266,7 +354,7 @@ async fn check_status(response: Response) -> Result<Response, GithubError> {
     }
     if is_rate_limited(&response) {
         return Err(GithubError::RateLimited {
-            reset_at: header_i64(&response, "x-ratelimit-reset").unwrap_or_default(),
+            reset_at: rate_limit_reset(&response),
         });
     }
     // **本文を読む前にヘッダを取る。** `text()` が `response` を消費する。
@@ -292,14 +380,38 @@ async fn check_status(response: Response) -> Result<Response, GithubError> {
 
 /// レート制限に当たった応答か。
 ///
-/// 429 はそのまま。403 は**残量ヘッダが 0 のときだけ**で、これが無いと
-/// スコープ不足の 403 まで「待てば直る」と読ませてしまう。
+/// 429 はそのまま。403 は 2 通りある。
+///
+/// - **一次制限**（時間あたりの総量）は `x-ratelimit-remaining` が 0 になる。
+/// - **二次制限**（短時間に叩きすぎ）は**残量を減らさずに** `retry-after` を付ける。
+///   これを見落とすと `Forbidden` に落ち、05 が「出してはいけない」と書いている
+///   「スコープが足りない」の案内が、**待てば直るものに対して**出る。
+///
+/// どちらの印も無い 403 はスコープ不足なので `Forbidden` のまま。
 fn is_rate_limited(response: &Response) -> bool {
     if response.status() == StatusCode::TOO_MANY_REQUESTS {
         return true;
     }
     response.status() == StatusCode::FORBIDDEN
-        && header_i64(response, "x-ratelimit-remaining") == Some(0)
+        && (header_i64(response, "x-ratelimit-remaining") == Some(0)
+            || header_str(response, "retry-after").is_some())
+}
+
+/// いつ回復するか（Unix epoch 秒）。判らなければ `None`。
+///
+/// **`retry-after` を優先する。** あれが付いているのは二次制限で、
+/// `x-ratelimit-reset`（一次制限の窓。1 時間先のこともある）は無関係か、
+/// そもそも付いていない。**0 で埋めない** —— 1970 年になり、表示側は
+/// 「もう明けている」と読んで即座に叩き直し、制限を踏み直す。
+fn rate_limit_reset(response: &Response) -> Option<i64> {
+    if let Some(after) = header_i64(response, "retry-after") {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default();
+        return Some(now + after);
+    }
+    header_i64(response, "x-ratelimit-reset")
 }
 
 /// 403 に添える「足りないスコープ」。GitHub は要求されるスコープを
@@ -329,7 +441,7 @@ mod tests {
     use super::*;
     use crate::github::{CheckState, RepoRef};
     use serde_json::json;
-    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client(server: &MockServer) -> GithubClient {
@@ -728,7 +840,7 @@ mod tests {
         assert_eq!(
             repo_err(response).await,
             GithubError::RateLimited {
-                reset_at: 1_789_000_000
+                reset_at: Some(1_789_000_000)
             }
         );
     }
@@ -747,7 +859,7 @@ mod tests {
         let response = ResponseTemplate::new(429).insert_header("x-ratelimit-reset", "42");
         assert_eq!(
             repo_err(response).await,
-            GithubError::RateLimited { reset_at: 42 }
+            GithubError::RateLimited { reset_at: Some(42) }
         );
     }
 
@@ -772,6 +884,149 @@ mod tests {
             panic!("Api ではない: {err:?}");
         };
         assert_eq!(body_head.chars().count(), BODY_HEAD_CHARS);
+    }
+
+    #[tokio::test]
+    async fn a_secondary_rate_limit_403_is_rate_limited_even_with_quota_left() {
+        // 二次制限は残量を減らさずに `retry-after` を付ける。見落とすと
+        // 「スコープが足りない」の案内が、待てば直るものに対して出る。
+        let response = ResponseTemplate::new(403)
+            .insert_header("x-ratelimit-remaining", "4999")
+            .insert_header("retry-after", "60");
+        let err = repo_err(response).await;
+        let GithubError::RateLimited { reset_at } = err else {
+            panic!("RateLimited ではない: {err:?}");
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let reset_at = reset_at.expect("retry-after があるので判る");
+        assert!(
+            (now + 55..=now + 65).contains(&reset_at),
+            "retry-after の秒数を今から数える: {reset_at} vs {now}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_without_any_reset_header_is_unknown_not_epoch_zero() {
+        // 0 を入れると 1970 年になり、表示側は「もう明けている」と読んで
+        // 即座に叩き直す。
+        let err = repo_err(ResponseTemplate::new(429)).await;
+        assert_eq!(err, GithubError::RateLimited { reset_at: None });
+    }
+
+    #[tokio::test]
+    async fn a_body_that_does_not_match_the_type_is_a_decode_error() {
+        // GHES の版差でフィールドが欠けた形。「通信に失敗」と出すと、
+        // サーバ互換性の問題を回線の問題として調べさせることになる。
+        let response = ResponseTemplate::new(200).set_body_json(json!({ "name": "r" }));
+        let err = repo_err(response).await;
+        assert!(
+            matches!(err, GithubError::Decode { .. }),
+            "Decode ではない: {err:?}"
+        );
+    }
+
+    // ---- ページング ----
+
+    #[test]
+    fn the_next_link_is_taken_from_the_link_header() {
+        let link = "<https://api.github.com/x?page=2>; rel=\"next\", \
+                    <https://api.github.com/x?page=9>; rel=\"last\"";
+        assert_eq!(
+            next_page(link).map(|u| u.to_string()),
+            Some("https://api.github.com/x?page=2".to_string())
+        );
+        // `next` が無ければ終わり（最終ページは `prev` / `first` しか持たない）。
+        assert!(next_page("<https://api.github.com/x?page=1>; rel=\"prev\"").is_none());
+    }
+
+    #[tokio::test]
+    async fn reviews_follow_the_link_header_because_page_one_changes_the_answer() {
+        // 配列は古い順。1 ページ目で止めると、変更要求のあと承認した人を
+        // `changes_requested` と数える。
+        let server = MockServer::start().await;
+        let next = format!(
+            "<{}/repos/o/r/pulls/12/reviews?page=2>; rel=\"next\"",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/12/reviews"))
+            .and(query_param_is_missing("page"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", next.as_str())
+                    .set_body_json(
+                        json!([{ "user": { "login": "a" }, "state": "CHANGES_REQUESTED" }]),
+                    ),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/12/reviews"))
+            .and(query_param("page", "2"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([{ "user": { "login": "a" }, "state": "APPROVED" }])),
+            )
+            .mount(&server)
+            .await;
+
+        let summary = client(&server).reviews("o", "r", 12).await.unwrap();
+        assert_eq!(
+            summary,
+            ReviewSummary {
+                approved: 1,
+                changes_requested: 0,
+                commented: 0,
+            },
+            "2 ページ目まで読めば最新は承認"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_runs_follow_the_link_header() {
+        // マトリクスビルドが 100 を超えると、2 ページ目の失敗が見えないまま
+        // 緑に見える。
+        let server = MockServer::start().await;
+        let next = format!(
+            "<{}/repos/o/r/commits/abc/check-runs?page=2>; rel=\"next\"",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits/abc/check-runs"))
+            .and(query_param_is_missing("page"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", next.as_str())
+                    .set_body_json(json!({ "check_runs": [
+                        { "name": "green", "status": "completed", "conclusion": "success", "html_url": null },
+                    ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits/abc/check-runs"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "check_runs": [
+                { "name": "red", "status": "completed", "conclusion": "failure", "html_url": null },
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits/abc/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "statuses": [] })))
+            .mount(&server)
+            .await;
+
+        let checks = client(&server).checks("o", "r", "abc").await.unwrap();
+        let seen: Vec<(&str, CheckState)> =
+            checks.iter().map(|c| (c.name.as_str(), c.state)).collect();
+        assert_eq!(
+            seen,
+            vec![("green", CheckState::Success), ("red", CheckState::Failure),]
+        );
     }
 
     /// PR 1 件のレスポンス。

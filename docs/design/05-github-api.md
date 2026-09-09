@@ -94,6 +94,15 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
   いま並ぶのは `checks` の 2 本（check-runs と commit status）だけで、**上限 4 の
   内側なので `Semaphore` が働く場面がまだ無い**。扇形に広がるのは
   `ui::panes::prs`（PR ごとに checks / reviews を引く）なので、そこで入れる
+- **一覧は `Link` の `rel="next"` を辿って全ページ集める。** `per_page=100` で
+  止めない。**切り捨てが答えを変えるものがある** —— `reviews` の配列は古い順なので、
+  1 ページ目だけ見ると「変更要求のあと承認した人」を `changes_requested` と数える。
+  check-runs もマトリクスビルドが 100 を超えると、2 ページ目の失敗が見えないまま
+  緑に見える。`Link` が輪を作っても止まるよう 10 ページ（1000 件）で打ち切る
+- **タイムアウトを付ける。** `reqwest` の既定は**無制限**で、GHES が固まると
+  OS の TCP タイムアウトまで（分単位）回り続ける。#56 のスピナーは出るが、
+  `Ctrl-C` が止められるのは `Cmd::Exec`（git）だけで HTTP は止まらない。
+  1 リクエスト 30 秒、接続確立 10 秒
 - **レートリミット残量の受け渡しもまだ。** 読む側（ヘッダの `[acct: …]` 表示）が
   無いので、ヘッダの `x-ratelimit-*` は
   [`GithubError::RateLimited`] を組むときにしか読んでいない。
@@ -139,11 +148,16 @@ pub enum GithubError {
     Unauthorized,                                  // 401
     Forbidden { needed_scopes: Vec<String>, saml: bool, body_head: String },  // 403（SAML / スコープ / IP allowlist）
     NotFound,                                      // 404（権限不足でも返る）
-    RateLimited { reset_at },
+    RateLimited { reset_at: Option<i64> },         // `None` = いつ戻るか判らない
     Network { message: String },
+    Decode { message: String },                    // 応答を型に落とせない
     Api { status, body_head: String },             // 本文先頭 200 文字
 }
 ```
+
+- **`Decode` を `Network` と分ける。** GHES の版差でフィールドが欠けた形はここに
+  来るので、「通信に失敗しました」と出すと**サーバ互換性の問題を回線の問題として
+  調べさせる**ことになる。
 
 - **`Network` は `reqwest::Error` を持てない。** `GithubError` は `Clone + PartialEq +
   Eq` を derive していて（通知に載せて比較するため）、`reqwest::Error` はどれも
@@ -154,9 +168,20 @@ pub enum GithubError {
 
 **レート制限を `Forbidden` より先に見る。** GitHub は使い切った要求に **403** を返す
 ことがある（429 のこともある）ので、順序が逆だと「スコープが足りない」の案内が出て、
-**待てば直るものを直らないものとして見せる**。403 をレート制限と読むのは
-`x-ratelimit-remaining` が 0 のときだけで、これが無いとスコープ不足の 403 まで
-巻き込む。
+**待てば直るものを直らないものとして見せる**。
+
+403 をレート制限と読む印は **2 つある**。
+
+- **一次制限**（時間あたりの総量）は `x-ratelimit-remaining` が 0 になる。
+- **二次制限**（短時間に叩きすぎ）は**残量を減らさずに** `retry-after` を付ける。
+  片方だけ見ていると、二次制限が丸ごと `Forbidden` に落ちる。
+
+どちらの印も無い 403 はスコープ不足なので `Forbidden` のまま。
+
+**回復時刻は `retry-after` を優先する。** あれが付いているのは二次制限で、
+`x-ratelimit-reset`（一次制限の窓。1 時間先のこともある）は無関係か、そもそも
+付いていない。**どちらも無いときは `None`。0 で埋めない** —— 1970 年になり、
+表示側は「もう明けている」と読んで即座に叩き直し、制限を踏み直す。
 
 **`InvalidHost` は `ssh -G` の `hostname` から届く。** `RemoteUrl` は host を検査
 するが、`ssh -G` が返す値は検査を通っていない（04）。

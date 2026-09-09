@@ -1282,16 +1282,15 @@ fn amend(state: &mut AppState) -> Cmd {
 
 /// 書き込みが走っているか。走っていれば理由を通知に出す。
 ///
-/// **「押したのに何も起きない」に見せない**（`JobKind::Exec` の `drop_notice`）。
-/// **キューには積まないと決めた**（01 の「ランタイム」）。待たずに済ませる手は
-/// `Ctrl-C`（中断）で、それは `drop_notice` の文言が案内している。
+/// **「押したのに何も起きない」に見せない**（`AppState::notify_dropped`）。
+/// **キューには積まないと決めた**（01 の「ランタイム」）。案内を `issue` と同じ
+/// 関数から出すのは、次に押すキーが状態で変わるため（中断を頼んだあとの `Ctrl-C` は
+/// 終了）。2 本に割ると、こちらだけが古い案内を出す。
 fn exec_busy(state: &mut AppState) -> bool {
     if !state.jobs.is_running(JobKind::Exec) {
         return false;
     }
-    if let Some(message) = JobKind::Exec.drop_notice() {
-        state.push_notice(NoticeLevel::Warn, message.to_string(), None);
-    }
+    state.notify_dropped(JobKind::Exec);
     true
 }
 
@@ -1807,7 +1806,7 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         state.push_rejected = push_rejection(state, &done.result, src, upgradable);
     }
 
-    let reload = Reload::after(&done.op, done.result.is_ok());
+    let reload = Reload::after(&done.op, ref_may_have_moved(&done.result));
 
     // **持っている値と、走っている読み取りが、ここで古くなる。** 走っている読み取りは
     // この書き込みより前に頼まれたものなので、届いても採ってはいけない。世代を進めて
@@ -1834,7 +1833,8 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     }
 }
 
-/// 書き込みのあとに読み直すもの。`ok` は git が成功したか。
+/// 書き込みのあとに読み直すもの。`moved` は ref が動いた可能性があるか
+/// （[`ref_may_have_moved`]）。
 ///
 /// **`git_exec` ではなく `app` に置く。** 「どの ref をグラフが辿るか」を知っているのは
 /// こちらで、`GitOp` の隣に `moves_refs` のような名前で置くと、git の事実を約束しながら
@@ -1870,7 +1870,7 @@ impl Reload {
         }
     }
 
-    fn after(op: &GitOp, ok: bool) -> Self {
+    fn after(op: &GitOp, moved: bool) -> Self {
         match op {
             // index / ワークツリーだけ。ref も HEAD も動かない。
             GitOp::Stage(_)
@@ -1929,16 +1929,35 @@ impl Reload {
             // 同じく walk が変わるが、**1 回で決まるので失敗したなら ref は元のまま**。
             // そこで読み直すと `GraphState::restart` がカーソルとスクロールを先頭に
             // 戻すので、pre-commit hook に弾かれただけでグラフの位置を失う。
+            // **中断は「失敗」ではない**（[`ref_may_have_moved`]）。
             GitOp::Commit { .. }
             | GitOp::BranchDelete { .. }
             | GitOp::Push { lease: Some(_), .. } => {
-                if ok {
+                if moved {
                     Reload::RefsAndLog
                 } else {
                     Reload::Refs
                 }
             }
         }
+    }
+}
+
+/// この書き込みで ref が動いた可能性があるか。
+///
+/// **中断は「動いたかもしれない」側に置く。** `git commit` は ref を書いてから
+/// post-commit hook を走らせるので、hook の最中に殺すと**コミットは済んでいる**
+/// （git 2.55 で確認。exit は signal で 143）。失敗と同じ扱いにすると `Reload::Refs`
+/// までしか出ず、**新しいコミットが積んだ行に無いままブランチのラベルだけが動く** ——
+/// 次に walk を作り直す操作まで画面に出てこない。
+///
+/// 網羅 `match` にしているのは、`ExecError` に変種を足したときにどちら側かを
+/// 選ばせるため。
+fn ref_may_have_moved(result: &Result<ExecOutput, ExecError>) -> bool {
+    match result {
+        Ok(_) | Err(ExecError::Canceled { .. }) => true,
+        // 起動していない / git が自分で断った。どちらも ref は元のまま。
+        Err(ExecError::NoResult { .. } | ExecError::Failed { .. }) => false,
     }
 }
 
@@ -4820,6 +4839,76 @@ feat/b
     }
 
     #[test]
+    fn a_canceled_commit_reloads_the_graph() {
+        // **中断は「失敗」ではない。** `git commit` は ref を書いてから post-commit
+        // hook を走らせるので、hook の最中に殺すとコミットは済んでいる（git 2.55 で
+        // 確認）。失敗と同じ扱いにすると、新しいコミットが積んだ行に無いまま
+        // ブランチのラベルだけが動く。
+        assert!(ref_may_have_moved(&Err(ExecError::Canceled {
+            argv: vec!["commit".into()],
+        })));
+        assert!(!ref_may_have_moved(&Err(ExecError::Failed {
+            argv: vec!["commit".into()],
+            code: Some(1),
+            stderr: "pre-commit hook が断りました".to_string(),
+            kind: ExecErrorKind::Other,
+        })));
+        assert!(!ref_may_have_moved(&Err(ExecError::NoResult {
+            argv: Vec::new(),
+            reason: "起動できませんでした".to_string(),
+        })));
+
+        let mut state = state_with_commits(3);
+        let _ = state.issue(Cmd::Exec(commit_op()));
+
+        let cmd = update(
+            &mut state,
+            exec_done_of(
+                commit_op(),
+                Err(ExecError::Canceled {
+                    argv: vec!["commit".into()],
+                }),
+            ),
+        );
+
+        // 積んだ行の読み直しまで出す（`Reload::RefsAndLog`）。
+        let Cmd::Batch(cmds) = cmd else {
+            panic!("読み直しが 1 つしか出ていません: {cmd:?}");
+        };
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd, Cmd::LoadLog { restart: true, .. })),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn waiting_for_a_canceled_git_does_not_advertise_cancel_again() {
+        // **中断を頼んだあとの `Ctrl-C` は終了。** そのまま「Ctrl-C で中断」と案内すると、
+        // モーダルに打った本文ごとアプリが終わる。
+        let mut state = state();
+        let _ = state.issue(Cmd::Exec(GitOp::Fetch {
+            remote: None,
+            prune: false,
+        }));
+
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+        let before = state
+            .notices
+            .back()
+            .expect("通知がありません")
+            .message
+            .clone();
+        assert!(before.contains("Ctrl-C で中断"), "{before}");
+
+        let _ = update(&mut state, Msg::Key(Key::ctrl('c')));
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+
+        let after = &state.notices.back().expect("通知がありません").message;
+        assert!(after.contains("Ctrl-C で終了"), "{after}");
+    }
+
+    #[test]
     fn a_canceled_push_does_not_arm_force() {
         // force に上げてよいのは git が非 FF で断ったときだけ（01 の「force push」）。
         // 中断は git の判断ではない。
@@ -4872,6 +4961,7 @@ feat/b
 
     #[test]
     fn a_dropped_exec_says_how_to_stop_waiting() {
+        // 落としたことだけでなく、待たずに済む手（`Ctrl-C`）まで書く。
         // 2 本目は落とす（キューには積まない。01 の「ランタイム」）。落としたことを
         // 伝えるだけでなく、待たずに済む手（`Ctrl-C`）まで書く。
         let mut state = state();

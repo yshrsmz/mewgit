@@ -114,7 +114,7 @@ impl AppState {
                     if self.jobs.start(job) {
                         cmd
                     } else {
-                        self.dropped(kind);
+                        self.notify_dropped(kind);
                         Cmd::None
                     }
                 }
@@ -124,11 +124,37 @@ impl AppState {
 
     /// 同種のジョブが走っていて発行できなかった `Cmd` を伝える。
     ///
-    /// 何を伝えるかは [`JobKind::drop_notice`] が種別ごとに持つ。
-    fn dropped(&mut self, kind: JobKind) {
-        if let Some(message) = kind.drop_notice() {
-            self.push_notice(NoticeLevel::Warn, message.to_string(), None);
-        }
+    /// 読み取りは黙って落とす（同じものをもう一度読むだけで、結果は変わらない）。
+    /// 書き込みだけは「押したのに何も起きない」に見えるので伝える。**キューには
+    /// 積まないと決めた**（01 の「ランタイム」）。
+    ///
+    /// **`JobKind` ではなくここに置くのは、案内に「次に押すキー」が入るから。**
+    /// それは状態で変わる —— **中断をもう頼んだあとの `Ctrl-C` は終了になる**ので
+    /// （01 の「キャンセル」）、`Ctrl-C` で中断と案内し続けると、モーダルに打った
+    /// 本文ごとアプリが終わる。`JobKind` は「もう頼んだか」を知らない。
+    ///
+    /// 網羅 `match` にしているのは、種別を足したときに黙って落とすかどうかを
+    /// 選ばせるため。
+    pub fn notify_dropped(&mut self, kind: JobKind) {
+        let message = match kind {
+            JobKind::Exec if self.jobs.cancel_requested(JobKind::Exec) => {
+                "中断を頼んだ git を待っています（Ctrl-C で終了）"
+            }
+            JobKind::Exec => "ほかの git 実行が終わるまで待ってください（Ctrl-C で中断）",
+            JobKind::LoadLog
+            | JobKind::LoadCommitDetail
+            | JobKind::LoadCommitFiles
+            | JobKind::LoadHeadMessage
+            | JobKind::LoadRepoInfo
+            | JobKind::LoadStatus
+            | JobKind::LoadBranches
+            | JobKind::LoadDiff
+            | JobKind::ResolveAccount
+            | JobKind::FetchPr
+            | JobKind::FetchChecks
+            | JobKind::FetchPrList => return,
+        };
+        self.push_notice(NoticeLevel::Warn, message.to_string(), None);
     }
 
     /// 通知を積む。[`MAX_NOTICES`] を超えた分は古いものから捨てる。
@@ -1108,6 +1134,16 @@ impl JobTracker {
         true
     }
 
+    /// この種別のジョブに中断を頼んであるか。走っていなければ偽。
+    ///
+    /// 読むのは案内文の側（[`AppState::notify_dropped`]）。頼んだかどうかで
+    /// 「次に押すキー」が変わる。
+    pub fn cancel_requested(&self, kind: JobKind) -> bool {
+        self.running
+            .iter()
+            .any(|job| job.kind == kind && job.canceling)
+    }
+
     /// 表示用。実行中のタスクを登録順に返す。
     pub fn iter(&self) -> impl Iterator<Item = &Job> {
         self.running.iter()
@@ -1176,34 +1212,6 @@ pub enum JobKind {
 }
 
 impl JobKind {
-    /// 同種が走っていて発行できなかったときに出す通知。黙って落としてよければ `None`。
-    ///
-    /// 読み取りは黙って落とす（同じものをもう一度読むだけで、結果は変わらない）。
-    /// 書き込みだけは「押したのに何も起きない」に見えるので伝える。**キューには
-    /// 積まないと決めた**（01 の「ランタイム」）。網羅 `match` にしているのは、
-    /// 種別を足したときにどちらなのかを選ばせるため。
-    ///
-    /// **文言に `Ctrl-C` を出すのは、それが待たずに済む唯一の手だから**（01 の
-    /// 「失敗の案内文」と同じで、次に何を押すかを書く）。中断はどの画面でも効く
-    /// （`update_key` がモーダルより先に見る）ので、ペインで割れない。
-    pub fn drop_notice(self) -> Option<&'static str> {
-        match self {
-            JobKind::Exec => Some("ほかの git 実行が終わるまで待ってください（Ctrl-C で中断）"),
-            JobKind::LoadLog
-            | JobKind::LoadCommitDetail
-            | JobKind::LoadCommitFiles
-            | JobKind::LoadHeadMessage
-            | JobKind::LoadRepoInfo
-            | JobKind::LoadStatus
-            | JobKind::LoadBranches
-            | JobKind::LoadDiff
-            | JobKind::ResolveAccount
-            | JobKind::FetchPr
-            | JobKind::FetchChecks
-            | JobKind::FetchPrList => None,
-        }
-    }
-
     /// この種別が読む値が、どの領域の世代で古くなるか。
     ///
     /// `None` は「書き込みでは古くならない」か、**値そのものが鍵を持っていて世代より

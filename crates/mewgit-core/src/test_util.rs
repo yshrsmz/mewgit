@@ -332,10 +332,14 @@ impl TestRepo {
         self.write_worktree_file(".gitattributes", b"slow.txt filter=slow\n");
         self.write_worktree_file("slow.txt", b"content\n");
         // git はフィルタをシェル経由で起こすので、`$$` はそのシェル自身の pid。
+        // **`exec` で置き換える。** `sleep` を fork すると、グループ宛ての signal を
+        // 送った瞬間にその子がまだメンバーに入っていない窓ができ、取り逃がした子が
+        // git の pipe を握ったまま残る（`wait_with_output` は pipe が閉じるまで
+        // 返らないので、テストが 30 秒待つ）。
         self.git(&[
             "config",
             "filter.slow.clean",
-            &format!("echo $$ > {}; sleep 30", pid_file.display()),
+            &format!("echo $$ > {}; exec sleep 30", pid_file.display()),
         ]);
         (GitOp::Stage(vec!["slow.txt".into()]), pid_file)
     }

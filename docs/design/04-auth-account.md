@@ -10,19 +10,78 @@
 ## gh との連携
 
 ```rust
-pub struct GhCli { bin: PathBuf }
+pub struct GhCli { bin: PathBuf, env: Vec<(OsString, OsString)> }
 
 impl GhCli {
-    pub async fn detect() -> Option<Self>;                      // PATH から探す
-    pub async fn auth_status(&self) -> Result<Vec<GhLogin>>;    // host, login, active, scopes
-    pub async fn token(&self, host: &str, user: &str) -> Result<SecretString>;
+    pub async fn detect(bin: impl Into<PathBuf>) -> Result<Self, AuthError>;   // gh --version
+    pub async fn auth_status(&self, host: &str) -> Result<Vec<GhLogin>, AuthError>;
+    pub async fn token(&self, host: &str, user: &str) -> Result<SecretString, AuthError>;
 }
 
-pub struct GhLogin { pub host: String, pub login: String, pub active: bool, pub scopes: Vec<String> }
+pub struct GhLogin { pub host, pub login, pub active: bool, pub scopes: Vec<String>, pub state: LoginState }
+pub enum LoginState { Success, Timeout, Error }
 ```
 
-- `gh auth status --json hosts` が使えるバージョンでは JSON を使い、古い場合はテキスト出力を解析する（バージョンは `gh --version` で判定）
-- `gh auth token --hostname H --user U` でユーザー指定取得。`--user` 非対応の古い gh では `active` のみ使える旨を degraded 理由に含める
+- **`bin` は `config` の `general.gh_bin` から渡す。** 直書きにすると、設定・既定値・
+  `MEWGIT_GH_BIN` の上書きとそのテストが実装に到達しない。#21 が `Runner` に
+  `git_bin` を**戻した**のと同じ理由で、渡し忘れを作らないよう引数で受ける。
+  08 の「相対パスを許すと任意コード実行になる」は `git_bin` と `gh_bin` の
+  2 つに掛かる
+- **作れる経路は `detect` だけ。** 「gh があり最低版を満たすことの証」を型で保つには、
+  検査を通らない構築経路を置かない（`Default` も公開のコンストラクタも無し）
+- **`env` はテストが実行環境から切り離すために要る。** `gh` は設定ディレクトリを
+  `GH_CONFIG_DIR` でしか受けず、`ssh -F` に当たる argv が無い。あわせて
+  `GH_TOKEN` / `GITHUB_TOKEN` も空で上書きしないと、隔離した config に無い
+  ログインが 1 件生える
+- **`auth_status` は `--hostname` で絞る。** 付けないと gh は**全ホストのトークンを
+  検証**し、到達できないホストが 1 つあるだけで待ち時間がそれに引きずられる
+  （実測: 絞ると 0.24 秒、絞らないと **30.2 秒**。gh に待ち時間を縮めるフラグは無い）。
+  下の手順 2 の「`target.host` で絞る」を、結果ではなく argv でやる。**config に
+  無いホストでも exit 0 で `{"hosts":{}}` が返る**ので「0 件なら `NotLoggedIn`」は変わらない
+
+### 最低版は gh 2.81.0。テキスト出力は解析しない
+
+`gh auth status --json hosts` は **2.81.0（2025-10-01 リリース）で入った**
+（[cli/cli#11544](https://github.com/cli/cli/pull/11544)、マージ 2025-09-25。
+`gh api` でリリースを引いて確認）。`gh auth token --user` は同じ版に既にある
+（v2.81.0 の `pkg/cmd/auth/token/token.go` を読んで確認）。**それ未満は
+`AuthError::GhTooOld` で degraded に落とし、テキスト出力は解析しない。**
+**版を読めない形も同じ `GhTooOld` に畳む**（通す理由が無い）。そのとき `found` には
+`gh --version` の**生の 1 行目**が入るので、UI は何が来たかを出せる。
+
+理由は「書式を確かめられないまま書くことになる」から。手元の 2.100.0 は
+`✓ Logged in to github.com account <login> (<source>)` / `- Active account: true` /
+スコープはクォート付き、という形だが、**古い版は `as <login>` でクォート無し、
+`- Active account:` の行自体が無い**。再現できない書式に対してパーサを書くのは
+`.claude/rules/verifying-assumptions.md` に反する。`gh` はもともと必須依存なので、
+要求版を案内するほうが行動可能（`brew upgrade gh`）。**古い gh の利用者が実際に出て
+きたら、その人の実出力をフィクスチャにして足す**ほうが確実。
+
+### `gh auth status --json hosts` の形（v2.100.0 のソースで確認）
+
+`hosts` は**ホストをキーにしたオブジェクト**で、値がエントリの配列。エントリは
+`{ state, error?, active, host, login, tokenSource, token?, scopes?, gitProtocol }`。
+
+- **`state` は `success` / `timeout` / `error` の 3 値。`gh` の層では絞らない。**
+  `GhLogin.state` に載せてそのまま運ぶ。**`timeout`（ホストに届かなかった）を
+  `error` と同じに畳んでよいかは `auth::resolve` のタスクで決める**ので、ここで
+  落とすと**送った先に判断の材料が届かない**（回線の一時的な失敗を「ログインして
+  いない」に化けさせる）
+- **`--show-token` を付けない。** 付けると `token` フィールドが JSON に入る（不変ルール 3）
+- **`scopes` はカンマ区切りの 1 本の文字列**（`"gist, read:org, repo"`）で、`omitempty`。
+  fine-grained PAT では**丸ごと欠ける**ので、無ければ空にする（下の EMU の節が
+  「`scopes` が空でも動作させる」と言っているのはこの形）
+- **同じ `login` が複数のエントリで出る。** 実機で `GITHUB_TOKEN`（環境変数）と
+  `keyring` の 2 つが、どちらも同じ login で並んだ。`GhLogin` は `tokenSource` を
+  持たないので**見分けられない重複**になり、下の手順 3「1 件なら `Single`」が誤爆する。
+  **`(host, login)` で畳み、`active` は OR、`state` は一番良かったもの
+  （`Success` > `Timeout` > `Error`）を採る。** `token(host, user)` は login で
+  引くので、畳んでも取り出せるトークンは変わらない。**スコープは `Success` な
+  エントリのものを採る** —— 出どころが違えば別のトークンなのでスコープも違いうる
+  （同じだとは確かめていない）
+- `--json` を付けると**認証に問題があっても exit 0** で返る（`gh auth status --help`
+  に明記）。素の `gh auth status` は exit 1 になるので、この差に依存しない
+
 - トークンは `secrecy::SecretString` で保持し、`Debug` 出力とログから除外する
 
 ## SSH エイリアスの正規化
@@ -145,7 +204,7 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
 pub enum AccountState {
     Resolving,
     Resolved(Account),                 // { host, login, token, source: Config | Probe | Single }
-    Degraded(DegradedReason),          // GhMissing | NotLoggedIn(host) | NoAccess | Ambiguous(Vec<GhLogin>)
+    Degraded(DegradedReason),          // GhMissing | GhTooOld | NotLoggedIn(host) | NoAccess | Ambiguous(Vec<GhLogin>)
 }
 
 pub struct RepoTarget { pub host: String, pub owner: String, pub repo: String }

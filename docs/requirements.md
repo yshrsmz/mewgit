@@ -51,7 +51,7 @@
 - トークンは `gh auth token --hostname <host> --user <login>` で取得し、アクティブアカウントに依存しない
 - トークンはメモリ上のみ保持し、ファイルやログに書かない
 - トークンの由来（OAuth / fine-grained PAT / classic PAT）は問わない。EMU では OAuth App 制限により PAT を `gh auth login --with-token` で入れているケースが多いため
-- `gh` 未インストール／未ログイン／トークン解決失敗の場合、GitHub パネルのみ degraded 表示にし、Git 機能は必ず動作させる
+- `gh` 未インストール／**版が古い**（`gh auth status --json` が入った 2.81.0 以上が要る。04）／未ログイン／トークン解決失敗の場合、GitHub パネルのみ degraded 表示にし、Git 機能は必ず動作させる
 
 ### 3.4 アカウント解決（EMU 対応の中核）
 

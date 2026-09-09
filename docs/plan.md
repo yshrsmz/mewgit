@@ -120,7 +120,9 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       `rustls-platform-verifier` = OS のトラストストア）になり、`query` が opt-in に
       なった（ページネーションに要る）。**どの feature が要るかは呼ぶコードが無いと
       検証できない**ので、宣言だけの状態で上げない（05 の「TLS とルート証明書」）
-- [ ] `auth::gh::GhCli` — detect / auth_status（JSON とテキスト両対応）/ token
+- [x] `auth::gh::GhCli` — detect / auth_status / token。**テキスト出力は解析しない**
+      と決めた（gh 2.81.0 未満は `GhTooOld` で degraded。04 の「最低版は gh 2.81.0」に
+      理由）
 - [x] `github::GithubClient` — `repo` / `pr_for_branch` / `checks` / `reviews` + wiremock テスト
 - [ ] `auth::resolve` — 明示設定 → 単一 → probe → Ambiguous の流れ + テスト
 - [ ] `Modal::AccountPicker` と `.git/config` への保存

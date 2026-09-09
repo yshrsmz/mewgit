@@ -3,8 +3,25 @@
 //! `gh api` は使わず `reqwest` で直接呼ぶ。型付きレスポンス・エラーヘッダの取得・
 //! 並列制御のため。
 //!
-//! 現時点では `app` の `AppState` / `Msg` が参照する型だけを定義している。
-//! `GithubClient` は M4 で実装する。
+//! ベース URL の形は 2 つある（`client` の `base_url` のドキュメント）。**port は
+//! ここでは扱わない** —— `auth::RemoteUrl` が port を捨てるので運ぶ経路が無く、
+//! 足すなら `RemoteUrl` に持たせるのと同じ PR（`auth::resolve`）でないと片方が
+//! 宙に浮く（04 / 05）。
+
+mod client;
+mod wire;
+
+pub use client::GithubClient;
+
+/// リポジトリのメタ情報。`auth::resolve` の probe 兼用なので、
+/// **存在するかどうか**（= `Ok` か [`GithubError::NotFound`] か）だけを見る
+/// 呼び出しもある。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoMeta {
+    pub owner: String,
+    pub repo: String,
+    pub default_branch: String,
+}
 
 /// PR 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +91,10 @@ pub struct ReviewSummary {
 /// GitHub API のエラー。403 / 404 は握りつぶさず本文の先頭を残す。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GithubError {
+    /// ベース URL を組めないホスト。`RemoteUrl` は host を検査するが、
+    /// **`ssh -G` が返す `hostname` は検査を通っていない**ので、ここに届きうる。
+    #[error("GitHub API: ホスト名が URL になりません: {host}")]
+    InvalidHost { host: String },
     #[error("GitHub API: 401 Unauthorized")]
     Unauthorized,
     #[error("GitHub API: 403 Forbidden")]

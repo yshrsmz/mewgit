@@ -14,41 +14,83 @@
 pub struct GithubClient { http: reqwest::Client, base: Url, token: SecretString }
 
 impl GithubClient {
-    pub fn new(host: &str, token: SecretString) -> Self;
-    pub async fn repo(&self, owner: &str, repo: &str) -> Result<RepoMeta>;              // probe 兼用
-    pub async fn pr_for_branch(&self, owner, repo, head: &str) -> Result<Option<PullRequest>>;
-    pub async fn pr_list(&self, owner, repo, filter: PrFilter) -> Result<Vec<PullRequest>>;
-    pub async fn checks(&self, owner, repo, sha: &str) -> Result<Vec<Check>>;
-    pub async fn reviews(&self, owner, repo, number: u64) -> Result<ReviewSummary>;
-    pub async fn create_pr(&self, owner, repo, input: CreatePr) -> Result<PullRequest>;
+    pub fn new(host: &str, token: SecretString) -> Result<Self>;                        // 実装済み
+    pub async fn repo(&self, owner, repo) -> Result<RepoMeta>;                          // 実装済み（probe 兼用）
+    pub async fn pr_for_branch(&self, owner, repo, head_owner, branch) -> Result<Option<PullRequest>>;  // 実装済み
+    pub async fn checks(&self, owner, repo, sha: &str) -> Result<Vec<Check>>;           // 実装済み
+    pub async fn reviews(&self, owner, repo, number: u64) -> Result<ReviewSummary>;     // 実装済み
+    pub async fn pr_list(&self, owner, repo, filter: PrFilter) -> Result<Vec<PullRequest>>;  // `ui::panes::prs` のタスク
+    pub async fn create_pr(&self, owner, repo, input: CreatePr) -> Result<PullRequest>;      // `Modal::PrCreate` のタスク
 }
 ```
 
+- **`new` は `Result`。** ベース URL を組めないホストがある（下の「ベース URL」）。
+- **`pr_for_branch` は `head` を 2 つに割って受ける。** API が求めるのは
+  `{owner}:{branch}` で、fork なら fork 側の owner。`:` を挟むのを 1 箇所にする。
+- **`repo` は probe 兼用**なので、`auth::resolve` は返り値を捨てて `Ok` か
+  `NotFound` かだけを見る。probe 専用に `()` を返す関数は作らない。
+- `RepoMeta` は `{ owner, repo, default_branch }` の 3 つだけ。`private` / `fork` /
+  `parent` は読む側が出てから足す。
+
 - ヘッダ: `Authorization: Bearer`、`Accept: application/vnd.github+json`、`X-GitHub-Api-Version`、`User-Agent: mewgit/<ver>`
-- ベース URL は `host` から組むが、**形が 2 つある**。github.com とデータレジデンシー
-  （`*.ghe.com`）は `https://api.{host}`、self-hosted の GHES は `https://{host}/api/v3`
-  （`gh` のバイナリに `https://%s/api/v3/` があるのを `strings` で確認）。
-  加えて **`auth::RemoteUrl` は port を捨てる**ので、非既定ポートの GHES はここに届かない。
-  **どちらも、このクライアントを書くタスクで決める**（04）。パスの形を落として port だけ
-  足すと、self-hosted では全部 404 になる
+### ベース URL
+
+**形が 2 つある。** github.com とデータレジデンシー（`*.ghe.com`）は
+`https://api.{host}`、self-hosted の GHES は `https://{host}/api/v3`
+（`gh` のバイナリに `https://%s/api/v3/` があるのを `strings` で確認）。
+
+**分類より前に「ホスト名だけか」を確かめる。** `Url::parse` は `a/b` や `a:8443`、
+`u@a` を通してしまい、それから組むと `https://api.a/b/` のような**動くが違う場所を
+指す**ベースになる。順序が逆だと `foo/bar.ghe.com` が `.ghe.com` で終わって
+データレジデンシー扱いになる。
+
+**ホストの大小は比較のときだけ無視する。** 組んだ URL の小文字化は `Url` が行う
+（WHATWG URL の host 正規化）ので、こちらでは触らない —— 二重に正規化すると
+出どころが 2 本になる。`RemoteUrl` は host を小文字化していない。
+
+**port はここでは受けない。** `auth::RemoteUrl` が port を捨てるので運ぶ経路が無く、
+足すなら `RemoteUrl` に持たせるのと同じ PR、つまり `auth::resolve` のタスクでないと
+片方が宙に浮く。**「パスの形を落として port だけ足すと self-hosted では全部 404」
+という警告は、パスの形をここで入れたことで解けている。**
 
 ### TLS とルート証明書
 
-**`reqwest` は 0.12 のまま据え置いてある。** 宣言だけで、まだ 1 行も呼んでいない。
+**`reqwest` は 0.13.4。** 0.13.5 は 2026-09-08 公開なので 14 日ルールに掛かる。
+feature は `json` / `query` / `rustls`。
 
-0.13 で `rustls-tls` feature が消えた。0.12 のそれは「rustls + 同梱の webpki ルート」
-だったが、0.13 はルート証明書の feature 自体を廃止し、既定を
-`rustls-platform-verifier`（OS のトラストストア）にした。同梱ルートに戻すには
-`webpki-root-certs` を足して `ClientBuilder::tls_certs_only` を呼ぶコードが要る。
-`query`（`?per_page=100` に使う）も opt-in になった。
+- **`rustls`**（aws-lc-rs + `rustls-platform-verifier` = OS のトラストストア）。
+  0.12 の `rustls-tls`（同梱の webpki ルート）は消えた。**同梱ルートには戻さない**
+  —— GHES の社内 CA が効くのは OS のトラストストアのほうで、
+  `webpki-root-certs` + `ClientBuilder::tls_certs_only` にすると社内 CA で落ちる
+- **`query`** は `?per_page=100` に要る（0.13 で opt-in になった）
+- **`system-proxy` は入れない。** 環境変数のプロキシ（`HTTP_PROXY` / `HTTPS_PROXY` /
+  `ALL_PROXY` / `NO_PROXY`）は feature に関係なく効く（hyper-util 0.1.20 の
+  `client/proxy/matcher.rs` の `Builder::from_system` が常に読み、feature が足すのは
+  macOS / Windows の **OS 設定**だけ。実装を読んで確認）。入れると 6 crate 増え、
+  MVP 外の Windows 向け `windows-registry` と `core-foundation` の 2 版目が入る。
+  **macOS / Windows の OS 設定のプロキシが要る形が出てきたら足す**
 
-**どの feature が要るかは、このクライアントを書いてからでないと決められない。**
-宣言だけの状態で上げると、検証する手段が無いまま feature の組み合わせと
-`aws-lc-sys`（重い build.rs を持つ crypto provider）を選ぶことになる。上げるのは
-`GithubClient` を書くタスクと同じ PR で行う（`docs/plan.md` の M4）。
+実測（2026-09-09）。
 
-- 認証付きリクエストは同時 4 本まで（`Semaphore`）
-- レートリミット残量をヘッダから読み、`app` に渡してステータスバーに表示
+| 測ったもの | 値 |
+|---|---|
+| lock に増えた crate | 26（`rustls-platform-verifier` が OS ごとの実装を連れてくる） |
+| macOS のビルド（依存だけ再コンパイル） | 17.2 秒 |
+| Linux（`ubuntu-latest`）の CI ジョブ | 1 分 45 秒。**`aws-lc-sys` の build.rs は追加セットアップなしに通る** |
+
+**`aws-lc-rs` / `aws-lc-sys` の版は lock でしか固定していない。** `Cargo.toml` に
+書いているのは `reqwest` だけで、そこから引かれる `aws-lc-*` は `^1.x` / `^0.x` の
+範囲。14 日ルールを手で数えたのは**この PR で新規に入ったときだけ**で、以後の更新は
+Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
+`cargo update --workspace` を叩いた場合は誰も担保しない。**
+
+- **認証付きリクエストは同時 4 本まで（`Semaphore`）。まだ入れていない。**
+  いま並列に呼ぶ経路が無く、踏めない腕になる。`ui::panes::prs`（PR ごとに
+  checks / reviews を並べて引く）のタスクで入れる
+- **レートリミット残量の受け渡しもまだ。** 読む側（ヘッダの `[acct: …]` 表示）が
+  無いので、ヘッダの `x-ratelimit-*` は
+  [`GithubError::RateLimited`] を組むときにしか読んでいない。
+  「ヘッダの Degraded 表示」のタスクで足す
 
 ## エンドポイント対応
 
@@ -77,6 +119,7 @@ pub struct Check { name, state: CheckState, url: Option<String> }
 
 ```rust
 pub enum GithubError {
+    InvalidHost { host },                          // ベース URL を組めないホスト
     Unauthorized,                                  // 401
     Forbidden { needed_scopes: Vec<String>, body: String },  // 403（SAML / スコープ / IP allowlist）
     NotFound,                                      // 404（権限不足でも返る）
@@ -87,6 +130,17 @@ pub enum GithubError {
 ```
 
 403 の本文に `SAML` / `Resource protected by organization SAML enforcement` が含まれる場合は `Forbidden` に `saml: true` を付け、案内を「トークンの SSO 承認」に切り替える。
+
+**レート制限を `Forbidden` より先に見る。** GitHub は使い切った要求に **403** を返す
+ことがある（429 のこともある）ので、順序が逆だと「スコープが足りない」の案内が出て、
+**待てば直るものを直らないものとして見せる**。403 をレート制限と読むのは
+`x-ratelimit-remaining` が 0 のときだけで、これが無いとスコープ不足の 403 まで
+巻き込む。
+
+**`InvalidHost` は `ssh -G` の `hostname` から届く。** `RemoteUrl` は host を検査
+するが、`ssh -G` が返す値は検査を通っていない（04）。
+
+**`body_head` は文字数で切る。** バイトで切ると多バイト文字の途中で落ちて panic する。
 
 ## PR チェックアウト
 

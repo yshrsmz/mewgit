@@ -25,6 +25,13 @@ grep 対象にテストコメントも入れる。** #42 では、レビュー�
 のに、同じ理由を書いたテストコメントだけが古いまま残った。テストコメントは設計書の語で
 検索しても出にくい。
 
+**逆に、判断を次のタスクへ送るときは、挙げた候補が他の設計書の制約で全滅していないかを
+数える。** #59 では 04 に「`resolve(api: &GithubClient)` は成り立たない」と書いて候補を
+2 つ挙げたが、**どちらも 00 のレイヤー則（`github` は `auth` の上段）で上向きになり、
+最初から死んでいた**（`/simplify` が拾った）。トークンが 1 本という目に付く理由だけを
+数えて、**先に効く制約を数えていなかった**。送り先の設計書に書く前に、その形が
+他の設計書で許されるかを確かめる。
+
 **設計書が「そのタスクで決める」と送った判断は、着手時に `docs/design/` 全体を grep する。**
 #47 では 02 の「`Branch.upstream` から push の `-u` を決めない」（短縮名の `None` には
 4 つの理由があるので、`branch.<name>.merge` を読んで決める）を破った実装を書き、
@@ -52,6 +59,14 @@ Rust の toolchain は `rust-toolchain.toml` が SoT。rustup がこれを読ん
 - GitHub Actions の `uses` はコミット SHA で固定し、行末コメントにタグを書く（Renovate が更新する）
 - ワークフローを触ったら `mise x ghalint -- ghalint run` と `mise x actionlint -- actionlint` を通す
 - 依存を新規追加するときは crates.io の公開日を確認し、14 日以上経過した版を採用する。既存依存の更新は Renovate（`yshrsmz/renovate-config` の `minimumReleaseAge: "2 weeks"`）が担保する
+- **14 日ルールは間接依存にも当たるが、固定できるのは lock だけ。** `Cargo.toml` に
+  書くのは直接依存だけで、そこから引かれる crate は範囲内で引き直せてしまう
+  （#59 では `reqwest` の下の `aws-lc-rs` / `aws-lc-sys` が 7 日前の公開だった）。
+  **手で数えるのは新規に入る回だけ**で、以後は Renovate に任せる —— `=` 固定は
+  上の方針に反し、直接依存でないものを `Cargo.toml` に書く副作用のほうが大きい。
+  人が `cargo update --workspace` を叩いた場合は誰も担保しない、という穴は残る。
+  数え方は `git diff origin/main -- Cargo.lock` から新規の crate を出して 1 件ずつ
+  crates.io に当たり、14 日未満は `cargo update -p <crate> --precise <版>` で落とす
 
 ## コマンド
 

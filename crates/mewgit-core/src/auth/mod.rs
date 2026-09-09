@@ -3,13 +3,14 @@
 //! `gh` から認証状態とトークンを取得し、リポジトリごとに使うアカウントを決める。
 //! トークンはメモリ上のみで保持する（不変ルール 3）。
 //!
-//! リモート URL の解析（[`url`]）とエイリアスの正規化（[`ssh`]）は実装済み。
-//! `GhCli` と `resolve` は M4 で実装するので、ここには `app` の `AppState` / `Msg` が
-//! 参照する型だけを置いてある。
+//! リモート URL の解析（[`url`]）、エイリアスの正規化（[`ssh`]）、`gh` の呼び出し
+//! （[`gh`]）は実装済み。`resolve` は M4 の次のタスクで実装するので、ここには
+//! `app` の `AppState` / `Msg` が参照する型を置いてある。
 //!
 //! **どのリモートの URL を見るかは M4 で決める**（04 の「既定リモートを決めるのは M4」）。
 //! それまで `RepoInfo.target` は `None` のまま。
 
+pub mod gh;
 pub mod ssh;
 pub mod url;
 
@@ -67,6 +68,11 @@ pub enum AccountState {
 pub enum DegradedReason {
     /// `gh` が PATH に無い。
     GhMissing,
+    /// `gh` が古い。`gh auth status --json` は 2.81.0 で入った（04）。
+    GhTooOld {
+        /// 見つかった版。案内に出すので、解釈できなければ生の 1 行目を入れる。
+        found: String,
+    },
     NotLoggedIn {
         host: String,
     },
@@ -92,6 +98,8 @@ pub struct ProbeAttempt {
 pub enum AuthError {
     #[error("gh が見つかりませんでした")]
     GhMissing,
+    #[error("gh {found} は古すぎます（{required} 以上が必要です）")]
+    GhTooOld { found: String, required: String },
     #[error("gh の実行に失敗しました: {}: {stderr}", .argv.join(" "))]
     GhFailed { argv: Vec<String>, stderr: String },
     #[error("gh の出力を解釈できませんでした: {message}")]

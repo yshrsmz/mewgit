@@ -10,19 +10,57 @@
 ## gh との連携
 
 ```rust
-pub struct GhCli { bin: PathBuf }
+pub struct GhCli;   // 「gh があり、最低版を満たす」ことの証。持つ値は無い
 
 impl GhCli {
-    pub async fn detect() -> Option<Self>;                      // PATH から探す
-    pub async fn auth_status(&self) -> Result<Vec<GhLogin>>;    // host, login, active, scopes
-    pub async fn token(&self, host: &str, user: &str) -> Result<SecretString>;
+    pub async fn detect() -> Result<Self, AuthError>;                  // gh --version
+    pub async fn auth_status(&self) -> Result<Vec<GhLogin>, AuthError>;
+    pub async fn token(&self, host: &str, user: &str) -> Result<SecretString, AuthError>;
 }
 
 pub struct GhLogin { pub host: String, pub login: String, pub active: bool, pub scopes: Vec<String> }
 ```
 
-- `gh auth status --json hosts` が使えるバージョンでは JSON を使い、古い場合はテキスト出力を解析する（バージョンは `gh --version` で判定）
-- `gh auth token --hostname H --user U` でユーザー指定取得。`--user` 非対応の古い gh では `active` のみ使える旨を degraded 理由に含める
+### 最低版は gh 2.81.0。テキスト出力は解析しない
+
+`gh auth status --json hosts` は **2.81.0（2025-10-01 リリース）で入った**
+（[cli/cli#11544](https://github.com/cli/cli/pull/11544)、マージ 2025-09-25。
+`gh api` でリリースを引いて確認）。`gh auth token --user` は同じ版に既にある
+（v2.81.0 の `pkg/cmd/auth/token/token.go` を読んで確認）。**それ未満は
+`AuthError::GhTooOld` で degraded に落とし、テキスト出力は解析しない。**
+
+理由は「書式を確かめられないまま書くことになる」から。手元の 2.100.0 は
+`✓ Logged in to github.com account <login> (<source>)` / `- Active account: true` /
+スコープはクォート付き、という形だが、**古い版は `as <login>` でクォート無し、
+`- Active account:` の行自体が無い**。再現できない書式に対してパーサを書くのは
+`.claude/rules/verifying-assumptions.md` に反する。`gh` はもともと必須依存なので、
+要求版を案内するほうが行動可能（`brew upgrade gh`）。**古い gh の利用者が実際に出て
+きたら、その人の実出力をフィクスチャにして足す**ほうが確実。
+
+`bin: PathBuf` は持たない。バイナリのパスを設定で差し替える要求が無く、#21 で
+`Runner.git_bin` を同じ理由で消してある。`Command::new("gh")` の PATH 解決に任せる。
+
+### `gh auth status --json hosts` の形（v2.100.0 のソースで確認）
+
+`hosts` は**ホストをキーにしたオブジェクト**で、値がエントリの配列。エントリは
+`{ state, error?, active, host, login, tokenSource, token?, scopes?, gitProtocol }`。
+
+- **`state` は `success` / `timeout` / `error` の 3 値。** 採るのは `success` だけ。
+  gh 自身が「このトークンは通らない」と言っているものを probe の候補にしない。
+  **`timeout`（ホストに届かなかった）を `error` と同じに畳んでよいかは `auth::resolve`
+  のタスクで決める** —— 回線の一時的な失敗を「ログインしていない」に化けさせる
+- **`--show-token` を付けない。** 付けると `token` フィールドが JSON に入る（不変ルール 3）
+- **`scopes` はカンマ区切りの 1 本の文字列**（`"gist, read:org, repo"`）で、`omitempty`。
+  fine-grained PAT では**丸ごと欠ける**ので、無ければ空にする（04 の EMU の節が
+  「`scopes` が空でも動作させる」と言っているのはこの形）
+- **同じ `login` が複数のエントリで出る。** 実機で `GITHUB_TOKEN`（環境変数）と
+  `keyring` の 2 つが、どちらも同じ login で並んだ。`GhLogin` は `tokenSource` を
+  持たないので**見分けられない重複**になり、下の手順 3「1 件なら `Single`」が誤爆する。
+  **`(host, login)` で畳み、`active` は OR を取る。** `token(host, user)` は login で
+  引くので、畳んでも取り出せるトークンは変わらない
+- `--json` を付けると**認証に問題があっても exit 0** で返る（`gh auth status --help`
+  に明記）。素の `gh auth status` は exit 1 になるので、この差に依存しない
+
 - トークンは `secrecy::SecretString` で保持し、`Debug` 出力とログから除外する
 
 ## SSH エイリアスの正規化
@@ -145,7 +183,7 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
 pub enum AccountState {
     Resolving,
     Resolved(Account),                 // { host, login, token, source: Config | Probe | Single }
-    Degraded(DegradedReason),          // GhMissing | NotLoggedIn(host) | NoAccess | Ambiguous(Vec<GhLogin>)
+    Degraded(DegradedReason),          // GhMissing | GhTooOld | NotLoggedIn(host) | NoAccess | Ambiguous(Vec<GhLogin>)
 }
 
 pub struct RepoTarget { pub host: String, pub owner: String, pub repo: String }

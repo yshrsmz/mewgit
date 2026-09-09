@@ -28,7 +28,8 @@ pub struct AppState {
 
 `RepoInfo` は `app` が組み立てる。パスとリモート一覧は `git_read`、ホスト名の正規化は
 `auth`（`ssh -G`）から来るため、どちらか一方の層には置けない。正規化済みの
-host / owner / repo は `RepoInfo.target: Option<RepoTarget>` に入れる。下位層に
+host / port / owner / repo は `RepoInfo.target: TargetState` に入れる（`Option` に
+しない理由は下の「`RepoInfo.target` を埋める」）。下位層に
 `RepoInfo` を渡さない（`auth::resolve` は `auth::RepoTarget`、`config::account_for` は
 `host` / `owner` / `repo` の 3 つを受ける）。
 
@@ -899,23 +900,84 @@ pub struct BranchState {
 
 | キー | 出す `GitOp` |
 |---|---|
-| `f` | `Fetch { remote: None, prune: false }` |
+| `f` | `Fetch { remote: Some(<既定リモート>), prune: false }`（下の「既定リモート」） |
 | `p` | `Pull { mode: FastForwardOnly }` |
 | `P` | `Push { .. }`（下の「push の行き先」） |
 
-- **fetch と pull はリモートを選ばない。** `remote: None` で git に決めさせる。
-  git は `branch.<name>.remote` → `origin` → （それも無く）リモートが 1 本ならそれ、
-  の順に選ぶ。**複数あって `origin` も `branch.<name>.remote` も無いと、何もせず
-  exit 0 で返る**（`remote.pushDefault` は push 専用で fetch には効かない。
-  git 2.55 で確認）。**この形では `f` が無反応になる** —— 通知も出ない。
-  塞ぐには「どのリモートを既定にするか」を決める必要があり、それは 04 の
-  「既定リモートを決めるのは M4」が持っているので、そちらへ送った。
-  こちらで選び直すと、config を読まないまま git の規則を写した 2 本目の実装になる
+- **`f` はリモートを明示する。** git に決めさせると、**複数あって `origin` も
+  `branch.<name>.remote` も無いときに何もせず exit 0 で返る**（git 2.55 で実測。
+  `remote.pushDefault` は push 専用で fetch には効かない）。stderr が空なので
+  不変ルール 4 の「stderr を UI まで届ける」経路も効かず、**`f` が無反応になる**。
+  [`default_remote`](#既定リモート) が決まらないときは `GitOp` を出さずに通知で断る
+- **`p` は選ばない。** 同じ状態でも `git pull --ff-only` は
+  `There is no tracking information for the current branch.` を stderr に書いて
+  **exit 1** で終わる（同じ一時リポジトリで実測）。**既存の通知経路がそのまま効く**
+  ので、こちらに `default_remote` を掛ける理由が無い。掛けると、git が出す
+  「`git branch --set-upstream-to=<remote>/<branch> main` で設定できます」という
+  **具体的な回復手順を、こちらの短い文言で置き換える**ことになる
 - **pull は `--ff-only`。** MVP にコンフリクト解消ビューが無い（requirements）ので、
   merge / rebase が衝突すると mewgit の中では抜けられない。`--ff-only` は早送りできな
   ければ何も変えずに終わる。モードを選ばせるのは continue / abort が揃う M5
 - **prune は付けない。** 消えた remote-tracking ref を消す操作で、`f` が黙って ref を
   消すのは「fetch は読むだけ」という期待と食い違う。出すなら M6 の設定から
+
+### 既定リモート
+
+**規則は 1 本**（`update::default_remote`）。読み手は 2 人で、`f` と
+`RepoInfo.target` を埋める経路。規則そのものと実測の表は 04 の「既定リモート」に
+あるので複製しない。要点だけ。
+
+```
+branch.<HEAD>.remote → リモートが 1 本ならそれ → origin → 決まらない
+```
+
+- **HEAD のブランチは `BranchState` から取る**（push の行き先と同じ理由。
+  `RepoInfo.head` は起動時に読んだきりで古い）。まだ届いていなければ
+  `branch.<HEAD>.remote` の段だけを飛ばす —— **決まらないに落とさない** ——
+  リモートが 1 本のふつうのリポジトリで、起動直後の `f` が断られてしまう
+- **`.`（ローカル追跡）は決まらない。** push が既に断っている形で、
+  fetch に渡すと git が「そんなリモートは無い」で落ちる
+- **`branch.<HEAD>.remote` が一覧に無い名前を指していたら、その段を飛ばさず
+  決まらないにする。** 飛ばすと `origin` へ落ちるが、ユーザーが書いた行き先とは
+  別のリモートを黙って fetch することになる
+
+**`-u` の提案（`propose_upstream`）はこの関数に畳まない。** git 自身が fetch と
+push で違う規則を持っているため。理由は 04 の「既定リモート」の末尾にある。
+ただし `propose_upstream` が持っていた「1 本ならそれ、複数なら `origin`」の
+**枝は `default_remote` から引く** —— 同じ規則を 2 本書かないため、違うのは
+`branch.<name>.pushRemote` を将来足す先だけにする。
+
+### `RepoInfo.target` を埋める
+
+`RepoInfo.target` は `RepoInfoLoaded` の中では決まらない。**`ssh -G` が非同期で、
+リーダースレッド（git2）の外にある**ため。1 往復増やす。
+
+```
+Msg::RepoInfoLoaded → update が default_remote で URL を選び RemoteUrl::parse
+  → Cmd::ResolveTarget(RemoteUrl)   （ssh なら ssh -G、https ならそのまま）
+  → Msg::TargetResolved { .. }      → RepoInfo.target = Some(..)
+```
+
+- **`Cmd::ResolveTarget` は `RemoteUrl` を運ぶ**（`Remote` の生 URL ではない）。
+  解析は純粋関数なので `update` の中で済み、**読めない URL のときに `Cmd` を
+  出さずに済む**（`InvalidRemoteUrl` はそのまま通知にする）
+- **https でも `Cmd` を通す。** ssh -G が要らないぶん往復は無駄だが、
+  **`target` を書く場所を 1 つに保つ**ほうが強い（2 本にすると、片方だけ
+  `valid_host` を通す・片方だけ通知を出す、が起きる。#18 の「共有は半分だけに
+  なりやすい」）
+- **`ssh -G` が失敗しても `target` は埋まる。** `host_raw` を使い、理由を通知に
+  出す（04）。`Msg` は `Result` ではなく**解決済みの `RepoTarget` と
+  「正規化できなかった理由」の `Option`** を運ぶ —— `Result` にすると、
+  呼び出し側が `Err` で `target` を `None` にしてしまい、04 が用意した
+  「degraded ではなく正規化だけを諦める」経路が消える
+
+**読み手は 2 人。** いま読んでいるのは**ヘッダ**で、決まっていれば
+`mewgit  yshrsmz/mewgit` のように `owner/repo` を並べる（07）。もう 1 人は次の PR の
+`Cmd::ResolveAccount`（04 の「タスクを 2 本に割った」）。
+
+**この PR で `Cmd::ResolveAccount` は発行しない。** ランタイムがまだ
+`not_implemented` で畳んでおり、**発行すると起動のたびに「未実装のコマンドです」が
+ステータスバーに出る**。
 
 ### push の行き先
 
@@ -959,9 +1021,9 @@ pub struct BranchState {
 **3 だけは git の規則そのものではない。** git は `branch.<name>.pushRemote` と
 `remote.pushDefault` も見る。読むこと自体は `git_read` にならできる（`upstream_config`
 と同じ形）が、**上流と同じ判断だとは書かない**（CLAUDE.md）。食い違っても確認モーダルに
-出た行き先を見て `n` で止められるので、危ないのは「見ずに `y`」だけ。**読む判断は
-04 の「既定リモートを決めるのは M4」へ送った** —— fetch が無反応になる件と同じ問いで、
-別々に決めると 2 つの規則が並ぶ。
+出た行き先を見て `n` で止められるので、危ないのは「見ずに `y`」だけ。**読む判断は M6 へ送った**（plan.md）。fetch の
+[`default_remote`](#既定リモート) には畳まない —— **git 自身が fetch と push で違う規則を
+持っている**ので、畳むと fetch の既定へ push することになる（04 の「既定リモート」）。
 
 **拒否の出口は `push_plan` の中に 1 本。** 「一覧がまだ届いていない」を呼び出し側の
 早期 return にすると、同じ「Warn を出して `Cmd::None`」が 2 箇所に割れる。
@@ -1301,6 +1363,7 @@ pub enum Msg {
     ExecFinished(Box<ExecDone>),       // { op, result, progress }
     ProgressDetected(Option<InProgressOp>),
     // auth / github
+    TargetResolved { target: RepoTarget, unnormalized: Option<String> },  // 上の「RepoInfo.target を埋める」
     AccountResolved(AccountState),
     PrLoaded(Box<Result<Option<PullRequest>, GithubError>>),
     ChecksLoaded(Result<Vec<Check>, GithubError>),
@@ -1377,6 +1440,7 @@ pub enum Cmd {
     LoadBranches,                      // ローカルブランチ一覧。RepoInfo とは別（02）
     Exec(GitOp),                       // git CLI 実行（03 参照）
     CancelExec,                        // 走っている Exec を中断する（上の「キャンセル」）
+    ResolveTarget(RemoteUrl),          // 既定リモートの URL → RepoTarget（上の「RepoInfo.target を埋める」）
     ResolveAccount,
     FetchPr, FetchChecks, FetchPrList,
     Quit,
@@ -1392,7 +1456,9 @@ pub fn init(state: &mut AppState) -> Cmd;
 `runtime::run` がループに入る前に 1 回呼ぶ。`main.rs` から呼ぶと、テストを書かない
 配線の側に処理が出てしまう。いまは `LoadRepoInfo` と
 `LoadLog { count: config.graph.page_size, restart: false }` と `LoadStatus` と
-`LoadBranches` の 4 つで、`ResolveAccount` はそのタスクでここに足す。起動時はまだ何も読んでいないので
+`LoadBranches` の 4 つで、`ResolveAccount` はそのタスクでここに足す。
+**`ResolveTarget` は `init` からは出さない** —— リモート一覧が要るので、
+`Msg::RepoInfoLoaded` が届いてから出す（上の「`RepoInfo.target` を埋める」）。起動時はまだ何も読んでいないので
 `restart` は偽でよい（`LogSession` が無ければ `restart` の有無に関わらず先頭から開く）。
 
 ## update の原則

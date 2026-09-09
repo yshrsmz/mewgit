@@ -7,8 +7,11 @@
 //! （[`gh`]）は実装済み。`resolve` は M4 の次のタスクで実装するので、ここには
 //! `app` の `AppState` / `Msg` が参照する型を置いてある。
 //!
-//! **どのリモートの URL を見るかは M4 で決める**（04 の「既定リモートを決めるのは M4」）。
-//! それまで `RepoInfo.target` は `None` のまま。
+//! **どのリモートの URL を見るかは決まった**（04 の「既定リモート」）。規則を持つのは
+//! `app` の `update::default_remote` で、材料の [`git_read::Remote`] と
+//! `Branch.upstream_config` がどちらも `auth` の上段の型だから（00）。
+//!
+//! [`git_read::Remote`]: crate::git_read::Remote
 
 pub mod gh;
 mod probe;
@@ -22,8 +25,44 @@ use secrecy::SecretString;
 pub struct RepoTarget {
     /// `ssh -G` で正規化済みのホスト名。
     pub host: String,
+    /// API のベース URL に載せる非既定ポート。既定（443）は `None`。
+    ///
+    /// **ssh の port は入らない。** `ssh://git@ghe.example.com:2222/o/r` の 2222 は
+    /// ssh の port で、API は `https://ghe.example.com/api/v3/` のまま。
+    /// [`url::RemoteScheme`] が https のときだけ値を持つので、ここへ載る経路も
+    /// https のリモートだけになる（04 の「port は scheme に畳む」）。
+    pub port: Option<u16>,
     pub owner: String,
     pub repo: String,
+}
+
+impl RepoTarget {
+    /// リモート URL からアカウント解決の対象を組む（01 の
+    /// 「`RepoInfo.target` を埋める」）。
+    ///
+    /// ssh のときだけ [`ssh::resolve_ssh_host`] を通す。**失敗しても `Ok` 側に落ちる**
+    /// —— `host_raw` を使い、理由を第 2 要素で返す。呼び出し側はそれを通知に出す。
+    /// `Result` にしないのは、`Err` を受けた側が `target` を捨ててしまい、04 の
+    /// 「degraded ではなく正規化だけを諦める」経路が消えるため。
+    ///
+    /// **port は scheme から取る。** https のときだけ値があり、ssh の port は
+    /// [`url::RemoteScheme`] の時点で捨ててある（04 の「port は scheme に畳む」）。
+    pub async fn resolve(ssh: &ssh::SshCommand, url: url::RemoteUrl) -> (Self, Option<String>) {
+        let (port, host, unnormalized) = match url.scheme {
+            url::RemoteScheme::Https { port } => (port, url.host_raw, None),
+            url::RemoteScheme::Ssh => match ssh::resolve_ssh_host(ssh, &url.host_raw).await {
+                Ok(host) => (None, host, None),
+                Err(err) => (None, url.host_raw, Some(err.to_string())),
+            },
+        };
+        let target = RepoTarget {
+            host,
+            port,
+            owner: url.owner,
+            repo: url.repo,
+        };
+        (target, unnormalized)
+    }
 }
 
 /// そのホストの 1 アカウント。
@@ -159,4 +198,56 @@ pub enum AuthError {
     SshResolveFailed { alias: String, message: String },
     #[error("リモート URL を解釈できませんでした: {url}")]
     InvalidRemoteUrl { url: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::url::RemoteUrl;
+    use super::*;
+    use crate::test_util::fake_ssh;
+
+    /// `hostname` を 1 行返すだけの偽 ssh。
+    const FAKE_HOST: &str = "echo 'host gh-work'\necho 'hostname github.com'\n";
+
+    #[tokio::test]
+    async fn an_https_remote_keeps_its_port_and_does_not_run_ssh() {
+        // **偽 ssh は `example.invalid` を返す。** https で `ssh -G` を回していたら
+        // host がそちらに化けるので、これが「回していない」の見張りになる。
+        let (_dir, ssh) = fake_ssh("echo 'hostname example.invalid'\n");
+        let url = RemoteUrl::parse("https://ghe.example.com:8443/acme/tools.git").unwrap();
+        let (target, unnormalized) = RepoTarget::resolve(&ssh, url).await;
+
+        assert_eq!(target.host, "ghe.example.com");
+        assert_eq!(target.port, Some(8443));
+        assert_eq!(target.owner, "acme");
+        assert_eq!(target.repo, "tools");
+        assert_eq!(unnormalized, None);
+    }
+
+    #[tokio::test]
+    async fn an_ssh_remote_is_normalized_and_carries_no_port() {
+        // **ssh の port は API の port ではない**ので、2222 は `RemoteScheme` の時点で
+        // 捨てられている（04 の「port は scheme に畳む」）。
+        let (_dir, ssh) = fake_ssh(FAKE_HOST);
+        let url = RemoteUrl::parse("ssh://git@gh-work:2222/yshrsmz/mewgit.git").unwrap();
+        let (target, unnormalized) = RepoTarget::resolve(&ssh, url).await;
+
+        assert_eq!(target.host, "github.com");
+        assert_eq!(target.port, None);
+        assert_eq!(unnormalized, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_normalization_keeps_the_raw_host_and_says_why() {
+        // **degraded ではなく正規化だけを諦める**（04）。`Err` を返して呼び出し側に
+        // `target` を捨てさせると、この経路が消える。
+        let (_dir, ssh) = fake_ssh("echo 'no hostname here'\n");
+        let url = RemoteUrl::parse("git@gh-work:yshrsmz/mewgit.git").unwrap();
+        let (target, unnormalized) = RepoTarget::resolve(&ssh, url).await;
+
+        assert_eq!(target.host, "gh-work");
+        assert_eq!(target.owner, "yshrsmz");
+        let reason = unnormalized.expect("理由が付いていない");
+        assert!(reason.contains("gh-work"), "{reason}");
+    }
 }

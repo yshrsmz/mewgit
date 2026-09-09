@@ -8,19 +8,21 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::auth::url::RemoteUrl;
+use crate::auth::RepoTarget;
 use crate::git_exec::{
     hunk_patch, push_remote_ref, supports_hunk_patch, ExecError, ExecErrorKind, ExecOutput, GitOp,
     PullMode,
 };
 use crate::git_read::{
     short_oid, Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError,
-    Hunk, LogPage, Oid, WorktreeSection, WorktreeSnapshot,
+    Hunk, LogPage, Oid, Remote, WorktreeSection, WorktreeSnapshot,
 };
 
 use super::{
     AppState, BranchLoad, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, GraphLine,
     GraphSelection, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
-    PushRejection, Region, RepoSnapshot, TextBuffer,
+    PushRejection, Region, RepoSnapshot, TargetState, TextBuffer,
 };
 
 /// 起動直後に実行してほしい副作用。
@@ -122,6 +124,10 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::DiffLoaded { target, result } => diff_loaded(state, target, *result),
         Msg::ExecFinished(done) => exec_finished(state, *done),
         Msg::ProgressDetected(_) => Cmd::None,
+        Msg::TargetResolved {
+            target,
+            unnormalized,
+        } => target_resolved(state, target, unnormalized),
         Msg::AccountResolved(_) => Cmd::None,
         Msg::PrLoaded(_) => Cmd::None,
         Msg::ChecksLoaded(_) => Cmd::None,
@@ -173,20 +179,23 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
     // `Alt-p` まで拾い、しかもこの段は全ペインを覆うので、07 が移動に予約している
     // `Ctrl-d` / `Ctrl-u` の隣で修飾付きのキーを先に食う。
     //
-    // **リモートを選ばない。** 追跡先（`branch.<name>.remote`）があればそれ、
-    // 無ければ `origin`、それも無くてリモートが 1 本ならそれ。**複数あって
-    // `origin` も追跡先も無いと、git は何もせず exit 0 で返る**（git 2.55 で確認。
-    // `remote.pushDefault` は push 専用で fetch には効かない）。こちらで選び直すと
-    // config を読まないまま git の規則を写すことになるので、既定リモートを決める
-    // タスクへ送った（01 の「リモート操作」）。
+    // **リモートを明示する。** git に決めさせると、**複数あって `origin` も追跡先も
+    // 無いときに何もせず exit 0 で返る**（git 2.55 で実測）。stderr が空なので
+    // 不変ルール 4 の経路も効かず、`f` が無反応になる（01 の「既定リモート」）。
     //
     // **`--prune` は付けない。** `f` が黙って remote-tracking ref を消すのは
     // 「fetch は読むだけ」という期待と食い違う（01）。
     if key == Key::char('f') {
-        return Cmd::Exec(GitOp::Fetch {
-            remote: None,
-            prune: false,
-        });
+        return match default_remote(state) {
+            Ok(remote) => Cmd::Exec(GitOp::Fetch {
+                remote: Some(remote.name.clone()),
+                prune: false,
+            }),
+            Err(reason) => {
+                state.push_notice(NoticeLevel::Warn, reason, None);
+                Cmd::None
+            }
+        };
     }
     // **`--ff-only`。** MVP にコンフリクト解消ビューが無いので、merge / rebase が
     // 衝突すると mewgit の中では抜けられない。モードを選ばせるのは continue /
@@ -761,10 +770,75 @@ fn push_plan(state: &AppState) -> PushPlan {
     }
 }
 
+/// 既定リモートを決める（01 と 04 の「既定リモート」）。
+///
+/// ```text
+/// branch.<HEAD>.remote → リモートが 1 本ならそれ → origin → 決まらない
+/// ```
+///
+/// **git の fetch の規則と同じ**（git 2.55 で実測。表は 04）。読み手は 2 人で、
+/// `f` と [`RepoInfo::target`](super::RepoInfo::target) を埋める経路。
+/// **`Err` の文言は `f` が通知に出す**ので、`target` 側は捨てる。
+///
+/// **`propose_upstream`（push の `-u`）はここに畳めない。** git 自身が fetch と push で
+/// 違う規則を持っており（push は `branch.<name>.pushRemote` > `remote.pushDefault` >
+/// fetch の規則）、畳むと **fetch の既定へ push する**という git がしない挙動になる。
+/// あちらが呼ぶのは、追跡設定が無いと判った**あと**なので、上の 1 段目は素通りする。
+///
+/// **80 桁に収める。** ステータスバーは要約行を 1 行で切るので、長いと
+/// 「どうすればよいか」の側から消える（M6 で詳細を出すまで）。
+fn default_remote(state: &AppState) -> Result<&Remote, String> {
+    let remotes = state.repo.remotes.as_slice();
+    if remotes.is_empty() {
+        // **`RepoInfo` にも「届いたか」の印は無い。** `LoadRepoInfo` と `LoadBranches` は
+        // 別のジョブなので、一覧だけ先に届いた瞬間がある。走っているなら待たせる。
+        return Err(if state.jobs.is_running(JobKind::LoadRepoInfo) {
+            "リモート一覧をまだ読めていません".to_string()
+        } else {
+            "リモートが登録されていません".to_string()
+        });
+    }
+
+    // **ブランチ一覧がまだなら、この段だけ飛ばす。** 決まらないに落とすと、リモートが
+    // 1 本のふつうのリポジトリで起動直後の `f` が断られる（01 の「既定リモート」）。
+    if let Some(config) = state
+        .branches
+        .head()
+        .and_then(|head| head.upstream_config.as_ref())
+    {
+        // **`.` はローカル追跡。** push が既に断っている形で、fetch に渡すと git が
+        // 「そんなリモートは無い」で落ちる。
+        if config.remote == "." {
+            return Err("追跡先がローカルです。リモートを設定してください".to_string());
+        }
+        // **`origin` へ落とさない。** 落とすと、ユーザーが書いた行き先とは別の
+        // リモートを黙って fetch することになる。
+        return remotes
+            .iter()
+            .find(|remote| remote.name == config.remote)
+            .ok_or_else(|| format!("追跡先の {} がリモートにありません", config.remote));
+    }
+
+    match remotes {
+        [only] => Ok(only),
+        many => many
+            .iter()
+            .find(|remote| remote.name == "origin")
+            .ok_or_else(|| {
+                let names = many
+                    .iter()
+                    .map(|remote| remote.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("origin がありません（{names}）。追跡先を設定してください")
+            }),
+    }
+}
+
 /// 追跡設定の無いブランチに `-u` 付きの push を提案する。
 ///
-/// リモートは 1 本ならそれ、複数なら `origin`。**どちらでもなければ選ばない** —
-/// 適当に選ぶと、fork 運用のリポジトリで他人のリポジトリへ push する形になる。
+/// リモートは [`default_remote`] が選ぶ。**適当に選ばない** — fork 運用のリポジトリで
+/// 他人のリポジトリへ push する形になる。
 ///
 /// **git の規則そのものではない**（git は `branch.<name>.pushRemote` と
 /// `remote.pushDefault` も見る）。読むこと自体は `git_read` にならできるが、そこまで
@@ -772,29 +846,9 @@ fn push_plan(state: &AppState) -> PushPlan {
 /// 行き先を見て `n` で止められる**ので、危ないのは「見ずに `y`」だけ。読む判断は
 /// 01 の「push の行き先」に送り先を書いた。
 fn propose_upstream(branch: &str, state: &AppState) -> PushPlan {
-    let candidate = match state.repo.remotes.as_slice() {
-        // **`RepoInfo` にも「届いたか」の印は無い。** `LoadRepoInfo` と `LoadBranches` は
-        // 別のジョブなので、一覧だけ先に届いた瞬間がある。走っているなら待たせる。
-        [] if state.jobs.is_running(JobKind::LoadRepoInfo) => {
-            return PushPlan::Refused("リモート一覧をまだ読めていません".to_string())
-        }
-        [] => return PushPlan::Refused("リモートが登録されていません".to_string()),
-        [only] => &only.name,
-        many => {
-            let Some(origin) = many.iter().find(|remote| remote.name == "origin") else {
-                let names = many
-                    .iter()
-                    .map(|remote| remote.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                // **80 桁に収める。** ステータスバーは要約行を 1 行で切るので、
-                // 長いと「どうすればよいか」の側から消える（M6 で詳細を出すまで）。
-                return PushPlan::Refused(format!(
-                    "origin がありません（{names}）。追跡先を設定してください"
-                ));
-            };
-            &origin.name
-        }
+    let candidate = match default_remote(state) {
+        Ok(remote) => &remote.name,
+        Err(reason) => return PushPlan::Refused(reason),
     };
 
     PushPlan::Ask {
@@ -1069,11 +1123,63 @@ fn repo_info_loaded(state: &mut AppState, result: Result<RepoSnapshot, GitReadEr
     // 書き込みの直後に頼んだぶんが落とされていたら、ここで頼み直す
     // （`status_loaded` と同じ形）。**採ったうえで頼み直す** —— 古い索引でも
     // ラベルは出せるので、届くまで前のものを出したままにする。
-    if state.jobs.is_fresh(JobKind::LoadRepoInfo, asked) {
+    let again = if state.jobs.is_fresh(JobKind::LoadRepoInfo, asked) {
         Cmd::None
     } else {
         Cmd::LoadRepoInfo
+    };
+    Cmd::Batch(vec![again, resolve_target(state)])
+}
+
+/// 既定リモートの URL から [`Cmd::ResolveTarget`] を組む（01 の
+/// 「`RepoInfo.target` を埋める」）。
+///
+/// **`TargetState::Unasked` のときだけ動く。** `repo_info_loaded` は ref を動かす
+/// 書き込みのたびに走るので、印を見ないと commit / checkout / fetch のたびに
+/// `ssh -G` のサブプロセスが増える。
+///
+/// **決まらなかったことの通知は出し分ける。**
+///
+/// - 既定リモートが決まらない（リモートが無い / `origin` が無い）→ **黙る。**
+///   リモートの無いローカルリポジトリで起動のたびに警告が出る。押したときに
+///   困るのは `f` なので、そちらが押された時点で言う
+/// - URL は見つかったが GitHub の形として読めない → **1 回だけ通知する。**
+///   `Unavailable` に落ちるので繰り返さない。GitHub 機能が丸ごと効かない状態を、
+///   ヘッダの degraded 表示（M4 の別タスク）が入るまで黙って隠さないため
+fn resolve_target(state: &mut AppState) -> Cmd {
+    if state.repo.target != TargetState::Unasked {
+        return Cmd::None;
     }
+    let Ok(remote) = default_remote(state) else {
+        state.repo.target = TargetState::Unavailable;
+        return Cmd::None;
+    };
+    match RemoteUrl::parse(&remote.url) {
+        // **ここで `issue` しない。** `update` の出口が 1 箇所で通す（同じ形の
+        // 二重発行は `JobTracker` に落とされ、`Cmd` が黙って消える）。
+        Ok(url) => Cmd::ResolveTarget(url),
+        Err(err) => {
+            state.repo.target = TargetState::Unavailable;
+            state.push_notice(NoticeLevel::Warn, err.to_string(), None);
+            Cmd::None
+        }
+    }
+}
+
+/// `ssh -G` の結果を `RepoInfo.target` に入れる。
+///
+/// `unnormalized` があっても `target` は埋める。**degraded ではなく正規化だけを
+/// 諦める**（04）。
+fn target_resolved(state: &mut AppState, target: RepoTarget, unnormalized: Option<String>) -> Cmd {
+    state.jobs.finish(JobKind::ResolveTarget);
+    state.repo.target = TargetState::Resolved(target);
+    if let Some(reason) = unnormalized {
+        state.push_notice(NoticeLevel::Warn, reason, None);
+    }
+    // **`Cmd::ResolveAccount` はまだ出さない。** ランタイムが `not_implemented` で
+    // 畳んでいるので、出すと起動のたびに「未実装のコマンドです」が出る。読み手が
+    // 入るのは次の PR（01 の「`RepoInfo.target` を埋める」）。
+    Cmd::None
 }
 
 /// ログのページを積む。
@@ -3183,12 +3289,12 @@ mod tests {
         // **共通キー**（07 のキー表）。フォーカスの `match` より先に見ないと、
         // あとから足したペインで押せなくなる。
         //
-        // fetch と pull はリモートを選ばず、`--prune` も付けない（01）。
+        // `f` は既定リモートを明示し、`p` は選ばない。`--prune` は付けない（01）。
         let expected = [
             (
                 'f',
                 Cmd::Exec(GitOp::Fetch {
-                    remote: None,
+                    remote: Some("origin".to_string()),
                     prune: false,
                 }),
             ),
@@ -3217,6 +3323,80 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- 既定リモート（01 / 04 の「既定リモート」）----
+
+    /// `f` が出した fetch のリモート名。出していなければ `None`。
+    fn fetched_remote(cmd: &Cmd) -> Option<String> {
+        match cmd {
+            Cmd::Exec(GitOp::Fetch { remote, .. }) => remote.clone(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn f_fetches_the_tracked_remote_not_origin() {
+        // 1 段目。**`origin` があっても追跡先が勝つ。**
+        let mut state = state_for_push(
+            &["origin", "upstream"],
+            tracking_branch("main", "upstream", HEADS_MAIN),
+        );
+        let cmd = press(&mut state, 'f');
+        assert_eq!(fetched_remote(&cmd).as_deref(), Some("upstream"), "{cmd:?}");
+    }
+
+    #[test]
+    fn f_fetches_the_only_remote_even_when_it_is_not_origin() {
+        // 2 段目。**git 2.55 も同じ**（単一リモート `upstream` で `git fetch` が
+        // `refs/remotes/upstream/main` を作るのを実測。表は 04）。
+        let mut state = state_for_push(&["upstream"], fake_branch("main", true));
+        let cmd = press(&mut state, 'f');
+        assert_eq!(fetched_remote(&cmd).as_deref(), Some("upstream"), "{cmd:?}");
+    }
+
+    #[test]
+    fn f_refuses_when_no_remote_can_be_chosen() {
+        // **これが「`f` が無反応」の見張り**（01）。git に決めさせると何もせず exit 0 で
+        // 返り、stderr が空なので不変ルール 4 の経路も効かない。
+        let mut state = state_for_push(&["fork", "upstream"], fake_branch("main", true));
+        assert_eq!(press(&mut state, 'f'), Cmd::None);
+        let notice = state.notices.back().expect("通知が出ていない");
+        // どのリモートがあるのかを出す（選び直せるように）。
+        assert!(
+            notice.message.contains("fork") && notice.message.contains("upstream"),
+            "{}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn f_refuses_a_locally_tracking_branch() {
+        // `.` は `git branch --set-upstream-to=main topic` が書く形。fetch に渡すと
+        // git が「そんなリモートは無い」で落ちる（push は既に断っている）。
+        let mut state = state_for_push(&["origin"], tracking_branch("main", ".", HEADS_MAIN));
+        assert_eq!(press(&mut state, 'f'), Cmd::None);
+        assert!(state.notices.back().is_some(), "通知が出ていない");
+    }
+
+    #[test]
+    fn f_refuses_a_tracked_remote_that_is_gone() {
+        // **`origin` へ落とさない。** 落とすと、ユーザーが書いた行き先とは別の
+        // リモートを黙って fetch する。
+        let mut state = state_for_push(&["origin"], tracking_branch("main", "gone", HEADS_MAIN));
+        assert_eq!(press(&mut state, 'f'), Cmd::None);
+        let notice = state.notices.back().expect("通知が出ていない");
+        assert!(notice.message.contains("gone"), "{}", notice.message);
+    }
+
+    #[test]
+    fn f_works_before_the_branch_list_arrives() {
+        // **1 段目だけ飛ばす。** 決まらないに落とすと、リモートが 1 本のふつうの
+        // リポジトリで起動直後の `f` が断られる（01 の「既定リモート」）。
+        let mut state = state_with_commits(2);
+        with_remotes(&mut state, &["origin"]);
+        let cmd = press(&mut state, 'f');
+        assert_eq!(fetched_remote(&cmd).as_deref(), Some("origin"), "{cmd:?}");
     }
 
     #[test]
@@ -4360,6 +4540,126 @@ feat/b
                 oid: commit(1).oid,
             },
             refs: RefIndex::from_iter([]),
+        }
+    }
+
+    // ---- RepoInfo.target（01 の「`RepoInfo.target` を埋める」）----
+
+    /// リモートを載せた `RepoInfoLoaded` を 1 通届ける。
+    ///
+    /// **`reply` を通すのは、ランタイムでは `Cmd` が必ず `AppState::issue` を通るから**
+    /// （ヘルパが実物では起きない形を作らないため）。
+    fn deliver_repo_info(state: &mut AppState, remotes: &[(&str, &str)]) -> Cmd {
+        let info = RepoSnapshot {
+            remotes: remotes
+                .iter()
+                .map(|(name, url)| Remote {
+                    name: (*name).to_string(),
+                    url: (*url).to_string(),
+                })
+                .collect(),
+            ..repo_snapshot()
+        };
+        reply(
+            state,
+            Cmd::LoadRepoInfo,
+            Msg::RepoInfoLoaded(Box::new(Ok(info))),
+        )
+    }
+
+    const ORIGIN_SSH: &str = "git@github.com:yshrsmz/mewgit.git";
+
+    #[test]
+    fn the_repo_info_asks_to_resolve_the_target() {
+        let mut state = state();
+        let cmd = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
+        let want = Cmd::ResolveTarget(RemoteUrl::parse(ORIGIN_SSH).unwrap());
+        assert!(issued(&cmd, &want), "{cmd:?}");
+    }
+
+    #[test]
+    fn the_target_is_resolved_once_not_on_every_write() {
+        // **これが `TargetState::Unasked` の見張り。** `RepoInfoLoaded` は ref を動かす
+        // 書き込みのたびに届くので、印を見ないと commit / checkout / fetch のたびに
+        // `ssh -G` のサブプロセスが 1 つ増える。
+        let mut state = state();
+        let _ = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
+        let cmd = update(
+            &mut state,
+            Msg::TargetResolved {
+                target: fake_target(),
+                unnormalized: None,
+            },
+        );
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.repo.target, TargetState::Resolved(fake_target()));
+
+        let cmd = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
+        let want = Cmd::ResolveTarget(RemoteUrl::parse(ORIGIN_SSH).unwrap());
+        assert!(!issued(&cmd, &want), "2 度目を頼んでいる: {cmd:?}");
+    }
+
+    #[test]
+    fn a_url_that_cannot_be_read_is_reported_once() {
+        // **ホストが GitHub かは見ない**（GHES があるので判定できない。04）。ここで
+        // 落ちるのは*形*が読めないもの —— これは GitLab のサブグループで、
+        // `owner/repo` の 2 段にならない。
+        //
+        // GitHub 機能が丸ごと効かない状態なので 1 回は言う。**`Unavailable` に落ちる
+        // ので繰り返さない** —— 書き込みのたびに出るのを防ぐ。
+        const SUBGROUP: &str = "https://gitlab.com/group/sub/repo.git";
+        let mut state = state();
+        let _ = deliver_repo_info(&mut state, &[("origin", SUBGROUP)]);
+        assert_eq!(state.repo.target, TargetState::Unavailable);
+        assert_eq!(state.notices.len(), 1, "{:?}", state.notices);
+
+        let _ = deliver_repo_info(&mut state, &[("origin", SUBGROUP)]);
+        assert_eq!(
+            state.notices.len(),
+            1,
+            "2 度目も通知した: {:?}",
+            state.notices
+        );
+    }
+
+    #[test]
+    fn a_repository_without_remotes_says_nothing() {
+        // リモートの無いローカルリポジトリで、起動のたびに警告を出さない。
+        // 押したときに困るのは `f` なので、そちらが押された時点で言う（01）。
+        let mut state = state();
+        let cmd = deliver_repo_info(&mut state, &[]);
+        assert_eq!(state.repo.target, TargetState::Unavailable);
+        assert!(state.notices.is_empty(), "{:?}", state.notices);
+        assert!(
+            !matches!(&cmd, Cmd::ResolveTarget(_)),
+            "頼む相手がいないのに頼んでいる: {cmd:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_that_could_not_be_normalized_still_fills_the_target() {
+        // **degraded ではなく正規化だけを諦める**（04）。`Msg` を `Result` にすると
+        // ここで `target` が捨てられ、その経路が消える。
+        let mut state = state();
+        let cmd = reply(
+            &mut state,
+            Cmd::ResolveTarget(RemoteUrl::parse(ORIGIN_SSH).unwrap()),
+            Msg::TargetResolved {
+                target: fake_target(),
+                unnormalized: Some("ssh -G gh-work に失敗しました".to_string()),
+            },
+        );
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.repo.target, TargetState::Resolved(fake_target()));
+        assert_eq!(state.notices.len(), 1, "{:?}", state.notices);
+    }
+
+    fn fake_target() -> RepoTarget {
+        RepoTarget {
+            host: "github.com".to_string(),
+            port: None,
+            owner: "yshrsmz".to_string(),
+            repo: "mewgit".to_string(),
         }
     }
 

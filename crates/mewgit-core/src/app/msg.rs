@@ -1,6 +1,6 @@
 //! `update` に入力されるイベント。設計は `docs/design/01-app-core.md`。
 
-use crate::auth::AccountState;
+use crate::auth::{AccountState, RepoTarget};
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp,
@@ -118,6 +118,18 @@ pub enum Msg {
     ProgressDetected(Option<InProgressOp>),
 
     // auth / github
+    /// [`Cmd::ResolveTarget`](super::Cmd::ResolveTarget) の結果（01 の
+    /// 「`RepoInfo.target` を埋める」）。
+    ///
+    /// **`Result` にしない。** `ssh -G` が失敗しても `host_raw` を使って `target` は
+    /// 埋まる（04 の「解決失敗なら `host_raw` をそのまま使い、通知に出す」）。
+    /// `Result` にすると呼び出し側が `Err` で `target` を捨て、**degraded ではなく
+    /// 正規化だけを諦める**という 04 の経路が消える。
+    TargetResolved {
+        target: RepoTarget,
+        /// 正規化できなかった理由。**`target` は埋まっている**（`host_raw` のまま）。
+        unnormalized: Option<String>,
+    },
     /// `auth::resolve` の結果。`Result<Account, AuthError>` にしないのは、`AuthError` と
     /// `DegradedReason` が同じ失敗を二重に表現してしまうため（04）。`AuthError` は
     /// `gh` / `ssh` 実行の内部エラーに留め、`resolve` の中で `DegradedReason` に畳む。

@@ -300,7 +300,7 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
         Style::default().add_modifier(Modifier::BOLD),
     )];
 
-    if let Some(target) = &state.repo.target {
+    if let Some(target) = state.repo.target.resolved() {
         spans.push(Span::raw(format!("  {}/{}", target.owner, target.repo)));
     }
 

@@ -297,6 +297,51 @@ pub(super) fn path_arg(path: &Path) -> Result<String, ArgvError> {
         })
 }
 
+impl GitOp {
+    /// この操作が走らせる `git` のサブコマンド。スピナーの説明に出す
+    /// （01 の「実行中ジョブ」）。
+    ///
+    /// **[`to_command`] の `argv[0]` と同じものを返す。** 別々に書いても
+    /// コンパイルは通るので、`verb_matches_the_argv` が全変種で突き合わせる。
+    /// `to_command` から取らないのは、語を 1 つ得るためにハンクのパッチまで
+    /// 組み直すことになるため（[`to_command`] は `Result` でもある）。
+    ///
+    /// 網羅 `match` にしているのは、変種を足したときに選ばせるため。
+    pub fn verb(&self) -> &'static str {
+        match self {
+            GitOp::Stage(_) => "add",
+            GitOp::Unstage(_) => "reset",
+            GitOp::StageHunk { .. } | GitOp::UnstageHunk { .. } | GitOp::DiscardHunk { .. } => {
+                "apply"
+            }
+            GitOp::Discard(_) => "restore",
+            GitOp::DiscardUntracked(_) => "clean",
+            GitOp::DiscardAdded(_) => "rm",
+            GitOp::Commit { .. } => "commit",
+            // 切り替えるかどうかで `switch --create` と `branch` に分かれる。
+            GitOp::BranchCreate { switch: true, .. } => "switch",
+            GitOp::BranchCreate { switch: false, .. } => "branch",
+            GitOp::Switch(_) => "switch",
+            GitOp::BranchDelete { .. } | GitOp::BranchRename { .. } => "branch",
+            GitOp::Fetch { .. } => "fetch",
+            GitOp::Pull { .. } => "pull",
+            GitOp::Push { .. } => "push",
+            GitOp::RebaseInteractive { .. }
+            | GitOp::RebaseContinue
+            | GitOp::RebaseSkip
+            | GitOp::RebaseAbort => "rebase",
+            GitOp::CherryPick(_) | GitOp::CherryPickContinue | GitOp::CherryPickAbort => {
+                "cherry-pick"
+            }
+            GitOp::Revert { .. } | GitOp::RevertContinue | GitOp::RevertAbort => "revert",
+            GitOp::StashPush { .. }
+            | GitOp::StashApply(_)
+            | GitOp::StashPop(_)
+            | GitOp::StashDrop(_) => "stash",
+        }
+    }
+}
+
 /// `stash@{index}`。
 fn stash(index: usize) -> String {
     format!("stash@{{{index}}}")
@@ -598,6 +643,16 @@ mod tests {
         for (op, expected) in cases() {
             let command = to_command(&op).expect("argv を組めませんでした");
             assert_eq!(command.argv, expected, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn verb_matches_the_argv() {
+        // スピナーの説明と実際に走る git がずれないこと。`cases` は全変種を
+        // 覆っている（`covers_every_variant`）ので、ここも全変種を回る。
+        for (op, _) in cases() {
+            let command = to_command(&op).expect("argv を組めませんでした");
+            assert_eq!(op.verb(), command.argv[0], "{op:?}");
         }
     }
 

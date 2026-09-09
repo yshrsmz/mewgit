@@ -29,6 +29,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let [left, right] = split_body(body);
 
     frame.render_widget(header_line(state), header);
+    // **スピナーは同じ領域に右寄せで重ねる。** `Paragraph` は既定のスタイルで
+    // 領域を塗り直すだけなので、左に描いたリポジトリ名は消えない。
+    if let Some(spinner) = spinner_line(state) {
+        frame.render_widget(Paragraph::new(spinner).right_aligned(), header);
+    }
     // **左は Graph と Diff の差し替え。** どちらを描くかは `focus` だけで決まる（07）。
     // 「いまどちらを見せているか」を別に持つと、`focus` と食い違う状態
     // （Diff を見せているのにキーは Graph が受ける）が表現できてしまう。
@@ -302,6 +307,26 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
     Paragraph::new(Line::from(spans))
 }
 
+/// スピナーの駒。[`Msg::Tick`](mewgit_core::app::Msg::Tick) ごとに 1 つ進む。
+const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+
+/// ヘッダ右端の「いま何が走っているか」。走っているものが無ければ `None`。
+///
+/// **駒と一緒に説明も出す**（`⠋ fetch status`）。07 は当初これをステータスバーに
+/// 置いていたが、あちらは 1 行しかなく、`git` の失敗の案内文に 72 セルを取ってある
+/// （01 の「失敗の案内文」）。ジョブが 1 つ増えるたびに案内が末尾から削られるので、
+/// 空いているヘッダへ移した。
+fn spinner_line(state: &AppState) -> Option<Line<'static>> {
+    if state.jobs.is_empty() {
+        return None;
+    }
+    // 駒は `Tick` の回数で選ぶ。`jobs` の中身では選ばない —— 走っているものが
+    // 変わらないあいだ止まって見える。
+    let frame = SPINNER[(state.tick % SPINNER.len() as u64) as usize];
+    let labels: Vec<&str> = state.jobs.iter().map(|job| job.label.as_str()).collect();
+    Some(Line::from(format!("{frame} {}", labels.join(" "))))
+}
+
 /// ステータスバー。直近の通知とキーヒントの両方を出す。
 ///
 /// 通知で置き換えないのは、起動時の設定警告が 1 件出るとヒントが二度と戻らなくなるため。
@@ -339,7 +364,8 @@ fn repo_label(state: &AppState) -> String {
 mod tests {
     use super::{file_row, pane_area, window, wrapped};
     use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
-    use mewgit_core::app::{AppState, NoticeLevel, Pane, TermSize};
+    use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TermSize};
+    use mewgit_core::git_exec::GitOp;
     use mewgit_core::test_util::fake_snapshot;
     use ratatui::style::Modifier;
 
@@ -501,6 +527,40 @@ mod tests {
     fn header_shows_the_repository_name() {
         let lines = draw(&state_at("/home/user/mewgit"), TermSize::default());
         assert!(lines[0].contains("mewgit"), "header: {:?}", lines[0]);
+    }
+
+    /// ジョブを 1 つ走らせた状態で描いたヘッダ（最上行）。
+    fn header_while_fetching(tick: u64) -> String {
+        let mut state = state_at("/repo");
+        let _ = state.issue(Cmd::Exec(GitOp::Fetch {
+            remote: None,
+            prune: false,
+        }));
+        state.tick = tick;
+        draw(&state, TermSize::default())[0].clone()
+    }
+
+    #[test]
+    fn the_header_spins_while_a_job_runs() {
+        // 走っているものが無ければ出さない。出しっぱなしだと「何か動いている」の
+        // 意味が消える。
+        let idle = draw(&state_at("/repo"), TermSize::default())[0].clone();
+        assert!(!idle.contains('⠋'), "header: {idle:?}");
+
+        let header = header_while_fetching(0);
+
+        // 駒と一緒に「何が」走っているかも出す（07 のヘッダ）。
+        assert!(header.contains("⠋ fetch"), "header: {header:?}");
+        // リポジトリ名は消えない（同じ領域に右寄せで重ねている）。
+        assert!(header.contains("repo"), "header: {header:?}");
+    }
+
+    #[test]
+    fn the_spinner_frame_follows_the_tick() {
+        // `Tick` ごとに駒が変わること。変わらないと「止まっている」と読める。
+        assert_ne!(header_while_fetching(0), header_while_fetching(1));
+        // 一周して戻る。溢れても止まらない（`tick` は `wrapping_add`）。
+        assert_eq!(header_while_fetching(0), header_while_fetching(8));
     }
 
     /// 描いたステータスバー（最下行）。

@@ -41,7 +41,7 @@ const TICK: i64 = 60;
 
 use crate::app::{update, AppState, Cmd, Msg};
 use crate::auth::ssh::SshCommand;
-use crate::git_exec::Runner;
+use crate::git_exec::{GitOp, Runner};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
     Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
@@ -313,6 +313,38 @@ impl TestRepo {
         self.rev_parse("HEAD")
     }
 
+    /// 途中で止まる書き込みを 1 つ用意する。`GitOp` と、フィルタが pid を書く
+    /// ファイルを返す。
+    ///
+    /// clean filter が自分の pid を書いてから眠るので、`git add` は
+    /// **`index.lock` を握ったまま止まる**。中断のテストはこの状態を作ってから
+    /// 合図を送る（03 の「キャンセル」）。**pid が書かれた時点が「git が走って
+    /// いる」**なので、[`wait_for_pid`] で待ってから中断する。
+    ///
+    /// pid のファイルはリポジトリの外に置く。中に置くと untracked として一覧に
+    /// 現れ、status を見るテストと混ざる。
+    pub fn slow_stage(&self) -> (GitOp, PathBuf) {
+        let pid_file = self
+            .path()
+            .parent()
+            .expect("一時ディレクトリの親がありません")
+            .join("filter.pid");
+        self.write_worktree_file(".gitattributes", b"slow.txt filter=slow\n");
+        self.write_worktree_file("slow.txt", b"content\n");
+        // git はフィルタをシェル経由で起こすので、`$$` はそのシェル自身の pid。
+        self.git(&[
+            "config",
+            "filter.slow.clean",
+            &format!("echo $$ > {}; sleep 30", pid_file.display()),
+        ]);
+        (GitOp::Stage(vec!["slow.txt".into()]), pid_file)
+    }
+
+    /// `.git/index.lock` の場所。中断したあとに残っていないことを見る。
+    pub fn index_lock(&self) -> PathBuf {
+        self.path().join(".git/index.lock")
+    }
+
     /// `.git/` の下のファイルを生バイト列で書く。git CLI では作れない ref 名
     /// （非 UTF-8）を仕込むのに使う。
     pub fn write_git_file(&self, name: &str, content: &[u8]) {
@@ -325,6 +357,35 @@ impl TestRepo {
         let out = self.git(&["rev-parse", rev]);
         Oid::from_str(&out).unwrap_or_else(|err| panic!("{rev} の Oid を読めませんでした: {err}"))
     }
+}
+
+/// [`TestRepo::slow_stage`] のフィルタが起動して pid を書くまで待つ。
+///
+/// 書かれなければ panic する。**ここを待たずに中断すると、git がまだ lock を
+/// 握る前に殺すことがあり、見張りが何も見ていない状態で緑になる。**
+pub async fn wait_for_pid(path: &Path) -> i32 {
+    for _ in 0..500 {
+        if let Ok(Ok(pid)) = fs::read_to_string(path).map(|text| text.trim().parse()) {
+            return pid;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("フィルタが起動しませんでした: {}", path.display());
+}
+
+/// そのプロセスが消えるまで待つ。消えなければ `false`。
+///
+/// 孤児は init に引き取られてから消えるので、即座には居なくならない。
+pub async fn wait_until_gone(pid: i32) -> bool {
+    for _ in 0..500 {
+        // SAFETY: signal 0 は「送れるかどうか」を見るだけで、相手にも自分にも
+        // 触らない。
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
 }
 
 /// bare な一時リポジトリ。

@@ -43,6 +43,14 @@ pub struct AppState {
     /// エラー・情報のトースト。積むのは [`AppState::push_notice`]。
     pub notices: VecDeque<Notice>,
     pub term: TermSize,
+    /// [`Msg::Tick`] が来た回数。スピナーの駒を選ぶのに使う（07 のヘッダ）。
+    ///
+    /// **時刻ではなく回数を持つ。** `ui` は `AppState` を描くだけなので、駒を時刻から
+    /// 決めると描画のたびに時計を読むことになり、`TestBackend` で「回った」ことを
+    /// 見張れない。`wrapping_add` で回すので溢れても止まらない。
+    ///
+    /// [`Msg::Tick`]: crate::app::Msg::Tick
+    pub tick: u64,
     /// 起動時に確定した設定。実行中は再読込しない（08）。
     pub config: Config,
 }
@@ -81,6 +89,7 @@ impl AppState {
             jobs: JobTracker::default(),
             notices: VecDeque::new(),
             term: TermSize::default(),
+            tick: 0,
             config,
         }
     }
@@ -101,7 +110,13 @@ impl AppState {
             cmd => match cmd.job_kind() {
                 None => cmd,
                 Some(kind) => {
-                    let job = Job::new(kind, kind.label().to_string());
+                    // **`Exec` だけは走らせる `GitOp` で説明が変わる**（`fetch` /
+                    // `push`）。ほかは種別だけで決まる。
+                    let label = match &cmd {
+                        Cmd::Exec(op) => op.verb().to_string(),
+                        _ => kind.label().to_string(),
+                    };
+                    let job = Job::new(kind, label);
                     if self.jobs.start(job) {
                         cmd
                     } else {
@@ -1093,7 +1108,7 @@ impl JobTracker {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
     pub kind: JobKind,
-    /// ステータスバーに出す短い説明。`Exec` 以外は種別から決まるが、`Exec` だけは
+    /// ヘッダのスピナーに添える短い説明。`Exec` 以外は種別から決まるが、`Exec` だけは
     /// `GitOp` によって変わる（`fetch` / `push` など）ので値として持つ。
     pub label: String,
     /// 走らせた時点の、この種別の領域の世代。
@@ -1106,7 +1121,7 @@ pub struct Job {
 }
 
 impl Job {
-    /// ステータスバーの説明を添えて組む。世代は [`JobTracker::start`] が刻む。
+    /// スピナーの説明を添えて組む。世代は [`JobTracker::start`] が刻む。
     pub fn new(kind: JobKind, label: String) -> Self {
         Self {
             kind,
@@ -1143,12 +1158,16 @@ impl JobKind {
     /// 同種が走っていて発行できなかったときに出す通知。黙って落としてよければ `None`。
     ///
     /// 読み取りは黙って落とす（同じものをもう一度読むだけで、結果は変わらない）。
-    /// 書き込みだけは「押したのに何も起きない」に見えるので伝える。キューに積んで
-    /// 順に流すのは M3（01 の「ランタイム」）。網羅 `match` にしているのは、
+    /// 書き込みだけは「押したのに何も起きない」に見えるので伝える。**キューには
+    /// 積まないと決めた**（01 の「ランタイム」）。網羅 `match` にしているのは、
     /// 種別を足したときにどちらなのかを選ばせるため。
+    ///
+    /// **文言に `Ctrl-C` を出すのは、それが待たずに済む唯一の手だから**（01 の
+    /// 「失敗の案内文」と同じで、次に何を押すかを書く）。中断はどの画面でも効く
+    /// （`update_key` がモーダルより先に見る）ので、ペインで割れない。
     pub fn drop_notice(self) -> Option<&'static str> {
         match self {
-            JobKind::Exec => Some("ほかの git 実行が終わるまで待ってください"),
+            JobKind::Exec => Some("ほかの git 実行が終わるまで待ってください（Ctrl-C で中断）"),
             JobKind::LoadLog
             | JobKind::LoadCommitDetail
             | JobKind::LoadCommitFiles
@@ -1195,10 +1214,10 @@ impl JobKind {
         }
     }
 
-    /// ステータスバーに出す既定の説明。
+    /// ヘッダのスピナーに添える既定の説明。
     ///
     /// `Exec` だけは `GitOp` によって `fetch` / `push` と変わるので、[`Job::label`] は
-    /// `String` のまま。実行時に差し替えるのは M3 の `Cmd::Exec` のタスク。
+    /// `String` のまま。差し替えているのは [`AppState::issue`]（`GitOp::verb`）。
     pub fn label(self) -> &'static str {
         match self {
             JobKind::LoadLog => "log",

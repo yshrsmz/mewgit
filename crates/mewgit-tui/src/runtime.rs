@@ -17,7 +17,7 @@ use mewgit_core::git_read::{GitReadError, ReaderHandle};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
 use ratatui::Terminal;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::input::event_to_msg;
 use crate::ui;
@@ -34,6 +34,17 @@ pub struct Runtime {
     /// `git` CLI の実行（03）。`Cmd::Exec` ごとに `clone` してタスクへ渡す。
     runner: Runner,
     tx: mpsc::UnboundedSender<Msg>,
+    /// 走っている [`Cmd::Exec`] への中断の合図（01 の「実行中ジョブのキャンセル」）。
+    ///
+    /// **`JoinHandle::abort` は使わない。** タスクを外から落とすと
+    /// [`Msg::ExecFinished`] が誰からも来ず、`JobKind::Exec` が走ったまま残って
+    /// 以後の書き込みが全部「ほかの git 実行が終わるまで待ってください」で落ちる。
+    /// 合図を受けたタスク自身が、中断した結果を `Msg` にして返す。
+    ///
+    /// 書き込みは同時に 1 つだけ（`AppState::issue`）なので 1 本で足りる。使い終えた
+    /// 送り手が残ることはあるが、`Exec` が走っていなければ `update` が
+    /// [`Cmd::CancelExec`] を出さないので撃たれない。
+    cancel: Option<oneshot::Sender<()>>,
 }
 
 /// リポジトリを開いて初期状態を作る。
@@ -78,7 +89,7 @@ where
         &state.config.general.git_bin,
         effective_ssh_from_env(reader.ssh_command()),
     );
-    let (runtime, mut msgs) = Runtime::new(reader, runner);
+    let (mut runtime, mut msgs) = Runtime::new(reader, runner);
 
     // 起動時の読み込み。ループの前に 1 回だけ。**サイズを入れるより先に出す。**
     // 逆にすると、サイズを知った時点で `load_more` が 1 ページ目を頼み、`init` の
@@ -154,7 +165,15 @@ fn layout(state: &mut AppState) -> Cmd {
 impl Runtime {
     fn new(reader: ReaderHandle, runner: Runner) -> (Self, mpsc::UnboundedReceiver<Msg>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { reader, runner, tx }, rx)
+        (
+            Self {
+                reader,
+                runner,
+                tx,
+                cancel: None,
+            },
+            rx,
+        )
     }
 
     /// [`Cmd`] を実行する。終了なら [`ControlFlow::Break`]。
@@ -165,7 +184,7 @@ impl Runtime {
     ///
     /// `match` で `_` を使わないのは、`Cmd` に変種を足したときに実装漏れをコンパイル
     /// エラーにするため（`update` や `Cmd::job_kind` と同じ）。
-    pub fn dispatch(&self, state: &mut AppState, cmd: Cmd) -> ControlFlow<()> {
+    pub fn dispatch(&mut self, state: &mut AppState, cmd: Cmd) -> ControlFlow<()> {
         match cmd {
             Cmd::None => ControlFlow::Continue(()),
             Cmd::Batch(cmds) => {
@@ -252,8 +271,12 @@ impl Runtime {
             Cmd::Exec(op) => {
                 let runner = self.runner.clone();
                 let tx = self.tx.clone();
+                // 中断の合図。**受け側はこのタスクの中**で、殺したあとの結果も
+                // このタスクが `Msg` にして返す。
+                let (cancel, canceled) = oneshot::channel();
+                self.cancel = Some(cancel);
                 tokio::spawn(async move {
-                    let result = runner.run(&op).await;
+                    let result = runner.run_cancelable(&op, canceled).await;
                     // 進行中操作の再検出は M5（03）。それまではここで `None` を入れる。
                     let done = ExecDone {
                         op,
@@ -274,6 +297,25 @@ impl Runtime {
                     let result = Box::new(reader.diff(target.clone()).await);
                     let _ = tx.send(Msg::DiffLoaded { target, result });
                 });
+                ControlFlow::Continue(())
+            }
+
+            Cmd::CancelExec => {
+                match self.cancel.take() {
+                    Some(cancel) => {
+                        // 受け側が落ちている（タスクが既に終わった）ときの `Err` は
+                        // 握る。`Msg::ExecFinished` がもう飛んでいるということなので、
+                        // 伝えることが無い。
+                        let _ = cancel.send(());
+                    }
+                    // 1 回目の中断で git が終われなかった形。**黙らない** ——
+                    // `Ctrl-C` を押したのに画面が変わらないのと同じに見える。
+                    None => state.push_notice(
+                        NoticeLevel::Info,
+                        "中断を頼んでいます。git の終了を待っています".to_string(),
+                        None,
+                    ),
+                }
                 ControlFlow::Continue(())
             }
 
@@ -322,7 +364,7 @@ mod tests {
     use mewgit_core::app::{Pane, TermSize};
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::HeadInfo;
-    use mewgit_core::test_util::{BareRepo, TestRepo};
+    use mewgit_core::test_util::{wait_for_pid, BareRepo, TestRepo};
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -375,7 +417,7 @@ mod tests {
         let oid = repo.commit("first");
         repo.git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
         let (mut state, reader) = opened(&repo);
-        let (runtime, mut msgs) = runtime_for(&repo, reader);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
 
         assert!(runtime
             .dispatch(&mut state, Cmd::LoadRepoInfo)
@@ -419,7 +461,7 @@ mod tests {
         repo.commit("first");
         repo.commit("second");
         let (mut state, reader) = opened(&repo);
-        let (runtime, mut msgs) = runtime_for(&repo, reader);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
 
         let cmd = init(&mut state);
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
@@ -504,7 +546,7 @@ mod tests {
         repo.commit_file("a.txt", "first");
         repo.write_worktree_file("b.txt", b"new");
         let (mut state, reader) = opened(&repo);
-        let (runtime, mut msgs) = runtime_for(&repo, reader);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
 
         let cmd = state.issue(Cmd::LoadStatus);
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
@@ -521,7 +563,7 @@ mod tests {
         repo.commit_file("a.txt", "one\ntwo\n");
         repo.write_worktree_file("a.txt", b"one\nTWO\n");
         let (mut state, reader) = opened(&repo);
-        let (runtime, mut msgs) = runtime_for(&repo, reader);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
 
         // ワーキングツリーを読み、Diff ペインを開くところまでを実際の経路で通す。
         let cmd = state.issue(Cmd::LoadStatus);
@@ -551,7 +593,7 @@ mod tests {
         repo.commit("first");
         repo.write_worktree_file("b.txt", b"new");
         let (mut state, reader) = opened(&repo);
-        let (runtime, mut msgs) = runtime_for(&repo, reader);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
 
         let cmd = state.issue(Cmd::Exec(GitOp::Stage(vec!["b.txt".into()])));
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
@@ -570,12 +612,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canceling_lets_the_next_write_through() {
+        // **中断したタスク自身が `Msg::ExecFinished` を返す。** `abort` で落とすと
+        // 誰も `JobKind::Exec` を畳まず、以後の書き込みが全部
+        // 「ほかの git 実行が終わるまで待ってください」で落ちる。
+        let repo = TestRepo::init();
+        repo.commit("first");
+        let (op, pid_file) = repo.slow_stage();
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+
+        let cmd = state.issue(Cmd::Exec(op));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        wait_for_pid(&pid_file).await;
+
+        // `Ctrl-C` が出すのはこれ（`update` 側で見張っている）。
+        assert!(runtime.dispatch(&mut state, Cmd::CancelExec).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        assert!(!state.jobs.is_running(JobKind::Exec));
+        // **「中断で終わった」ことまで見る。** 合図が届いていないと、フィルタが
+        // 眠り終えた 30 秒後に成功が返ってきて、ジョブだけ見る見張りは緑になる。
+        let notice = state.notices.back().expect("通知がありません");
+        assert!(notice.message.contains("中断"), "{notice:?}");
+        assert!(!repo.index_lock().exists(), "index.lock が残っています");
+        // 次の書き込みが通る（落とされない）。
+        let cmd = state.issue(Cmd::Exec(GitOp::Stage(vec!["slow.txt".into()])));
+        assert!(matches!(cmd, Cmd::Exec(_)), "{cmd:?}");
+    }
+
+    #[tokio::test]
+    async fn canceling_without_a_running_task_says_it_is_still_waiting() {
+        // 合図を使い切ったあとの 2 回目。**黙らない** —— `Ctrl-C` を押したのに
+        // 画面が変わらないのと同じに見える。
+        let repo = TestRepo::init();
+        repo.commit("first");
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, _msgs) = runtime_for(&repo, reader);
+
+        assert!(runtime.dispatch(&mut state, Cmd::CancelExec).is_continue());
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert!(notice.message.contains("待っています"), "{notice:?}");
+    }
+
+    #[tokio::test]
     async fn a_failed_exec_reaches_the_notices_with_its_argv_and_stderr() {
         // Git CLI のエラーは握りつぶさない（不変ルール 4）。
         let repo = TestRepo::init();
         repo.commit("first");
         let (mut state, reader) = opened(&repo);
-        let (runtime, mut msgs) = runtime_for(&repo, reader);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
 
         let cmd = state.issue(Cmd::Exec(GitOp::Stage(vec!["missing.txt".into()])));
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
@@ -604,7 +692,7 @@ mod tests {
     async fn quit_breaks_the_loop() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = runtime_for(&repo, reader);
+        let (mut runtime, _msgs) = runtime_for(&repo, reader);
         assert!(runtime.dispatch(&mut state, Cmd::Quit).is_break());
     }
 
@@ -612,7 +700,7 @@ mod tests {
     async fn none_continues() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = runtime_for(&repo, reader);
+        let (mut runtime, _msgs) = runtime_for(&repo, reader);
         assert!(runtime.dispatch(&mut state, Cmd::None).is_continue());
         assert!(state.notices.is_empty());
     }
@@ -621,7 +709,7 @@ mod tests {
     async fn batch_stops_at_quit() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = runtime_for(&repo, reader);
+        let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
         // Quit の後ろは実行しない。未実装 notice が 1 件だけであることで確かめる。
         let batch = Cmd::Batch(vec![Cmd::ResolveAccount, Cmd::Quit, Cmd::FetchPr]);
@@ -633,7 +721,7 @@ mod tests {
     async fn unimplemented_cmd_warns_instead_of_disappearing() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = runtime_for(&repo, reader);
+        let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
         assert!(runtime
             .dispatch(&mut state, Cmd::ResolveAccount)
@@ -651,7 +739,7 @@ mod tests {
         // 通知も出ない（「1 回だけ警告が出てあとは無反応」になる）。
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = runtime_for(&repo, reader);
+        let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
         let cmd = state.issue(Cmd::ResolveAccount);
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
@@ -666,7 +754,7 @@ mod tests {
     async fn nested_batch_is_dispatched() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let (runtime, _msgs) = runtime_for(&repo, reader);
+        let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
         let nested = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::ResolveAccount]), Cmd::FetchPr]);
         assert!(runtime.dispatch(&mut state, nested).is_continue());
@@ -680,7 +768,7 @@ mod tests {
         repo.git(&["commit", "--amend", "-q", "-m", "subject\n\nbody"]);
         let oid = repo.head_oid();
         let (mut state, reader) = opened(&repo);
-        let (runtime, mut msgs) = runtime_for(&repo, reader);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
 
         // 行が無いとカーソルの指すコミットが決まらず、届いた詳細は捨てられる。
         // 先に 1 ページ積む。

@@ -87,11 +87,10 @@ fn heading(section: WorktreeSection) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, pane_text, row_is_reversed, state_at};
-    use mewgit_core::app::{Cmd, Msg, TermSize};
+    use crate::test_util::{draw, pane_text, row_is_reversed, state_at, state_with_status};
+    use mewgit_core::app::{Cmd, TermSize};
     use mewgit_core::git_read::{FileStatus, WorktreeSnapshot};
     use mewgit_core::test_util::fake_entry;
-    use mewgit_core::test_util::reply;
 
     /// 既定の 80x24。右ペインは 32 桁になるので、テストはその幅で読める内容にする。
     const SIZE: TermSize = TermSize {
@@ -102,21 +101,9 @@ mod tests {
     /// スナップショットを `Msg::StatusLoaded` 経由で入れた状態。
     ///
     /// `AppState` に直接書かない。カーソルの詰め直し（`clamp`）を通した形を描く。
-    fn state_with(snapshot: WorktreeSnapshot) -> AppState {
-        let mut state = state_at("/repo");
-        // **発行してから届ける。** 通さない返信は刻印を持たず、`status_loaded` が
-        // 「書き込みより前に頼まれたもの」として頼み直す（01 の「実行中ジョブ › 世代」）。
-        let _ = reply(
-            &mut state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(snapshot))),
-        );
-        state
-    }
-
     #[test]
     fn sections_and_files_are_listed_in_order() {
-        let state = state_with(WorktreeSnapshot {
+        let state = state_with_status(WorktreeSnapshot {
             staged: vec![fake_entry("staged.txt", FileStatus::Added)],
             unstaged: vec![fake_entry("unstaged.txt", FileStatus::Modified)],
             untracked: vec![fake_entry("new.txt", FileStatus::Untracked)],
@@ -138,7 +125,7 @@ mod tests {
     fn a_rename_shows_both_names() {
         let mut renamed = fake_entry("new.txt", FileStatus::Renamed);
         renamed.old_path = Some("old.txt".into());
-        let state = state_with(WorktreeSnapshot {
+        let state = state_with_status(WorktreeSnapshot {
             staged: vec![renamed],
             ..WorktreeSnapshot::default()
         });
@@ -150,7 +137,7 @@ mod tests {
 
     #[test]
     fn the_selected_row_is_highlighted() {
-        let mut state = state_with(WorktreeSnapshot {
+        let mut state = state_with_status(WorktreeSnapshot {
             unstaged: vec![
                 fake_entry("a.txt", FileStatus::Modified),
                 fake_entry("b.txt", FileStatus::Modified),
@@ -166,7 +153,7 @@ mod tests {
 
     #[test]
     fn an_empty_worktree_says_so() {
-        let state = state_with(WorktreeSnapshot::default());
+        let state = state_with_status(WorktreeSnapshot::default());
 
         let text = draw(&state, SIZE).join("\n");
 
@@ -189,7 +176,7 @@ mod tests {
 
     #[test]
     fn the_cursor_row_counts_the_headings() {
-        let mut state = state_with(WorktreeSnapshot {
+        let mut state = state_with_status(WorktreeSnapshot {
             staged: vec![fake_entry("s.txt", FileStatus::Added)],
             unstaged: vec![fake_entry("u.txt", FileStatus::Modified)],
             ..WorktreeSnapshot::default()

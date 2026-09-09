@@ -1,9 +1,9 @@
 //! テスト用のヘルパ。`mewgit-tui` は 1 つのバイナリクレートなので、単体テストは
 //! すべて同じコンパイル単位に入る。feature で切り分ける必要はない。
 
-use mewgit_core::app::{update, AppState, Cmd, Key, Modal, Msg, Pane, RepoInfo, TermSize};
+use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Modal, Msg, Pane, RepoInfo, TermSize};
 use mewgit_core::config::Config;
-use mewgit_core::git_read::{Commit, LogPage};
+use mewgit_core::git_read::{Commit, FileEntry, GitReadError, LogPage, WorktreeSnapshot};
 use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents, reply};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Position;
@@ -156,6 +156,55 @@ pub fn state_on_first_commit(summaries: &[&str]) -> AppState {
     let mut state = state_with_commits(summaries);
     let _ = update(&mut state, Msg::Key(Key::char('j')));
     state
+}
+
+/// ワーキングツリーの一覧が届いた状態。
+///
+/// **発行してから届ける。** 通さない返信は刻印を持たず、`status_loaded` が
+/// 「書き込みより前に頼まれたもの」として頼み直す（01 の「実行中ジョブ › 世代」）。
+pub fn state_with_status(snapshot: WorktreeSnapshot) -> AppState {
+    let mut state = state_at("/repo");
+    let _ = reply(
+        &mut state,
+        Cmd::LoadStatus,
+        Msg::StatusLoaded(Box::new(Ok(snapshot))),
+    );
+    state
+}
+
+/// ワーキングツリーを読み、`Enter` で Diff ペインを開いた状態。
+///
+/// **`AppState` に直に書かず `Enter` を通す。** `focus` と `wanted_diff` が実際の経路で
+/// 揃った形を描くため。`focus = Pane::Diff` を直に置くと、対象の無い状態
+/// （`focus_candidates` が候補から外す形。01）を作れてしまい、実物では出ない画面を
+/// 見張ることになる。
+pub fn state_showing_diff(snapshot: WorktreeSnapshot) -> AppState {
+    let mut state = state_with_status(snapshot);
+    state.focus = Pane::Worktree;
+    let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+    // **開けたことを確かめる。** `Enter` は差分で表せる行が無ければ断られるので、
+    // 見ないと「Diff を出した状態」を名乗りながら Worktree のままの状態を返しうる。
+    assert_eq!(state.focus, Pane::Diff, "Diff ペインが開いていません");
+    state
+}
+
+/// コミットのファイル一覧の返信を届ける。**成功も失敗もここを通す。**
+///
+/// oid はカーソルの指すコミットから取る。手で書くと、選ぶ行を変えたときに返信が
+/// 黙って別のコミットのものになり、テストが待ち状態のまま緑になる。
+pub fn deliver_commit_files(state: &mut AppState, result: Result<Vec<FileEntry>, GitReadError>) {
+    let oid = state
+        .graph
+        .cursor_commit()
+        .expect("コミット行を選んでいません")
+        .oid;
+    let _ = update(
+        state,
+        Msg::CommitFilesLoaded {
+            oid,
+            result: Box::new(result),
+        },
+    );
 }
 
 /// モーダルを出した状態。下に何か描かれていること（覆いのテスト）が要るので、

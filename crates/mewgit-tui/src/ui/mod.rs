@@ -219,6 +219,23 @@ pub const LOADING: &str = "読み込み中…";
 /// 変更が 1 つも無いときの文言。ワーキングツリーとコミットのファイル一覧が使う。
 pub const NO_CHANGES: &str = "変更はありません";
 
+/// コミットのファイル一覧が出せないときの文言。
+///
+/// **読み手は 2 つ。** CommitDetail ペイン（一覧そのもの）と Diff ペイン（一覧が
+/// 決まらないと対象が決まらない）。分けて書くと、届く前・失敗・空の 3 通りのうち
+/// どれかが片方だけ古くなる —— 実際、Diff 側に書き直したときに失敗の腕が落ちて、
+/// **一覧の読み込みに失敗すると Diff ペインが永久に「読み込み中…」を出していた**。
+pub fn files_placeholder(state: &AppState) -> &'static str {
+    if state.graph.fresh_files().is_some() {
+        // 届いていて空。`--allow-empty` のコミット。
+        NO_CHANGES
+    } else if state.graph.has_files_failed() {
+        "ファイル一覧を読み込めませんでした"
+    } else {
+        LOADING
+    }
+}
+
 /// ファイル一覧の 1 行。`M src/main.rs`、rename は `R old.txt -> new.txt`。
 ///
 /// **Worktree ペインとコミット詳細のファイル一覧が同じものを使う**（07）。区画の
@@ -321,8 +338,9 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::{file_row, pane_area, window, wrapped};
-    use crate::test_util::{draw, state_at, terminal_with};
+    use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
     use mewgit_core::app::{AppState, NoticeLevel, Pane, TermSize};
+    use mewgit_core::test_util::fake_snapshot;
     use ratatui::style::Modifier;
 
     #[test]
@@ -396,10 +414,16 @@ mod tests {
     fn the_focused_pane_is_the_only_one_with_a_bold_border() {
         // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
         let size = TermSize::default();
-        // 巡回の候補はグラフの選択で変わる（01）。`state_at` は行が無いので WIP 側。
-        let candidates = state_at("/repo").focus_candidates();
+        // 巡回の候補はグラフの選択で変わる（01）。WIP 側で回す。
+        //
+        // **差分で表せる行を 1 つ置く。** 変更が無いと `Diff` が候補から外れ（01 の
+        // 「Pane と Modal」）、この見張りが**黙って 1 ペインぶん減る** —— 下の
+        // 「Graph と Diff は同じ領域」の腕がまさに踏まれなくなる（#40 と同じ形）。
+        let base = || state_with_status(fake_snapshot(&[], &["a.txt"], &[]));
+        let candidates = base().focus_candidates();
+        assert!(candidates.contains(&Pane::Diff), "{candidates:?}");
         for &focus in candidates {
-            let mut state = state_at("/repo");
+            let mut state = base();
             state.focus = focus;
             let terminal = terminal_with(&state, size);
             let buffer = terminal.backend().buffer();
@@ -430,11 +454,13 @@ mod tests {
 
     #[test]
     fn the_left_area_swaps_between_the_graph_and_the_diff() {
-        let mut state = state_at("/repo");
+        let state = state_at("/repo");
         let text = draw(&state, TermSize::default()).join("\n");
         assert!(text.contains("Graph"), "{text}");
 
-        state.focus = Pane::Diff;
+        // **`focus` を直に置かない。** 対象の無い `Diff` は候補から外れる（01）ので、
+        // 直に置くと実物では出ない画面を見張ることになる。
+        let state = state_showing_diff(fake_snapshot(&[], &["a.txt"], &[]));
         let text = draw(&state, TermSize::default()).join("\n");
 
         // 差し替えであって分割ではない。両方出すと 80 桁ではどちらも読めない。

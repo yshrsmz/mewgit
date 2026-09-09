@@ -88,7 +88,7 @@ fn files_lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
         .fresh_files()
         .filter(|files| !files.entries.is_empty())
     else {
-        return (vec![Line::raw(files_placeholder(state))], 0);
+        return (vec![Line::raw(ui::files_placeholder(state))], 0);
     };
 
     let mut lines = Vec::with_capacity(files.entries.len() + 1);
@@ -107,18 +107,6 @@ fn files_lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
         }
     }
     (lines, cursor)
-}
-
-/// 一覧が出せないときの文言。
-fn files_placeholder(state: &AppState) -> &'static str {
-    if state.graph.fresh_files().is_some() {
-        // 届いていて空。`--allow-empty` のコミット。
-        ui::NO_CHANGES
-    } else if state.graph.has_files_failed() {
-        "ファイル一覧を読み込めませんでした"
-    } else {
-        ui::LOADING
-    }
 }
 
 /// 詳細がまだ無いときの文言。
@@ -178,11 +166,11 @@ fn who(label: &str, sig: &Signature, time: Timestamp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, pane_text, row_is_reversed, state_on_first_commit};
-    use mewgit_core::app::{update, AppState, JobKind, Key, Msg, Pane, TermSize};
-    use mewgit_core::git_read::{
-        short_oid, CommitDetail, FileEntry, FileStatus, GitReadError, Oid,
+    use crate::test_util::{
+        deliver_commit_files, draw, pane_text, row_is_reversed, state_on_first_commit,
     };
+    use mewgit_core::app::{update, AppState, JobKind, Key, Msg, Pane, TermSize};
+    use mewgit_core::git_read::{short_oid, CommitDetail, FileEntry, FileStatus, GitReadError};
     use mewgit_core::test_util::{fake_detail, fake_entry, fake_oid};
 
     /// 1 件目のコミットを選び、その詳細が届いた状態。
@@ -285,21 +273,10 @@ mod tests {
         assert!(text.contains("詳細を読み込めませんでした"), "{text}");
     }
 
-    /// ファイル一覧の返信を届ける。**成功も失敗もここを通す。**
-    fn with_files(state: &mut AppState, oid: Oid, result: Result<Vec<FileEntry>, GitReadError>) {
-        let _ = update(
-            state,
-            Msg::CommitFilesLoaded {
-                oid,
-                result: Box::new(result),
-            },
-        );
-    }
-
     /// 詳細と一覧の両方が届いた状態。
     fn with_detail_and_files(entries: Vec<FileEntry>) -> AppState {
         let mut state = with_detail(&["subject"], fake_detail(0, "subject"));
-        with_files(&mut state, fake_oid(0), Ok(entries));
+        deliver_commit_files(&mut state, Ok(entries));
         state
     }
 
@@ -362,7 +339,7 @@ mod tests {
     #[test]
     fn a_file_list_that_failed_says_so_instead_of_loading() {
         let mut state = with_detail(&["subject"], fake_detail(0, "subject"));
-        with_files(&mut state, fake_oid(0), Err(GitReadError::NonUtf8Head));
+        deliver_commit_files(&mut state, Err(GitReadError::NonUtf8Head));
 
         let text = draw(&state, WIDE).join("\n");
 
@@ -383,7 +360,7 @@ mod tests {
             &["subject line"],
             fake_detail(0, "subject line\n\nbody line"),
         );
-        with_files(&mut state, fake_oid(0), Ok(entries));
+        deliver_commit_files(&mut state, Ok(entries));
 
         let text = draw(&state, TermSize::default()).join("\n");
 
@@ -406,9 +383,8 @@ mod tests {
                 result: Box::new(Err(GitReadError::NonUtf8Head)),
             },
         );
-        with_files(
+        deliver_commit_files(
             &mut state,
-            oid,
             Ok(vec![fake_entry("a.txt", FileStatus::Modified)]),
         );
 
@@ -422,9 +398,8 @@ mod tests {
     fn a_detail_for_another_commit_hides_the_file_list_too() {
         // 一覧も oid の一致で濾す。前のコミットのファイルを出したままにしない。
         let mut state = with_detail(&["first", "second"], fake_detail(0, "first"));
-        with_files(
+        deliver_commit_files(
             &mut state,
-            fake_oid(0),
             Ok(vec![fake_entry("a.txt", FileStatus::Modified)]),
         );
         // 2 件目へ。1 件目の一覧しか持っていない。
@@ -440,9 +415,8 @@ mod tests {
         // リサイズの途中では枠より小さい端末が来る。
         for (width, height) in [(1, 1), (10, 3), (20, 5)] {
             let mut state = with_detail(&["subject"], fake_detail(0, "subject\n\nbody"));
-            with_files(
+            deliver_commit_files(
                 &mut state,
-                fake_oid(0),
                 Ok(vec![fake_entry("a.txt", FileStatus::Modified)]),
             );
             let lines = draw(&state, TermSize { width, height });

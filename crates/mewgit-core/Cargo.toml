@@ -19,7 +19,7 @@ git2 = "0.21"
 # tokio の `Child::kill` は SIGKILL しか送れず、それだと git が index.lock を
 # 残したまま死ぬ（実測。03 の表）。
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 toml = "1.0"
 globset = "0.4"
 tempfile = { version = "3", optional = true }

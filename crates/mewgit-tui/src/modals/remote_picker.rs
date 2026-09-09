@@ -1,9 +1,8 @@
 //! リモート選択モーダルの描画。設計は `docs/design/07-ui.md` の
 //! 「RemotePicker モーダル」。
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::modals;
@@ -17,7 +16,9 @@ const TITLE: &str = "fetch するリモート";
 const HINT: &str = "[j/k] 選ぶ   [Enter] fetch   [Esc] やめる";
 
 /// 理由と一覧のあいだに空ける行数。
-const GAP_ROWS: u16 = 1;
+///
+/// **`modals::GAP_ROWS` とは別のもの**（あちらは本文とキーの案内のあいだ）。
+const REASON_GAP_ROWS: u16 = 1;
 
 /// 一覧から fetch するリモートを選ばせる。
 pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], cursor: usize) {
@@ -34,14 +35,15 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], c
         area,
         block,
         modals::WIDTH,
-        reason_rows.saturating_add(GAP_ROWS + rows),
+        reason_rows.saturating_add(REASON_GAP_ROWS + rows),
         HINT,
     );
 
-    let [reason_area, _gap, list] = ratatui::layout::Layout::vertical([
-        ratatui::layout::Constraint::Length(reason_rows),
-        ratatui::layout::Constraint::Length(GAP_ROWS),
-        ratatui::layout::Constraint::Min(0),
+    // **空行は理由の枠に含める。** 3 本に割って真ん中を捨てると、捨てる束縛と
+    // 制約が 1 つずつ増えるだけで結果は同じ（`Paragraph` は上詰め）。
+    let [reason_area, list] = Layout::vertical([
+        Constraint::Length(reason_rows.saturating_add(REASON_GAP_ROWS)),
+        Constraint::Min(0),
     ])
     .areas(body);
 
@@ -60,7 +62,11 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], c
             }
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), list);
+    // **`ui::render_rows` を通す。** 素の `Paragraph` で描くと、枠に入りきらない
+    // 本数のときにカーソル行が画面の外へ出たまま `j` で動き続け、**見えていない
+    // リモートを `Enter` で fetch する** —— このモーダルが防ぐために在る
+    // 「黙って選ばない」そのもの。ペインの一覧が 4 つともここを通っている。
+    ui::render_rows(frame, list, lines, cursor..cursor + 1);
 }
 
 #[cfg(test)]
@@ -134,6 +140,23 @@ mod tests {
             row_of(&lines, "upstream") < row_of(&lines, "[Enter] fetch"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_cursor_row_stays_visible_when_the_list_is_taller_than_the_box() {
+        // **窓を切り出さずに描くと、カーソルが枠の外へ出たまま `j` で動き続け、
+        // 見えていないリモートを `Enter` で fetch する。** 既存の 4 本はどちらでも
+        // 通るので、この見張りが無いと素の `Paragraph` に戻せてしまう。
+        let remotes: Vec<String> = (0..30).map(|i| format!("remote{i:02}")).collect();
+        let state = state_with_modal(Modal::RemotePicker {
+            reason: "origin がありません".to_string(),
+            remotes,
+            cursor: 29,
+        });
+
+        let text = draw(&state, SIZE).join("\n");
+
+        assert!(text.contains("remote29"), "{text}");
     }
 
     #[test]

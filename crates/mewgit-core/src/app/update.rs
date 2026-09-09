@@ -19,7 +19,6 @@ use crate::git_read::{
     Hunk, LogPage, Oid, Remote, WorktreeSection, WorktreeSnapshot,
 };
 
-use super::state::stepped_index;
 use super::{
     AppState, BranchLoad, Cmd, CommitFiles, DiffCursor, DiffView, ExecDone, GraphLine,
     GraphSelection, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
@@ -407,27 +406,29 @@ fn confirm_key(state: &mut AppState, key: Key) -> Cmd {
 /// **先にモーダルを閉じてから `Cmd` を返す**（[`confirm_key`] と同じ理由。閉じずに
 /// 返すと、`Cmd` が [`AppState::issue`] に落とされたときにモーダルだけが画面に残る）。
 fn remote_picker_key(state: &mut AppState, key: Key) -> Cmd {
-    let Some(Modal::RemotePicker {
-        remotes, cursor, ..
-    }) = state.modal.as_mut()
-    else {
+    let Some(modal) = state.modal.as_mut() else {
         return Cmd::None;
     };
 
     match key.code() {
-        // 端の扱いはペインのカーソルと同じ規則（`state::stepped_index`）。
+        // 端の扱いはペインのカーソルと同じ規則（`Modal::move_cursor`）。
         KeyCode::Char('j') | KeyCode::Down => {
-            *cursor = stepped_index(*cursor, remotes.len(), 1);
+            modal.move_cursor(1);
             Cmd::None
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            *cursor = stepped_index(*cursor, remotes.len(), -1);
+            modal.move_cursor(-1);
             Cmd::None
         }
         KeyCode::Enter => {
             // **一覧は空にならない**（空なら `fetch` が開かない）が、`get` で取るのは
             // 添字を信じないため。取れなければ閉じるだけにする。
-            let picked = remotes.get(*cursor).cloned();
+            let picked = match modal {
+                Modal::RemotePicker {
+                    remotes, cursor, ..
+                } => remotes.get(*cursor).cloned(),
+                _ => None,
+            };
             state.modal = None;
             picked.map_or(Cmd::None, |remote| fetch_from(&remote))
         }
@@ -806,24 +807,47 @@ fn push_plan(state: &AppState) -> PushPlan {
 fn fetch(state: &mut AppState) -> Cmd {
     let reason = match default_remote(state) {
         Ok(remote) => return fetch_from(&remote.name),
-        Err(reason) => reason,
+        // **選ばせる相手がいるかは規則の側が既に判じている。** ここで一覧を数え直すと、
+        // `conventional_remote` の `[]` の腕と同じ判断が 2 本並ぶ。
+        Err(NoRemote::Nobody(reason)) => {
+            state.push_notice(NoticeLevel::Warn, reason, None);
+            return Cmd::None;
+        }
+        Err(NoRemote::Ask(reason)) => reason,
     };
-    let remotes: Vec<String> = state
-        .repo
-        .remotes
-        .iter()
-        .map(|remote| remote.name.clone())
-        .collect();
-    if remotes.is_empty() {
-        state.push_notice(NoticeLevel::Warn, reason, None);
-        return Cmd::None;
-    }
     state.modal = Some(Modal::RemotePicker {
         reason,
-        remotes,
+        remotes: state
+            .repo
+            .remotes
+            .iter()
+            .map(|remote| remote.name.clone())
+            .collect(),
         cursor: 0,
     });
     Cmd::None
+}
+
+/// 既定リモートが決まらなかった形（01 の「決まらないときの逃げ道」）。
+///
+/// **`String` 1 本で返さない。** 「選ばせる相手がいるか」は規則の側でしか判らないのに
+/// 文字列だけを返すと、呼ぶ側がリモート一覧を数え直して**同じ判断を 2 本目に書く**
+/// ことになる。どちらの腕も案内文を持つのは、行き先（通知 / モーダルの本文）が違うだけで
+/// 「なぜ決まらないか」は同じだから。
+enum NoRemote {
+    /// 選ばせる相手がいない（まだ読めていない / 1 本も登録されていない）。通知に落とす。
+    Nobody(String),
+    /// 候補はあるが、mewgit が選ぶと危ない。**人に選ばせる。**
+    Ask(String),
+}
+
+impl NoRemote {
+    /// 案内文。押せるキーが無い場面（`P` の `-u` 提案）はこれを通知に出すだけ。
+    fn into_message(self) -> String {
+        match self {
+            NoRemote::Nobody(message) | NoRemote::Ask(message) => message,
+        }
+    }
 }
 
 /// リモートを明示した fetch。**`--prune` は付けない**（01 の「リモート操作」）。
@@ -863,7 +887,7 @@ const LOCAL_TRACKING: &str = "追跡先がローカルです。リモートを�
 /// 違う規則を持っており（push は `branch.<name>.pushRemote` > `remote.pushDefault` >
 /// fetch の規則）、畳むと **fetch の既定へ push する**という git がしない挙動になる。
 /// あちらが呼ぶのは追跡設定が無いと判った**あと**なので、[`conventional_remote`] でよい。
-fn default_remote(state: &AppState) -> Result<&Remote, String> {
+fn default_remote(state: &AppState) -> Result<&Remote, NoRemote> {
     // **リモート一覧が空のあいだは 1 段目に入らない。** `LoadRepoInfo` と
     // `LoadBranches` は別のジョブなので、ブランチだけ先に届いた瞬間がある。そこで
     // 1 段目を通すと、追跡先が一覧に無いのは当たり前なので「追跡先の origin が
@@ -884,7 +908,7 @@ fn default_remote(state: &AppState) -> Result<&Remote, String> {
         // **`.` はローカル追跡。** push が既に断っている形で、fetch に渡すと git が
         // 「そんなリモートは無い」で落ちる。
         if config.remote == "." {
-            return Err(LOCAL_TRACKING.to_string());
+            return Err(NoRemote::Ask(LOCAL_TRACKING.to_string()));
         }
         // **`origin` へ落とさない。** 落とすと、ユーザーが書いた行き先とは別の
         // リモートを黙って fetch することになる。
@@ -893,7 +917,9 @@ fn default_remote(state: &AppState) -> Result<&Remote, String> {
             .remotes
             .iter()
             .find(|remote| remote.name == config.remote)
-            .ok_or_else(|| format!("追跡先の {} がリモートにありません", config.remote));
+            .ok_or_else(|| {
+                NoRemote::Ask(format!("追跡先の {} がリモートにありません", config.remote))
+            });
     }
 
     conventional_remote(state)
@@ -912,14 +938,14 @@ fn default_remote(state: &AppState) -> Result<&Remote, String> {
 ///
 /// **80 桁に収める。** ステータスバーは要約行を 1 行で切るので、長いと
 /// 「どうすればよいか」の側から消える（M6 で詳細を出すまで）。
-fn conventional_remote(state: &AppState) -> Result<&Remote, String> {
+fn conventional_remote(state: &AppState) -> Result<&Remote, NoRemote> {
     match state.repo.remotes.as_slice() {
         // **`RepoInfo` にも「届いたか」の印は無い。** `LoadRepoInfo` と `LoadBranches` は
         // 別のジョブなので、一覧だけ先に届いた瞬間がある。走っているなら待たせる。
-        [] if state.jobs.is_running(JobKind::LoadRepoInfo) => {
-            Err("リモート一覧をまだ読めていません".to_string())
-        }
-        [] => Err("リモートが登録されていません".to_string()),
+        [] if state.jobs.is_running(JobKind::LoadRepoInfo) => Err(NoRemote::Nobody(
+            "リモート一覧をまだ読めていません".to_string(),
+        )),
+        [] => Err(NoRemote::Nobody("リモートが登録されていません".to_string())),
         [only] => Ok(only),
         many => many
             .iter()
@@ -930,7 +956,9 @@ fn conventional_remote(state: &AppState) -> Result<&Remote, String> {
                     .map(|remote| remote.name.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("origin がありません（{names}）。追跡先を設定してください")
+                NoRemote::Ask(format!(
+                    "origin がありません（{names}）。追跡先を設定してください"
+                ))
             }),
     }
 }
@@ -948,7 +976,9 @@ fn conventional_remote(state: &AppState) -> Result<&Remote, String> {
 fn propose_upstream(branch: &str, state: &AppState) -> PushPlan {
     let candidate = match conventional_remote(state) {
         Ok(remote) => &remote.name,
-        Err(reason) => return PushPlan::Refused(reason),
+        // **`Ask` でもモーダルは開かない。** push の行き先を選ばせるのは不変ルール 5 の
+        // 手前の判断で、読むだけの fetch と同じ扱いにはできない（01）。
+        Err(no) => return PushPlan::Refused(no.into_message()),
     };
 
     PushPlan::Ask {

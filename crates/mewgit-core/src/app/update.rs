@@ -794,6 +794,15 @@ const LOCAL_TRACKING: &str = "追跡先がローカルです。リモートを�
 /// fetch の規則）、畳むと **fetch の既定へ push する**という git がしない挙動になる。
 /// あちらが呼ぶのは追跡設定が無いと判った**あと**なので、[`conventional_remote`] でよい。
 fn default_remote(state: &AppState) -> Result<&Remote, String> {
+    // **リモート一覧が空のあいだは 1 段目に入らない。** `LoadRepoInfo` と
+    // `LoadBranches` は別のジョブなので、ブランチだけ先に届いた瞬間がある。そこで
+    // 1 段目を通すと、追跡先が一覧に無いのは当たり前なので「追跡先の origin が
+    // リモートにありません」—— **設定が壊れていると言ってしまう**（`/code-review` が
+    // 拾った）。空のときの文言は [`conventional_remote`] が 2 通り持っている。
+    if state.repo.remotes.is_empty() {
+        return conventional_remote(state);
+    }
+
     // **ブランチ一覧がまだなら、この段だけ飛ばす。** 決まらないに落とすと、リモートが
     // 1 本のふつうのリポジトリで起動直後の `f` が断られる（01 の「既定リモート」）。
     // **`f` はキーなので、遅れて届いた一覧は次に押したときに効く。**
@@ -1133,14 +1142,25 @@ fn reload_log(state: &AppState) -> Cmd {
 fn repo_info_loaded(state: &mut AppState, result: Result<RepoSnapshot, GitReadError>) -> Cmd {
     let asked = state.jobs.finish(JobKind::LoadRepoInfo);
 
-    match result {
+    let resolve = match result {
         Ok(info) => {
             state.repo.remotes = info.remotes;
             state.repo.head = Some(info.head);
             state.graph.refs = info.refs;
+            // **`Ok` のときだけ。** `Err` の直後は `remotes` が前のまま（起動時なら
+            // 空）で、`jobs.finish` は上で済んでいるから「まだ読めていません」の
+            // 腕にも入らない。呼ぶと**読めなかっただけ**の一回を
+            // `TargetState::Unavailable` として latch し、下の `again` が読み直しに
+            // 成功しても `Unasked` ではなくなっているので二度と頼まない
+            // （`TargetState` の doc が言う「決められなかった」は読めなかったことでは
+            // ない）。`/code-review` が拾った。
+            resolve_target(state)
         }
-        Err(err) => state.push_notice(NoticeLevel::Warn, err.to_string(), None),
-    }
+        Err(err) => {
+            state.push_notice(NoticeLevel::Warn, err.to_string(), None);
+            Cmd::None
+        }
+    };
     // 書き込みの直後に頼んだぶんが落とされていたら、ここで頼み直す
     // （`status_loaded` と同じ形）。**採ったうえで頼み直す** —— 古い索引でも
     // ラベルは出せるので、届くまで前のものを出したままにする。
@@ -1149,7 +1169,7 @@ fn repo_info_loaded(state: &mut AppState, result: Result<RepoSnapshot, GitReadEr
     } else {
         Cmd::LoadRepoInfo
     };
-    Cmd::batch([again, resolve_target(state)])
+    Cmd::batch([again, resolve])
 }
 
 /// 既定リモートの URL から [`Cmd::ResolveTarget`] を組む（01 の
@@ -4647,6 +4667,49 @@ feat/b
         let cmd = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
         let want = Cmd::ResolveTarget(RemoteUrl::parse(ORIGIN_SSH).unwrap());
         assert!(!issued(&cmd, &want), "2 度目を頼んでいる: {cmd:?}");
+    }
+
+    #[test]
+    fn a_failed_repo_info_does_not_give_up_on_the_target() {
+        // **読めなかっただけの一回で latch しない。** `Err` の直後は `remotes` が
+        // 前のまま（起動時なら空）なので、そこで `Unavailable` を書くと、読み直しが
+        // 成功しても `Unasked` ではなくなっていて二度と頼まない。
+        let mut state = state();
+        let cmd = reply(
+            &mut state,
+            Cmd::LoadRepoInfo,
+            Msg::RepoInfoLoaded(Box::new(Err(GitReadError::NonUtf8Head))),
+        );
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.repo.target, TargetState::Unasked, "諦めている");
+
+        // 読み直しが通れば target は決まる。
+        let cmd = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
+        assert_eq!(
+            cmd,
+            Cmd::ResolveTarget(RemoteUrl::parse(ORIGIN_SSH).unwrap())
+        );
+    }
+
+    #[test]
+    fn f_waits_when_the_branch_list_arrives_before_the_remotes() {
+        // **`f_works_before_the_branch_list_arrives` の逆順。** 一覧が空のまま
+        // 1 段目を通すと、追跡先が見つからないのは当たり前なので「追跡先の origin が
+        // リモートにありません」——**設定が壊れていると言ってしまう**。
+        let mut state = state_with_commits(2);
+        let _ = state.issue(Cmd::LoadRepoInfo);
+        let _ = with_branches(
+            &mut state,
+            Ok(vec![tracking_branch("main", "origin", HEADS_MAIN)]),
+        );
+
+        assert_eq!(press(&mut state, 'f'), Cmd::None);
+        let notice = state.notices.back().expect("通知が出ていない");
+        assert!(
+            notice.message.contains("まだ読めていません"),
+            "{}",
+            notice.message
+        );
     }
 
     #[test]

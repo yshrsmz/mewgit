@@ -116,6 +116,10 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
 /// **port の構文はどちらの scheme でも確かめる。** 値を使うのは https だけだが
 /// （[`RemoteScheme`]）、読めない port を「port が無い」と同じに扱うと、git が動かない
 /// URL を解析できたことにしてしまう。`0` はポート番号ではないので落とす。
+///
+/// **数字だけを受ける。** `u16::from_str` は先頭の `+` を通すので、`parse` に任せると
+/// `https://h:+8443/a/b` が port 8443 として通る —— git は取りに行けない URL なのに、
+/// こちらだけが読めたことにする（`/code-review` が拾った）。
 fn split_authority(authority: &str) -> Option<(&str, Option<u16>)> {
     // user 名に `@` が入ることがあるので、最後の `@` で割る。
     let host = authority
@@ -123,7 +127,10 @@ fn split_authority(authority: &str) -> Option<(&str, Option<u16>)> {
         .map_or(authority, |(_, host)| host);
     // IPv6 リテラル（`[::1]:22`）は `[` を含むので `valid_host` で落ちる。
     let (host, port) = match host.split_once(':') {
-        Some((host, port)) => (host, Some(port.parse::<u16>().ok().filter(|p| *p != 0)?)),
+        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => {
+            (host, Some(port.parse::<u16>().ok().filter(|p| *p != 0)?))
+        }
+        Some(_) => return None,
         None => (host, None),
     };
     valid_host(host).then_some((host, port))
@@ -311,6 +318,9 @@ mod tests {
             "https://github.com:/a/b",
             "https://github.com:99999/a/b",
             "https://github.com:0/a/b",
+            // `u16::from_str` は先頭の `+` を通すが、git はこの URL を取りに行けない。
+            "https://github.com:+8443/a/b",
+            "https://github.com: 443/a/b",
             "ssh://git@github.com:x/a/b",
             "ssh://git@github.com:0/a/b",
         ] {

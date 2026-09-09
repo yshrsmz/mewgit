@@ -942,6 +942,11 @@ conventional_remote = リモートが 1 本ならそれ → origin → 決まら
   `branch.<HEAD>.remote` の段だけを飛ばす —— **決まらないに落とさない** ——
   リモートが 1 本のふつうのリポジトリで、起動直後の `f` が断られてしまう。
   **この寛容さは `f` にしか成り立たない**（上の非対称）
+- **逆順も数える。** ブランチ一覧だけが先に届く瞬間もある（`LoadRepoInfo` と
+  `LoadBranches` は別のジョブ）。リモート一覧が空のまま 1 段目を通すと、追跡先が
+  見つからないのは当たり前なので「追跡先の origin がリモートにありません」と、
+  **設定が壊れていると言ってしまう**。空のあいだは 1 段目に入らず
+  `conventional_remote` の「まだ読めていません」に落とす
 - **`.`（ローカル追跡）は決まらない。** push が既に断っている形で、
   fetch に渡すと git が「そんなリモートは無い」で落ちる
 - **`branch.<HEAD>.remote` が一覧に無い名前を指していたら、その段を飛ばさず
@@ -965,6 +970,10 @@ Msg::RepoInfoLoaded → update が default_remote で URL を選び RemoteUrl::p
   → Msg::TargetResolved { .. }      → RepoInfo.target = Some(..)
 ```
 
+- **`RepoInfoLoaded` が `Err` のときは頼まない。** 失敗の直後は `remotes` が前のまま
+  （起動時なら空）なので、そこで決めると**読めなかっただけの一回**を「決められな
+  かった」として latch し、隣の行が出す読み直しが成功しても `Unasked` ではなくなって
+  いて二度と頼まない。`TargetState::Unavailable` は**読めなかったこと**ではない
 - **`Cmd::ResolveTarget` は `RemoteUrl` を運ぶ**（`Remote` の生 URL ではない）。
   解析は純粋関数なので `update` の中で済み、**読めない URL のときに `Cmd` を
   出さずに済む**（`InvalidRemoteUrl` はそのまま通知にする）

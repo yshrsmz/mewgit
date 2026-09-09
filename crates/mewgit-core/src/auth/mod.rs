@@ -135,8 +135,10 @@ pub(crate) fn split_scopes(raw: &str) -> Vec<String> {
 /// `auth` 層のエラー。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
-    #[error("gh が見つかりませんでした")]
-    GhMissing,
+    /// **パスを載せる。** `general.gh_bin` / `MEWGIT_GH_BIN` の書き間違いでも
+    /// ここに来るので、「gh が見つかりませんでした」だけだと PATH を探させてしまう。
+    #[error("{bin} が見つかりませんでした")]
+    GhMissing { bin: String },
     /// `gh` はあるが起動できない（実行権限が無いなど）。**`GhMissing` と分ける** ——
     /// 「見つかりませんでした」と出すと、権限の問題を探せなくなる。
     #[error("{message}")]

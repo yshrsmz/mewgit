@@ -57,9 +57,6 @@ pub enum LoginState { Success, Timeout, Error }
 要求版を案内するほうが行動可能（`brew upgrade gh`）。**古い gh の利用者が実際に出て
 きたら、その人の実出力をフィクスチャにして足す**ほうが確実。
 
-`bin: PathBuf` は持たない。バイナリのパスを設定で差し替える要求が無く、#21 で
-`Runner.git_bin` を同じ理由で消してある。`Command::new("gh")` の PATH 解決に任せる。
-
 ### `gh auth status --json hosts` の形（v2.100.0 のソースで確認）
 
 `hosts` は**ホストをキーにしたオブジェクト**で、値がエントリの配列。エントリは

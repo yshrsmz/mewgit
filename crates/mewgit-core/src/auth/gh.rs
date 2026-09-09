@@ -103,7 +103,9 @@ impl GhCli {
                 ProbeError::Spawn {
                     kind: io::ErrorKind::NotFound,
                     ..
-                } => AuthError::GhMissing,
+                } => AuthError::GhMissing {
+                    bin: self.bin.to_string_lossy().into_owned(),
+                },
                 ProbeError::Spawn { .. } => AuthError::GhUnrunnable {
                     message: err.describe(),
                 },
@@ -157,16 +159,28 @@ fn parse_version(line: &str) -> Option<Version> {
     )
 }
 
-/// `2.100.0` を割る。**3 つ揃っていることを求める** —— `2.81` のような形を
-/// gh が出す実例は見ていないので、受ける腕を作らない。
+/// `2.100.0` を割る。
+///
+/// **3 つ揃っていることは求める** —— `2.81` のような形を gh が出す実例は見ていないし、
+/// 2 つだけだと「パッチが 0」なのか「読み違い」なのか決められない。
+///
+/// **一方、パッチのぶら下がり（`2.85.0+dfsg1`、`2.90.0-rc.1`）は許す。** こちらも
+/// 実例は見ていないが、**外したときの害が非対称**。厳しくして外すと、十分新しい gh で
+/// GitHub 機能を丸ごと失う。緩めて外しても、比較に使う 3 つの数は変わらない。
 fn parse_number(number: &str) -> Option<Version> {
     let mut parts = number.split('.');
-    let version = Version(
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-    );
-    parts.next().is_none().then_some(version)
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?;
+    let digits = patch.len() - patch.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let version = Version(major, minor, patch[..digits].parse().ok()?);
+    // **パッチが数字だけで終わっているのに 4 つ目が続く形（`2.81.0.1`）は受けない。**
+    // 知らない採番なので、3 つ目までを版として読んでよい根拠が無い。ぶら下がりが
+    // 付いていれば（`2.85.0-rc.1`）そこから先は接尾辞なので、`.` で割れていても数えない。
+    if digits == patch.len() && parts.next().is_some() {
+        return None;
+    }
+    Some(version)
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,30 +227,54 @@ impl WireEntry {
 ///   違いうる（`GH_TOKEN` と keyring で別のトークンなので）。**同じだとは
 ///   確かめていない**ので、先に見たほうを残すのではなく「通ったほう」を選ぶ。
 fn merge_logins(status: WireStatus) -> Vec<GhLogin> {
-    let mut merged: BTreeMap<(String, String), GhLogin> = BTreeMap::new();
+    let mut merged: BTreeMap<(String, String), Slot> = BTreeMap::new();
     for (host, entries) in status.hosts {
         for entry in entries {
+            // **login の無いエントリは落とす。** 期限切れの `GH_TOKEN` を export した
+            // ままだと `{"state":"error","active":true,"login":""}` が本物のログインの
+            // 隣に並ぶ（実測）。`token(host, user)` は login で引くので**取り出す術が
+            // 無く**、候補として数えると 04 の手順 3「1 件なら `Single`」が誤爆する。
+            // `state` の絞り込みと違って、これは `resolve` の方針では変わらない
+            // —— どの方針でも使えないため。
+            if entry.login.is_empty() {
+                continue;
+            }
             let state = entry.state();
             let slot = merged
                 .entry((host.clone(), entry.login.clone()))
-                .or_insert_with(|| GhLogin {
-                    host: host.clone(),
-                    login: entry.login,
-                    active: false,
-                    scopes: Vec::new(),
-                    // 最初の 1 件で必ず上書きされるか、この値のまま残る。
-                    state: LoginState::Error,
+                .or_insert_with(|| Slot {
+                    login: GhLogin {
+                        host: host.clone(),
+                        login: entry.login,
+                        active: false,
+                        scopes: Vec::new(),
+                        // 最初の 1 件で上書きされるか、この値のまま残る。
+                        state: LoginState::Error,
+                    },
+                    scopes_taken: false,
                 });
-            slot.active |= entry.active;
-            if better(state, slot.state) {
-                slot.state = state;
+            slot.login.active |= entry.active;
+            if better(state, slot.login.state) {
+                slot.login.state = state;
             }
-            if state == LoginState::Success && slot.scopes.is_empty() {
-                slot.scopes = split_scopes(entry.scopes.as_deref().unwrap_or(""));
+            // **`scopes.is_empty()` を「まだ埋めていない」の印にしない。** fine-grained
+            // PAT は本当にスコープが空なので（04 の EMU の節）、印にすると
+            // 「空だった 1 件目」を「未取得」と読んで、**別のトークンのスコープを
+            // 混ぜ込む**。混ざると「足りないスコープ」の案内が嘘になる。
+            if state == LoginState::Success && !slot.scopes_taken {
+                slot.login.scopes = split_scopes(entry.scopes.as_deref().unwrap_or(""));
+                slot.scopes_taken = true;
             }
         }
     }
-    merged.into_values().collect()
+    merged.into_values().map(|slot| slot.login).collect()
+}
+
+/// 畳んでいる途中の 1 件。`scopes_taken` は「`Success` なエントリから取ったか」で、
+/// **「空かどうか」とは別の問い**。
+struct Slot {
+    login: GhLogin,
+    scopes_taken: bool,
 }
 
 /// `a` のほうが望ましい状態か。`Success` > `Timeout` > `Error`。
@@ -312,8 +350,25 @@ mod tests {
             // 3 つ揃っていない形は受けない（gh が出す実例を見ていない）。
             "gh version 2.81",
             "gh version 2.81.0.1",
+            "gh version .81.0",
         ] {
             assert_eq!(parse_version(line), None, "{line:?} は読めないはず");
+        }
+    }
+
+    #[test]
+    fn a_patch_with_packaging_junk_still_reads() {
+        // 実例は見ていないが、外したときの害が非対称。厳しくして外すと、十分新しい
+        // gh で GitHub 機能を丸ごと失う。
+        for line in [
+            "gh version 2.85.0+dfsg1",
+            "gh version 2.85.0-rc.1 (2026-01-01)",
+        ] {
+            assert_eq!(
+                parse_version(line),
+                Some(Version(2, 85, 0)),
+                "{line:?} は 2.85.0 として読む"
+            );
         }
     }
 
@@ -371,10 +426,17 @@ mod tests {
         // 戻すと、ここで本物の gh が走って成功してしまう（#21 の
         // `the_configured_git_binary_is_the_one_that_runs` と同じ形）。
         let dir = tempfile::tempdir().expect("一時ディレクトリ");
-        let err = GhCli::detect(dir.path().join("no-such-gh"))
+        let path = dir.path().join("no-such-gh");
+        let err = GhCli::detect(&path)
             .await
             .expect_err("存在しないバイナリなので失敗する");
-        assert_eq!(err, AuthError::GhMissing);
+        let AuthError::GhMissing { bin } = &err else {
+            panic!("GhMissing ではない: {err:?}");
+        };
+        // **パスを案内に出す。** `general.gh_bin` の書き間違いでもここに来るので、
+        // 「gh が見つかりませんでした」だけだと PATH を探させてしまう。
+        assert_eq!(bin, &path.to_string_lossy());
+        assert!(err.to_string().contains("no-such-gh"), "{err}");
     }
 
     #[tokio::test]
@@ -490,6 +552,39 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].state, LoginState::Success);
         assert_eq!(merged[0].scopes, vec!["gist", "repo"]);
+    }
+
+    #[test]
+    fn an_entry_without_a_login_is_not_a_candidate() {
+        // 期限切れの `GH_TOKEN` を export したままだと、本物のログインの隣に
+        // login の無いエントリが並ぶ（実測）。`token(host, user)` は login で引くので
+        // 取り出す術が無く、数えると「1 件なら Single」が誤爆する。
+        let merged = logins(
+            r#"{"hosts":{"github.com":[
+                {"state":"error","active":true,"login":"","tokenSource":"GH_TOKEN"},
+                {"state":"success","active":false,"login":"me","tokenSource":"keyring"}
+            ]}}"#,
+        );
+        let names: Vec<&str> = merged.iter().map(|l| l.login.as_str()).collect();
+        assert_eq!(names, vec!["me"], "名前の無い候補は数えない");
+    }
+
+    #[test]
+    fn scopes_do_not_migrate_from_another_token_source() {
+        // 1 件目が fine-grained PAT（スコープが本当に空）で、2 件目が別の
+        // トークン。空を「未取得」の印にすると、持っていないスコープを報告する。
+        let merged = logins(
+            r#"{"hosts":{"github.com":[
+                {"state":"success","active":true,"login":"me"},
+                {"state":"success","active":false,"login":"me","scopes":"repo, gist"}
+            ]}}"#,
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].scopes,
+            Vec::<String>::new(),
+            "1 件目の「本当に空」を 2 件目で埋めない"
+        );
     }
 
     #[test]

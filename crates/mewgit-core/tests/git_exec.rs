@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use mewgit_core::auth::ssh::SshCommand;
 use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, Runner};
 use mewgit_core::git_read::Oid;
-use mewgit_core::test_util::{BareRepo, TestRepo};
+use mewgit_core::test_util::{wait_for_pid, wait_until_gone, BareRepo, TestRepo};
 
 /// `origin` に bare リポジトリを登録したワークツリー付きリポジトリ。
 fn clone_of(remote: &BareRepo) -> TestRepo {
@@ -87,6 +87,7 @@ fn failure_kind(err: &ExecError) -> ExecErrorKind {
     match err {
         ExecError::Failed { kind, .. } => *kind,
         ExecError::NoResult { reason, .. } => panic!("git が走っていません: {reason}"),
+        ExecError::Canceled { argv } => panic!("中断していません: git {}", argv.join(" ")),
     }
 }
 
@@ -703,4 +704,42 @@ async fn a_failing_command_carries_argv_and_stderr() {
     assert_eq!(argv, &["switch", "no-such-branch"]);
     assert_eq!(*code, Some(128));
     assert!(stderr.contains("no-such-branch"), "stderr: {stderr}");
+}
+
+#[tokio::test]
+async fn canceling_kills_the_process_group_and_leaves_no_lock() {
+    // **SIGKILL では `index.lock` が残る**（git は SIGTERM でしか後始末をしない）。
+    // **git だけに送ると子が孤児として残る**（パスフレーズを訊きに `/dev/tty` を
+    // 掴んだ ssh が生き残ると画面が壊れる）。どちらも実測して決めた形なので、
+    // ここで両方を見張る（03 の「キャンセル」）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let (op, pid_file) = repo.slow_stage();
+
+    let runner = repo.runner();
+    let (cancel, canceled) = tokio::sync::oneshot::channel();
+    let running = tokio::spawn(async move { runner.run_cancelable(&op, canceled).await });
+
+    let filter = wait_for_pid(&pid_file).await;
+    assert!(
+        repo.index_lock().exists(),
+        "index.lock を握った状態を作れていません"
+    );
+
+    cancel.send(()).expect("中断を送れませんでした");
+    let err = running
+        .await
+        .expect("タスクが落ちました")
+        .expect_err("中断したのに成功しています");
+
+    assert!(
+        matches!(err, ExecError::Canceled { .. }),
+        "中断は失敗ではなく Canceled で返す: {err:?}"
+    );
+    assert_eq!(err.argv(), ["add", "--", "slow.txt"]);
+    assert!(!repo.index_lock().exists(), "index.lock が残っています");
+    assert!(
+        wait_until_gone(filter).await,
+        "git の子（フィルタ {filter}）が生き残っています"
+    );
 }

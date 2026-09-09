@@ -544,8 +544,8 @@ impl ReaderHandle {
   進めたあとで返り先を失い、そのページのコミットがどのページにも現れなくなる。返り先が
   消えていたら読まない、という判定は競合を狭めるだけで無くせない（`send` が成功した直後に
   受け側が消える窓が残る）ので、ランタイム側の規約にする。**ログ読み込みのタスクは abort
-  しない。** M3 のキャンセルは `Cmd::Exec` に効かせる。状態を持たない `refs` / `head` /
-  `remotes` / `status` / `diff` は drop されても捨ててよい
+  しない。** 中断が効くのは `Cmd::Exec` だけ（01 の「キャンセル」）。状態を持たない
+  `refs` / `head` / `remotes` / `status` / `diff` は drop されても捨ててよい
 - **`log_page(count, restart)` の `restart` はセッションを捨ててから読む。** commit や
   fetch で HEAD が動くと積んだ行が丸ごと古くなり、続きを読む経路では直せない（新しい
   コミットは末尾ではなく先頭に付く）。`Live` も `Exhausted` も `Idle` に落としてから

@@ -63,6 +63,15 @@ pub enum Cmd {
     LoadBranches,
     /// git CLI の実行（03 参照）。
     Exec(GitOp),
+    /// 走っている [`Cmd::Exec`] を中断する（01 の「実行中ジョブのキャンセル」）。
+    ///
+    /// **[`JobKind`] を持たない。** 中断は新しいタスクを起こすのではなく、走って
+    /// いるタスクに合図するだけ。ジョブを登録すると、`Exec` が終わったときに
+    /// 誰も畳まないものが `JobTracker` に残る。
+    ///
+    /// **どの `Exec` かは持たない。** 書き込みは同時に 1 つだけなので
+    /// （`AppState::issue` が 2 本目を落とす）、走っているものは常に 1 つに定まる。
+    CancelExec,
     ResolveAccount,
     FetchPr,
     FetchChecks,
@@ -94,21 +103,36 @@ impl Cmd {
     /// [`JobKind`] を別に列挙せずここで対応させることで、`Cmd` を単一の真実にする。
     /// 網羅 `match` なので変種を足したら実装漏れがコンパイルエラーになる。
     pub fn job_kind(&self) -> Option<JobKind> {
+        self.job().map(|(kind, _)| kind)
+    }
+
+    /// この `Cmd` が生む非同期ジョブ —— 種別と、スピナーに添える説明
+    /// （01 の「スピナー」）。副作用の無い `Cmd` は `None`。
+    ///
+    /// **種別と説明を 1 つの `match` から出す。** 別々の関数に割ると、`Exec` のように
+    /// ペイロードで説明が変わる変種を足したときに、説明の側だけ足りない形が組める
+    /// （受け皿の `_` があるとコンパイルも通り、スピナーが静的な語のまま黙る）。
+    ///
+    /// 網羅 `match` で書くので、`Cmd` に変種を足したら実装漏れがコンパイルエラーになる。
+    pub fn job(&self) -> Option<(JobKind, &'static str)> {
         match self {
-            Cmd::None | Cmd::Batch(_) | Cmd::Quit => None,
-            Cmd::LoadLog { .. } => Some(JobKind::LoadLog),
-            Cmd::LoadCommitDetail(_) => Some(JobKind::LoadCommitDetail),
-            Cmd::LoadCommitFiles(_) => Some(JobKind::LoadCommitFiles),
-            Cmd::LoadHeadMessage => Some(JobKind::LoadHeadMessage),
-            Cmd::LoadStatus => Some(JobKind::LoadStatus),
-            Cmd::LoadRepoInfo => Some(JobKind::LoadRepoInfo),
-            Cmd::LoadBranches => Some(JobKind::LoadBranches),
-            Cmd::LoadDiff(_) => Some(JobKind::LoadDiff),
-            Cmd::Exec(_) => Some(JobKind::Exec),
-            Cmd::ResolveAccount => Some(JobKind::ResolveAccount),
-            Cmd::FetchPr => Some(JobKind::FetchPr),
-            Cmd::FetchChecks => Some(JobKind::FetchChecks),
-            Cmd::FetchPrList => Some(JobKind::FetchPrList),
+            // `CancelExec` は走っているタスクへの合図で、新しいタスクを起こさない。
+            Cmd::None | Cmd::Batch(_) | Cmd::Quit | Cmd::CancelExec => None,
+            Cmd::LoadLog { .. } => Some((JobKind::LoadLog, "log")),
+            Cmd::LoadCommitDetail(_) => Some((JobKind::LoadCommitDetail, "commit")),
+            Cmd::LoadCommitFiles(_) => Some((JobKind::LoadCommitFiles, "files")),
+            Cmd::LoadHeadMessage => Some((JobKind::LoadHeadMessage, "head")),
+            Cmd::LoadStatus => Some((JobKind::LoadStatus, "status")),
+            Cmd::LoadRepoInfo => Some((JobKind::LoadRepoInfo, "repo")),
+            Cmd::LoadBranches => Some((JobKind::LoadBranches, "branches")),
+            Cmd::LoadDiff(_) => Some((JobKind::LoadDiff, "diff")),
+            // **`Exec` だけは走らせる `GitOp` で説明が変わる**（`fetch` / `push`）。
+            // `verb()` は `to_command` の `argv[0]` と同じ語を返す（03）。
+            Cmd::Exec(op) => Some((JobKind::Exec, op.verb())),
+            Cmd::ResolveAccount => Some((JobKind::ResolveAccount, "account")),
+            Cmd::FetchPr => Some((JobKind::FetchPr, "pr")),
+            Cmd::FetchChecks => Some((JobKind::FetchChecks, "checks")),
+            Cmd::FetchPrList => Some((JobKind::FetchPrList, "pr list")),
         }
     }
 }
@@ -185,6 +209,9 @@ mod tests {
         assert_eq!(Cmd::None.job_kind(), None);
         assert_eq!(Cmd::Batch(vec![]).job_kind(), None);
         assert_eq!(Cmd::Quit.job_kind(), None);
+        // 中断は走っているタスクへの合図。ジョブを登録すると、`Exec` が終わった
+        // ときに誰も畳まないものが `JobTracker` に残る。
+        assert_eq!(Cmd::CancelExec.job_kind(), None);
 
         assert_eq!(Cmd::LoadStatus.job_kind(), Some(JobKind::LoadStatus));
         assert_eq!(Cmd::FetchPr.job_kind(), Some(JobKind::FetchPr));
@@ -192,5 +219,15 @@ mod tests {
             Cmd::Exec(GitOp::RebaseAbort).job_kind(),
             Some(JobKind::Exec)
         );
+    }
+
+    #[test]
+    fn the_label_of_an_exec_is_the_git_subcommand() {
+        // スピナーに `git` とだけ出しても、何が走っているかは判らない（01）。
+        assert_eq!(
+            Cmd::Exec(GitOp::RebaseAbort).job(),
+            Some((JobKind::Exec, "rebase"))
+        );
+        assert_eq!(Cmd::LoadStatus.job(), Some((JobKind::LoadStatus, "status")));
     }
 }

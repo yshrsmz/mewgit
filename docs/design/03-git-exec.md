@@ -221,6 +221,9 @@ impl Runner {
     /// 実行時に重ねる環境変数。テストの隔離と、M5 のエディタ差し替えに使う。
     pub fn with_env(self, vars: ...) -> Self;
     pub async fn run(&self, op: &GitOp) -> Result<ExecOutput, ExecError>;
+    /// 中断できる形（下の「キャンセル」）。
+    pub async fn run_cancelable(&self, op: &GitOp, cancel: oneshot::Receiver<()>)
+        -> Result<ExecOutput, ExecError>;
 }
 
 pub struct ExecOutput { pub argv: Vec<String>, pub stdout: String, pub stderr: String }
@@ -229,6 +232,8 @@ pub enum ExecError {
     /// git の終了状態を得られなかった。argv を組めなかった / Runner が拒否した /
     /// 起動できなかった / 終了を待てなかった。
     NoResult { argv: Vec<String>, reason: String },
+    /// ユーザーが中断した（下の「キャンセル」）。
+    Canceled { argv: Vec<String> },
     /// git が非 0 で終わった。
     Failed { argv: Vec<String>, code: Option<i32>, stderr: String, kind: ExecErrorKind },
 }
@@ -237,14 +242,60 @@ pub enum ExecError {
 - argv と stdin の組み立ては純粋関数 `to_command()`（「argv への変換」）
 - `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
   引数にしているのは、設定を読んだのに渡し忘れる経路を作らないため
-- **`ExecError` を 2 つに割るのは、失敗の種類で埋まるフィールドが違うため。** 1 つの
+- **`ExecError` を割るのは、失敗の種類で埋まるフィールドが違うため。** 1 つの
   struct にすると「起動していないときは `code` が `None`、`stderr` に git ではない文言、
-  `kind` は分類表に載らない値」という約束を、読む側が毎回思い出すことになる
+  `kind` は分類表に載らない値」という約束を、読む側が毎回思い出すことになる。
+  `Canceled` も同じ理由で 3 つ目にした（中断した git の `code` と `stderr` は
+  signal の言い換えでしかない）
 - 環境変数: `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`（エラー文の検出を安定させる）、`GIT_EDITOR=true`（意図しないエディタ起動を防ぐ）。`with_env` の指定はこの後に重ねるので、テストは上書きできる
 - **`GIT_TERMINAL_PROMPT=0` では ssh のパスフレーズ入力を止められない。** `ssh` は
-  stdin ではなく `/dev/tty` を直接読むので、agent に載っていない鍵だと raw mode の画面に
-  プロンプトが出てそのまま止まる（タイムアウトは設けない方針、キャンセルは M3）。
+  stdin ではなく `/dev/tty` を直接読むので、agent に載っていない鍵だと止まる
+  （タイムアウトは設けない方針。抜けるのは下の「キャンセル」）。**画面は壊れない** ——
+  git を自分のプロセスグループで起こしている（下の「キャンセル」）ため、そこから
+  `/dev/tty` を読む子孫は SIGTTIN で停止する（別グループの子が `/dev/tty` を読むと
+  `stat` が `T`、同じグループなら `S+` で入力待ちになることを実測）。**プロンプトが
+  出ないまま止まる**ので、押した本人にはなお何が起きているか判らない。
   **実効 ssh の後ろに `-o BatchMode=yes` を重ねて塞ぐ**（下の「BatchMode の重ね方」）
+
+### キャンセル
+
+```rust
+pub async fn run(&self, op: &GitOp) -> Result<ExecOutput, ExecError>;
+pub async fn run_cancelable(&self, op: &GitOp, cancel: oneshot::Receiver<()>)
+    -> Result<ExecOutput, ExecError>;
+```
+
+**`git` は自分のプロセスグループの長として起動し（`process_group(0)`）、中断は
+そのグループ宛てに SIGTERM を送る。** 実測で決めた形（macOS の git 2.55、`index.lock` を
+握ったまま止まる clean filter で確認）。
+
+| 送り方 | `index.lock` | git の子（ssh / hook / filter） |
+|---|---|---|
+| SIGKILL（`kill_on_drop`） | **残る**。以後の書き込みが全部落ちる | 孤児として生き残る |
+| git 本体だけに SIGTERM | 消える | 孤児として生き残る |
+| **グループ宛てに SIGTERM** | 消える | 一緒に死ぬ |
+
+- **`kill_on_drop` は付けない。** あれが送るのは SIGKILL で、git は sigchain の後始末を
+  せずに死ぬ。future を捨てるのは mewgit 自身が終わるときだけなので、そのまま走らせて
+  git に自分で終わらせるほうが安全
+- **殺したあと、終了を待ってから返す。** 待たずに捨てると、lock の削除が済む前に
+  呼び出し側が次の書き込みを出せてしまう
+- **待つのは「git が終わるまで」ではなく「pipe が閉じるまで」**（`wait_with_output` は
+  `wait` と両方の `read_to_end` を join する。tokio 1.53 の実装で確認）。グループ宛ての
+  signal は送った瞬間のメンバーに届くので、**直後に fork された子孫を取り逃がすと、
+  その子孫が git の pipe を握っているぶん `ExecFinished` が遅れる**。短く打ち切らない
+  のは、lock の削除より先に次の書き込みを出さないため。**その間の脱出口は 2 回目の
+  `Ctrl-C`（終了）**（01 の「キャンセル」）
+- **中断は失敗と型で分ける**（`ExecError::Canceled { argv }`）。git の exit code と stderr は
+  signal で落としたことの言い換えにしかならず、`ExecErrorKind` の分類表にも載らない。
+  UI は「押した本人が止めた」ものとして扱う（01 の「キャンセル」）。**出力は読まずに
+  捨てる** —— fetch は progress を数十 KB 吐いてから殺されるので、使わないものを UTF-8
+  検証に通さない
+- **合図が届いたあとでも、git が成功していれば `Ok` を返す。** signal より先に終わって
+  いた形で、書き込みの結果はリポジトリに残っている。`Canceled` にすると、済んだ commit を
+  「中断した」と案内したうえに読み直しの経路まで変わる（`update::Reload` は成否で分かれる）
+- `run` は送り手を作らずに `run_cancelable` へ渡す。受け側の `Ok(())` パターンが外れた枝は
+  `select!` が無効にするので、その呼び方では中断の腕が二度と選ばれない
 
 ### BatchMode の重ね方
 
@@ -264,9 +315,11 @@ GIT_SSH_COMMAND = "<実効> -o BatchMode=yes"
 - **`GIT_SSH` だけが設定されている環境では何も足さない。** `GIT_SSH` は引数の渡し方が
   違い（シェルを通さない）、`GIT_SSH_COMMAND` を置くと git はそちらを優先するので、
   重ねるつもりが差し替えになる。**その環境では守りが無く、しかもユーザーには何も
-  出ない** —— 止まって初めて分かる。塞ぐのは実行中ジョブのキャンセル（M3 の 4 本目）で、
-  そこまでは「止まったら `Ctrl-C`」しか無い。**通知を出す形にはしない** — 起動時に
-  「あなたの環境は守られていません」と出しても、fetch を押すまで意味が無い
+  出ない** —— 止まって初めて分かる（プロンプトすら出ない。上の `GIT_TERMINAL_PROMPT` の
+  項）。抜ける手は実行中ジョブのキャンセル（下の「キャンセル」）で、**グループごと殺すので
+  停止した ssh も一緒に死ぬ**（停止中のプロセスにも SIGTERM は届く。実測）。
+  **通知を出す形にはしない** — 起動時に「あなたの環境は守られていません」と出しても、
+  fetch を押すまで意味が無い
 - **ユーザーが明示した `BatchMode=no` は勝つ。** ssh は同じ項目を**先に現れた値**で
   決めるので（`ssh -o BatchMode=no -o BatchMode=yes -G` が `batchmode no` を返す。
   OpenSSH 10.3 で確認）、実効値の中に書かれた設定はこちらの追記より前に来る。
@@ -287,13 +340,16 @@ GIT_SSH_COMMAND = "<実効> -o BatchMode=yes"
 - stdin は閉じる。例外はハンクの 3 操作（`StageHunk` / `UnstageHunk` / `DiscardHunk`）
   だけで、どれも `git apply … -` に patch を stdin で渡す
 - stdout / stderr は表示専用なので lossy で `String` にする
-- タイムアウトは設けない（fetch の長さは予測不能）。代わりに UI からキャンセル可能にし、子プロセスを kill する（`kill_on_drop`）
+- タイムアウトは設けない（fetch の長さは予測不能）。代わりに UI から中断できるようにする
+  （下の「キャンセル」）
 - **`RebaseInteractive` は `Runner` が実行せずに拒否する**（M5 まで）。todo を差し替えずに `git rebase -i` を走らせると、`GIT_EDITOR=true` により全 `pick` の rebase が実行され、`plan` を黙って捨てた破壊的操作になる。M5 で `--sequence-editor` を配線したら外す
 - **進行中操作（`InProgressOp`）の再検出は M5。** `git_read::in_progress` がまだ無いので、`ExecDone.progress` はランタイムが `None` を入れる
 
 終了状態を得られない経路は 4 つ（`to_command` の失敗、`RebaseInteractive` の拒否、
 起動の失敗、終了待ちの失敗）。どれも `ExecError::NoResult` で返し、`reason` には git の
-stderr ではなく mewgit の説明文を入れる。
+stderr ではなく mewgit の説明文を入れる。**中断はここに入れない** —— 終了状態は
+得られており（signal で落ちた）、区別したいのは「失敗か、止めたか」だから
+（`ExecError::Canceled`。上の「キャンセル」）。
 
 ## エラー分類（ExecErrorKind）
 

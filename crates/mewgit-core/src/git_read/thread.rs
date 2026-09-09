@@ -38,8 +38,8 @@ enum Request {
         restart: bool,
         reply: Reply<LogPage>,
     },
-    /// 状態を持たないので、返り先が消えても失うものは無い（M3 のキャンセルで
-    /// abort してよい側。`LogPage` だけが例外）。
+    /// 状態を持たないので、返り先が消えても失うものは無い（abort してよい側。
+    /// `LogPage` だけが例外）。
     CommitDetail {
         oid: Oid,
         reply: Reply<CommitDetail>,
@@ -115,7 +115,8 @@ impl ReaderHandle {
     /// **この future は cancel-safe ではない。** 完了前に drop すると、スレッド側は
     /// walk を進めたあとで返り先を失い、そのページのコミットはどのページにも現れなく
     /// なる（グラフに親の見つからない行が残る）。ランタイムはログ読み込みのタスクを
-    /// abort しないこと。M3 で入れるキャンセルは `Cmd::Exec`（git CLI の実行）に効かせる。
+    /// abort しないこと。中断が効くのは `Cmd::Exec`（git CLI の実行）だけ
+    /// （01 の「キャンセル」）。
     /// **`restart` はセッションを捨ててから読む。** commit や fetch で HEAD が動くと
     /// 積んだ行が丸ごと古くなり、続きを読む経路では直せない（新しいコミットは末尾では
     /// なく先頭に付く）。別のメソッドに分けないのは、「セッションを取り出して成功した

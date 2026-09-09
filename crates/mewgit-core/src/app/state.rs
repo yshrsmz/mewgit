@@ -43,6 +43,14 @@ pub struct AppState {
     /// エラー・情報のトースト。積むのは [`AppState::push_notice`]。
     pub notices: VecDeque<Notice>,
     pub term: TermSize,
+    /// [`Msg::Tick`] が来た回数。スピナーの駒を選ぶのに使う（07 のヘッダ）。
+    ///
+    /// **時刻ではなく回数を持つ。** `ui` は `AppState` を描くだけなので、駒を時刻から
+    /// 決めると描画のたびに時計を読むことになり、`TestBackend` で「回った」ことを
+    /// 見張れない。`wrapping_add` で回すので溢れても止まらない。
+    ///
+    /// [`Msg::Tick`]: crate::app::Msg::Tick
+    pub tick: u64,
     /// 起動時に確定した設定。実行中は再読込しない（08）。
     pub config: Config,
 }
@@ -81,6 +89,7 @@ impl AppState {
             jobs: JobTracker::default(),
             notices: VecDeque::new(),
             term: TermSize::default(),
+            tick: 0,
             config,
         }
     }
@@ -98,14 +107,14 @@ impl AppState {
                 let issued: Vec<Cmd> = cmds.into_iter().map(|cmd| self.issue(cmd)).collect();
                 Cmd::batch(issued)
             }
-            cmd => match cmd.job_kind() {
+            cmd => match cmd.job() {
                 None => cmd,
-                Some(kind) => {
-                    let job = Job::new(kind, kind.label().to_string());
+                Some((kind, label)) => {
+                    let job = Job::new(kind, label);
                     if self.jobs.start(job) {
                         cmd
                     } else {
-                        self.dropped(kind);
+                        self.notify_dropped(kind);
                         Cmd::None
                     }
                 }
@@ -115,11 +124,37 @@ impl AppState {
 
     /// 同種のジョブが走っていて発行できなかった `Cmd` を伝える。
     ///
-    /// 何を伝えるかは [`JobKind::drop_notice`] が種別ごとに持つ。
-    fn dropped(&mut self, kind: JobKind) {
-        if let Some(message) = kind.drop_notice() {
-            self.push_notice(NoticeLevel::Warn, message.to_string(), None);
-        }
+    /// 読み取りは黙って落とす（同じものをもう一度読むだけで、結果は変わらない）。
+    /// 書き込みだけは「押したのに何も起きない」に見えるので伝える。**キューには
+    /// 積まないと決めた**（01 の「ランタイム」）。
+    ///
+    /// **`JobKind` ではなくここに置くのは、案内に「次に押すキー」が入るから。**
+    /// それは状態で変わる —— **中断をもう頼んだあとの `Ctrl-C` は終了になる**ので
+    /// （01 の「キャンセル」）、`Ctrl-C` で中断と案内し続けると、モーダルに打った
+    /// 本文ごとアプリが終わる。`JobKind` は「もう頼んだか」を知らない。
+    ///
+    /// 網羅 `match` にしているのは、種別を足したときに黙って落とすかどうかを
+    /// 選ばせるため。
+    pub fn notify_dropped(&mut self, kind: JobKind) {
+        let message = match kind {
+            JobKind::Exec if self.jobs.cancel_requested(JobKind::Exec) => {
+                "中断を頼んだ git を待っています（Ctrl-C で終了）"
+            }
+            JobKind::Exec => "ほかの git 実行が終わるまで待ってください（Ctrl-C で中断）",
+            JobKind::LoadLog
+            | JobKind::LoadCommitDetail
+            | JobKind::LoadCommitFiles
+            | JobKind::LoadHeadMessage
+            | JobKind::LoadRepoInfo
+            | JobKind::LoadStatus
+            | JobKind::LoadBranches
+            | JobKind::LoadDiff
+            | JobKind::ResolveAccount
+            | JobKind::FetchPr
+            | JobKind::FetchChecks
+            | JobKind::FetchPrList => return,
+        };
+        self.push_notice(NoticeLevel::Warn, message.to_string(), None);
     }
 
     /// 通知を積む。[`MAX_NOTICES`] を超えた分は古いものから捨てる。
@@ -1079,6 +1114,36 @@ impl JobTracker {
         }
     }
 
+    /// 走っているこの種別のジョブに「中断を頼んだ」と刻む。
+    ///
+    /// **まだ頼んでいなければ真。** 走っていないときと、既に頼んだあとは偽 ——
+    /// `Ctrl-C` はそこで終了に落ちる（01 の「キャンセル」）。刻みを持たないと、
+    /// SIGTERM で死なない git のあいだ `Ctrl-C` が中断を返し続け、モーダル表示中は
+    /// 脱出口が 1 つも無くなる。
+    ///
+    /// **刻みはジョブと一緒に消える。** [`finish`](Self::finish) が `Job` ごと
+    /// 落とすので、次の書き込みは頼んでいない状態から始まる。
+    pub fn request_cancel(&mut self, kind: JobKind) -> bool {
+        let Some(job) = self.running.iter_mut().find(|job| job.kind == kind) else {
+            return false;
+        };
+        if job.canceling {
+            return false;
+        }
+        job.canceling = true;
+        true
+    }
+
+    /// この種別のジョブに中断を頼んであるか。走っていなければ偽。
+    ///
+    /// 読むのは案内文の側（[`AppState::notify_dropped`]）。頼んだかどうかで
+    /// 「次に押すキー」が変わる。
+    pub fn cancel_requested(&self, kind: JobKind) -> bool {
+        self.running
+            .iter()
+            .any(|job| job.kind == kind && job.canceling)
+    }
+
     /// 表示用。実行中のタスクを登録順に返す。
     pub fn iter(&self) -> impl Iterator<Item = &Job> {
         self.running.iter()
@@ -1093,9 +1158,10 @@ impl JobTracker {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
     pub kind: JobKind,
-    /// ステータスバーに出す短い説明。`Exec` 以外は種別から決まるが、`Exec` だけは
-    /// `GitOp` によって変わる（`fetch` / `push` など）ので値として持つ。
-    pub label: String,
+    /// ヘッダのスピナーに添える短い説明。どの `Cmd` から来たかで決まるので、
+    /// [`Cmd::job`] が種別と一緒に返す（`Exec` は `fetch` / `push` のように
+    /// 走らせるサブコマンド）。
+    pub label: &'static str,
     /// 走らせた時点の、この種別の領域の世代。
     ///
     /// **非公開で、[`JobTracker::start`] だけが入れる。** 組み立てる側に持たせると、
@@ -1103,15 +1169,21 @@ pub struct Job {
     /// ときに、世代の無いジョブが黙って混ざる）。領域を持たない種別
     /// （[`JobKind::region`] が `None`）では `None` のまま。
     epoch: Option<u64>,
+    /// 中断を頼んだか（[`JobTracker::request_cancel`]）。**2 回目の `Ctrl-C` を
+    /// 終了に落とすために持つ。** 持たないと、SIGTERM で死なない git のあいだ
+    /// `Ctrl-C` が中断を返し続け、モーダル表示中は脱出口が 1 つも無くなる
+    /// （`q` は入力文字。01 の「キャンセル」）。
+    canceling: bool,
 }
 
 impl Job {
-    /// ステータスバーの説明を添えて組む。世代は [`JobTracker::start`] が刻む。
-    pub fn new(kind: JobKind, label: String) -> Self {
+    /// スピナーの説明を添えて組む。世代は [`JobTracker::start`] が刻む。
+    pub fn new(kind: JobKind, label: &'static str) -> Self {
         Self {
             kind,
             label,
             epoch: None,
+            canceling: false,
         }
     }
 }
@@ -1140,30 +1212,6 @@ pub enum JobKind {
 }
 
 impl JobKind {
-    /// 同種が走っていて発行できなかったときに出す通知。黙って落としてよければ `None`。
-    ///
-    /// 読み取りは黙って落とす（同じものをもう一度読むだけで、結果は変わらない）。
-    /// 書き込みだけは「押したのに何も起きない」に見えるので伝える。キューに積んで
-    /// 順に流すのは M3（01 の「ランタイム」）。網羅 `match` にしているのは、
-    /// 種別を足したときにどちらなのかを選ばせるため。
-    pub fn drop_notice(self) -> Option<&'static str> {
-        match self {
-            JobKind::Exec => Some("ほかの git 実行が終わるまで待ってください"),
-            JobKind::LoadLog
-            | JobKind::LoadCommitDetail
-            | JobKind::LoadCommitFiles
-            | JobKind::LoadHeadMessage
-            | JobKind::LoadRepoInfo
-            | JobKind::LoadStatus
-            | JobKind::LoadBranches
-            | JobKind::LoadDiff
-            | JobKind::ResolveAccount
-            | JobKind::FetchPr
-            | JobKind::FetchChecks
-            | JobKind::FetchPrList => None,
-        }
-    }
-
     /// この種別が読む値が、どの領域の世代で古くなるか。
     ///
     /// `None` は「書き込みでは古くならない」か、**値そのものが鍵を持っていて世代より
@@ -1192,28 +1240,6 @@ impl JobKind {
             | JobKind::FetchPr
             | JobKind::FetchChecks
             | JobKind::FetchPrList => None,
-        }
-    }
-
-    /// ステータスバーに出す既定の説明。
-    ///
-    /// `Exec` だけは `GitOp` によって `fetch` / `push` と変わるので、[`Job::label`] は
-    /// `String` のまま。実行時に差し替えるのは M3 の `Cmd::Exec` のタスク。
-    pub fn label(self) -> &'static str {
-        match self {
-            JobKind::LoadLog => "log",
-            JobKind::LoadCommitDetail => "commit",
-            JobKind::LoadCommitFiles => "files",
-            JobKind::LoadHeadMessage => "head",
-            JobKind::LoadRepoInfo => "repo",
-            JobKind::LoadStatus => "status",
-            JobKind::LoadBranches => "branches",
-            JobKind::LoadDiff => "diff",
-            JobKind::Exec => "git",
-            JobKind::ResolveAccount => "account",
-            JobKind::FetchPr => "pr",
-            JobKind::FetchChecks => "checks",
-            JobKind::FetchPrList => "pr list",
         }
     }
 }
@@ -2054,7 +2080,7 @@ mod tests {
     }
 
     fn job(kind: JobKind) -> Job {
-        Job::new(kind, "test".to_string())
+        Job::new(kind, "test")
     }
 
     #[test]

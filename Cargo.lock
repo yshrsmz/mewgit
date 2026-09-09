@@ -1179,6 +1179,7 @@ dependencies = [
  "anyhow",
  "git2",
  "globset",
+ "libc",
  "mewgit-core",
  "reqwest",
  "secrecy",

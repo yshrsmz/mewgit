@@ -1,11 +1,13 @@
 //! `git` サブプロセスの実行。設計は `docs/design/03-git-exec.md` の「Runner」。
 
 use std::ffi::OsString;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
+use tokio::sync::oneshot;
 
 use super::{to_command, ExecError, ExecErrorKind, ExecOutput, GitCommand, GitOp};
 use crate::auth::ssh::SshCommand;
@@ -80,11 +82,29 @@ impl Runner {
         self
     }
 
-    /// `git` を実行して結果を返す。
+    /// `git` を実行して結果を返す。**キャンセルできない形。**
+    ///
+    /// 送り手を作らずに [`run_cancelable`](Self::run_cancelable) へ渡す。受け側の
+    /// `Ok(())` パターンが外れた枝は `select!` が無効にするので、この呼び方では
+    /// キャンセルの腕が二度と選ばれない。
+    pub async fn run(&self, op: &GitOp) -> Result<ExecOutput, ExecError> {
+        let (_, cancel) = oneshot::channel();
+        self.run_cancelable(op, cancel).await
+    }
+
+    /// `git` を実行し、`cancel` が届いたらプロセスグループごと中断する。
     ///
     /// `git` を起動しないまま失敗する経路が 2 つある（argv を組めなかったときと、
-    /// `RebaseInteractive`）。どちらも [`ExecErrorKind::NotAttempted`] で返す。
-    pub async fn run(&self, op: &GitOp) -> Result<ExecOutput, ExecError> {
+    /// `RebaseInteractive`）。どちらも [`ExecError::NoResult`] で返す。
+    ///
+    /// **中断は「殺して忘れる」ではなく、殺してから終了を待つ。** 待たずに future を
+    /// 捨てると、`git` の後始末（lock ファイルの削除）が済む前に呼び出し側が次の
+    /// 書き込みを出せてしまう。
+    pub async fn run_cancelable(
+        &self,
+        op: &GitOp,
+        cancel: oneshot::Receiver<()>,
+    ) -> Result<ExecOutput, ExecError> {
         let command = to_command(op).map_err(|err| ExecError::NoResult {
             argv: Vec::new(),
             reason: err.to_string(),
@@ -99,8 +119,10 @@ impl Runner {
 
         let mut child = self.spawn(&command)?;
 
-        // stdin への書き込みと終了待ちを同時に進める。順に行うと、パイプのバッファを
-        // 超えるパッチで git 側が stdout を書けずに止まり、こちらも書き込みで止まる。
+        // **殺す相手はここで控える。** `wait_with_output` が `child` を取るので、
+        // 中断が決まってからでは pid を引けない。
+        let pid = child.id();
+
         let pipe = child.stdin.take();
         let write = async {
             if let (Some(mut pipe), Some(bytes)) = (pipe, command.stdin.as_ref()) {
@@ -110,12 +132,57 @@ impl Runner {
                 let _ = pipe.shutdown().await;
             }
         };
-        let (_, waited) = tokio::join!(write, child.wait_with_output());
+        // stdin への書き込みと終了待ちを同時に進める。順に行うと、パイプのバッファを
+        // 超えるパッチで git 側が stdout を書けずに止まり、こちらも書き込みで止まる。
+        let run = async {
+            let (_, waited) = tokio::join!(write, child.wait_with_output());
+            waited
+        };
+        tokio::pin!(run);
+
+        // `select!` を抜けたところで `&mut run` の借用が切れるので、中断した側は
+        // このあと同じ future を待ち直せる。**待ち直すために `Option` に受ける** ——
+        // 腕の中で `run.await` すると借用が重なる。
+        // **「中断した」を別の旗で持たない。** 持つと「殺したのに待ち直さない」という
+        // 組み合わせが型で書ける。
+        let mut finished = None;
+        tokio::select! {
+            waited = &mut run => finished = Some(waited),
+            // 送り手が落ちた（キャンセルできない呼び方）ときはパターンが外れ、
+            // `select!` がこの腕を無効にする。
+            Ok(()) = cancel => terminate(pid),
+        }
+        // **これは「合図を撃った」であって「中断で終わった」ではない**（下の分岐で
+        // 終了状態まで確かめる）。
+        let signaled = finished.is_none();
+        let waited = match finished {
+            Some(waited) => waited,
+            None => run.await,
+        };
 
         let output = waited.map_err(|err| ExecError::NoResult {
             argv: command.argv.clone(),
             reason: format!("git の終了を待てませんでした: {err}"),
         })?;
+
+        // **「合図を撃った」だけでは中断と決めない。** `select!` は両方 ready なら
+        // 無作為に腕を選ぶので、**git が自分の理由で非 0 になったのと `Ctrl-C` が
+        // 同じ瞬間に来た**形では、終わっているのに中断の腕が採られる。そのまま
+        // `Canceled` にすると argv も stderr も落ち（不変ルール 4）、push では
+        // 非 FF の記憶まで消えて force の経路が黙って消える。**SIGTERM で落ちたことを
+        // 終了状態で確かめる。**
+        //
+        // **成功していれば成功として返す。** signal が届く前に git が終わっていた形で、
+        // 書き込みの結果はリポジトリに残っている。`Canceled` にすると、済んだ commit を
+        // 「中断した」と案内したうえに読み直しの経路まで変わる（`update::Reload` は
+        // 中断を「動いたかもしれない」側に置いている）。
+        //
+        // **中断した出力は読まない。** stderr と exit code は signal で落ちたことの
+        // 言い換えにしかならず、案内は「中断した」で足りる。fetch は progress を
+        // 数十 KB 吐いてから殺されるので、捨てるものを UTF-8 検証に通さない。
+        if canceled_by(signaled, &output.status) {
+            return Err(ExecError::Canceled { argv: command.argv });
+        }
 
         let stdout = lossy(output.stdout);
         let stderr = lossy(output.stderr);
@@ -153,8 +220,15 @@ impl Runner {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // 実行中ジョブのキャンセル（M3）で子プロセスを残さないため。
-            .kill_on_drop(true);
+            // **git を自分のプロセスグループの長にする。** キャンセルはこのグループ
+            // 宛てに SIGTERM を送る（[`terminate`]）。git だけに送っても、git が
+            // 起こした ssh や hook は孤児として生き残る（実測。03 の「キャンセル」）。
+            //
+            // **`kill_on_drop` は付けない。** あれが送るのは SIGKILL で、git は
+            // sigchain の後始末をせずに死ぬ —— `index.lock` が残り、以後の書き込みが
+            // 全部落ちる（実測）。future を捨てるのは mewgit 自身が終わるときだけ
+            // なので、そのまま走らせて git に自分で終わらせるほうが安全。
+            .process_group(0);
         // **`GIT_TERMINAL_PROMPT=0` は ssh に効かない**（ssh は stdin ではなく
         // `/dev/tty` を直に読む）。
         if let Some(ssh) = &self.git_ssh_command {
@@ -166,6 +240,42 @@ impl Runner {
             argv: command.argv.clone(),
             reason: format!("{} を起動できませんでした: {err}", self.git_bin.display()),
         })
+    }
+}
+
+/// 中断で終わったか。`signaled` は「こちらが合図を撃ったか」。
+///
+/// **撃っただけでは決めない。** `select!` は両方 ready なら無作為に腕を選ぶので、
+/// **git が自分の理由で非 0 になったのと `Ctrl-C` が同じ瞬間に来た**形では、終わって
+/// いるのに合図の腕が採られる。そのまま `Canceled` にすると argv も stderr も落ち
+/// （不変ルール 4）、push では非 FF の記憶まで消えて force の経路が黙って消える。
+///
+/// **逆に、こちらが撃っていない SIGTERM は中断ではない**（外から `kill` された）。
+/// 押した本人が止めたものだけを `Canceled` にする。
+fn canceled_by(signaled: bool, status: &ExitStatus) -> bool {
+    signaled && status.signal() == Some(libc::SIGTERM)
+}
+
+/// プロセスグループごと SIGTERM を送る。
+///
+/// **グループ宛て（負の pid）で送る。** git 単体に送ると、git が起こした ssh や
+/// hook が孤児として残る（実測。03 の「キャンセル」）。残った ssh は端末を掴んだまま
+/// 眠り続け、mewgit を終えても居座る。
+///
+/// **SIGKILL ではなく SIGTERM。** git は SIGTERM では sigchain の後始末が走り、
+/// `index.lock` を消してから終わる。SIGKILL だと残る（実測）。
+///
+/// `pid` が `None`（既に終わって刈られている）なら何もしない。呼ぶのは
+/// [`Runner::run_cancelable`] が `child` を握ったままのあいだだけなので、pid が
+/// 別のプロセスに再利用されている窓は無い。
+fn terminate(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    // SAFETY: `kill` は失敗しても errno を返すだけで、こちらのメモリには触らない。
+    // 相手が既に居なければ ESRCH が返るだけ。
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGTERM);
     }
 }
 
@@ -337,5 +447,24 @@ mod tests {
         let saml = "ERROR: The `acme' organization has enabled or enforced SAML SSO. \
                     Access rejected.";
         assert_eq!(classify("", saml), ExecErrorKind::SamlSsoRequired);
+    }
+
+    /// wait(2) の終了状態。下位 7 bit が signal、その上が exit code。
+    fn status(raw: i32) -> ExitStatus {
+        ExitStatus::from_raw(raw)
+    }
+
+    #[test]
+    fn only_our_own_sigterm_counts_as_a_cancel() {
+        // 撃った合図で SIGTERM に落ちた。これが中断。
+        assert!(canceled_by(true, &status(libc::SIGTERM)));
+
+        // **合図と同じ瞬間に git が自分の理由で落ちた形。** `select!` はどちらも
+        // ready なら無作為に腕を選ぶので起こりうる。`Canceled` にすると argv も
+        // stderr も落ち、push では非 FF の記憶まで消える。
+        assert!(!canceled_by(true, &status(1 << 8)));
+
+        // 撃っていない SIGTERM（外から kill された）は中断ではない。
+        assert!(!canceled_by(false, &status(libc::SIGTERM)));
     }
 }

@@ -209,6 +209,17 @@ pub enum ExecError {
         /// mewgit 側の説明文。git の stderr ではない。
         reason: String,
     },
+    /// ユーザーが中断した（01 の「実行中ジョブのキャンセル」）。
+    ///
+    /// **`Failed` と分けるのは、これが失敗ではないから。** git の exit code と
+    /// stderr は signal で落としたことの言い換えにしかならず、[`ExecErrorKind`] の
+    /// 分類表にも載らない。読む側は「押した本人が止めた」ものとして扱う
+    /// （通知は `Error` ではなく `Info`）。
+    #[error("git の実行を中断しました")]
+    Canceled {
+        /// 中断した argv。`git` 自身は含まない。
+        argv: Vec<String>,
+    },
     /// `git` が非 0 で終わった。
     #[error("git の実行に失敗しました: git {}", .argv.join(" "))]
     Failed {
@@ -224,7 +235,9 @@ impl ExecError {
     /// 実行した（しようとした）argv。UI はどちらの失敗でもこれを見せる。
     pub fn argv(&self) -> &[String] {
         match self {
-            ExecError::NoResult { argv, .. } | ExecError::Failed { argv, .. } => argv,
+            ExecError::NoResult { argv, .. }
+            | ExecError::Canceled { argv }
+            | ExecError::Failed { argv, .. } => argv,
         }
     }
 

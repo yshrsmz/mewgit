@@ -7,6 +7,7 @@ use serde::de::DeserializeOwned;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::auth::split_scopes;
 use crate::auth::url::valid_host;
 
 use super::wire::{
@@ -417,14 +418,9 @@ fn rate_limit_reset(response: &Response) -> Option<i64> {
 /// 403 に添える「足りないスコープ」。GitHub は要求されるスコープを
 /// `x-accepted-oauth-scopes` で返す。
 fn needed_scopes(response: &Response) -> Vec<String> {
+    // 割り方は `auth` と共有する（`gh auth status` の `scopes` が 2 人目の利用者）。
     header_str(response, "x-accepted-oauth-scopes")
-        .map(|v| {
-            v.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
+        .map(split_scopes)
         .unwrap_or_default()
 }
 

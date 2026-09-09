@@ -4,10 +4,8 @@
 //! `.git/config` のリモート URL に書かれたホストは `~/.ssh/config` のエイリアス
 //! （`gh-work` など）のことがある。`ssh -G` に解決させて実ホスト名にする。
 
+use std::ffi::OsStr;
 use std::path::Path;
-use std::process::Stdio;
-
-use tokio::process::Command;
 
 use super::AuthError;
 
@@ -114,49 +112,22 @@ async fn resolve_with(
         message,
     };
 
-    let mut cmd = Command::new(ssh_bin);
+    // **`alias` は positional に載る**ので `--` を置く（03 の「argv への変換」と
+    // 同じ数え方）。`.git/config` の URL は clone してきた値がそのまま入り、
+    // `RemoteUrl` の `host_of` が `user@` を捨てるので、`git@-oProxyCommand=...`
+    // は裸の `-oProxyCommand=...` になってここへ来る（04）。
+    let mut args: Vec<&OsStr> = Vec::new();
     if let Some(path) = config_file {
-        cmd.arg("-F").arg(path);
+        args.push(OsStr::new("-F"));
+        args.push(path.as_os_str());
     }
-    cmd.arg("-G")
-        // **`alias` は positional に載る**ので `--` を置く（03 の「argv への変換」と
-        // 同じ数え方）。`.git/config` の URL は clone してきた値がそのまま入り、
-        // `RemoteUrl` の `host_of` が `user@` を捨てるので、`git@-oProxyCommand=...`
-        // は裸の `-oProxyCommand=...` になってここへ来る（04）。
-        .arg("--")
-        .arg(alias)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // ここから下の 2 つと下の spawn エラーの文言は `git_exec::Runner::spawn` と
-        // 同じ（エラー文の安定と、キャンセルで子を残さないこと）。**共有先はまだ
-        // 作らない** — 抽出できるのは `Command` の組み立てだけで、エラー型が違うので
-        // 呼び出し側で包み直しが要る。M4 の `GhCli` が 3 本目になったら数え直す。
-        .env("LC_ALL", "C")
-        .kill_on_drop(true);
+    args.extend([OsStr::new("-G"), OsStr::new("--"), OsStr::new(alias)]);
 
-    let output = cmd.output().await.map_err(|err| {
-        failed(format!(
-            "{} を起動できませんでした: {err}",
-            ssh_bin.display()
-        ))
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = stderr.trim();
-        let code = output.status.code().map_or_else(
-            || "シグナルで終了".to_string(),
-            |code| format!("exit {code}"),
-        );
-        return Err(failed(if stderr.is_empty() {
-            code
-        } else {
-            format!("{code}: {stderr}")
-        }));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    // 起動の形は `gh` と共有している（`probe`）。**数え直した結果はそこの doc に
+    // ある** — `git_exec::Runner::spawn` は前提が違うので入っていない。
+    let stdout = super::probe::output(ssh_bin, args, &[])
+        .await
+        .map_err(|err| failed(err.describe()))?;
     hostname_from_dump(&stdout)
         .map(str::to_string)
         .ok_or_else(|| failed("ssh -G の出力に hostname の行がありませんでした".to_string()))

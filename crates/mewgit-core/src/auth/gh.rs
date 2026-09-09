@@ -1,26 +1,141 @@
 //! `gh` CLI の呼び出し。設計は `docs/design/04-auth-account.md` の「gh との連携」。
 //!
-//! **JSON しか読まない。** `gh auth status --json hosts` は 2.81.0 で入った。
+//! **JSON しか読まない。** `gh auth status --json hosts` は [`REQUIRED`] で入った。
 //! それ未満は [`AuthError::GhTooOld`] に落とし、テキスト出力は解析しない（04 に理由）。
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io;
+use std::path::PathBuf;
 
 use secrecy::SecretString;
 use serde::Deserialize;
-use tokio::process::Command;
 
-use super::{AuthError, GhLogin};
+use super::probe::{self, ProbeError};
+use super::{split_scopes, AuthError, GhLogin, LoginState};
 
 /// `gh auth status --json` と `gh auth token --user` が揃う最低版。
-const REQUIRED: Version = Version(2, 81, 0);
-
-/// `gh` があり、最低版を満たすことの証。
 ///
-/// **バイナリのパスは持たない。** 設定で差し替える要求が無く、#21 で
-/// `Runner.git_bin` を同じ理由で消してある。PATH 解決は `Command` に任せる。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `ui` の案内文もここを読む（[`AuthError::GhTooOld`] は要求版を値として持たない）。
+pub const REQUIRED: &str = "2.81.0";
+
+/// `gh` があり、[`REQUIRED`] を満たすことの証。
+///
+/// **作れる経路は [`detect`](Self::detect) だけ。** `Default` も公開の
+/// コンストラクタも置かないので、「値がある = 検査済み」が構築経路の数と一致する。
+#[derive(Debug)]
 pub struct GhCli {
+    /// `config` の `general.gh_bin`。**直書きしない** —— #21 が `Runner` に
+    /// `git_bin` を戻したのと同じ理由で、設定・既定値・`MEWGIT_GH_BIN` の上書きと
+    /// そのテストが実装に到達しなくなる。渡し忘れを作らないよう引数で受ける。
+    bin: PathBuf,
+    /// テストが実行環境から切り離すための上書き。
     env: Vec<(OsString, OsString)>,
+}
+
+impl GhCli {
+    /// `gh --version` を叩いて、存在と最低版を確かめる。
+    ///
+    /// `bin` には `config.general.gh_bin` を渡す。
+    pub async fn detect(bin: impl Into<PathBuf>) -> Result<Self, AuthError> {
+        Self::detect_with_env(bin, Vec::new()).await
+    }
+
+    /// [`detect`](Self::detect) に環境変数の上書きを添える。
+    ///
+    /// **テストが `GH_CONFIG_DIR` で実行環境から切り離すために要る。** `gh` は
+    /// 設定ディレクトリを環境変数でしか受けず（`gh help environment`）、
+    /// `ssh` の `-F` に当たる argv が無い。公開しないのは、production から
+    /// 使う場面が無いため。
+    async fn detect_with_env(
+        bin: impl Into<PathBuf>,
+        env: Vec<(OsString, OsString)>,
+    ) -> Result<Self, AuthError> {
+        let cli = GhCli {
+            bin: bin.into(),
+            env,
+        };
+        check_version(cli.run(&["--version"]).await?.lines().next().unwrap_or(""))?;
+        Ok(cli)
+    }
+
+    /// そのホストのログイン一覧。
+    ///
+    /// **`--hostname` で絞る。** 付けないと gh は**全ホストのトークンを検証**し、
+    /// 到達できないホストが 1 つ混ざっているだけで待ち時間がそれに引きずられる
+    /// （実測: 絞ると 0.24 秒、絞らないと **30.2 秒**）。04 の手順 2 が
+    /// 「`auth_status()` を `target.host` で絞る」と言っている、その絞り込みを
+    /// 結果ではなく argv でやる。**config に無いホストでも exit 0 で
+    /// `{"hosts":{}}` が返る**ので、「0 件なら `NotLoggedIn`」の経路は変わらない。
+    ///
+    /// **`--show-token` は付けない**（付けると JSON に生のトークンが入る。不変ルール 3）。
+    pub async fn auth_status(&self, host: &str) -> Result<Vec<GhLogin>, AuthError> {
+        let out = self
+            .run(&["auth", "status", "--hostname", host, "--json", "hosts"])
+            .await?;
+        let status: WireStatus =
+            serde_json::from_str(&out).map_err(|e| AuthError::GhUnparsable {
+                message: e.to_string(),
+            })?;
+        Ok(merge_logins(status))
+    }
+
+    /// 指定したアカウントのトークン。
+    pub async fn token(&self, host: &str, user: &str) -> Result<SecretString, AuthError> {
+        let mut out = self
+            .run(&["auth", "token", "--hostname", host, "--user", user])
+            .await?;
+        // 末尾を切り詰めて `String` ごと渡す。`trim()` の `&str` を渡すと、
+        // トークンを載せた平のバッファがもう 1 本増える。
+        out.truncate(out.trim_end().len());
+        Ok(SecretString::from(out))
+    }
+
+    /// `gh` を起動して stdout を返す。
+    ///
+    /// argv にトークンは載らない（[`token`](Self::token) が受けるのは host と login だけ）。
+    async fn run(&self, args: &[&str]) -> Result<String, AuthError> {
+        probe::output(&self.bin, args, &self.env)
+            .await
+            .map_err(|err| match &err {
+                // 「PATH に無い」だけを `GhMissing` にする。実行権限が無い場合まで
+                // 畳むと、「gh が見つかりませんでした」と案内して探させることになる。
+                ProbeError::Spawn {
+                    kind: io::ErrorKind::NotFound,
+                    ..
+                } => AuthError::GhMissing,
+                ProbeError::Spawn { .. } => AuthError::GhUnrunnable {
+                    message: err.describe(),
+                },
+                ProbeError::Failed { .. } => AuthError::GhFailed {
+                    argv: std::iter::once(self.bin.to_string_lossy().into_owned())
+                        .chain(args.iter().map(|a| (*a).to_string()))
+                        .collect(),
+                    message: err.describe(),
+                },
+            })
+    }
+}
+
+/// `gh --version` の 1 行目が [`REQUIRED`] を満たすか。
+///
+/// **起動と分けてある。** 一緒にすると、古い gh を持っていない限り
+/// [`AuthError::GhTooOld`] の腕を踏めない。
+fn check_version(first_line: &str) -> Result<(), AuthError> {
+    let line = first_line.trim();
+    let found = parse_version(line);
+    // 版を読めないのは「古すぎる」ではなく「知らない形」だが、**通す理由が無い**
+    // ので同じ扱いにする。案内には生の 1 行目を出して、何が来たか判るようにする。
+    match found {
+        Some(v) if v >= required() => Ok(()),
+        _ => Err(AuthError::GhTooOld {
+            found: found.map_or_else(|| line.to_string(), |v| v.to_string()),
+        }),
+    }
+}
+
+fn required() -> Version {
+    parse_number(REQUIRED).expect("REQUIRED は版として書いてある")
 }
 
 /// `major.minor.patch`。比較にしか使わないので `semver` は足さない。
@@ -33,105 +148,31 @@ impl std::fmt::Display for Version {
     }
 }
 
-impl GhCli {
-    /// 追加の環境変数を重ねる。`git_exec::Runner::with_env` と同じ形。
-    ///
-    /// **テストが `GH_CONFIG_DIR` で実行環境から切り離すために要る。** `gh` は
-    /// 設定ディレクトリを環境変数でしか指定できず（`gh help environment`。
-    /// 相当するフラグは無い）、`ssh` の `-F` のように argv で渡せない。
-    #[must_use]
-    pub fn with_env<I, K, V>(mut self, vars: I) -> Self
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<OsString>,
-        V: Into<OsString>,
-    {
-        self.env
-            .extend(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
-        self
-    }
-
-    /// `gh --version` を叩いて、存在と最低版を確かめる。
-    pub async fn detect() -> Result<Self, AuthError> {
-        Self::default().detected().await
-    }
-
-    /// [`detect`](Self::detect) と同じだが、重ねた環境変数を保ったまま確かめる。
-    pub async fn detected(self) -> Result<Self, AuthError> {
-        let out = self.run(&["--version"]).await?;
-        // 版を読めないのは「古すぎる」ではなく「知らない形」だが、**通す理由が無い**
-        // ので同じ扱いにする。案内には生の 1 行目を出して、何が来たか判るようにする。
-        let first = out.lines().next().unwrap_or("").trim();
-        let found = parse_version(first);
-        match found {
-            Some(v) if v >= REQUIRED => Ok(self),
-            _ => Err(AuthError::GhTooOld {
-                found: found.map_or_else(|| first.to_string(), |v| v.to_string()),
-                required: REQUIRED.to_string(),
-            }),
-        }
-    }
-
-    /// ログイン一覧。**`--show-token` は付けない**（付けると JSON に生のトークンが入る。
-    /// 不変ルール 3）。
-    pub async fn auth_status(&self) -> Result<Vec<GhLogin>, AuthError> {
-        let out = self.run(&["auth", "status", "--json", "hosts"]).await?;
-        let status: WireStatus =
-            serde_json::from_str(&out).map_err(|e| AuthError::GhUnparsable {
-                message: e.to_string(),
-            })?;
-        Ok(merge_logins(status))
-    }
-
-    /// 指定したアカウントのトークン。
-    pub async fn token(&self, host: &str, user: &str) -> Result<SecretString, AuthError> {
-        let out = self
-            .run(&["auth", "token", "--hostname", host, "--user", user])
-            .await?;
-        Ok(SecretString::from(out.trim()))
-    }
-
-    /// `gh` を起動して stdout を返す。
-    ///
-    /// **stderr は [`AuthError::GhFailed`] に載せる**（不変ルール 4 と同じ扱い）。
-    /// argv にトークンは載らない（[`token`](Self::token) が受けるのは host と login だけ）。
-    async fn run(&self, args: &[&str]) -> Result<String, AuthError> {
-        let out = Command::new("gh")
-            .args(args)
-            .envs(self.env.iter().map(|(k, v)| (k, v)))
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|_| AuthError::GhMissing)?;
-        if !out.status.success() {
-            return Err(AuthError::GhFailed {
-                argv: std::iter::once("gh")
-                    .chain(args.iter().copied())
-                    .map(str::to_string)
-                    .collect(),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            });
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    }
-}
-
 /// `gh version 2.100.0 (2026-09-03)` から版を取る。
 fn parse_version(line: &str) -> Option<Version> {
-    let rest = line.strip_prefix("gh version ")?;
-    let number = rest.split_whitespace().next()?;
+    parse_number(
+        line.strip_prefix("gh version ")?
+            .split_whitespace()
+            .next()?,
+    )
+}
+
+/// `2.100.0` を割る。**3 つ揃っていることを求める** —— `2.81` のような形を
+/// gh が出す実例は見ていないので、受ける腕を作らない。
+fn parse_number(number: &str) -> Option<Version> {
     let mut parts = number.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    // パッチは無い形（`2.81`）も受ける。比較で 0 として効く。
-    let patch = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    Some(Version(major, minor, patch))
+    let version = Version(
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    parts.next().is_none().then_some(version)
 }
 
 #[derive(Debug, Deserialize)]
 struct WireStatus {
     /// ホストをキーにしたオブジェクト。値はそのホストのエントリの配列。
-    hosts: std::collections::HashMap<String, Vec<WireEntry>>,
+    hosts: BTreeMap<String, Vec<WireEntry>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,57 +186,78 @@ struct WireEntry {
     scopes: Option<String>,
 }
 
+impl WireEntry {
+    fn state(&self) -> LoginState {
+        match self.state.as_str() {
+            "success" => LoginState::Success,
+            "timeout" => LoginState::Timeout,
+            // `error` と、gh が今後足す状態。**未知を成功にしない。**
+            _ => LoginState::Error,
+        }
+    }
+}
+
 /// エントリを [`GhLogin`] に畳む。
 ///
 /// **`(host, login)` で 1 件にまとめる。** 同じ login が複数のエントリで出る
 /// （実機で `GITHUB_TOKEN` と `keyring` の 2 つが並んだ）。`GhLogin` は
-/// `tokenSource` を持たないので**見分けられない重複**になり、`resolve` の
+/// トークンの出どころを持たないので**見分けられない重複**になり、`resolve` の
 /// 「1 件なら `Single`」が誤爆する。`token(host, user)` は login で引くので、
 /// 畳んでも取り出せるトークンは変わらない。
 ///
-/// **採るのは `state == "success"` だけ。** gh 自身が「このトークンは通らない」と
-/// 言っているものを probe の候補にしない。`timeout`（ホストに届かなかった）を
-/// `error` と同じに畳んでよいかは `auth::resolve` のタスクで決める（04）。
+/// 畳むときの規則は 2 つ。
+///
+/// - **状態は「一番良かったもの」を採る。** どれか 1 つでも通るなら、その login は
+///   probe の候補になりうる。
+/// - **スコープは `Success` なエントリのものを採る。** 出どころが違えばスコープも
+///   違いうる（`GH_TOKEN` と keyring で別のトークンなので）。**同じだとは
+///   確かめていない**ので、先に見たほうを残すのではなく「通ったほう」を選ぶ。
 fn merge_logins(status: WireStatus) -> Vec<GhLogin> {
-    let mut merged: Vec<GhLogin> = Vec::new();
+    let mut merged: BTreeMap<(String, String), GhLogin> = BTreeMap::new();
     for (host, entries) in status.hosts {
         for entry in entries {
-            if entry.state != "success" {
-                continue;
-            }
-            let scopes = entry
-                .scopes
-                .as_deref()
-                .unwrap_or("")
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect();
-            match merged
-                .iter_mut()
-                .find(|l| l.host == host && l.login == entry.login)
-            {
-                // どちらかが active なら active。スコープは先に見たほうを残す
-                // （同じアカウントなので同じはず。違っても片方を選ぶしかない）。
-                Some(existing) => existing.active |= entry.active,
-                None => merged.push(GhLogin {
+            let state = entry.state();
+            let slot = merged
+                .entry((host.clone(), entry.login.clone()))
+                .or_insert_with(|| GhLogin {
                     host: host.clone(),
                     login: entry.login,
-                    active: entry.active,
-                    scopes,
-                }),
+                    active: false,
+                    scopes: Vec::new(),
+                    // 最初の 1 件で必ず上書きされるか、この値のまま残る。
+                    state: LoginState::Error,
+                });
+            slot.active |= entry.active;
+            if better(state, slot.state) {
+                slot.state = state;
+            }
+            if state == LoginState::Success && slot.scopes.is_empty() {
+                slot.scopes = split_scopes(entry.scopes.as_deref().unwrap_or(""));
             }
         }
     }
-    // `HashMap` の反復順は不定なので、呼ぶ側とテストのために並べる。
-    merged.sort_by(|a, b| (&a.host, &a.login).cmp(&(&b.host, &b.login)));
-    merged
+    merged.into_values().collect()
+}
+
+/// `a` のほうが望ましい状態か。`Success` > `Timeout` > `Error`。
+///
+/// `Timeout` を `Error` より上に置くのは、**届かなかっただけでトークンが悪いとは
+/// 限らない**ため。この 2 つを同じに扱ってよいかは `auth::resolve` で決める（04）。
+fn better(a: LoginState, b: LoginState) -> bool {
+    fn rank(s: LoginState) -> u8 {
+        match s {
+            LoginState::Success => 2,
+            LoginState::Timeout => 1,
+            LoginState::Error => 0,
+        }
+    }
+    rank(a) > rank(b)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn logins(json: &str) -> Vec<GhLogin> {
         merge_logins(serde_json::from_str(json).expect("JSON"))
@@ -207,22 +269,127 @@ mod tests {
     /// `gh` は設定ディレクトリを環境変数でしか受けないので `GH_CONFIG_DIR` を使い、
     /// **トークンの環境変数も空で上書きする** —— `GH_TOKEN` / `GITHUB_TOKEN` が
     /// 効いていると、隔離したはずの config に無いログインが 1 件生える。
-    fn isolated(config_dir: &std::path::Path) -> GhCli {
-        GhCli::default().with_env([
-            ("GH_CONFIG_DIR", config_dir.as_os_str()),
-            ("GH_TOKEN", "".as_ref()),
-            ("GITHUB_TOKEN", "".as_ref()),
-            ("GH_ENTERPRISE_TOKEN", "".as_ref()),
-        ])
+    ///
+    /// `TempDir` は返り値で持つ。テストごとに作ると「束縛し続ける」注意書きが
+    /// 人数分に増える（`ssh` の `resolve` ヘルパと同じ形）。
+    async fn isolated() -> (tempfile::TempDir, GhCli) {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let cli = GhCli::detect_with_env("gh", env_for(dir.path()))
+            .await
+            .expect("gh が入っていること");
+        (dir, cli)
     }
+
+    fn env_for(config_dir: &Path) -> Vec<(OsString, OsString)> {
+        ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"]
+            .into_iter()
+            .map(|k| (OsString::from(k), OsString::new()))
+            .chain(std::iter::once((
+                OsString::from("GH_CONFIG_DIR"),
+                config_dir.as_os_str().to_owned(),
+            )))
+            .collect()
+    }
+
+    // ---- 版 ----
+
+    #[test]
+    fn reads_the_version_line() {
+        // 実機の `gh --version` の 1 行目。
+        assert_eq!(
+            parse_version("gh version 2.100.0 (2026-09-03)"),
+            Some(Version(2, 100, 0))
+        );
+    }
+
+    #[test]
+    fn rejects_lines_that_are_not_a_version() {
+        for line in [
+            "",
+            "gh version",
+            "git version 2.55.0",
+            "gh version x.y.z",
+            // 3 つ揃っていない形は受けない（gh が出す実例を見ていない）。
+            "gh version 2.81",
+            "gh version 2.81.0.1",
+        ] {
+            assert_eq!(parse_version(line), None, "{line:?} は読めないはず");
+        }
+    }
+
+    #[test]
+    fn the_required_version_is_the_one_that_added_json_output() {
+        // 2.81.0 で `gh auth status --json` が入った（04）。境界を固定する。
+        assert_eq!(required(), Version(2, 81, 0));
+        // 数字で比べる。文字列だと "2.100" < "2.81" になる。
+        assert!(Version(2, 100, 0) >= required());
+    }
+
+    #[test]
+    fn a_gh_older_than_required_is_reported_with_its_version() {
+        let err =
+            check_version("gh version 2.80.9 (2025-09-01)").expect_err("2.81.0 未満なので断る");
+        assert_eq!(
+            err,
+            AuthError::GhTooOld {
+                found: "2.80.9".to_string()
+            }
+        );
+        // 案内には要求版が出る。
+        assert!(err.to_string().contains(REQUIRED), "{err}");
+    }
+
+    #[test]
+    fn a_version_line_we_cannot_read_keeps_the_raw_line() {
+        // 何が来たか判らないと直しようが無いので、生の 1 行目を案内に載せる。
+        let err = check_version("  gh version wat  ").expect_err("読めないので断る");
+        assert_eq!(
+            err,
+            AuthError::GhTooOld {
+                found: "gh version wat".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn the_version_on_this_machine_is_accepted() {
+        assert!(check_version("gh version 2.100.0 (2026-09-03)").is_ok());
+    }
+
+    // ---- 実物の gh ----
 
     #[tokio::test]
     async fn detect_accepts_the_gh_on_this_machine() {
-        // 実物を叩く。CI にも開発機にも `gh` は入っている前提（GitHub 連携が
-        // 動く環境でしか意味の無いモジュールなので、無い環境は想定しない）。
-        GhCli::detect()
+        GhCli::detect("gh")
             .await
             .expect("gh が 2.81.0 以上で入っていること");
+    }
+
+    #[tokio::test]
+    async fn the_configured_gh_binary_is_the_one_that_runs() {
+        // `config` の `general.gh_bin` を渡し忘れていないことの見張り。直書きに
+        // 戻すと、ここで本物の gh が走って成功してしまう（#21 の
+        // `the_configured_git_binary_is_the_one_that_runs` と同じ形）。
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let err = GhCli::detect(dir.path().join("no-such-gh"))
+            .await
+            .expect_err("存在しないバイナリなので失敗する");
+        assert_eq!(err, AuthError::GhMissing);
+    }
+
+    #[tokio::test]
+    async fn a_gh_that_cannot_be_executed_is_not_reported_as_missing() {
+        // 実行権限の無いファイル。「見つかりませんでした」と案内すると探させてしまう。
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let path = dir.path().join("gh");
+        std::fs::write(&path, b"#!/bin/sh\n").expect("書ける");
+        let err = GhCli::detect(&path)
+            .await
+            .expect_err("実行できないので失敗する");
+        let AuthError::GhUnrunnable { message } = err else {
+            panic!("GhUnrunnable ではない: {err:?}");
+        };
+        assert!(message.contains("起動できませんでした"), "{message}");
     }
 
     #[tokio::test]
@@ -230,23 +397,23 @@ mod tests {
         // ログインが 0 件なのは失敗ではない。`NotLoggedIn` に畳むのは `resolve` の仕事。
         // **`--json` を付けると認証に問題があっても exit 0** で返る（04）ので、
         // 素の `gh auth status` の exit 1 に引きずられない。
-        let dir = tempfile::tempdir().expect("一時ディレクトリ");
-        let logins = isolated(dir.path())
-            .auth_status()
+        let (_dir, cli) = isolated().await;
+        let logins = cli
+            .auth_status("github.com")
             .await
             .expect("空の config でも Ok");
         assert_eq!(logins, Vec::new());
     }
 
     #[tokio::test]
-    async fn a_failing_gh_carries_its_argv_and_stderr() {
+    async fn a_failing_gh_carries_its_argv_and_the_reason() {
         // 不変ルール 4 と同じ扱い。握りつぶさず UI まで届ける。
-        let dir = tempfile::tempdir().expect("一時ディレクトリ");
-        let err = isolated(dir.path())
+        let (_dir, cli) = isolated().await;
+        let err = cli
             .token("github.com", "nobody")
             .await
             .expect_err("ログインしていないので失敗する");
-        let AuthError::GhFailed { argv, stderr } = err else {
+        let AuthError::GhFailed { argv, message } = err else {
             panic!("GhFailed ではない: {err:?}");
         };
         assert_eq!(
@@ -261,79 +428,68 @@ mod tests {
                 "nobody"
             ]
         );
-        assert!(!stderr.is_empty(), "stderr を落とさない");
+        // 終了コードか stderr、少なくとも片方は残る。
+        assert!(!message.is_empty(), "理由を落とさない");
     }
 
-    #[test]
-    fn reads_the_version_line() {
-        // 実機の `gh --version` の 1 行目。
-        assert_eq!(
-            parse_version("gh version 2.100.0 (2026-09-03)"),
-            Some(Version(2, 100, 0))
-        );
-        // パッチが無い形も受ける。
-        assert_eq!(parse_version("gh version 2.81"), Some(Version(2, 81, 0)));
-    }
-
-    #[test]
-    fn rejects_lines_that_are_not_a_version() {
-        for line in ["", "gh version", "git version 2.55.0", "gh version x.y.z"] {
-            assert_eq!(parse_version(line), None, "{line:?} は読めないはず");
-        }
-    }
-
-    #[test]
-    fn the_required_version_is_the_one_that_added_json_output() {
-        // 2.81.0 で `gh auth status --json` が入った（04）。境界を固定する。
-        assert!(Version(2, 81, 0) >= REQUIRED);
-        assert!(Version(2, 80, 9) < REQUIRED);
-        // 数字で比べる。文字列だと "2.100" < "2.81" になる。
-        assert!(Version(2, 100, 0) >= REQUIRED);
-    }
+    // ---- 一覧の畳み込み ----
 
     #[test]
     fn the_same_login_from_two_sources_is_one_account() {
         // 実機の形。`GITHUB_TOKEN`（active）と `keyring`（非 active）が並ぶ。
-        let merged = logins(
-            r#"{"hosts":{"github.com":[
-                {"state":"success","active":true,"host":"github.com","login":"me",
-                 "tokenSource":"GITHUB_TOKEN","scopes":"gist, repo","gitProtocol":"https"},
-                {"state":"success","active":false,"host":"github.com","login":"me",
-                 "tokenSource":"keyring","scopes":"gist, repo","gitProtocol":"https"}
-            ]}}"#,
-        );
-        assert_eq!(merged.len(), 1, "同じ login は 1 件に畳む: {merged:?}");
-        assert!(merged[0].active, "どちらかが active なら active");
-        assert_eq!(merged[0].scopes, vec!["gist", "repo"]);
+        // 順序を入れ替えても同じ結果になること（`active` を落とさない）も見る。
+        let pair = [
+            r#"{"state":"success","active":true,"host":"github.com","login":"me",
+                "tokenSource":"GITHUB_TOKEN","scopes":"gist, repo","gitProtocol":"https"}"#,
+            r#"{"state":"success","active":false,"host":"github.com","login":"me",
+                "tokenSource":"keyring","scopes":"gist, repo","gitProtocol":"https"}"#,
+        ];
+        for order in [[0, 1], [1, 0]] {
+            let merged = logins(&format!(
+                r#"{{"hosts":{{"github.com":[{},{}]}}}}"#,
+                pair[order[0]], pair[order[1]]
+            ));
+            assert_eq!(merged.len(), 1, "同じ login は 1 件に畳む: {merged:?}");
+            assert!(merged[0].active, "どちらかが active なら active");
+            assert_eq!(merged[0].scopes, vec!["gist", "repo"]);
+        }
     }
 
     #[test]
-    fn the_active_flag_survives_whichever_order_the_entries_come_in() {
-        // 上の裏返し。非 active が先に来ても落とさない。
+    fn a_login_that_gh_could_not_verify_is_still_reported() {
+        // **落とさずに運ぶ。** `Timeout` を `Error` と同じに畳んでよいかは
+        // `resolve` のタスクで決めるので、その材料をここで捨てない（04）。
         let merged = logins(
             r#"{"hosts":{"github.com":[
-                {"state":"success","active":false,"host":"github.com","login":"me",
-                 "tokenSource":"keyring","gitProtocol":"https"},
-                {"state":"success","active":true,"host":"github.com","login":"me",
-                 "tokenSource":"GITHUB_TOKEN","gitProtocol":"https"}
+                {"state":"error","active":true,"login":"bad"},
+                {"state":"timeout","active":false,"login":"slow"},
+                {"state":"success","active":false,"login":"ok"}
+            ]}}"#,
+        );
+        let seen: Vec<(&str, LoginState)> =
+            merged.iter().map(|l| (l.login.as_str(), l.state)).collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("bad", LoginState::Error),
+                ("ok", LoginState::Success),
+                ("slow", LoginState::Timeout),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_best_state_wins_and_its_scopes_come_with_it() {
+        // 出どころが違えばスコープも違いうる。通ったほうのスコープを採る。
+        let merged = logins(
+            r#"{"hosts":{"github.com":[
+                {"state":"error","active":true,"login":"me","scopes":"stale"},
+                {"state":"success","active":false,"login":"me","scopes":"gist, repo"}
             ]}}"#,
         );
         assert_eq!(merged.len(), 1);
-        assert!(merged[0].active);
-    }
-
-    #[test]
-    fn different_logins_stay_separate() {
-        let merged = logins(
-            r#"{"hosts":{"github.com":[
-                {"state":"success","active":true,"host":"github.com","login":"b",
-                 "tokenSource":"keyring","gitProtocol":"https"},
-                {"state":"success","active":false,"host":"github.com","login":"a",
-                 "tokenSource":"keyring","gitProtocol":"https"}
-            ]}}"#,
-        );
-        let names: Vec<&str> = merged.iter().map(|l| l.login.as_str()).collect();
-        assert_eq!(names, vec!["a", "b"], "並べて返す（HashMap の順は不定）");
+        assert_eq!(merged[0].state, LoginState::Success);
+        assert_eq!(merged[0].scopes, vec!["gist", "repo"]);
     }
 
     #[test]
@@ -341,39 +497,18 @@ mod tests {
         // `scopes` は omitempty。欠けても落ちず、空で返す（04 の EMU の節）。
         let merged = logins(
             r#"{"hosts":{"github.com":[
-                {"state":"success","active":true,"host":"github.com","login":"me",
-                 "tokenSource":"keyring","gitProtocol":"https"}
+                {"state":"success","active":true,"login":"me"}
             ]}}"#,
         );
         assert_eq!(merged[0].scopes, Vec::<String>::new());
     }
 
     #[test]
-    fn entries_that_gh_could_not_verify_are_not_candidates() {
-        // `error` も `timeout` も落とす。gh 自身が通らないと言っているトークンを
-        // probe の候補にしない。
-        let merged = logins(
-            r#"{"hosts":{"github.com":[
-                {"state":"error","active":true,"host":"github.com","login":"bad",
-                 "error":"authentication failed","tokenSource":"keyring","gitProtocol":"https"},
-                {"state":"timeout","active":false,"host":"github.com","login":"slow",
-                 "tokenSource":"keyring","gitProtocol":"https"},
-                {"state":"success","active":false,"host":"github.com","login":"ok",
-                 "tokenSource":"keyring","gitProtocol":"https"}
-            ]}}"#,
-        );
-        let names: Vec<&str> = merged.iter().map(|l| l.login.as_str()).collect();
-        assert_eq!(names, vec!["ok"]);
-    }
-
-    #[test]
     fn several_hosts_come_back_together() {
         let merged = logins(
             r#"{"hosts":{
-                "github.com":[{"state":"success","active":true,"host":"github.com",
-                 "login":"me","tokenSource":"keyring","gitProtocol":"https"}],
-                "acme.ghe.com":[{"state":"success","active":true,"host":"acme.ghe.com",
-                 "login":"me","tokenSource":"keyring","gitProtocol":"https"}]
+                "github.com":[{"state":"success","active":true,"login":"me"}],
+                "acme.ghe.com":[{"state":"success","active":true,"login":"me"}]
             }}"#,
         );
         let hosts: Vec<&str> = merged.iter().map(|l| l.host.as_str()).collect();

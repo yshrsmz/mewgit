@@ -11,6 +11,7 @@
 //! それまで `RepoInfo.target` は `None` のまま。
 
 pub mod gh;
+mod probe;
 pub mod ssh;
 pub mod url;
 
@@ -25,13 +26,34 @@ pub struct RepoTarget {
     pub repo: String,
 }
 
-/// `gh auth status` の 1 エントリ。
+/// そのホストの 1 アカウント。
+///
+/// **`gh auth status` の 1 エントリではない。** 同じ login が複数のエントリで出る
+/// （実機で `GITHUB_TOKEN` と `keyring` の 2 つが並んだ）ので、`(host, login)` で
+/// 畳んである（04）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GhLogin {
     pub host: String,
     pub login: String,
     pub active: bool,
     pub scopes: Vec<String>,
+    /// gh がそのトークンを検証した結果。
+    ///
+    /// **`gh` の層で絞らずに運ぶ。** 04 は「`Timeout` を `Error` と同じに畳んで
+    /// よいか」を `auth::resolve` のタスクへ送っており、ここで落とすと**送った先に
+    /// 判断の材料が届かない**。
+    pub state: LoginState,
+}
+
+/// `gh auth status` がそのアカウントに付けた状態（`status.go` の 3 値）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginState {
+    /// トークンが通った。probe の候補になる。
+    Success,
+    /// ホストに届かなかった。**トークンが悪いとは限らない。**
+    Timeout,
+    /// gh がトークンを拒まれた。
+    Error,
 }
 
 /// 使用するアカウント。`token` は `Debug` に出ない（`SecretString`）。
@@ -68,9 +90,12 @@ pub enum AccountState {
 pub enum DegradedReason {
     /// `gh` が PATH に無い。
     GhMissing,
-    /// `gh` が古い。`gh auth status --json` は 2.81.0 で入った（04）。
+    /// `gh` が古い。`gh auth status --json` は [`gh::REQUIRED`] で入った（04）。
+    ///
+    /// 要求版は案内に出すが、**値としては持たない** —— 定数から引ける
+    /// （`ui` からは [`gh::REQUIRED`] を読む）。
     GhTooOld {
-        /// 見つかった版。案内に出すので、解釈できなければ生の 1 行目を入れる。
+        /// 見つかった版。解釈できなければ `gh --version` の生の 1 行目が入る。
         found: String,
     },
     NotLoggedIn {
@@ -93,15 +118,37 @@ pub struct ProbeAttempt {
     pub status: u16,
 }
 
+/// カンマ区切りの OAuth スコープを割る。
+///
+/// **2 人の利用者がいる。** `gh auth status` の `scopes`（カンマ区切りの 1 本の
+/// 文字列）と、GitHub API が 403 に添える `x-accepted-oauth-scopes`
+/// （`github::client`）。00 の依存の向きで `github` は `auth` の上段なので、
+/// 下段のここに置いて上から呼ぶ。
+pub(crate) fn split_scopes(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// `auth` 層のエラー。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
     #[error("gh が見つかりませんでした")]
     GhMissing,
-    #[error("gh {found} は古すぎます（{required} 以上が必要です）")]
-    GhTooOld { found: String, required: String },
-    #[error("gh の実行に失敗しました: {}: {stderr}", .argv.join(" "))]
-    GhFailed { argv: Vec<String>, stderr: String },
+    /// `gh` はあるが起動できない（実行権限が無いなど）。**`GhMissing` と分ける** ——
+    /// 「見つかりませんでした」と出すと、権限の問題を探せなくなる。
+    #[error("{message}")]
+    GhUnrunnable { message: String },
+    /// **`required` は持たない。** 常に [`gh::REQUIRED`] なので、持たせると
+    /// 誤った値を組める（「導出できる値を引数に取らせない」）。
+    #[error("gh {found} は古すぎます（{} 以上が必要です）", gh::REQUIRED)]
+    GhTooOld { found: String },
+    /// **`message` は `stderr` ではない。** 終了コードも入る（stderr が空のまま
+    /// 落ちる gh があるため）。argv は不変ルール 4 と同じ理由で残す。
+    #[error("gh の実行に失敗しました: {}: {message}", .argv.join(" "))]
+    GhFailed { argv: Vec<String>, message: String },
     #[error("gh の出力を解釈できませんでした: {message}")]
     GhUnparsable { message: String },
     #[error("{host} にログインしていません")]

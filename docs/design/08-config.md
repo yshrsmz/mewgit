@@ -10,7 +10,7 @@ macOS でも XDG のパスを使う。`directories` クレートの `config_dir(
 `~/Library/Application Support` を返すため使わない。`XDG_CONFIG_HOME` → `$HOME/.config` の
 順で自前に組み立て、ホームディレクトリは `std::env::home_dir()` で取る。どちらも
 絶対パスのときだけ採用する。相対パスを許すと cwd 基準で解決され、開いているリポジトリが
-置いた `.config/mewgit/config.toml` を読んでしまう（`general.git_bin` があるので任意コード実行になる）。
+置いた `.config/mewgit/config.toml` を読んでしまう（`general.git_bin` と `general.gh_bin` があるので任意コード実行になる）。
 
 ## config.toml
 

@@ -106,7 +106,13 @@ fn host_of(authority: &str) -> Option<&str> {
 /// ときだけで、`git@-4:a/b.git` も `git@-oProxyCommand=id:a/b.git` も素通りする
 /// （`core.sshCommand` で argv をダンプして確認。`git@-4` を 1 語で ssh に渡すので
 /// オプションにならない）。user を捨てるこちらだけが裸の host を作る。
-fn valid_host(host: &str) -> bool {
+///
+/// **`github` からも呼ぶ**（`github::client::base_url`）。ベース URL に補間する前に
+/// 同じ問いへ答える必要があり、[`super::ssh::resolve_ssh_host`] が返す `hostname` は
+/// この検査を通っていないため。00 の依存の向きで `github` は `auth` の上段なので
+/// 参照してよい。**述語を 2 本にしない** —— 別に書くと、`-` 始まりを弾く上の理由が
+/// 片方にしか残らない。
+pub(crate) fn valid_host(host: &str) -> bool {
     !host.is_empty()
         && !host.starts_with('-')
         && host

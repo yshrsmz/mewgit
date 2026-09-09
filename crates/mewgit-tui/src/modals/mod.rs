@@ -5,6 +5,7 @@
 pub mod commit_message;
 pub mod confirm;
 pub mod input;
+pub mod remote_picker;
 
 use mewgit_core::app::{Modal, TextBuffer};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -24,6 +25,11 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
         Modal::Input {
             title, prompt, buf, ..
         } => input::render(frame, area, title, prompt, buf),
+        Modal::RemotePicker {
+            reason,
+            remotes,
+            cursor,
+        } => remote_picker::render(frame, area, reason, remotes, *cursor),
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
         Modal::RebaseEditor { .. }
         | Modal::PrCreate { .. }

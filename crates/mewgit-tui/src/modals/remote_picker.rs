@@ -39,11 +39,18 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], c
         HINT,
     );
 
+    // **一覧に先に行を渡す。** 理由を `Length` にすると、`modals::place` が箱を端末の
+    // 高さに丸めたときに**一覧が 0 行に潰れる** —— リモート名が 1 つも出ないのに
+    // `j` と `Enter` は効くので、見えていない相手を fetch する。`ui::render_rows` が
+    // 守るのは「カーソルが一覧の外へ出ない」ことで、**一覧そのものが消えることは
+    // 守らない**（`/code-review` が拾った）。理由の文言はリモート名を並べるので、
+    // 本数が増えるほど長くなる = 潰れやすくなる。
+    //
     // **空行は理由の枠に含める。** 3 本に割って真ん中を捨てると、捨てる束縛と
     // 制約が 1 つずつ増えるだけで結果は同じ（`Paragraph` は上詰め）。
     let [reason_area, list] = Layout::vertical([
-        Constraint::Length(reason_rows.saturating_add(REASON_GAP_ROWS)),
-        Constraint::Min(0),
+        Constraint::Max(reason_rows.saturating_add(REASON_GAP_ROWS)),
+        Constraint::Min(1),
     ])
     .areas(body);
 
@@ -157,6 +164,37 @@ mod tests {
         let text = draw(&state, SIZE).join("\n");
 
         assert!(text.contains("remote29"), "{text}");
+    }
+
+    #[test]
+    fn a_long_reason_never_squeezes_the_list_to_nothing() {
+        // **`a_wrapped_reason_does_not_push_the_remotes_out_of_the_box` の狭い版。**
+        // あちらは 80x24 に 4 行の理由なので、一覧が 0 行に潰れる形を踏まない。
+        // 理由はリモート名を並べるので**本数が増えるほど長くなる**。実機で測った境目は
+        // 30 本 × 80x14（直す前は一覧が **0 行**、直したあとは 1 行）。**8 本では
+        // 同じ 80x14 でも 5 行出るので踏めない** —— 本数と高さの両方を効かせる。
+        let remotes: Vec<String> = (0..30)
+            .map(|i| format!("very-long-remote-name-{i:02}"))
+            .collect();
+        let reason = format!("origin がありません（{}）。", remotes.join(", "));
+        let state = state_with_modal(Modal::RemotePicker {
+            reason,
+            remotes,
+            cursor: 29,
+        });
+
+        let text = draw(
+            &state,
+            TermSize {
+                width: 80,
+                height: 14,
+            },
+        )
+        .join("\n");
+
+        // カーソルが指している相手が画面に出ていること。1 つも出ないまま
+        // `Enter` が効く状態を作らない。
+        assert!(text.contains("very-long-remote-name-29"), "{text}");
     }
 
     #[test]

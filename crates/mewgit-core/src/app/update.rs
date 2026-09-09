@@ -744,7 +744,7 @@ fn push_plan(state: &AppState) -> PushPlan {
     // その守りを外している。`-u` の提案にも落とさない —— そちらは
     // `branch.<name>.remote` を上書きするので、ユーザーが書いた `.` が黙って消える。
     if config.remote == "." {
-        return PushPlan::Refused(LOCAL_TRACKING.to_string());
+        return PushPlan::Refused(NoRemote::Ask(LOCAL_TRACKING.to_string()).into_notice());
     }
 
     // **直前の `P` が断られたときだけ force に上げる**（01 の「force push」）。
@@ -809,11 +809,13 @@ fn fetch(state: &mut AppState) -> Cmd {
         Ok(remote) => return fetch_from(&remote.name),
         // **選ばせる相手がいるかは規則の側が既に判じている。** ここで一覧を数え直すと、
         // `conventional_remote` の `[]` の腕と同じ判断が 2 本並ぶ。
-        Err(NoRemote::Nobody(reason)) => {
-            state.push_notice(NoticeLevel::Warn, reason, None);
+        // **`Nobody` は選ばせる相手がいない。** 指示を足して通知に落とす。
+        Err(no @ NoRemote::Nobody(_)) => {
+            state.push_notice(NoticeLevel::Warn, no.into_notice(), None);
             return Cmd::None;
         }
-        Err(NoRemote::Ask(reason)) => reason,
+        // **`Ask` は診断のまま。** 指示はモーダルが提供する操作そのものなので足さない。
+        Err(NoRemote::Ask(diagnosis)) => diagnosis,
     };
     state.modal = Some(Modal::RemotePicker {
         reason,
@@ -842,10 +844,20 @@ enum NoRemote {
 }
 
 impl NoRemote {
-    /// 案内文。押せるキーが無い場面（`P` の `-u` 提案）はこれを通知に出すだけ。
-    fn into_message(self) -> String {
+    /// 押せるキーが無い場面（`P`）に出す案内。**診断に指示を足す。**
+    ///
+    /// **指示を診断側へ混ぜない。** `f` は同じ診断を [`Modal::RemotePicker`] の本文に
+    /// 出すが、そこでは**すぐ下にリモートが並んでいて選べる** —— 「設定してください」と
+    /// 書くと、**その操作を今まさに提供しているモーダルの中で、外でやれと言う**ことに
+    /// なる（`/code-review` が拾った。CLAUDE.md の「案内が求める操作を自分が持って
+    /// いるかを数える」の裏返し）。指示を足すのは、**足せる操作を持たない側**の仕事。
+    fn into_notice(self) -> String {
         match self {
-            NoRemote::Nobody(message) | NoRemote::Ask(message) => message,
+            // **足さない。** 待つか `git remote add` するかで、こちらから出せる
+            // 「次に何をするか」が無い（「追跡先を設定してください」はリモートが
+            // 1 本も無い相手には嘘になる）。
+            NoRemote::Nobody(message) => message,
+            NoRemote::Ask(diagnosis) => format!("{diagnosis}。追跡先を設定してください"),
         }
     }
 }
@@ -865,7 +877,7 @@ fn fetch_from(remote: &str) -> Cmd {
 ///
 /// **`f` と `P` で同じものを出す。** 別々に書くと、片方を書き換えたときに同じ設定へ
 /// 別のことを言い始める（`git branch --set-upstream-to=main topic` の 1 つの状態）。
-const LOCAL_TRACKING: &str = "追跡先がローカルです。リモートを設定してください";
+const LOCAL_TRACKING: &str = "追跡先がローカルです";
 
 /// `git fetch`（引数なし）が選ぶリモート（01 と 04 の「既定リモート」）。
 ///
@@ -956,9 +968,7 @@ fn conventional_remote(state: &AppState) -> Result<&Remote, NoRemote> {
                     .map(|remote| remote.name.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
-                NoRemote::Ask(format!(
-                    "origin がありません（{names}）。追跡先を設定してください"
-                ))
+                NoRemote::Ask(format!("origin がありません（{names}）"))
             }),
     }
 }
@@ -978,7 +988,7 @@ fn propose_upstream(branch: &str, state: &AppState) -> PushPlan {
         Ok(remote) => &remote.name,
         // **`Ask` でもモーダルは開かない。** push の行き先を選ばせるのは不変ルール 5 の
         // 手前の判断で、読むだけの fetch と同じ扱いにはできない（01）。
-        Err(no) => return PushPlan::Refused(no.into_message()),
+        Err(no) => return PushPlan::Refused(no.into_notice()),
     };
 
     PushPlan::Ask {

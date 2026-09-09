@@ -923,29 +923,36 @@ pub struct BranchState {
 
 ### 既定リモート
 
-**規則は 1 本**（`update::default_remote`）。読み手は 2 人で、`f` と
-`RepoInfo.target` を埋める経路。規則そのものと実測の表は 04 の「既定リモート」に
-あるので複製しない。要点だけ。
+**関数は 2 本。** `default_remote`（`git fetch` が取るもの）と `conventional_remote`
+（名前の慣習だけで選ぶもの）。規則そのものと実測の表、どちらがどれを呼ぶかの表は
+04 の「既定リモート」にあるので複製しない。要点だけ。
 
 ```
-branch.<HEAD>.remote → リモートが 1 本ならそれ → origin → 決まらない
+default_remote      = branch.<HEAD>.remote → conventional_remote
+conventional_remote = リモートが 1 本ならそれ → origin → 決まらない
 ```
+
+**`RepoInfo.target` が `default_remote` を呼ばない理由は 04 にある**（返信の到着順で
+答えが割れ、latch されるので直らない）。ここで数えておくのは**引き受ける側の非対称**
+だけ —— `f` はキーなので、遅れて届いたブランチ一覧は次に押したときに効く。`target` は
+1 回きりなので効かない。
 
 - **HEAD のブランチは `BranchState` から取る**（push の行き先と同じ理由。
   `RepoInfo.head` は起動時に読んだきりで古い）。まだ届いていなければ
   `branch.<HEAD>.remote` の段だけを飛ばす —— **決まらないに落とさない** ——
-  リモートが 1 本のふつうのリポジトリで、起動直後の `f` が断られてしまう
+  リモートが 1 本のふつうのリポジトリで、起動直後の `f` が断られてしまう。
+  **この寛容さは `f` にしか成り立たない**（上の非対称）
 - **`.`（ローカル追跡）は決まらない。** push が既に断っている形で、
   fetch に渡すと git が「そんなリモートは無い」で落ちる
 - **`branch.<HEAD>.remote` が一覧に無い名前を指していたら、その段を飛ばさず
   決まらないにする。** 飛ばすと `origin` へ落ちるが、ユーザーが書いた行き先とは
   別のリモートを黙って fetch することになる
 
-**`-u` の提案（`propose_upstream`）はこの関数に畳まない。** git 自身が fetch と
-push で違う規則を持っているため。理由は 04 の「既定リモート」の末尾にある。
-ただし `propose_upstream` が持っていた「1 本ならそれ、複数なら `origin`」の
-**枝は `default_remote` から引く** —— 同じ規則を 2 本書かないため、違うのは
-`branch.<name>.pushRemote` を将来足す先だけにする。
+**`-u` の提案（`propose_upstream`）は `default_remote` に畳まない。** git 自身が
+fetch と push で違う規則を持っているため。理由は 04 の「既定リモート」の末尾にある。
+ただし「1 本ならそれ、複数なら `origin`」の枝は共有する（`conventional_remote`）——
+同じ規則を 2 本書かないため、違うのは `branch.<name>.pushRemote` を将来足す先だけに
+する。
 
 ### `RepoInfo.target` を埋める
 
@@ -967,9 +974,11 @@ Msg::RepoInfoLoaded → update が default_remote で URL を選び RemoteUrl::p
   なりやすい」）
 - **`ssh -G` が失敗しても `target` は埋まる。** `host_raw` を使い、理由を通知に
   出す（04）。`Msg` は `Result` ではなく**解決済みの `RepoTarget` と
-  「正規化できなかった理由」の `Option`** を運ぶ —— `Result` にすると、
-  呼び出し側が `Err` で `target` を `None` にしてしまい、04 が用意した
-  「degraded ではなく正規化だけを諦める」経路が消える
+  「正規化できなかった理由」の `Option<AuthError>`**（`auth::ResolvedTarget`）を運ぶ
+  —— `Result` にすると、呼び出し側が `Err` で `target` を落としてしまい、04 が用意した
+  「degraded ではなく正規化だけを諦める」経路が消える。**`Box` に載せる**のは、`Msg` の
+  サイズが最大変種で決まり、1 打鍵ごとに作られる `Msg::Key` まで大きくなるため
+  （`msg_stays_small` が 128 バイトで見張っている）
 
 **読み手は 2 人。** いま読んでいるのは**ヘッダ**で、決まっていれば
 `mewgit  yshrsmz/mewgit` のように `owner/repo` を並べる（07）。もう 1 人は次の PR の
@@ -1363,7 +1372,7 @@ pub enum Msg {
     ExecFinished(Box<ExecDone>),       // { op, result, progress }
     ProgressDetected(Option<InProgressOp>),
     // auth / github
-    TargetResolved { target: RepoTarget, unnormalized: Option<String> },  // 上の「RepoInfo.target を埋める」
+    TargetResolved(Box<ResolvedTarget>),  // { target, unnormalized }。上の「RepoInfo.target を埋める」
     AccountResolved(AccountState),
     PrLoaded(Box<Result<Option<PullRequest>, GithubError>>),
     ChecksLoaded(Result<Vec<Check>, GithubError>),

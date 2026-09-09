@@ -134,28 +134,30 @@ async fn resolve_with(
         OsString::from(alias),
     ]);
 
-    let (bin, args) = match ssh {
-        // `sh -c '<実効 ssh> "$@"' ssh -G -- <alias>`。**alias をシェルの文字列に
-        // 埋めない** —— `"$@"` の位置引数に載せるので、`$(touch x)` を渡してもシェルは
-        // 展開せず、ssh が「hostname として不正」で落ちる（04 の実測）。`-c` の次の
-        // `ssh` は `$0` に入るだけの捨て値で、起動されるのは実効値のほう。
-        SshCommand::Shell(command) => {
-            let mut shell = vec![
-                OsString::from("-c"),
-                OsString::from(format!("{command} \"$@\"")),
-                OsString::from(SSH_BIN),
-            ];
-            shell.extend(args);
-            (Path::new(SHELL_BIN), shell)
-        }
-        // `GIT_SSH` はシェルを通さない argv 規約なので `-G` を解する保証が無い。
-        // 素の `ssh` に落とす（04 の表）。
-        SshCommand::Opaque => (Path::new(SSH_BIN), args),
+    // `GIT_SSH` はシェルを通さない argv 規約なので `-G` を解する保証が無く、叩かない。
+    // 落とし先は素の `ssh` = [`SshCommand::default`] と同じ（04 の表）。
+    let command = match ssh {
+        SshCommand::Shell(command) => command.as_str(),
+        SshCommand::Opaque => SSH_BIN,
     };
+    // `sh -c '<実効 ssh> "$@"' ssh -G -- <alias>`。**alias をシェルの文字列に埋めない**
+    // —— `"$@"` の位置引数に載せるので、`$(touch x)` を渡してもシェルは展開せず、
+    // ssh が「hostname として不正」で落ちる（04 の実測）。`-c` の次の `ssh` は `$0` に
+    // 入るだけの捨て値で、起動されるのは実効値のほう。
+    //
+    // **`Opaque` を直起動する腕は置かない。** 落とし先が `Shell("ssh")` と同じ値なので、
+    // 分けても**どちらの腕を通ったかを観測できるテストが書けない**（「テストで踏めない
+    // 状態をコードに入れない」）。
+    let mut shell = vec![
+        OsString::from("-c"),
+        OsString::from(format!("{command} \"$@\"")),
+        OsString::from(SSH_BIN),
+    ];
+    shell.extend(args);
 
     // 起動の形は `gh` と共有している（`probe`）。**数え直した結果はそこの doc に
     // ある** — `git_exec::Runner::spawn` は前提が違うので入っていない。
-    let stdout = super::probe::output(bin, args, &[])
+    let stdout = super::probe::output(Path::new(SHELL_BIN), shell, &[])
         .await
         .map_err(|err| failed(err.describe()))?;
     let host = hostname_from_dump(&stdout)
@@ -186,7 +188,7 @@ fn hostname_from_dump(dump: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::fake_ssh;
+    use crate::test_util::fake_ssh_host;
 
     /// `-F` に渡す ssh_config を書いて、そこで `ssh -G` を回す。
     ///
@@ -336,11 +338,7 @@ mod tests {
     async fn the_effective_ssh_is_the_one_that_runs() {
         // **これが「実効値に向けた」の見張り。** PATH の素の `ssh` を叩いていたら
         // `gh-work` はそのまま返ってくるので、偽物の hostname は出ない。
-        let (_dir, ssh) = fake_ssh(
-            "echo 'host gh-work'
-echo 'hostname fake.example.com'
-",
-        );
+        let (_dir, ssh) = fake_ssh_host("fake.example.com");
         assert_eq!(
             resolve_with(&ssh, None, "gh-work").await.unwrap(),
             "fake.example.com"
@@ -364,10 +362,7 @@ echo 'hostname fake.example.com'
         // **`sh -c` を通すようになったので数え直した腕。** alias を実効値の文字列に
         // 埋めると `$(...)` がシェルに展開される。`"$@"` の位置引数に載せているので
         // 展開されず、ssh が「ホスト名として不正」で落ちる（04 の実測）。
-        let (dir, ssh) = fake_ssh(
-            "echo 'hostname github.com'
-",
-        );
+        let (dir, ssh) = fake_ssh_host("github.com");
         let canary = dir.path().join("PWNED");
         let alias = format!("$(touch {})", canary.display());
         // 偽物は何を渡されても同じ hostname を返すので、見るのは canary の有無だけ。
@@ -379,25 +374,24 @@ echo 'hostname fake.example.com'
     async fn a_hostname_that_is_not_a_host_is_refused() {
         // **産出側の検査**（04）。`-4` を通すと `RepoTarget.host` まで進み、
         // `GithubClient::new` が `InvalidHost` で落として degraded だけが残る。
-        let (_dir, ssh) = fake_ssh(
-            "echo 'hostname -4'
-",
-        );
+        let (_dir, ssh) = fake_ssh_host("-4");
         let err = resolve_with(&ssh, None, "gh-work").await.unwrap_err();
         assert!(err.to_string().contains("-4"), "{err}");
     }
 
     #[tokio::test]
     async fn git_ssh_falls_back_to_plain_ssh() {
-        // `Opaque` は値を持たない単位ヴァリアントなので、落とし先は `SSH_BIN` しか
-        // ない（04 の表）。**どのランチャを通ったかは観測できない** —— 見るのは
-        // その腕が正しい argv を組めていることだけ。
+        // `Opaque` は値を持たない単位ヴァリアントなので、落とし先は素の `ssh`（04 の表）。
+        // **見張れるのは「素の ssh と同じ結果になる」ことだけ** —— 分岐を残しても
+        // どちらのランチャを通ったかは観測できないので、腕ごと畳んである。
         let (_dir, path) = crate::test_util::temp_file("config", GH_WORK);
         assert_eq!(
             resolve_with(&SshCommand::Opaque, Some(&path), "gh-work")
                 .await
                 .unwrap(),
-            "github.com"
+            resolve_with(&SshCommand::default(), Some(&path), "gh-work")
+                .await
+                .unwrap(),
         );
     }
 }

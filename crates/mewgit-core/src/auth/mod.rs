@@ -8,8 +8,10 @@
 //! `app` の `AppState` / `Msg` が参照する型を置いてある。
 //!
 //! **どのリモートの URL を見るかは決まった**（04 の「既定リモート」）。規則を持つのは
-//! `app` の `update::default_remote` で、材料の [`git_read::Remote`] と
-//! `Branch.upstream_config` がどちらも `auth` の上段の型だから（00）。
+//! `app` で、材料の [`git_read::Remote`] と `Branch.upstream_config` がどちらも
+//! `auth` の上段の型だから（00）。[`RepoTarget`] を組むのに使うのは
+//! `update::conventional_remote`（名前の慣習だけで選ぶほう）で、`f` が使う
+//! `update::default_remote` とは**別の問いに答える**。
 //!
 //! [`git_read::Remote`]: crate::git_read::Remote
 
@@ -36,6 +38,20 @@ pub struct RepoTarget {
     pub repo: String,
 }
 
+/// [`RepoTarget::resolve`] の結果。
+///
+/// **タプルで返さない。** 呼び出し側が並び順を覚えることになる
+/// （`git_read::repo::Tracking` と同じ判断）。`app` は
+/// [`Msg::TargetResolved`](crate::app::Msg::TargetResolved) で `Box` に載せて運ぶ
+/// —— `Msg` のサイズは最大変種で決まり、1 打鍵ごとに作られる `Msg::Key` まで
+/// 大きくなる（`msg_stays_small`）。
+#[derive(Debug)]
+pub struct ResolvedTarget {
+    pub target: RepoTarget,
+    /// 正規化できなかった理由。**`target` は埋まっている**（`host_raw` のまま）。
+    pub unnormalized: Option<AuthError>,
+}
+
 impl RepoTarget {
     /// リモート URL からアカウント解決の対象を組む（01 の
     /// 「`RepoInfo.target` を埋める」）。
@@ -45,23 +61,30 @@ impl RepoTarget {
     /// `Result` にしないのは、`Err` を受けた側が `target` を捨ててしまい、04 の
     /// 「degraded ではなく正規化だけを諦める」経路が消えるため。
     ///
+    /// **理由は [`AuthError`] のまま返す。** ここで `String` に潰すと、`auth` の中で
+    /// エラー型を畳むことになり（規約は「各モジュールで `thiserror`、`app` 層で集約」）、
+    /// `SshResolveFailed { alias, message }` が持っている argv 相当の内訳が M6 の
+    /// `Notice.detail` へ届かなくなる。
+    ///
     /// **port は scheme から取る。** https のときだけ値があり、ssh の port は
     /// [`url::RemoteScheme`] の時点で捨ててある（04 の「port は scheme に畳む」）。
-    pub async fn resolve(ssh: &ssh::SshCommand, url: url::RemoteUrl) -> (Self, Option<String>) {
+    pub async fn resolve(ssh: &ssh::SshCommand, url: url::RemoteUrl) -> ResolvedTarget {
         let (port, host, unnormalized) = match url.scheme {
             url::RemoteScheme::Https { port } => (port, url.host_raw, None),
             url::RemoteScheme::Ssh => match ssh::resolve_ssh_host(ssh, &url.host_raw).await {
                 Ok(host) => (None, host, None),
-                Err(err) => (None, url.host_raw, Some(err.to_string())),
+                Err(err) => (None, url.host_raw, Some(err)),
             },
         };
-        let target = RepoTarget {
-            host,
-            port,
-            owner: url.owner,
-            repo: url.repo,
-        };
-        (target, unnormalized)
+        ResolvedTarget {
+            target: RepoTarget {
+                host,
+                port,
+                owner: url.owner,
+                repo: url.repo,
+            },
+            unnormalized,
+        }
     }
 }
 
@@ -204,18 +227,18 @@ pub enum AuthError {
 mod tests {
     use super::url::RemoteUrl;
     use super::*;
-    use crate::test_util::fake_ssh;
-
-    /// `hostname` を 1 行返すだけの偽 ssh。
-    const FAKE_HOST: &str = "echo 'host gh-work'\necho 'hostname github.com'\n";
+    use crate::test_util::{fake_ssh, fake_ssh_host};
 
     #[tokio::test]
     async fn an_https_remote_keeps_its_port_and_does_not_run_ssh() {
         // **偽 ssh は `example.invalid` を返す。** https で `ssh -G` を回していたら
         // host がそちらに化けるので、これが「回していない」の見張りになる。
-        let (_dir, ssh) = fake_ssh("echo 'hostname example.invalid'\n");
+        let (_dir, ssh) = fake_ssh_host("example.invalid");
         let url = RemoteUrl::parse("https://ghe.example.com:8443/acme/tools.git").unwrap();
-        let (target, unnormalized) = RepoTarget::resolve(&ssh, url).await;
+        let ResolvedTarget {
+            target,
+            unnormalized,
+        } = RepoTarget::resolve(&ssh, url).await;
 
         assert_eq!(target.host, "ghe.example.com");
         assert_eq!(target.port, Some(8443));
@@ -228,9 +251,12 @@ mod tests {
     async fn an_ssh_remote_is_normalized_and_carries_no_port() {
         // **ssh の port は API の port ではない**ので、2222 は `RemoteScheme` の時点で
         // 捨てられている（04 の「port は scheme に畳む」）。
-        let (_dir, ssh) = fake_ssh(FAKE_HOST);
+        let (_dir, ssh) = fake_ssh_host("github.com");
         let url = RemoteUrl::parse("ssh://git@gh-work:2222/yshrsmz/mewgit.git").unwrap();
-        let (target, unnormalized) = RepoTarget::resolve(&ssh, url).await;
+        let ResolvedTarget {
+            target,
+            unnormalized,
+        } = RepoTarget::resolve(&ssh, url).await;
 
         assert_eq!(target.host, "github.com");
         assert_eq!(target.port, None);
@@ -243,11 +269,18 @@ mod tests {
         // `target` を捨てさせると、この経路が消える。
         let (_dir, ssh) = fake_ssh("echo 'no hostname here'\n");
         let url = RemoteUrl::parse("git@gh-work:yshrsmz/mewgit.git").unwrap();
-        let (target, unnormalized) = RepoTarget::resolve(&ssh, url).await;
+        let ResolvedTarget {
+            target,
+            unnormalized,
+        } = RepoTarget::resolve(&ssh, url).await;
 
         assert_eq!(target.host, "gh-work");
         assert_eq!(target.owner, "yshrsmz");
+        // **どの alias で失敗したかを持ったまま返す**（`String` に潰さない）。
         let reason = unnormalized.expect("理由が付いていない");
-        assert!(reason.contains("gh-work"), "{reason}");
+        assert!(
+            matches!(&reason, AuthError::SshResolveFailed { alias, .. } if alias == "gh-work"),
+            "{reason:?}"
+        );
     }
 }

@@ -337,11 +337,8 @@ impl Runtime {
                 let ssh = self.ssh.clone();
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
-                    let (target, unnormalized) = RepoTarget::resolve(&ssh, url).await;
-                    let _ = tx.send(Msg::TargetResolved {
-                        target,
-                        unnormalized,
-                    });
+                    let resolved = RepoTarget::resolve(&ssh, url).await;
+                    let _ = tx.send(Msg::TargetResolved(Box::new(resolved)));
                 });
                 ControlFlow::Continue(())
             }

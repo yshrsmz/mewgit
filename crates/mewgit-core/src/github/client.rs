@@ -76,12 +76,15 @@ fn base_url(host: &str, port: Option<u16>) -> Result<Url, GithubError> {
     if !valid_host(&lower) {
         return Err(invalid());
     }
-    // 分類は port を外したホストで済ませてある。ここから先は authority を組むだけ。
+    // **分類は port を外したホストで済ませる。** ここで先に決めておくと、下の
+    // authority を組むときに `lower` を move できる（`clone` は「あとで要る」と読める
+    // ので、要らないなら置かない）。
+    let api_subdomain = lower == "github.com" || lower.ends_with(".ghe.com");
     let authority = match port {
         Some(port) => format!("{lower}:{port}"),
-        None => lower.clone(),
+        None => lower,
     };
-    let raw = if lower == "github.com" || lower.ends_with(".ghe.com") {
+    let raw = if api_subdomain {
         format!("https://api.{authority}/")
     } else {
         format!("https://{authority}/api/v3/")

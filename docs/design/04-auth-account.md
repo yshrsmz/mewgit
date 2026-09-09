@@ -219,14 +219,27 @@ ssh が `hostname contains invalid characters` で落ちる。実測）。`sh -c
 
 ### 既定リモート
 
-**規則は git の fetch と同じにした。** 実装は `app` の `update::default_remote`
-1 本で、`RepoInfo.target` を埋める経路と `f` の両方がそれを呼ぶ（01 の「既定リモート」）。
+**問いは 1 つではない。** `app` に関数が 2 本ある（01 の「既定リモート」）。
 `auth` に置かないのは、材料が `git_read::Remote` と `Branch.upstream_config` で、
 どちらも `auth` の**上段**の型だから（00）。
 
+| 関数 | 答える問い | 読み手 |
+|---|---|---|
+| `update::default_remote` | `git fetch`（引数なし）はどれを取るか | `f` |
+| `update::conventional_remote` | 名前の慣習だけで選ぶならどれか | `default_remote` の 2 段目、`-u` の提案、`RepoInfo.target` |
+
 ```
-branch.<HEAD>.remote → リモートが 1 本ならそれ → origin → 決まらない
+default_remote      = branch.<HEAD>.remote → conventional_remote
+conventional_remote = リモートが 1 本ならそれ → origin → 決まらない
 ```
+
+**`RepoInfo.target` は `default_remote` を呼ばない。** ブランチの追跡設定を混ぜると、
+`Msg::BranchesLoaded` と `Msg::RepoInfoLoaded` の**どちらが先に届くかで答えが割れる**
+——`init` が両方を別々のジョブとして出すので順序は決まらず、しかも `target` は
+1 回きり決めて latch するので二度と直らない。`CLAUDE.md` が「ループテストは非同期の
+返信の順序に依存できない」と書いている、その順序に production が乗ってしまう。
+**ブランチを切り替えても `target` は変わらない**という事実とも噛み合わない。
+`/simplify` の altitude が拾った。
 
 git 2.55 で実測した（`env -i` の一時リポジトリ）。
 
@@ -238,7 +251,7 @@ git 2.55 で実測した（`env -i` の一時リポジトリ）。
 「1 本ならそれ → 複数なら `origin`」と「`origin` があればそれ → 無ければ 1 本のとき
 だけ」は**同じ結果**になる（食い違うのは「単一かつ `origin` でない」場合だけで、
 どちらもその 1 本を選ぶ）。既にある `propose_upstream` が前者の順で書かれているので
-そちらに合わせる。
+そちらに合わせる。**これが `conventional_remote`。**
 
 **`branch.<HEAD>.remote` が `.`（ローカル追跡）や、存在しないリモートを指すときは
 決まらない**（`None`）。`.` は 01 の push が既に断っている形で、存在しない名前は

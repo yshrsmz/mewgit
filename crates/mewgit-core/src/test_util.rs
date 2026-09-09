@@ -42,6 +42,14 @@ pub fn fake_ssh(body: &str) -> (tempfile::TempDir, SshCommand) {
     (dir, SshCommand::Shell(format!("sh {}", path.display())))
 }
 
+/// `hostname <host>` の 1 行だけを返す偽 ssh。[`fake_ssh`] の 4 人めまでの使い道。
+///
+/// **`host <alias>` の行は入れない。** 「`host` ではなく `hostname` を拾う」の見張りは
+/// `hostname_from_dump` のユニットテストが持っており、こちらで重ねても踏む腕は増えない。
+pub fn fake_ssh_host(host: &str) -> (tempfile::TempDir, SshCommand) {
+    fake_ssh(&format!("echo 'hostname {host}'\n"))
+}
+
 /// コミット日時の起点（2023-11-14T22:13:20Z）。`git` を 1 回叩くごとに [`TICK`] 秒進める。
 ///
 /// 実時間を使うと、続けて作ったコミットが同じ秒に落ちて `Sort::TIME` での並びが

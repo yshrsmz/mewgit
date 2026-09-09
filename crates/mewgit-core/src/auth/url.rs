@@ -79,7 +79,7 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
         // **最初の `/` より前に `:` があるもの**だけが scp 形式。
         let (authority, path) = url.split_once(':')?;
         // authority に `/` があればローカルパス（`~/repos/x@host:a/b.git` など）。
-        // **`valid_host` では落ちない** — `host_of` が最後の `@` から後ろだけを見るので、
+        // **`valid_host` では落ちない** — `split_authority` が最後の `@` から後ろだけを見るので、
         // `/` を含む部分がそこで消える。
         if authority.contains('/') {
             return None;
@@ -91,13 +91,8 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
     };
 
     let (host, port) = split_authority(authority)?;
-    // **port の構文はどちらの scheme でも確かめる。** 値を使うのは https だけだが、
-    // 読めない port を「port が無い」と同じに扱うと、git が動かない URL を
-    // 解析できたことにしてしまう。`0` はポート番号ではないので落とす。
-    let port = match port {
-        Some(raw) => Some(raw.parse::<u16>().ok().filter(|port| *port != 0)?),
-        None => None,
-    };
+    // **既定ポートを畳むのはここだけ。** どのポートを受けるかは `split_authority` が
+    // 1 箇所で答えており、scheme で変わるのはこの畳み方だけ。
     let scheme = if is_https {
         RemoteScheme::Https {
             port: port.filter(|port| *port != HTTPS_PORT),
@@ -116,15 +111,19 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
     })
 }
 
-/// `[user@]host[:port]` を host と（書いてあれば）port の文字列に割る。
-fn split_authority(authority: &str) -> Option<(&str, Option<&str>)> {
+/// `[user@]host[:port]` を host と port に割る。
+///
+/// **port の構文はどちらの scheme でも確かめる。** 値を使うのは https だけだが
+/// （[`RemoteScheme`]）、読めない port を「port が無い」と同じに扱うと、git が動かない
+/// URL を解析できたことにしてしまう。`0` はポート番号ではないので落とす。
+fn split_authority(authority: &str) -> Option<(&str, Option<u16>)> {
     // user 名に `@` が入ることがあるので、最後の `@` で割る。
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
     // IPv6 リテラル（`[::1]:22`）は `[` を含むので `valid_host` で落ちる。
     let (host, port) = match host.split_once(':') {
-        Some((host, port)) => (host, Some(port)),
+        Some((host, port)) => (host, Some(port.parse::<u16>().ok().filter(|p| *p != 0)?)),
         None => (host, None),
     };
     valid_host(host).then_some((host, port))
@@ -134,7 +133,7 @@ fn split_authority(authority: &str) -> Option<(&str, Option<&str>)> {
 ///
 /// **`-` 始まりを弾くのが眼目。** 理由は 2 つある。第一に、ホスト名の構文として
 /// `-` 始まりは受けない（`https://-4/a/b` を拒むのはこちらの理由）。第二に、
-/// [`host_of`] が `user@` を捨てるので、通すと**裸の** `-4` が `ssh -G` の positional
+/// [`split_authority`] が `user@` を捨てるので、通すと**裸の** `-4` が `ssh -G` の positional
 /// に載る（04 の「alias は argv の positional に載る」）。
 ///
 /// **git と同じ判断ではない。** git 2.55 が拒むのは `user@host` 全体が `-` で始まる
@@ -339,7 +338,7 @@ mod tests {
             "/srv/repos/b.git",
             "../sibling",
             // `:` はあるが、その手前に `/` があるローカルパス。**`valid_host` では
-            // 落ちない** — `host_of` が最後の `@` から後ろだけを見るので、
+            // 落ちない** — `split_authority` が最後の `@` から後ろだけを見るので、
             // `~/repos/x` の部分が消えて `host` だけが残る。
             "~/repos/x@host:a/b.git",
             // owner か repo が足りない / 多い。
@@ -390,7 +389,7 @@ mod tests {
     #[test]
     fn rejects_option_like_host() {
         // `-` 始まりは 2 つの理由で受けない。ホスト名の構文として不正であること
-        // （`https://-4/a/b` はこちら）と、`host_of` が `user@` を捨てるので裸の値が
+        // （`https://-4/a/b` はこちら）と、`split_authority` が `user@` を捨てるので裸の値が
         // `ssh -G` の positional に載ること（04）。**git は `git@-4:a/b.git` を通す**
         // ので、git に合わせると後者が塞げない（`valid_host` の doc に実測がある）。
         for url in [

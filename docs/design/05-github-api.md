@@ -39,10 +39,16 @@ impl GithubClient {
 `https://api.{host}`、self-hosted の GHES は `https://{host}/api/v3`
 （`gh` のバイナリに `https://%s/api/v3/` があるのを `strings` で確認）。
 
-**分類より前に「ホスト名だけか」を確かめる。** `Url::parse` は `a/b` や `a:8443`、
-`u@a` を通してしまい、それから組むと `https://api.a/b/` のような**動くが違う場所を
-指す**ベースになる。順序が逆だと `foo/bar.ghe.com` が `.ghe.com` で終わって
-データレジデンシー扱いになる。
+**分類より前に「ホスト名だけか」を確かめる。** 順序が逆だと `foo/bar.ghe.com` が
+`.ghe.com` で終わってデータレジデンシー扱いになり、`https://api.foo/bar.ghe.com/`
+という**動くが違う場所を指す**ベースになる。
+
+**述語は `auth::url::valid_host` を呼ぶ。書き直さない。** 00 の依存の向きで
+`github` は `auth` の上段なので参照してよい。自前で `Url::parse` して host / port /
+path を突き合わせる形も書けるが、それは `-4` も `-oProxyCommand=id` も `[::1]` も
+通す —— **`-` 始まりを弾くのが眼目**だと 04 が名指ししている、まさにその形。
+`InvalidHost` がここに要る理由（`ssh -G` の `hostname` は `RemoteUrl` の検査を
+通っていない）と、その穴を塞ぐ述語は同じ 1 本でなければ噛み合わない。
 
 **ホストの大小は比較のときだけ無視する。** 組んだ URL の小文字化は `Url` が行う
 （WHATWG URL の host 正規化）ので、こちらでは触らない —— 二重に正規化すると
@@ -85,8 +91,9 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
 `cargo update --workspace` を叩いた場合は誰も担保しない。**
 
 - **認証付きリクエストは同時 4 本まで（`Semaphore`）。まだ入れていない。**
-  いま並列に呼ぶ経路が無く、踏めない腕になる。`ui::panes::prs`（PR ごとに
-  checks / reviews を並べて引く）のタスクで入れる
+  いま並ぶのは `checks` の 2 本（check-runs と commit status）だけで、**上限 4 の
+  内側なので `Semaphore` が働く場面がまだ無い**。扇形に広がるのは
+  `ui::panes::prs`（PR ごとに checks / reviews を引く）なので、そこで入れる
 - **レートリミット残量の受け渡しもまだ。** 読む側（ヘッダの `[acct: …]` 表示）が
   無いので、ヘッダの `x-ratelimit-*` は
   [`GithubError::RateLimited`] を組むときにしか読んでいない。
@@ -108,12 +115,21 @@ GraphQL は MVP では使わない（1 画面に必要な情報は REST 数本�
 ## モデル
 
 ```rust
-pub struct PullRequest { number, title, state: PrStatus, draft, head: RefSpec, base: RefSpec, url, author, review: ReviewSummary, checks: Option<CheckSummary> }
+pub struct PullRequest { number, title, state: PrStatus, draft, head: RefSpec, base: RefSpec, url, author, review: Option<ReviewSummary>, checks: Option<CheckSummary> }
 pub enum PrStatus { Open, Closed, Merged }   // app::PrState（画面の状態）と紛らわしいので Status
-pub struct RefSpec { owner: String, repo: String, branch: String, sha: String }
+pub struct RefSpec { repo: Option<RepoRef>, branch: String, sha: String }
+pub struct RepoRef { owner: String, repo: String }
 pub enum CheckState { Success, Failure, Pending, Skipped, Neutral }
 pub struct Check { name, state: CheckState, url: Option<String> }
 ```
+
+- **`review` と `checks` はどちらも `Option`。** 別リクエストなので、PR 一覧を
+  引いた直後はどちらも未取得。`review` に `ReviewSummary::default()` を入れると
+  **「レビュー 0 件」と区別できない**ので、2 つは対称にする。
+- **`RefSpec.repo` が `Option` なのは fork の削除を表すため。** GitHub は削除された
+  fork の `head.repo` を `null` で返す。空文字で埋めると「owner が空」と区別できず、
+  下の PR チェックアウトが**同一リポジトリかどうかを owner の比較で決めている**ので、
+  消えた fork を fork 経路へ落とす。
 
 ## エラー
 
@@ -121,13 +137,18 @@ pub struct Check { name, state: CheckState, url: Option<String> }
 pub enum GithubError {
     InvalidHost { host },                          // ベース URL を組めないホスト
     Unauthorized,                                  // 401
-    Forbidden { needed_scopes: Vec<String>, body: String },  // 403（SAML / スコープ / IP allowlist）
+    Forbidden { needed_scopes: Vec<String>, saml: bool, body_head: String },  // 403（SAML / スコープ / IP allowlist）
     NotFound,                                      // 404（権限不足でも返る）
     RateLimited { reset_at },
-    Network(reqwest::Error),
+    Network { message: String },
     Api { status, body_head: String },             // 本文先頭 200 文字
 }
 ```
+
+- **`Network` は `reqwest::Error` を持てない。** `GithubError` は `Clone + PartialEq +
+  Eq` を derive していて（通知に載せて比較するため）、`reqwest::Error` はどれも
+  満たさない。文字列 1 本にし、**`without_url()` で URL を落としてから**入れる
+  （`Display` が URL を出すことがある）。
 
 403 の本文に `SAML` / `Resource protected by organization SAML enforcement` が含まれる場合は `Forbidden` に `saml: true` を付け、案内を「トークンの SSO 承認」に切り替える。
 

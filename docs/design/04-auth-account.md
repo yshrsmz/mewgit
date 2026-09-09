@@ -54,6 +54,13 @@ pub async fn resolve_ssh_host(alias: &str) -> Result<String, AuthError>   // ssh
 - scheme が ssh のときのみ `ssh -G` を実行し、`hostname` 行を実ホストとする
 - 結果は `app` が `RepoInfo.target.host` として保持する（例: `github.com`、`acme.ghe.com`）
 - `ssh` が無い、または解決失敗なら `host_raw` をそのまま使い、通知に出す
+- **`resolve_ssh_host` の戻り値は `valid_host` を通っていない。** いまは
+  `github::client::base_url` が同じ述語（`auth::url::valid_host`）を呼んで塞いでいる
+  が、**より深い形は産出側で検査すること** —— `hostname_from_dump` の結果に
+  `valid_host` を掛ければ、上の「解決失敗なら `host_raw` を使って通知に出す」経路に
+  そのまま乗り、`github` 側の検査が要らなくなる。採るなら `Err` になる条件の数
+  （下の「ssh -G の実測」の 3 つ）と `hostname_from_dump` の「`None` の理由を 1 つに
+  保つ」を同じコミットで数え直す。**このタスク（`auth::resolve`）で決める。**
 
 ### ssh -G の実測（OpenSSH 10.3p1）
 
@@ -155,13 +162,23 @@ pub async fn resolve(
 `RepoInfo`（01）は `app` 層の型なので受け取らない。`auth` は `app` より下にあり、
 依存の向きは上から下のみ（00 参照）。呼び出し側が `RepoInfo` から `RepoTarget` を作る。
 
-**`api: &GithubClient` は成り立たない。このタスクで形を決め直す。** `GithubClient` は
-**トークンを 1 本抱える**（05。`new(host, token)`）ので、手順 4 の「各トークンで
-`GET /repos/{owner}/{repo}` を並列に試す」を 1 つのクライアントでは回せない。
-候補は「ホストだけ渡して `resolve` の中でトークンごとに組む」「`GhLogin` から
-クライアントを作る関数を渡す」の 2 つ。**`GithubClient::new` が `Result` を返す**
-（ベース URL を組めないホストがある）ので、組む場所によって `Degraded` の理由が
-1 つ増えるかどうかが変わる —— そこまで含めて決める。
+**`api: &GithubClient` は成り立たない。このタスクで形を決め直す。** 理由は 2 つあり、
+**先に効くのは 00 のレイヤー則**のほう。
+
+1. **依存の向き。** 00 の図で `github` は `auth` の**上段**なので、`auth` が
+   `github` の型を名指しするのは上向きで、`RepoInfo` を受け取らないのと同じ理由で
+   できない。**「ホストだけ渡して `resolve` の中で組む」も「クライアントを作る関数を
+   渡す」も、同じ理由で不可。** 成立するのは、probe を `auth` の外へ出す
+   （`app` が候補ごとに `github::repo` を叩き、結果だけ `resolve` に渡す）か、
+   `auth` 側が `github` の型を名指ししない狭い結果型で受けるか、の 2 つ。
+2. **トークンが 1 本。** `GithubClient` はトークンを抱える（05。`new(host, token)`）
+   ので、手順 4 の「各トークンで `GET /repos/{owner}/{repo}` を並列に試す」を
+   1 つのクライアントでは回せない。**`reqwest::Client` のほうは共有される**
+   （`github` がプロセスで 1 つ持つ）ので、候補ごとに `GithubClient` を作っても
+   トラストストアの読み直しは起きない。
+
+`GithubClient::new` は `Result`（ベース URL を組めないホストがある）なので、
+組む場所によって `Degraded` の理由が 1 つ増えるかどうかが変わる。そこまで含めて決める。
 
 手順:
 

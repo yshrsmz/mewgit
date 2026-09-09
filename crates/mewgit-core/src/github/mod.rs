@@ -34,7 +34,10 @@ pub struct PullRequest {
     pub base: RefSpec,
     pub url: String,
     pub author: String,
-    pub review: ReviewSummary,
+    /// レビューは別リクエスト（`reviews`）なので、未取得なら `None`。
+    /// **`ReviewSummary::default()` を入れない** —— 「レビュー 0 件」と
+    /// 区別できなくなる。`checks` と対称にしてある。
+    pub review: Option<ReviewSummary>,
     /// チェックは別リクエストなので、未取得なら `None`。
     pub checks: Option<CheckSummary>,
 }
@@ -46,13 +49,25 @@ pub enum PrStatus {
     Merged,
 }
 
-/// PR の head / base。fork の場合 `owner` が元リポジトリと異なる。
+/// PR の head / base。
+///
+/// **`repo` が `Option` なのは fork の削除を表すため。** GitHub は削除された
+/// fork の `head.repo` を `null` で返す。空文字で埋めると「owner が空」と
+/// 区別できなくなり、PR チェックアウト（05）が**同一リポジトリかどうかを owner の
+/// 比較で決めている**ので、消えた fork を fork 経路へ落とす。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefSpec {
-    pub owner: String,
-    pub repo: String,
+    /// fork が削除されていれば `None`。fork のときは元リポジトリと owner が異なる。
+    pub repo: Option<RepoRef>,
     pub branch: String,
     pub sha: String,
+}
+
+/// リポジトリの指し先。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoRef {
+    pub owner: String,
+    pub repo: String,
 }
 
 /// CI チェック 1 件。

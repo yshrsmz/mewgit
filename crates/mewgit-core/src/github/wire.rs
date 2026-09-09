@@ -8,8 +8,9 @@
 //! 予告なく行うので、`deny_unknown_fields` にはしない。
 
 use serde::Deserialize;
+use std::collections::HashMap;
 
-use super::{Check, CheckState, PrStatus, PullRequest, RefSpec, RepoMeta, ReviewSummary};
+use super::{Check, CheckState, PrStatus, PullRequest, RefSpec, RepoMeta, RepoRef, ReviewSummary};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct WireRepo {
@@ -52,8 +53,10 @@ pub(super) struct WirePullRef {
     #[serde(rename = "ref")]
     pub ref_name: String,
     pub sha: String,
-    /// **fork が削除されると `null` になる。** owner / repo が引けないので、
-    /// そのときは空文字にせず `ref` と `sha` だけを持つ [`RefSpec`] にする。
+    /// **fork が削除されると `null` になる。** [`RefSpec::repo`] も `Option` なので
+    /// そのまま運ぶ。空文字を入れると「消えた fork」と「owner が空」を
+    /// 区別できなくなり、05 の PR チェックアウトが**同一リポジトリかどうかを
+    /// owner の比較で決めている**ので、消えた fork を fork 経路へ落とす。
     pub repo: Option<WireRepoRef>,
 }
 
@@ -65,13 +68,11 @@ pub(super) struct WireRepoRef {
 
 impl From<WirePullRef> for RefSpec {
     fn from(w: WirePullRef) -> Self {
-        let (owner, repo) = match w.repo {
-            Some(r) => (r.owner.login, r.name),
-            None => (String::new(), String::new()),
-        };
         RefSpec {
-            owner,
-            repo,
+            repo: w.repo.map(|r| RepoRef {
+                owner: r.owner.login,
+                repo: r.name,
+            }),
             branch: w.ref_name,
             sha: w.sha,
         }
@@ -81,7 +82,7 @@ impl From<WirePullRef> for RefSpec {
 impl WirePull {
     /// PR の状態。**`state` だけでは merge と close を区別できない**ので
     /// `merged_at` を先に見る（GitHub は merge した PR も `state: "closed"` で返す）。
-    fn status(&self) -> PrStatus {
+    pub(super) fn status(&self) -> PrStatus {
         if self.merged_at.is_some() {
             PrStatus::Merged
         } else if self.state == "open" {
@@ -105,8 +106,9 @@ impl From<WirePull> for PullRequest {
             url: w.html_url,
             // Ghost user（アカウント削除）では `user` が `null` になる。
             author: w.user.map(|u| u.login).unwrap_or_default(),
-            review: ReviewSummary::default(),
-            // チェックは別リクエスト（`checks`）なので、ここでは未取得。
+            // レビューもチェックも別リクエスト（`reviews` / `checks`）なので未取得。
+            // **`ReviewSummary::default()` を入れない** —— 「0 件」と区別できない。
+            review: None,
             checks: None,
         }
     }
@@ -203,45 +205,37 @@ pub(super) struct WireReview {
 /// 配列は古い順に来るので、後に来たものが勝つ。
 pub(super) fn summarize_reviews(reviews: Vec<WireReview>) -> ReviewSummary {
     /// 1 人のユーザーの現在の状態。数え上げる 3 つだけを持つ。
-    #[derive(Clone, Copy)]
     enum Verdict {
         Approved,
         ChangesRequested,
         Commented,
     }
 
-    // 「そのユーザーの現在の状態」。dismiss されたら取り除く。
-    let mut latest: Vec<(String, Verdict)> = Vec::new();
+    let mut latest: HashMap<String, Verdict> = HashMap::new();
     for review in reviews {
         // Ghost user（アカウント削除）のレビューは誰のものか判らないので数えない。
         let Some(user) = review.user else { continue };
-        let seen = latest.iter().position(|(u, _)| *u == user.login);
         match review.state.as_str() {
-            "APPROVED" => set(&mut latest, seen, user.login, Verdict::Approved),
-            "CHANGES_REQUESTED" => set(&mut latest, seen, user.login, Verdict::ChangesRequested),
+            "APPROVED" => {
+                latest.insert(user.login, Verdict::Approved);
+            }
+            "CHANGES_REQUESTED" => {
+                latest.insert(user.login, Verdict::ChangesRequested);
+            }
             "DISMISSED" => {
-                if let Some(at) = seen {
-                    latest.remove(at);
-                }
+                latest.remove(&user.login);
             }
-            // 既に承認 / 変更要求があるなら上書きしない。
-            "COMMENTED" if seen.is_none() => {
-                latest.push((user.login, Verdict::Commented));
+            // `or_insert` が「既にあるなら上書きしない」そのもの。
+            "COMMENTED" => {
+                latest.entry(user.login).or_insert(Verdict::Commented);
             }
-            // `COMMENTED` の上書きしない側、`PENDING`（未 submit の下書き）、未知の状態。
+            // `PENDING`（未 submit の下書き）と未知の状態。
             _ => {}
         }
     }
 
-    fn set(latest: &mut Vec<(String, Verdict)>, at: Option<usize>, login: String, v: Verdict) {
-        match at {
-            Some(at) => latest[at].1 = v,
-            None => latest.push((login, v)),
-        }
-    }
-
     let mut summary = ReviewSummary::default();
-    for (_, verdict) in latest {
+    for verdict in latest.into_values() {
         match verdict {
             Verdict::Approved => summary.approved += 1,
             Verdict::ChangesRequested => summary.changes_requested += 1,

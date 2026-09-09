@@ -4,6 +4,9 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use reqwest::{Response, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
+use std::sync::OnceLock;
+
+use crate::auth::url::valid_host;
 
 use super::wire::{
     summarize_reviews, WireCheckRuns, WireCombinedStatus, WirePull, WireRepo, WireReview,
@@ -41,12 +44,15 @@ fn base_url(host: &str) -> Result<Url, GithubError> {
         host: host.to_string(),
     };
     let lower = host.to_ascii_lowercase();
-    // **先に「ホスト名だけか」を確かめる。** `Url::parse` は `a/b` や `a:8443`、
-    // `u@a` を通してしまい、それから組むと `https://api.a/b/` のように
-    // **動くが違う場所を指す**ベースになる。分類より前に置くのは、`.ghe.com` で
-    // 終わるかの判定自体が `foo/bar.ghe.com` で真になるため。
-    let probe = Url::parse(&format!("https://{lower}/")).map_err(|_| invalid())?;
-    if probe.host_str() != Some(lower.as_str()) || probe.port().is_some() || probe.path() != "/" {
+    // **分類より先に「ホスト名だけか」を確かめる。** 順序が逆だと
+    // `foo/bar.ghe.com` が `.ghe.com` で終わって真になり、
+    // `https://api.foo/bar.ghe.com/` という**動くが違う場所を指す**ベースになる。
+    //
+    // 述語は `auth` のものを呼ぶ。**別に書くと、`-` 始まりを弾く理由
+    // （`ssh -G` の positional に裸の `-oProxyCommand=id` が載る。04）が
+    // 片方にしか残らない** —— 実際、自前で `Url::parse` して突き合わせる形は
+    // `-4` も `[::1]` も `.` も通していた。
+    if !valid_host(&lower) {
         return Err(invalid());
     }
     let raw = if lower == "github.com" || lower.ends_with(".ghe.com") {
@@ -59,31 +65,29 @@ fn base_url(host: &str) -> Result<Url, GithubError> {
 
 /// GitHub REST API クライアント。
 ///
-/// トークンは [`SecretString`] のまま持ち、`Debug` には出さない（不変ルール 3）。
+/// トークンは [`SecretString`] のまま持つので `Debug` には出ない（不変ルール 3）。
+/// `auth::Account` と同じ形。見張りは `debug_does_not_leak_the_token`。
+#[derive(Debug)]
 pub struct GithubClient {
     http: reqwest::Client,
     base: Url,
     token: SecretString,
 }
 
-impl std::fmt::Debug for GithubClient {
-    /// **トークンを出さない。** `derive` にすると `SecretString` の `Debug` に
-    /// 依存することになるので、ここで落とす。
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GithubClient")
-            .field("base", &self.base.as_str())
-            .finish_non_exhaustive()
-    }
-}
-
-impl GithubClient {
-    /// ホスト名からクライアントを作る。
-    pub fn new(host: &str, token: SecretString) -> Result<Self, GithubError> {
-        Self::with_base_url(base_url(host)?, token)
-    }
-
-    /// ベース URL を直に与える。テストと、ベース URL の規則を通さない呼び出しのため。
-    fn with_base_url(base: Url, token: SecretString) -> Result<Self, GithubError> {
+/// プロセスで 1 つの [`reqwest::Client`]。
+///
+/// **クライアントごとに組まない。** トークンは `bearer_auth` でリクエスト単位に
+/// 載るので、`reqwest::Client` はトークンにもベース URL にも依存しない。組むたびに
+/// Linux では `rustls-platform-verifier` が `/etc/ssl/certs` を読み直し
+/// （`rustls-platform-verifier-0.7.0/src/verification/others.rs` の
+/// `load_native_certs`）、コネクションプールも分かれる。`auth::resolve` は
+/// トークン候補ごとにクライアントを作るので、そこで人数分払うことになる。
+///
+/// 失敗（TLS バックエンドを初期化できない）も憶える。**プロセス全体の条件**なので
+/// 呼び直しても変わらない。
+fn shared_http() -> Result<reqwest::Client, GithubError> {
+    static HTTP: OnceLock<Result<reqwest::Client, GithubError>> = OnceLock::new();
+    HTTP.get_or_init(|| {
         let mut headers = HeaderMap::new();
         headers.insert(
             ACCEPT,
@@ -97,11 +101,27 @@ impl GithubClient {
             USER_AGENT,
             HeaderValue::from_static(concat!("mewgit/", env!("CARGO_PKG_VERSION"))),
         );
-        let http = reqwest::Client::builder()
+        reqwest::Client::builder()
             .default_headers(headers)
             .build()
-            .map_err(network)?;
-        Ok(GithubClient { http, base, token })
+            .map_err(network)
+    })
+    .clone()
+}
+
+impl GithubClient {
+    /// ホスト名からクライアントを作る。
+    pub fn new(host: &str, token: SecretString) -> Result<Self, GithubError> {
+        Self::with_base_url(base_url(host)?, token)
+    }
+
+    /// ベース URL を直に与える。テストがモックサーバを指すための seam。
+    fn with_base_url(base: Url, token: SecretString) -> Result<Self, GithubError> {
+        Ok(GithubClient {
+            http: shared_http()?,
+            base,
+            token,
+        })
     }
 
     /// リポジトリのメタ情報。`auth::resolve` の probe 兼用。
@@ -139,12 +159,13 @@ impl GithubClient {
                 ],
             )
             .await?;
-        let prs: Vec<PullRequest> = wire.into_iter().map(Into::into).collect();
-        Ok(prs
+        // **選んでから変換する。** 全件を値型にすると、採らない PR の `String` まで
+        // 確保したうえで採った 1 件を clone することになる。
+        let at = wire
             .iter()
-            .find(|pr| pr.state == PrStatus::Open)
-            .or_else(|| prs.first())
-            .cloned())
+            .position(|w| w.status() == PrStatus::Open)
+            .unwrap_or(0);
+        Ok(wire.into_iter().nth(at).map(Into::into))
     }
 
     /// コミットのチェック一覧。
@@ -159,13 +180,19 @@ impl GithubClient {
         sha: &str,
     ) -> Result<Vec<Check>, GithubError> {
         let runs_url = self.endpoint(&["repos", owner, repo, "commits", sha, "check-runs"]);
-        let runs: WireCheckRuns = self.get(runs_url, &[("per_page", PER_PAGE)]).await?;
         let status_url = self.endpoint(&["repos", owner, repo, "commits", sha, "status"]);
-        let combined: WireCombinedStatus = self.get(status_url, &[("per_page", PER_PAGE)]).await?;
-
-        let mut checks: Vec<Check> = runs.check_runs.into_iter().map(Into::into).collect();
-        checks.extend(combined.statuses.into_iter().map(Check::from));
-        Ok(checks)
+        // **2 本は独立なので並べる。** 順に待つと RTT がそのまま倍になる。
+        // 同時 2 本は 05 の上限（4）の内側なので、`Semaphore` はまだ要らない。
+        let (runs, combined): (WireCheckRuns, WireCombinedStatus) = tokio::try_join!(
+            self.get(runs_url, &[("per_page", PER_PAGE)]),
+            self.get(status_url, &[("per_page", PER_PAGE)]),
+        )?;
+        Ok(runs
+            .check_runs
+            .into_iter()
+            .map(Check::from)
+            .chain(combined.statuses.into_iter().map(Check::from))
+            .collect())
     }
 
     /// PR のレビュー集計。数え方は `wire::summarize_reviews`。
@@ -242,21 +269,16 @@ async fn check_status(response: Response) -> Result<Response, GithubError> {
             reset_at: header_i64(&response, "x-ratelimit-reset").unwrap_or_default(),
         });
     }
-    let needed_scopes = header_str(&response, "x-accepted-oauth-scopes")
-        .map(|v| {
-            v.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    // **本文を読む前にヘッダを取る。** `text()` が `response` を消費する。
+    let scopes = needed_scopes(&response);
+    // 401 / 404 でも本文は読み切る。読まずに落とすと hyper がその接続を
+    // プールへ戻せない（GitHub のエラー本文は数十バイト）。
     let body = response.text().await.unwrap_or_default();
     let body_head: String = body.chars().take(BODY_HEAD_CHARS).collect();
     Err(match status {
         StatusCode::UNAUTHORIZED => GithubError::Unauthorized,
         StatusCode::FORBIDDEN => GithubError::Forbidden {
-            needed_scopes,
+            needed_scopes: scopes,
             saml: body.contains("SAML"),
             body_head,
         },
@@ -280,6 +302,20 @@ fn is_rate_limited(response: &Response) -> bool {
         && header_i64(response, "x-ratelimit-remaining") == Some(0)
 }
 
+/// 403 に添える「足りないスコープ」。GitHub は要求されるスコープを
+/// `x-accepted-oauth-scopes` で返す。
+fn needed_scopes(response: &Response) -> Vec<String> {
+    header_str(response, "x-accepted-oauth-scopes")
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn header_str<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
     response.headers().get(name)?.to_str().ok()
 }
@@ -291,7 +327,7 @@ fn header_i64(response: &Response, name: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::CheckState;
+    use crate::github::{CheckState, RepoRef};
     use serde_json::json;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -299,6 +335,20 @@ mod tests {
     fn client(server: &MockServer) -> GithubClient {
         let base = Url::parse(&format!("{}/", server.uri())).expect("mock server の URI");
         GithubClient::with_base_url(base, SecretString::from("t0ken")).expect("クライアント")
+    }
+
+    /// `/repos/o/r` にこの応答を返させ、`repo` が返すエラーを取る。
+    ///
+    /// エラーの分類はステータスとヘッダだけで決まるので、どの API から呼んでも
+    /// 同じ。**一番引数の少ない `repo` で代表させる。**
+    async fn repo_err(response: ResponseTemplate) -> GithubError {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        client(&server).repo("o", "r").await.unwrap_err()
     }
 
     // ---- ベース URL ----
@@ -375,6 +425,11 @@ mod tests {
             "user@ghe.example.com",
             "",
             " ",
+            // `-` 始まりは `auth` が「弾くのが眼目」と書いている形（04）。
+            // 自前で `Url::parse` して突き合わせる検査はこれを通していた。
+            "-4",
+            "-oProxyCommand=id",
+            "[::1]",
         ] {
             assert!(
                 matches!(base_url(host), Err(GithubError::InvalidHost { .. })),
@@ -517,9 +572,20 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(pr.head.owner, "", "fork が消えていても branch / sha は残す");
-        assert_eq!(pr.head.branch, "feat/x");
+        assert_eq!(
+            pr.head.repo, None,
+            "消えた fork は None で表す（空文字にしない）"
+        );
+        assert_eq!(pr.head.branch, "feat/x", "branch と sha は残る");
         assert_eq!(pr.head.sha, "deadbeef");
+        assert_eq!(
+            pr.base.repo,
+            Some(RepoRef {
+                owner: "o".into(),
+                repo: "r".into()
+            }),
+            "base 側は消えていない"
+        );
     }
 
     #[tokio::test]
@@ -618,50 +684,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_404_becomes_not_found() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r"))
-            .respond_with(
-                ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })),
-            )
-            .mount(&server)
-            .await;
-
-        assert_eq!(
-            client(&server).repo("o", "r").await.unwrap_err(),
-            GithubError::NotFound
-        );
+        let body = json!({ "message": "Not Found" });
+        let response = ResponseTemplate::new(404).set_body_json(body);
+        assert_eq!(repo_err(response).await, GithubError::NotFound);
     }
 
     #[tokio::test]
     async fn a_401_becomes_unauthorized() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&server)
-            .await;
-
         assert_eq!(
-            client(&server).repo("o", "r").await.unwrap_err(),
+            repo_err(ResponseTemplate::new(401)).await,
             GithubError::Unauthorized
         );
     }
 
     #[tokio::test]
     async fn a_saml_403_carries_the_scopes_and_the_saml_flag() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r"))
-            .respond_with(
-                ResponseTemplate::new(403)
-                    .insert_header("x-accepted-oauth-scopes", "repo, read:org")
-                    .set_body_string("Resource protected by organization SAML enforcement."),
-            )
-            .mount(&server)
-            .await;
-
-        let err = client(&server).repo("o", "r").await.unwrap_err();
+        let response = ResponseTemplate::new(403)
+            .insert_header("x-accepted-oauth-scopes", "repo, read:org")
+            .set_body_string("Resource protected by organization SAML enforcement.");
+        let err = repo_err(response).await;
         let GithubError::Forbidden {
             needed_scopes,
             saml,
@@ -680,19 +721,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_403_with_no_quota_left_is_rate_limited_not_forbidden() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r"))
-            .respond_with(
-                ResponseTemplate::new(403)
-                    .insert_header("x-ratelimit-remaining", "0")
-                    .insert_header("x-ratelimit-reset", "1789000000"),
-            )
-            .mount(&server)
-            .await;
-
+        // 残量ヘッダが 0 のときだけレート制限。無ければスコープ不足の 403。
+        let response = ResponseTemplate::new(403)
+            .insert_header("x-ratelimit-remaining", "0")
+            .insert_header("x-ratelimit-reset", "1789000000");
         assert_eq!(
-            client(&server).repo("o", "r").await.unwrap_err(),
+            repo_err(response).await,
             GithubError::RateLimited {
                 reset_at: 1_789_000_000
             }
@@ -700,31 +734,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_429_is_rate_limited() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r"))
-            .respond_with(ResponseTemplate::new(429).insert_header("x-ratelimit-reset", "42"))
-            .mount(&server)
-            .await;
+    async fn a_403_with_quota_left_stays_forbidden() {
+        let response = ResponseTemplate::new(403).insert_header("x-ratelimit-remaining", "4999");
+        assert!(
+            matches!(repo_err(response).await, GithubError::Forbidden { .. }),
+            "残量があるなら待っても直らない"
+        );
+    }
 
+    #[tokio::test]
+    async fn a_429_is_rate_limited() {
+        let response = ResponseTemplate::new(429).insert_header("x-ratelimit-reset", "42");
         assert_eq!(
-            client(&server).repo("o", "r").await.unwrap_err(),
+            repo_err(response).await,
             GithubError::RateLimited { reset_at: 42 }
         );
     }
 
     #[tokio::test]
     async fn other_statuses_keep_the_head_of_the_body() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
-            .mount(&server)
-            .await;
-
+        let response = ResponseTemplate::new(500).set_body_string("boom");
         assert_eq!(
-            client(&server).repo("o", "r").await.unwrap_err(),
+            repo_err(response).await,
             GithubError::Api {
                 status: 500,
                 body_head: "boom".into()
@@ -734,16 +765,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_body_head_is_cut_by_characters_not_bytes() {
-        let server = MockServer::start().await;
         // 多バイト文字だけの本文。バイトで切ると境界で panic する。
         let body = "あ".repeat(BODY_HEAD_CHARS + 50);
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r"))
-            .respond_with(ResponseTemplate::new(500).set_body_string(body))
-            .mount(&server)
-            .await;
-
-        let err = client(&server).repo("o", "r").await.unwrap_err();
+        let err = repo_err(ResponseTemplate::new(500).set_body_string(body)).await;
         let GithubError::Api { body_head, .. } = err else {
             panic!("Api ではない: {err:?}");
         };

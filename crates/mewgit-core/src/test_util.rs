@@ -61,7 +61,7 @@ const TICK: i64 = 60;
 
 use crate::app::{update, AppState, Cmd, Msg};
 use crate::auth::ssh::SshCommand;
-use crate::auth::{Account, AccountSource, RepoTarget};
+use crate::auth::{Account, AccountSource, GhLogin, LoginState, RepoTarget};
 use crate::git_exec::{GitOp, Runner};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
@@ -480,6 +480,20 @@ pub fn fake_account(login: &str) -> Account {
         login: login.to_string(),
         token: SecretString::from("fake-token".to_string()),
         source: AccountSource::Single,
+    }
+}
+
+/// そのホストの 1 ログイン（`gh auth status` の 1 件）。
+///
+/// **`active` は偽、`scopes` は 1 本、`state` は `Success`。** 行の見た目を変える
+/// 3 つなので、既定は「印の付かない普通の 1 件」にしておき、見張りたい側が上書きする。
+pub fn fake_login(login: &str) -> GhLogin {
+    GhLogin {
+        host: fake_target().host,
+        login: login.to_string(),
+        active: false,
+        scopes: vec!["repo".to_string()],
+        state: LoginState::Success,
     }
 }
 

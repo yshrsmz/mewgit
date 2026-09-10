@@ -208,7 +208,7 @@ fn read_mewgit_user(path: &Path) -> Option<String> {
         .ok()?
         .open_level(git2::ConfigLevel::Local)
         .ok()?
-        .get_string("mewgit.user")
+        .get_string(super::MEWGIT_USER)
         .ok()
 }
 

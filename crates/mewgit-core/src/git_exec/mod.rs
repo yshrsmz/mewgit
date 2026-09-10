@@ -150,6 +150,17 @@ pub enum GitOp {
     StashApply(usize),
     StashPop(usize),
     StashDrop(usize),
+    /// このリポジトリで使う GitHub アカウントを `.git/config` に憶える
+    /// （`Modal::AccountPicker` の `Enter`。01 の「アカウントの選び直し」）。
+    ///
+    /// **書き込みなので git2 ではなく CLI**（不変ルール 1）。**キーの名前は
+    /// [`auth::MEWGIT_USER`] の 1 本**で、読む側（`auth::resolve` の git2）と
+    /// 別々に書かない。
+    ///
+    /// [`auth::MEWGIT_USER`]: crate::auth::MEWGIT_USER
+    SetAccount {
+        login: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

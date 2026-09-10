@@ -330,19 +330,37 @@ fn account_span(account: &AccountState) -> Option<Span<'_>> {
             "[gh: {} @ {}]",
             account.login, account.host
         ))),
-        AccountState::Degraded(reason) => Some(Span::styled(
-            format!("[gh: {}]", degraded(reason)),
-            theme::warn(),
-        )),
+        AccountState::Degraded(reason) => Some(Span::styled(degraded_label(reason), theme::warn())),
     }
+}
+
+/// ヘッダに出す degraded の 1 行（`[gh: …]` ごと）。
+///
+/// **キーを添えるのは選べるときだけ**（07）。`A` は `f` / `p` / `P` と同じ共通キー
+/// なので、どのペインで見ていても押せる（#53 の「案内にキーを書いたら、その案内が
+/// 出ている画面でそのキーが効くかを数える」）。**選べない degraded で書かない**のは、
+/// そちらで `A` が出すのは内訳の表示だけで、押しても直らないから。
+///
+/// **`[gh: …]` ごと組むのは、長さの見張り（`every_degraded_reason_fits_the_header`）に
+/// 出荷される形をそのまま渡すため。** `degraded` だけを渡すと、キーのぶんが
+/// 見張りから外れる。
+fn degraded_label(reason: &DegradedReason) -> String {
+    let hint = if reason.candidates().is_empty() {
+        ""
+    } else {
+        "。A で選ぶ"
+    };
+    format!("[gh: {}{hint}]", degraded(reason))
 }
 
 /// degraded の理由を 1 行にする。
 ///
-/// **診断だけを書く。** 「選んでください」のような指示は書かない —— `Ambiguous` を
-/// 選び直す `Modal::AccountPicker` はまだ無く、押すキーの無い案内になる（04 / 07）。
+/// **診断だけを書く。** 押すキー（`Ambiguous` の `A`）を添えるのは呼び出し側で、
+/// ここは「何が起きているか」だけを返す —— [`modals::account_picker`] が同じ問いに
+/// **別の答え**を返す（あちらは `[gh: …]` の外に置く文なので主語が要る）ので、
+/// 分担は 04 の表にある。
 /// **内訳も出さない。** `NoAccess` の `attempts` は 1 件ずつ理由を持っているが、
-/// 並べる先はピッカーのタスクへ送ってある（04）。
+/// 並べるのは `Modal::AccountPicker`（04）。
 fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
     match reason {
         DegradedReason::GhMissing => "ありません".into(),
@@ -350,8 +368,8 @@ fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
         DegradedReason::GhTooOld { found } => {
             format!("{found} は古い（{} 以上）", gh::REQUIRED).into()
         }
-        // **`message` は出さない。** `gh` が起動できない理由は 1 行に収まらず、
-        // 出す先は M6 の `Notice.detail` と `Modal::AccountPicker`（04）。
+        // **`message` は出さない。** `gh` が起動できない理由は 1 行に収まらないので、
+        // 出す先は `A` で開く `Modal::AccountPicker`（04）。
         DegradedReason::Unusable { .. } => "実行できません".into(),
         DegradedReason::NotLoggedIn { host } => format!("{host} に未ログイン").into(),
         DegradedReason::ConfiguredUnavailable { login, .. } => {
@@ -428,12 +446,12 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{degraded, file_row, pane_area, window, wrapped};
+    use super::{degraded_label, file_row, pane_area, window, wrapped};
     use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
     use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TargetState, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::test_util::{fake_account, fake_snapshot};
+    use mewgit_core::test_util::{fake_account, fake_login, fake_snapshot};
     use ratatui::style::{Color, Modifier};
 
     #[test]
@@ -683,8 +701,10 @@ mod tests {
             DegradedReason::NoAccess {
                 attempts: Vec::new(),
             },
+            // **候補を空にしない。** 空だと `A` の案内が付かず、**出荷される
+            // `Ambiguous` の形（いちばん長い）を測らないまま緑になる**。
             DegradedReason::Ambiguous {
-                candidates: Vec::new(),
+                candidates: vec![fake_login("user_shortcode"), fake_login("taro")],
             },
         ];
         let size = TermSize {
@@ -692,12 +712,35 @@ mod tests {
             height: 24,
         };
         for reason in reasons {
-            let want = format!("[gh: {}]", degraded(&reason));
+            let want = degraded_label(&reason);
             let mut state = shipping_header_state();
             state.account = AccountState::Degraded(reason);
             let line = header(&state, size);
             assert!(line.contains(&want), "はみ出している: {line:?} / {want}");
         }
+    }
+
+    #[test]
+    fn only_a_degraded_account_you_can_pick_says_which_key_to_press() {
+        // **押すキーがあるのは `Ambiguous` だけ**（07）。ほかの degraded で `A` を
+        // 案内すると、押しても直らないキーを勧めることになる（内訳が出るだけ）。
+        let size = TermSize {
+            width: 100,
+            height: 24,
+        };
+        let mut state = shipping_header_state();
+
+        state.account = AccountState::Degraded(DegradedReason::Ambiguous {
+            candidates: vec![fake_login("taro"), fake_login("taro_acme")],
+        });
+        let pickable = header(&state, size);
+        assert!(pickable.contains("A で選ぶ"), "header: {pickable:?}");
+
+        state.account = AccountState::Degraded(DegradedReason::NoAccess {
+            attempts: Vec::new(),
+        });
+        let shown = header(&state, size);
+        assert!(!shown.contains("A で選ぶ"), "header: {shown:?}");
     }
 
     /// 実際に `[gh: …]` が出るときのヘッダの状態。

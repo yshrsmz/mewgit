@@ -2,9 +2,11 @@
 //!
 //! キー処理は `app::update` にある。`ui` は `Cmd` を作らない（不変ルール 2）。
 
+pub mod account_picker;
 pub mod commit_message;
 pub mod confirm;
 pub mod input;
+pub mod picker;
 pub mod remote_picker;
 
 use mewgit_core::app::{Modal, TextBuffer};
@@ -30,11 +32,11 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
             remotes,
             cursor,
         } => remote_picker::render(frame, area, reason, remotes, *cursor),
+        Modal::AccountPicker { reason, cursor } => {
+            account_picker::render(frame, area, reason, *cursor);
+        }
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
-        Modal::RebaseEditor { .. }
-        | Modal::PrCreate { .. }
-        | Modal::AccountPicker { .. }
-        | Modal::Help => {}
+        Modal::RebaseEditor { .. } | Modal::PrCreate { .. } | Modal::Help => {}
     }
 }
 
@@ -51,6 +53,28 @@ const GAP_ROWS: u16 = 1;
 /// キーの案内に取る行数。高さの見積もりと `Layout` で同じものを使う。
 const HINT_ROWS: u16 = 1;
 
+/// 枠の内側の右に空ける桁数。
+///
+/// **ratatui の折り返しは 1 セルだけはみ出す。** `WordWrapper` は行が幅を超えるかを
+/// **次の文字を足す前**に見る（`>=` 比較）ので、最後の 1 文字が全角だと行が
+/// `幅 + 1` セルで確定し、最後に残った語をそのまま吐く（`ratatui-widgets` 0.3.2 の
+/// `reflow.rs` を読んで確認）。**はみ出した 1 セルは枠の縦線を上書きする** ——
+/// `Paragraph` は枠より後に描くため。1 桁空けておけば、はみ出しはそこに落ちる。
+///
+/// **`Confirm` から在ったが、`gh` の `message`（全角と識別子が混ざる）を出す
+/// `AccountPicker` で初めて実機に出た**（`the_box_keeps_its_border_when_a_line_just_
+/// overflows`）。はみ出しが 1 セルで収まるのは、比較が `>=` なので**最後の文字を
+/// 足す前の幅が `幅 - 1` 以下**だから。
+const RIGHT_MARGIN: u16 = 1;
+
+/// 枠の内側のうち、文字を描いてよい領域。
+fn text_area(inner: Rect) -> Rect {
+    Rect {
+        width: inner.width.saturating_sub(RIGHT_MARGIN),
+        ..inner
+    }
+}
+
 /// モーダルの枠。
 pub fn block(title: &str) -> Block<'static> {
     Block::default()
@@ -65,7 +89,7 @@ pub fn block(title: &str) -> Block<'static> {
 /// 足したときに折り返し幅だけが古いまま残り、本文の末尾が黙って切れる。高さは
 /// 折り返してからでないと決まらないので、幅の判る当て木を [`Block::inner`] に通す。
 pub fn inner_width(area: Rect, want: u16, block: &Block<'_>) -> u16 {
-    block.inner(probe(area, want)).width
+    text_area(block.inner(probe(area, want))).width
 }
 
 /// 箱を画面の中央に描き、本文に使える領域を返す。
@@ -93,7 +117,9 @@ pub fn place(
     // 本文 + 空行 + キーの案内 + 枠。
     let height = body_rows.saturating_add(GAP_ROWS + HINT_ROWS + border_rows);
     let area = centered(area, probe.width, height);
-    let inner = block.inner(area);
+    // **測るときと同じ幅で描く。** [`inner_width`] が右に 1 桁空けているので、
+    // ここで空けないと折り返しの見積もりと実際の描画がずれる。
+    let inner = text_area(block.inner(area));
 
     // 下のペインを `Clear` で消してから描く。覆わずに重ねると下の文字が透けて読めない。
     frame.render_widget(Clear, area);
@@ -148,7 +174,43 @@ pub fn cursor_col(buf: &TextBuffer, width: u16) -> (u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::cursor_col;
-    use mewgit_core::app::TextBuffer;
+    use crate::test_util::{draw, row_of, state_with_modal, terminal_with};
+    use mewgit_core::app::{Cmd, Modal, TermSize, TextBuffer};
+
+    const SIZE: TermSize = TermSize {
+        width: 100,
+        height: 24,
+    };
+
+    #[test]
+    fn the_box_keeps_its_border_when_a_line_just_overflows() {
+        // **ratatui の折り返しは 1 セルはみ出す**（[`RIGHT_MARGIN`]）。はみ出した
+        // 全角 1 文字が枠の縦線を上書きするので、**箱の右辺がその行だけ消える**。
+        //
+        // **踏むには幅がぴったり `内側 + 1` セルで、最後が全角の本文が要る。**
+        // 下は 10 + 1 + 25 + 1 + 22 = 59 セル（枠の内側は 58）。1 セル短いと通る。
+        // `Confirm` から在った形だが、実機で出たのは `gh` の `message`（全角と
+        // 識別子が混ざる）を出す `AccountPicker` を入れてから。
+        let state = state_with_modal(Modal::Confirm {
+            title: "確認".to_string(),
+            body: "設定が指す nobody-does-not-exist-xyz のトークンがありません".to_string(),
+            on_yes: Cmd::None,
+        });
+        let lines = draw(&state, SIZE);
+        let body = row_of(&lines, "設定が指す");
+        // キーの案内は ASCII だけなので、はみ出しようがない = 正しい枠の位置。
+        let hint = row_of(&lines, "[y] 実行");
+
+        let terminal = terminal_with(&state, SIZE);
+        let buffer = terminal.backend().buffer();
+        let borders = |row: u16| -> Vec<u16> {
+            (0..SIZE.width)
+                .filter(|&x| buffer[(x, row)].symbol() == "│")
+                .collect()
+        };
+
+        assert_eq!(borders(body), borders(hint), "本文が枠の縦線を食っている");
+    }
 
     #[test]
     fn the_cursor_column_counts_display_width_not_characters() {

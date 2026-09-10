@@ -144,9 +144,11 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       ここ**（04 の「`Backend` の production 実装は `github` に置く」）。
       **`Modal::AccountPicker` より先に置いた** —— 配線はどちらにも要る前提で、
       こちらは `AccountState` を出すだけなので読み手として小さい
-- [ ] `Modal::AccountPicker` と `.git/config` への保存。**`NoAccess` / `Ambiguous` の
+- [x] `Modal::AccountPicker` と `.git/config` への保存。**`NoAccess` / `Ambiguous` の
       内訳（どの login がなぜ落ちたか）を並べるのもここ** —— ヘッダは 1 行なので
-      件数しか出していない（04 の「解決結果は画面上部に」）
+      件数しか出していない（04 の「解決結果は画面上部に」）。**開くのは共通キー `A`**
+      で、`Degraded` 以外は通知に落とす（01 の「アカウントの選び直し」）。保存は
+      `GitOp::SetAccount`（`git config --local`）で、書いたあとに解決をやり直す
 - [ ] `ui::panes::prs` — 現ブランチ PR、チェック一覧、一覧タブ、ブラウザで開く。
       **レートリミット残量の受け渡しもここ** —— ヘッダ表示のタスクへ送られていたが、
       あちらで API を叩くのは起動時の probe だけで、常時出す残量の産出元にならない

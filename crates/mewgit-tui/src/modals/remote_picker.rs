@@ -1,12 +1,14 @@
 //! リモート選択モーダルの描画。設計は `docs/design/07-ui.md` の
 //! 「RemotePicker モーダル」。
+//!
+//! **箱の中の割り方は `modals::picker` と共有する**（2 人目の `AccountPicker` が
+//! 出た時点で寄せた）。ここに残るのはタイトル・キーの案内・行の組み立てだけ。
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::Frame;
 
-use crate::modals;
-use crate::ui::{self, theme};
+use crate::modals::picker::{self, Picker};
 
 /// 枠のタイトル。**何を選ぶのかを出す** —— 「リモート」だけだと、fetch なのか
 /// push なのかが判らない（開く経路は `f` 1 つ。01）。
@@ -15,65 +17,21 @@ const TITLE: &str = "fetch するリモート";
 /// キーの案内。`update::remote_picker_key` が受けるキーと揃える。
 const HINT: &str = "[j/k] 選ぶ   [Enter] fetch   [Esc] やめる";
 
-/// 理由と一覧のあいだに空ける行数。
-///
-/// **`modals::GAP_ROWS` とは別のもの**（あちらは本文とキーの案内のあいだ）。
-const REASON_GAP_ROWS: u16 = 1;
-
 /// 一覧から fetch するリモートを選ばせる。
 pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], cursor: usize) {
-    let block = modals::block(TITLE);
-    // **理由は折り返しうる。** 桁数を幅で割る見積もりだと単語境界で折れて増えたぶんを
-    // 数え落とし、末尾が黙って切れる（`Confirm` と同じ理由。07）。
-    let width = modals::inner_width(area, modals::WIDTH, &block);
-    let (reason_text, reason_rows) = ui::wrapped(reason, width);
-
-    // 一覧は折り返さない。リモート名は 1 行に収まる（収まらない名前は端で切れる）。
-    let rows = u16::try_from(remotes.len()).unwrap_or(u16::MAX);
-    let body = modals::place(
+    picker::render(
         frame,
         area,
-        block,
-        modals::WIDTH,
-        reason_rows.saturating_add(REASON_GAP_ROWS + rows),
-        HINT,
+        Picker {
+            title: TITLE,
+            // 1 行目は**なぜ選ばされているか**。これが無いと、毎回出るのか設定が
+            // 壊れているのかが判らない（07）。
+            body: reason,
+            rows: remotes.iter().map(|r| Line::from(r.as_str())).collect(),
+            cursor,
+            hint: HINT,
+        },
     );
-
-    // **一覧に先に行を渡す。** 理由を `Length` にすると、`modals::place` が箱を端末の
-    // 高さに丸めたときに**一覧が 0 行に潰れる** —— リモート名が 1 つも出ないのに
-    // `j` と `Enter` は効くので、見えていない相手を fetch する。`ui::render_rows` が
-    // 守るのは「カーソルが一覧の外へ出ない」ことで、**一覧そのものが消えることは
-    // 守らない**（`/code-review` が拾った）。理由の文言はリモート名を並べるので、
-    // 本数が増えるほど長くなる = 潰れやすくなる。
-    //
-    // **空行は理由の枠に含める。** 3 本に割って真ん中を捨てると、捨てる束縛と
-    // 制約が 1 つずつ増えるだけで結果は同じ（`Paragraph` は上詰め）。
-    let [reason_area, list] = Layout::vertical([
-        Constraint::Max(reason_rows.saturating_add(REASON_GAP_ROWS)),
-        Constraint::Min(1),
-    ])
-    .areas(body);
-
-    frame.render_widget(reason_text, reason_area);
-    // カーソル行はペインと同じ反転（`theme::selected`）。一覧から 1 つ選ぶ形が
-    // 同じなので、見た目も揃える。
-    let lines: Vec<Line> = remotes
-        .iter()
-        .enumerate()
-        .map(|(index, remote)| {
-            let line = Line::from(remote.as_str());
-            if index == cursor {
-                line.style(theme::selected())
-            } else {
-                line
-            }
-        })
-        .collect();
-    // **`ui::render_rows` を通す。** 素の `Paragraph` で描くと、枠に入りきらない
-    // 本数のときにカーソル行が画面の外へ出たまま `j` で動き続け、**見えていない
-    // リモートを `Enter` で fetch する** —— このモーダルが防ぐために在る
-    // 「黙って選ばない」そのもの。ペインの一覧が 4 つともここを通っている。
-    ui::render_rows(frame, list, lines, cursor..cursor + 1);
 }
 
 #[cfg(test)]

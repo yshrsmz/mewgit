@@ -397,7 +397,7 @@ pub async fn resolve<B: Backend + Sync>(
 | `Ok(RepoMeta)` | `Ok(())` | |
 | `Err(Decode)` | **`Ok(())`** | `check_status` を通ったあとにしか出ない = **2xx が返っている**。GHES の版差で本文の形が違うだけで、アクセス権はある。`Failed` に落とすと動いている環境が `NoAccess` になる |
 | `Err(Unauthorized)` | `Err(Denied { 401 })` | |
-| `Err(Forbidden)` | `Err(Denied { 403 })` | **SAML の 403 もここ。** 「SSO 承認が要る」は直せる状態だが、サーバは**答えを返している**（このトークンでは通らない）ので `Undetermined`（確かめられなかった）ではない。**`saml` の印はここで落ちる** —— probe の `AttemptFailure` に載せる先が無く、読み手（`Modal::AccountPicker`）もまだ無い。載せ方はピッカーのタスクで数え直す |
+| `Err(Forbidden)` | `Err(Denied { 403 })` | **SAML の 403 もここ。** 「SSO 承認が要る」は直せる状態だが、サーバは**答えを返している**（このトークンでは通らない）ので `Undetermined`（確かめられなかった）ではない。**`saml` の印はここで落ちる。載せないと決めた**（ピッカーのタスクで数え直した結果）—— 403 の候補は `Ambiguous` に並ばず落ちるので、印が出るのは `NoAccess` の内訳だけ。そこで直し方まで書くには bool ではなく**どの org を承認するか**（`body_head`）と `needed_scopes` が要り、それは M4 の「403 の `needed_scopes` 案内」が要る材料と同じ。**そちらで 1 回作る。** `Denied` に `saml: bool` を足すと `Denied { 404, saml: true }` が型で組める（「旗と値を割らない」） |
 | `Err(NotFound)` | `Err(Denied { 404 })` | 権限が無ければ GitHub は 404 を返す |
 | `Err(Api { status: 4xx, .. })` | `Err(Denied { status })` | |
 | `Err(Api { status: 5xx, .. })` | **`Err(Undetermined)`** | **サーバが一時的に答えられないだけ**で、断られてはいない。`Denied` に畳むと手順 4 が「除外できた」と数え、GHES のメンテナンスや 502 が 1 回混じった回に**別のアカウントを黙って選んで latch する**（`/code-review` が拾った。`unchecked` の見張りが塞いだはずの形） |
@@ -436,13 +436,20 @@ pub async fn resolve<B: Backend + Sync>(
      回線やレート制限で 1 本落ちただけの回に**別のアカウントを黙って選んで latch
      する** —— EMU と個人アカウントの両方がその repo の collaborator なら、以後の
      PR が違う名前で立ち、再起動するまで直らない（`/code-review` が拾った）
-   - 成功が複数 → `Degraded(Ambiguous)`。UI で選ばせ、選択を `.git/config` に保存する。
+   - 成功が複数 → `Degraded(Ambiguous)`。`A` で開くモーダルが選ばせ、選んだ login を
+     `.git/config` の `mewgit.user` に書く（`GitOp::SetAccount`。01 の「アカウントの
+     選び直し」）。**書いたあとは解決をやり直す**ので、以後は手順 1 で
+     `Resolved(source: Config)` になり probe を通らない。
      **`Vec<GhLogin>` を運ぶので、選び直すときに `auth_status` を呼び直さなくてよい**
      （実測 0.95 秒。#61）。**並べるのは除外できなかった候補**（通ったもの +
      `Undetermined`）—— 断られたものを混ぜると、選べるアカウントとして 401 の
-     ログインを出すことになる。**候補ごとの probe の結果は運んでいない**ので、
-     ピッカーが「確かめられた / 確かめられなかった」を出し分けたくなったら、
-     そのタスクで `Ambiguous` の中身を数え直す
+     ログインを出すことになる。**候補ごとの probe の結果は運んでいない。ピッカーのタスクで数え直して、
+     据え置くと決めた** —— 運ぶこと自体は安い（`passed` と `unchecked` は
+     `resolve` の中にある）が、**印を見た人に取れる行動が無い**。
+     `Undetermined` は回線・レート制限・TLS 初期化を畳んだもので、行に書けるのは
+     「確かめられませんでした」だけ。しかも**状況はプロセス共通**なので、
+     ほとんどの回は全候補に同じ印が付いて何も分けない。**gh 側の検証結果
+     （`LoginState`）は行に出す**ので、そちらで足りるかを先に見る
    - 成功が 0 件 → `Degraded(NoAccess)`。各アカウントの落ちた理由を保持して表示。
      **全部が `Undetermined`（起動時に回線が無い）もここ** —— 選ばせないのは、
      どれも動かない状態でアカウントを選んでも何も直らないため。変種の名前を
@@ -498,6 +505,12 @@ GitHub の形として読めないリポジトリでは `RepoTarget` が作れ�
 `git2::opts::set_search_path`（プロセス全体・`unsafe`）が要り、並列に走る他のテストの
 git2 まで巻き込む。上の表は手で叩いた結果（`git2` 0.21）。
 
+**書くのは `git` CLI**（不変ルール 1、`GitOp::SetAccount`。03 に argv と実測）。
+読みが git2、書きが CLI で割れるので、**キーの名前は `auth::MEWGIT_USER` の 1 本**に
+する —— 別々に書くと、片方を直したときに黙って別のキーを読み書きする。
+`git config --local` の書き先はリンクされたワークツリーでも共有の `.git/config` で、
+上の `open_level(Local)` が読む段と同じ（03 の表）。
+
 ### `gh auth token` の実測（gh 2.100.0）
 
 | 状況 | 結果 |
@@ -511,31 +524,39 @@ git2 まで巻き込む。上の表は手で叩いた結果（`git2` 0.21）。
 解決結果は画面上部に `[gh: login @ host]` として表示する。`Degraded` は黄色で理由を表示。
 **決まるまでは何も出さない**（`Resolving` のあいだ。07 のヘッダ）。
 
-**`Unusable` と `ConfiguredUnavailable` の `message` もヘッダには出さない。** 上の `reason_for` が
+**ヘッダに出すのは 1 行に収まる診断だけ。** `NoAccess` の `attempts`
+（「どの login がなぜ落ちたか」）は件数しか出さず
+（`[gh: 届いたアカウントがありません（2 件）]`）、`Unusable` と
+`ConfiguredUnavailable` の `message` も出さない。上の `reason_for` が
 `GhUnrunnable` / `GhFailed` / `GhUnparsable` を 1 つに畳んでよいと言う根拠は
-「直し方の違いは `message`（`AuthError` の `Display`）に出ている」だが、**その
-`message` を出す画面はまだ無い**（起動できない理由は 1 行に収まらない）。
-出す先は M6 の `Notice.detail` と `Modal::AccountPicker` で、それまでは
-**畳んだ 3 つを見分ける手掛かりが画面に無い**。分け直すのではなく表示先を足す、が
-この判断の続き（「状態に届いている」と「画面に出ている」は別）。
-`ConfiguredUnavailable` の `message`（実測の `no oauth token found for <host> account
-<login>`。下の表）も同じ扱いで、ヘッダには login しか出ない。
+「直し方の違いは `message`（`AuthError` の `Display`）に出ている」なので、
+**その `message` を出す画面が要る**（起動できない理由は 1 行に収まらない）。
 
-**`AccountState::Resolving` を割るかどうかは `Modal::AccountPicker` のタスクで数え直す。**
-いまの `Resolving` は「走っている最中」と「**永久に頼まれない**」（既定リモートが無い /
-URL を GitHub の形として読めない = `TargetState::Unavailable`）の 2 つを兼ねている。
-唯一の読み手であるヘッダはどちらも同じ（何も出さない）なので割っていないが、ピッカーが
-「アカウントがありません」と言えるかどうかはこの 2 つで変わる。そのとき、`state.repo.target`
-を一緒に読む形にするか `Resolving` を割るかを数える（#54 の「`None` に 2 つの意味」と
-同じ形。`TargetState` はまさにその理由で 3 値にしてある）。
+### 内訳を出すのは `Modal::AccountPicker`
 
-**ヘッダに出すのは 1 行に収まる診断だけ。** `NoAccess` の `attempts` は
-「どの login がなぜ落ちたか」を 1 件ずつ持っているが、ヘッダは件数しか出さない
-（`[gh: 届いたアカウントがありません（2 件）]`）。**1 件ずつ並べる先は `Modal::AccountPicker` の
-タスクへ送る** —— 選ばせる画面が候補と理由を並べる場所で、それまでは
-`Notice.detail`（M6）と同じく画面に出る先が無い。**`Ambiguous` に
-「選んでください」と書かない**のも同じ理由で、ピッカーが無いあいだは押すキーが
-無い（#63 / #65 で踏んだ「案内が求める操作を自分が持っていない」形）。
+**送ってあった「1 件ずつ並べる先」はここ。** `A` で開くモーダルが、解決の内訳を
+並べる唯一の画面になる（01 の「アカウントの選び直し」、07 の「AccountPicker
+モーダル」）。ヘッダの 1 行との分担は次のとおり。
+
+| | ヘッダ | `Modal::AccountPicker` |
+|---|---|---|
+| `Ambiguous` | 件数と `A` の案内 | 候補を 1 件ずつ（login / scopes / `LoginState`）。`Enter` で選ぶ |
+| `NoAccess` | 件数だけ | `attempts` を 1 件ずつ（login とその `AttemptFailure`）。**選ばせない** |
+| `Unusable` / `ConfiguredUnavailable` | 畳んだ 1 行 | `message` そのまま |
+| `GhMissing` / `GhTooOld` / `NotLoggedIn` | 1 行で足りる | 同じ 1 行 + 外での直し方 |
+
+**外での直し方を書くのはモーダルの側。** `gh auth login` も `gh` の入れ替えも
+mewgit は提供していないので、#65 で決めた「**指示を足すのは、その操作を持たない側**」に
+そのまま当たる（`RemotePicker` が「追跡先を設定してください」を本文に書かないのは、
+あちらが**その操作を提供している**ため。裏返しの形）。`Ambiguous` だけは mewgit が
+選ばせられるので、本文に書くのは保存先（`.git/config` の `mewgit.user`）で、
+外での指示は書かない。
+
+**`AccountState::Resolving` は割らない**（送ってあった判断の答え）。`Resolving` が
+兼ねている「走っている最中」と「**永久に頼まれない**」（`TargetState::Unavailable`）を
+見分けるのは `state.repo.target` のほう —— あれは**まさにその理由で 3 値**にしてある
+（#54 の「`None` に 2 つの意味」）。割ると同じ事実が 2 箇所に出て、`Unavailable` を
+立てた側と食い違いうる。`A` が出す通知の文言はこの 2 つで変わる（01 の表）。
 
 ## EMU 特有の考慮
 

@@ -29,6 +29,12 @@ pub use resolve::{resolve, Backend};
 
 use secrecy::SecretString;
 
+/// `.git/config` に憶えるアカウントのキー（08 の `[mewgit]`）。
+///
+/// **読む側（[`resolve`] の git2）と書く側（`GitOp::SetAccount` の argv。03）で
+/// 1 本にする。** 別々に書くと、片方を直したときに黙って別のキーを読み書きする。
+pub const MEWGIT_USER: &str = "mewgit.user";
+
 /// アカウント解決の対象。`app` の `RepoInfo` は上位層の型なので受け取らない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoTarget {
@@ -178,11 +184,9 @@ pub enum DegradedReason {
     /// 解釈できない）。**3 つを分けない** —— 直し方の違いは `message` に出ており、
     /// これで分岐する読み手が UI に無い（[`resolve`] の `reason_for`）。
     ///
-    /// **ただし `message` を出す画面もまだ無い。** ヘッダは 1 行なので
-    /// 「gh を実行できません」しか出さず（07）、出す先は M6 の `Notice.detail` と
-    /// `Modal::AccountPicker`（04 の「解決結果は画面上部に」）。それまでは
-    /// **畳んだ 3 つを見分ける手掛かりが画面に出ない** —— 直すのは分け方ではなく
-    /// 表示先のほう。
+    /// **`message` は `Modal::AccountPicker` が出す**（04 の「内訳を出すのは
+    /// `Modal::AccountPicker`」）。ヘッダは 1 行なので「gh を実行できません」しか
+    /// 出さない（07）—— 畳んだ 3 つを見分ける手掛かりは `A` で開く画面のほうにある。
     Unusable {
         message: String,
     },
@@ -220,6 +224,28 @@ pub enum DegradedReason {
     Ambiguous {
         candidates: Vec<GhLogin>,
     },
+}
+
+impl DegradedReason {
+    /// 選ばせてよい候補。[`Ambiguous`](Self::Ambiguous) 以外は空。
+    ///
+    /// **読み手が 3 人いるので 1 本にする** —— `Modal::AccountPicker` の描画、
+    /// カーソル移動、`Enter` の確定（01 の「アカウントの選び直し」）。別々に
+    /// `matches!` を書くと、`NoAccess` を選ばせない約束を片方だけが守る形になる。
+    ///
+    /// **`NoAccess` を空にするのは意図**（04 の手順 4）。どれも届かない状態で
+    /// アカウントを選んでも何も直らない。
+    pub fn candidates(&self) -> &[GhLogin] {
+        match self {
+            DegradedReason::Ambiguous { candidates } => candidates,
+            DegradedReason::GhMissing
+            | DegradedReason::GhTooOld { .. }
+            | DegradedReason::Unusable { .. }
+            | DegradedReason::NotLoggedIn { .. }
+            | DegradedReason::ConfiguredUnavailable { .. }
+            | DegradedReason::NoAccess { .. } => &[],
+        }
+    }
 }
 
 /// `NoAccess` のとき、どのログインがなぜ落ちたか。

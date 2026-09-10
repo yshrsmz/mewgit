@@ -4,13 +4,19 @@
 //! 「その argv を実際の git に渡すと意図した結果になるか」。
 
 use std::fs;
+use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use mewgit_core::auth::ssh::SshCommand;
+use mewgit_core::auth::{
+    resolve, AttemptFailure, AuthError, Backend, DegradedReason, GhLogin, RepoTarget,
+};
+use mewgit_core::config::Config;
 use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, Runner};
 use mewgit_core::git_read::Oid;
 use mewgit_core::test_util::{wait_for_pid, wait_until_gone, BareRepo, TestRepo};
+use secrecy::SecretString;
 
 /// `origin` に bare リポジトリを登録したワークツリー付きリポジトリ。
 fn clone_of(remote: &BareRepo) -> TestRepo {
@@ -125,6 +131,70 @@ async fn unstage_works_before_the_first_commit() {
         .await
         .expect("unstage できませんでした");
     assert_eq!(repo.porcelain(), "?? file.txt");
+}
+
+/// 手順 1 で止まる [`Backend`]。**トークンを返さない。**
+///
+/// [`resolve`] が `.git/config` の `mewgit.user` を読めたかどうかだけを見たいので、
+/// 読めた先（`ConfiguredUnavailable` は login を持つ）で判る形にしてある。読めて
+/// いなければ手順 2 へ落ちて `NotLoggedIn` になる。
+struct StopsAtStepOne;
+
+impl Backend for StopsAtStepOne {
+    fn logins(&self, _host: &str) -> impl Future<Output = Result<Vec<GhLogin>, AuthError>> + Send {
+        std::future::ready(Ok(Vec::new()))
+    }
+
+    fn token(
+        &self,
+        _host: &str,
+        _login: &str,
+    ) -> impl Future<Output = Result<SecretString, AuthError>> + Send {
+        std::future::ready(Err(AuthError::GhFailed {
+            argv: vec!["auth".to_string(), "token".to_string()],
+            message: "no oauth token found".to_string(),
+        }))
+    }
+
+    fn probe(
+        &self,
+        _target: &RepoTarget,
+        _token: &SecretString,
+    ) -> impl Future<Output = Result<(), AttemptFailure>> + Send {
+        std::future::ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn set_account_writes_where_the_resolver_reads() {
+    // **書く側（この argv）と読む側（`auth::resolve` の git2）が同じ段・同じキーか。**
+    // `resolve` は `ConfigLevel::Local` だけを読む（04 の「`.git/config` の読み方」）
+    // ので、段が違うと**書けたのに読まれない**。読み手を通さずに
+    // `git config --get` で読み返すと、その食い違いを見張れない。
+    //
+    // **login を `-` 始まりにしても書ける。** ただしこれは `--` の見張りではない
+    // —— `--` を外しても同じ結果になることを実測した（03 の表）。
+    let repo = TestRepo::init();
+    repo.runner()
+        .run(&GitOp::SetAccount {
+            login: "-taro".into(),
+        })
+        .await
+        .expect("mewgit.user を書けませんでした");
+
+    let target = RepoTarget {
+        host: "github.com".to_string(),
+        port: None,
+        owner: "yshrsmz".to_string(),
+        repo: "mewgit".to_string(),
+    };
+    let resolved = resolve(&target, repo.path(), &StopsAtStepOne, &Config::default()).await;
+
+    // 手順 1 まで届いた = 書いた login をそのまま読んでいる。
+    assert!(
+        matches!(&resolved, Err(DegradedReason::ConfiguredUnavailable { login, .. }) if login == "-taro"),
+        "{resolved:?}"
+    );
 }
 
 #[tokio::test]

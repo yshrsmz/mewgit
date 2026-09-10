@@ -198,5 +198,13 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       `Modal::AccountPicker` のタスクで入れた。07 の「モーダル」）
 - [ ] ロケール（`LC_ALL` / `LC_CTYPE` / `LANG`）から `graph.ascii` の既定を決める
       （曖昧幅を全角扱いする端末は UTF-8 でもずれる。06 の「ASCII フォールバック」）
+- [ ] `app/state.rs` を割るかを決める。**`update.rs` を割ったので workspace で
+      いちばん長いファイルになった（2269 行。次は `update/graph.rs` の 1155 行）が、
+      割る根拠は `update.rs` より弱い** —— 中身は `AppState` とその部品という 1 つの関心事で、
+      大半が `pub` な型定義なので、割っても `pub(super)` として見えるものが増えない
+      （00 の「ディレクトリ構成」）。**引き金は行数ではなく、`Modal` / `GraphState` /
+      `WorktreeState` / `JobTracker` が独立して育ったかどうか。** M6 は `Modal::Help` と
+      `RebaseEditor`、ステータスバーの通知履歴で `Modal` と `Notice` に手が入るので、
+      そこで数え直す
 - [ ] `.git/HEAD` mtime 監視での外部変更検知
 - [ ] README、リリースワークフロー（`cargo dist` or release-please）

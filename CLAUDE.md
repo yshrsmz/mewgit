@@ -67,6 +67,15 @@ Rust の toolchain は `rust-toolchain.toml` が SoT。rustup がこれを読ん
 - 依存を追加・削除したら、`--locked` 付きのコマンドを叩く前に `cargo update --offline --workspace` で lock を更新する。`--locked` は lock の書き換えを拒否するので、先に流さないと `cannot update the lock file` で落ちる
 - GitHub Actions の `uses` はコミット SHA で固定し、行末コメントにタグを書く（Renovate が更新する）
 - ワークフローを触ったら `mise x ghalint -- ghalint run` と `mise x actionlint -- actionlint` を通す
+- **`cargo fix` は、`#[cfg(test)] mod tests { use super::*; }` が使っている import を
+  ヘッダから消すことがある。** lib ユニットは `cfg(test)` を切って検査するので、テスト
+  からしか届かない import が「未使用」に見え、その判断が同じソースに書き戻されて test
+  ユニットが落ちる（`--all-targets` を付けても防げない。#75 で `app/update.rs` を
+  割ったときに 216 エラー）。
+  **道具が壊れているのではなく、ヘッダがテスト専用の import を抱えている形が壊れている**
+  ので、直すのは `cargo fix` の出力のほう —— **ヘッダは cargo fix に切り詰めさせ、
+  足りなくなった名前を各 `mod tests` の `use` に足す**。そこまでやれば 2 回目以降の
+  `cargo fix` は素直に効く
 - 依存を新規追加するときは crates.io の公開日を確認し、14 日以上経過した版を採用する。既存依存の更新は Renovate（`yshrsmz/renovate-config` の `minimumReleaseAge: "2 weeks"`）が担保する
 - **14 日ルールは間接依存にも当たるが、固定できるのは lock だけ。** `Cargo.toml` に
   書くのは直接依存だけで、そこから引かれる crate は範囲内で引き直せてしまう

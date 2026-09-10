@@ -8,7 +8,7 @@
 //! （一覧が 0 行に潰れる）を片方だけが踏み直す。
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::text::{Line, Text};
 use ratatui::Frame;
 
 use crate::modals;
@@ -24,7 +24,10 @@ pub struct Picker<'a> {
     /// 枠のタイトル。**何を選ぶのかを出す。**
     pub title: &'a str,
     /// なぜこの画面が出ているか。**折り返す**ので長くてよい。
-    pub body: &'a str,
+    ///
+    /// **`String` で受けない。** 行に割ってあるものを `\n` で繋いで渡すと、
+    /// `Text::from(&str)` が同じ位置で割り直す（描くのは毎フレーム）。
+    pub body: Text<'a>,
     /// 選ばせる行。**空でよい** —— `AccountPicker` は選ばせない degraded でも開く
     /// （04）。そのとき空行も一覧の領域も取らない。
     pub rows: Vec<Line<'a>>,
@@ -85,19 +88,12 @@ pub fn render(frame: &mut Frame, area: Rect, picker: Picker<'_>) {
     frame.render_widget(body_text, body_area);
 
     // カーソル行はペインと同じ反転（`theme::selected`）。一覧から 1 つ選ぶ形が
-    // 同じなので、見た目も揃える。
-    let lines: Vec<Line> = picker
-        .rows
-        .into_iter()
-        .enumerate()
-        .map(|(index, line)| {
-            if index == picker.cursor {
-                line.style(theme::selected())
-            } else {
-                line
-            }
-        })
-        .collect();
+    // 同じなので、見た目も揃える。**その場で塗る** —— 1 行のために `Vec` を
+    // 組み直すと、描くたびに全行を積み替えることになる。
+    let mut lines = picker.rows;
+    if let Some(line) = lines.get_mut(picker.cursor) {
+        line.style = theme::selected();
+    }
     // **`ui::render_rows` を通す。** 素の `Paragraph` で描くと、枠に入りきらない
     // 本数のときにカーソル行が画面の外へ出たまま `j` で動き続け、**見えていない
     // 相手を `Enter` で選ぶ** —— このモーダルが防ぐために在る「黙って選ばない」

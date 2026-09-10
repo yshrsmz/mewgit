@@ -34,8 +34,6 @@ test-util = ["dep:tempfile"]
 
 [dev-dependencies]
 anyhow.workspace = true
-# 統合テストが `auth::Backend` を実装するため（`token` が `SecretString` を返す）。
-secrecy.workspace = true
 mewgit-core = { path = ".", features = ["test-util"] }
 # 統合テストが `tempfile::tempdir()` を直に使う（リポジトリの外を開くケース）。
 tempfile = "3"

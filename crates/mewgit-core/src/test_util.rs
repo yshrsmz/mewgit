@@ -13,11 +13,14 @@
 //! `git` の stderr で落ちるだけになる。分けておけばコンパイルエラーで気付く。
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::future::Future;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Mutex;
 
 /// 一時ディレクトリにテキストファイルを 1 枚書く。
 ///
@@ -61,7 +64,10 @@ const TICK: i64 = 60;
 
 use crate::app::{update, AppState, Cmd, Msg};
 use crate::auth::ssh::SshCommand;
-use crate::auth::{Account, AccountSource, GhLogin, LoginState, RepoTarget};
+use crate::auth::{
+    Account, AccountSource, AttemptFailure, AuthError, Backend, DegradedReason, GhLogin,
+    LoginState, RepoTarget,
+};
 use crate::git_exec::{GitOp, Runner};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
@@ -483,6 +489,126 @@ pub fn fake_account(login: &str) -> Account {
     }
 }
 
+/// 手順 1〜4 を踏むための [`Backend`](crate::auth::Backend)。
+///
+/// **実 `gh` では踏めない**（04 の「`&GhCli` を `resolve` の引数にすると
+/// テストできない」）ので、trait の向こう側はここで組む。
+///
+/// **`test_util` に置くのは 2 人目（`tests/git_exec.rs` の `SetAccount`）が出たから。**
+/// テストバイナリは別々にコンパイルされるので、`#[cfg(test)] mod tests` の中では
+/// 統合テストから見えない（規約）。
+pub struct Fake {
+    logins: Result<Vec<GhLogin>, AuthError>,
+    /// login ごとの probe の結果。無い login は届かなかったことにする。
+    probes: BTreeMap<String, Result<(), AttemptFailure>>,
+    /// トークンを取れない login と、そのときの `gh` の失敗。**種類を持つ** ——
+    /// 手順 1 は login 固有の失敗（`GhFailed`）とプロセス全体の条件
+    /// （`GhMissing` など）を分けるので、1 種類しか作れないと片方を踏めない。
+    no_token: BTreeMap<String, AuthError>,
+    calls: Mutex<Vec<String>>,
+    /// 全候補が揃うまで probe を返さない関所。**逐次に回すと開かない。**
+    gate: Option<tokio::sync::Barrier>,
+}
+
+impl Fake {
+    pub fn new(logins: Vec<GhLogin>) -> Self {
+        Fake {
+            logins: Ok(logins),
+            probes: BTreeMap::new(),
+            no_token: BTreeMap::new(),
+            calls: Mutex::default(),
+            gate: None,
+        }
+    }
+
+    pub fn failing(err: AuthError) -> Self {
+        Fake {
+            logins: Err(err),
+            ..Fake::new(Vec::new())
+        }
+    }
+
+    pub fn probing(mut self, login: &str, outcome: Result<(), AttemptFailure>) -> Self {
+        self.probes.insert(login.to_string(), outcome);
+        self
+    }
+
+    pub fn without_token(self, login: &str) -> Self {
+        self.failing_token(
+            login,
+            AuthError::GhFailed {
+                argv: vec!["gh".to_string(), "auth".to_string(), "token".to_string()],
+                message: format!("exit 1: no oauth token found for account {login}"),
+            },
+        )
+    }
+
+    pub fn failing_token(mut self, login: &str, err: AuthError) -> Self {
+        self.no_token.insert(login.to_string(), err);
+        self
+    }
+
+    pub fn gated(mut self, parties: usize) -> Self {
+        self.gate = Some(tokio::sync::Barrier::new(parties));
+        self
+    }
+
+    fn record(&self, call: String) {
+        self.calls.lock().expect("記録").push(call);
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("記録").clone()
+    }
+}
+
+impl Backend for Fake {
+    fn logins(&self, host: &str) -> impl Future<Output = Result<Vec<GhLogin>, AuthError>> + Send {
+        self.record(format!("logins:{host}"));
+        let result = self.logins.clone();
+        async move { result }
+    }
+
+    fn token(
+        &self,
+        _host: &str,
+        login: &str,
+    ) -> impl Future<Output = Result<SecretString, AuthError>> + Send {
+        self.record(format!("token:{login}"));
+        let result = match self.no_token.get(login) {
+            Some(err) => Err(err.clone()),
+            None => Ok(SecretString::from(format!("token-for-{login}"))),
+        };
+        async move { result }
+    }
+
+    fn probe(
+        &self,
+        _target: &RepoTarget,
+        token: &SecretString,
+    ) -> impl Future<Output = Result<(), AttemptFailure>> + Send {
+        use secrecy::ExposeSecret;
+        let login = token
+            .expose_secret()
+            .strip_prefix("token-for-")
+            .expect("トークンは token() が作ったもの")
+            .to_string();
+        self.record(format!("probe:{login}"));
+        let outcome = self.probes.get(&login).cloned().unwrap_or_else(|| {
+            Err(AttemptFailure::Undetermined {
+                message: "テストが結果を用意していない".to_string(),
+            })
+        });
+        let gate = self.gate.as_ref();
+        async move {
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
+            outcome
+        }
+    }
+}
+
 /// そのホストの 1 ログイン（`gh auth status` の 1 件）。
 ///
 /// **`active` は偽、`scopes` は 1 本、`state` は `Success`。** 行の見た目を変える
@@ -494,6 +620,18 @@ pub fn fake_login(login: &str) -> GhLogin {
         active: false,
         scopes: vec!["repo".to_string()],
         state: LoginState::Success,
+    }
+}
+
+/// 候補が複数ある `Ambiguous`。
+///
+/// **候補を空にしない形をここで持つ。** ヘッダの長さの見張り
+/// （`every_degraded_reason_fits_the_header`）は候補があるときの文言
+/// （`A で選ぶ` が付く）を測るためにこれを要る。空の `Ambiguous` を各テストが
+/// 手で組めるようにしておくと、**出荷される形を測らないまま緑になる**。
+pub fn fake_ambiguous(logins: &[&str]) -> DegradedReason {
+    DegradedReason::Ambiguous {
+        candidates: logins.iter().map(|login| fake_login(login)).collect(),
     }
 }
 

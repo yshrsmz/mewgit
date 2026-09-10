@@ -13,7 +13,7 @@ use mewgit_core::app::{Modal, TextBuffer};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 
 /// 表示中のモーダルを描く。
@@ -59,26 +59,25 @@ const HINT_ROWS: u16 = 1;
 /// **次の文字を足す前**に見る（`>=` 比較）ので、最後の 1 文字が全角だと行が
 /// `幅 + 1` セルで確定し、最後に残った語をそのまま吐く（`ratatui-widgets` 0.3.2 の
 /// `reflow.rs` を読んで確認）。**はみ出した 1 セルは枠の縦線を上書きする** ——
-/// `Paragraph` は枠より後に描くため。1 桁空けておけば、はみ出しはそこに落ちる。
+/// `Paragraph` は枠より後に描き、`render_line` は領域の幅で切らないため
+/// （同 `paragraph.rs`）。1 桁空けておけば、はみ出しはそこに落ちる。
 ///
 /// **`Confirm` から在ったが、`gh` の `message`（全角と識別子が混ざる）を出す
 /// `AccountPicker` で初めて実機に出た**（`the_box_keeps_its_border_when_a_line_just_
 /// overflows`）。はみ出しが 1 セルで収まるのは、比較が `>=` なので**最後の文字を
 /// 足す前の幅が `幅 - 1` 以下**だから。
+///
+/// **[`Block`] の padding に載せる。** [`Block::inner`] が padding を差し引くので、
+/// 幅を測る側（[`inner_width`]）と描く側（[`place`]）が**どちらも `Block::inner` の
+/// 1 本から出る**。`inner` を受け取ってから引く形にすると、`block()` を受けて自分で
+/// `inner` を呼ぶモーダルが 1 つ増えた時点で黙って穴が戻る。
 const RIGHT_MARGIN: u16 = 1;
-
-/// 枠の内側のうち、文字を描いてよい領域。
-fn text_area(inner: Rect) -> Rect {
-    Rect {
-        width: inner.width.saturating_sub(RIGHT_MARGIN),
-        ..inner
-    }
-}
 
 /// モーダルの枠。
 pub fn block(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
+        .padding(Padding::right(RIGHT_MARGIN))
         .title(title.to_string())
         .border_style(Style::default().add_modifier(Modifier::BOLD))
 }
@@ -89,7 +88,7 @@ pub fn block(title: &str) -> Block<'static> {
 /// 足したときに折り返し幅だけが古いまま残り、本文の末尾が黙って切れる。高さは
 /// 折り返してからでないと決まらないので、幅の判る当て木を [`Block::inner`] に通す。
 pub fn inner_width(area: Rect, want: u16, block: &Block<'_>) -> u16 {
-    text_area(block.inner(probe(area, want))).width
+    block.inner(probe(area, want)).width
 }
 
 /// 箱を画面の中央に描き、本文に使える領域を返す。
@@ -117,9 +116,7 @@ pub fn place(
     // 本文 + 空行 + キーの案内 + 枠。
     let height = body_rows.saturating_add(GAP_ROWS + HINT_ROWS + border_rows);
     let area = centered(area, probe.width, height);
-    // **測るときと同じ幅で描く。** [`inner_width`] が右に 1 桁空けているので、
-    // ここで空けないと折り返しの見積もりと実際の描画がずれる。
-    let inner = text_area(block.inner(area));
+    let inner = block.inner(area);
 
     // 下のペインを `Clear` で消してから描く。覆わずに重ねると下の文字が透けて読めない。
     frame.render_widget(Clear, area);

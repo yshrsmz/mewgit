@@ -4,12 +4,15 @@
 //! **箱の中の割り方は `modals::picker` と共有する**（`RemotePicker` と 2 人）。
 //! ここに残るのはタイトル・キーの案内・本文・行の組み立て。
 
-use mewgit_core::auth::{gh, AttemptFailure, DegradedReason, GhLogin, LoginState, ProbeAttempt};
+use mewgit_core::auth::{
+    gh, AttemptFailure, DegradedReason, GhLogin, LoginState, ProbeAttempt, MEWGIT_USER,
+};
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Text};
 use ratatui::Frame;
 
 use crate::modals::picker::{self, Picker};
+use crate::ui;
 
 /// 選ばせるときの枠のタイトル。
 const TITLE_PICK: &str = "GitHub アカウントを選ぶ";
@@ -24,7 +27,14 @@ const HINT_PICK: &str = "[j/k] 選ぶ   [Enter] 保存   [Esc] やめる";
 const HINT_SHOW: &str = "[Esc] 閉じる";
 
 /// 保存先。**黙って `.git/config` を変えない**（01 の「アカウントの選び直し」）。
-const SAVES_TO: &str = "選ぶと .git/config の mewgit.user に保存します";
+///
+/// **キーの名前は [`MEWGIT_USER`] から引く。** 書く側（`GitOp::SetAccount` の argv）
+/// と読む側（`auth::resolve` の git2）が 1 本の定数を見ているのに、**画面だけが
+/// literal だと、キーを変えたときにここが古い場所を案内する**（`.git/config` しか
+/// 見ていないテストでは落ちない）。
+fn saves_to() -> String {
+    format!("選ぶと .git/config の {MEWGIT_USER} に保存します")
+}
 
 /// アカウント解決の内訳を出し、選べるなら選ばせる。
 pub fn render(frame: &mut Frame, area: Rect, reason: &DegradedReason, cursor: usize) {
@@ -38,7 +48,7 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &DegradedReason, cursor: us
         area,
         Picker {
             title: if pick { TITLE_PICK } else { TITLE_SHOW },
-            body: &body(reason),
+            body: body(reason),
             rows: candidates.iter().map(candidate_line).collect(),
             cursor,
             hint: if pick { HINT_PICK } else { HINT_SHOW },
@@ -54,7 +64,7 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &DegradedReason, cursor: us
 ///
 /// **内訳を一覧側に置かない**のは、一覧が折り返さないため —— `Unusable` の
 /// `message` は 1 行に収まらず、このモーダルが在る理由そのものが右端で切れる（07）。
-fn body(reason: &DegradedReason) -> String {
+fn body(reason: &DegradedReason) -> Text<'static> {
     let lines: Vec<String> = match reason {
         DegradedReason::GhMissing => vec![
             "gh が見つかりません".to_string(),
@@ -76,7 +86,7 @@ fn body(reason: &DegradedReason) -> String {
         DegradedReason::ConfiguredUnavailable { login, message } => vec![
             format!("設定が指す {login} のトークンがありません"),
             message.clone(),
-            ".git/config の mewgit.user か、設定ファイルの [[repos]] を直してください".to_string(),
+            format!(".git/config の {MEWGIT_USER} か、設定ファイルの [[repos]] を直してください"),
         ],
         // **「権限が無い」と読ませない。** 全部が「確かめられなかった」形もここに来る
         // （04）ので、1 件ずつの理由をそのまま並べる。
@@ -90,12 +100,9 @@ fn body(reason: &DegradedReason) -> String {
         }
         // **外での直し方を書かない。** 選ばせるのはこのモーダル自身で、書くと
         // 「いま提供している操作を外でやれ」になる（#65）。
-        DegradedReason::Ambiguous { candidates } => vec![
-            format!("アカウントを 1 つに絞れません（{} 件）", candidates.len()),
-            SAVES_TO.to_string(),
-        ],
+        DegradedReason::Ambiguous { .. } => vec![ui::degraded(reason).into_owned(), saves_to()],
     };
-    lines.join("\n")
+    Text::from(lines.into_iter().map(Line::from).collect::<Vec<_>>())
 }
 
 /// `NoAccess` の 1 件。

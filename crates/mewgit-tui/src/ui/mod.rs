@@ -336,17 +336,24 @@ fn account_span(account: &AccountState) -> Option<Span<'_>> {
 
 /// ヘッダに出す degraded の 1 行（`[gh: …]` ごと）。
 ///
-/// **キーを添えるのは選べるときだけ**（07）。`A` は `f` / `p` / `P` と同じ共通キー
-/// なので、どのペインで見ていても押せる（#53 の「案内にキーを書いたら、その案内が
-/// 出ている画面でそのキーが効くかを数える」）。**選べない degraded で書かない**のは、
-/// そちらで `A` が出すのは内訳の表示だけで、押しても直らないから。
+/// **どの degraded にも `A` を添える。** `A` は `f` / `p` / `P` と同じ共通キーなので、
+/// どのペインで見ていても押せる（#53 の「案内にキーを書いたら、その案内が出ている
+/// 画面でそのキーが効くかを数える」）。**選べない degraded でも押す価値がある** ——
+/// ヘッダが 1 行に詰めて落とした内訳（`NoAccess` の `attempts`、`Unusable` の
+/// `message`）と外での直し方を出すのは `Modal::AccountPicker` だけで（04 の
+/// 「内訳を出すのは `Modal::AccountPicker`」）、そこへ行く手掛かりが画面に無いと
+/// **出す先を用意したのに誰も辿り着けない**。
+///
+/// 文言が 2 つに割れるのは「押すと何が起きるか」が違うから。判定は
+/// [`DegradedReason::candidates`] の 1 本で、選ばせる側（モーダルのタイトル・
+/// キーの案内・`Enter`）と同じものを見る。
 ///
 /// **`[gh: …]` ごと組むのは、長さの見張り（`every_degraded_reason_fits_the_header`）に
 /// 出荷される形をそのまま渡すため。** `degraded` だけを渡すと、キーのぶんが
 /// 見張りから外れる。
 fn degraded_label(reason: &DegradedReason) -> String {
     let hint = if reason.candidates().is_empty() {
-        ""
+        "。A で詳細"
     } else {
         "。A で選ぶ"
     };
@@ -361,7 +368,7 @@ fn degraded_label(reason: &DegradedReason) -> String {
 /// 分担は 04 の表にある。
 /// **内訳も出さない。** `NoAccess` の `attempts` は 1 件ずつ理由を持っているが、
 /// 並べるのは `Modal::AccountPicker`（04）。
-fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
+pub fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
     match reason {
         DegradedReason::GhMissing => "ありません".into(),
         // 要求版は定数から引く。`GhTooOld` は値として持っていない（04）。
@@ -451,7 +458,7 @@ mod tests {
     use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TargetState, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::test_util::{fake_account, fake_login, fake_snapshot};
+    use mewgit_core::test_util::{fake_account, fake_ambiguous, fake_snapshot};
     use ratatui::style::{Color, Modifier};
 
     #[test]
@@ -662,7 +669,9 @@ mod tests {
         let state = state_with_account(AccountState::Degraded(DegradedReason::GhMissing));
 
         let line = header(&state, TermSize::default());
-        assert!(line.contains("[gh: ありません]"), "header: {line:?}");
+        // 押すキーの案内は `degraded_label` が足す（`every_degraded_account_says_
+        // which_key_to_press`）。ここで見るのは理由の文言と色。
+        assert!(line.contains("[gh: ありません。"), "header: {line:?}");
         assert_eq!(header_color_at(&state, "[gh:"), Color::Yellow);
         // 解決できているアカウントは色を付けない（注意を引くのは degraded だけ）。
         assert_eq!(
@@ -703,9 +712,7 @@ mod tests {
             },
             // **候補を空にしない。** 空だと `A` の案内が付かず、**出荷される
             // `Ambiguous` の形（いちばん長い）を測らないまま緑になる**。
-            DegradedReason::Ambiguous {
-                candidates: vec![fake_login("user_shortcode"), fake_login("taro")],
-            },
+            fake_ambiguous(&["user_shortcode", "taro"]),
         ];
         let size = TermSize {
             width: 100,
@@ -721,18 +728,17 @@ mod tests {
     }
 
     #[test]
-    fn only_a_degraded_account_you_can_pick_says_which_key_to_press() {
-        // **押すキーがあるのは `Ambiguous` だけ**（07）。ほかの degraded で `A` を
-        // 案内すると、押しても直らないキーを勧めることになる（内訳が出るだけ）。
+    fn every_degraded_account_says_which_key_to_press() {
+        // **選べない degraded でも `A` を案内する。** ヘッダが落とした内訳と外での
+        // 直し方を出す画面は `Modal::AccountPicker` だけなので（04）、案内が無いと
+        // 出す先を用意したのに誰も辿り着けない。**文言は押すと何が起きるかで割る。**
         let size = TermSize {
             width: 100,
             height: 24,
         };
         let mut state = shipping_header_state();
 
-        state.account = AccountState::Degraded(DegradedReason::Ambiguous {
-            candidates: vec![fake_login("taro"), fake_login("taro_acme")],
-        });
+        state.account = AccountState::Degraded(fake_ambiguous(&["taro", "taro_acme"]));
         let pickable = header(&state, size);
         assert!(pickable.contains("A で選ぶ"), "header: {pickable:?}");
 
@@ -740,7 +746,7 @@ mod tests {
             attempts: Vec::new(),
         });
         let shown = header(&state, size);
-        assert!(!shown.contains("A で選ぶ"), "header: {shown:?}");
+        assert!(shown.contains("A で詳細"), "header: {shown:?}");
     }
 
     /// 実際に `[gh: …]` が出るときのヘッダの状態。

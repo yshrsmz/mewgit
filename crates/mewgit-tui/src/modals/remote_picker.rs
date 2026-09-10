@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], c
             title: TITLE,
             // 1 行目は**なぜ選ばされているか**。これが無いと、毎回出るのか設定が
             // 壊れているのかが判らない（07）。
-            body: reason,
+            body: reason.into(),
             rows: remotes.iter().map(|r| Line::from(r.as_str())).collect(),
             cursor,
             hint: HINT,

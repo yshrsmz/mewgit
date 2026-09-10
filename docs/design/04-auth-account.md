@@ -538,12 +538,20 @@ git2 まで巻き込む。上の表は手で叩いた結果（`git2` 0.21）。
 並べる唯一の画面になる（01 の「アカウントの選び直し」、07 の「AccountPicker
 モーダル」）。ヘッダの 1 行との分担は次のとおり。
 
+**どの理由でもヘッダは `A` を案内する**（`A で選ぶ` / `A で詳細`）。**選べない
+degraded でも案内する**のは、ヘッダが落としたものを出す画面がここしか無いから ——
+案内が無いと、出す先を用意したのに誰も辿り着けない（07 のヘッダ）。
+
 | | ヘッダ | `Modal::AccountPicker` |
 |---|---|---|
-| `Ambiguous` | 件数と `A` の案内 | 候補を 1 件ずつ（login / scopes / `LoginState`）。`Enter` で選ぶ |
-| `NoAccess` | 件数だけ | `attempts` を 1 件ずつ（login とその `AttemptFailure`）。**選ばせない** |
-| `Unusable` / `ConfiguredUnavailable` | 畳んだ 1 行 | `message` そのまま |
-| `GhMissing` / `GhTooOld` / `NotLoggedIn` | 1 行で足りる | 同じ 1 行 + 外での直し方 |
+| `Ambiguous` | 件数 + `A で選ぶ` | 候補を 1 件ずつ（login / scopes / `LoginState`）。`Enter` で選ぶ |
+| `NoAccess` | 件数だけ + `A で詳細` | `attempts` を 1 件ずつ（login とその `AttemptFailure`）。**選ばせない** |
+| `Unusable` / `ConfiguredUnavailable` | 畳んだ 1 行 + `A で詳細` | `message` そのまま |
+| `GhMissing` / `GhTooOld` / `NotLoggedIn` | 1 行で足りる + `A で詳細` | 同じ 1 行 + 外での直し方 |
+
+**件数の文言はヘッダとモーダルで 1 本**（`ui::degraded`）。残る 5 腕は共有できない
+—— あちらは `[gh: …]` の中に置く前提で主語が `gh` なので、単体で読むと文にならない
+（`GhMissing` は「ありません」）。
 
 **外での直し方を書くのはモーダルの側。** `gh auth login` も `gh` の入れ替えも
 mewgit は提供していないので、#65 で決めた「**指示を足すのは、その操作を持たない側**」に

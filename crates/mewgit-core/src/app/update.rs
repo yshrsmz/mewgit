@@ -377,8 +377,10 @@ fn modal_key(state: &mut AppState, key: Key) -> Cmd {
         Some(Modal::Confirm { .. }) => confirm_key(state, key),
         Some(Modal::CommitMessage { .. }) => commit_message_key(state, key),
         Some(Modal::Input { .. }) => input_key(state, key),
-        Some(Modal::RemotePicker { .. }) => remote_picker_key(state, key),
-        Some(Modal::AccountPicker { .. }) => account_picker_key(state, key),
+        // **一覧から 1 つ選ぶモーダルは骨格が同じ**（`j` / `k` / `Esc`）。
+        // 違うのは `Enter` で出す `Cmd` だけなので、そこだけ各モーダルが持つ。
+        Some(Modal::RemotePicker { .. }) => picker_key(state, key, remote_picked),
+        Some(Modal::AccountPicker { .. }) => picker_key(state, key, account_picked),
         // 他のモーダルはそれぞれのタスクで実装する。閉じる道だけ開けておく。
         Some(_) => {
             if key == Key::new(KeyCode::Esc) {
@@ -407,43 +409,60 @@ fn confirm_key(state: &mut AppState, key: Key) -> Cmd {
     }
 }
 
-/// リモート選択モーダル。`j` / `k` で選び、`Enter` で fetch、`Esc` で取り消し。
+/// 一覧から 1 つ選ぶモーダルのキー処理。`j` / `k` で選び、`Enter` で確定、`Esc` で閉じる。
 ///
-/// **先にモーダルを閉じてから `Cmd` を返す**（[`confirm_key`] と同じ理由。閉じずに
-/// 返すと、`Cmd` が [`AppState::issue`] に落とされたときにモーダルだけが画面に残る）。
-fn remote_picker_key(state: &mut AppState, key: Key) -> Cmd {
-    let Some(modal) = state.modal.as_mut() else {
-        return Cmd::None;
-    };
-
+/// **確定だけを `on_enter` に委ねる。** 骨格（カーソル・閉じ方・受けないキー）は
+/// [`Modal::RemotePicker`] と [`Modal::AccountPicker`] で同じで、2 本に写すと
+/// ピッカーのキーを 1 つ足したときに片方だけ古くなる（描画側を
+/// `modals::picker` に寄せたのと同じ数え方。07）。**閉じるかどうかも `on_enter` が
+/// 決める** —— [`confirm_key`] は先に閉じてから返すが、`Cmd` が
+/// [`AppState::issue`] に落とされる形では閉じてはいけない（`submit_exec`）。
+///
+/// **クロージャではなく `fn` を受ける。** 環境を捕まえる必要が無く、`Modal` に
+/// コールバックを持たせない規約とも揃う。
+fn picker_key(state: &mut AppState, key: Key, on_enter: fn(&mut AppState) -> Cmd) -> Cmd {
     match key.code() {
         // 端の扱いはペインのカーソルと同じ規則（`Modal::move_cursor`）。
+        // **候補が空なら動かない**（`stepped_index`）ので、選ばせない
+        // `AccountPicker` でもここで断らなくてよい。
         KeyCode::Char('j') | KeyCode::Down => {
-            modal.move_cursor(1);
+            move_modal_cursor(state, 1);
             Cmd::None
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            modal.move_cursor(-1);
+            move_modal_cursor(state, -1);
             Cmd::None
         }
-        KeyCode::Enter => {
-            // **一覧は空にならない**（空なら `fetch` が開かない）が、`get` で取るのは
-            // 添字を信じないため。取れなければ閉じるだけにする。
-            let picked = match modal {
-                Modal::RemotePicker {
-                    remotes, cursor, ..
-                } => remotes.get(*cursor).cloned(),
-                _ => None,
-            };
-            state.modal = None;
-            picked.map_or(Cmd::None, |remote| fetch_from(&remote))
-        }
+        KeyCode::Enter => on_enter(state),
         KeyCode::Esc => {
             state.modal = None;
             Cmd::None
         }
         _ => Cmd::None,
     }
+}
+
+fn move_modal_cursor(state: &mut AppState, delta: isize) {
+    if let Some(modal) = state.modal.as_mut() {
+        modal.move_cursor(delta);
+    }
+}
+
+/// [`Modal::RemotePicker`] の `Enter`。選んだリモートで fetch する。
+///
+/// **先にモーダルを閉じてから `Cmd` を返す**（[`confirm_key`] と同じ理由。閉じずに
+/// 返すと、`Cmd` が [`AppState::issue`] に落とされたときにモーダルだけが画面に残る）。
+fn remote_picked(state: &mut AppState) -> Cmd {
+    // **一覧は空にならない**（空なら `fetch` が開かない）が、`get` で取るのは
+    // 添字を信じないため。取れなければ閉じるだけにする。
+    let picked = match state.modal.as_ref() {
+        Some(Modal::RemotePicker {
+            remotes, cursor, ..
+        }) => remotes.get(*cursor).cloned(),
+        _ => None,
+    };
+    state.modal = None;
+    picked.map_or(Cmd::None, |remote| fetch_from(&remote))
 }
 
 /// `A`。アカウント解決の結果を出す（01 の「アカウントの選び直し」）。
@@ -498,42 +517,21 @@ fn source_label(source: AccountSource) -> &'static str {
     }
 }
 
-/// アカウント選択モーダル。`j` / `k` で選び、`Enter` で保存、`Esc` で閉じる。
+/// [`Modal::AccountPicker`] の `Enter`。選んだ login を `.git/config` に書く。
 ///
 /// **選べるのは `Ambiguous` のときだけ**（[`DegradedReason::candidates`] が空なら
-/// `Enter` は何もしない）。`NoAccess` を選ばせないのは、どれも届かない状態で
-/// アカウントを選んでも何も直らないから（04 の手順 4）。
-fn account_picker_key(state: &mut AppState, key: Key) -> Cmd {
-    match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => {
-            if let Some(modal) = state.modal.as_mut() {
-                modal.move_cursor(1);
-            }
-            Cmd::None
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if let Some(modal) = state.modal.as_mut() {
-                modal.move_cursor(-1);
-            }
-            Cmd::None
-        }
-        KeyCode::Enter => {
-            let Some(Modal::AccountPicker { reason, cursor }) = state.modal.as_ref() else {
-                return Cmd::None;
-            };
-            let Some(login) = reason.candidates().get(*cursor).map(|c| c.login.clone()) else {
-                return Cmd::None;
-            };
-            // **[`submit_exec`] を通す。** ほかの `git` が走っているあいだは閉じない
-            // —— 閉じてから `Cmd` が落とされると、選んだのに何も起きない。
-            submit_exec(state, GitOp::SetAccount { login })
-        }
-        KeyCode::Esc => {
-            state.modal = None;
-            Cmd::None
-        }
-        _ => Cmd::None,
-    }
+/// 何もしない）。`NoAccess` を選ばせないのは、どれも届かない状態でアカウントを
+/// 選んでも何も直らないから（04 の手順 4）。
+fn account_picked(state: &mut AppState) -> Cmd {
+    let Some(Modal::AccountPicker { reason, cursor }) = state.modal.as_ref() else {
+        return Cmd::None;
+    };
+    let Some(login) = reason.candidates().get(*cursor).map(|c| c.login.clone()) else {
+        return Cmd::None;
+    };
+    // **[`submit_exec`] を通す。** ほかの `git` が走っているあいだは閉じない
+    // —— 閉じてから `Cmd` が落とされると、選んだのに何も起きない。
+    submit_exec(state, GitOp::SetAccount { login })
 }
 
 /// グラフペインのキー処理。
@@ -2190,7 +2188,7 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         state.jobs.advance(*region);
     }
 
-    let reloaded = match reload {
+    match reload {
         Reload::Nothing => Cmd::LoadStatus,
         // **ブランチ一覧も ref から導かれる。** commit は `refs/heads/<現在>` を
         // 動かすので、読み直さないと Branches ペインが commit 前の ahead のまま残る。
@@ -2201,33 +2199,20 @@ fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
             Cmd::LoadBranches,
             reload_log(state),
         ]),
-    };
-
-    Cmd::batch([reloaded, resolve_again(state, &done.op)])
+        Reload::Account => resolve_again(state),
+    }
 }
 
 /// `.git/config` にアカウントを書いたあとの読み直し（01 の「アカウントの選び直し」）。
 ///
-/// **`Reload` に混ぜない。** あちらが数えるのは git の読み取り（index / ref / ログ）で、
-/// アカウントは `gh` と GitHub API のほう。`Reload` に腕を足すと、`git` の読み直しの
-/// 一覧に `gh` の話が並ぶ。
-///
-/// **成否を見ない。** 中断（`ExecError::Canceled`）では**書けたかどうか判らない**
-/// （#56 の「失敗なら ref は元のまま」が中断では成り立たない、と同じ形）。読み直せば
-/// `.git/config` の実物が答えるので、成否で分岐する理由が無い。
-///
 /// **`Cmd::ResolveAccount` の 2 つ目の発行元**（1 つ目は [`target_resolved`]）。
-fn resolve_again(state: &mut AppState, op: &GitOp) -> Cmd {
-    if !matches!(op, GitOp::SetAccount { .. }) {
-        return Cmd::None;
-    }
+fn resolve_again(state: &mut AppState) -> Cmd {
     // **`target` が無ければ何もしない。** `Degraded` は `target` が決まったあとにしか
     // 出ないのでここには来ないが、来たときに `Resolving` へ落とすと
     // 頼み直す相手がいないまま**ヘッダから `[gh: …]` が消えたきり**になる。
-    let TargetState::Resolved(target) = &state.repo.target else {
+    let Some(target) = state.repo.target.resolved().cloned() else {
         return Cmd::None;
     };
-    let target = target.clone();
     state.account = AccountState::Resolving;
     Cmd::ResolveAccount(target)
 }
@@ -2252,6 +2237,18 @@ enum Reload {
     Refs,
     /// 索引と、積んだログの両方。
     RefsAndLog,
+    /// git の読み取りは 1 つも古くならない。**アカウントの解決だけをやり直す**
+    /// （`.git/config` の `mewgit.user`。01 の「アカウントの選び直し」）。
+    ///
+    /// **`Nothing` に落とさない。** あちらは `Cmd::LoadStatus` を出して
+    /// `Region::Worktree` の世代を進めるので、index もワークツリーも触っていない
+    /// 書き込みで**飛んでいた status / diff の返信が捨てられ、頼み直しになる**。
+    ///
+    /// **`exec_finished` の外に `matches!` を置かない。** ここに腕があれば、
+    /// 次に「ref を動かさないが別のものを古くする」書き込みが来たときに
+    /// [`Reload::after`] の網羅 `match` が選ばせる（外に置くと、その op は嘘の
+    /// 分類に落ちて後始末だけが 2 本目の分岐として積まれる）。
+    Account,
 }
 
 impl Reload {
@@ -2266,6 +2263,8 @@ impl Reload {
             Reload::Nothing => &[Region::Worktree],
             Reload::Refs => &[Region::Worktree, Region::Refs],
             Reload::RefsAndLog => &[Region::Worktree, Region::Refs, Region::Log],
+            // git の読み取りは何も古くならない（`.git/config` の 1 行だけ）。
+            Reload::Account => &[],
         }
     }
 
@@ -2309,12 +2308,13 @@ impl Reload {
             | GitOp::StashPop(_)
             | GitOp::StashDrop(_) => Reload::Nothing,
 
-            // `.git/config` の 1 行だけ。index もワークツリーも ref も動かないので、
-            // ここで出る `Cmd::LoadStatus` と `Region::Worktree` の世代送りは**空振り**。
-            // **それでも変種を足さない** —— 世代を進めて落ちるのは「この書き込みより
-            // 前に頼んだ読み取り」だけで、落ちても読み直すだけの 1 往復。読み直すのは
-            // `account` のほうで、それは下の [`exec_finished`] が `Reload` とは別に出す。
-            GitOp::SetAccount { .. } => Reload::Nothing,
+            // `.git/config` の 1 行だけ。index もワークツリーも ref も動かない。
+            //
+            // **成否を見ない**（`Reload::after` はどの腕でも結果を見ない）。中断
+            // （`ExecError::Canceled`）では**書けたかどうか判らない**（#56 の
+            // 「失敗なら ref は元のまま」が中断では成り立たない、と同じ形）。
+            // 読み直せば `.git/config` の実物が答えるので、成否で分岐する理由が無い。
+            GitOp::SetAccount { .. } => Reload::Account,
 
             // walk に入るコミットの集合が変わる。**失敗しても途中まで ref が
             // 動いていることがある**ので成否を見ない。fetch / pull は一部の ref だけ
@@ -2473,9 +2473,9 @@ mod tests {
     };
     use crate::graph::LaneState;
     use crate::test_util::{
-        fake_account, fake_branch, fake_commit, fake_commit_with_parents, fake_detail, fake_entry,
-        fake_file_diff, fake_hunk, fake_login, fake_oid, fake_remote, fake_snapshot, fake_target,
-        fake_upstream, reply,
+        fake_account, fake_ambiguous, fake_branch, fake_commit, fake_commit_with_parents,
+        fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot,
+        fake_target, fake_upstream, reply,
     };
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
@@ -5156,16 +5156,9 @@ feat/b
         state
     }
 
-    /// 候補 2 件の `Ambiguous`。**選べる degraded はこれだけ**（04 の手順 4）。
-    fn ambiguous() -> DegradedReason {
-        DegradedReason::Ambiguous {
-            candidates: vec![fake_login("taro_acme"), fake_login("taro")],
-        }
-    }
-
     #[test]
     fn a_opens_the_picker_when_the_account_is_degraded() {
-        let mut state = state_degraded(ambiguous());
+        let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
 
         let cmd = press(&mut state, 'A');
 
@@ -5174,7 +5167,8 @@ feat/b
         assert_eq!(
             state.modal,
             Some(Modal::AccountPicker {
-                reason: ambiguous(),
+                // **理由をそのまま持つ**ので、`Ambiguous` の中身も一致する。
+                reason: fake_ambiguous(&["taro_acme", "taro"]),
                 cursor: 0
             })
         );
@@ -5218,7 +5212,7 @@ feat/b
 
     #[test]
     fn the_picker_saves_the_chosen_login_to_git_config() {
-        let mut state = state_degraded(ambiguous());
+        let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
         let _ = press(&mut state, 'A');
         let _ = press(&mut state, 'j');
 
@@ -5259,7 +5253,7 @@ feat/b
     fn choosing_an_account_is_refused_while_another_git_is_running() {
         // **`submit_exec` を通す。** 閉じてから `Cmd` が落とされると、選んだのに
         // 何も起きない（01 の「アカウントの選び直し」）。
-        let mut state = state_degraded(ambiguous());
+        let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
         let _ = state.issue(Cmd::Exec(GitOp::Fetch {
             remote: None,
             prune: false,
@@ -5278,7 +5272,7 @@ feat/b
     fn writing_the_account_asks_for_the_resolution_again() {
         // **`Cmd::ResolveAccount` の 2 つ目の発行元。** 書いた `mewgit.user` は
         // 手順 1 で読まれるので、`Resolved(source: Config)` に落ち着く。
-        let mut state = state_degraded(ambiguous());
+        let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
         let op = GitOp::SetAccount {
             login: "taro".to_string(),
         };
@@ -5289,10 +5283,10 @@ feat/b
             exec_done_of(op, Ok(fake_output())),
         );
 
-        assert_eq!(
-            cmd,
-            Cmd::batch([Cmd::LoadStatus, Cmd::ResolveAccount(fake_target())])
-        );
+        // **`Cmd::LoadStatus` は出さない**（`Reload::Account`）。index もワークツリーも
+        // 触っていないので、出すと空振りの status 走査に加えて `Region::Worktree` の
+        // 世代が進み、飛んでいた読み取りが捨てられる。
+        assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
         // ヘッダの古い degraded を残さない（07 は `Resolving` のあいだ何も出さない）。
         assert!(matches!(state.account, AccountState::Resolving));
     }
@@ -5302,7 +5296,7 @@ feat/b
         // **成否を見ない。** 中断では**書けたかどうか判らない**（#56 の「失敗なら
         // ref は元のまま」が中断では成り立たない、と同じ形）。読み直せば
         // `.git/config` の実物が答える。
-        let mut state = state_degraded(ambiguous());
+        let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
         let op = GitOp::SetAccount {
             login: "taro".to_string(),
         };
@@ -5318,10 +5312,7 @@ feat/b
             ),
         );
 
-        assert!(
-            matches!(cmd, Cmd::Batch(ref cmds) if cmds.contains(&Cmd::ResolveAccount(fake_target()))),
-            "{cmd:?}"
-        );
+        assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
         assert!(matches!(state.account, AccountState::Resolving));
     }
 
@@ -5329,7 +5320,7 @@ feat/b
     fn a_write_from_another_op_leaves_the_account_alone() {
         // **`SetAccount` だけが解決をやり直す。** 全部の書き込みで頼み直すと、
         // stage のたびに `gh` が走る。
-        let mut state = state_degraded(ambiguous());
+        let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
         let op = GitOp::Stage(vec!["a.txt".into()]);
 
         let cmd = reply(

@@ -100,8 +100,13 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 決めたことと理由:
 
 - **`SetAccount` はアカウント解決の結果を `.git/config` に憶える**（`Modal::AccountPicker`
-  の `Enter`。01 の「アカウントの選び直し」）。**書き込みなので `git` CLI を通す**
-  （不変ルール 1）。**キーの名前は `auth::MEWGIT_USER` の 1 本**から取る —— 読む側
+  の `Enter`。01 の「アカウントの選び直し」）。**`git` CLI を通す理由に不変ルール 1 を
+  引かない** —— あのルールの理由は **hook が走らないこと**で、名指しされているのは
+  commit / checkout / rebase / stash。`git config --local` は hook を 1 つも走らせない
+  ので、引くと「config の書き込みは `GitOp` でなければならない」と読めてしまう。
+  ここで CLI なのは**「読みは git2、書きは CLI」の分担**と、失敗の argv と stderr が
+  `ExecError` で UI まで届く経路（不変ルール 4）に乗せるため。
+  **キーの名前は `auth::MEWGIT_USER` の 1 本**から取る —— 読む側
   （`auth::resolve` の git2）と別々に書くと、片方を直したときに黙って別のキーを
   読み書きする。実測（git 2.55、`env -i` の一時リポジトリ）:
 

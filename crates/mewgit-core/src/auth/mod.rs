@@ -4,8 +4,13 @@
 //! トークンはメモリ上のみで保持する（不変ルール 3）。
 //!
 //! リモート URL の解析（[`url`]）、エイリアスの正規化（[`ssh`]）、`gh` の呼び出し
-//! （[`gh`]）は実装済み。`resolve` は M4 の次のタスクで実装するので、ここには
-//! `app` の `AppState` / `Msg` が参照する型を置いてある。
+//! （[`gh`]）、アカウント解決（[`resolve`]）はここにある。この `mod.rs` に置くのは
+//! `app` の `AppState` / `Msg` が参照する値型だけ。
+//!
+//! **[`resolve`] を呼ぶ経路はまだ無い。** [`Backend`] の production 実装と
+//! `Cmd::ResolveAccount` の配線は次のタスク（ヘッダの `[acct: …]` 表示）で入る
+//! —— 読み手の無い `Cmd` を出すと、起動のたびに「未実装のコマンドです」が出る
+//! （01 の「`RepoInfo.target` を埋める」）。
 //!
 //! **どのリモートの URL を見るかは決まった**（04 の「既定リモート」）。規則を持つのは
 //! `app` で、材料の [`git_read::Remote`] と `Branch.upstream_config` がどちらも
@@ -17,8 +22,11 @@
 
 pub mod gh;
 mod probe;
+mod resolve;
 pub mod ssh;
 pub mod url;
+
+pub use resolve::{resolve, Backend, ProbeOutcome};
 
 use secrecy::SecretString;
 
@@ -101,20 +109,21 @@ pub struct GhLogin {
     pub scopes: Vec<String>,
     /// gh がそのトークンを検証した結果。
     ///
-    /// **`gh` の層で絞らずに運ぶ。** 04 は「`Timeout` を `Error` と同じに畳んで
-    /// よいか」を `auth::resolve` のタスクへ送っており、ここで落とすと**送った先に
-    /// 判断の材料が届かない**。
+    /// **絞り込みには使わない。** [`resolve`] は `state` で候補を落とさないと
+    /// 決めた（04 の「`LoginState` で候補を絞らない」）—— `Single` は検証せずに
+    /// 確定するので、gh の判定で落とすと **probe を一度も通さずに別のアカウントを
+    /// 選ぶ**形が作れる。運ぶのは表示のため。
     pub state: LoginState,
 }
 
 /// `gh auth status` がそのアカウントに付けた状態（`status.go` の 3 値）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginState {
-    /// トークンが通った。probe の候補になる。
+    /// トークンが通った。
     Success,
     /// ホストに届かなかった。**トークンが悪いとは限らない。**
     Timeout,
-    /// gh がトークンを拒まれた。
+    /// gh がトークンを拒まれた。**それでも probe の候補には残る**（上の `state`）。
     Error,
 }
 
@@ -160,24 +169,64 @@ pub enum DegradedReason {
         /// 見つかった版。解釈できなければ `gh --version` の生の 1 行目が入る。
         found: String,
     },
+    /// `gh` は居るのに答えが返らなかった（起動できない / 非 0 終了 / 出力を
+    /// 解釈できない）。**3 つを分けない** —— 直し方の違いは `message` に出ており、
+    /// これで分岐する読み手が UI に無い（[`resolve`] の `reason_for`）。
+    Unusable {
+        message: String,
+    },
     NotLoggedIn {
         host: String,
+    },
+    /// `.git/config` の `mewgit.user` か設定ファイルの `[[repos]]` が指す login の
+    /// トークンを取れなかった。
+    ///
+    /// **[`Unusable`](Self::Unusable) に畳まない。** 直すのは gh ではなく設定の
+    /// ほうなので、どの login を指していたかを案内に出す。**手順 2 へ落とさない**
+    /// のも同じ理由 —— 指定を無視して別のアカウントを選ぶと、EMU と個人アカウントを
+    /// 取り違える。
+    ConfiguredUnavailable {
+        login: String,
+        message: String,
     },
     /// どの候補トークンでもリポジトリにアクセスできなかった。
     NoAccess {
         attempts: Vec<ProbeAttempt>,
     },
     /// 複数の候補がアクセスできた。UI で選ばせる。
+    ///
+    /// **並ぶのは probe を通った候補だけ。** 落ちたものを混ぜると、選べるアカウント
+    /// として 401 のログインを出すことになる。**[`GhLogin`] ごと運ぶ**ので、
+    /// 選び直すときに `gh auth status` を呼び直さなくてよい（04）。
     Ambiguous {
         candidates: Vec<GhLogin>,
     },
 }
 
-/// `NoAccess` のとき、どのログインがどの HTTP ステータスで落ちたか。
+/// `NoAccess` のとき、どのログインがなぜ落ちたか。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeAttempt {
     pub login: String,
-    pub status: u16,
+    pub failure: AttemptFailure,
+}
+
+/// 候補 1 件がリポジトリに届かなかった理由。
+///
+/// **`status: u16` では足りない**（「二値の結果に 3 つ目を足したら入口と出口を
+/// 数える」）。HTTP まで届かない失敗は**ステータスを持たない**ので、0 や 599 を
+/// 埋めると案内が「HTTP 0 で断られました」になる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttemptFailure {
+    /// HTTP のステータスで断られた（401 / 403 / 404）。**このアカウントでは無理**。
+    Denied { status: u16 },
+    /// 断られてはいないが確かめられなかった（回線、TLS バックエンドの初期化、
+    /// レート制限）。**もう一度なら通りうる**ので `Denied` と分ける ——
+    /// レート制限を `Denied { status: 429 }` に畳むと、待てば直るものを
+    /// 「アクセス権がありません」として出すことになる（05 の `RateLimited` は
+    /// 429 だけでなく**印の付いた 403** からも来るので、ステータスを載せても嘘になる）。
+    Undetermined { message: String },
+    /// `gh` からトークンを取れなかった。**probe まで行っていない。**
+    NoToken { message: String },
 }
 
 /// カンマ区切りの OAuth スコープを割る。

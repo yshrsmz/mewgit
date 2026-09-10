@@ -280,7 +280,8 @@ struct Slot {
 /// `a` のほうが望ましい状態か。`Success` > `Timeout` > `Error`。
 ///
 /// `Timeout` を `Error` より上に置くのは、**届かなかっただけでトークンが悪いとは
-/// 限らない**ため。この 2 つを同じに扱ってよいかは `auth::resolve` で決める（04）。
+/// 限らない**ため。**`resolve` はどちらでも候補を落とさない**と決めたので
+/// （04 の「`LoginState` で候補を絞らない」）、この順序が効くのは表示だけ。
 fn better(a: LoginState, b: LoginState) -> bool {
     fn rank(s: LoginState) -> u8 {
         match s {

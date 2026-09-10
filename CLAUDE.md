@@ -364,6 +364,10 @@ env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/d
   ビルド成果物より古くなり、fingerprint が変わらずに古いバイナリが走る。「この見張りは
   本当に落ちるか」を確かめるために実装を一時的に書き換えたときは、戻したあと `touch`
   してから流し直す
+- **その戻しに `git checkout <file>` を使わない。** 戻る先は**コミット**であって、
+  壊す直前の状態ではない。同じファイルに未コミットの修正（レビュー指摘の適用など）が
+  あると丸ごと消える。#68 では `/simplify` の適用を全部消して replay する羽目になった。
+  `cp` で退避して `cp` で戻し、戻したあと `touch` する（上の項）
 - `Path` 同士の `assert_eq!` は末尾の区切りを無視するので、パスの正規化はテストできない。
   git2 の `workdir()` / `path()` は `/…/repo/` と末尾を付けて返すため、正規化を確かめる
   ときは `to_string_lossy()` で文字列に直して見る

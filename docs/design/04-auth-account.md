@@ -380,7 +380,7 @@ pub async fn resolve<B: Backend + Sync>(
   下の表を通す
 - **表を通すのは `Result` 全体で、`Err` だけではない。** `Err(Decode)` が `Ok(())` に
   なる行があるので、「成功したか」を先に数えると 1 行落ちる（`to_argv` と同じく
-  純粋関数にして、9 行を 1 件ずつ見張る）
+  純粋関数にして、表の行を 1 つずつ見張る）
 
 **TLS 初期化の失敗は候補ごとの `Undetermined` のままにする**（送っていた
 「実装するタスクで数え直す」の答え）。1 回だけ判定して `Unusable` に落とす形は 2 つの
@@ -397,9 +397,10 @@ pub async fn resolve<B: Backend + Sync>(
 | `Ok(RepoMeta)` | `Ok(())` | |
 | `Err(Decode)` | **`Ok(())`** | `check_status` を通ったあとにしか出ない = **2xx が返っている**。GHES の版差で本文の形が違うだけで、アクセス権はある。`Failed` に落とすと動いている環境が `NoAccess` になる |
 | `Err(Unauthorized)` | `Err(Denied { 401 })` | |
-| `Err(Forbidden)` | `Err(Denied { 403 })` | |
+| `Err(Forbidden)` | `Err(Denied { 403 })` | **SAML の 403 もここ。** 「SSO 承認が要る」は直せる状態だが、サーバは**答えを返している**（このトークンでは通らない）ので `Undetermined`（確かめられなかった）ではない。**`saml` の印はここで落ちる** —— probe の `AttemptFailure` に載せる先が無く、読み手（`Modal::AccountPicker`）もまだ無い。載せ方はピッカーのタスクで数え直す |
 | `Err(NotFound)` | `Err(Denied { 404 })` | 権限が無ければ GitHub は 404 を返す |
-| `Err(Api { status, .. })` | `Err(Denied { status })` | |
+| `Err(Api { status: 4xx, .. })` | `Err(Denied { status })` | |
+| `Err(Api { status: 5xx, .. })` | **`Err(Undetermined)`** | **サーバが一時的に答えられないだけ**で、断られてはいない。`Denied` に畳むと手順 4 が「除外できた」と数え、GHES のメンテナンスや 502 が 1 回混じった回に**別のアカウントを黙って選んで latch する**（`/code-review` が拾った。`unchecked` の見張りが塞いだはずの形） |
 | `Err(RateLimited)` | `Err(Undetermined)` | **ステータスを載せない。** 05 の `RateLimited` は 429 だけでなく**印の付いた 403** からも来る |
 | `Err(Network)` | `Err(Undetermined)` | |
 | `Err(InvalidHost)` | `Err(Undetermined)` | 届かないはず（1 本目で `valid_host` を通している）。`unreachable!()` にしない |

@@ -426,8 +426,8 @@ fn repo_label(state: &AppState) -> String {
 mod tests {
     use super::{degraded, file_row, pane_area, window, wrapped};
     use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
-    use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TermSize};
-    use mewgit_core::auth::{AccountState, DegradedReason};
+    use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TargetState, TermSize};
+    use mewgit_core::auth::{AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::test_util::{fake_account, fake_snapshot};
     use ratatui::style::{Color, Modifier};
@@ -653,6 +653,14 @@ mod tests {
     fn every_degraded_reason_fits_the_header() {
         // **7 つを 1 つずつ回す。** 理由を足したときに、文言の無い腕と、ヘッダから
         // はみ出す長さの両方をここで落とす（通知の 72 セルと同じ形の見張り。01）。
+        //
+        // **出荷される形のヘッダで測る**（`/code-review` が拾った）。`[acct: …]` が
+        // 出るのは `Cmd::ResolveAccount` を出したリポジトリだけで、それを出すのは
+        // `target_resolved` —— **`owner/repo` が必ず左隣にある**。走っているジョブの
+        // スピナーも右端に重なる。素の `state_at("/repo")` で測ると、実際には
+        // 存在しない短いヘッダを見張ることになる。
+        //
+        // **幅は 100。** 07 の目標のレイアウトがその幅で、`< 100` は M6 のタスク。
         let reasons = [
             DegradedReason::GhMissing,
             DegradedReason::GhTooOld {
@@ -675,12 +683,33 @@ mod tests {
                 candidates: Vec::new(),
             },
         ];
+        let size = TermSize {
+            width: 100,
+            height: 24,
+        };
         for reason in reasons {
             let want = format!("[acct: {}]", degraded(&reason));
-            let state = state_with_account(AccountState::Degraded(reason));
-            let line = header(&state, TermSize::default());
+            let mut state = shipping_header_state();
+            state.account = AccountState::Degraded(reason);
+            let line = header(&state, size);
             assert!(line.contains(&want), "はみ出している: {line:?} / {want}");
         }
+    }
+
+    /// 実際に `[acct: …]` が出るときのヘッダの状態。
+    ///
+    /// 長めのリポジトリ名（`claude-code`）と `owner/repo`、それに走っているジョブの
+    /// スピナーを一緒に出す。**この 3 つは `[acct: …]` と同じ 1 行を分け合う。**
+    fn shipping_header_state() -> AppState {
+        let mut state = state_at("/tmp/claude-code");
+        state.repo.target = TargetState::Resolved(RepoTarget {
+            host: "github.com".to_string(),
+            port: None,
+            owner: "anthropics".to_string(),
+            repo: "claude-code".to_string(),
+        });
+        let _ = state.issue(Cmd::LoadBranches);
+        state
     }
 
     #[test]

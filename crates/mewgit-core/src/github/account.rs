@@ -99,6 +99,16 @@ fn attempt(result: Result<RepoMeta, GithubError>) -> Result<(), AttemptFailure> 
         Err(GithubError::Forbidden { .. }) => Err(denied(403)),
         // 権限が無ければ GitHub は 404 を返す。
         Err(GithubError::NotFound) => Err(denied(404)),
+        // **5xx は「断られた」ではない。** サーバが一時的に答えられないだけで、
+        // もう一度なら通りうる。`resolve` の手順 4 は `Denied` を「除外できた」と
+        // 数える（`Undetermined` だけが候補に残る）ので、ここへ畳むと **GHES の
+        // メンテナンスや 502 が 1 回混じっただけで、別のアカウントが黙って選ばれて
+        // latch する** —— `unchecked` の見張りが塞いだはずの形（04 の手順 4）。
+        Err(
+            err @ GithubError::Api {
+                status: 500..=599, ..
+            },
+        ) => Err(undetermined(&err)),
         Err(GithubError::Api { status, .. }) => Err(denied(status)),
         // **レート制限にステータスを載せない。** 05 の `RateLimited` は 429 だけでなく
         // 印の付いた 403 からも来るので、`Denied { status }` に畳むと嘘になる。
@@ -108,14 +118,20 @@ fn attempt(result: Result<RepoMeta, GithubError>) -> Result<(), AttemptFailure> 
             err @ (GithubError::RateLimited { .. }
             | GithubError::Network { .. }
             | GithubError::InvalidHost { .. }),
-        ) => Err(AttemptFailure::Undetermined {
-            message: err.to_string(),
-        }),
+        ) => Err(undetermined(&err)),
     }
 }
 
 fn denied(status: u16) -> AttemptFailure {
     AttemptFailure::Denied { status }
+}
+
+/// 断られてはいないが確かめられなかった。**理由は `Display` をそのまま運ぶ** ——
+/// `NoAccess` の案内は 1 件ずつこれを並べる（04）。
+fn undetermined(err: &GithubError) -> AttemptFailure {
+    AttemptFailure::Undetermined {
+        message: err.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -153,12 +169,13 @@ mod tests {
                 Err(denied(403)),
             ),
             (Err(GithubError::NotFound), Err(denied(404))),
+            // 4xx はこのアカウントで無理。5xx は下のテスト（確かめられなかった側）。
             (
                 Err(GithubError::Api {
-                    status: 502,
-                    body_head: "bad gateway".to_string(),
+                    status: 422,
+                    body_head: "unprocessable".to_string(),
                 }),
-                Err(denied(502)),
+                Err(denied(422)),
             ),
         ];
         for (result, want) in cases {
@@ -167,10 +184,14 @@ mod tests {
         }
     }
 
-    /// 確かめられなかった 3 つ。**`message` に理由が残る** —— `NoAccess` の案内は
+    /// 確かめられなかった側。**`message` に理由が残る** —— `NoAccess` の案内は
     /// これを 1 件ずつ並べる（04）。
+    ///
+    /// **5xx がここに居ることが要**（`/code-review` が拾った）。`Denied` に畳むと、
+    /// `resolve` の手順 4 が「除外できた」と数えて、502 が 1 回混じっただけで
+    /// 別のアカウントを黙って選んで latch する。
     #[test]
-    fn the_three_undetermined_rows_keep_their_reason() {
+    fn the_undetermined_rows_keep_their_reason() {
         let cases = [
             GithubError::RateLimited { reset_at: None },
             GithubError::Network {
@@ -178,6 +199,14 @@ mod tests {
             },
             GithubError::InvalidHost {
                 host: "-4".to_string(),
+            },
+            GithubError::Api {
+                status: 502,
+                body_head: "bad gateway".to_string(),
+            },
+            GithubError::Api {
+                status: 503,
+                body_head: "maintenance".to_string(),
             },
         ];
         for err in cases {

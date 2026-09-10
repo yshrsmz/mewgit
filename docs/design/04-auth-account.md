@@ -508,7 +508,7 @@ git2 まで巻き込む。上の表は手で叩いた結果（`git2` 0.21）。
 2 行目は手順 1 の安全のため —— `mewgit.user = B` が黙って A のトークンを B として
 返す形は無い。
 
-解決結果は画面上部に `[acct: login @ host]` として表示する。`Degraded` は黄色で理由を表示。
+解決結果は画面上部に `[gh: login @ host]` として表示する。`Degraded` は黄色で理由を表示。
 **決まるまでは何も出さない**（`Resolving` のあいだ。07 のヘッダ）。
 
 **`Unusable` と `ConfiguredUnavailable` の `message` もヘッダには出さない。** 上の `reason_for` が
@@ -531,7 +531,7 @@ URL を GitHub の形として読めない = `TargetState::Unavailable`）の 2 
 
 **ヘッダに出すのは 1 行に収まる診断だけ。** `NoAccess` の `attempts` は
 「どの login がなぜ落ちたか」を 1 件ずつ持っているが、ヘッダは件数しか出さない
-（`[acct: 届いたアカウントがありません（2 件）]`）。**1 件ずつ並べる先は `Modal::AccountPicker` の
+（`[gh: 届いたアカウントがありません（2 件）]`）。**1 件ずつ並べる先は `Modal::AccountPicker` の
 タスクへ送る** —— 選ばせる画面が候補と理由を並べる場所で、それまでは
 `Notice.detail`（M6）と同じく画面に出る先が無い。**`Ambiguous` に
 「選んでください」と書かない**のも同じ理由で、ピッカーが無いあいだは押すキーが

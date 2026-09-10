@@ -139,7 +139,7 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       **配線は入れていない** —— `Backend` の production 実装（`github::AccountBackend`）と
       `Cmd::ResolveAccount` の発行は次のタスクで、読み手が無いまま出すと起動のたびに
       「未実装のコマンドです」が出る（01 の「`RepoInfo.target` を埋める」）
-- [x] ヘッダの `[acct: login @ host]` 表示と Degraded 表示。**`auth::Backend` の
+- [x] ヘッダの `[gh: login @ host]` 表示と Degraded 表示。**`auth::Backend` の
       production 実装（`github::AccountBackend`）と `Cmd::ResolveAccount` の配線も
       ここ**（04 の「`Backend` の production 実装は `github` に置く」）。
       **`Modal::AccountPicker` より先に置いた** —— 配線はどちらにも要る前提で、

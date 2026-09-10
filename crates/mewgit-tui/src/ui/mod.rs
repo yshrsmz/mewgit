@@ -313,7 +313,11 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
     Paragraph::new(Line::from(spans))
 }
 
-/// ヘッダの `[acct: …]`。まだ決まっていなければ `None`（07）。
+/// ヘッダの `[gh: …]`。まだ決まっていなければ `None`（07）。
+///
+/// **見出しは `gh`。** 誰として GitHub に喋るかを出す欄で、その誰かを決めるのも
+/// トークンを出すのも `gh` CLI（04）。degraded の理由も `gh` の話が多いので、
+/// [`degraded`] の側では `gh` を繰り返さない（`[gh: gh がありません]` にしない）。
 ///
 /// **`Resolving` のあいだは何も出さない。** 走っていることは右端のスピナー
 /// （`account`）が出しているので、左にも「解決中」を出すと同じことを 2 箇所で言う。
@@ -323,11 +327,11 @@ fn account_span(account: &AccountState) -> Option<Span<'_>> {
     match account {
         AccountState::Resolving => None,
         AccountState::Resolved(account) => Some(Span::raw(format!(
-            "[acct: {} @ {}]",
+            "[gh: {} @ {}]",
             account.login, account.host
         ))),
         AccountState::Degraded(reason) => Some(Span::styled(
-            format!("[acct: {}]", degraded(reason)),
+            format!("[gh: {}]", degraded(reason)),
             theme::warn(),
         )),
     }
@@ -341,14 +345,14 @@ fn account_span(account: &AccountState) -> Option<Span<'_>> {
 /// 並べる先はピッカーのタスクへ送ってある（04）。
 fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
     match reason {
-        DegradedReason::GhMissing => "gh がありません".into(),
+        DegradedReason::GhMissing => "ありません".into(),
         // 要求版は定数から引く。`GhTooOld` は値として持っていない（04）。
         DegradedReason::GhTooOld { found } => {
-            format!("gh {found} は古い（{} 以上）", gh::REQUIRED).into()
+            format!("{found} は古い（{} 以上）", gh::REQUIRED).into()
         }
         // **`message` は出さない。** `gh` が起動できない理由は 1 行に収まらず、
         // 出す先は M6 の `Notice.detail` と `Modal::AccountPicker`（04）。
-        DegradedReason::Unusable { .. } => "gh を実行できません".into(),
+        DegradedReason::Unusable { .. } => "実行できません".into(),
         DegradedReason::NotLoggedIn { host } => format!("{host} に未ログイン").into(),
         DegradedReason::ConfiguredUnavailable { login, .. } => {
             format!("{login} のトークンがありません").into()
@@ -618,7 +622,7 @@ mod tests {
         let line = header(&state_with_account(resolved_account()), TermSize::default());
 
         assert!(
-            line.contains("[acct: user_shortcode @ github.com]"),
+            line.contains("[gh: user_shortcode @ github.com]"),
             "header: {line:?}"
         );
     }
@@ -632,7 +636,7 @@ mod tests {
             TermSize::default(),
         );
 
-        assert!(!line.contains("acct"), "header: {line:?}");
+        assert!(!line.contains("[gh:"), "header: {line:?}");
     }
 
     #[test]
@@ -640,11 +644,11 @@ mod tests {
         let state = state_with_account(AccountState::Degraded(DegradedReason::GhMissing));
 
         let line = header(&state, TermSize::default());
-        assert!(line.contains("[acct: gh がありません]"), "header: {line:?}");
-        assert_eq!(header_color_at(&state, "[acct:"), Color::Yellow);
+        assert!(line.contains("[gh: ありません]"), "header: {line:?}");
+        assert_eq!(header_color_at(&state, "[gh:"), Color::Yellow);
         // 解決できているアカウントは色を付けない（注意を引くのは degraded だけ）。
         assert_eq!(
-            header_color_at(&state_with_account(resolved_account()), "[acct:"),
+            header_color_at(&state_with_account(resolved_account()), "[gh:"),
             Color::Reset
         );
     }
@@ -654,7 +658,7 @@ mod tests {
         // **7 つを 1 つずつ回す。** 理由を足したときに、文言の無い腕と、ヘッダから
         // はみ出す長さの両方をここで落とす（通知の 72 セルと同じ形の見張り。01）。
         //
-        // **出荷される形のヘッダで測る**（`/code-review` が拾った）。`[acct: …]` が
+        // **出荷される形のヘッダで測る**（`/code-review` が拾った）。`[gh: …]` が
         // 出るのは `Cmd::ResolveAccount` を出したリポジトリだけで、それを出すのは
         // `target_resolved` —— **`owner/repo` が必ず左隣にある**。走っているジョブの
         // スピナーも右端に重なる。素の `state_at("/repo")` で測ると、実際には
@@ -688,7 +692,7 @@ mod tests {
             height: 24,
         };
         for reason in reasons {
-            let want = format!("[acct: {}]", degraded(&reason));
+            let want = format!("[gh: {}]", degraded(&reason));
             let mut state = shipping_header_state();
             state.account = AccountState::Degraded(reason);
             let line = header(&state, size);
@@ -696,10 +700,10 @@ mod tests {
         }
     }
 
-    /// 実際に `[acct: …]` が出るときのヘッダの状態。
+    /// 実際に `[gh: …]` が出るときのヘッダの状態。
     ///
     /// 長めのリポジトリ名（`claude-code`）と `owner/repo`、それに走っているジョブの
-    /// スピナーを一緒に出す。**この 3 つは `[acct: …]` と同じ 1 行を分け合う。**
+    /// スピナーを一緒に出す。**この 3 つは `[gh: …]` と同じ 1 行を分け合う。**
     fn shipping_header_state() -> AppState {
         let mut state = state_at("/tmp/claude-code");
         state.repo.target = TargetState::Resolved(RepoTarget {

@@ -173,7 +173,7 @@
 ### 6.3 画面構成
 
 ```
-┌ Repo: owner/name  [acct: user_shortcode @ github.com] ─────┐
+┌ Repo: owner/name  [gh: user_shortcode @ github.com] ─────┐
 │ Graph（左・広）        │ 右上: Branches / Stash / PRs      │
 │                        │ 右下: Working tree / Commit詳細   │
 ├──────────────── Status bar: 進行中の rebase / 選択操作 ────┤

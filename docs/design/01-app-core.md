@@ -1052,7 +1052,7 @@ Msg::RepoInfoLoaded → update が default_remote で URL を選び RemoteUrl::p
 
 **`TargetState::Unavailable` に落ちたリポジトリでは一度も出さない。** GitHub の
 リポジトリとして特定できないので解決する対象が無く、`account` は `Resolving` の
-ままになる。ヘッダは `Resolving` のあいだ `[acct: …]` を出さないので（07）、
+ままになる。ヘッダは `Resolving` のあいだ `[gh: …]` を出さないので（07）、
 GitHub と関係のないリポジトリで degraded の理由が並ぶことはない。
 
 ### push の行き先

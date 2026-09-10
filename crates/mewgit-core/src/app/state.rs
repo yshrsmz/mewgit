@@ -938,7 +938,9 @@ fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Op
 /// `0..len` の添字を `delta` 動かした位置。端では止まり、要素が無ければ据え置く。
 ///
 /// **平坦な添字のカーソルの端の扱いはここ 1 箇所。** [`CommitFiles::move_cursor`] と
-/// [`BranchState::move_cursor`] が同じ規則を使う（Stash / PRs も同じ形になる）。
+/// [`BranchState::move_cursor`]、それに [`Modal::RemotePicker`] のカーソルが同じ規則を
+/// 使う（Stash / PRs / [`Modal::AccountPicker`] も同じ形になる）。**呼ぶのは所有する型の
+/// `move_cursor` だけ** —— 直に呼ぶ利用者を作ると、そのぶん可視性を広げることになる。
 ///
 /// [`GraphState::move_cursor`] は通らない。WIP 行があるので行数が 0 にならず、
 /// カーソルを動かしたらスクロールも寄せる必要があるため。
@@ -1345,7 +1347,50 @@ pub enum Modal {
         candidates: Vec<GhLogin>,
         cursor: usize,
     },
+    /// fetch するリモートを一覧から選ぶ（01 の「決まらないときの逃げ道」）。
+    ///
+    /// **`f` が既定リモートを決められないときだけ開く。** 決められないのは
+    /// 「黙って選ぶと危ない」形（`origin` が無い / 追跡先がローカル / 追跡先が一覧に
+    /// 無い）で、**危ないのは mewgit が選ぶこと**。人が選ぶなら危なくないので、
+    /// **候補が 1 本でも素通しにしない**。
+    ///
+    /// **確定後に何をするかを持たない**（`InputIntent` に当たるものが無い）。
+    /// 出口は `GitOp::Fetch` 1 つだけで、`p` / `P` はここを通らない（01）。
+    /// 2 つ目の出口が要るときに、そのタスクで `InputIntent` と同じ形を足す。
+    RemotePicker {
+        /// なぜ選ばされているか。`update::default_remote` が返した理由をそのまま出す。
+        /// **無いと、毎回出るのか設定が壊れているのかが判らない。**
+        reason: String,
+        remotes: Vec<String>,
+        cursor: usize,
+    },
     Help,
+}
+
+impl Modal {
+    /// 一覧から 1 つ選ぶモーダルのカーソルを動かす。カーソルを持たないモーダルでは
+    /// 何もしない。
+    ///
+    /// **端の扱いは [`stepped_index`]**（ペインのカーソルと同じ規則）。ここに置くのは、
+    /// 平坦な添字のカーソルが**どれも所有する型の `move_cursor` に包まれている**ため
+    /// （[`BranchState::move_cursor`] / [`CommitFiles::move_cursor`]）。`update` から
+    /// [`stepped_index`] を直に呼ぶと、そのために可視性を広げることになる。
+    ///
+    /// [`Modal::AccountPicker`] と [`Modal::RebaseEditor`] が入るときは、ここに腕を足す。
+    pub(super) fn move_cursor(&mut self, delta: isize) {
+        match self {
+            Modal::RemotePicker {
+                remotes, cursor, ..
+            } => *cursor = stepped_index(*cursor, remotes.len(), delta),
+            Modal::Confirm { .. }
+            | Modal::Input { .. }
+            | Modal::CommitMessage { .. }
+            | Modal::RebaseEditor { .. }
+            | Modal::PrCreate { .. }
+            | Modal::AccountPicker { .. }
+            | Modal::Help => {}
+        }
+    }
 }
 
 /// [`Modal::Input`] の確定後に何をするか。

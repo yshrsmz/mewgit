@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::auth::url::RemoteUrl;
-use crate::auth::ResolvedTarget;
+use crate::auth::{Account, AccountState, DegradedReason, ResolvedTarget};
 use crate::git_exec::{
     hunk_patch, push_remote_ref, supports_hunk_patch, ExecError, ExecErrorKind, ExecOutput, GitOp,
     PullMode,
@@ -125,7 +125,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::ExecFinished(done) => exec_finished(state, *done),
         Msg::ProgressDetected(_) => Cmd::None,
         Msg::TargetResolved(resolved) => target_resolved(state, *resolved),
-        Msg::AccountResolved(_) => Cmd::None,
+        Msg::AccountResolved(result) => account_resolved(state, result),
         Msg::PrLoaded(_) => Cmd::None,
         Msg::ChecksLoaded(_) => Cmd::None,
         Msg::PrListLoaded(_) => Cmd::None,
@@ -1325,13 +1325,29 @@ fn resolve_target(state: &mut AppState) -> Cmd {
 /// 諦める**（04）。
 fn target_resolved(state: &mut AppState, resolved: ResolvedTarget) -> Cmd {
     state.jobs.finish(JobKind::ResolveTarget);
+    // **`Cmd::ResolveAccount` の発行元はここ 1 箇所。** `init` からは出せない ——
+    // `auth::resolve` は `RepoTarget` を要るので、`Msg::RepoInfoLoaded` →
+    // `Cmd::ResolveTarget` → ここ、と 2 往復待ってからでないと材料が揃わない
+    // （01 の「`RepoInfo.target` を埋める」）。
+    let account = Cmd::ResolveAccount(Box::new(resolved.target.clone()));
     state.repo.target = TargetState::Resolved(resolved.target);
     if let Some(reason) = resolved.unnormalized {
         state.push_notice(NoticeLevel::Warn, reason.to_string(), None);
     }
-    // **`Cmd::ResolveAccount` はまだ出さない。** ランタイムが `not_implemented` で
-    // 畳んでいるので、出すと起動のたびに「未実装のコマンドです」が出る。読み手が
-    // 入るのは次の PR（01 の「`RepoInfo.target` を埋める」）。
+    account
+}
+
+/// 決まったアカウントを状態に入れる（04 の手順 1〜4 の結果）。
+///
+/// **通知は出さない。** `Degraded` はヘッダに出るので（07）、同じことを 2 箇所で
+/// 言わない。理由の内訳（`NoAccess` の `attempts`）を並べる先は
+/// `Modal::AccountPicker` のタスクへ送ってある（04）。
+fn account_resolved(state: &mut AppState, result: Result<Account, DegradedReason>) -> Cmd {
+    state.jobs.finish(JobKind::ResolveAccount);
+    state.account = match result {
+        Ok(account) => AccountState::Resolved(account),
+        Err(reason) => AccountState::Degraded(reason),
+    };
     Cmd::None
 }
 
@@ -2317,7 +2333,7 @@ mod tests {
     use crate::app::{
         BranchLoad, GraphSelection, Job, Modal, Modifiers, RepoInfo, TermSize, TextBuffer,
     };
-    use crate::auth::AuthError;
+    use crate::auth::{AccountSource, AuthError};
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
     use crate::git_read::{
@@ -2329,6 +2345,7 @@ mod tests {
         fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_target,
         fake_upstream, reply,
     };
+    use secrecy::SecretString;
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
     const ROWS: usize = 20;
@@ -4843,7 +4860,7 @@ feat/b
         let mut state = state();
         let _ = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
         let cmd = update(&mut state, resolved_target(None));
-        assert_eq!(cmd, Cmd::None);
+        assert_eq!(cmd, Cmd::ResolveAccount(Box::new(fake_target())));
         assert_eq!(state.repo.target, TargetState::Resolved(fake_target()));
 
         let cmd = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
@@ -4941,9 +4958,67 @@ feat/b
                 message: "出力に hostname の行がありませんでした".to_string(),
             })),
         );
-        assert_eq!(cmd, Cmd::None);
+        // **正規化できなくてもアカウントは頼む。** `host_raw` のままの `target` で
+        // GitHub に届く形（`ssh -G` が無い環境のホスト名がそのまま正しい）はある。
+        assert_eq!(cmd, Cmd::ResolveAccount(Box::new(fake_target())));
         assert_eq!(state.repo.target, TargetState::Resolved(fake_target()));
         assert_eq!(state.notices.len(), 1, "{:?}", state.notices);
+    }
+
+    #[test]
+    fn a_repository_that_is_not_on_github_never_asks_for_an_account() {
+        // **`Cmd::ResolveAccount` の発行元は `target_resolved` の 1 箇所**（01）。
+        // 既定リモートが決まらないリポジトリでは `target` が `Unavailable` に落ちるので、
+        // アカウントは一度も頼まれず `Resolving` のまま残る（ヘッダは何も出さない。07）。
+        let mut state = state();
+        let cmd = deliver_repo_info(&mut state, &[]);
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(matches!(state.account, AccountState::Resolving));
+        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
+    }
+
+    #[test]
+    fn a_resolved_account_lands_in_the_state() {
+        let mut state = state();
+        let cmd = reply(
+            &mut state,
+            Cmd::ResolveAccount(Box::new(fake_target())),
+            Msg::AccountResolved(Ok(Account {
+                host: "github.com".to_string(),
+                login: "taro".to_string(),
+                token: SecretString::from("t".to_string()),
+                source: AccountSource::Single,
+            })),
+        );
+
+        assert_eq!(cmd, Cmd::None);
+        match &state.account {
+            AccountState::Resolved(account) => assert_eq!(account.login, "taro"),
+            other => panic!("解決していない: {other:?}"),
+        }
+        // 畳んでいないと、以後の `Cmd::ResolveAccount` が `issue` に黙って落とされる。
+        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
+    }
+
+    #[test]
+    fn a_degraded_account_lands_in_the_state_without_a_notice() {
+        // **通知を出さない。** degraded はヘッダに出るので（07）、同じことを 2 箇所で
+        // 言わない。理由の内訳を並べる先は `Modal::AccountPicker` のタスク（04）。
+        let mut state = state();
+        let cmd = reply(
+            &mut state,
+            Cmd::ResolveAccount(Box::new(fake_target())),
+            Msg::AccountResolved(Err(DegradedReason::GhMissing)),
+        );
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(matches!(
+            state.account,
+            AccountState::Degraded(DegradedReason::GhMissing)
+        ));
+        assert!(state.notices.is_empty(), "{:?}", state.notices);
+        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
     }
 
     /// [`Msg::TargetResolved`] 1 通。中身は [`fake_target`]。
@@ -5094,16 +5169,17 @@ feat/b
         let mut state = state();
         let _ = init(&mut state);
 
+        let account = Cmd::ResolveAccount(Box::new(fake_target()));
         let cmd = state.issue(Cmd::Batch(vec![
             Cmd::LoadLog {
                 count: 10,
                 restart: false,
             },
-            Cmd::ResolveAccount,
+            account.clone(),
         ]));
 
         // `init` が走らせていないので、`ResolveAccount` は残る。
-        assert_eq!(cmd, Cmd::ResolveAccount);
+        assert_eq!(cmd, account);
     }
 
     #[test]

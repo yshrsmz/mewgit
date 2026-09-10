@@ -4,6 +4,7 @@
 //! 結果を [`Msg`](crate::app::Msg) として返す。
 
 use crate::auth::url::RemoteUrl;
+use crate::auth::RepoTarget;
 use crate::git_exec::GitOp;
 use crate::git_read::{DiffTarget, Oid};
 
@@ -83,7 +84,21 @@ pub enum Cmd {
     /// [`RepoInfo::target`](super::RepoInfo::target) を書く場所を 1 つに保つほうが
     /// 強い（2 本にすると、片方だけ通知を出す・片方だけ検査する、が起きる。#18）。
     ResolveTarget(RemoteUrl),
-    ResolveAccount,
+    /// そのリポジトリで使う GitHub アカウントを決める（04 の手順 1〜4）。
+    ///
+    /// **対象を運ぶ。** ランタイムに
+    /// [`RepoInfo::target`](super::RepoInfo::target) を読ませると、`TargetState` の
+    /// 3 つのうち `Resolved` 以外を受けたときの腕を `dispatch` に書くことになり、
+    /// **どのテストからも踏めない腕**が 2 つ増える（`update` はその 2 つでは
+    /// この `Cmd` を出さない）。
+    ///
+    /// **出すのは [`Msg::TargetResolved`](super::Msg::TargetResolved) を受けたとき
+    /// だけで、`init` からは出さない** —— [`RepoTarget`] は起動時にはまだ無い
+    /// （01 の「`RepoInfo.target` を埋める」）。
+    ///
+    /// `Box` に載せるのは、[`RepoTarget`] が `String` 3 本ぶんあり、1 打鍵ごとに
+    /// 組まれる `Cmd::None` と同じ `enum` に載るため。
+    ResolveAccount(Box<RepoTarget>),
     FetchPr,
     FetchChecks,
     FetchPrList,
@@ -141,7 +156,7 @@ impl Cmd {
             // `verb()` は `to_command` の `argv[0]` と同じ語を返す（03）。
             Cmd::Exec(op) => Some((JobKind::Exec, op.verb())),
             Cmd::ResolveTarget(_) => Some((JobKind::ResolveTarget, "remote")),
-            Cmd::ResolveAccount => Some((JobKind::ResolveAccount, "account")),
+            Cmd::ResolveAccount(_) => Some((JobKind::ResolveAccount, "account")),
             Cmd::FetchPr => Some((JobKind::FetchPr, "pr")),
             Cmd::FetchChecks => Some((JobKind::FetchChecks, "checks")),
             Cmd::FetchPrList => Some((JobKind::FetchPrList, "pr list")),

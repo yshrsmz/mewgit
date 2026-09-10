@@ -21,7 +21,7 @@ tracing-subscriber.workspace = true
 # 開ける。理由は 07 の「モーダル」。
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
-futures = "0.3"
+futures.workspace = true
 
 [dev-dependencies]
 # ランタイムのテストが実リポジトリを要る。`features` を付けないと

@@ -4,9 +4,8 @@
 //! 並列制御のため。
 //!
 //! ベース URL の形は 2 つある（`client` の `base_url` のドキュメント）。**port は
-//! ここでは扱わない** —— `auth::RemoteUrl` が port を捨てるので運ぶ経路が無く、
-//! 足すなら `RemoteUrl` に持たせるのと同じ PR（`auth::resolve`）でないと片方が
-//! 宙に浮く（04 / 05）。
+//! https の非既定ポートだけ**が `auth::RepoTarget` から届く —— ssh の port は
+//! `auth::url::RemoteScheme` の時点で捨ててある（04 の「port は scheme に畳む」）。
 
 mod client;
 mod wire;

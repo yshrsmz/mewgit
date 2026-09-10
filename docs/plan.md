@@ -133,11 +133,18 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       が port を受ける、`ssh -G` の結果を産出側で `valid_host`、`resolve_ssh_host` を
       実効 ssh（`sh -c`）に向ける。**`auth::resolve` から割った 1 本目**（04 の
       「タスクを 2 本に割った」）。port と target 埋めは同じ PR でないと片方が宙に浮く
-- [ ] `auth::resolve` — 明示設定 → 単一 → probe → Ambiguous の流れ + テスト。
-      **2 本目。** `auth` が `github` を名指ししない狭い trait で probe を受ける
-      （`api: &GithubClient` は 00 のレイヤー則で不可。04）
+- [x] `auth::resolve` — 明示設定 → 単一 → probe → Ambiguous の流れ + テスト。
+      **2 本目。** `auth` が `github` を名指ししない狭い trait（`auth::Backend`）で
+      probe を受ける（`api: &GithubClient` は 00 のレイヤー則で不可。04）。
+      **配線は入れていない** —— `Backend` の production 実装（`github::AccountBackend`）と
+      `Cmd::ResolveAccount` の発行は次のタスクで、読み手が無いまま出すと起動のたびに
+      「未実装のコマンドです」が出る（01 の「`RepoInfo.target` を埋める」）
+- [ ] ヘッダの `[acct: login @ host]` 表示と Degraded 表示。**`auth::Backend` の
+      production 実装（`github::AccountBackend`）と `Cmd::ResolveAccount` の配線も
+      ここ**（04 の「`Backend` の production 実装は `github` に置く」）。
+      **`Modal::AccountPicker` より先に置いた** —— 配線はどちらにも要る前提で、
+      こちらは `AccountState` を出すだけなので読み手として小さい
 - [ ] `Modal::AccountPicker` と `.git/config` への保存
-- [ ] ヘッダの `[acct: login @ host]` 表示と Degraded 表示
 - [ ] `ui::panes::prs` — 現ブランチ PR、チェック一覧、一覧タブ、ブラウザで開く
 - [ ] `Modal::PrCreate` と `create_pr`
 - [ ] PR チェックアウト（同一リポジトリ / fork）

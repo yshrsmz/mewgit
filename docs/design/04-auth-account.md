@@ -63,10 +63,8 @@ pub enum LoginState { Success, Timeout, Error }
 `{ state, error?, active, host, login, tokenSource, token?, scopes?, gitProtocol }`。
 
 - **`state` は `success` / `timeout` / `error` の 3 値。`gh` の層では絞らない。**
-  `GhLogin.state` に載せてそのまま運ぶ。**`timeout`（ホストに届かなかった）を
-  `error` と同じに畳んでよいかは `auth::resolve` のタスクで決める**ので、ここで
-  落とすと**送った先に判断の材料が届かない**（回線の一時的な失敗を「ログインして
-  いない」に化けさせる）
+  `GhLogin.state` に載せてそのまま運ぶ。**`resolve` も絞らない**と決めた
+  （下の「`LoginState` で候補を絞らない」）ので、`state` が効くのは表示だけ
 - **`--show-token` を付けない。** 付けると `token` フィールドが JSON に入る（不変ルール 3）
 - **`scopes` はカンマ区切りの 1 本の文字列**（`"gist, read:org, repo"`）で、`omitempty`。
   fine-grained PAT では**丸ごと欠ける**ので、無ければ空にする（下の EMU の節が
@@ -288,9 +286,27 @@ git 自身も fetch でエラーにする。
 
 ```rust
 pub enum AccountState {
-    Resolving,
+    Resolving,                         // まだ頼んでいない。`resolve` は返さない
     Resolved(Account),                 // { host, login, token, source: Config | Probe | Single }
-    Degraded(DegradedReason),          // GhMissing | GhTooOld | NotLoggedIn(host) | NoAccess | Ambiguous(Vec<GhLogin>)
+    Degraded(DegradedReason),
+}
+
+pub enum DegradedReason {
+    GhMissing,
+    GhTooOld { found: String },
+    Unusable { message: String },                  // gh は居るのに答えが返らない
+    NotLoggedIn { host: String },
+    ConfiguredUnavailable { login, message },      // 明示指定の login のトークンが取れない
+    NoAccess { attempts: Vec<ProbeAttempt> },
+    Ambiguous { candidates: Vec<GhLogin> },        // probe を通った候補だけ
+}
+
+pub struct ProbeAttempt { pub login: String, pub failure: AttemptFailure }
+
+pub enum AttemptFailure {
+    Denied { status: u16 },        // HTTP で断られた。このアカウントでは無理
+    Undetermined { message: String },  // 回線 / TLS / レート制限。もう一度なら通りうる
+    NoToken { message: String },   // gh からトークンを取れず、probe まで行っていない
 }
 
 pub struct RepoTarget {
@@ -301,20 +317,29 @@ pub struct RepoTarget {
     pub repo: String,
 }
 
-pub async fn resolve(
+pub trait Backend {
+    fn logins(&self, host: &str) -> impl Future<Output = Result<Vec<GhLogin>, AuthError>> + Send;
+    fn token(&self, host: &str, login: &str)
+        -> impl Future<Output = Result<SecretString, AuthError>> + Send;
+    fn probe(&self, target: &RepoTarget, token: &SecretString)
+        -> impl Future<Output = Result<(), AttemptFailure>> + Send;
+}
+
+pub async fn resolve<B: Backend + Sync>(
     target: &RepoTarget,
     repo_path: &Path,          // .git/config の mewgit.user を読むため
-    gh: &GhCli,
+    backend: &B,
     cfg: &Config,
-    api: &GithubClient,
 ) -> AccountState
 ```
 
 `RepoInfo`（01）は `app` 層の型なので受け取らない。`auth` は `app` より下にあり、
 依存の向きは上から下のみ（00 参照）。呼び出し側が `RepoInfo` から `RepoTarget` を作る。
 
-**`api: &GithubClient` は成り立たない。このタスクで形を決め直す。** 理由は 2 つあり、
-**先に効くのは 00 のレイヤー則**のほう。
+### 外の世界は `Backend` の 3 つに畳む
+
+**`api: &GithubClient` は成り立たない。** 理由は 2 つあり、**先に効くのは 00 の
+レイヤー則**のほう。
 
 1. **依存の向き。** 00 の図で `github` は `auth` の**上段**なので、`auth` が
    `github` の型を名指しするのは上向きで、`RepoInfo` を受け取らないのと同じ理由で
@@ -328,31 +353,146 @@ pub async fn resolve(
    （`github` がプロセスで 1 つ持つ）ので、候補ごとに `GithubClient` を作っても
    トラストストアの読み直しは起きない。
 
-`GithubClient::new` は `Result` なので、組む場所によって `Degraded` の理由が 1 つ
-増えるかどうかが変わる。**`InvalidHost` のほうは 1 本目で届かなくなった**（`ssh -G` の
-結果を産出側で検査したので、`RepoTarget.host` は必ず `valid_host` を通っている）が、
-**`shared_http()` の失敗は残る** —— TLS バックエンドを初期化できない、という
-プロセス全体の条件なので、host を先に検査しても消えない（05）。そこまで含めて決める。
-
 **`&GhCli` を `resolve` の引数にするとテストできない**（1 本目で数えた）。#61 の
 テストは JSON を解析する純粋関数を直に叩いており、`GhCli::auth_status` の非同期経路は
 **空 config（0 件）しか通していない** —— 偽トークンを置いた `GH_CONFIG_DIR` では
 `gh` が実ホストへ検証に出るので、Single / Probe / Ambiguous を実 `gh` では踏めない。
 「テストが書きにくい設計になっていたらテストを省くのではなく設計を直す」に当たるので、
 **上の 2 案のうち後者（`auth` が `github` の型を名指ししない狭い trait）を採り、
-`gh` 側も同じ trait に載せる。** 実装は 2 本目。
+`gh` 側も同じ trait に載せた。**
+
+**返り値に `Send` を要求する。** ランタイムは `Cmd::ResolveAccount` を `tokio::spawn`
+に載せるので、`resolve` の future 全体が `Send` でないと積めない。trait に
+`async fn` と書くと付かないので、`-> impl Future<Output = ..> + Send` で書く。
+
+### `Backend` の production 実装は `github` に置く（次のタスク）
+
+**この PR では実装しない。** 呼ぶ側（`Cmd::ResolveAccount` の配線）が入るのは
+ヘッダ表示のタスクで、読み手の無い実装を先に置くと #49 の `to_argv` と同じ
+「到達不能な腕」になる。決めたことだけ書き残す。
+
+- **置き場所は `github`。** `auth::Backend` と `GithubClient` の両方を名指しできる
+  最下段がここ（`auth` は `github` を名指しできない）。`struct AccountBackend { gh: Result<GhCli, AuthError> }`
+- **`GhCli::detect` の失敗は `Backend` の中に持つ。** ランタイムが畳むと、01 が
+  「`AuthError` は `resolve` の中で `DegradedReason` に畳む」と決めた変換が 2 箇所に
+  なる。`logins` / `token` が抱えた `Err` を clone して返せば
+  （`AuthError` は `Clone`）、手順 2 がそのまま `GhMissing` / `GhTooOld` に落とす
+- **`probe` は `GithubClient::new(target.host, target.port, token)` → `repo(owner, repo)`。**
+  `new` の失敗（`shared_http()` の TLS 初期化。`InvalidHost` は 1 本目で届かなくなった）も
+  `Undetermined` に落とす。**ただしこれは「プロセス全体の条件が候補ごとの服を着る」形**
+  （下の手順 1 と同じ）—— 全候補が同じ理由で `NoAccess` に並ぶ。`resolve` の手前で
+  1 回だけ判定して `Unusable` に落とす形もあるので、**実装するタスクで数え直す**
+
+| `GithubClient::repo` の結果 | `probe` の返り値 | 理由 |
+|---|---|---|
+| `Ok(RepoMeta)` | `Ok(())` | |
+| `Err(Decode)` | **`Ok(())`** | `check_status` を通ったあとにしか出ない = **2xx が返っている**。GHES の版差で本文の形が違うだけで、アクセス権はある。`Failed` に落とすと動いている環境が `NoAccess` になる |
+| `Err(Unauthorized)` | `Err(Denied { 401 })` | |
+| `Err(Forbidden)` | `Err(Denied { 403 })` | |
+| `Err(NotFound)` | `Err(Denied { 404 })` | 権限が無ければ GitHub は 404 を返す |
+| `Err(Api { status, .. })` | `Err(Denied { status })` | |
+| `Err(RateLimited)` | `Err(Undetermined)` | **ステータスを載せない。** 05 の `RateLimited` は 429 だけでなく**印の付いた 403** からも来る |
+| `Err(Network)` | `Err(Undetermined)` | |
+| `Err(InvalidHost)` | `Err(Undetermined)` | 届かないはず（1 本目で `valid_host` を通している）。`unreachable!()` にしない |
 
 手順:
 
 1. 明示指定があれば、その login のトークンを取得して `Resolved(source: Config)`。優先順は
    1. `.git/config` の `mewgit.user`。`auth` が git2 の `Config` で読む（`config` モジュールは `.git/config` を見ない。08 参照）
    2. 設定ファイルの `[[repos]]` マッチ。`cfg.account_for(&target.host, &target.owner, &target.repo)`
+   - **一覧を引かない。** `gh auth status` は候補のトークンをホストへ検証しに行くので、
+     答えが決まっているのに 0.24 秒払うことになる
+   - **トークンが取れなかったら手順 2 へ落とさない。** `ConfiguredUnavailable` で止める
+     —— 指定を無視して別のアカウントを選ぶと、EMU と個人アカウントを取り違える。
+     直すのは gh ではなく設定のほうなので、`Unusable` にも畳まず login を持たせる
+   - **ただし `ConfiguredUnavailable` にするのは login 固有の失敗（`GhFailed`）だけ。**
+     手順 1 は手順 2 を**意図的に飛ばす**ので、**`gh` の失敗の入口はここにもある**
+     —— `gh` が居ない・古いをまとめて畳むと、「`mewgit.user` を直してください」と
+     案内しながら `GhTooOld` の腕（「2.81.0 以上に上げてください」）が一度も
+     発火しない。**プロセス全体の条件が、login ごとの設定ミスの服を着る**
+     （`/simplify` の altitude が拾った）
+   - **空文字（`user = ` が残った形）は「指定なし」と同じ。** `gh auth token --user ""`
+     を叩いても答えは返らない
 2. `auth_status()` を `target.host` で絞る。0 件なら `Degraded(NotLoggedIn)`
-3. 1 件なら `Resolved(source: Single)`
-4. 複数なら各トークンで `GET /repos/{owner}/{repo}` を並列に試す
-   - 成功が 1 件 → `Resolved(source: Probe)`
-   - 成功が複数 → `Degraded(Ambiguous)`。UI で選ばせ、選択を `.git/config` に保存する
-   - 成功が 0 件 → `Degraded(NoAccess)`。各アカウントの HTTP ステータスを保持して表示
+3. 1 件なら `Resolved(source: Single)`。**probe しない**（選びようが無く、起動のたびに
+   1 往復払う理由が無い）。トークンが取れなければ `NoAccess`（`NoToken` の attempt 1 件）
+4. 複数なら各トークンで `GET /repos/{owner}/{repo}` を並列に試す。**出口は
+   `AttemptFailure` と同じ 3 つで数える**（「二値だった結果に 3 つ目を足したら、
+   入口と出口の両方を数える」）—— 断られた（`Denied` / `NoToken`）候補だけが
+   除外でき、`Undetermined` は**除外できていない**
+   - 成功が 1 件で、`Undetermined` が 0 件 → `Resolved(source: Probe)`。
+     **トークンを取り直さない**（probe に使ったものをそのまま `Account` に載せる）
+   - **成功が 1 件でも `Undetermined` が残っていれば `Ambiguous`。** 混ぜると、
+     回線やレート制限で 1 本落ちただけの回に**別のアカウントを黙って選んで latch
+     する** —— EMU と個人アカウントの両方がその repo の collaborator なら、以後の
+     PR が違う名前で立ち、再起動するまで直らない（`/code-review` が拾った）
+   - 成功が複数 → `Degraded(Ambiguous)`。UI で選ばせ、選択を `.git/config` に保存する。
+     **`Vec<GhLogin>` を運ぶので、選び直すときに `auth_status` を呼び直さなくてよい**
+     （実測 0.95 秒。#61）。**並べるのは除外できなかった候補**（通ったもの +
+     `Undetermined`）—— 断られたものを混ぜると、選べるアカウントとして 401 の
+     ログインを出すことになる。**候補ごとの probe の結果は運んでいない**ので、
+     ピッカーが「確かめられた / 確かめられなかった」を出し分けたくなったら、
+     そのタスクで `Ambiguous` の中身を数え直す
+   - 成功が 0 件 → `Degraded(NoAccess)`。各アカウントの落ちた理由を保持して表示。
+     **全部が `Undetermined`（起動時に回線が無い）もここ** —— 選ばせないのは、
+     どれも動かない状態でアカウントを選んでも何も直らないため。変種の名前を
+     「権限が無い」と読まない
+
+**候補ごとの「token → probe」を 1 本の future にして `join_all` で回す。** 逐次だと
+N×(トークン取得 + RTT) を起動のたびに払う。tokio には動的な本数を待つ組み合わせ子が
+無く、`JoinSet` は `'static` を要求して `&Backend` を借りる future を載せられないので、
+`futures` の `join_all` を使う（`mewgit-tui` が既に使っている版と同じ）。
+**逐次に戻すと開かない関所**（`Barrier` + `timeout`）で見張る。
+
+### 送った判断 —— `resolve` の戻り値は `AccountState` のまま
+
+doc に「`Resolving` は返さない」と書いてあるが、見張っているのはその文だけで、
+`Result<Account, DegradedReason>` にすれば型になる（`/simplify` の altitude）。
+**今回は採らない。** 01 が「`AccountResolved` は `resolve` の戻り値をそのまま運ぶ」と
+決めており、変えるなら 01 の `Msg` と 04 の signature を先に直す 1 本になる。
+`Resolving` を返しても実害は「解決中の表示が残る」だけで、`Cmd` を出した側が
+既に置いている値と同じ。**ヘッダ表示のタスクで、`Msg` を触るついでに数え直す。**
+
+### `LoginState` で候補を絞らない
+
+送られていた「`Timeout` を `Error` と同じに畳んでよいか」の答え。**どちらも落とさない**
+ので、畳む / 畳まないの判断が要らない形になった。`state` は表示のためだけに運ぶ。
+
+理由は**害が非対称**だから。手順 3 の `Single` は**検証せずに確定する**ので、gh の
+判定で候補を落とすと「2 件のうち 1 件が `Error`」が `Single` に化け、**probe を
+一度も通さずに別のアカウントを選ぶ**。落とさなければ払うのは並列のリクエスト 1 本。
+`gh` の検証と probe は**別の問い**でもある（gh はトークンが生きているかを見るが、
+こちらは*このリポジトリに*届くかを見る）。
+
+全部が `Error` のときも、`NotLoggedIn`（ログインはしている、という意味で嘘）ではなく
+`NoAccess` に落ちて 401 が並ぶ。
+
+### `.git/config` の読み方（git2 で実測）
+
+`Repository::config()` は**全段**を返すので、`~/.gitconfig` に `mewgit.user` を
+書くと全リポジトリに効く。08 が「`config` モジュールは `.git/config` を見ない」と
+割った境目が消えるので、**`open_level(ConfigLevel::Local)` で局所の段だけを読む**。
+リンクされたワークツリーでも `Local` はリポジトリ共有の `config` なので、同じ
+リポジトリなら同じアカウントになる（`Worktree` の段は読まない）。
+
+| 読み方 | `~/.gitconfig` に `mewgit.user = global_taro` があるとき |
+|---|---|
+| `repo.config()` | `Some("global_taro")` |
+| `repo.config().open_level(Local)` | `None` |
+
+**この 2 行を回すテストは書いていない。** libgit2 に global の段を差し替えさせるには
+`git2::opts::set_search_path`（プロセス全体・`unsafe`）が要り、並列に走る他のテストの
+git2 まで巻き込む。上の表は手で叩いた結果（`git2` 0.21）。
+
+### `gh auth token` の実測（gh 2.100.0）
+
+| 状況 | 結果 |
+|---|---|
+| ログイン 0 件で `--user nobody` | **exit 1** / `no oauth token found for github.com account nobody` |
+| `GH_TOKEN` を立てて `--user nobody` | **同じ**（環境変数のトークンで代替されない） |
+
+2 行目は手順 1 の安全のため —— `mewgit.user = B` が黙って A のトークンを B として
+返す形は無い。
 
 解決結果は画面上部に `[acct: login @ host]` として常時表示する。`Degraded` は黄色で理由を表示。
 

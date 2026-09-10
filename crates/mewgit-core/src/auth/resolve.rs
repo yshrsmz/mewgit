@@ -208,7 +208,7 @@ fn read_mewgit_user(path: &Path) -> Option<String> {
         .ok()?
         .open_level(git2::ConfigLevel::Local)
         .ok()?
-        .get_string("mewgit.user")
+        .get_string(super::MEWGIT_USER)
         .ok()
 }
 
@@ -272,129 +272,8 @@ fn resolved(
 mod tests {
     use super::*;
     use crate::auth::LoginState;
-    use crate::test_util::{fake_target, TestRepo};
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use crate::test_util::{fake_target, Fake, TestRepo};
     use std::time::Duration;
-
-    /// 手順 1〜4 を踏むための [`Backend`]。
-    ///
-    /// **実 `gh` では踏めない**（04 の「`&GhCli` を `resolve` の引数にすると
-    /// テストできない」）ので、trait の向こう側はここで組む。
-    struct Fake {
-        logins: Result<Vec<GhLogin>, AuthError>,
-        /// login ごとの probe の結果。無い login は届かなかったことにする。
-        probes: BTreeMap<String, Result<(), AttemptFailure>>,
-        /// トークンを取れない login と、そのときの `gh` の失敗。**種類を持つ** ——
-        /// 手順 1 は login 固有の失敗（`GhFailed`）とプロセス全体の条件
-        /// （`GhMissing` など）を分けるので、1 種類しか作れないと片方を踏めない。
-        no_token: BTreeMap<String, AuthError>,
-        calls: Mutex<Vec<String>>,
-        /// 全候補が揃うまで probe を返さない関所。**逐次に回すと開かない。**
-        gate: Option<tokio::sync::Barrier>,
-    }
-
-    impl Fake {
-        fn new(logins: Vec<GhLogin>) -> Self {
-            Fake {
-                logins: Ok(logins),
-                probes: BTreeMap::new(),
-                no_token: BTreeMap::new(),
-                calls: Mutex::default(),
-                gate: None,
-            }
-        }
-
-        fn failing(err: AuthError) -> Self {
-            Fake {
-                logins: Err(err),
-                ..Fake::new(Vec::new())
-            }
-        }
-
-        fn probing(mut self, login: &str, outcome: Result<(), AttemptFailure>) -> Self {
-            self.probes.insert(login.to_string(), outcome);
-            self
-        }
-
-        fn without_token(self, login: &str) -> Self {
-            self.failing_token(
-                login,
-                AuthError::GhFailed {
-                    argv: vec!["gh".to_string(), "auth".to_string(), "token".to_string()],
-                    message: format!("exit 1: no oauth token found for account {login}"),
-                },
-            )
-        }
-
-        fn failing_token(mut self, login: &str, err: AuthError) -> Self {
-            self.no_token.insert(login.to_string(), err);
-            self
-        }
-
-        fn gated(mut self, parties: usize) -> Self {
-            self.gate = Some(tokio::sync::Barrier::new(parties));
-            self
-        }
-
-        fn record(&self, call: String) {
-            self.calls.lock().expect("記録").push(call);
-        }
-
-        fn calls(&self) -> Vec<String> {
-            self.calls.lock().expect("記録").clone()
-        }
-    }
-
-    impl Backend for Fake {
-        fn logins(
-            &self,
-            host: &str,
-        ) -> impl Future<Output = Result<Vec<GhLogin>, AuthError>> + Send {
-            self.record(format!("logins:{host}"));
-            let result = self.logins.clone();
-            async move { result }
-        }
-
-        fn token(
-            &self,
-            _host: &str,
-            login: &str,
-        ) -> impl Future<Output = Result<SecretString, AuthError>> + Send {
-            self.record(format!("token:{login}"));
-            let result = match self.no_token.get(login) {
-                Some(err) => Err(err.clone()),
-                None => Ok(SecretString::from(format!("token-for-{login}"))),
-            };
-            async move { result }
-        }
-
-        fn probe(
-            &self,
-            _target: &RepoTarget,
-            token: &SecretString,
-        ) -> impl Future<Output = Result<(), AttemptFailure>> + Send {
-            use secrecy::ExposeSecret;
-            let login = token
-                .expose_secret()
-                .strip_prefix("token-for-")
-                .expect("トークンは token() が作ったもの")
-                .to_string();
-            self.record(format!("probe:{login}"));
-            let outcome = self.probes.get(&login).cloned().unwrap_or_else(|| {
-                Err(AttemptFailure::Undetermined {
-                    message: "テストが結果を用意していない".to_string(),
-                })
-            });
-            let gate = self.gate.as_ref();
-            async move {
-                if let Some(gate) = gate {
-                    gate.wait().await;
-                }
-                outcome
-            }
-        }
-    }
 
     /// `state` は既定で `Success`。**絞り込みに使わないので**（04）、値が効くのは
     /// `gh_state_does_not_narrow_the_candidates` の 1 本だけ。

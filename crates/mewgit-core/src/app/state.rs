@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use crate::auth::{AccountState, GhLogin, RepoTarget};
+use crate::auth::{AccountState, DegradedReason, RepoTarget};
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
@@ -1343,8 +1343,20 @@ pub enum Modal {
         base: String,
         draft: bool,
     },
+    /// アカウント解決の内訳を出し、選べるなら選ばせる（01 の
+    /// 「アカウントの選び直し」）。`A` で開く。
+    ///
+    /// **持つのは [`DegradedReason`] そのもの。** 選べる候補
+    /// （[`DegradedReason::candidates`]）も内訳（`NoAccess` の `attempts`、
+    /// `Unusable` の `message`）もそこから引けるので、`Vec<GhLogin>` を写すと
+    /// 同じ候補が [`AppState::account`] と 2 箇所にでき、`ui` と `update` が
+    /// どちらを読むかで答えが割れうる。**開いているあいだ `account` は動かない**
+    /// （`Degraded` は解決が終わった形で、2 度目の `Cmd::ResolveAccount` は
+    /// モーダルを閉じたあとにしか出ない）ので、写しでも導出でも結果は同じ。
+    ///
+    /// **`Resolved` / `Resolving` では開かない**（通知に落とす。01 の表）。
     AccountPicker {
-        candidates: Vec<GhLogin>,
+        reason: DegradedReason,
         cursor: usize,
     },
     /// fetch するリモートを一覧から選ぶ（01 の「決まらないときの逃げ道」）。
@@ -1376,18 +1388,22 @@ impl Modal {
     /// （[`BranchState::move_cursor`] / [`CommitFiles::move_cursor`]）。`update` から
     /// [`stepped_index`] を直に呼ぶと、そのために可視性を広げることになる。
     ///
-    /// [`Modal::AccountPicker`] と [`Modal::RebaseEditor`] が入るときは、ここに腕を足す。
+    /// [`Modal::RebaseEditor`] が入るときは、ここに腕を足す。
     pub(super) fn move_cursor(&mut self, delta: isize) {
         match self {
             Modal::RemotePicker {
                 remotes, cursor, ..
             } => *cursor = stepped_index(*cursor, remotes.len(), delta),
+            // **選べない degraded では候補が空**なので、`stepped_index` が 0 を返して
+            // 動かない（`NoAccess` の内訳は本文に出る。07）。
+            Modal::AccountPicker { reason, cursor } => {
+                *cursor = stepped_index(*cursor, reason.candidates().len(), delta);
+            }
             Modal::Confirm { .. }
             | Modal::Input { .. }
             | Modal::CommitMessage { .. }
             | Modal::RebaseEditor { .. }
             | Modal::PrCreate { .. }
-            | Modal::AccountPicker { .. }
             | Modal::Help => {}
         }
     }

@@ -2,16 +2,18 @@
 //!
 //! キー処理は `app::update` にある。`ui` は `Cmd` を作らない（不変ルール 2）。
 
+pub mod account_picker;
 pub mod commit_message;
 pub mod confirm;
 pub mod input;
+pub mod picker;
 pub mod remote_picker;
 
 use mewgit_core::app::{Modal, TextBuffer};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 
 /// 表示中のモーダルを描く。
@@ -30,11 +32,11 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
             remotes,
             cursor,
         } => remote_picker::render(frame, area, reason, remotes, *cursor),
+        Modal::AccountPicker { reason, cursor } => {
+            account_picker::render(frame, area, reason, *cursor);
+        }
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
-        Modal::RebaseEditor { .. }
-        | Modal::PrCreate { .. }
-        | Modal::AccountPicker { .. }
-        | Modal::Help => {}
+        Modal::RebaseEditor { .. } | Modal::PrCreate { .. } | Modal::Help => {}
     }
 }
 
@@ -51,10 +53,31 @@ const GAP_ROWS: u16 = 1;
 /// キーの案内に取る行数。高さの見積もりと `Layout` で同じものを使う。
 const HINT_ROWS: u16 = 1;
 
+/// 枠の内側の右に空ける桁数。
+///
+/// **ratatui の折り返しは 1 セルだけはみ出す。** `WordWrapper` は行が幅を超えるかを
+/// **次の文字を足す前**に見る（`>=` 比較）ので、最後の 1 文字が全角だと行が
+/// `幅 + 1` セルで確定し、最後に残った語をそのまま吐く（`ratatui-widgets` 0.3.2 の
+/// `reflow.rs` を読んで確認）。**はみ出した 1 セルは枠の縦線を上書きする** ——
+/// `Paragraph` は枠より後に描き、`render_line` は領域の幅で切らないため
+/// （同 `paragraph.rs`）。1 桁空けておけば、はみ出しはそこに落ちる。
+///
+/// **`Confirm` から在ったが、`gh` の `message`（全角と識別子が混ざる）を出す
+/// `AccountPicker` で初めて実機に出た**（`the_box_keeps_its_border_when_a_line_just_
+/// overflows`）。はみ出しが 1 セルで収まるのは、比較が `>=` なので**最後の文字を
+/// 足す前の幅が `幅 - 1` 以下**だから。
+///
+/// **[`Block`] の padding に載せる。** [`Block::inner`] が padding を差し引くので、
+/// 幅を測る側（[`inner_width`]）と描く側（[`place`]）が**どちらも `Block::inner` の
+/// 1 本から出る**。`inner` を受け取ってから引く形にすると、`block()` を受けて自分で
+/// `inner` を呼ぶモーダルが 1 つ増えた時点で黙って穴が戻る。
+const RIGHT_MARGIN: u16 = 1;
+
 /// モーダルの枠。
 pub fn block(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
+        .padding(Padding::right(RIGHT_MARGIN))
         .title(title.to_string())
         .border_style(Style::default().add_modifier(Modifier::BOLD))
 }
@@ -148,7 +171,43 @@ pub fn cursor_col(buf: &TextBuffer, width: u16) -> (u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::cursor_col;
-    use mewgit_core::app::TextBuffer;
+    use crate::test_util::{draw, row_of, state_with_modal, terminal_with};
+    use mewgit_core::app::{Cmd, Modal, TermSize, TextBuffer};
+
+    const SIZE: TermSize = TermSize {
+        width: 100,
+        height: 24,
+    };
+
+    #[test]
+    fn the_box_keeps_its_border_when_a_line_just_overflows() {
+        // **ratatui の折り返しは 1 セルはみ出す**（[`RIGHT_MARGIN`]）。はみ出した
+        // 全角 1 文字が枠の縦線を上書きするので、**箱の右辺がその行だけ消える**。
+        //
+        // **踏むには幅がぴったり `内側 + 1` セルで、最後が全角の本文が要る。**
+        // 下は 10 + 1 + 25 + 1 + 22 = 59 セル（枠の内側は 58）。1 セル短いと通る。
+        // `Confirm` から在った形だが、実機で出たのは `gh` の `message`（全角と
+        // 識別子が混ざる）を出す `AccountPicker` を入れてから。
+        let state = state_with_modal(Modal::Confirm {
+            title: "確認".to_string(),
+            body: "設定が指す nobody-does-not-exist-xyz のトークンがありません".to_string(),
+            on_yes: Cmd::None,
+        });
+        let lines = draw(&state, SIZE);
+        let body = row_of(&lines, "設定が指す");
+        // キーの案内は ASCII だけなので、はみ出しようがない = 正しい枠の位置。
+        let hint = row_of(&lines, "[y] 実行");
+
+        let terminal = terminal_with(&state, SIZE);
+        let buffer = terminal.backend().buffer();
+        let borders = |row: u16| -> Vec<u16> {
+            (0..SIZE.width)
+                .filter(|&x| buffer[(x, row)].symbol() == "│")
+                .collect()
+        };
+
+        assert_eq!(borders(body), borders(hint), "本文が枠の縦線を食っている");
+    }
 
     #[test]
     fn the_cursor_column_counts_display_width_not_characters() {

@@ -330,19 +330,46 @@ fn account_span(account: &AccountState) -> Option<Span<'_>> {
             "[gh: {} @ {}]",
             account.login, account.host
         ))),
-        AccountState::Degraded(reason) => Some(Span::styled(
-            format!("[gh: {}]", degraded(reason)),
-            theme::warn(),
-        )),
+        AccountState::Degraded(reason) => Some(Span::styled(degraded_label(reason), theme::warn())),
     }
+}
+
+/// ヘッダに出す degraded の 1 行（`[gh: …]` ごと）。
+///
+/// **どの degraded にも `A` を添える。** `A` は `f` / `p` / `P` と同じ共通キーなので、
+/// どのペインで見ていても押せる（#53 の「案内にキーを書いたら、その案内が出ている
+/// 画面でそのキーが効くかを数える」）。**選べない degraded でも押す価値がある** ——
+/// ヘッダが 1 行に詰めて落とした内訳（`NoAccess` の `attempts`、`Unusable` の
+/// `message`）と外での直し方を出すのは `Modal::AccountPicker` だけで（04 の
+/// 「内訳を出すのは `Modal::AccountPicker`」）、そこへ行く手掛かりが画面に無いと
+/// **出す先を用意したのに誰も辿り着けない**。
+///
+/// 文言が 2 つに割れるのは「押すと何が起きるか」が違うから。判定は
+/// [`DegradedReason::candidates`] の 1 本で、選ばせる側（モーダルのタイトル・
+/// キーの案内・`Enter`）と同じものを見る。
+///
+/// **`[gh: …]` ごと組むのは、長さの見張り（`every_degraded_reason_fits_the_header`）に
+/// 出荷される形をそのまま渡すため。** `degraded` だけを渡すと、キーのぶんが
+/// 見張りから外れる。
+fn degraded_label(reason: &DegradedReason) -> String {
+    let hint = if reason.candidates().is_empty() {
+        "。A で詳細"
+    } else {
+        "。A で選ぶ"
+    };
+    format!("[gh: {}{hint}]", degraded(reason))
 }
 
 /// degraded の理由を 1 行にする。
 ///
-/// **診断だけを書く。** 「選んでください」のような指示は書かない —— `Ambiguous` を
-/// 選び直す `Modal::AccountPicker` はまだ無く、押すキーの無い案内になる（04 / 07）。
+/// **診断だけを書く。** 押すキーを添えるのは [`degraded_label`] で、ここは
+/// 「何が起きているか」だけを返す。
+///
+/// **1 行の予算に合わせて詰めてある。** リポジトリ名とスピナーと同じ 1 行を
+/// 分け合うので（07 のヘッダ）、`Modal::AccountPicker` は**同じ事実を別の文言**で
+/// 書く（あちらは箱の中で折り返せる）。揃えると、ここを詰めるたびにあちらが痩せる。
 /// **内訳も出さない。** `NoAccess` の `attempts` は 1 件ずつ理由を持っているが、
-/// 並べる先はピッカーのタスクへ送ってある（04）。
+/// 並べるのは `Modal::AccountPicker`（04）。
 fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
     match reason {
         DegradedReason::GhMissing => "ありません".into(),
@@ -350,8 +377,8 @@ fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
         DegradedReason::GhTooOld { found } => {
             format!("{found} は古い（{} 以上）", gh::REQUIRED).into()
         }
-        // **`message` は出さない。** `gh` が起動できない理由は 1 行に収まらず、
-        // 出す先は M6 の `Notice.detail` と `Modal::AccountPicker`（04）。
+        // **`message` は出さない。** `gh` が起動できない理由は 1 行に収まらないので、
+        // 出す先は `A` で開く `Modal::AccountPicker`（04）。
         DegradedReason::Unusable { .. } => "実行できません".into(),
         DegradedReason::NotLoggedIn { host } => format!("{host} に未ログイン").into(),
         DegradedReason::ConfiguredUnavailable { login, .. } => {
@@ -359,10 +386,10 @@ fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
         }
         // **「権限が無い」と読ませない。** 回線が無いだけの回もここに来る（04）。
         DegradedReason::NoAccess { attempts } => {
-            format!("届いたアカウントがありません（{} 件）", attempts.len()).into()
+            format!("どれも届きません（{} 件）", attempts.len()).into()
         }
         DegradedReason::Ambiguous { candidates } => {
-            format!("アカウントを 1 つに絞れません（{} 件）", candidates.len()).into()
+            format!("1 つに絞れません（{} 件）", candidates.len()).into()
         }
     }
 }
@@ -428,12 +455,12 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{degraded, file_row, pane_area, window, wrapped};
+    use super::{degraded_label, file_row, pane_area, window, wrapped};
     use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
     use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TargetState, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::test_util::{fake_account, fake_snapshot};
+    use mewgit_core::test_util::{fake_account, fake_ambiguous, fake_snapshot};
     use ratatui::style::{Color, Modifier};
 
     #[test]
@@ -644,7 +671,9 @@ mod tests {
         let state = state_with_account(AccountState::Degraded(DegradedReason::GhMissing));
 
         let line = header(&state, TermSize::default());
-        assert!(line.contains("[gh: ありません]"), "header: {line:?}");
+        // 押すキーの案内は `degraded_label` が足す（`every_degraded_account_says_
+        // which_key_to_press`）。ここで見るのは理由の文言と色。
+        assert!(line.contains("[gh: ありません。"), "header: {line:?}");
         assert_eq!(header_color_at(&state, "[gh:"), Color::Yellow);
         // 解決できているアカウントは色を付けない（注意を引くのは degraded だけ）。
         assert_eq!(
@@ -665,6 +694,11 @@ mod tests {
         // 存在しない短いヘッダを見張ることになる。
         //
         // **幅は 100。** 07 の目標のレイアウトがその幅で、`< 100` は M6 のタスク。
+        //
+        // **`owner/repo` と login の長さは fixture 任せ。** どちらも上限が無いので
+        // 「いちばん長い形」を作れない —— 31 桁の `owner/repo` を実測したら
+        // `A` の案内が落ちた（07 のヘッダに残した）。ここが見張るのは
+        // 「現実的な名前で、目標幅に収まって隙間が残るか」まで。
         let reasons = [
             DegradedReason::GhMissing,
             DegradedReason::GhTooOld {
@@ -683,21 +717,47 @@ mod tests {
             DegradedReason::NoAccess {
                 attempts: Vec::new(),
             },
-            DegradedReason::Ambiguous {
-                candidates: Vec::new(),
-            },
+            // **候補を空にしない。** 空だと `A` の案内が付かず、**出荷される
+            // `Ambiguous` の形（いちばん長い）を測らないまま緑になる**。
+            fake_ambiguous(&["user_shortcode", "taro"]),
         ];
         let size = TermSize {
             width: 100,
             height: 24,
         };
         for reason in reasons {
-            let want = format!("[gh: {}]", degraded(&reason));
+            // **末尾に空白まで見る。** `contains` だけだと、スピナーと隙間なく
+            // 並んだ状態（余白ゼロ）で通ってしまい、**リポジトリ名が 1 桁伸びた
+            // 瞬間に案内が落ちる**のを見張れない（`/code-review` が拾った。
+            // 実測で `Ambiguous` がちょうどその状態だったので文言を詰めた）。
+            let want = format!("{} ", degraded_label(&reason));
             let mut state = shipping_header_state();
             state.account = AccountState::Degraded(reason);
             let line = header(&state, size);
             assert!(line.contains(&want), "はみ出している: {line:?} / {want}");
         }
+    }
+
+    #[test]
+    fn every_degraded_account_says_which_key_to_press() {
+        // **選べない degraded でも `A` を案内する。** ヘッダが落とした内訳と外での
+        // 直し方を出す画面は `Modal::AccountPicker` だけなので（04）、案内が無いと
+        // 出す先を用意したのに誰も辿り着けない。**文言は押すと何が起きるかで割る。**
+        let size = TermSize {
+            width: 100,
+            height: 24,
+        };
+        let mut state = shipping_header_state();
+
+        state.account = AccountState::Degraded(fake_ambiguous(&["taro", "taro_acme"]));
+        let pickable = header(&state, size);
+        assert!(pickable.contains("A で選ぶ"), "header: {pickable:?}");
+
+        state.account = AccountState::Degraded(DegradedReason::NoAccess {
+            attempts: Vec::new(),
+        });
+        let shown = header(&state, size);
+        assert!(shown.contains("A で詳細"), "header: {shown:?}");
     }
 
     /// 実際に `[gh: …]` が出るときのヘッダの状態。

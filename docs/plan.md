@@ -144,9 +144,17 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       ここ**（04 の「`Backend` の production 実装は `github` に置く」）。
       **`Modal::AccountPicker` より先に置いた** —— 配線はどちらにも要る前提で、
       こちらは `AccountState` を出すだけなので読み手として小さい
-- [ ] `Modal::AccountPicker` と `.git/config` への保存。**`NoAccess` / `Ambiguous` の
+- [x] `Modal::AccountPicker` と `.git/config` への保存。**`NoAccess` / `Ambiguous` の
       内訳（どの login がなぜ落ちたか）を並べるのもここ** —— ヘッダは 1 行なので
-      件数しか出していない（04 の「解決結果は画面上部に」）
+      件数しか出していない（04 の「解決結果は画面上部に」）。**開くのは共通キー `A`**
+      で、`Degraded` 以外は通知に落とす（01 の「アカウントの選び直し」）。保存は
+      `GitOp::SetAccount`（`git config --local`）で、書いたあとに解決をやり直す
+- [ ] 保存したアカウントの選び直しと指定の解除。**`A` は `Resolved` では通知しか
+      出せず、`.git/config` に書いた `mewgit.user` を mewgit から外せない**
+      （`/code-review` が拾った。01 の「アカウントの選び直し」）。要るのは
+      **候補一覧の取り直し**（`gh auth status` をもう一度）と、
+      **`AccountSource::Config` を出どころで割ること**（`.git/config` は `--unset`
+      できるが設定ファイルの `[[repos]]` は外せないので、同じ案内を出せない）
 - [ ] `ui::panes::prs` — 現ブランチ PR、チェック一覧、一覧タブ、ブラウザで開く。
       **レートリミット残量の受け渡しもここ** —— ヘッダ表示のタスクへ送られていたが、
       あちらで API を叩くのは起動時の probe だけで、常時出す残量の産出元にならない
@@ -185,7 +193,9 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       `ahead == 0` でまとめて断っている** —— `↓n` だけのブランチが `f` のあとに force で
       通ってしまう形と同じ見た目なので、区別するには「巻き戻すつもりだ」を別の入口で
       受けるしかない（01 の「force push」）
-- [ ] 端末幅 < 100 のレイアウト
+- [ ] 端末幅 < 100 のレイアウト。**枠付きペインの折り返しが 1 セルはみ出す件もここ** ——
+      `ui::pane_block` に `Padding::right(1)` を足す（`modals::block` は
+      `Modal::AccountPicker` のタスクで入れた。07 の「モーダル」）
 - [ ] ロケール（`LC_ALL` / `LC_CTYPE` / `LANG`）から `graph.ascii` の既定を決める
       （曖昧幅を全角扱いする端末は UTF-8 でもずれる。06 の「ASCII フォールバック」）
 - [ ] `.git/HEAD` mtime 監視での外部変更検知

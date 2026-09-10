@@ -95,13 +95,36 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `RevertContinue` / `Abort` | `revert --continue` / `--abort` |
 | `StashPush { .. }` | `stash push [--include-untracked] [--message <m>] [-- <paths>]` |
 | `StashApply(i)` / `Pop` / `Drop` | `stash apply` / `pop` / `drop` `stash@{i}` |
+| `SetAccount { login }` | `config --local -- mewgit.user <login>` |
 
 決めたことと理由:
 
+- **`SetAccount` はアカウント解決の結果を `.git/config` に憶える**（`Modal::AccountPicker`
+  の `Enter`。01 の「アカウントの選び直し」）。**`git` CLI を通す理由に不変ルール 1 を
+  引かない** —— あのルールの理由は **hook が走らないこと**で、名指しされているのは
+  commit / checkout / rebase / stash。`git config --local` は hook を 1 つも走らせない
+  ので、引くと「config の書き込みは `GitOp` でなければならない」と読めてしまう。
+  ここで CLI なのは**「読みは git2、書きは CLI」の分担**と、失敗の argv と stderr が
+  `ExecError` で UI まで届く経路（不変ルール 4）に乗せるため。
+  **キーの名前は `auth::MEWGIT_USER` の 1 本**から取る —— 読む側
+  （`auth::resolve` の git2）と別々に書くと、片方を直したときに黙って別のキーを
+  読み書きする。実測（git 2.55、`env -i` の一時リポジトリ）:
+
+  | 確かめたこと | 結果 |
+  |---|---|
+  | `config --local mewgit.user <値>`（`--` 無し） | 値が `--global` / `--unset` / `--list` / `-4` でも**そのまま値として書かれる**（exit 0） |
+  | `config --local -- mewgit.user <値>` | **同じ結果。** `git config` はキーより後ろをオプションとして読まない |
+  | linked worktree での `--local` | 共有の `.git/config` に書く（`config.worktree` は作られない）= 読み側の git2 `ConfigLevel::Local` と同じ段 |
+
+  **`--` は守りになっていない**（上の 2 行目）。それでも置くのは、外したときの根拠が
+  「いまの git はそう読まない」だけになるから —— `git branch --move` はまさにそれで
+  足をすくわれた（下の項）。**「守っている」と書かない**のが `--` を置くことより大事で、
+  書くと `-` 始まりの login をここで弾いたつもりになる
 - **パスの前には必ず `--` を置く。** `-n` や `HEAD` という名前のファイルがオプションや
   revision として解釈されるのを防ぐ
-- **ユーザーが打った文字が positional に載るところにも `--` を置く。** いまは
-  `BranchRename` の `to` だけ（`Modal::Input` が受けた文字がそのまま来る）。
+- **人が打った文字や外から来た名前が positional に載るところにも `--` を置く。**
+  いまは `BranchRename` の `to`（`Modal::Input` が受けた文字がそのまま来る）と
+  `SetAccount` の `login`（上。**こちらは実測では効いていない**）の 2 つ。
   `git branch` は parse-options なので、`git branch --move topic --force` は
   「`--force` へ改名」ではなく**「HEAD を `topic` へ強制改名」**と読まれ、元の
   `topic` が黙って消えて **exit 0 で返る**（git 2.55 で確認）。`--` があれば

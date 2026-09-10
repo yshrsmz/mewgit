@@ -8,9 +8,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use mewgit_core::auth::ssh::SshCommand;
+use mewgit_core::auth::{resolve, DegradedReason};
+use mewgit_core::config::Config;
 use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, Runner};
 use mewgit_core::git_read::Oid;
-use mewgit_core::test_util::{wait_for_pid, wait_until_gone, BareRepo, TestRepo};
+use mewgit_core::test_util::{
+    fake_target, wait_for_pid, wait_until_gone, BareRepo, Fake, TestRepo,
+};
 
 /// `origin` に bare リポジトリを登録したワークツリー付きリポジトリ。
 fn clone_of(remote: &BareRepo) -> TestRepo {
@@ -125,6 +129,36 @@ async fn unstage_works_before_the_first_commit() {
         .await
         .expect("unstage できませんでした");
     assert_eq!(repo.porcelain(), "?? file.txt");
+}
+
+#[tokio::test]
+async fn set_account_writes_where_the_resolver_reads() {
+    // **書く側（この argv）と読む側（`auth::resolve` の git2）が同じ段・同じキーか。**
+    // `resolve` は `ConfigLevel::Local` だけを読む（04 の「`.git/config` の読み方」）
+    // ので、段が違うと**書けたのに読まれない**。読み手を通さずに
+    // `git config --get` で読み返すと、その食い違いを見張れない。
+    //
+    // **login を `-` 始まりにしても書ける。** ただしこれは `--` の見張りではない
+    // —— `--` を外しても同じ結果になることを実測した（03 の表）。
+    let repo = TestRepo::init();
+    repo.runner()
+        .run(&GitOp::SetAccount {
+            login: "-taro".into(),
+        })
+        .await
+        .expect("mewgit.user を書けませんでした");
+
+    // **手順 1 で止まる `Backend`。** 一覧は空なので、`mewgit.user` を読めていな
+    // ければ手順 2 へ落ちて `NotLoggedIn` になる。読めていれば、その login の
+    // トークンが取れずに `ConfiguredUnavailable` で止まる（04 の手順 1）。
+    let backend = Fake::new(Vec::new()).without_token("-taro");
+    let resolved = resolve(&fake_target(), repo.path(), &backend, &Config::default()).await;
+
+    // 手順 1 まで届いた = 書いた login をそのまま読んでいる。
+    assert!(
+        matches!(&resolved, Err(DegradedReason::ConfiguredUnavailable { login, .. }) if login == "-taro"),
+        "{resolved:?}"
+    );
 }
 
 #[tokio::test]

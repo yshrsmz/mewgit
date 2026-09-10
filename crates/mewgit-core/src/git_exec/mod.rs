@@ -150,6 +150,20 @@ pub enum GitOp {
     StashApply(usize),
     StashPop(usize),
     StashDrop(usize),
+    /// このリポジトリで使う GitHub アカウントを `.git/config` に憶える
+    /// （`Modal::AccountPicker` の `Enter`。01 の「アカウントの選び直し」）。
+    ///
+    /// **CLI を通す理由に不変ルール 1 を引かない**（03）。あのルールの理由は hook が
+    /// 走らないことで、`git config` は hook を 1 つも走らせない。ここで CLI なのは
+    /// 「読みは git2、書きは CLI」の分担と、失敗の argv と stderr が [`ExecError`] で
+    /// UI まで届く経路（不変ルール 4）に乗せるため。**キーの名前は
+    /// [`auth::MEWGIT_USER`] の 1 本**で、読む側（`auth::resolve` の git2）と
+    /// 別々に書かない。
+    ///
+    /// [`auth::MEWGIT_USER`]: crate::auth::MEWGIT_USER
+    SetAccount {
+        login: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

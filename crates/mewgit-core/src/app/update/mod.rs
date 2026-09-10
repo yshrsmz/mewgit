@@ -3,18 +3,19 @@
 //! `update` は同期・純粋（`AppState` の変更を除く）。I/O は呼ばず、必要な副作用は
 //! [`Cmd`] として返す。
 //!
-//! **ここにあるのは入口と、2 つ以上のモジュールが使う道具だけ**（`focus` /
-//! `input` / `confirm` / `submit_exec` / `edit_key`）。ペインごとのキー処理は
-//! それぞれのモジュールにある（01 の「この文書とコードの対応」）。
+//! **ここにあるのは入口と、2 つ以上のモジュールが使う道具だけ** —— `focus`
+//! （4 モジュール）、`confirm` と `submit_exec`（3）、`edit_key` と `exec_busy`（2）。
+//! ペインごとのキー処理はそれぞれのモジュールにある（01 の「この文書とコードの対応」）。
 //!
-//! 利用者が 1 つしかない道具はここに置かない —— `test_support` と同じ数え方で、
-//! 1 人のものを寄せると置き場所を探す手間だけが増える。
+//! **利用者が 1 つしかない道具はここに置かない** —— `test_support` と同じ数え方で、
+//! 1 人のものを寄せると置き場所を探す手間だけが増える。`Modal::Input` を組む `input`
+//! が [`branches`] にあるのはこのため（`Modal::Confirm` の `confirm` と対に
+//! 見えるが、いまの利用者はブランチの作成とリネームだけ）。
 
 use crate::git_exec::{GitOp, PullMode};
 
 use super::{
-    AppState, Cmd, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
-    TextBuffer,
+    AppState, Cmd, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, TextBuffer,
 };
 use account::{account_resolved, open_account, repo_info_loaded, target_resolved};
 use branches::{branches_key, branches_loaded};
@@ -263,27 +264,6 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
 fn focus(state: &mut AppState, pane: Pane) -> Cmd {
     state.focus = pane;
     load_diff(state)
-}
-
-/// 入力モーダルを開く。
-///
-/// **`Modal::Input` を組むのはここ 1 本**（[`confirm`] と同じ形）。フィールドを足せば
-/// リテラルは全部コンパイルエラーになるので、揃えたいのは**開き方**のほう —
-/// 「`Cmd` を返さずに `modal` へ置くだけ」を各キーの腕に散らさない。
-fn input(
-    state: &mut AppState,
-    title: String,
-    prompt: String,
-    buf: TextBuffer,
-    intent: InputIntent,
-) -> Cmd {
-    state.modal = Some(Modal::Input {
-        title,
-        prompt,
-        buf,
-        intent,
-    });
-    Cmd::None
 }
 
 /// 破壊的な `GitOp` を確認モーダルに載せる（不変ルール 5）。

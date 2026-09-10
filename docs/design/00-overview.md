@@ -79,13 +79,17 @@ crates/
 無く、`clippy::too_many_lines` は `allow` 既定の**関数**単位）。1 ファイル = 1 つの
 privacy 境界なので、割ると「どれが本当に他から呼ばれているか」が `pub(super)` として
 可視になる —— 平坦なままだと 90 項目が全部 private で、共有の意図が読めない。
-**いま `pub(super)` は 37 個で、36 個は他のモジュールが実際に名指ししている。**
+**いま `pub(super)` は 36 個で、35 個は他のモジュールが実際に名指ししている。**
 残る 1 つ（`remote::NoRemote`）は `pub(super)` な関数の返り値型なので、狭めると
-`private_interfaces` が `-D warnings` で落ちる。**`mod.rs` の項目には付けない** ——
+`private_interfaces` が `-D warnings` で落ちる。**35 個のうち 2 つ
+（`worktree::COMMIT_DIFF` と `NOT_LATEST`）を名指ししているのは他モジュールの
+テストだけ** —— Diff ペインのキーが `worktree::act` を通る以上、断りの文言は
+worktree が持ち主で、見張りは Diff 側に要る。**`mod.rs` の項目には付けない** ——
 あそこの `super` は `app` なので、`pub(super)` は「`app` から呼べる」という別のことを
 言ってしまう（子モジュールは private のままでも見える）。
-`state.rs` を割っていないのは、行数では 2 番目でも中身が `AppState` とその部品という
-1 つの関心事だから（`docs/plan.md` の M6 に、割る引き金つきで送ってある）。
+`state.rs` を割っていないのは、**割ったことで workspace 最長になった（2269 行）いまも**
+中身が `AppState` とその部品という 1 つの関心事だから（`docs/plan.md` の M6 に、割る
+引き金つきで送ってある）。
 
 **テストは対象と同じモジュールに置く。** private を叩くテストが多く、1 本に残すと
 そのために `pub(super)` を増やすことになる。2 つ以上のモジュールが呼ぶヘルパだけ

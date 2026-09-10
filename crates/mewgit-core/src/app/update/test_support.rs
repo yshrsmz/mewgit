@@ -10,7 +10,7 @@
 //! 土台で、ここは `app::update` の中だけ。
 
 use super::*;
-use crate::app::{ExecDone, Modal, RepoInfo, RepoSnapshot, TextBuffer};
+use crate::app::{ExecDone, InputIntent, Modal, RepoInfo, RepoSnapshot, TextBuffer};
 use crate::config::Config;
 use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput};
 use crate::git_read::{

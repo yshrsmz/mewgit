@@ -3,9 +3,9 @@
 use crate::git_exec::GitOp;
 use crate::git_read::{short_oid, Branch, GitReadError, Oid};
 
-use super::{confirm, focus, input};
+use super::{confirm, focus};
 use crate::app::{
-    AppState, Cmd, InputIntent, JobKind, Key, KeyCode, NoticeLevel, Pane, TextBuffer,
+    AppState, Cmd, InputIntent, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
 };
 
 /// Branches ペインのキー処理。
@@ -74,6 +74,27 @@ fn delete_branch(state: &mut AppState, force: bool) -> Cmd {
         ("ブランチを削除", format!("{name} を削除します。"))
     };
     confirm(state, title, body, GitOp::BranchDelete { name, force })
+}
+
+/// 入力モーダルを開く。
+///
+/// **`Modal::Input` を組むのはここ 1 本**（[`confirm`] と同じ形）。フィールドを足せば
+/// リテラルは全部コンパイルエラーになるので、揃えたいのは**開き方**のほう —
+/// 「`Cmd` を返さずに `modal` へ置くだけ」を各キーの腕に散らさない。
+fn input(
+    state: &mut AppState,
+    title: String,
+    prompt: String,
+    buf: TextBuffer,
+    intent: InputIntent,
+) -> Cmd {
+    state.modal = Some(Modal::Input {
+        title,
+        prompt,
+        buf,
+        intent,
+    });
+    Cmd::None
 }
 
 /// `n`。ブランチを作る入力モーダルを開く（01 の「1 行入力」）。

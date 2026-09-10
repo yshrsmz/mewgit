@@ -3,8 +3,12 @@
 //! `update` は同期・純粋（`AppState` の変更を除く）。I/O は呼ばず、必要な副作用は
 //! [`Cmd`] として返す。
 //!
-//! ペインごとのキー処理は、対応するペインのタスクと一緒に足す。いまあるのは
-//! グラフ・ワーキングツリー・diff。
+//! **ここにあるのは入口と、2 つ以上のモジュールが使う道具だけ**（`focus` /
+//! `input` / `confirm` / `submit_exec` / `edit_key`）。ペインごとのキー処理は
+//! それぞれのモジュールにある（01 の「この文書とコードの対応」）。
+//!
+//! 利用者が 1 つしかない道具はここに置かない —— `test_support` と同じ数え方で、
+//! 1 人のものを寄せると置き場所を探す手間だけが増える。
 
 use crate::git_exec::{GitOp, PullMode};
 
@@ -256,7 +260,7 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
 /// **フォーカスを動かすキーはすべてここを通す**（`Tab` / `Shift+Tab` の巡回、
 /// Worktree の `Enter`、Diff の `Esc`）。腕ごとに `Cmd::LoadDiff` を書くと、あとから
 /// ペインを足すたびに同じ特殊ケースが増える（01 の「diff の遅延取得」）。
-pub(super) fn focus(state: &mut AppState, pane: Pane) -> Cmd {
+fn focus(state: &mut AppState, pane: Pane) -> Cmd {
     state.focus = pane;
     load_diff(state)
 }
@@ -266,7 +270,7 @@ pub(super) fn focus(state: &mut AppState, pane: Pane) -> Cmd {
 /// **`Modal::Input` を組むのはここ 1 本**（[`confirm`] と同じ形）。フィールドを足せば
 /// リテラルは全部コンパイルエラーになるので、揃えたいのは**開き方**のほう —
 /// 「`Cmd` を返さずに `modal` へ置くだけ」を各キーの腕に散らさない。
-pub(super) fn input(
+fn input(
     state: &mut AppState,
     title: String,
     prompt: String,
@@ -286,7 +290,7 @@ pub(super) fn input(
 ///
 /// **`Modal::Confirm` を組むのはここ 1 本。** 2 箇所で組むと、フィールドが増えたときに
 /// 片方だけ直した状態が生まれる（`Modal` の構築は網羅を強制しない）。
-pub(super) fn confirm(state: &mut AppState, title: &str, body: String, op: GitOp) -> Cmd {
+fn confirm(state: &mut AppState, title: &str, body: String, op: GitOp) -> Cmd {
     state.modal = Some(Modal::Confirm {
         title: title.to_string(),
         body,
@@ -301,7 +305,7 @@ pub(super) fn confirm(state: &mut AppState, title: &str, body: String, op: GitOp
 /// 変えるときに片方だけ古くなり、**どちらのテストも自分のモーダルしか踏まないので
 /// 通ってしまう**。行の上下移動と改行はここに入れない — 行が 1 本か複数かで違い、
 /// それがこの 2 つのモーダルの唯一の差だから（01 の「1 行入力」）。
-pub(super) fn edit_key(buf: &mut TextBuffer, key: Key) -> bool {
+fn edit_key(buf: &mut TextBuffer, key: Key) -> bool {
     match key.code() {
         KeyCode::Backspace => buf.backspace(),
         KeyCode::Delete => buf.delete(),
@@ -322,7 +326,7 @@ pub(super) fn edit_key(buf: &mut TextBuffer, key: Key) -> bool {
 /// **キューには積まないと決めた**（01 の「ランタイム」）。案内を `issue` と同じ
 /// 関数から出すのは、次に押すキーが状態で変わるため（中断を頼んだあとの `Ctrl-C` は
 /// 終了）。2 本に割ると、こちらだけが古い案内を出す。
-pub(super) fn exec_busy(state: &mut AppState) -> bool {
+fn exec_busy(state: &mut AppState) -> bool {
     if !state.jobs.is_running(JobKind::Exec) {
         return false;
     }
@@ -332,7 +336,7 @@ pub(super) fn exec_busy(state: &mut AppState) -> bool {
 
 /// 編集中のモーダルを確定して `Cmd::Exec` を返す。
 ///
-/// **`Cmd::Exec` が落とされるなら閉じない。** [`confirm_key`] は先に閉じてから返すが、
+/// **`Cmd::Exec` が落とされるなら閉じない。** `modal::confirm_key` は先に閉じてから返すが、
 /// あちらのモーダルはユーザーが打ったものを持っていない。ここで同じことをすると、
 /// 前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
 /// 「ほかの git 実行が終わるまで待ってください」と出て**打った文字ごと消える**。
@@ -340,7 +344,7 @@ pub(super) fn exec_busy(state: &mut AppState) -> bool {
 ///
 /// **2 人目（`Modal::Input`）が出た時点でここへ移した。** 写すと、片方だけ
 /// 「閉じてから返す」形に戻ったときに気付けない（01 の「1 行入力」）。
-pub(super) fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
+fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
     if exec_busy(state) {
         return Cmd::None;
     }
@@ -352,16 +356,15 @@ pub(super) fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
 
 #[cfg(test)]
 mod tests {
-    use super::exec::ref_may_have_moved;
 
     use super::test_support::{
-        commit_loads, commit_op, cursor, detail_ok, exec_done, exec_done_of, more, press, state,
-        state_with_commits, state_with_page, ROWS,
+        commit_loads, cursor, detail_ok, exec_done_of, more, press, state, state_with_commits,
+        state_with_page, ROWS,
     };
     use super::*;
     use crate::app::{Modal, TermSize};
 
-    use crate::git_exec::{ExecError, ExecErrorKind};
+    use crate::git_exec::ExecError;
 
     use crate::test_util::{fake_snapshot, fake_target};
 
@@ -554,73 +557,6 @@ mod tests {
         });
 
         assert_eq!(update(&mut state, Msg::Key(Key::ctrl('c'))), Cmd::Quit);
-    }
-
-    #[test]
-    fn a_canceled_exec_is_not_reported_as_an_error() {
-        // 押した本人が止めたものを `Error` で出すと、頼んでいないことが壊れたように
-        // 読める。ジョブは畳まれ、次の書き込みは通る。
-        let mut state = state();
-        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
-
-        let cmd = update(
-            &mut state,
-            exec_done(Err(ExecError::Canceled {
-                argv: vec!["add".into(), "--".into(), "a.txt".into()],
-            })),
-        );
-
-        assert_eq!(cmd, Cmd::LoadStatus);
-        assert!(!state.jobs.is_running(JobKind::Exec));
-        let notice = state.notices.back().expect("通知がありません");
-        assert_eq!(notice.level, NoticeLevel::Info);
-        assert_eq!(notice.message, "git の実行を中断しました");
-        // 証拠は `detail` に残す（不変ルール 4）。
-        assert_eq!(notice.detail.as_deref(), Some("git add -- a.txt"));
-    }
-
-    #[test]
-    fn a_canceled_commit_reloads_the_graph() {
-        // **中断は「失敗」ではない。** `git commit` は ref を書いてから post-commit
-        // hook を走らせるので、hook の最中に殺すとコミットは済んでいる（git 2.55 で
-        // 確認）。失敗と同じ扱いにすると、新しいコミットが積んだ行に無いまま
-        // ブランチのラベルだけが動く。
-        assert!(ref_may_have_moved(&Err(ExecError::Canceled {
-            argv: vec!["commit".into()],
-        })));
-        assert!(!ref_may_have_moved(&Err(ExecError::Failed {
-            argv: vec!["commit".into()],
-            code: Some(1),
-            stderr: "pre-commit hook が断りました".to_string(),
-            kind: ExecErrorKind::Other,
-        })));
-        assert!(!ref_may_have_moved(&Err(ExecError::NoResult {
-            argv: Vec::new(),
-            reason: "起動できませんでした".to_string(),
-        })));
-
-        let mut state = state_with_commits(3);
-        let _ = state.issue(Cmd::Exec(commit_op()));
-
-        let cmd = update(
-            &mut state,
-            exec_done_of(
-                commit_op(),
-                Err(ExecError::Canceled {
-                    argv: vec!["commit".into()],
-                }),
-            ),
-        );
-
-        // 積んだ行の読み直しまで出す（`Reload::RefsAndLog`）。
-        let Cmd::Batch(cmds) = cmd else {
-            panic!("読み直しが 1 つしか出ていません: {cmd:?}");
-        };
-        assert!(
-            cmds.iter()
-                .any(|cmd| matches!(cmd, Cmd::LoadLog { restart: true, .. })),
-            "{cmds:?}"
-        );
     }
 
     #[test]

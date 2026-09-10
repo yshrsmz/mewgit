@@ -1,6 +1,11 @@
-//! 書き込みの後始末（01 の「書き込みのあとの読み直し」）。
+//! 書き込みの後始末。
 //!
 //! `Cmd::Exec` が終わったときに、何を読み直し・何を案内するかを決める。
+//!
+//! **対応する `##` が 01 に 1 つも無い、唯一のモジュール。** 材料は 3 節に散っている
+//! —— 01 の「ログの読み直し」（`Reload` を名指ししているのはここ）、「書き込みの
+//! あとの status」、「失敗の案内文」。**この 3 つを直したらここも読む**（01 の
+//! 「この文書とコードの対応」）。
 //! **`git_exec` ではなく `app` に置く** —— どの ref をグラフが辿るかを知って
 //! いるのはこちらで、`GitOp` の隣に置くと git の事実を約束しながら中身は UI の
 //! 方針、という形になる（[`Reload`] の doc）。
@@ -220,7 +225,7 @@ impl Reload {
 ///
 /// 網羅 `match` にしているのは、`ExecError` に変種を足したときにどちら側かを
 /// 選ばせるため。
-pub(super) fn ref_may_have_moved(result: &Result<ExecOutput, ExecError>) -> bool {
+fn ref_may_have_moved(result: &Result<ExecOutput, ExecError>) -> bool {
     match result {
         Ok(_) | Err(ExecError::Canceled { .. }) => true,
         // 起動していない / git が自分で断った。どちらも ref は元のまま。
@@ -868,5 +873,72 @@ mod tests {
         assert_eq!(cmd, Cmd::None);
         assert!(state.graph.load_failed);
         assert!(state.graph.lines.is_empty());
+    }
+
+    #[test]
+    fn a_canceled_exec_is_not_reported_as_an_error() {
+        // 押した本人が止めたものを `Error` で出すと、頼んでいないことが壊れたように
+        // 読める。ジョブは畳まれ、次の書き込みは通る。
+        let mut state = state();
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
+
+        let cmd = update(
+            &mut state,
+            exec_done(Err(ExecError::Canceled {
+                argv: vec!["add".into(), "--".into(), "a.txt".into()],
+            })),
+        );
+
+        assert_eq!(cmd, Cmd::LoadStatus);
+        assert!(!state.jobs.is_running(JobKind::Exec));
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Info);
+        assert_eq!(notice.message, "git の実行を中断しました");
+        // 証拠は `detail` に残す（不変ルール 4）。
+        assert_eq!(notice.detail.as_deref(), Some("git add -- a.txt"));
+    }
+
+    #[test]
+    fn a_canceled_commit_reloads_the_graph() {
+        // **中断は「失敗」ではない。** `git commit` は ref を書いてから post-commit
+        // hook を走らせるので、hook の最中に殺すとコミットは済んでいる（git 2.55 で
+        // 確認）。失敗と同じ扱いにすると、新しいコミットが積んだ行に無いまま
+        // ブランチのラベルだけが動く。
+        assert!(ref_may_have_moved(&Err(ExecError::Canceled {
+            argv: vec!["commit".into()],
+        })));
+        assert!(!ref_may_have_moved(&Err(ExecError::Failed {
+            argv: vec!["commit".into()],
+            code: Some(1),
+            stderr: "pre-commit hook が断りました".to_string(),
+            kind: ExecErrorKind::Other,
+        })));
+        assert!(!ref_may_have_moved(&Err(ExecError::NoResult {
+            argv: Vec::new(),
+            reason: "起動できませんでした".to_string(),
+        })));
+
+        let mut state = state_with_commits(3);
+        let _ = state.issue(Cmd::Exec(commit_op()));
+
+        let cmd = update(
+            &mut state,
+            exec_done_of(
+                commit_op(),
+                Err(ExecError::Canceled {
+                    argv: vec!["commit".into()],
+                }),
+            ),
+        );
+
+        // 積んだ行の読み直しまで出す（`Reload::RefsAndLog`）。
+        let Cmd::Batch(cmds) = cmd else {
+            panic!("読み直しが 1 つしか出ていません: {cmd:?}");
+        };
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd, Cmd::LoadLog { restart: true, .. })),
+            "{cmds:?}"
+        );
     }
 }

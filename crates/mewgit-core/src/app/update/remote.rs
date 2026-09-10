@@ -251,11 +251,28 @@ impl NoRemote {
     }
 }
 
+/// [`Modal::RemotePicker`] の `Enter`。選んだリモートで fetch する。
+///
+/// **先にモーダルを閉じてから `Cmd` を返す**（`modal::confirm_key` と同じ理由。閉じずに
+/// 返すと、`Cmd` が [`AppState::issue`] に落とされたときにモーダルだけが画面に残る）。
+pub(super) fn remote_picked(state: &mut AppState) -> Cmd {
+    // **一覧は空にならない**（空なら `fetch` が開かない）が、`get` で取るのは
+    // 添字を信じないため。取れなければ閉じるだけにする。
+    let picked = match state.modal.as_ref() {
+        Some(Modal::RemotePicker {
+            remotes, cursor, ..
+        }) => remotes.get(*cursor).cloned(),
+        _ => None,
+    };
+    state.modal = None;
+    picked.map_or(Cmd::None, |remote| fetch_from(&remote))
+}
+
 /// リモートを明示した fetch。**`--prune` は付けない**（01 の「リモート操作」）。
 ///
 /// **組むのはここ 1 本。** `f` と [`Modal::RemotePicker`] の確定の 2 人が出したので、
 /// 別々に書くと片方だけ `--prune` が付く形になる。
-pub(super) fn fetch_from(remote: &str) -> Cmd {
+fn fetch_from(remote: &str) -> Cmd {
     Cmd::Exec(GitOp::Fetch {
         remote: Some(remote.to_string()),
         prune: false,
@@ -333,7 +350,7 @@ fn default_remote(state: &AppState) -> Result<&Remote, NoRemote> {
 /// ```
 ///
 /// **ブランチの状態を読まない。** 読み手が 3 人（`f` / `-u` の提案 /
-/// [`RepoInfo::target`](super::RepoInfo::target)）いて、そのうち `target` は 1 回きり
+/// [`RepoInfo::target`](super::super::RepoInfo::target)）いて、そのうち `target` は 1 回きり
 /// 決めて latch するので、**返信の到着順で答えが変わってはいけない**
 /// （[`default_remote`] の doc）。
 ///

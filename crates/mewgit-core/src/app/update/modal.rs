@@ -1,4 +1,4 @@
-//! モーダルのキー処理（01 の「モーダル」）。
+//! モーダルのキー処理（01 の「Pane と Modal」）。
 //!
 //! 表示中の入力はすべてここが受ける。**確定して何をするかは各モーダルの側**に
 //! あり（[`super::account::account_picked`] など）、ここが持つのは骨格 ——
@@ -7,7 +7,7 @@
 use crate::git_exec::GitOp;
 
 use super::account::account_picked;
-use super::remote::fetch_from;
+use super::remote::remote_picked;
 use super::worktree::commit_message_key;
 use super::{edit_key, submit_exec};
 use crate::app::{AppState, Cmd, InputIntent, Key, KeyCode, Modal, NoticeLevel};
@@ -87,23 +87,6 @@ fn move_modal_cursor(state: &mut AppState, delta: isize) {
     if let Some(modal) = state.modal.as_mut() {
         modal.move_cursor(delta);
     }
-}
-
-/// [`Modal::RemotePicker`] の `Enter`。選んだリモートで fetch する。
-///
-/// **先にモーダルを閉じてから `Cmd` を返す**（[`confirm_key`] と同じ理由。閉じずに
-/// 返すと、`Cmd` が [`AppState::issue`] に落とされたときにモーダルだけが画面に残る）。
-fn remote_picked(state: &mut AppState) -> Cmd {
-    // **一覧は空にならない**（空なら `fetch` が開かない）が、`get` で取るのは
-    // 添字を信じないため。取れなければ閉じるだけにする。
-    let picked = match state.modal.as_ref() {
-        Some(Modal::RemotePicker {
-            remotes, cursor, ..
-        }) => remotes.get(*cursor).cloned(),
-        _ => None,
-    };
-    state.modal = None;
-    picked.map_or(Cmd::None, |remote| fetch_from(&remote))
 }
 
 /// [`Modal::Input`] のキー処理。**文字キーはすべて入力になる。**

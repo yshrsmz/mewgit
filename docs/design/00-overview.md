@@ -55,21 +55,35 @@ crates/
     app/        state.rs  msg.rs  cmd.rs  key.rs
       update/   mod.rs  graph.rs  worktree.rs  diff.rs  branches.rs
                 remote.rs  account.rs  modal.rs  exec.rs
+                test_support.rs（`#[cfg(test)]`）
     graph/      lane.rs
-    git_read/   repo.rs   log.rs  diff.rs  status.rs
-    git_exec/   argv.rs   runner.rs rebase.rs
-    github/     client.rs pr.rs   checks.rs
-    auth/       gh.rs     resolve.rs ssh.rs  url.rs
+    git_read/   repo.rs   log.rs  diff.rs  status.rs  thread.rs
+    git_exec/   argv.rs   runner.rs patch.rs  〔rebase.rs〕
+    github/     client.rs wire.rs  account.rs  〔pr.rs  checks.rs〕
+    auth/       gh.rs     resolve.rs probe.rs  ssh.rs  url.rs
     config/     mod.rs
   mewgit-tui/src/
     main.rs   runtime.rs  input.rs
-    ui/  panes/  modals/
+    ui/       mod.rs    lanes.rs  theme.rs  time.rs
+    panes/    graph.rs  worktree.rs  diff.rs  commit.rs  branches.rs
+    modals/   confirm.rs  input.rs  commit_message.rs  picker.rs
+              remote_picker.rs  account_picker.rs
 ```
+
+**〔〕はまだ無いファイル**（`rebase.rs` は M5、`pr.rs` / `checks.rs` は M4 の
+`ui::panes::prs`）。**印を付けるのは、実在する行と混ざると木全体が信用できなく
+なるため** —— 「この構成に合わせて置く」の意味と「ここに在る」の意味が同じ字で
+書いてあると、読む側は確かめるまでどちらか判らない。
 
 **`update` を割ってあるのは関心事の数のほうで、行数ではない**（Rust に行数の目安は
 無く、`clippy::too_many_lines` は `allow` 既定の**関数**単位）。1 ファイル = 1 つの
 privacy 境界なので、割ると「どれが本当に他から呼ばれているか」が `pub(super)` として
 可視になる —— 平坦なままだと 90 項目が全部 private で、共有の意図が読めない。
+**いま `pub(super)` は 37 個で、36 個は他のモジュールが実際に名指ししている。**
+残る 1 つ（`remote::NoRemote`）は `pub(super)` な関数の返り値型なので、狭めると
+`private_interfaces` が `-D warnings` で落ちる。**`mod.rs` の項目には付けない** ——
+あそこの `super` は `app` なので、`pub(super)` は「`app` から呼べる」という別のことを
+言ってしまう（子モジュールは private のままでも見える）。
 `state.rs` を割っていないのは、行数では 2 番目でも中身が `AppState` とその部品という
 1 つの関心事だから（`docs/plan.md` の M6 に、割る引き金つきで送ってある）。
 

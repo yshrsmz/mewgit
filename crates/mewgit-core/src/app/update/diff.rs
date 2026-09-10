@@ -1,13 +1,43 @@
 //! Diff ペインのキー処理と、diff の遅延取得（01 の「diff の遅延取得」）。
 //!
+//! **Diff ペインを開く [`open_diff`] もここ。** 呼ぶのは Graph（コミット詳細の
+//! `Enter`）と Worktree だが、断る条件（[`NO_DIFF`]）を見張るテストがこちらにある。
+//!
 //! **ハンクに効く `s` / `u` / `x` の本体は [`super::worktree`] にある** ——
-//! 区画と変更種別から `GitOp` を選ぶ表がファイル単位と共通だから（[`super::worktree::plan`]）。
+//! 区画と変更種別から `GitOp` を選ぶ表がファイル単位と共通だから（`worktree::plan`）。
 
 use crate::git_read::{DiffTarget, FileDiff, GitReadError};
 
 use super::focus;
 use super::worktree::{act, Action};
-use crate::app::{AppState, Cmd, DiffCursor, DiffView, JobKind, Key, KeyCode, NoticeLevel};
+use crate::app::{AppState, Cmd, DiffCursor, DiffView, JobKind, Key, KeyCode, NoticeLevel, Pane};
+
+/// `Enter`。左の領域を Diff に差し替える（07）。
+///
+/// **出す相手がいなければ断る。** `focus` を移しても `update` の出口の
+/// [`AppState::reseat_focus`] が候補外として `Graph` に座り直させるので、押した結果は
+/// どちらでも同じ画面になる。**黙って何も起きないと、キーが効いていないのか対象が
+/// 悪いのか判らない**ので理由を通知に出す（conflicted の `s` / `u` / `x` と同じ形）。
+pub(super) fn open_diff(state: &mut AppState) -> Cmd {
+    if state.focus_candidates().contains(&Pane::Diff) {
+        return focus(state, Pane::Diff);
+    }
+    state.push_notice(NoticeLevel::Warn, NO_DIFF.to_string(), None);
+    Cmd::None
+}
+
+/// 差分を出せる行が選ばれていないときの理由。
+///
+/// **出るのは Worktree ペインからだけ。** 踏めるのは 3 つ —— カーソルが conflicted の
+/// 行にある（2 者の diff で表せない）、ワーキングツリーに変更が無い、一覧がまだ届いて
+/// いない。コミット詳細からの `Enter` も同じ入口を通るが、あちらは候補から外さないので
+/// 断りに落ちない（01 の「Pane と Modal」）。
+/// **`Tab` でも同じ行は候補から外れる**（[`AppState::focus_candidates`]）ので、
+/// 入口は両方とも塞がっている。
+///
+/// **「この行」とは書かない。** 3 つのうち 2 つは行がまだ無い状態で、そこで行を名指し
+/// すると、存在しない行について断ったことになる。
+const NO_DIFF: &str = "差分を出せる行が選ばれていません";
 
 /// 見せている diff が要るなら頼む。
 ///
@@ -40,7 +70,7 @@ pub(super) fn load_diff(state: &mut AppState) -> Cmd {
 /// Diff ペインのキー処理。
 ///
 /// カーソルはハンク単位で、`s` / `u` / `x` はカーソルの指すハンクに効く（07）。
-/// 可否の表は Worktree ペインと共通（[`plan`]）。
+/// 可否の表は Worktree ペインと共通（`worktree::plan`）。
 pub(super) fn diff_key(state: &mut AppState, key: Key) -> Cmd {
     match key.code() {
         KeyCode::Char('j') | KeyCode::Down => move_hunk(state, 1),
@@ -130,14 +160,14 @@ pub(super) fn diff_loaded(
 
 #[cfg(test)]
 mod tests {
-    use super::super::graph::NO_DIFF;
     use super::super::test_support::{
-        diff_ok, exec_done, fake_diff, fake_output, only_staged, press, press_code, worktree_state,
+        diff_ok, exec_done, fake_diff, fake_output, only_staged, open_confirm, press, press_code,
+        worktree_state,
     };
     use super::super::update;
     use super::super::worktree::NOT_LATEST;
     use super::*;
-    use crate::app::{Job, Modal, Msg, Pane};
+    use crate::app::{Job, Msg, Pane};
 
     use crate::git_exec::{hunk_patch, GitOp};
     use crate::git_read::{FileStatus, Hunk, LineOrigin, WorktreeSection, WorktreeSnapshot};
@@ -490,9 +520,7 @@ mod tests {
 
         assert_eq!(press(&mut state, 'x'), Cmd::None);
 
-        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
-            panic!("確認モーダルが出ていません: {:?}", state.modal);
-        };
+        let (body, on_yes) = open_confirm(&state);
         // **ファイル名だけでは足りない。** ファイル単位の discard と同じ本文になり、
         // どちらを押したのか画面から判らなくなる。
         assert!(body.contains("a.txt"), "本文に対象が無い: {body}");

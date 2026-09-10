@@ -70,7 +70,8 @@ Rust の toolchain は `rust-toolchain.toml` が SoT。rustup がこれを読ん
 - **`cargo fix` は、`#[cfg(test)] mod tests { use super::*; }` が使っている import を
   ヘッダから消すことがある。** lib ユニットは `cfg(test)` を切って検査するので、テスト
   からしか届かない import が「未使用」に見え、その判断が同じソースに書き戻されて test
-  ユニットが落ちる（`--all-targets` を付けても防げない。#75 の分割で 216 エラー）。
+  ユニットが落ちる（`--all-targets` を付けても防げない。`app/update.rs` を割ったとき
+  に 216 エラー）。
   **道具が壊れているのではなく、ヘッダがテスト専用の import を抱えている形が壊れている**
   ので、直すのは `cargo fix` の出力のほう —— **ヘッダは cargo fix に切り詰めさせ、
   足りなくなった名前を各 `mod tests` の `use` に足す**。そこまでやれば 2 回目以降の

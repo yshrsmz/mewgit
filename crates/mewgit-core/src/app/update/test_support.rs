@@ -1,12 +1,13 @@
 //! [`super`] のテストが共有する土台。
 //!
-//! **2 つ以上のモジュールから呼ばれるヘルパだけを置く。** 1 人しか使わないものは
-//! そのモジュールの `mod tests` に残す ——「2 つ目の利用者が出た時点で共有先を
-//! 作る」の裏返しで、1 人のものを寄せると置き場所を探す手間だけが増える。
+//! **2 つ以上のモジュールから呼ばれるヘルパだけを置く**（理由は 00 の
+//! 「ディレクトリ構成」）。1 人しか使わないものはそのモジュールの `mod tests` に残す。
+//! **他のヘルパから呼ばれるだけのものもここ** —— `failed_with` と `with_remotes` は
+//! 直接の利用者が 1 モジュールずつだが、この中の `reject_non_fast_forward` /
+//! `state_for_push` を通して 3 モジュールに届く。
 //!
-//! `crate::test_util` とは別。あちらは `test-util` feature で外のクレートにも配る
-//! 土台（`TestRepo` など）で、ここは `app::update` の中だけの `AppState` 組み立てと
-//! キー送り。
+//! `crate::test_util` とは別。あちらは `test-util` feature で `mewgit-tui` にも配る
+//! 土台で、ここは `app::update` の中だけ。
 
 use super::*;
 use crate::app::{ExecDone, Modal, RepoInfo, RepoSnapshot, TextBuffer};

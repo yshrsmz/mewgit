@@ -7,7 +7,7 @@
 use crate::git_read::{CommitDetail, FileEntry, GitReadError, LogPage, Oid};
 
 use super::branches::open_branch_create;
-use super::diff::load_diff;
+use super::diff::{load_diff, open_diff};
 use super::focus;
 use crate::app::{AppState, Cmd, CommitFiles, GraphLine, JobKind, Key, KeyCode, NoticeLevel, Pane};
 
@@ -47,37 +47,10 @@ pub(super) fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
     }
 }
 
-/// `Enter`。左の領域を Diff に差し替える（07）。
-///
-/// **出す相手がいなければ断る。** `focus` を移しても `update` の出口の
-/// [`AppState::reseat_focus`] が候補外として `Graph` に座り直させるので、押した結果は
-/// どちらでも同じ画面になる。**黙って何も起きないと、キーが効いていないのか対象が
-/// 悪いのか判らない**ので理由を通知に出す（conflicted の `s` / `u` / `x` と同じ形）。
-pub(super) fn open_diff(state: &mut AppState) -> Cmd {
-    if state.focus_candidates().contains(&Pane::Diff) {
-        return focus(state, Pane::Diff);
-    }
-    state.push_notice(NoticeLevel::Warn, NO_DIFF.to_string(), None);
-    Cmd::None
-}
-
-/// 差分を出せる行が選ばれていないときの理由。
-///
-/// **出るのは Worktree ペインからだけ。** 踏めるのは 3 つ —— カーソルが conflicted の
-/// 行にある（2 者の diff で表せない）、ワーキングツリーに変更が無い、一覧がまだ届いて
-/// いない。コミット詳細からの `Enter` も同じ入口を通るが、あちらは候補から外さないので
-/// 断りに落ちない（01 の「Pane と Modal」）。
-/// **`Tab` でも同じ行は候補から外れる**（[`AppState::focus_candidates`]）ので、
-/// 入口は両方とも塞がっている。
-///
-/// **「この行」とは書かない。** 3 つのうち 2 つは行がまだ無い状態で、そこで行を名指し
-/// すると、存在しない行について断ったことになる。
-pub(super) const NO_DIFF: &str = "差分を出せる行が選ばれていません";
-
 /// ファイル一覧のカーソルを `delta` 行動かす。
 ///
 /// **動かすと diff の対象が変わるので、直前の失敗を落とす**（ワーキングツリーの
-/// [`moved`] と同じ形）。移動して戻ってくれば 1 回だけ試し直せる。
+/// `worktree::moved` と同じ形）。移動して戻ってくれば 1 回だけ試し直せる。
 ///
 /// **動かすのは出ている一覧だけ。** 別のコミットのものが残っていることがあり
 /// （読み込み中・失敗中）、濾さずに動かすと画面に出ていない一覧のカーソルが黙って動く。

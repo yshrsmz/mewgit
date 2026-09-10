@@ -794,8 +794,10 @@ pub fn fake_oid(index: u8) -> Oid {
 /// もの」として捨てられる（01 の「実行中ジョブ › 世代」）。書き込みやキー入力から
 /// `Cmd` が出ている経路では、そちらが既に発行しているので要らない。
 ///
-/// **`app` のテストヘルパはここが唯一の置き場所。** `mewgit-core` の中の
-/// `mod tests` に書くと `mewgit-tui` から呼べず、同じ理由のコメントごと写すことになる。
+/// **`mewgit-tui` からも呼ぶ `app` のテストヘルパは、ここが唯一の置き場所。**
+/// `mewgit-core` の中の `mod tests` に書くと `mewgit-tui` から呼べず、同じ理由の
+/// コメントごと写すことになる。**`app::update` の中だけで使うものは
+/// `app/update/test_support.rs`**（`AppState` の組み立てとキー送り）。
 pub fn reply(state: &mut AppState, cmd: Cmd, msg: Msg) -> Cmd {
     let _ = state.issue(cmd);
     update(state, msg)

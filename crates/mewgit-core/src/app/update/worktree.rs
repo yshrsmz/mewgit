@@ -12,7 +12,7 @@ use crate::git_read::{
 };
 
 use super::diff::load_diff;
-use super::graph::open_diff;
+use super::diff::open_diff;
 use super::{confirm, edit_key, exec_busy, focus, submit_exec};
 use crate::app::{
     AppState, Cmd, GraphSelection, JobKind, Key, KeyCode, Modal, Motion, NoticeLevel, Pane,
@@ -47,7 +47,7 @@ pub(super) fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
 /// 一覧は古く（`stale`）、一度も読めていない一覧は空と区別が付かない（`loaded`）。
 /// どちらも「変更がありません」の根拠にすると、実際には stage されているのに拒否する
 /// （01 の「commit」）。そのときは開いて git の側に判定を任せる。
-pub(super) fn commit(state: &mut AppState) -> Cmd {
+fn commit(state: &mut AppState) -> Cmd {
     let trusted = state.worktree_is_current();
     if trusted && state.worktree.snapshot.staged.is_empty() {
         state.push_notice(
@@ -140,7 +140,7 @@ fn commit_submit(state: &mut AppState) -> Cmd {
 /// git2 の読みは commit（pre-commit hook や署名を含む）より先に返るのが普通で、
 /// そのときの刻印は「最新」。刻印が拾えるのは「読みが走っているあいだに書き込みが
 /// 終わった」形だけで、ここは順序が逆（01 の「commit」）。
-pub(super) fn amend(state: &mut AppState) -> Cmd {
+fn amend(state: &mut AppState) -> Cmd {
     if exec_busy(state) {
         return Cmd::None;
     }
@@ -202,7 +202,7 @@ pub(super) fn head_message_loaded(
 /// **カーソルを動かすキーはすべてここを通す。** 動かすと diff の対象が変わるので、
 /// 直前の失敗を落として 1 回だけ試し直せるようにする（`GraphState.load_failed` を
 /// `scrolled` で落とすのと同じ形。01 の「diff の遅延取得」）。
-pub(super) fn moved(state: &mut AppState, delta: isize) -> Cmd {
+fn moved(state: &mut AppState, delta: isize) -> Cmd {
     state.worktree.move_cursor(delta);
     state.diff.failed = None;
     Cmd::None
@@ -377,7 +377,7 @@ fn plan(action: Action, section: WorktreeSection, scope: Scope<'_>) -> Result<Pl
 }
 
 /// ハンクを `git apply` に渡すパッチに戻す。載せられない名前はその理由。
-pub(super) fn patch_of(path: &Path, hunk: &Hunk) -> Result<Vec<u8>, String> {
+fn patch_of(path: &Path, hunk: &Hunk) -> Result<Vec<u8>, String> {
     hunk_patch(path, hunk).map_err(|err| err.to_string())
 }
 
@@ -479,7 +479,7 @@ fn paths_of(entry: &FileEntry) -> Vec<PathBuf> {
 
 /// 確認モーダルに出すパス。**対象をそのまま並べる**（07）。「選択中のファイル」と
 /// だけ書くと、カーソルがどこにあるか思い出せないまま `y` を押すことになる。
-pub(super) fn names(paths: &[PathBuf]) -> String {
+fn names(paths: &[PathBuf]) -> String {
     paths
         .iter()
         .map(|path| path.display().to_string())
@@ -527,8 +527,8 @@ pub(super) fn status_loaded(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        commit_op, exec_done, exec_done_of, fake_output, only_staged, press, press_code, state,
-        type_text, worktree_state,
+        commit_op, exec_done, exec_done_of, fake_output, only_staged, open_confirm, press,
+        press_code, state, type_text, worktree_state,
     };
     use super::super::update;
     use super::*;
@@ -648,9 +648,7 @@ mod tests {
         // 破壊的操作は必ず確認を通す（不変ルール 5）。押しただけでは実行しない。
         assert_eq!(press(&mut state, 'x'), Cmd::None);
 
-        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
-            panic!("確認モーダルが出ていません: {:?}", state.modal);
-        };
+        let (body, on_yes) = open_confirm(&state);
         assert!(body.contains("a.txt"), "本文に対象が無い: {body}");
         assert_eq!(on_yes, &Cmd::Exec(GitOp::Discard(vec!["a.txt".into()])));
     }
@@ -664,9 +662,7 @@ mod tests {
 
         let _ = press(&mut state, 'x');
 
-        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
-            panic!("確認モーダルが出ていません");
-        };
+        let (body, on_yes) = open_confirm(&state);
         // tracked の discard と同じ文面にしない。こちらはファイルが消える。
         assert!(body.contains("削除"), "本文: {body}");
         assert_eq!(
@@ -684,9 +680,7 @@ mod tests {
 
         let _ = press(&mut state, 'x');
 
-        let Some(Modal::Confirm { on_yes, .. }) = &state.modal else {
-            panic!("確認モーダルが出ていません");
-        };
+        let (_, on_yes) = open_confirm(&state);
         assert_eq!(
             on_yes,
             &Cmd::Exec(GitOp::DiscardAdded(vec!["a.txt".into()]))
@@ -708,9 +702,7 @@ mod tests {
 
         let _ = press(&mut state, 'x');
 
-        let Some(Modal::Confirm { on_yes, .. }) = &state.modal else {
-            panic!("確認モーダルが出ていません");
-        };
+        let (_, on_yes) = open_confirm(&state);
         assert_eq!(on_yes, &Cmd::Exec(GitOp::Discard(vec!["a.txt".into()])));
     }
 

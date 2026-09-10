@@ -404,7 +404,9 @@ env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/d
 `gh pr create` の前に、CI 相当のチェックに加えて必ずこの順で実行する。
 
 1. `/simplify` — 重複・冗長・不要な抽象を削る。指摘の適用まで含む
-2. `/code-review medium` — バグを探す。指摘があれば直してから次へ
+2. `/code-review high` — バグを探す。指摘があれば直してから次へ。**`high` は網羅を
+   広く取るぶん確度の低い指摘も混じる**（`medium` は確度の高いものだけを出す）ので、
+   採らない判断が増える。その理由は下のとおり PR 本文に書く
 3. 修正が出たら CI 相当のチェックを流し直し、別コミットとして積む（amend しない）
 
 どちらも指摘ゼロなら何もコミットせずに PR へ進む。レビュー指摘に「直さない」判断をした

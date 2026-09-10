@@ -416,14 +416,27 @@ pub async fn resolve<B: Backend + Sync>(
 2. `auth_status()` を `target.host` で絞る。0 件なら `Degraded(NotLoggedIn)`
 3. 1 件なら `Resolved(source: Single)`。**probe しない**（選びようが無く、起動のたびに
    1 往復払う理由が無い）。トークンが取れなければ `NoAccess`（`NoToken` の attempt 1 件）
-4. 複数なら各トークンで `GET /repos/{owner}/{repo}` を並列に試す
-   - 成功が 1 件 → `Resolved(source: Probe)`。**トークンを取り直さない**（probe に
-     使ったものをそのまま `Account` に載せる）
+4. 複数なら各トークンで `GET /repos/{owner}/{repo}` を並列に試す。**出口は
+   `AttemptFailure` と同じ 3 つで数える**（「二値だった結果に 3 つ目を足したら、
+   入口と出口の両方を数える」）—— 断られた（`Denied` / `NoToken`）候補だけが
+   除外でき、`Undetermined` は**除外できていない**
+   - 成功が 1 件で、`Undetermined` が 0 件 → `Resolved(source: Probe)`。
+     **トークンを取り直さない**（probe に使ったものをそのまま `Account` に載せる）
+   - **成功が 1 件でも `Undetermined` が残っていれば `Ambiguous`。** 混ぜると、
+     回線やレート制限で 1 本落ちただけの回に**別のアカウントを黙って選んで latch
+     する** —— EMU と個人アカウントの両方がその repo の collaborator なら、以後の
+     PR が違う名前で立ち、再起動するまで直らない（`/code-review` が拾った）
    - 成功が複数 → `Degraded(Ambiguous)`。UI で選ばせ、選択を `.git/config` に保存する。
      **`Vec<GhLogin>` を運ぶので、選び直すときに `auth_status` を呼び直さなくてよい**
-     （実測 0.95 秒。#61）。**並べるのは通った候補だけ** —— 落ちたものを混ぜると、
-     選べるアカウントとして 401 のログインを出すことになる
-   - 成功が 0 件 → `Degraded(NoAccess)`。各アカウントの落ちた理由を保持して表示
+     （実測 0.95 秒。#61）。**並べるのは除外できなかった候補**（通ったもの +
+     `Undetermined`）—— 断られたものを混ぜると、選べるアカウントとして 401 の
+     ログインを出すことになる。**候補ごとの probe の結果は運んでいない**ので、
+     ピッカーが「確かめられた / 確かめられなかった」を出し分けたくなったら、
+     そのタスクで `Ambiguous` の中身を数え直す
+   - 成功が 0 件 → `Degraded(NoAccess)`。各アカウントの落ちた理由を保持して表示。
+     **全部が `Undetermined`（起動時に回線が無い）もここ** —— 選ばせないのは、
+     どれも動かない状態でアカウントを選んでも何も直らないため。変種の名前を
+     「権限が無い」と読まない
 
 **候補ごとの「token → probe」を 1 本の future にして `join_all` で回す。** 逐次だと
 N×(トークン取得 + RTT) を起動のたびに払う。tokio には動的な本数を待つ組み合わせ子が

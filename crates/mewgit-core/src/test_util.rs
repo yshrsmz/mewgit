@@ -456,7 +456,6 @@ fn shown<S: AsRef<OsStr>>(args: &[S]) -> String {
         .join(" ")
 }
 
-/// リモート 1 件。URL は使う側が見ないので、名前から作った偽物でよい。
 /// アカウント解決の対象。`app` の `update` と `auth::resolve` の両方が使う。
 ///
 /// **owner / repo は実在のものに合わせてある** —— `[[repos]]` の glob を書く
@@ -470,6 +469,7 @@ pub fn fake_target() -> RepoTarget {
     }
 }
 
+/// リモート 1 件。URL は使う側が見ないので、名前から作った偽物でよい。
 pub fn fake_remote(name: &str) -> Remote {
     Remote {
         name: name.to_string(),

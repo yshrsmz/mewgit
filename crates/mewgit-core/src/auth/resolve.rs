@@ -115,10 +115,21 @@ pub async fn resolve<B: Backend + Sync>(
     .await;
 
     let mut passed = Vec::new();
+    let mut unchecked = Vec::new();
     let mut attempts = Vec::new();
     for (login, result) in candidates {
         match result {
             Ok(token) => passed.push((login, token)),
+            // **`Undetermined` は「除外できた」ではない。** 断られていない候補は
+            // 下の fold で数え直す（`AttemptFailure` に 3 つ目を足したので、
+            // 出口も 3 つで数える。`CLAUDE.md`）。
+            Err(failure @ AttemptFailure::Undetermined { .. }) => {
+                attempts.push(ProbeAttempt {
+                    login: login.login.clone(),
+                    failure,
+                });
+                unchecked.push(login);
+            }
             Err(failure) => attempts.push(ProbeAttempt {
                 login: login.login,
                 failure,
@@ -126,18 +137,31 @@ pub async fn resolve<B: Backend + Sync>(
         }
     }
 
-    match passed.len() {
-        0 => AccountState::Degraded(DegradedReason::NoAccess { attempts }),
-        // **トークンを取り直さない。** probe に使ったものをそのまま渡す。
-        1 => {
+    match (passed.len(), unchecked.is_empty()) {
+        // **確かめられなかった候補が 1 つも無いときだけ「1 件に絞れた」と言う。**
+        // 混ぜると、回線やレート制限で 1 本落ちただけの回に**別のアカウントを黙って
+        // 選んで latch する** —— EMU と個人アカウントの両方がそのリポジトリの
+        // collaborator なら、以後の PR は違う名前で立つ。**トークンを取り直さない**
+        // （probe に使ったものをそのまま渡す）。
+        (1, true) => {
             let (login, token) = passed.remove(0);
             resolved(target, login.login, token, AccountSource::Probe)
         }
-        // **通った候補だけを並べる。** 落ちたものを混ぜると、UI が「選べるアカウント」
-        // として 401 のログインを出すことになる。**`auth_status` を呼び直さないで
-        // 済むよう `GhLogin` ごと運ぶ**（呼び直すと 0.95 秒を再度払う。#61 の実測）。
+        // 届いたことを確かめられた候補が無い。**理由は `attempts` に全部ある** ——
+        // 全部が `Undetermined`（起動時に回線が無い）の形もここに来るので、
+        // 読む側は変種の名前を「権限が無い」と読まない。**選ばせない**のは、
+        // どれも動かない状態でアカウントを選んでも何も直らないため。
+        (0, _) => AccountState::Degraded(DegradedReason::NoAccess { attempts }),
+        // **除外できなかった候補を並べる。** 断られたもの（401 / 404）は落とす ——
+        // UI が「選べるアカウント」として届かないログインを出すことになる。
+        // **`auth_status` を呼び直さないで済むよう `GhLogin` ごと運ぶ**
+        // （呼び直すと 0.95 秒を再度払う。#61 の実測）。
         _ => AccountState::Degraded(DegradedReason::Ambiguous {
-            candidates: passed.into_iter().map(|(login, _)| login).collect(),
+            candidates: passed
+                .into_iter()
+                .map(|(login, _)| login)
+                .chain(unchecked)
+                .collect(),
         }),
     }
 }
@@ -621,6 +645,34 @@ mod tests {
         match reason(&state) {
             // **通った候補だけが並ぶ。** 404 だった `jiro` を混ぜると、選べる
             // アカウントとして届かないログインを出すことになる。
+            DegradedReason::Ambiguous { candidates } => {
+                let names: Vec<&str> = candidates.iter().map(|c| c.login.as_str()).collect();
+                assert_eq!(names, vec!["taro", "hanako"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unchecked_candidate_keeps_the_choice_open() {
+        // **確かめられなかった候補は「除外できた」ではない。** 通ったのが 1 件でも、
+        // 回線やレート制限で 1 本落ちただけの回に別のアカウントを黙って latch すると、
+        // 以後の PR が違う名前で立つ（`/code-review` が拾った）。
+        let backend = Fake::new(three())
+            .probing("taro", Ok(()))
+            .probing(
+                "hanako",
+                Err(AttemptFailure::Undetermined {
+                    message: "レート制限に達しました".to_string(),
+                }),
+            )
+            .probing("jiro", denied(404));
+
+        let state = resolve_plain(&backend).await;
+
+        match reason(&state) {
+            // 断られた `jiro` は落ちる。残るのは通った `taro` と、確かめられなかった
+            // `hanako` の 2 つ。
             DegradedReason::Ambiguous { candidates } => {
                 let names: Vec<&str> = candidates.iter().map(|c| c.login.as_str()).collect();
                 assert_eq!(names, vec!["taro", "hanako"]);

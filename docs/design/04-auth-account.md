@@ -507,12 +507,30 @@ git2 まで巻き込む。上の表は手で叩いた結果（`git2` 0.21）。
 2 行目は手順 1 の安全のため —— `mewgit.user = B` が黙って A のトークンを B として
 返す形は無い。
 
-解決結果は画面上部に `[acct: login @ host]` として常時表示する。`Degraded` は黄色で理由を表示。
-**`Resolving` のあいだは何も出さない**（07 のヘッダ）。
+解決結果は画面上部に `[acct: login @ host]` として表示する。`Degraded` は黄色で理由を表示。
+**決まるまでは何も出さない**（`Resolving` のあいだ。07 のヘッダ）。
+
+**`Unusable` と `ConfiguredUnavailable` の `message` もヘッダには出さない。** 上の `reason_for` が
+`GhUnrunnable` / `GhFailed` / `GhUnparsable` を 1 つに畳んでよいと言う根拠は
+「直し方の違いは `message`（`AuthError` の `Display`）に出ている」だが、**その
+`message` を出す画面はまだ無い**（起動できない理由は 1 行に収まらない）。
+出す先は M6 の `Notice.detail` と `Modal::AccountPicker` で、それまでは
+**畳んだ 3 つを見分ける手掛かりが画面に無い**。分け直すのではなく表示先を足す、が
+この判断の続き（「状態に届いている」と「画面に出ている」は別）。
+`ConfiguredUnavailable` の `message`（実測の `no oauth token found for <host> account
+<login>`。下の表）も同じ扱いで、ヘッダには login しか出ない。
+
+**`AccountState::Resolving` を割るかどうかは `Modal::AccountPicker` のタスクで数え直す。**
+いまの `Resolving` は「走っている最中」と「**永久に頼まれない**」（既定リモートが無い /
+URL を GitHub の形として読めない = `TargetState::Unavailable`）の 2 つを兼ねている。
+唯一の読み手であるヘッダはどちらも同じ（何も出さない）なので割っていないが、ピッカーが
+「アカウントがありません」と言えるかどうかはこの 2 つで変わる。そのとき、`state.repo.target`
+を一緒に読む形にするか `Resolving` を割るかを数える（#54 の「`None` に 2 つの意味」と
+同じ形。`TargetState` はまさにその理由で 3 値にしてある）。
 
 **ヘッダに出すのは 1 行に収まる診断だけ。** `NoAccess` の `attempts` は
 「どの login がなぜ落ちたか」を 1 件ずつ持っているが、ヘッダは件数しか出さない
-（`アクセスできません (2 件)`）。**1 件ずつ並べる先は `Modal::AccountPicker` の
+（`[acct: 届いたアカウントがありません（2 件）]`）。**1 件ずつ並べる先は `Modal::AccountPicker` の
 タスクへ送る** —— 選ばせる画面が候補と理由を並べる場所で、それまでは
 `Notice.detail`（M6）と同じく画面に出る先が無い。**`Ambiguous` に
 「選んでください」と書かない**のも同じ理由で、ピッカーが無いあいだは押すキーが

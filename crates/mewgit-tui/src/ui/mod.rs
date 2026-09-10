@@ -305,9 +305,9 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
         spans.push(Span::raw(format!("  {}/{}", target.owner, target.repo)));
     }
 
-    if let Some((label, style)) = account_label(&state.account) {
+    if let Some(account) = account_span(&state.account) {
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(label, style));
+        spans.push(account);
     }
 
     Paragraph::new(Line::from(spans))
@@ -319,16 +319,17 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
 /// （`account`）が出しているので、左にも「解決中」を出すと同じことを 2 箇所で言う。
 /// 既定リモートが無いなどで一度も頼まないリポジトリ（`TargetState::Unavailable`）も
 /// ここに来るので、GitHub と関係のないリポジトリには何も出ない（01）。
-fn account_label(account: &AccountState) -> Option<(String, Style)> {
+fn account_span(account: &AccountState) -> Option<Span<'_>> {
     match account {
         AccountState::Resolving => None,
-        AccountState::Resolved(account) => Some((
-            format!("[acct: {} @ {}]", account.login, account.host),
-            Style::default(),
+        AccountState::Resolved(account) => Some(Span::raw(format!(
+            "[acct: {} @ {}]",
+            account.login, account.host
+        ))),
+        AccountState::Degraded(reason) => Some(Span::styled(
+            format!("[acct: {}]", degraded(reason)),
+            theme::warn(),
         )),
-        AccountState::Degraded(reason) => {
-            Some((format!("[acct: {}]", degraded(reason)), theme::warn()))
-        }
     }
 }
 
@@ -338,24 +339,26 @@ fn account_label(account: &AccountState) -> Option<(String, Style)> {
 /// 選び直す `Modal::AccountPicker` はまだ無く、押すキーの無い案内になる（04 / 07）。
 /// **内訳も出さない。** `NoAccess` の `attempts` は 1 件ずつ理由を持っているが、
 /// 並べる先はピッカーのタスクへ送ってある（04）。
-fn degraded(reason: &DegradedReason) -> String {
+fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
     match reason {
-        DegradedReason::GhMissing => "gh がありません".to_string(),
+        DegradedReason::GhMissing => "gh がありません".into(),
         // 要求版は定数から引く。`GhTooOld` は値として持っていない（04）。
         DegradedReason::GhTooOld { found } => {
-            format!("gh {found} は古い（{} 以上）", gh::REQUIRED)
+            format!("gh {found} は古い（{} 以上）", gh::REQUIRED).into()
         }
-        DegradedReason::Unusable { .. } => "gh を実行できません".to_string(),
-        DegradedReason::NotLoggedIn { host } => format!("{host} に未ログイン"),
+        // **`message` は出さない。** `gh` が起動できない理由は 1 行に収まらず、
+        // 出す先は M6 の `Notice.detail` と `Modal::AccountPicker`（04）。
+        DegradedReason::Unusable { .. } => "gh を実行できません".into(),
+        DegradedReason::NotLoggedIn { host } => format!("{host} に未ログイン").into(),
         DegradedReason::ConfiguredUnavailable { login, .. } => {
-            format!("{login} のトークンがありません")
+            format!("{login} のトークンがありません").into()
         }
         // **「権限が無い」と読ませない。** 回線が無いだけの回もここに来る（04）。
         DegradedReason::NoAccess { attempts } => {
-            format!("届いたアカウントがありません（{} 件）", attempts.len())
+            format!("届いたアカウントがありません（{} 件）", attempts.len()).into()
         }
         DegradedReason::Ambiguous { candidates } => {
-            format!("アカウントを 1 つに絞れません（{} 件）", candidates.len())
+            format!("アカウントを 1 つに絞れません（{} 件）", candidates.len()).into()
         }
     }
 }
@@ -604,7 +607,8 @@ mod tests {
         let col = line
             .find(needle)
             .unwrap_or_else(|| panic!("{needle} がヘッダにありません: {line:?}"));
-        assert!(line.is_char_boundary(col) && line[..col].is_ascii());
+        // バイト位置をセル列として使うので、手前が ASCII であることだけ確かめる。
+        assert!(line[..col].is_ascii(), "{line:?}");
         let terminal = crate::test_util::terminal_with(state, size);
         terminal.backend().buffer()[(col as u16, 0)].fg
     }
@@ -637,10 +641,7 @@ mod tests {
 
         let line = header(&state, TermSize::default());
         assert!(line.contains("[acct: gh がありません]"), "header: {line:?}");
-        assert_eq!(
-            header_color_at(&state, "[acct:"),
-            ratatui::style::Color::Yellow
-        );
+        assert_eq!(header_color_at(&state, "[acct:"), Color::Yellow);
         // 解決できているアカウントは色を付けない（注意を引くのは degraded だけ）。
         assert_eq!(
             header_color_at(&state_with_account(resolved_account()), "[acct:"),

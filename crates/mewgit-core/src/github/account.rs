@@ -121,21 +121,13 @@ fn denied(status: u16) -> AttemptFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::fake_target;
 
     fn meta() -> RepoMeta {
         RepoMeta {
             owner: "owner".to_string(),
             repo: "repo".to_string(),
             default_branch: "main".to_string(),
-        }
-    }
-
-    fn target(host: &str) -> RepoTarget {
-        RepoTarget {
-            host: host.to_string(),
-            port: None,
-            owner: "owner".to_string(),
-            repo: "repo".to_string(),
         }
     }
 
@@ -228,7 +220,13 @@ mod tests {
         let backend = AccountBackend::detect("/nonexistent/gh").await;
 
         let result = backend
-            .probe(&target("-4"), &SecretString::from("token".to_string()))
+            .probe(
+                &RepoTarget {
+                    host: "-4".to_string(),
+                    ..fake_target()
+                },
+                &SecretString::from("token".to_string()),
+            )
             .await;
 
         match result {

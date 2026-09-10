@@ -52,21 +52,6 @@ pub struct Runtime {
     /// **`Runner` と同じ値を持つ。** `Runner::new` が受け取るのは
     /// `-o BatchMode=yes` を重ねたあとの文字列なので、そこからは取り出せない。
     ssh: SshCommand,
-    /// [`Cmd::ResolveAccount`] を走らせる材料（04 の手順 1〜4）。
-    account: AccountEnv,
-}
-
-/// アカウント解決に要るもの。
-///
-/// **`dispatch` から `AppState` を読まない。** 書いてよいのが `notices` だけなのと
-/// 同じ理由で、起動時に決まってから変わらない値は `Runtime` が持つ（`Runner` が
-/// `git_bin` を受け取っているのと同じ形）。
-#[derive(Debug, Clone)]
-struct AccountEnv {
-    /// ワークツリーのルート。`.git/config` の `mewgit.user` を読むのに要る（04）。
-    repo_path: std::path::PathBuf,
-    /// `gh` の場所（`general.gh_bin`）と `[[repos]]` のマッチに要る（08）。
-    config: Config,
 }
 
 /// リポジトリを開いて初期状態を作る。
@@ -112,15 +97,7 @@ where
         &state.config.general.git_bin,
         ssh.clone(),
     );
-    let (mut runtime, mut msgs) = Runtime::new(
-        reader,
-        runner,
-        ssh,
-        AccountEnv {
-            repo_path: state.repo.path.clone(),
-            config: state.config.clone(),
-        },
-    );
+    let (mut runtime, mut msgs) = Runtime::new(reader, runner, ssh);
 
     // 起動時の読み込み。ループの前に 1 回だけ。**サイズを入れるより先に出す。**
     // 逆にすると、サイズを知った時点で `load_more` が 1 ページ目を頼み、`init` の
@@ -198,7 +175,6 @@ impl Runtime {
         reader: ReaderHandle,
         runner: Runner,
         ssh: SshCommand,
-        account: AccountEnv,
     ) -> (Self, mpsc::UnboundedReceiver<Msg>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (
@@ -208,7 +184,6 @@ impl Runtime {
                 tx,
                 cancel: None,
                 ssh,
-                account,
             },
             rx,
         )
@@ -374,12 +349,17 @@ impl Runtime {
             // 起動時に 1 回だけなので、`gh --version` の往復を最初のフレームの前に
             // 置く理由が無い。
             Cmd::ResolveAccount(target) => {
-                let env = self.account.clone();
+                // **材料は `AppState` から取る。** 起動時に決まってから変わらない値
+                // （08。実行中は設定を読み直さない）なので `Runtime` に写しを持つことも
+                // できるが、持つと出どころが 2 本になり、テストが本体と違う設定を
+                // 掴んだまま緑になる。`dispatch` に禁じられているのは `notices` 以外を
+                // **書く**ことで、読むことではない（01 のランタイム）。
+                let repo_path = state.repo.path.clone();
+                let config = state.config.clone();
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
-                    let backend = AccountBackend::detect(&env.config.general.gh_bin).await;
-                    let result =
-                        auth::resolve(&target, &env.repo_path, &backend, &env.config).await;
+                    let backend = AccountBackend::detect(&config.general.gh_bin).await;
+                    let result = auth::resolve(&target, &repo_path, &backend, &config).await;
                     let _ = tx.send(Msg::AccountResolved(result));
                 });
                 ControlFlow::Continue(())
@@ -434,7 +414,7 @@ mod tests {
 
     /// リポジトリを開いた状態とハンドル。
     fn opened(repo: &TestRepo) -> (AppState, ReaderHandle) {
-        open(repo.path(), Config::default()).expect("リポジトリを開けませんでした")
+        open(repo.path(), offline_config()).expect("リポジトリを開けませんでした")
     }
 
     /// テスト用のランタイム。`git` は隔離した環境で走らせる
@@ -443,20 +423,13 @@ mod tests {
         repo: &TestRepo,
         reader: ReaderHandle,
     ) -> (Runtime, mpsc::UnboundedReceiver<Msg>) {
-        Runtime::new(
-            reader,
-            repo.runner(),
-            SshCommand::default(),
-            AccountEnv {
-                repo_path: repo.path().to_path_buf(),
-                config: offline_config(),
-            },
-        )
+        Runtime::new(reader, repo.runner(), SshCommand::default())
     }
 
     /// **実物の `gh` を叩かない設定。** `general.gh_bin` を存在しないパスに向けると、
     /// `AccountBackend` は `GhMissing` を抱えたまま作られる（04）。実行環境の
-    /// keyring と GitHub への往復をテストに持ち込まないため。
+    /// keyring と GitHub への往復をテストに持ち込まないため、`opened` が作る
+    /// `AppState` はこれを持つ（`Cmd::ResolveAccount` は `state.config` を読む）。
     fn offline_config() -> Config {
         let mut config = Config::default();
         config.general.gh_bin = "/nonexistent/gh".to_string();
@@ -825,7 +798,7 @@ mod tests {
         let (mut state, reader) = opened(&repo);
         let (mut runtime, mut msgs) = runtime_for(&repo, reader);
 
-        let cmd = state.issue(Cmd::ResolveAccount(Box::new(fake_target())));
+        let cmd = state.issue(Cmd::ResolveAccount(fake_target()));
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
         let msg = msgs.recv().await.expect("Msg が返りませんでした");
         let _ = update(&mut state, msg);

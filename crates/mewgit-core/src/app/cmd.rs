@@ -96,9 +96,10 @@ pub enum Cmd {
     /// だけで、`init` からは出さない** —— [`RepoTarget`] は起動時にはまだ無い
     /// （01 の「`RepoInfo.target` を埋める」）。
     ///
-    /// `Box` に載せるのは、[`RepoTarget`] が `String` 3 本ぶんあり、1 打鍵ごとに
-    /// 組まれる `Cmd::None` と同じ `enum` に載るため。
-    ResolveAccount(Box<RepoTarget>),
+    /// **`Box` に載せない。** [`Msg`](super::Msg) と違って `Cmd` の大きさを決めて
+    /// いるのは [`Cmd::Exec`]（`GitOp` が 96 バイト）で、[`RepoTarget`] は 80 バイト。
+    /// 箱に入れても 96 のまま（実測）なので、ヒープ確保と間接参照が増えるだけになる。
+    ResolveAccount(RepoTarget),
     FetchPr,
     FetchChecks,
     FetchPrList,
@@ -183,6 +184,17 @@ fn flatten_into(cmd: Cmd, out: &mut Vec<Cmd>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmd_stays_small() {
+        // **`ResolveAccount` の doc が書いている「箱に入れても変わらない」の見張り。**
+        // 大きさを決めているのは `Exec(GitOp)` で、`RepoTarget`（80 バイト）も
+        // `RemoteUrl`（80 バイト）もそれより小さいから裸で載せている。`GitOp` が
+        // 伸びればここが落ちて、その断定を数え直すことになる（実測値は 64bit で 96）。
+        // `Msg` 側の `msg_stays_small` と同じ形。
+        let size = std::mem::size_of::<Cmd>();
+        assert!(size <= 96, "Cmd が大きすぎます: {size} バイト");
+    }
 
     #[test]
     fn batch_drops_none_and_unwraps_single() {

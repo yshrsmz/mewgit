@@ -1329,7 +1329,7 @@ fn target_resolved(state: &mut AppState, resolved: ResolvedTarget) -> Cmd {
     // `auth::resolve` は `RepoTarget` を要るので、`Msg::RepoInfoLoaded` →
     // `Cmd::ResolveTarget` → ここ、と 2 往復待ってからでないと材料が揃わない
     // （01 の「`RepoInfo.target` を埋める」）。
-    let account = Cmd::ResolveAccount(Box::new(resolved.target.clone()));
+    let account = Cmd::ResolveAccount(resolved.target.clone());
     state.repo.target = TargetState::Resolved(resolved.target);
     if let Some(reason) = resolved.unnormalized {
         state.push_notice(NoticeLevel::Warn, reason.to_string(), None);
@@ -2333,7 +2333,7 @@ mod tests {
     use crate::app::{
         BranchLoad, GraphSelection, Job, Modal, Modifiers, RepoInfo, TermSize, TextBuffer,
     };
-    use crate::auth::{AccountSource, AuthError};
+    use crate::auth::AuthError;
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
     use crate::git_read::{
@@ -4859,7 +4859,7 @@ feat/b
         let mut state = state();
         let _ = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
         let cmd = update(&mut state, resolved_target(None));
-        assert_eq!(cmd, Cmd::ResolveAccount(Box::new(fake_target())));
+        assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
         assert_eq!(state.repo.target, TargetState::Resolved(fake_target()));
 
         let cmd = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
@@ -4959,7 +4959,7 @@ feat/b
         );
         // **正規化できなくてもアカウントは頼む。** `host_raw` のままの `target` で
         // GitHub に届く形（`ssh -G` が無い環境のホスト名がそのまま正しい）はある。
-        assert_eq!(cmd, Cmd::ResolveAccount(Box::new(fake_target())));
+        assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
         assert_eq!(state.repo.target, TargetState::Resolved(fake_target()));
         assert_eq!(state.notices.len(), 1, "{:?}", state.notices);
     }
@@ -4982,7 +4982,7 @@ feat/b
         let mut state = state();
         let cmd = reply(
             &mut state,
-            Cmd::ResolveAccount(Box::new(fake_target())),
+            Cmd::ResolveAccount(fake_target()),
             Msg::AccountResolved(Ok(fake_account("taro"))),
         );
 
@@ -5002,7 +5002,7 @@ feat/b
         let mut state = state();
         let cmd = reply(
             &mut state,
-            Cmd::ResolveAccount(Box::new(fake_target())),
+            Cmd::ResolveAccount(fake_target()),
             Msg::AccountResolved(Err(DegradedReason::GhMissing)),
         );
 
@@ -5163,7 +5163,7 @@ feat/b
         let mut state = state();
         let _ = init(&mut state);
 
-        let account = Cmd::ResolveAccount(Box::new(fake_target()));
+        let account = Cmd::ResolveAccount(fake_target());
         let cmd = state.issue(Cmd::Batch(vec![
             Cmd::LoadLog {
                 count: 10,

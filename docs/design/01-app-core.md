@@ -1291,7 +1291,8 @@ impl AppState {
 - **頼んだ時点で「2 回目が何をするか」を通知に出す。** 頼んだ直後は画面が何も変わらない
   ので、出さないと効いていないように見える（上の「失敗の案内文」と同じ方針）
 - ランタイムの `Cmd::CancelExec` は**合図を撃つだけ**。方針を持つのは `app` の側で、
-  `dispatch` は `AppState` に何も書かない
+  `dispatch` が書くのは `notices` だけ（下の「ランタイム」の規則どおり。1 回目で
+  終われなかったときの案内をここから出す）
 
 ### 世代
 
@@ -1526,7 +1527,7 @@ pub enum Cmd {
     Exec(GitOp),                       // git CLI 実行（03 参照）
     CancelExec,                        // 走っている Exec を中断する（上の「キャンセル」）
     ResolveTarget(RemoteUrl),          // 既定リモートの URL → RepoTarget（上の「RepoInfo.target を埋める」）
-    ResolveAccount(Box<RepoTarget>),   // どのリポジトリのアカウントを決めるか（04 の手順 1〜4）
+    ResolveAccount(RepoTarget),        // どのリポジトリのアカウントを決めるか（04 の手順 1〜4）
     FetchPr, FetchChecks, FetchPrList,
     Quit,
 }
@@ -1535,9 +1536,9 @@ pub enum Cmd {
 **`ResolveAccount` は対象を運ぶ。** ランタイムに `state.repo.target` を読ませると、
 `TargetState` の 3 つのうち `Resolved` 以外を受けたときの腕を `dispatch` に書くことに
 なり、**どのテストからも踏めない腕**が 2 つ増える（`update` はその 2 つでは `Cmd` を
-出さない）。`Box` に載せるのは `Cmd::Exec(GitOp)` と同じ理由ではなく、
-`RepoTarget` が `String` 3 本ぶんあり、1 打鍵ごとに組まれる `Cmd::None` と同じ
-`enum` に載るため。
+出さない）。**`Box` には載せない** —— `Msg` と違って `Cmd` の大きさを決めているのは
+`Exec(GitOp)`（96 バイト）で、`RepoTarget`（80 バイト）を箱に入れても 96 のまま
+（実測）。`ResolveTarget` が運ぶ `RemoteUrl`（80 バイト）も同じ理由で裸で載せている。
 
 ## 起動時の読み込み
 
@@ -1621,8 +1622,14 @@ loop {
 - `dispatch` の `match` でも `_` を使わず全 `Cmd` 変種を列挙する。`update` / `Cmd::job_kind`
   と同じ理由で、変種を足したときに実装漏れをコンパイルエラーにするため
 - 未実装の `Cmd` は黙って捨てず `Notice::Warn` に積む。開発中に落ちているのが見えるように
-- **`dispatch` が `AppState` に書いてよいのは `notices` だけ。** それ以外の状態変化は
-  `Msg` にして `update` に戻す。状態遷移の入口を `update` 1 つに保つため
+- **`dispatch` が `AppState` に書いてよいのは `notices` だけ**（と、未実装 `Cmd` の
+  ジョブを畳むところ）。それ以外の状態変化は `Msg` にして `update` に戻す。状態遷移の
+  入口を `update` 1 つに保つため
+- **読むほうは制限しない。** 起動時に確定して変わらない値（`repo.path`、`config`）は
+  `dispatch` が `state` から取る —— `Runtime` に写しを持たせると出どころが 2 本になり、
+  テストが本体と違う値を掴んだまま緑になる（`Cmd::ResolveAccount` で実際に起きた）。
+  **`Cmd` に載せて運ぶのは、載せないと踏めない腕が増えるものだけ**（`RepoTarget` は
+  `TargetState` の残り 2 つを `dispatch` に持ち込まないために運ぶ）
 - 初期の端末サイズは `Terminal::size()` で取り、`Msg::Resize` にして `update` に流す。
   起動時に `Resize` イベントは飛んでこない
 - **描画の直前に毎回 `ui::graph_rows(state.term)` と `state.graph.viewport` を比べ、違えば

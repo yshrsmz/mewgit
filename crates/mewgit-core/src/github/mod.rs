@@ -7,9 +7,11 @@
 //! https の非既定ポートだけ**が `auth::RepoTarget` から届く —— ssh の port は
 //! `auth::url::RemoteScheme` の時点で捨ててある（04 の「port は scheme に畳む」）。
 
+mod account;
 mod client;
 mod wire;
 
+pub use account::AccountBackend;
 pub use client::GithubClient;
 
 /// リポジトリのメタ情報。`auth::resolve` の probe 兼用なので、

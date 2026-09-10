@@ -48,6 +48,13 @@ pub fn removed() -> Style {
     Style::default().fg(Color::Red)
 }
 
+/// 効かなくなっている機能の注意書き（ヘッダの degraded なアカウントなど。04 / 07）。
+///
+/// **エラーではない。** git の操作は動くので `removed` の赤とは分ける。
+pub fn warn() -> Style {
+    Style::default().fg(Color::Yellow)
+}
+
 /// 色名 1 つ。読めなければ `None`。
 ///
 /// `[graph] colors` の palette もここを通す。「文字列 → 色」の解釈を 1 箇所に置く。

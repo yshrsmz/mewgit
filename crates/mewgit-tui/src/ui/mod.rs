@@ -16,6 +16,7 @@ use std::path::Path;
 
 use crate::{modals, panes};
 use mewgit_core::app::{AppState, GraphSelection, Pane, TermSize};
+use mewgit_core::auth::{gh, AccountState, DegradedReason};
 use mewgit_core::git_read::{FileEntry, FileStatus};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -304,7 +305,66 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
         spans.push(Span::raw(format!("  {}/{}", target.owner, target.repo)));
     }
 
+    if let Some(account) = account_span(&state.account) {
+        spans.push(Span::raw("  "));
+        spans.push(account);
+    }
+
     Paragraph::new(Line::from(spans))
+}
+
+/// ヘッダの `[gh: …]`。まだ決まっていなければ `None`（07）。
+///
+/// **見出しは `gh`。** 誰として GitHub に喋るかを出す欄で、その誰かを決めるのも
+/// トークンを出すのも `gh` CLI（04）。degraded の理由も `gh` の話が多いので、
+/// [`degraded`] の側では `gh` を繰り返さない（`[gh: gh がありません]` にしない）。
+///
+/// **`Resolving` のあいだは何も出さない。** 走っていることは右端のスピナー
+/// （`account`）が出しているので、左にも「解決中」を出すと同じことを 2 箇所で言う。
+/// 既定リモートが無いなどで一度も頼まないリポジトリ（`TargetState::Unavailable`）も
+/// ここに来るので、GitHub と関係のないリポジトリには何も出ない（01）。
+fn account_span(account: &AccountState) -> Option<Span<'_>> {
+    match account {
+        AccountState::Resolving => None,
+        AccountState::Resolved(account) => Some(Span::raw(format!(
+            "[gh: {} @ {}]",
+            account.login, account.host
+        ))),
+        AccountState::Degraded(reason) => Some(Span::styled(
+            format!("[gh: {}]", degraded(reason)),
+            theme::warn(),
+        )),
+    }
+}
+
+/// degraded の理由を 1 行にする。
+///
+/// **診断だけを書く。** 「選んでください」のような指示は書かない —— `Ambiguous` を
+/// 選び直す `Modal::AccountPicker` はまだ無く、押すキーの無い案内になる（04 / 07）。
+/// **内訳も出さない。** `NoAccess` の `attempts` は 1 件ずつ理由を持っているが、
+/// 並べる先はピッカーのタスクへ送ってある（04）。
+fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
+    match reason {
+        DegradedReason::GhMissing => "ありません".into(),
+        // 要求版は定数から引く。`GhTooOld` は値として持っていない（04）。
+        DegradedReason::GhTooOld { found } => {
+            format!("{found} は古い（{} 以上）", gh::REQUIRED).into()
+        }
+        // **`message` は出さない。** `gh` が起動できない理由は 1 行に収まらず、
+        // 出す先は M6 の `Notice.detail` と `Modal::AccountPicker`（04）。
+        DegradedReason::Unusable { .. } => "実行できません".into(),
+        DegradedReason::NotLoggedIn { host } => format!("{host} に未ログイン").into(),
+        DegradedReason::ConfiguredUnavailable { login, .. } => {
+            format!("{login} のトークンがありません").into()
+        }
+        // **「権限が無い」と読ませない。** 回線が無いだけの回もここに来る（04）。
+        DegradedReason::NoAccess { attempts } => {
+            format!("届いたアカウントがありません（{} 件）", attempts.len()).into()
+        }
+        DegradedReason::Ambiguous { candidates } => {
+            format!("アカウントを 1 つに絞れません（{} 件）", candidates.len()).into()
+        }
+    }
 }
 
 /// スピナーの駒。[`Msg::Tick`](mewgit_core::app::Msg::Tick) ごとに 1 つ進む。
@@ -368,12 +428,13 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_row, pane_area, window, wrapped};
+    use super::{degraded, file_row, pane_area, window, wrapped};
     use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
-    use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TermSize};
+    use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TargetState, TermSize};
+    use mewgit_core::auth::{AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::test_util::fake_snapshot;
-    use ratatui::style::Modifier;
+    use mewgit_core::test_util::{fake_account, fake_snapshot};
+    use ratatui::style::{Color, Modifier};
 
     #[test]
     fn a_file_row_puts_the_status_letter_before_the_path() {
@@ -527,6 +588,132 @@ mod tests {
         let text = draw(&state, TermSize::default()).join("\n");
 
         assert!(text.contains("Commit "), "{text}");
+    }
+
+    /// 解決済みのアカウントを持つ状態。
+    fn state_with_account(account: AccountState) -> AppState {
+        let mut state = state_at("/repo");
+        state.account = account;
+        state
+    }
+
+    fn resolved_account() -> AccountState {
+        AccountState::Resolved(fake_account("user_shortcode"))
+    }
+
+    /// ヘッダの `needle` が始まるセルの前景色。
+    ///
+    /// **バッファを見る。** `draw` の文字列にはスタイルが残らないので、黄色で出して
+    /// いるかは色を読まないと判らない（`row_is_reversed` と同じ理由でここに置く）。
+    fn header_color_at(state: &AppState, needle: &str) -> Color {
+        let size = TermSize::default();
+        let line = header(state, size);
+        let col = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} がヘッダにありません: {line:?}"));
+        // バイト位置をセル列として使うので、手前が ASCII であることだけ確かめる。
+        assert!(line[..col].is_ascii(), "{line:?}");
+        let terminal = crate::test_util::terminal_with(state, size);
+        terminal.backend().buffer()[(col as u16, 0)].fg
+    }
+
+    #[test]
+    fn header_shows_the_resolved_account() {
+        let line = header(&state_with_account(resolved_account()), TermSize::default());
+
+        assert!(
+            line.contains("[gh: user_shortcode @ github.com]"),
+            "header: {line:?}"
+        );
+    }
+
+    #[test]
+    fn header_says_nothing_while_the_account_is_unresolved() {
+        // **`Resolving` は出さない**（07）。走っていることは右端のスピナーが出しており、
+        // 既定リモートの無いリポジトリはここから動かない（01）。
+        let line = header(
+            &state_with_account(AccountState::Resolving),
+            TermSize::default(),
+        );
+
+        assert!(!line.contains("[gh:"), "header: {line:?}");
+    }
+
+    #[test]
+    fn a_degraded_account_is_shown_in_the_warn_style() {
+        let state = state_with_account(AccountState::Degraded(DegradedReason::GhMissing));
+
+        let line = header(&state, TermSize::default());
+        assert!(line.contains("[gh: ありません]"), "header: {line:?}");
+        assert_eq!(header_color_at(&state, "[gh:"), Color::Yellow);
+        // 解決できているアカウントは色を付けない（注意を引くのは degraded だけ）。
+        assert_eq!(
+            header_color_at(&state_with_account(resolved_account()), "[gh:"),
+            Color::Reset
+        );
+    }
+
+    #[test]
+    fn every_degraded_reason_fits_the_header() {
+        // **7 つを 1 つずつ回す。** 理由を足したときに、文言の無い腕と、ヘッダから
+        // はみ出す長さの両方をここで落とす（通知の 72 セルと同じ形の見張り。01）。
+        //
+        // **出荷される形のヘッダで測る**（`/code-review` が拾った）。`[gh: …]` が
+        // 出るのは `Cmd::ResolveAccount` を出したリポジトリだけで、それを出すのは
+        // `target_resolved` —— **`owner/repo` が必ず左隣にある**。走っているジョブの
+        // スピナーも右端に重なる。素の `state_at("/repo")` で測ると、実際には
+        // 存在しない短いヘッダを見張ることになる。
+        //
+        // **幅は 100。** 07 の目標のレイアウトがその幅で、`< 100` は M6 のタスク。
+        let reasons = [
+            DegradedReason::GhMissing,
+            DegradedReason::GhTooOld {
+                found: "2.80.0".to_string(),
+            },
+            DegradedReason::Unusable {
+                message: "起動できませんでした".to_string(),
+            },
+            DegradedReason::NotLoggedIn {
+                host: "github.com".to_string(),
+            },
+            DegradedReason::ConfiguredUnavailable {
+                login: "taro".to_string(),
+                message: "no oauth token found".to_string(),
+            },
+            DegradedReason::NoAccess {
+                attempts: Vec::new(),
+            },
+            DegradedReason::Ambiguous {
+                candidates: Vec::new(),
+            },
+        ];
+        let size = TermSize {
+            width: 100,
+            height: 24,
+        };
+        for reason in reasons {
+            let want = format!("[gh: {}]", degraded(&reason));
+            let mut state = shipping_header_state();
+            state.account = AccountState::Degraded(reason);
+            let line = header(&state, size);
+            assert!(line.contains(&want), "はみ出している: {line:?} / {want}");
+        }
+    }
+
+    /// 実際に `[gh: …]` が出るときのヘッダの状態。
+    ///
+    /// 長めのリポジトリ名（`claude-code`）と `owner/repo`、それに走っているジョブの
+    /// スピナーを一緒に出す。**この 3 つは `[gh: …]` と同じ 1 行を分け合う。**
+    fn shipping_header_state() -> AppState {
+        let mut state = state_at("/tmp/claude-code");
+        state.repo.target = TargetState::Resolved(RepoTarget {
+            host: "github.com".to_string(),
+            port: None,
+            owner: "anthropics".to_string(),
+            repo: "claude-code".to_string(),
+        });
+        let _ = state.issue(Cmd::LoadBranches);
+        state
     }
 
     #[test]

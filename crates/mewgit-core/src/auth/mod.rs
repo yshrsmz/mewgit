@@ -7,10 +7,9 @@
 //! （[`gh`]）、アカウント解決（[`resolve`]）はここにある。この `mod.rs` に置くのは
 //! `app` の `AppState` / `Msg` が参照する値型だけ。
 //!
-//! **[`resolve`] を呼ぶ経路はまだ無い。** [`Backend`] の production 実装と
-//! `Cmd::ResolveAccount` の配線は次のタスク（ヘッダの `[acct: …]` 表示）で入る
-//! —— 読み手の無い `Cmd` を出すと、起動のたびに「未実装のコマンドです」が出る
-//! （01 の「`RepoInfo.target` を埋める」）。
+//! [`Backend`] の production 実装は `github::AccountBackend`（04 の
+//! 「`Backend` の production 実装は `github` に置く」）。`auth` は `github` を
+//! 名指しできない（00 のレイヤー則）ので、ここには trait だけがある。
 //!
 //! **どのリモートの URL を見るかは決まった**（04 の「既定リモート」）。規則を持つのは
 //! `app` で、材料の [`git_read::Remote`] と `Branch.upstream_config` がどちらも
@@ -148,6 +147,12 @@ pub enum AccountSource {
 }
 
 /// アカウント解決の状態。`Degraded` でも Git 機能は動かす。
+///
+/// **[`resolve`] の戻り値ではない。** あちらは `Result<Account, DegradedReason>` を
+/// 返し、`Resolving` を返せないことが型になっている（04 の「`resolve` の戻り値」）。
+/// `Resolving` はここにだけある値で、**`Cmd::ResolveAccount` をまだ出していない**
+/// ことを表す —— 走っている最中と、既定リモートが無いなどで
+/// [`RepoTarget`] を作れず一度も頼まないリポジトリの両方がこれになる（01）。
 #[derive(Debug, Default)]
 pub enum AccountState {
     #[default]
@@ -172,6 +177,12 @@ pub enum DegradedReason {
     /// `gh` は居るのに答えが返らなかった（起動できない / 非 0 終了 / 出力を
     /// 解釈できない）。**3 つを分けない** —— 直し方の違いは `message` に出ており、
     /// これで分岐する読み手が UI に無い（[`resolve`] の `reason_for`）。
+    ///
+    /// **ただし `message` を出す画面もまだ無い。** ヘッダは 1 行なので
+    /// 「gh を実行できません」しか出さず（07）、出す先は M6 の `Notice.detail` と
+    /// `Modal::AccountPicker`（04 の「解決結果は画面上部に」）。それまでは
+    /// **畳んだ 3 つを見分ける手掛かりが画面に出ない** —— 直すのは分け方ではなく
+    /// 表示先のほう。
     Unusable {
         message: String,
     },

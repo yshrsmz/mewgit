@@ -11,10 +11,11 @@ use mewgit_core::app::{
     TermSize,
 };
 use mewgit_core::auth::ssh::{effective_ssh_from_env, SshCommand};
-use mewgit_core::auth::RepoTarget;
+use mewgit_core::auth::{self, RepoTarget};
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
 use mewgit_core::git_read::{GitReadError, ReaderHandle};
+use mewgit_core::github::AccountBackend;
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
 use ratatui::Terminal;
@@ -343,10 +344,28 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
-            // M4 以降で実装する。
-            Cmd::ResolveAccount => {
-                not_implemented(state, JobKind::ResolveAccount, "ResolveAccount")
+            // `gh` の起動と GitHub API は `AccountBackend` の中（04）。ここは待って
+            // 結果を `Msg` にするだけ。**`GhCli::detect` もタスクの中で走らせる** ——
+            // 起動時に 1 回だけなので、`gh --version` の往復を最初のフレームの前に
+            // 置く理由が無い。
+            Cmd::ResolveAccount(target) => {
+                // **材料は `AppState` から取る。** 起動時に決まってから変わらない値
+                // （08。実行中は設定を読み直さない）なので `Runtime` に写しを持つことも
+                // できるが、持つと出どころが 2 本になり、テストが本体と違う設定を
+                // 掴んだまま緑になる。`dispatch` に禁じられているのは `notices` 以外を
+                // **書く**ことで、読むことではない（01 のランタイム）。
+                let repo_path = state.repo.path.clone();
+                let config = state.config.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let backend = AccountBackend::detect(&config.general.gh_bin).await;
+                    let result = auth::resolve(&target, &repo_path, &backend, &config).await;
+                    let _ = tx.send(Msg::AccountResolved(result));
+                });
+                ControlFlow::Continue(())
             }
+
+            // M4 以降で実装する。
             Cmd::FetchPr => not_implemented(state, JobKind::FetchPr, "FetchPr"),
             Cmd::FetchChecks => not_implemented(state, JobKind::FetchChecks, "FetchChecks"),
             Cmd::FetchPrList => not_implemented(state, JobKind::FetchPrList, "FetchPrList"),
@@ -386,15 +405,16 @@ mod tests {
     use super::*;
     use futures::stream;
     use mewgit_core::app::{Pane, TermSize};
+    use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::HeadInfo;
-    use mewgit_core::test_util::{wait_for_pid, BareRepo, TestRepo};
+    use mewgit_core::test_util::{fake_target, wait_for_pid, BareRepo, TestRepo};
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// リポジトリを開いた状態とハンドル。
     fn opened(repo: &TestRepo) -> (AppState, ReaderHandle) {
-        open(repo.path(), Config::default()).expect("リポジトリを開けませんでした")
+        open(repo.path(), offline_config()).expect("リポジトリを開けませんでした")
     }
 
     /// テスト用のランタイム。`git` は隔離した環境で走らせる
@@ -404,6 +424,16 @@ mod tests {
         reader: ReaderHandle,
     ) -> (Runtime, mpsc::UnboundedReceiver<Msg>) {
         Runtime::new(reader, repo.runner(), SshCommand::default())
+    }
+
+    /// **実物の `gh` を叩かない設定。** `general.gh_bin` を存在しないパスに向けると、
+    /// `AccountBackend` は `GhMissing` を抱えたまま作られる（04）。実行環境の
+    /// keyring と GitHub への往復をテストに持ち込まないため、`opened` が作る
+    /// `AppState` はこれを持つ（`Cmd::ResolveAccount` は `state.config` を読む）。
+    fn offline_config() -> Config {
+        let mut config = Config::default();
+        config.general.gh_bin = "/nonexistent/gh".to_string();
+        config
     }
 
     fn key(code: KeyCode) -> std::io::Result<Event> {
@@ -721,7 +751,7 @@ mod tests {
         let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
         // Quit の後ろは実行しない。未実装 notice が 1 件だけであることで確かめる。
-        let batch = Cmd::Batch(vec![Cmd::ResolveAccount, Cmd::Quit, Cmd::FetchPr]);
+        let batch = Cmd::Batch(vec![Cmd::FetchPr, Cmd::Quit, Cmd::FetchChecks]);
         assert!(runtime.dispatch(&mut state, batch).is_break());
         assert_eq!(state.notices.len(), 1);
     }
@@ -732,14 +762,12 @@ mod tests {
         let (mut state, reader) = opened(&repo);
         let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
-        assert!(runtime
-            .dispatch(&mut state, Cmd::ResolveAccount)
-            .is_continue());
+        assert!(runtime.dispatch(&mut state, Cmd::FetchPr).is_continue());
 
         assert_eq!(state.notices.len(), 1);
         let notice = &state.notices[0];
         assert_eq!(notice.level, NoticeLevel::Warn);
-        assert!(notice.message.contains("ResolveAccount"));
+        assert!(notice.message.contains("FetchPr"));
     }
 
     #[test]
@@ -750,13 +778,41 @@ mod tests {
         let (mut state, reader) = opened(&repo);
         let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
-        let cmd = state.issue(Cmd::ResolveAccount);
+        let cmd = state.issue(Cmd::FetchPr);
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
-        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
+        assert!(!state.jobs.is_running(JobKind::FetchPr));
 
-        let again = state.issue(Cmd::ResolveAccount);
+        let again = state.issue(Cmd::FetchPr);
         assert!(runtime.dispatch(&mut state, again).is_continue());
         assert_eq!(state.notices.len(), 2);
+    }
+
+    /// `Cmd::ResolveAccount` が `AccountBackend` を通って `Msg` で返る（04）。
+    ///
+    /// **`gh` は存在しないパスに向けてある**ので、答えは `GhMissing` に決まる。
+    /// ここで見張るのは配線 —— 手順 1〜4 の分岐は `auth::resolve` のテストが
+    /// `Backend` の向こう側を組んで踏んでいる（実 `gh` では踏めない。04）。
+    #[tokio::test]
+    async fn resolve_account_comes_back_through_the_backend() {
+        let repo = TestRepo::init();
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+
+        let cmd = state.issue(Cmd::ResolveAccount(fake_target()));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        assert!(
+            matches!(
+                state.account,
+                AccountState::Degraded(DegradedReason::GhMissing)
+            ),
+            "{:?}",
+            state.account
+        );
+        // 畳んでいないと、2 回目の `Cmd::ResolveAccount` が `issue` に落とされる。
+        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
     }
 
     #[tokio::test]
@@ -765,7 +821,7 @@ mod tests {
         let (mut state, reader) = opened(&repo);
         let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
-        let nested = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::ResolveAccount]), Cmd::FetchPr]);
+        let nested = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::FetchPr]), Cmd::FetchChecks]);
         assert!(runtime.dispatch(&mut state, nested).is_continue());
         assert_eq!(state.notices.len(), 2);
     }

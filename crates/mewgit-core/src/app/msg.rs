@@ -1,6 +1,6 @@
 //! `update` に入力されるイベント。設計は `docs/design/01-app-core.md`。
 
-use crate::auth::{AccountState, ResolvedTarget};
+use crate::auth::{Account, DegradedReason, ResolvedTarget};
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp,
@@ -131,7 +131,12 @@ pub enum Msg {
     /// `auth::resolve` の結果。`Result<Account, AuthError>` にしないのは、`AuthError` と
     /// `DegradedReason` が同じ失敗を二重に表現してしまうため（04）。`AuthError` は
     /// `gh` / `ssh` 実行の内部エラーに留め、`resolve` の中で `DegradedReason` に畳む。
-    AccountResolved(AccountState),
+    ///
+    /// **[`AccountState`](crate::auth::AccountState) では運ばない。** あの型には
+    /// 「まだ頼んでいない」（`Resolving`）があり、`resolve` は返さない —— 運ぶ型に
+    /// すると、その約束を見張るのは doc の 1 文だけになる（01 の `AccountResolved`）。
+    /// [`update`](super::update) が `Ok` を `Resolved`、`Err` を `Degraded` に写す。
+    AccountResolved(Result<Account, DegradedReason>),
     PrLoaded(Box<Result<Option<PullRequest>, GithubError>>),
     ChecksLoaded(Result<Vec<Check>, GithubError>),
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),

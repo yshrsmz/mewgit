@@ -15,8 +15,8 @@ use secrecy::SecretString;
 use crate::config::Config;
 
 use super::{
-    Account, AccountSource, AccountState, AttemptFailure, AuthError, DegradedReason, GhLogin,
-    ProbeAttempt, RepoTarget,
+    Account, AccountSource, AttemptFailure, AuthError, DegradedReason, GhLogin, ProbeAttempt,
+    RepoTarget,
 };
 
 /// [`resolve`] が外の世界に頼む 3 つ。
@@ -48,8 +48,10 @@ pub trait Backend {
 
 /// リポジトリで使うアカウントを決める（04 の手順 1〜4）。
 ///
-/// **`Resolving` は返さない。** あれは「まだ頼んでいない」で、`Cmd` を出した側が
-/// 置く値（[`AccountState::default`]）。
+/// **戻り値は [`AccountState`](super::AccountState) ではない。** あの型には
+/// 「まだ頼んでいない」（`Resolving`）があり、ここは返さない —— `AccountState` を
+/// 返す形だと、その約束を見張るのは doc の 1 文だけになる。写すのは
+/// `update`（`Ok` → `Resolved`、`Err` → `Degraded`）。
 ///
 /// `repo_path` はワークツリーのルート。手順 1 の `mewgit.user` を読むために要る
 /// （`config` モジュールは `.git/config` を見ない。08）。
@@ -58,23 +60,23 @@ pub async fn resolve<B: Backend + Sync>(
     repo_path: &Path,
     backend: &B,
     cfg: &Config,
-) -> AccountState {
+) -> Result<Account, DegradedReason> {
     // 手順 1。**明示指定があれば一覧を引かない** —— `gh auth status` は全候補の
     // トークンをホストへ検証しに行くので、答えが決まっているのに 0.24 秒払うことになる。
     if let Some(login) = explicit_login(target, repo_path, cfg).await {
         return match backend.token(&target.host, &login).await {
             Ok(token) => resolved(target, login, token, AccountSource::Config),
-            Err(err) => AccountState::Degraded(configured_failed(login, err)),
+            Err(err) => Err(configured_failed(login, err)),
         };
     }
 
     // 手順 2。
     let mut logins = match backend.logins(&target.host).await {
         Ok(logins) => logins,
-        Err(err) => return AccountState::Degraded(reason_for(err)),
+        Err(err) => return Err(reason_for(err)),
     };
     if logins.is_empty() {
-        return AccountState::Degraded(DegradedReason::NotLoggedIn {
+        return Err(DegradedReason::NotLoggedIn {
             host: target.host.clone(),
         });
     }
@@ -85,7 +87,7 @@ pub async fn resolve<B: Backend + Sync>(
         let login = logins.remove(0).login;
         return match backend.token(&target.host, &login).await {
             Ok(token) => resolved(target, login, token, AccountSource::Single),
-            Err(err) => AccountState::Degraded(DegradedReason::NoAccess {
+            Err(err) => Err(DegradedReason::NoAccess {
                 attempts: vec![ProbeAttempt {
                     login,
                     failure: AttemptFailure::NoToken {
@@ -151,12 +153,12 @@ pub async fn resolve<B: Backend + Sync>(
         // 全部が `Undetermined`（起動時に回線が無い）の形もここに来るので、
         // 読む側は変種の名前を「権限が無い」と読まない。**選ばせない**のは、
         // どれも動かない状態でアカウントを選んでも何も直らないため。
-        (0, _) => AccountState::Degraded(DegradedReason::NoAccess { attempts }),
+        (0, _) => Err(DegradedReason::NoAccess { attempts }),
         // **除外できなかった候補を並べる。** 断られたもの（401 / 404）は落とす ——
         // UI が「選べるアカウント」として届かないログインを出すことになる。
         // **`auth_status` を呼び直さないで済むよう `GhLogin` ごと運ぶ**
         // （呼び直すと 0.95 秒を再度払う。#61 の実測）。
-        _ => AccountState::Degraded(DegradedReason::Ambiguous {
+        _ => Err(DegradedReason::Ambiguous {
             candidates: passed
                 .into_iter()
                 .map(|(login, _)| login)
@@ -257,8 +259,8 @@ fn resolved(
     login: String,
     token: SecretString,
     source: AccountSource,
-) -> AccountState {
-    AccountState::Resolved(Account {
+) -> Result<Account, DegradedReason> {
+    Ok(Account {
         host: target.host.clone(),
         login,
         token,
@@ -420,30 +422,27 @@ mod tests {
 
     /// 明示指定の無いリポジトリで手順 2 以降を踏む。**リポジトリを引数に取らない**
     /// —— `mewgit.user` を書くテストだけが `TestRepo` を自分で持つ。
-    async fn resolve_plain(backend: &Fake) -> AccountState {
+    async fn resolve_plain(backend: &Fake) -> Resolved {
         let repo = TestRepo::init();
         resolve(&fake_target(), repo.path(), backend, &Config::default()).await
     }
 
     /// `mewgit.user = taro` を書いたリポジトリで解決する（手順 1）。
-    async fn resolve_configured(backend: &Fake) -> AccountState {
+    async fn resolve_configured(backend: &Fake) -> Resolved {
         let repo = TestRepo::init();
         repo.git(&["config", "mewgit.user", "taro"]);
         resolve(&fake_target(), repo.path(), backend, &Config::default()).await
     }
 
-    fn account(state: &AccountState) -> &Account {
-        match state {
-            AccountState::Resolved(account) => account,
-            other => panic!("解決していない: {other:?}"),
-        }
+    /// [`resolve`] の戻り値。
+    type Resolved = Result<Account, DegradedReason>;
+
+    fn account(resolved: &Resolved) -> &Account {
+        resolved.as_ref().expect("解決していない")
     }
 
-    fn reason(state: &AccountState) -> &DegradedReason {
-        match state {
-            AccountState::Degraded(reason) => reason,
-            other => panic!("degraded ではない: {other:?}"),
-        }
+    fn reason(resolved: &Resolved) -> &DegradedReason {
+        resolved.as_ref().expect_err("degraded ではない")
     }
 
     fn secret(account: &Account) -> String {

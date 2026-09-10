@@ -285,8 +285,10 @@ git 自身も fetch でエラーにする。
 載せる（ssh の port は API の port ではない。上の「port は scheme に畳む」）。
 
 ```rust
+// 状態の側。`resolve` が返すのは下の `Result<Account, DegradedReason>` で、
+// `Resolving` は `Cmd::ResolveAccount` を出す前に置く値（01）。
 pub enum AccountState {
-    Resolving,                         // まだ頼んでいない。`resolve` は返さない
+    Resolving,                         // まだ頼んでいない。`resolve` は返さない（型でそうなっている）
     Resolved(Account),                 // { host, login, token, source: Config | Probe | Single }
     Degraded(DegradedReason),
 }
@@ -330,7 +332,7 @@ pub async fn resolve<B: Backend + Sync>(
     repo_path: &Path,          // .git/config の mewgit.user を読むため
     backend: &B,
     cfg: &Config,
-) -> AccountState
+) -> Result<Account, DegradedReason>
 ```
 
 `RepoInfo`（01）は `app` 層の型なので受け取らない。`auth` は `app` より下にあり、
@@ -365,11 +367,7 @@ pub async fn resolve<B: Backend + Sync>(
 に載せるので、`resolve` の future 全体が `Send` でないと積めない。trait に
 `async fn` と書くと付かないので、`-> impl Future<Output = ..> + Send` で書く。
 
-### `Backend` の production 実装は `github` に置く（次のタスク）
-
-**この PR では実装しない。** 呼ぶ側（`Cmd::ResolveAccount` の配線）が入るのは
-ヘッダ表示のタスクで、読み手の無い実装を先に置くと #49 の `to_argv` と同じ
-「到達不能な腕」になる。決めたことだけ書き残す。
+### `Backend` の production 実装は `github` に置く（`github::AccountBackend`）
 
 - **置き場所は `github`。** `auth::Backend` と `GithubClient` の両方を名指しできる
   最下段がここ（`auth` は `github` を名指しできない）。`struct AccountBackend { gh: Result<GhCli, AuthError> }`
@@ -379,9 +377,20 @@ pub async fn resolve<B: Backend + Sync>(
   （`AuthError` は `Clone`）、手順 2 がそのまま `GhMissing` / `GhTooOld` に落とす
 - **`probe` は `GithubClient::new(target.host, target.port, token)` → `repo(owner, repo)`。**
   `new` の失敗（`shared_http()` の TLS 初期化。`InvalidHost` は 1 本目で届かなくなった）も
-  `Undetermined` に落とす。**ただしこれは「プロセス全体の条件が候補ごとの服を着る」形**
-  （下の手順 1 と同じ）—— 全候補が同じ理由で `NoAccess` に並ぶ。`resolve` の手前で
-  1 回だけ判定して `Unusable` に落とす形もあるので、**実装するタスクで数え直す**
+  下の表を通す
+- **表を通すのは `Result` 全体で、`Err` だけではない。** `Err(Decode)` が `Ok(())` に
+  なる行があるので、「成功したか」を先に数えると 1 行落ちる（`to_argv` と同じく
+  純粋関数にして、9 行を 1 件ずつ見張る）
+
+**TLS 初期化の失敗は候補ごとの `Undetermined` のままにする**（送っていた
+「実装するタスクで数え直す」の答え）。1 回だけ判定して `Unusable` に落とす形は 2 つの
+理由で採らない。**`resolve` の外に `AccountState` の産出元がもう 1 つできる** ——
+畳むのはランタイムになり、01 が「`update` に手書きのマッピングを生やさない」と決めた
+境目に、`resolve` を通らない degraded の経路が並ぶ。そして**見張れない** ——
+`shared_http()` は `OnceLock` で、失敗させるには TLS バックエンドの初期化を折る
+必要がある。**プロセス全体の条件が候補ごとの服を着る**形（手順 1 の `gh` と同じ）で
+あることは変わらないが、こちらは**全候補が同じ `message` で並ぶだけ**で、手順 1 の
+ように「設定を直してください」と誤った直し方を案内する腕には落ちない。
 
 | `GithubClient::repo` の結果 | `probe` の返り値 | 理由 |
 |---|---|---|
@@ -444,14 +453,18 @@ N×(トークン取得 + RTT) を起動のたびに払う。tokio には動的�
 `futures` の `join_all` を使う（`mewgit-tui` が既に使っている版と同じ）。
 **逐次に戻すと開かない関所**（`Barrier` + `timeout`）で見張る。
 
-### 送った判断 —— `resolve` の戻り値は `AccountState` のまま
+### `resolve` の戻り値は `Result<Account, DegradedReason>`
 
-doc に「`Resolving` は返さない」と書いてあるが、見張っているのはその文だけで、
-`Result<Account, DegradedReason>` にすれば型になる（`/simplify` の altitude）。
-**今回は採らない。** 01 が「`AccountResolved` は `resolve` の戻り値をそのまま運ぶ」と
-決めており、変えるなら 01 の `Msg` と 04 の signature を先に直す 1 本になる。
-`Resolving` を返しても実害は「解決中の表示が残る」だけで、`Cmd` を出した側が
-既に置いている値と同じ。**ヘッダ表示のタスクで、`Msg` を触るついでに数え直す。**
+**ヘッダ表示のタスクで数え直して採った**（送っていたのは `/simplify` の altitude）。
+`AccountState` を返す形だと「`Resolving` は返さない」を見張るのは doc の 1 文だけで、
+`Result` にすればそれが型になる。01 の `Msg::AccountResolved` も同じ形にしたので、
+「`resolve` の戻り値をそのまま運ぶ」は保たれている。`update` が `Ok` を
+`Resolved`、`Err` を `Degraded` に写す。
+
+**`AccountState` は状態の側に残る。** `Resolving`（まだ頼んでいない）が要るのは
+`Cmd::ResolveAccount` を出していないリポジトリ —— 既定リモートが無い、URL を
+GitHub の形として読めないリポジトリでは `RepoTarget` が作れず、解決を頼まない
+（01 の「`RepoInfo.target` を埋める」）。
 
 ### `LoginState` で候補を絞らない
 
@@ -495,6 +508,15 @@ git2 まで巻き込む。上の表は手で叩いた結果（`git2` 0.21）。
 返す形は無い。
 
 解決結果は画面上部に `[acct: login @ host]` として常時表示する。`Degraded` は黄色で理由を表示。
+**`Resolving` のあいだは何も出さない**（07 のヘッダ）。
+
+**ヘッダに出すのは 1 行に収まる診断だけ。** `NoAccess` の `attempts` は
+「どの login がなぜ落ちたか」を 1 件ずつ持っているが、ヘッダは件数しか出さない
+（`アクセスできません (2 件)`）。**1 件ずつ並べる先は `Modal::AccountPicker` の
+タスクへ送る** —— 選ばせる画面が候補と理由を並べる場所で、それまでは
+`Notice.detail`（M6）と同じく画面に出る先が無い。**`Ambiguous` に
+「選んでください」と書かない**のも同じ理由で、ピッカーが無いあいだは押すキーが
+無い（#63 / #65 で踏んだ「案内が求める操作を自分が持っていない」形）。
 
 ## EMU 特有の考慮
 

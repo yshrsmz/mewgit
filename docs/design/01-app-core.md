@@ -1039,13 +1039,21 @@ Msg::RepoInfoLoaded → update が default_remote で URL を選び RemoteUrl::p
   サイズが最大変種で決まり、1 打鍵ごとに作られる `Msg::Key` まで大きくなるため
   （`msg_stays_small` が 128 バイトで見張っている）
 
-**読み手は 2 人。** いま読んでいるのは**ヘッダ**で、決まっていれば
-`mewgit  yshrsmz/mewgit` のように `owner/repo` を並べる（07）。もう 1 人は次の PR の
-`Cmd::ResolveAccount`（04 の「タスクを 2 本に割った」）。
+**読み手は 2 人。** 1 人目は**ヘッダ**で、決まっていれば
+`mewgit  yshrsmz/mewgit` のように `owner/repo` を並べる（07）。2 人目は
+`Cmd::ResolveAccount`（04 の「タスクを 2 本に割った」）で、**`target_resolved` が
+そのまま出す**。
 
-**この PR で `Cmd::ResolveAccount` は発行しない。** ランタイムがまだ
-`not_implemented` で畳んでおり、**発行すると起動のたびに「未実装のコマンドです」が
-ステータスバーに出る**。
+**`Cmd::ResolveAccount` の発行元はここ 1 箇所で、`init` ではない。**
+`auth::resolve` は `RepoTarget` を要るので、起動時にはまだ材料が無い ——
+`Msg::RepoInfoLoaded` → `Cmd::ResolveTarget` → `Msg::TargetResolved` と 2 往復
+待ってからでないと出せない。`Cmd` に `RepoTarget` を載せてあるのはこのため
+（下の「Cmd」）。
+
+**`TargetState::Unavailable` に落ちたリポジトリでは一度も出さない。** GitHub の
+リポジトリとして特定できないので解決する対象が無く、`account` は `Resolving` の
+ままになる。ヘッダは `Resolving` のあいだ `[acct: …]` を出さないので（07）、
+GitHub と関係のないリポジトリで degraded の理由が並ぶことはない。
 
 ### push の行き先
 
@@ -1432,7 +1440,7 @@ pub enum Msg {
     ProgressDetected(Option<InProgressOp>),
     // auth / github
     TargetResolved(Box<ResolvedTarget>),  // { target, unnormalized }。上の「RepoInfo.target を埋める」
-    AccountResolved(AccountState),
+    AccountResolved(Result<Account, DegradedReason>),
     PrLoaded(Box<Result<Option<PullRequest>, GithubError>>),
     ChecksLoaded(Result<Vec<Check>, GithubError>),
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),
@@ -1455,10 +1463,19 @@ pub enum Msg {
 失敗したセッションは捨てられ、次の読み込みは履歴の先頭から来る（02）ので、残すと
 同じコミットが二重に並ぶ。
 
-`AccountResolved` は 04 の `resolve` の戻り値をそのまま運ぶ（`AccountState`）。
-`Result<Account, AuthError>` にすると `AuthError` と `DegradedReason` が同じ失敗を
-二重に表現し、`update` に手書きのマッピングが生える。`AuthError` は `gh` / `ssh` 実行の
-内部エラーに留め、`resolve` の中で `DegradedReason` に畳む。
+`AccountResolved` は 04 の `resolve` の戻り値をそのまま運ぶ
+（`Result<Account, DegradedReason>`）。`Result<Account, AuthError>` にしないのは、
+`AuthError` と `DegradedReason` が同じ失敗を二重に表現し、`update` に手書きの
+マッピングが生えるため。`AuthError` は `gh` / `ssh` 実行の内部エラーに留め、
+`resolve` の中で `DegradedReason` に畳む。
+
+**`AccountState` は運ばない**（04 の「送った判断」をここで畳んだ）。あの型には
+`Resolving`（まだ頼んでいない）があり、`resolve` はそれを返さない ——
+運ぶ型にしておくと、その約束を見張るのは doc の 1 文だけになる。`update` は
+`Ok` を `Resolved`、`Err` を `Degraded` に写して `state.account` に入れる。
+**2 つの型が残るのは、状態には「まだ頼んでいない」が要るから**で、
+`Cmd::ResolveAccount` を出していないリポジトリ（`TargetState::Unavailable`）が
+それに当たる（上の「`RepoInfo.target` を埋める」）。
 
 `StatusLoaded` も `Result` を運ぶ。理由は `LogLoaded` と同じで、失敗の通り道が無いと
 `JobKind::LoadStatus` が走ったまま残り、以後の `Cmd::LoadStatus` が黙って落ちる。
@@ -1509,11 +1526,18 @@ pub enum Cmd {
     Exec(GitOp),                       // git CLI 実行（03 参照）
     CancelExec,                        // 走っている Exec を中断する（上の「キャンセル」）
     ResolveTarget(RemoteUrl),          // 既定リモートの URL → RepoTarget（上の「RepoInfo.target を埋める」）
-    ResolveAccount,
+    ResolveAccount(Box<RepoTarget>),   // どのリポジトリのアカウントを決めるか（04 の手順 1〜4）
     FetchPr, FetchChecks, FetchPrList,
     Quit,
 }
 ```
+
+**`ResolveAccount` は対象を運ぶ。** ランタイムに `state.repo.target` を読ませると、
+`TargetState` の 3 つのうち `Resolved` 以外を受けたときの腕を `dispatch` に書くことに
+なり、**どのテストからも踏めない腕**が 2 つ増える（`update` はその 2 つでは `Cmd` を
+出さない）。`Box` に載せるのは `Cmd::Exec(GitOp)` と同じ理由ではなく、
+`RepoTarget` が `String` 3 本ぶんあり、1 打鍵ごとに組まれる `Cmd::None` と同じ
+`enum` に載るため。
 
 ## 起動時の読み込み
 
@@ -1524,9 +1548,10 @@ pub fn init(state: &mut AppState) -> Cmd;
 `runtime::run` がループに入る前に 1 回呼ぶ。`main.rs` から呼ぶと、テストを書かない
 配線の側に処理が出てしまう。いまは `LoadRepoInfo` と
 `LoadLog { count: config.graph.page_size, restart: false }` と `LoadStatus` と
-`LoadBranches` の 4 つで、`ResolveAccount` はそのタスクでここに足す。
-**`ResolveTarget` は `init` からは出さない** —— リモート一覧が要るので、
-`Msg::RepoInfoLoaded` が届いてから出す（上の「`RepoInfo.target` を埋める」）。起動時はまだ何も読んでいないので
+`LoadBranches` の 4 つ。
+**`ResolveTarget` と `ResolveAccount` は `init` からは出さない** —— 前者はリモート
+一覧が要るので `Msg::RepoInfoLoaded` を、後者は `RepoTarget` が要るので
+`Msg::TargetResolved` を待ってから出す（上の「`RepoInfo.target` を埋める」）。起動時はまだ何も読んでいないので
 `restart` は偽でよい（`LogSession` が無ければ `restart` の有無に関わらず先頭から開く）。
 
 ## update の原則

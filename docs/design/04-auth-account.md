@@ -526,7 +526,7 @@ git2 まで巻き込む。上の表は手で叩いた結果（`git2` 0.21）。
 
 **ヘッダに出すのは 1 行に収まる診断だけ。** `NoAccess` の `attempts`
 （「どの login がなぜ落ちたか」）は件数しか出さず
-（`[gh: 届いたアカウントがありません（2 件）]`）、`Unusable` と
+（`[gh: どれも届きません（2 件）。A で詳細]`）、`Unusable` と
 `ConfiguredUnavailable` の `message` も出さない。上の `reason_for` が
 `GhUnrunnable` / `GhFailed` / `GhUnparsable` を 1 つに畳んでよいと言う根拠は
 「直し方の違いは `message`（`AuthError` の `Display`）に出ている」なので、

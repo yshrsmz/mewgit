@@ -14,7 +14,7 @@ use crate::modals::picker::{self, Picker};
 /// push なのかが判らない（開く経路は `f` 1 つ。01）。
 const TITLE: &str = "fetch するリモート";
 
-/// キーの案内。`update::remote_picker_key` が受けるキーと揃える。
+/// キーの案内。`update::picker_key` と `update::remote_picked` が受けるキーと揃える。
 const HINT: &str = "[j/k] 選ぶ   [Enter] fetch   [Esc] やめる";
 
 /// 一覧から fetch するリモートを選ばせる。

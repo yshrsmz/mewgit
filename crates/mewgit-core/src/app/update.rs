@@ -490,7 +490,7 @@ fn account_view(account: &AccountState, target: &TargetState) -> Result<Modal, S
             cursor: 0,
         }),
         AccountState::Resolved(account) => Err(format!(
-            "{} @ {} を使っています（{}）",
+            "{} @ {} を使用（{}）",
             account.login,
             account.host,
             source_label(account.source)
@@ -509,9 +509,15 @@ fn account_view(account: &AccountState, target: &TargetState) -> Result<Modal, S
 }
 
 /// [`AccountSource`] を通知に出す語（04 の手順 1〜4）。
+///
+/// **`Config` は置き場所まで出す。** mewgit から選び直す手段がまだ無いので
+/// （01 の「アカウントの選び直し」）、**どこを直せば変わるかを言えるのはここだけ**
+/// —— 指示を足すのはその操作を持たない側（#65）。**どちらの指定かは判らない**ので
+/// 2 つとも出す（`AccountSource::Config` は `.git/config` と設定ファイルの
+/// `[[repos]]` を兼ねている）。
 fn source_label(source: AccountSource) -> &'static str {
     match source {
-        AccountSource::Config => "設定で指定",
+        AccountSource::Config => "設定: mewgit.user / [[repos]]",
         AccountSource::Single => "ログインが 1 つだけ",
         AccountSource::Probe => "届いたのが 1 つだけ",
     }
@@ -2230,7 +2236,7 @@ fn resolve_again(state: &mut AppState) -> Cmd {
 /// （`to_command` と同じ）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reload {
-    /// index / ワークツリーだけ。`Cmd::LoadStatus` は常に出すので、ここでは何も足さない。
+    /// index / ワークツリーだけ。`Cmd::LoadStatus` のほかには何も足さない。
     Nothing,
     /// ref の索引（ラベルと HEAD）。**walk に入るコミットの集合は変わらない**ので、
     /// 積んだログはそのままでよい。
@@ -2254,10 +2260,12 @@ enum Reload {
 impl Reload {
     /// この書き込みで古くなる領域。**累積**で、`Refs` は index とワークツリーも含む。
     ///
-    /// 書き込みは必ず [`Region::Worktree`] を古くする（`switch` も `push` も
-    /// ワークツリーや index を動かしうるし、`Cmd::LoadStatus` は常に出している）。
-    /// 判別子をここに置くのは、`Reload` が「どの書き込みがどこを古くするか」を
-    /// 既に持っているため（01 の「実行中ジョブ › 世代」）。
+    /// **git のワークツリーに触る書き込みは必ず [`Region::Worktree`] を古くする**
+    /// （`switch` も `push` もワークツリーや index を動かしうるし、そのとき
+    /// `Cmd::LoadStatus` を必ず出す）。**触らないものが 1 つある** ——
+    /// [`Reload::Account`] は `.git/config` の 1 行しか書かないので、どの領域も
+    /// 古くならない。判別子をここに置くのは、`Reload` が「どの書き込みがどこを
+    /// 古くするか」を既に持っているため（01 の「実行中ジョブ › 世代」）。
     fn regions(self) -> &'static [Region] {
         match self {
             Reload::Nothing => &[Region::Worktree],
@@ -5208,6 +5216,39 @@ feat/b
             "2 つの Resolving に同じ案内を出している"
         );
         assert!(never_asked.contains("GitHub"), "{never_asked}");
+    }
+
+    #[test]
+    fn every_notice_that_a_prints_fits_the_status_bar() {
+        // **72 セルはステータスバーの予算**（01 の「失敗の案内文」）。`A` は通知の
+        // **新しい産出元**なので、`exec_advice` を回している見張りは自分では拾わない
+        // （CLAUDE.md の「共有した見張りは新しい産出元を自分では拾わない」）。
+        //
+        // **いちばん長いのは `Resolved(Config)`** —— 選び直す手段がまだ無いので、
+        // どこを直せば変わるかまで出している（01）。login は EMU の shortcode を
+        // 想定して長めにする。
+        let mut configured = fake_account("yamada_taro_acme");
+        configured.source = AccountSource::Config;
+        let cases = [
+            (AccountState::Resolved(configured), TargetState::Unasked),
+            (
+                AccountState::Resolved(fake_account("taro")),
+                TargetState::Unasked,
+            ),
+            (AccountState::Resolving, TargetState::Unavailable),
+            (
+                AccountState::Resolving,
+                TargetState::Resolved(fake_target()),
+            ),
+        ];
+
+        for (account, target) in cases {
+            let message = account_view(&account, &target).expect_err("モーダルを開いている");
+            assert!(cells(&message) <= 72, "{} セル: {message}", cells(&message));
+        }
+        // **login の長さに上限は無い**ので「いちばん長い形」は作れない。ここが
+        // 見張るのは、現実的な長さで予算に収まるところまで（ヘッダの
+        // `every_degraded_reason_fits_the_header` と同じ数え方）。
     }
 
     #[test]

@@ -12,7 +12,6 @@ use ratatui::text::{Line, Text};
 use ratatui::Frame;
 
 use crate::modals::picker::{self, Picker};
-use crate::ui;
 
 /// 選ばせるときの枠のタイトル。
 const TITLE_PICK: &str = "GitHub アカウントを選ぶ";
@@ -20,7 +19,7 @@ const TITLE_PICK: &str = "GitHub アカウントを選ぶ";
 /// 内訳を出すだけのときの枠のタイトル。**「選ぶ」と書かない** —— 選べる相手がいない。
 const TITLE_SHOW: &str = "GitHub アカウント";
 
-/// キーの案内。`update::account_picker_key` が受けるキーと揃える。
+/// キーの案内。`update::picker_key` と `update::account_picked` が受けるキーと揃える。
 const HINT_PICK: &str = "[j/k] 選ぶ   [Enter] 保存   [Esc] やめる";
 
 /// 選べないときの案内。**`j/k` も `Enter` も書かない** —— どれも効かない。
@@ -58,9 +57,12 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &DegradedReason, cursor: us
 
 /// 本文。1 行目が何が起きているかで、以降が内訳と直し方。
 ///
-/// **`ui::degraded`（ヘッダの 1 行）は呼べない。** あちらは `[gh: …]` の中に置く
-/// 前提で主語が `gh` なので、単体で読むと文にならない（`GhMissing` は「ありません」）。
-/// 04 の表がヘッダとここの分担を持っている。
+/// **`ui::degraded`（ヘッダの 1 行）とは別の文言。同じ事実を 2 通りに書く。**
+/// あちらは `[gh: …]` の中に置く前提で主語が `gh` なので単体では文にならず
+/// （`GhMissing` は「ありません」）、しかも**リポジトリ名とスピナーと 1 行を
+/// 分け合う**ので詰めてある（`どれも届きません（2 件）`）。ここは箱の中で折り返せる
+/// ので、詰める理由が無い。**揃えると、ヘッダを 1 桁詰めるたびにこちらが痩せる。**
+/// 分担は 04 の表にある。
 ///
 /// **内訳を一覧側に置かない**のは、一覧が折り返さないため —— `Unusable` の
 /// `message` は 1 行に収まらず、このモーダルが在る理由そのものが右端で切れる（07）。
@@ -100,7 +102,10 @@ fn body(reason: &DegradedReason) -> Text<'static> {
         }
         // **外での直し方を書かない。** 選ばせるのはこのモーダル自身で、書くと
         // 「いま提供している操作を外でやれ」になる（#65）。
-        DegradedReason::Ambiguous { .. } => vec![ui::degraded(reason).into_owned(), saves_to()],
+        DegradedReason::Ambiguous { candidates } => vec![
+            format!("アカウントを 1 つに絞れません（{} 件）", candidates.len()),
+            saves_to(),
+        ],
     };
     Text::from(lines.into_iter().map(Line::from).collect::<Vec<_>>())
 }

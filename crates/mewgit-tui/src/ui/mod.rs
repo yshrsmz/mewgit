@@ -362,13 +362,15 @@ fn degraded_label(reason: &DegradedReason) -> String {
 
 /// degraded の理由を 1 行にする。
 ///
-/// **診断だけを書く。** 押すキー（`Ambiguous` の `A`）を添えるのは呼び出し側で、
-/// ここは「何が起きているか」だけを返す —— [`modals::account_picker`] が同じ問いに
-/// **別の答え**を返す（あちらは `[gh: …]` の外に置く文なので主語が要る）ので、
-/// 分担は 04 の表にある。
+/// **診断だけを書く。** 押すキーを添えるのは [`degraded_label`] で、ここは
+/// 「何が起きているか」だけを返す。
+///
+/// **1 行の予算に合わせて詰めてある。** リポジトリ名とスピナーと同じ 1 行を
+/// 分け合うので（07 のヘッダ）、`Modal::AccountPicker` は**同じ事実を別の文言**で
+/// 書く（あちらは箱の中で折り返せる）。揃えると、ここを詰めるたびにあちらが痩せる。
 /// **内訳も出さない。** `NoAccess` の `attempts` は 1 件ずつ理由を持っているが、
 /// 並べるのは `Modal::AccountPicker`（04）。
-pub fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
+fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
     match reason {
         DegradedReason::GhMissing => "ありません".into(),
         // 要求版は定数から引く。`GhTooOld` は値として持っていない（04）。
@@ -384,10 +386,10 @@ pub fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
         }
         // **「権限が無い」と読ませない。** 回線が無いだけの回もここに来る（04）。
         DegradedReason::NoAccess { attempts } => {
-            format!("届いたアカウントがありません（{} 件）", attempts.len()).into()
+            format!("どれも届きません（{} 件）", attempts.len()).into()
         }
         DegradedReason::Ambiguous { candidates } => {
-            format!("アカウントを 1 つに絞れません（{} 件）", candidates.len()).into()
+            format!("1 つに絞れません（{} 件）", candidates.len()).into()
         }
     }
 }
@@ -692,6 +694,11 @@ mod tests {
         // 存在しない短いヘッダを見張ることになる。
         //
         // **幅は 100。** 07 の目標のレイアウトがその幅で、`< 100` は M6 のタスク。
+        //
+        // **`owner/repo` と login の長さは fixture 任せ。** どちらも上限が無いので
+        // 「いちばん長い形」を作れない —— 31 桁の `owner/repo` を実測したら
+        // `A` の案内が落ちた（07 のヘッダに残した）。ここが見張るのは
+        // 「現実的な名前で、目標幅に収まって隙間が残るか」まで。
         let reasons = [
             DegradedReason::GhMissing,
             DegradedReason::GhTooOld {
@@ -719,7 +726,11 @@ mod tests {
             height: 24,
         };
         for reason in reasons {
-            let want = degraded_label(&reason);
+            // **末尾に空白まで見る。** `contains` だけだと、スピナーと隙間なく
+            // 並んだ状態（余白ゼロ）で通ってしまい、**リポジトリ名が 1 桁伸びた
+            // 瞬間に案内が落ちる**のを見張れない（`/code-review` が拾った。
+            // 実測で `Ambiguous` がちょうどその状態だったので文言を詰めた）。
+            let want = format!("{} ", degraded_label(&reason));
             let mut state = shipping_header_state();
             state.account = AccountState::Degraded(reason);
             let line = header(&state, size);

@@ -61,6 +61,7 @@ const TICK: i64 = 60;
 
 use crate::app::{update, AppState, Cmd, Msg};
 use crate::auth::ssh::SshCommand;
+use crate::auth::RepoTarget;
 use crate::git_exec::{GitOp, Runner};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
@@ -456,6 +457,19 @@ fn shown<S: AsRef<OsStr>>(args: &[S]) -> String {
 }
 
 /// リモート 1 件。URL は使う側が見ないので、名前から作った偽物でよい。
+/// アカウント解決の対象。`app` の `update` と `auth::resolve` の両方が使う。
+///
+/// **owner / repo は実在のものに合わせてある** —— `[[repos]]` の glob を書く
+/// テストがこの値に当たる。
+pub fn fake_target() -> RepoTarget {
+    RepoTarget {
+        host: "github.com".to_string(),
+        port: None,
+        owner: "yshrsmz".to_string(),
+        repo: "mewgit".to_string(),
+    }
+}
+
 pub fn fake_remote(name: &str) -> Remote {
     Remote {
         name: name.to_string(),

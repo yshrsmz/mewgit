@@ -22,8 +22,8 @@ libc = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 # `auth::resolve` が候補ごとの probe を並列に回すため（`join_all`）。tokio には
 # 動的な本数を待つ組み合わせ子が無く、`JoinSet` は 'static を要求するので
-# `&Backend` を借りる future を載せられない。`mewgit-tui` が既に使っている版と同じ。
-futures = "0.3"
+# `&Backend` を借りる future を載せられない。
+futures.workspace = true
 toml = "1.0"
 globset = "0.4"
 tempfile = { version = "3", optional = true }

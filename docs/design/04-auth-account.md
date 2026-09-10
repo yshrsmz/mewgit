@@ -322,10 +322,8 @@ pub trait Backend {
     fn token(&self, host: &str, login: &str)
         -> impl Future<Output = Result<SecretString, AuthError>> + Send;
     fn probe(&self, target: &RepoTarget, token: &SecretString)
-        -> impl Future<Output = ProbeOutcome> + Send;
+        -> impl Future<Output = Result<(), AttemptFailure>> + Send;
 }
-
-pub enum ProbeOutcome { Ok, Failed(AttemptFailure) }
 
 pub async fn resolve<B: Backend + Sync>(
     target: &RepoTarget,
@@ -381,19 +379,21 @@ pub async fn resolve<B: Backend + Sync>(
   （`AuthError` は `Clone`）、手順 2 がそのまま `GhMissing` / `GhTooOld` に落とす
 - **`probe` は `GithubClient::new(target.host, target.port, token)` → `repo(owner, repo)`。**
   `new` の失敗（`shared_http()` の TLS 初期化。`InvalidHost` は 1 本目で届かなくなった）も
-  `Undetermined` に落とす —— プロセス全体の条件なので候補ごとに違う答えにならない
+  `Undetermined` に落とす。**ただしこれは「プロセス全体の条件が候補ごとの服を着る」形**
+  （下の手順 1 と同じ）—— 全候補が同じ理由で `NoAccess` に並ぶ。`resolve` の手前で
+  1 回だけ判定して `Unusable` に落とす形もあるので、**実装するタスクで数え直す**
 
-| `GithubClient::repo` の結果 | `ProbeOutcome` | 理由 |
+| `GithubClient::repo` の結果 | `probe` の返り値 | 理由 |
 |---|---|---|
-| `Ok(RepoMeta)` | `Ok` | |
-| `Err(Decode)` | **`Ok`** | `check_status` を通ったあとにしか出ない = **2xx が返っている**。GHES の版差で本文の形が違うだけで、アクセス権はある。`Failed` に落とすと動いている環境が `NoAccess` になる |
-| `Err(Unauthorized)` | `Failed(Denied { 401 })` | |
-| `Err(Forbidden)` | `Failed(Denied { 403 })` | |
-| `Err(NotFound)` | `Failed(Denied { 404 })` | 権限が無ければ GitHub は 404 を返す |
-| `Err(Api { status, .. })` | `Failed(Denied { status })` | |
-| `Err(RateLimited)` | `Failed(Undetermined)` | **ステータスを載せない。** 05 の `RateLimited` は 429 だけでなく**印の付いた 403** からも来る |
-| `Err(Network)` | `Failed(Undetermined)` | |
-| `Err(InvalidHost)` | `Failed(Undetermined)` | 届かないはず（1 本目で `valid_host` を通している）。`unreachable!()` にしない |
+| `Ok(RepoMeta)` | `Ok(())` | |
+| `Err(Decode)` | **`Ok(())`** | `check_status` を通ったあとにしか出ない = **2xx が返っている**。GHES の版差で本文の形が違うだけで、アクセス権はある。`Failed` に落とすと動いている環境が `NoAccess` になる |
+| `Err(Unauthorized)` | `Err(Denied { 401 })` | |
+| `Err(Forbidden)` | `Err(Denied { 403 })` | |
+| `Err(NotFound)` | `Err(Denied { 404 })` | 権限が無ければ GitHub は 404 を返す |
+| `Err(Api { status, .. })` | `Err(Denied { status })` | |
+| `Err(RateLimited)` | `Err(Undetermined)` | **ステータスを載せない。** 05 の `RateLimited` は 429 だけでなく**印の付いた 403** からも来る |
+| `Err(Network)` | `Err(Undetermined)` | |
+| `Err(InvalidHost)` | `Err(Undetermined)` | 届かないはず（1 本目で `valid_host` を通している）。`unreachable!()` にしない |
 
 手順:
 
@@ -405,6 +405,12 @@ pub async fn resolve<B: Backend + Sync>(
    - **トークンが取れなかったら手順 2 へ落とさない。** `ConfiguredUnavailable` で止める
      —— 指定を無視して別のアカウントを選ぶと、EMU と個人アカウントを取り違える。
      直すのは gh ではなく設定のほうなので、`Unusable` にも畳まず login を持たせる
+   - **ただし `ConfiguredUnavailable` にするのは login 固有の失敗（`GhFailed`）だけ。**
+     手順 1 は手順 2 を**意図的に飛ばす**ので、**`gh` の失敗の入口はここにもある**
+     —— `gh` が居ない・古いをまとめて畳むと、「`mewgit.user` を直してください」と
+     案内しながら `GhTooOld` の腕（「2.81.0 以上に上げてください」）が一度も
+     発火しない。**プロセス全体の条件が、login ごとの設定ミスの服を着る**
+     （`/simplify` の altitude が拾った）
    - **空文字（`user = ` が残った形）は「指定なし」と同じ。** `gh auth token --user ""`
      を叩いても答えは返らない
 2. `auth_status()` を `target.host` で絞る。0 件なら `Degraded(NotLoggedIn)`
@@ -424,6 +430,15 @@ N×(トークン取得 + RTT) を起動のたびに払う。tokio には動的�
 無く、`JoinSet` は `'static` を要求して `&Backend` を借りる future を載せられないので、
 `futures` の `join_all` を使う（`mewgit-tui` が既に使っている版と同じ）。
 **逐次に戻すと開かない関所**（`Barrier` + `timeout`）で見張る。
+
+### 送った判断 —— `resolve` の戻り値は `AccountState` のまま
+
+doc に「`Resolving` は返さない」と書いてあるが、見張っているのはその文だけで、
+`Result<Account, DegradedReason>` にすれば型になる（`/simplify` の altitude）。
+**今回は採らない。** 01 が「`AccountResolved` は `resolve` の戻り値をそのまま運ぶ」と
+決めており、変えるなら 01 の `Msg` と 04 の signature を先に直す 1 本になる。
+`Resolving` を返しても実害は「解決中の表示が残る」だけで、`Cmd` を出した側が
+既に置いている値と同じ。**ヘッダ表示のタスクで、`Msg` を触るついでに数え直す。**
 
 ### `LoginState` で候補を絞らない
 

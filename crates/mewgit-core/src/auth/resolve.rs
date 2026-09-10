@@ -35,23 +35,15 @@ pub trait Backend {
         login: &str,
     ) -> impl Future<Output = Result<SecretString, AuthError>> + Send;
 
-    /// そのトークンで `GET /repos/{owner}/{repo}` に届くか。
+    /// そのトークンで `GET /repos/{owner}/{repo}` に届いたか。
     ///
-    /// **`Result` ではない。** 呼ぶ側が見るのは「このアカウントで通ったか」だけで、
-    /// 失敗の種類は [`AttemptFailure`] が持つ（05 の「`repo` は probe 兼用」）。
+    /// **成功側は空。** 呼ぶ側が見るのは「このアカウントで通ったか」だけで、
+    /// リポジトリのメタ情報は捨てる（05 の「`repo` は probe 兼用」）。
     fn probe(
         &self,
         target: &RepoTarget,
         token: &SecretString,
-    ) -> impl Future<Output = ProbeOutcome> + Send;
-}
-
-/// [`Backend::probe`] の結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProbeOutcome {
-    /// リポジトリに届いた。
-    Ok,
-    Failed(AttemptFailure),
+    ) -> impl Future<Output = Result<(), AttemptFailure>> + Send;
 }
 
 /// リポジトリで使うアカウントを決める（04 の手順 1〜4）。
@@ -72,22 +64,17 @@ pub async fn resolve<B: Backend + Sync>(
     if let Some(login) = explicit_login(target, repo_path, cfg).await {
         return match backend.token(&target.host, &login).await {
             Ok(token) => resolved(target, login, token, AccountSource::Config),
-            // **`Unusable` に畳まない。** 直すのは gh ではなく設定のほうなので、
-            // どの login を指していたかを持ったまま返す。
-            Err(err) => degraded(DegradedReason::ConfiguredUnavailable {
-                login,
-                message: err.to_string(),
-            }),
+            Err(err) => AccountState::Degraded(configured_failed(login, err)),
         };
     }
 
     // 手順 2。
     let mut logins = match backend.logins(&target.host).await {
         Ok(logins) => logins,
-        Err(err) => return degraded(reason_for(err)),
+        Err(err) => return AccountState::Degraded(reason_for(err)),
     };
     if logins.is_empty() {
-        return degraded(DegradedReason::NotLoggedIn {
+        return AccountState::Degraded(DegradedReason::NotLoggedIn {
             host: target.host.clone(),
         });
     }
@@ -98,7 +85,7 @@ pub async fn resolve<B: Backend + Sync>(
         let login = logins.remove(0).login;
         return match backend.token(&target.host, &login).await {
             Ok(token) => resolved(target, login, token, AccountSource::Single),
-            Err(err) => degraded(DegradedReason::NoAccess {
+            Err(err) => AccountState::Degraded(DegradedReason::NoAccess {
                 attempts: vec![ProbeAttempt {
                     login,
                     failure: AttemptFailure::NoToken {
@@ -123,10 +110,7 @@ pub async fn resolve<B: Backend + Sync>(
                 )
             }
         };
-        match backend.probe(target, &token).await {
-            ProbeOutcome::Ok => (login, Ok(token)),
-            ProbeOutcome::Failed(failure) => (login, Err(failure)),
-        }
+        (login, backend.probe(target, &token).await.map(|()| token))
     }))
     .await;
 
@@ -143,7 +127,7 @@ pub async fn resolve<B: Backend + Sync>(
     }
 
     match passed.len() {
-        0 => degraded(DegradedReason::NoAccess { attempts }),
+        0 => AccountState::Degraded(DegradedReason::NoAccess { attempts }),
         // **トークンを取り直さない。** probe に使ったものをそのまま渡す。
         1 => {
             let (login, token) = passed.remove(0);
@@ -152,7 +136,7 @@ pub async fn resolve<B: Backend + Sync>(
         // **通った候補だけを並べる。** 落ちたものを混ぜると、UI が「選べるアカウント」
         // として 401 のログインを出すことになる。**`auth_status` を呼び直さないで
         // 済むよう `GhLogin` ごと運ぶ**（呼び直すと 0.95 秒を再度払う。#61 の実測）。
-        _ => degraded(DegradedReason::Ambiguous {
+        _ => AccountState::Degraded(DegradedReason::Ambiguous {
             candidates: passed.into_iter().map(|(login, _)| login).collect(),
         }),
     }
@@ -225,6 +209,25 @@ fn reason_for(err: AuthError) -> DegradedReason {
     }
 }
 
+/// 手順 1 の `token()` が失敗した理由を畳む。
+///
+/// **login 固有の失敗だけを [`DegradedReason::ConfiguredUnavailable`] にする。**
+/// `gh` が居ない・古いは**プロセス全体の条件**で、設定を直しても変わらない ——
+/// 一緒くたにすると「`mewgit.user` を直してください」と案内しながら、UI の
+/// `GhTooOld`（「2.81.0 以上に上げてください」）の腕が一度も発火しなくなる。
+/// **手順 1 は手順 2 を意図的に飛ばすので、`gh` の失敗の入口はここにもある。**
+fn configured_failed(login: String, err: AuthError) -> DegradedReason {
+    match err {
+        // `gh auth token --user <login>` が非 0 で終わったもの。実測の文言は
+        // `no oauth token found for <host> account <login>`（04 の表）。
+        AuthError::GhFailed { .. } => DegradedReason::ConfiguredUnavailable {
+            login,
+            message: err.to_string(),
+        },
+        other => reason_for(other),
+    }
+}
+
 fn resolved(
     target: &RepoTarget,
     login: String,
@@ -239,20 +242,13 @@ fn resolved(
     })
 }
 
-fn degraded(reason: DegradedReason) -> AccountState {
-    AccountState::Degraded(reason)
-}
-
-/// 呼ばれた分だけ名前を積む記録。テストが「呼んでいない」を見張るために要る。
-#[cfg(test)]
-type Calls = std::sync::Mutex<Vec<String>>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::LoginState;
-    use crate::test_util::TestRepo;
-    use std::collections::{BTreeMap, BTreeSet};
+    use crate::test_util::{fake_target, TestRepo};
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     /// 手順 1〜4 を踏むための [`Backend`]。
@@ -262,10 +258,12 @@ mod tests {
     struct Fake {
         logins: Result<Vec<GhLogin>, AuthError>,
         /// login ごとの probe の結果。無い login は届かなかったことにする。
-        probes: BTreeMap<String, ProbeOutcome>,
-        /// トークンを取れない login。
-        no_token: BTreeSet<String>,
-        calls: Calls,
+        probes: BTreeMap<String, Result<(), AttemptFailure>>,
+        /// トークンを取れない login と、そのときの `gh` の失敗。**種類を持つ** ——
+        /// 手順 1 は login 固有の失敗（`GhFailed`）とプロセス全体の条件
+        /// （`GhMissing` など）を分けるので、1 種類しか作れないと片方を踏めない。
+        no_token: BTreeMap<String, AuthError>,
+        calls: Mutex<Vec<String>>,
         /// 全候補が揃うまで probe を返さない関所。**逐次に回すと開かない。**
         gate: Option<tokio::sync::Barrier>,
     }
@@ -275,8 +273,8 @@ mod tests {
             Fake {
                 logins: Ok(logins),
                 probes: BTreeMap::new(),
-                no_token: BTreeSet::new(),
-                calls: Calls::default(),
+                no_token: BTreeMap::new(),
+                calls: Mutex::default(),
                 gate: None,
             }
         }
@@ -288,13 +286,23 @@ mod tests {
             }
         }
 
-        fn probing(mut self, login: &str, outcome: ProbeOutcome) -> Self {
+        fn probing(mut self, login: &str, outcome: Result<(), AttemptFailure>) -> Self {
             self.probes.insert(login.to_string(), outcome);
             self
         }
 
-        fn without_token(mut self, login: &str) -> Self {
-            self.no_token.insert(login.to_string());
+        fn without_token(self, login: &str) -> Self {
+            self.failing_token(
+                login,
+                AuthError::GhFailed {
+                    argv: vec!["gh".to_string(), "auth".to_string(), "token".to_string()],
+                    message: format!("exit 1: no oauth token found for account {login}"),
+                },
+            )
+        }
+
+        fn failing_token(mut self, login: &str, err: AuthError) -> Self {
+            self.no_token.insert(login.to_string(), err);
             self
         }
 
@@ -328,13 +336,9 @@ mod tests {
             login: &str,
         ) -> impl Future<Output = Result<SecretString, AuthError>> + Send {
             self.record(format!("token:{login}"));
-            let result = if self.no_token.contains(login) {
-                Err(AuthError::GhFailed {
-                    argv: vec!["gh".to_string(), "auth".to_string(), "token".to_string()],
-                    message: format!("exit 1: no oauth token found for account {login}"),
-                })
-            } else {
-                Ok(SecretString::from(format!("token-for-{login}")))
+            let result = match self.no_token.get(login) {
+                Some(err) => Err(err.clone()),
+                None => Ok(SecretString::from(format!("token-for-{login}"))),
             };
             async move { result }
         }
@@ -343,7 +347,7 @@ mod tests {
             &self,
             _target: &RepoTarget,
             token: &SecretString,
-        ) -> impl Future<Output = ProbeOutcome> + Send {
+        ) -> impl Future<Output = Result<(), AttemptFailure>> + Send {
             use secrecy::ExposeSecret;
             let login = token
                 .expose_secret()
@@ -352,7 +356,7 @@ mod tests {
                 .to_string();
             self.record(format!("probe:{login}"));
             let outcome = self.probes.get(&login).cloned().unwrap_or_else(|| {
-                ProbeOutcome::Failed(AttemptFailure::Undetermined {
+                Err(AttemptFailure::Undetermined {
                     message: "テストが結果を用意していない".to_string(),
                 })
             });
@@ -366,32 +370,42 @@ mod tests {
         }
     }
 
-    fn login(name: &str, state: LoginState) -> GhLogin {
+    /// `state` は既定で `Success`。**絞り込みに使わないので**（04）、値が効くのは
+    /// `gh_state_does_not_narrow_the_candidates` の 1 本だけ。
+    fn login(name: &str) -> GhLogin {
         GhLogin {
             host: "github.com".to_string(),
             login: name.to_string(),
             active: false,
             scopes: Vec::new(),
-            state,
+            state: LoginState::Success,
         }
     }
 
-    fn target() -> RepoTarget {
-        RepoTarget {
-            host: "github.com".to_string(),
-            port: None,
-            owner: "acme".to_string(),
-            repo: "tools".to_string(),
-        }
+    /// 候補 3 件。手順 4 を踏むテストが使う。
+    fn three() -> Vec<GhLogin> {
+        ["taro", "hanako", "jiro"]
+            .iter()
+            .map(|n| login(n))
+            .collect()
     }
 
-    fn denied(status: u16) -> ProbeOutcome {
-        ProbeOutcome::Failed(AttemptFailure::Denied { status })
+    fn denied(status: u16) -> Result<(), AttemptFailure> {
+        Err(AttemptFailure::Denied { status })
     }
 
-    /// 明示指定の無いリポジトリ。手順 2 以降を踏むテストが使う。
-    fn plain_repo() -> TestRepo {
-        TestRepo::init()
+    /// 明示指定の無いリポジトリで手順 2 以降を踏む。**リポジトリを引数に取らない**
+    /// —— `mewgit.user` を書くテストだけが `TestRepo` を自分で持つ。
+    async fn resolve_plain(backend: &Fake) -> AccountState {
+        let repo = TestRepo::init();
+        resolve(&fake_target(), repo.path(), backend, &Config::default()).await
+    }
+
+    /// `mewgit.user = taro` を書いたリポジトリで解決する（手順 1）。
+    async fn resolve_configured(backend: &Fake) -> AccountState {
+        let repo = TestRepo::init();
+        repo.git(&["config", "mewgit.user", "taro"]);
+        resolve(&fake_target(), repo.path(), backend, &Config::default()).await
     }
 
     fn account(state: &AccountState) -> &Account {
@@ -423,14 +437,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_explicit_user_in_git_config_is_used_without_listing_logins() {
-        let repo = plain_repo();
-        repo.git(&["config", "mewgit.user", "taro"]);
-        let backend = Fake::new(vec![
-            login("taro", LoginState::Success),
-            login("hanako", LoginState::Success),
-        ]);
+        let backend = Fake::new(vec![login("taro"), login("hanako")]);
 
-        let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+        let state = resolve_configured(&backend).await;
 
         let account = account(&state);
         assert_eq!(account.login, "taro");
@@ -444,11 +453,11 @@ mod tests {
 
     #[tokio::test]
     async fn the_config_file_supplies_the_login_when_git_config_has_none() {
-        let repo = plain_repo();
-        let backend = Fake::new(vec![login("taro", LoginState::Success)]);
-        let config = config_with_rule("github.com/acme/*", "taro_acme");
+        let repo = TestRepo::init();
+        let backend = Fake::new(vec![login("taro")]);
+        let config = config_with_rule("github.com/yshrsmz/*", "taro_acme");
 
-        let state = resolve(&target(), repo.path(), &backend, &config).await;
+        let state = resolve(&fake_target(), repo.path(), &backend, &config).await;
 
         let account = account(&state);
         assert_eq!(account.login, "taro_acme");
@@ -457,12 +466,12 @@ mod tests {
 
     #[tokio::test]
     async fn git_config_beats_the_config_file() {
-        let repo = plain_repo();
+        let repo = TestRepo::init();
         repo.git(&["config", "mewgit.user", "taro"]);
         let backend = Fake::new(Vec::new());
-        let config = config_with_rule("github.com/acme/*", "taro_acme");
+        let config = config_with_rule("github.com/yshrsmz/*", "taro_acme");
 
-        let state = resolve(&target(), repo.path(), &backend, &config).await;
+        let state = resolve(&fake_target(), repo.path(), &backend, &config).await;
 
         assert_eq!(account(&state).login, "taro");
     }
@@ -471,11 +480,11 @@ mod tests {
     async fn an_empty_mewgit_user_falls_through_to_the_login_list() {
         // 設定を消し忘れた形（`user = ` が残る）。**degraded にしない** ——
         // 空の login では `gh auth token --user ""` を叩いても答えが返らない。
-        let repo = plain_repo();
+        let repo = TestRepo::init();
         repo.git(&["config", "mewgit.user", ""]);
-        let backend = Fake::new(vec![login("hanako", LoginState::Success)]);
+        let backend = Fake::new(vec![login("hanako")]);
 
-        let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+        let state = resolve(&fake_target(), repo.path(), &backend, &Config::default()).await;
 
         let account = account(&state);
         assert_eq!(account.login, "hanako");
@@ -486,11 +495,9 @@ mod tests {
     async fn an_explicit_login_without_a_token_does_not_fall_through() {
         // **指定を無視して別のアカウントを選ばない。** EMU と個人アカウントを
         // 取り違える形になる。
-        let repo = plain_repo();
-        repo.git(&["config", "mewgit.user", "taro"]);
-        let backend = Fake::new(vec![login("hanako", LoginState::Success)]).without_token("taro");
+        let backend = Fake::new(vec![login("hanako")]).without_token("taro");
 
-        let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+        let state = resolve_configured(&backend).await;
 
         match reason(&state) {
             DegradedReason::ConfiguredUnavailable { login, message } => {
@@ -503,11 +510,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_process_wide_gh_failure_is_not_dressed_as_a_setting_mistake() {
+        // **手順 1 は手順 2 を飛ばすので、`gh` の失敗の入口はここにもある。**
+        // 全部 `ConfiguredUnavailable` に畳むと「`mewgit.user` を直してください」と
+        // 案内しながら、UI の `GhTooOld`（「2.81.0 以上に上げてください」）の腕が
+        // 一度も発火しない。
+        let backend = Fake::new(Vec::new()).failing_token(
+            "taro",
+            AuthError::GhTooOld {
+                found: "2.80.0".to_string(),
+            },
+        );
+
+        let state = resolve_configured(&backend).await;
+
+        assert_eq!(
+            reason(&state),
+            &DegradedReason::GhTooOld {
+                found: "2.80.0".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn no_login_for_the_host_is_not_logged_in() {
-        let repo = plain_repo();
         let backend = Fake::new(Vec::new());
 
-        let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+        let state = resolve_plain(&backend).await;
 
         assert_eq!(
             reason(&state),
@@ -519,10 +548,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_single_login_is_taken_without_probing() {
-        let repo = plain_repo();
-        let backend = Fake::new(vec![login("taro", LoginState::Success)]);
+        let backend = Fake::new(vec![login("taro")]);
 
-        let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+        let state = resolve_plain(&backend).await;
 
         let account = account(&state);
         assert_eq!(account.login, "taro");
@@ -536,10 +564,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_single_login_without_a_token_reports_the_attempt() {
-        let repo = plain_repo();
-        let backend = Fake::new(vec![login("taro", LoginState::Success)]).without_token("taro");
+        let backend = Fake::new(vec![login("taro")]).without_token("taro");
 
-        let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+        let state = resolve_plain(&backend).await;
 
         match reason(&state) {
             // **`Denied { status: 0 }` にしない。** HTTP まで行っていない。
@@ -560,17 +587,12 @@ mod tests {
 
     #[tokio::test]
     async fn the_only_login_that_reaches_the_repo_wins() {
-        let repo = plain_repo();
-        let backend = Fake::new(vec![
-            login("taro", LoginState::Success),
-            login("hanako", LoginState::Success),
-            login("jiro", LoginState::Success),
-        ])
-        .probing("hanako", ProbeOutcome::Ok)
-        .probing("taro", denied(404))
-        .probing("jiro", denied(403));
+        let backend = Fake::new(three())
+            .probing("hanako", Ok(()))
+            .probing("taro", denied(404))
+            .probing("jiro", denied(403));
 
-        let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+        let state = resolve_plain(&backend).await;
 
         let account = account(&state);
         assert_eq!(account.login, "hanako");
@@ -589,17 +611,12 @@ mod tests {
 
     #[tokio::test]
     async fn several_reachable_logins_are_ambiguous() {
-        let repo = plain_repo();
-        let backend = Fake::new(vec![
-            login("taro", LoginState::Success),
-            login("hanako", LoginState::Success),
-            login("jiro", LoginState::Success),
-        ])
-        .probing("taro", ProbeOutcome::Ok)
-        .probing("hanako", ProbeOutcome::Ok)
-        .probing("jiro", denied(404));
+        let backend = Fake::new(three())
+            .probing("taro", Ok(()))
+            .probing("hanako", Ok(()))
+            .probing("jiro", denied(404));
 
-        let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+        let state = resolve_plain(&backend).await;
 
         match reason(&state) {
             // **通った候補だけが並ぶ。** 404 だった `jiro` を混ぜると、選べる
@@ -614,22 +631,17 @@ mod tests {
 
     #[tokio::test]
     async fn no_reachable_login_keeps_every_reason() {
-        let repo = plain_repo();
-        let backend = Fake::new(vec![
-            login("taro", LoginState::Success),
-            login("hanako", LoginState::Success),
-            login("jiro", LoginState::Success),
-        ])
-        .probing("taro", denied(401))
-        .probing(
-            "hanako",
-            ProbeOutcome::Failed(AttemptFailure::Undetermined {
-                message: "接続できません".to_string(),
-            }),
-        )
-        .without_token("jiro");
+        let backend = Fake::new(three())
+            .probing("taro", denied(401))
+            .probing(
+                "hanako",
+                Err(AttemptFailure::Undetermined {
+                    message: "接続できません".to_string(),
+                }),
+            )
+            .without_token("jiro");
 
-        let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+        let state = resolve_plain(&backend).await;
 
         match reason(&state) {
             // **3 つとも別の腕。** `u16` 1 本では「HTTP 0」に潰れる。
@@ -655,15 +667,17 @@ mod tests {
         // 「黙って別のアカウントを選ぶ」形が作れる。落とさなければ払うのは
         // 並列のリクエスト 1 本（04 の「候補の絞り込み」）。
         for dropped in [LoginState::Error, LoginState::Timeout] {
-            let repo = plain_repo();
             let backend = Fake::new(vec![
-                login("taro", LoginState::Success),
-                login("hanako", dropped),
+                login("taro"),
+                GhLogin {
+                    state: dropped,
+                    ..login("hanako")
+                },
             ])
             .probing("taro", denied(404))
-            .probing("hanako", ProbeOutcome::Ok);
+            .probing("hanako", Ok(()));
 
-            let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+            let state = resolve_plain(&backend).await;
 
             let account = account(&state);
             assert_eq!(account.login, "hanako", "{dropped:?}");
@@ -681,30 +695,21 @@ mod tests {
     async fn candidates_are_probed_in_parallel() {
         // **逐次に回すと開かない関所。** 3 本が揃うまで `probe` が返らないので、
         // 1 本ずつ await する実装ではここで止まる（`timeout` が拾う）。
-        let repo = plain_repo();
-        let backend = Fake::new(vec![
-            login("taro", LoginState::Success),
-            login("hanako", LoginState::Success),
-            login("jiro", LoginState::Success),
-        ])
-        .probing("taro", ProbeOutcome::Ok)
-        .probing("hanako", denied(404))
-        .probing("jiro", denied(404))
-        .gated(3);
+        let backend = Fake::new(three())
+            .probing("taro", Ok(()))
+            .probing("hanako", denied(404))
+            .probing("jiro", denied(404))
+            .gated(3);
 
-        let state = tokio::time::timeout(
-            Duration::from_secs(5),
-            resolve(&target(), repo.path(), &backend, &Config::default()),
-        )
-        .await
-        .expect("probe が並列に走っていない");
+        let state = tokio::time::timeout(Duration::from_secs(5), resolve_plain(&backend))
+            .await
+            .expect("probe が並列に走っていない");
 
         assert_eq!(account(&state).login, "taro");
     }
 
     #[tokio::test]
     async fn gh_failures_keep_their_own_reason() {
-        let repo = plain_repo();
         let cases = [
             (
                 AuthError::GhMissing {
@@ -731,7 +736,7 @@ mod tests {
         ];
         for (err, want) in cases {
             let backend = Fake::failing(err.clone());
-            let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+            let state = resolve_plain(&backend).await;
             assert_eq!(reason(&state), &want, "{err:?}");
         }
 
@@ -751,7 +756,7 @@ mod tests {
         ];
         for err in unusable {
             let backend = Fake::failing(err.clone());
-            let state = resolve(&target(), repo.path(), &backend, &Config::default()).await;
+            let state = resolve_plain(&backend).await;
             match reason(&state) {
                 DegradedReason::Unusable { message } => {
                     assert_eq!(message, &err.to_string(), "{err:?}");

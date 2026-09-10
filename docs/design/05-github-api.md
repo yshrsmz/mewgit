@@ -30,7 +30,7 @@ impl GithubClient {
 - **`repo` は probe 兼用**なので、返り値を捨てて「届いたか」だけを見る呼び出しがある。
   probe 専用に `()` を返す関数は作らない。**`auth::resolve` が直に呼ぶのではない**
   —— `github` は `auth` の上段なので、`auth::Backend` を実装する側
-  （`github::AccountBackend`）がここを呼んで `ProbeOutcome` に落とす。
+  （`github::AccountBackend`）がここを呼んで `Result<(), auth::AttemptFailure>` に落とす。
   `GithubError` の各腕をどちらに割るかの表は 04 にある。**`Decode` は `Ok` 側**
   （`check_status` を通ったあとにしか出ないので 2xx が返っている）。
 - `RepoMeta` は `{ owner, repo, default_branch }` の 3 つだけ。`private` / `fork` /

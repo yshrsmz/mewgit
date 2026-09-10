@@ -26,7 +26,7 @@ mod resolve;
 pub mod ssh;
 pub mod url;
 
-pub use resolve::{resolve, Backend, ProbeOutcome};
+pub use resolve::{resolve, Backend};
 
 use secrecy::SecretString;
 

@@ -19,3 +19,7 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 secrecy = "0.10"
+# `join_all` を core と tui の両方が使う。**版を 1 本にする** —— 別々に書くと
+# Renovate が片方だけ上げたときに、境目をまたぐ `Future` / `Stream` が別クレートの
+# 型に割れる（crossterm と ratatui で踏んだ形。CLAUDE.md）。
+futures = "0.3"

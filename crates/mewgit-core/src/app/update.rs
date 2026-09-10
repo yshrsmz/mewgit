@@ -2317,7 +2317,7 @@ mod tests {
     use crate::app::{
         BranchLoad, GraphSelection, Job, Modal, Modifiers, RepoInfo, TermSize, TextBuffer,
     };
-    use crate::auth::{AuthError, RepoTarget};
+    use crate::auth::AuthError;
     use crate::config::Config;
     use crate::git_exec::{ExecErrorKind, ExecOutput};
     use crate::git_read::{
@@ -2326,7 +2326,8 @@ mod tests {
     use crate::graph::LaneState;
     use crate::test_util::{
         fake_branch, fake_commit, fake_commit_with_parents, fake_detail, fake_entry,
-        fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_upstream, reply,
+        fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_target,
+        fake_upstream, reply,
     };
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
@@ -4951,15 +4952,6 @@ feat/b
             target: fake_target(),
             unnormalized,
         }))
-    }
-
-    fn fake_target() -> RepoTarget {
-        RepoTarget {
-            host: "github.com".to_string(),
-            port: None,
-            owner: "yshrsmz".to_string(),
-            repo: "mewgit".to_string(),
-        }
     }
 
     #[test]

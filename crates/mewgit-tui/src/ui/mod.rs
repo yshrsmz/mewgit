@@ -16,6 +16,7 @@ use std::path::Path;
 
 use crate::{modals, panes};
 use mewgit_core::app::{AppState, GraphSelection, Pane, TermSize};
+use mewgit_core::auth::{gh, AccountState, DegradedReason};
 use mewgit_core::git_read::{FileEntry, FileStatus};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -304,7 +305,59 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
         spans.push(Span::raw(format!("  {}/{}", target.owner, target.repo)));
     }
 
+    if let Some((label, style)) = account_label(&state.account) {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(label, style));
+    }
+
     Paragraph::new(Line::from(spans))
+}
+
+/// ヘッダの `[acct: …]`。まだ決まっていなければ `None`（07）。
+///
+/// **`Resolving` のあいだは何も出さない。** 走っていることは右端のスピナー
+/// （`account`）が出しているので、左にも「解決中」を出すと同じことを 2 箇所で言う。
+/// 既定リモートが無いなどで一度も頼まないリポジトリ（`TargetState::Unavailable`）も
+/// ここに来るので、GitHub と関係のないリポジトリには何も出ない（01）。
+fn account_label(account: &AccountState) -> Option<(String, Style)> {
+    match account {
+        AccountState::Resolving => None,
+        AccountState::Resolved(account) => Some((
+            format!("[acct: {} @ {}]", account.login, account.host),
+            Style::default(),
+        )),
+        AccountState::Degraded(reason) => {
+            Some((format!("[acct: {}]", degraded(reason)), theme::warn()))
+        }
+    }
+}
+
+/// degraded の理由を 1 行にする。
+///
+/// **診断だけを書く。** 「選んでください」のような指示は書かない —— `Ambiguous` を
+/// 選び直す `Modal::AccountPicker` はまだ無く、押すキーの無い案内になる（04 / 07）。
+/// **内訳も出さない。** `NoAccess` の `attempts` は 1 件ずつ理由を持っているが、
+/// 並べる先はピッカーのタスクへ送ってある（04）。
+fn degraded(reason: &DegradedReason) -> String {
+    match reason {
+        DegradedReason::GhMissing => "gh がありません".to_string(),
+        // 要求版は定数から引く。`GhTooOld` は値として持っていない（04）。
+        DegradedReason::GhTooOld { found } => {
+            format!("gh {found} は古い（{} 以上）", gh::REQUIRED)
+        }
+        DegradedReason::Unusable { .. } => "gh を実行できません".to_string(),
+        DegradedReason::NotLoggedIn { host } => format!("{host} に未ログイン"),
+        DegradedReason::ConfiguredUnavailable { login, .. } => {
+            format!("{login} のトークンがありません")
+        }
+        // **「権限が無い」と読ませない。** 回線が無いだけの回もここに来る（04）。
+        DegradedReason::NoAccess { attempts } => {
+            format!("届いたアカウントがありません（{} 件）", attempts.len())
+        }
+        DegradedReason::Ambiguous { candidates } => {
+            format!("アカウントを 1 つに絞れません（{} 件）", candidates.len())
+        }
+    }
 }
 
 /// スピナーの駒。[`Msg::Tick`](mewgit_core::app::Msg::Tick) ごとに 1 つ進む。
@@ -368,12 +421,13 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_row, pane_area, window, wrapped};
+    use super::{degraded, file_row, pane_area, window, wrapped};
     use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
     use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TermSize};
+    use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::test_util::fake_snapshot;
-    use ratatui::style::Modifier;
+    use mewgit_core::test_util::{fake_account, fake_snapshot};
+    use ratatui::style::{Color, Modifier};
 
     #[test]
     fn a_file_row_puts_the_status_letter_before_the_path() {
@@ -527,6 +581,105 @@ mod tests {
         let text = draw(&state, TermSize::default()).join("\n");
 
         assert!(text.contains("Commit "), "{text}");
+    }
+
+    /// 解決済みのアカウントを持つ状態。
+    fn state_with_account(account: AccountState) -> AppState {
+        let mut state = state_at("/repo");
+        state.account = account;
+        state
+    }
+
+    fn resolved_account() -> AccountState {
+        AccountState::Resolved(fake_account("user_shortcode"))
+    }
+
+    /// ヘッダの `needle` が始まるセルの前景色。
+    ///
+    /// **バッファを見る。** `draw` の文字列にはスタイルが残らないので、黄色で出して
+    /// いるかは色を読まないと判らない（`row_is_reversed` と同じ理由でここに置く）。
+    fn header_color_at(state: &AppState, needle: &str) -> Color {
+        let size = TermSize::default();
+        let line = header(state, size);
+        let col = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} がヘッダにありません: {line:?}"));
+        assert!(line.is_char_boundary(col) && line[..col].is_ascii());
+        let terminal = crate::test_util::terminal_with(state, size);
+        terminal.backend().buffer()[(col as u16, 0)].fg
+    }
+
+    #[test]
+    fn header_shows_the_resolved_account() {
+        let line = header(&state_with_account(resolved_account()), TermSize::default());
+
+        assert!(
+            line.contains("[acct: user_shortcode @ github.com]"),
+            "header: {line:?}"
+        );
+    }
+
+    #[test]
+    fn header_says_nothing_while_the_account_is_unresolved() {
+        // **`Resolving` は出さない**（07）。走っていることは右端のスピナーが出しており、
+        // 既定リモートの無いリポジトリはここから動かない（01）。
+        let line = header(
+            &state_with_account(AccountState::Resolving),
+            TermSize::default(),
+        );
+
+        assert!(!line.contains("acct"), "header: {line:?}");
+    }
+
+    #[test]
+    fn a_degraded_account_is_shown_in_the_warn_style() {
+        let state = state_with_account(AccountState::Degraded(DegradedReason::GhMissing));
+
+        let line = header(&state, TermSize::default());
+        assert!(line.contains("[acct: gh がありません]"), "header: {line:?}");
+        assert_eq!(
+            header_color_at(&state, "[acct:"),
+            ratatui::style::Color::Yellow
+        );
+        // 解決できているアカウントは色を付けない（注意を引くのは degraded だけ）。
+        assert_eq!(
+            header_color_at(&state_with_account(resolved_account()), "[acct:"),
+            Color::Reset
+        );
+    }
+
+    #[test]
+    fn every_degraded_reason_fits_the_header() {
+        // **7 つを 1 つずつ回す。** 理由を足したときに、文言の無い腕と、ヘッダから
+        // はみ出す長さの両方をここで落とす（通知の 72 セルと同じ形の見張り。01）。
+        let reasons = [
+            DegradedReason::GhMissing,
+            DegradedReason::GhTooOld {
+                found: "2.80.0".to_string(),
+            },
+            DegradedReason::Unusable {
+                message: "起動できませんでした".to_string(),
+            },
+            DegradedReason::NotLoggedIn {
+                host: "github.com".to_string(),
+            },
+            DegradedReason::ConfiguredUnavailable {
+                login: "taro".to_string(),
+                message: "no oauth token found".to_string(),
+            },
+            DegradedReason::NoAccess {
+                attempts: Vec::new(),
+            },
+            DegradedReason::Ambiguous {
+                candidates: Vec::new(),
+            },
+        ];
+        for reason in reasons {
+            let want = format!("[acct: {}]", degraded(&reason));
+            let state = state_with_account(AccountState::Degraded(reason));
+            let line = header(&state, TermSize::default());
+            assert!(line.contains(&want), "はみ出している: {line:?} / {want}");
+        }
     }
 
     #[test]

@@ -2341,11 +2341,10 @@ mod tests {
     };
     use crate::graph::LaneState;
     use crate::test_util::{
-        fake_branch, fake_commit, fake_commit_with_parents, fake_detail, fake_entry,
+        fake_account, fake_branch, fake_commit, fake_commit_with_parents, fake_detail, fake_entry,
         fake_file_diff, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_target,
         fake_upstream, reply,
     };
-    use secrecy::SecretString;
 
     /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
     const ROWS: usize = 20;
@@ -4984,12 +4983,7 @@ feat/b
         let cmd = reply(
             &mut state,
             Cmd::ResolveAccount(Box::new(fake_target())),
-            Msg::AccountResolved(Ok(Account {
-                host: "github.com".to_string(),
-                login: "taro".to_string(),
-                token: SecretString::from("t".to_string()),
-                source: AccountSource::Single,
-            })),
+            Msg::AccountResolved(Ok(fake_account("taro"))),
         );
 
         assert_eq!(cmd, Cmd::None);

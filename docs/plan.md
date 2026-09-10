@@ -139,13 +139,18 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       **配線は入れていない** —— `Backend` の production 実装（`github::AccountBackend`）と
       `Cmd::ResolveAccount` の発行は次のタスクで、読み手が無いまま出すと起動のたびに
       「未実装のコマンドです」が出る（01 の「`RepoInfo.target` を埋める」）
-- [ ] ヘッダの `[acct: login @ host]` 表示と Degraded 表示。**`auth::Backend` の
+- [x] ヘッダの `[acct: login @ host]` 表示と Degraded 表示。**`auth::Backend` の
       production 実装（`github::AccountBackend`）と `Cmd::ResolveAccount` の配線も
       ここ**（04 の「`Backend` の production 実装は `github` に置く」）。
       **`Modal::AccountPicker` より先に置いた** —— 配線はどちらにも要る前提で、
       こちらは `AccountState` を出すだけなので読み手として小さい
-- [ ] `Modal::AccountPicker` と `.git/config` への保存
-- [ ] `ui::panes::prs` — 現ブランチ PR、チェック一覧、一覧タブ、ブラウザで開く
+- [ ] `Modal::AccountPicker` と `.git/config` への保存。**`NoAccess` / `Ambiguous` の
+      内訳（どの login がなぜ落ちたか）を並べるのもここ** —— ヘッダは 1 行なので
+      件数しか出していない（04 の「解決結果は画面上部に」）
+- [ ] `ui::panes::prs` — 現ブランチ PR、チェック一覧、一覧タブ、ブラウザで開く。
+      **レートリミット残量の受け渡しもここ** —— ヘッダ表示のタスクへ送られていたが、
+      あちらで API を叩くのは起動時の probe だけで、常時出す残量の産出元にならない
+      （05 の「まだ実装していない」）
 - [ ] `Modal::PrCreate` と `create_pr`
 - [ ] PR チェックアウト（同一リポジトリ / fork）
 - [ ] 403 の `needed_scopes` 案内

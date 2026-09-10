@@ -61,12 +61,13 @@ const TICK: i64 = 60;
 
 use crate::app::{update, AppState, Cmd, Msg};
 use crate::auth::ssh::SshCommand;
-use crate::auth::RepoTarget;
+use crate::auth::{Account, AccountSource, RepoTarget};
 use crate::git_exec::{GitOp, Runner};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
     Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
 };
+use secrecy::SecretString;
 use tempfile::TempDir;
 
 /// 一時ディレクトリと、実行環境の設定を持ち込まない `git` の実行。
@@ -466,6 +467,19 @@ pub fn fake_target() -> RepoTarget {
         port: None,
         owner: "yshrsmz".to_string(),
         repo: "mewgit".to_string(),
+    }
+}
+
+/// 解決済みのアカウント 1 件（[`fake_target`] のホスト）。
+///
+/// **`ui` からも使う。** トークンを組むのに `secrecy` が要り、`mewgit-tui` は
+/// あのクレートに依存していない（ヘッダはトークンを描かない）。
+pub fn fake_account(login: &str) -> Account {
+    Account {
+        host: fake_target().host,
+        login: login.to_string(),
+        token: SecretString::from("fake-token".to_string()),
+        source: AccountSource::Single,
     }
 }
 

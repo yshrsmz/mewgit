@@ -166,7 +166,7 @@ pub(super) fn branches_loaded(
         }
     }
 
-    // 落とされたぶんの追いつき（`repo_info_loaded` と同じ形）。
+    // 続きを頼む: 落とされたぶんの追いつき（`repo_info_loaded` と同じ形）。
     if state.jobs.is_fresh(JobKind::LoadBranches, asked) {
         Cmd::None
     } else {

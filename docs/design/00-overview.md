@@ -79,12 +79,13 @@ crates/
 無く、`clippy::too_many_lines` は `allow` 既定の**関数**単位）。1 ファイル = 1 つの
 privacy 境界なので、割ると「どれが本当に他から呼ばれているか」が `pub(super)` として
 可視になる —— 平坦なままだと 90 項目が全部 private で、共有の意図が読めない。
-**いま `pub(super)` は 36 個で、35 個は他のモジュールが実際に名指ししている。**
-残る 1 つ（`remote::NoRemote`）は `pub(super)` な関数の返り値型なので、狭めると
-`private_interfaces` が `-D warnings` で落ちる。**35 個のうち 2 つ
-（`worktree::COMMIT_DIFF` と `NOT_LATEST`）を名指ししているのは他モジュールの
-テストだけ** —— Diff ペインのキーが `worktree::act` を通る以上、断りの文言は
-worktree が持ち主で、見張りは Diff 側に要る。**`mod.rs` の項目には付けない** ——
+**`pub(super)` はほぼ全部が他のモジュールから実際に名指しされている**（数はここに
+書かない。`grep -h "^pub(super) " crates/mewgit-core/src/app/update/*.rs` で出る）。
+例外は `remote::NoRemote` の 1 つで、`pub(super)` な関数の返り値型なので狭めると
+`private_interfaces` が `-D warnings` で落ちる。**名指ししているのが他モジュールの
+テストだけ、というものもある**（`worktree::COMMIT_DIFF` と `NOT_LATEST`）——
+Diff ペインのキーが `worktree::act` を通る以上、断りの文言は worktree が持ち主で、
+見張りは Diff 側に要る。**`mod.rs` の項目には付けない** ——
 あそこの `super` は `app` なので、`pub(super)` は「`app` から呼べる」という別のことを
 言ってしまう（子モジュールは private のままでも見える）。
 `state.rs` を割っていないのは、**割ったことで workspace 最長になった（2269 行）いまも**

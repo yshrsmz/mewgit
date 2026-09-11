@@ -72,7 +72,10 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
     state.issue(cmd)
 }
 
-/// **続きを頼む判断は 13 箇所にある。** いまはそれぞれの経路に置いてある。
+/// **続きを頼む判断は、それぞれの経路に置いてある。** 場所には `// 続きを頼む:` の
+/// 印があり、**一覧はそこから出る**（`grep -rnE "^ *// 続きを頼む:"`）。
+/// **数をここに書かない** —— 導出できる値を離れた場所に置いたコピーになる
+/// （`CLAUDE.md`）。判断を足したら印も置く。
 ///
 /// **`update` の出口で導出する形には畳まない**（M3 の世代のタスクで決めた。01 の
 /// 「実行中ジョブ › 世代」）。追いつきの判断材料は**届いた返信の刻印**で、それが読める
@@ -115,6 +118,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
             // 縮んだ窓でカーソルが外に出たままにならないようにする。
             state.graph.scroll_into_view();
             // 窓が広がって残りが 1 画面を切ることがある。
+            // 続きを頼む: ログの追加ページ。
             load_more(state)
         }
         Msg::Paste(text) => paste(state, &text),
@@ -263,6 +267,7 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
 /// ペインを足すたびに同じ特殊ケースが増える（01 の「diff の遅延取得」）。
 fn focus(state: &mut AppState, pane: Pane) -> Cmd {
     state.focus = pane;
+    // 続きを頼む: 見えるようになったペインの diff。
     load_diff(state)
 }
 

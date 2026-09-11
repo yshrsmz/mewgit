@@ -126,6 +126,7 @@ pub(super) fn repo_info_loaded(
     } else {
         Cmd::LoadRepoInfo
     };
+    // 続きを頼む: 落とされたぶんの `LoadRepoInfo` の追いつき。
     Cmd::batch([again, resolve])
 }
 

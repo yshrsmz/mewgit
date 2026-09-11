@@ -66,6 +66,7 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         state.jobs.advance(*region);
     }
 
+    // 続きを頼む: 書き込みで動いた領域の読み直し（`Reload::after`）。
     match reload {
         Reload::Nothing => Cmd::LoadStatus,
         // **ブランチ一覧も ref から導かれる。** commit は `refs/heads/<現在>` を

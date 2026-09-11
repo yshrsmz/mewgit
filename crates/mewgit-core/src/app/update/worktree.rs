@@ -159,6 +159,7 @@ pub(super) fn head_message_loaded(
     // 中身を見る前に頼み直す（`Ok(None)` の「amend できるコミットがありません」も、
     // その時点では正しくない）。**別のモーダルが開いていれば頼み直さない** ——
     // 下の `modal.is_some()` が届いたものを捨てるので、読むだけ無駄になる。
+    // 続きを頼む: 書き込みより前に読んだ本文を捨てたぶんの頼み直し。
     if !state.jobs.is_fresh(JobKind::LoadHeadMessage, asked) {
         return if state.modal.is_some() {
             Cmd::None
@@ -521,6 +522,8 @@ pub(super) fn status_loaded(
 
     // **`clamp` のあとに見る。** 書き込みで選んでいたファイルが別の区画へ移ると
     // diff の対象も変わる（01 の「diff の遅延取得」）。
+    //
+    // 続きを頼む: 落とされたぶんの status の追いつきと、区画が変わった diff。
     Cmd::batch([again, load_diff(state)])
 }
 

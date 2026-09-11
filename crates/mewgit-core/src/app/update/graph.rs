@@ -82,6 +82,7 @@ fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
         state.graph.detail_failed = None;
         state.graph.files_failed = None;
     }
+    // 続きを頼む: ログの追加ページと、カーソルの指すコミットの詳細 / ファイル一覧。
     Cmd::batch([load_more(state), load_commit(state)])
 }
 
@@ -162,6 +163,7 @@ pub(super) fn commit_detail_loaded(
             state.graph.detail_failed = Some(oid);
         }
     }
+    // 続きを頼む: 別のコミットの詳細が届いたときの頼み直し。
     load_commit(state)
 }
 
@@ -195,6 +197,8 @@ pub(super) fn commit_files_loaded(
             state.graph.files_failed = Some(oid);
         }
     }
+    // 続きを頼む: 別のコミットの一覧が届いたときの頼み直しと、一覧が届いて対象が
+    // 決まった diff。
     Cmd::batch([load_commit(state), load_diff(state)])
 }
 
@@ -267,6 +271,7 @@ pub(super) fn log_loaded(
     //
     // **失敗の処理より後に置く。** 先に置くと、古いページが失敗したときに
     // `load_failed` を立てないまま読み直しを出し、「失敗 → 再読込 → 失敗」を回す。
+    // 続きを頼む: 書き込みより前に頼んだページを捨てたぶんの読み直し。
     if !state.jobs.is_fresh(JobKind::LoadLog, asked) {
         return reload_log(state);
     }
@@ -291,6 +296,8 @@ pub(super) fn log_loaded(
     // `scrolled`（そこで頼む）か `restart`（WIP 行に戻るので頼むものが無い）だけ。
     // 頼んでも `load_detail` / `load_files` が「持っている」「失敗した」で断るので
     // 害は無いが、読む状態が変わっていない経路を一覧に増やさない。
+    //
+    // 続きを頼む: 窓が埋まるまでのログの追加ページ。
     load_more(state)
 }
 

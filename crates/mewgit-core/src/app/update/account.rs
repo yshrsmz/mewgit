@@ -115,27 +115,32 @@ pub(super) fn account_unset(state: &mut AppState) -> Cmd {
 ///
 /// **`state.account` は動かさない。** `Err` を [`DegradedReason`] に畳むと
 /// `auth::resolve` の外に [`AccountState`] の産出元ができ、04 が決めた境目が消える。
+///
+/// **`Repick` に着いたら上書きしてよい。** 「もう埋まっていないか」を先に見たく
+/// なるが、その形は組めない —— この `Cmd` を出すのは [`open_account`] だけで、
+/// あれは必ず [`AccountListing::Waiting`] を置き、2 通目は
+/// [`AppState::issue`](crate::app::AppState::issue) が落とす。**踏めない状態を
+/// 見張るコードを置かない**（`CLAUDE.md`）。カーソルも同じで、待っているあいだは
+/// 候補が空なので `j` / `k` が動かせない（`stepped_index`）。
 pub(super) fn accounts_listed(
     state: &mut AppState,
     result: Result<Vec<GhLogin>, AuthError>,
 ) -> Cmd {
     state.jobs.finish(JobKind::ListAccounts);
-    let Some(Modal::AccountPicker { view, cursor }) = state.modal.as_mut() else {
+    let Some(Modal::AccountPicker {
+        view: AccountView::Repick(repick),
+        ..
+    }) = state.modal.as_mut()
+    else {
         return Cmd::None;
     };
-    let AccountView::Repick(repick) = view else {
-        return Cmd::None;
-    };
-    if repick.logins != AccountListing::Waiting {
-        return Cmd::None;
-    }
     repick.logins = match result {
         Ok(logins) => AccountListing::Listed(logins),
+        // **`AuthError` のまま持たない。** 変種で分岐する読み手が UI に無く
+        // （直し方の違いは `Display` に出ている）、持たせると `DegradedReason::Unusable`
+        // が「3 つを分けない」と決めたのと同じ理由で読まれない状態が増える。
         Err(err) => AccountListing::Failed(err.to_string()),
     };
-    // **カーソルは先頭に戻す。** 待っているあいだの `j` / `k` は候補が空なので
-    // 動かないが（`stepped_index`）、印を残さない。
-    *cursor = 0;
     Cmd::None
 }
 
@@ -276,12 +281,12 @@ mod tests {
     use super::super::{init, update};
     use super::*;
     use crate::app::{KeyCode, Modal, Msg};
-    use crate::auth::{AccountSource, AttemptFailure, GhLogin, LoginState, ProbeAttempt};
+    use crate::auth::{AccountSource, AttemptFailure, GhLogin, ProbeAttempt};
 
     use crate::git_exec::ExecError;
     use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote};
 
-    use crate::test_util::{fake_account, fake_ambiguous, fake_target, reply};
+    use crate::test_util::{fake_account, fake_ambiguous, fake_logins, fake_target, reply};
 
     /// リモートを載せた `RepoInfoLoaded` を 1 通届ける。
     ///
@@ -658,22 +663,12 @@ mod tests {
         state
     }
 
-    fn logins(names: &[&str]) -> Vec<GhLogin> {
-        names
-            .iter()
-            .map(|name| GhLogin {
-                host: "github.com".to_string(),
-                login: (*name).to_string(),
-                active: false,
-                scopes: vec!["repo".to_string()],
-                state: LoginState::Success,
-            })
-            .collect()
-    }
-
     #[test]
     fn the_listed_logins_land_in_the_open_repick_and_can_be_chosen() {
-        let mut state = repick_with(AccountSource::Probe, Ok(logins(&["taro_acme", "hanako"])));
+        let mut state = repick_with(
+            AccountSource::Probe,
+            Ok(fake_logins(&["taro_acme", "hanako"])),
+        );
         // 畳んでいないと、次に `A` を押したときの `Cmd` が `issue` に落とされる。
         assert!(!state.jobs.is_running(JobKind::ListAccounts));
 
@@ -745,7 +740,10 @@ mod tests {
         let second = press(&mut state, 'A');
         assert_eq!(second, Cmd::None, "2 度目が落とされていない");
 
-        let cmd = update(&mut state, Msg::AccountsListed(Ok(logins(&["taro_acme"]))));
+        let cmd = update(
+            &mut state,
+            Msg::AccountsListed(Ok(fake_logins(&["taro_acme"]))),
+        );
 
         assert_eq!(cmd, Cmd::None);
         let Some(Modal::AccountPicker {
@@ -757,7 +755,7 @@ mod tests {
         };
         assert_eq!(
             repick.logins,
-            AccountListing::Listed(logins(&["taro_acme"]))
+            AccountListing::Listed(fake_logins(&["taro_acme"]))
         );
     }
 
@@ -767,7 +765,11 @@ mod tests {
         let cmd = press(&mut state, 'A');
         let _ = press_code(&mut state, KeyCode::Esc);
 
-        let _ = reply(&mut state, cmd, Msg::AccountsListed(Ok(logins(&["taro"]))));
+        let _ = reply(
+            &mut state,
+            cmd,
+            Msg::AccountsListed(Ok(fake_logins(&["taro"]))),
+        );
 
         assert!(state.modal.is_none(), "閉じたモーダルが戻っている");
         // **畳むのは形を見る前。** 畳まないと、次に `A` を押した `Cmd` が落とされる。
@@ -832,31 +834,6 @@ mod tests {
     }
 
     #[test]
-    fn removing_the_account_asks_for_the_resolution_again() {
-        // **`SetAccount` と同じ腕**（`Reload::Account`）。外そうとしたキーが既に
-        // 無ければ `git config --unset` は exit 5 を stderr 空で返す（03 の実測表）
-        // ので、成否から「いま何が設定されているか」は読めない。
-        let mut state = state_resolved(AccountSource::GitConfig);
-
-        let cmd = reply(
-            &mut state,
-            Cmd::Exec(GitOp::UnsetAccount),
-            exec_done_of(
-                GitOp::UnsetAccount,
-                Err(ExecError::Failed {
-                    argv: vec!["config".to_string()],
-                    code: Some(5),
-                    stderr: String::new(),
-                    kind: crate::git_exec::ExecErrorKind::Other,
-                }),
-            ),
-        );
-
-        assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
-        assert!(matches!(state.account, AccountState::Resolving));
-    }
-
-    #[test]
     fn the_picker_never_lets_you_choose_when_nothing_reached_the_repository() {
         // **`NoAccess` は並べるだけ**（04 の手順 4）—— どれも届かない状態で選んでも
         // 何も直らない。`j` も `Enter` も効かず、`Esc` で閉じる。
@@ -897,52 +874,63 @@ mod tests {
         assert!(notice.message.contains("ほかの git"), "{}", notice.message);
     }
 
+    /// `.git/config` を書き換える `GitOp` の 2 つ。**どちらも `Reload::Account`。**
+    fn account_writes() -> [GitOp; 2] {
+        [
+            GitOp::SetAccount {
+                login: "taro".to_string(),
+            },
+            GitOp::UnsetAccount,
+        ]
+    }
+
     #[test]
     fn writing_the_account_asks_for_the_resolution_again() {
-        // **`Cmd::ResolveAccount` の 2 つ目の発行元。** 書いた `mewgit.user` は
-        // 手順 1 で読まれるので、`Resolved(source: Config)` に落ち着く。
-        let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
-        let op = GitOp::SetAccount {
-            login: "taro".to_string(),
-        };
+        // **`Cmd::ResolveAccount` のもう 1 つの発行元**（片方は `target_resolved`）。
+        // 書いた `mewgit.user` は手順 1 で読まれるので `Resolved(GitConfig)` に、
+        // 外したあとは手順 2 以降へ落ちる。
+        for op in account_writes() {
+            let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
 
-        let cmd = reply(
-            &mut state,
-            Cmd::Exec(op.clone()),
-            exec_done_of(op, Ok(fake_output())),
-        );
+            let cmd = reply(
+                &mut state,
+                Cmd::Exec(op.clone()),
+                exec_done_of(op.clone(), Ok(fake_output())),
+            );
 
-        // **`Cmd::LoadStatus` は出さない**（`Reload::Account`）。index もワークツリーも
-        // 触っていないので、出すと空振りの status 走査に加えて `Region::Worktree` の
-        // 世代が進み、飛んでいた読み取りが捨てられる。
-        assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
-        // ヘッダの古い degraded を残さない（07 は `Resolving` のあいだ何も出さない）。
-        assert!(matches!(state.account, AccountState::Resolving));
+            // **`Cmd::LoadStatus` は出さない**（`Reload::Account`）。index もワークツリーも
+            // 触っていないので、出すと空振りの status 走査に加えて `Region::Worktree` の
+            // 世代が進み、飛んでいた読み取りが捨てられる。
+            assert_eq!(cmd, Cmd::ResolveAccount(fake_target()), "{op:?}");
+            // ヘッダの古い degraded を残さない（07 は `Resolving` のあいだ何も出さない）。
+            assert!(matches!(state.account, AccountState::Resolving), "{op:?}");
+        }
     }
 
     #[test]
     fn a_write_that_did_not_finish_still_asks_for_the_resolution_again() {
         // **成否を見ない。** 中断では**書けたかどうか判らない**（#56 の「失敗なら
-        // ref は元のまま」が中断では成り立たない、と同じ形）。読み直せば
-        // `.git/config` の実物が答える。
-        let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
-        let op = GitOp::SetAccount {
-            login: "taro".to_string(),
-        };
+        // ref は元のまま」が中断では成り立たない、と同じ形）。`UnsetAccount` は
+        // 失敗の側も同じで、設定されていないキーへの `git config --unset` は
+        // **exit 5 を stderr 空**で返す（03 の実測表。実物の git で叩くのは
+        // `tests/git_exec.rs`）。読み直せば `.git/config` の実物が答える。
+        for op in account_writes() {
+            let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
 
-        let cmd = reply(
-            &mut state,
-            Cmd::Exec(op.clone()),
-            exec_done_of(
-                op,
-                Err(ExecError::Canceled {
-                    argv: vec!["config".to_string()],
-                }),
-            ),
-        );
+            let cmd = reply(
+                &mut state,
+                Cmd::Exec(op.clone()),
+                exec_done_of(
+                    op.clone(),
+                    Err(ExecError::Canceled {
+                        argv: vec!["config".to_string()],
+                    }),
+                ),
+            );
 
-        assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
-        assert!(matches!(state.account, AccountState::Resolving));
+            assert_eq!(cmd, Cmd::ResolveAccount(fake_target()), "{op:?}");
+            assert!(matches!(state.account, AccountState::Resolving), "{op:?}");
+        }
     }
 
     #[test]

@@ -349,8 +349,11 @@ impl Runtime {
 
             // `gh` の起動と GitHub API は `AccountBackend` の中（04）。ここは待って
             // 結果を `Msg` にするだけ。**`GhCli::detect` もタスクの中で走らせる** ——
-            // 起動時に 1 回だけなので、`gh --version` の往復を最初のフレームの前に
-            // 置く理由が無い。
+            // 最初のフレームの前に `gh --version` の往復を置かずに済むうえ、
+            // **`Runtime` に写しを持たないので、外で `gh` を入れ直した回に古い
+            // `Err(GhMissing)` を掴んだまま固まらない**（下の `ListAccounts` も
+            // 同じ理由で毎回 detect する。実測 0.03〜0.04 秒で、待っている
+            // `gh auth status` の 0.95 秒に比べれば小さい）。
             Cmd::ResolveAccount(target) => {
                 // **材料は `AppState` から取る。** 起動時に決まってから変わらない値
                 // （08。実行中は設定を読み直さない）なので `Runtime` に写しを持つことも
@@ -372,6 +375,7 @@ impl Runtime {
             // —— 引くのは一覧だけで、degraded の理由を作り直すのは
             // `Cmd::ResolveAccount` の仕事（畳むと `AccountState` の産出元が増える。04）。
             Cmd::ListAccounts(host) => {
+                // **`detect` は上の腕と同じく毎回走らせる**（理由もあちらに書いてある）。
                 let gh_bin = state.config.general.gh_bin.clone();
                 let tx = self.tx.clone();
                 tokio::spawn(async move {

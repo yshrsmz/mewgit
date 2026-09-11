@@ -1428,10 +1428,13 @@ pub enum AccountView {
 ///
 /// **`login` / `host` / `source` は [`AppState::account`] の写し。** `ui` の
 /// モーダル描画は `Modal` しか受け取らない（`modals::render`）ので、ここに無い値は
-/// 画面に出せない。**写して安全なのは、開いているあいだ `account` が動かないから**
-/// —— `Cmd::ResolveAccount` の発行元は 2 つだけで、1 つ目（`target_resolved`）は
-/// リポジトリごとに 1 回、2 つ目（`resolve_again`）は書き込みのあとで、そのときは
-/// モーダルが閉じている（01）。
+/// 画面に出せない —— [`Modal::RemotePicker`] が `remotes` を写しているのと同じ形。
+/// **写して安全なのは、開いているあいだ [`AppState::account`] が動かないから** ——
+/// `Cmd::ResolveAccount` を出すのは `update::account` の `target_resolved`
+/// （リポジトリごとに 1 回）と `resolve_again`（書き込みのあと。そのときモーダルは
+/// 閉じている）で、どちらもモーダルが開いているあいだには走らない（01）。
+/// **発行元を数えない** —— 数はここから離れた場所にあり、増えたときに誰も直さない
+/// （`CLAUDE.md`）。見張るのは数ではなく「開いているあいだは動かない」のほう。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repick {
     pub login: String,
@@ -1462,9 +1465,9 @@ pub enum AccountListing {
 impl AccountView {
     /// `Enter` で選べる候補。
     ///
-    /// **読み手が 3 人いるので 1 本にする** —— `ui`（一覧の行・タイトル・キーの案内）、
-    /// `Modal::move_cursor`、`Enter` の確定。別々に `matches!` を書くと、選ばせない
-    /// はずの画面で `Enter` だけが効く。
+    /// **読み手が散っているので 1 本にする** —— `ui`（一覧の行・タイトル・キーの
+    /// 案内）、`Modal::move_cursor`、`Enter` の確定。別々に `matches!` を書くと、
+    /// 選ばせないはずの画面で `Enter` だけが効く。
     ///
     /// **`Waiting` と `Failed` が空なのは意図。** 候補が届いていない画面で `Enter` を
     /// 効かせる相手がいない。
@@ -1483,19 +1486,24 @@ impl AccountView {
     /// **キーの案内（`[u] 指定を解除`）もこれを読む。** 別々に見ると、効かない画面に
     /// 案内だけが出る（#53）。
     ///
-    /// **degraded でも 1 つだけ真になる。** [`DegradedReason::ConfiguredUnavailable`]
-    /// は明示指定のトークンが取れなかった形で、**外す対象は在る** —— ここを偽に
+    /// **degraded でも真になりうる。** [`DegradedReason::ConfiguredUnavailable`] は
+    /// 明示指定のトークンが取れなかった形で、**外す対象は在る** —— ここを偽に
     /// すると、壊れた `mewgit.user` を憶えたまま `A` が案内しか出せない行き止まりが
-    /// 残る（塞ぎたかった `Resolved` 側の穴の、degraded に落ちた版）。残りの degraded
-    /// が偽なのは、`gh` が居ない・古い・ログインしていないが**プロセス全体の条件**で、
-    /// `mewgit.user` を外しても変わらないから（04 の `configured_failed`）。
+    /// 残る（塞ぎたかった `Resolved` 側の穴の、degraded に落ちた版）。
+    ///
+    /// **どの degraded が出どころを持つかは [`DegradedReason::configured_source`] に
+    /// 聞く。** ここで変種を `match` すると、`_ =>` の受け皿が
+    /// [`DegradedReason`] とは別のモジュールに座り、出どころを運ぶ変種が増えても
+    /// 黙って偽を返す。
     pub fn is_unsettable(&self) -> bool {
+        self.source().is_some_and(AccountSource::is_unsettable)
+    }
+
+    /// この画面が指している明示指定の出どころ。無ければ `None`。
+    fn source(&self) -> Option<AccountSource> {
         match self {
-            AccountView::Degraded(DegradedReason::ConfiguredUnavailable { source, .. }) => {
-                source.is_unsettable()
-            }
-            AccountView::Degraded(_) => false,
-            AccountView::Repick(repick) => repick.source.is_unsettable(),
+            AccountView::Degraded(reason) => reason.configured_source(),
+            AccountView::Repick(repick) => Some(repick.source),
         }
     }
 }

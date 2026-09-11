@@ -1120,8 +1120,15 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
   `state.account` は動かない**（`Degraded` は解決が終わった形で、2 度目の
   `Cmd::ResolveAccount` はモーダルを閉じたあとにしか出ない）ので、写しでも導出でも
   結果は同じ。少ないほうを採る
-- `AccountView::Repick(Listing)` —— 取り直した候補（下）。`Listing` は
-  `Waiting` / `Listed(Vec<GhLogin>)` / `Failed(String)` の 3 値
+- `AccountView::Repick(Repick)` —— いまのアカウント（`login` / `host` / `source`）と、
+  取り直した候補（下）。候補の `AccountListing` は `Waiting` /
+  `Listed(Vec<GhLogin>)` / `Failed(String)` の 3 値。
+  **`login` / `host` / `source` は `AppState::account` の写し** —— `ui` のモーダル
+  描画は `Modal` しか受け取らないので、ここに無い値は画面に出せない
+  （`Modal::RemotePicker` が `remotes` を写しているのと同じ形）。**写して安全なのは、
+  開いているあいだ `account` が動かないから** —— `Cmd::ResolveAccount` を出す
+  `target_resolved` はリポジトリごとに 1 回、`resolve_again` は書き込みのあとで、
+  そのときモーダルは閉じている
 
 **選べる候補は `view` の 1 本の述語から出す**（`AccountView::candidates`）。`Degraded`
 なら `DegradedReason::candidates`、`Repick` なら `Listed` のときだけ中身で、残りは空。
@@ -1151,11 +1158,19 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
 - **`gh auth status` の失敗を `DegradedReason` に畳まない。** 畳むと `resolve` の外に
   `AccountState` の産出元がもう 1 つでき、04 が「degraded の理由を作るのは `resolve`
   だけ」と決めた境目が消える（`Backend` の TLS 初期化を `Unusable` に落とさないのと
-  同じ数え方）。`Failed(String)` として本文に出すだけにして、`state.account` は動かさない
-- **返信を採るのは、モーダルがまだ `Repick(Waiting)` のときだけ。** 0.95 秒のあいだに
+  同じ数え方）。`Failed(String)` として本文に出すだけにして、`state.account` は動かさない。
+  **`AuthError` のまま持たない**のも同じ形 —— 変種で分岐する読み手が UI に無く
+  （直し方の違いは `Display` に出ている）、`DegradedReason::Unusable` が
+  「3 つを分けない」と決めたのと同じ理由になる。**代わりに次の一手を本文に書く**
+  （`Esc` で閉じてから `A` で引き直す）—— 引き直しは mewgit が持っている操作なので、
+  行き止まりにしない（#65）。**`A` はモーダル表示中には効かない**ので、閉じてからと
+  書く（#53）
+- **返信を採るのは、モーダルがまだ `Repick` のときだけ。** 0.95 秒のあいだに
   `Esc` で閉じられるし、別のモーダルも開く。**もう一度 `A` を押された形も通る** ——
   2 度目の `Cmd` は `AppState::issue` が落とすので、遅れて届いた 1 通が**新しいほうの
-  モーダル**を埋める。だから見るのは**モーダルの形**であって「自分が頼んだか」ではない
+  モーダル**を埋める。だから見るのは**モーダルの形**であって「自分が頼んだか」ではない。
+  **「もう埋まっていないか」は見ない** —— この `Cmd` を出すのは `A` の 1 箇所だけで、
+  そこは必ず `Waiting` を置く。踏めない状態を見張るコードは置かない
 
 選んだ login は `.git/config` の `mewgit.user` に書く（`GitOp::SetAccount`。03）。
 `u` で外す（`GitOp::UnsetAccount`）。

@@ -43,35 +43,58 @@ fn saves_to() -> String {
 
 /// アカウント解決の内訳を出し、選べるなら選ばせる。
 pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize) {
-    // **選べるかどうかは 1 つの述語から出す。** タイトル・案内・行を別々に見ると、
-    // 片方だけが「選べる」ふりをする（07）。
     let candidates = view.candidates();
-    let pick = !candidates.is_empty();
-    // **`Repick` は待っているあいだも「選ぶ」。** 0.95 秒で候補が出るので、途中で
-    // 枠のタイトルが書き換わるほうが読めない（07）。
-    let title = match view {
-        AccountView::Repick(_) => TITLE_PICK,
-        AccountView::Degraded(_) if pick => TITLE_PICK,
-        AccountView::Degraded(_) => TITLE_SHOW,
-    };
 
     picker::render(
         frame,
         area,
         Picker {
-            title,
+            title: title(view),
             body: body(view),
             rows: candidates.iter().map(candidate_line).collect(),
             cursor,
-            hint: &hint(view, pick),
+            hint: &hint(view),
         },
     );
 }
 
+/// 枠のタイトル。**「選べるか」を 1 つの述語から出す**（[`hint`] と行の有無も同じ）
+/// —— 別々に見ると、片方だけが「選べる」ふりをする（07）。
+///
+/// **待っているあいだだけは、候補が空でも「選ぶ」と書く。** 0.95 秒で候補が出る
+/// ものを「選べません」と名乗って書き換えるほうが読めない（07）。**引けなかった
+/// ときは書き換える** —— あれは待てば変わる状態ではないので、選べる相手がいない
+/// ことを枠でも言う。
+fn title(view: &AccountView) -> &'static str {
+    if !view.candidates().is_empty() || waiting(view) {
+        TITLE_PICK
+    } else {
+        TITLE_SHOW
+    }
+}
+
+/// 候補の取り直しを待っているか。**「まだ答えが出ていない」を言うのはここだけ。**
+fn waiting(view: &AccountView) -> bool {
+    matches!(
+        view,
+        AccountView::Repick(Repick {
+            logins: AccountListing::Waiting,
+            ..
+        })
+    )
+}
+
 /// キーの案内。**`u` は [`AccountView::is_unsettable`] が真のときだけ足す** ——
 /// 出す条件と `update::account_key` が受ける条件が同じ 1 本の述語から出る（#53）。
-fn hint(view: &AccountView, pick: bool) -> String {
-    let base = if pick { HINT_PICK } else { HINT_SHOW };
+///
+/// **`pick` を引数に取らない。** 呼ぶ側が計算して渡す形にすると、候補が無いのに
+/// `[Enter] 保存` を出す組み合わせが型で作れる（「導出できる値を引数に取らせない」）。
+fn hint(view: &AccountView) -> String {
+    let base = if view.candidates().is_empty() {
+        HINT_SHOW
+    } else {
+        HINT_PICK
+    };
     if view.is_unsettable() {
         format!("{HINT_UNSET}   {base}")
     } else {
@@ -82,13 +105,11 @@ fn hint(view: &AccountView, pick: bool) -> String {
 /// 本文。[`AccountView`] の 2 つで分かれる。
 fn body(view: &AccountView) -> Text<'static> {
     match view {
-        AccountView::Degraded(reason) => lines(degraded_body(reason)),
-        AccountView::Repick(repick) => lines(repick_body(repick)),
+        AccountView::Degraded(reason) => degraded_body(reason),
+        AccountView::Repick(repick) => repick_body(repick),
     }
-}
-
-fn lines(lines: Vec<String>) -> Text<'static> {
-    Text::from(lines.into_iter().map(Line::from).collect::<Vec<_>>())
+    .into_iter()
+    .collect()
 }
 
 /// 選び直しの本文。1 行目が「いま誰で、なぜそれになったか」。
@@ -113,29 +134,57 @@ fn repick_body(repick: &Repick) -> Vec<String> {
         AccountListing::Listed(_) => lines.push(saves_to()),
         // **`gh` の失敗をここで出す。** `DegradedReason` に畳まないと決めてあるので
         // （01 の「候補の取り直し」）、`state.account` は `Resolved` のまま。
+        // **次の一手を書く。** 引けなかった理由（gh が消えた・答えない）は外で
+        // 直すものだが、**引き直しは mewgit が持っている操作**なので、そこまで
+        // 案内する。**`A` はモーダル表示中には効かない**ので閉じてから、と書く
+        // （#53 の「案内にキーを書いたら、その案内が出ている画面でそのキーが
+        // 効くかを数える」）。
         AccountListing::Failed(message) => {
             lines.push("候補を読み込めませんでした".to_string());
             lines.push(message.clone());
+            lines.push("Esc で閉じてから A で引き直せます".to_string());
         }
     }
     // **外せない側にだけ外での直し方を書く**（#65 の「指示を足すのは、その操作を
-    // 持たない側」）。外せる側には `[u] 指定を解除` が出ているので書かない。
-    if matches!(source, AccountSource::RepoRule) {
-        lines.push("設定ファイルの [[repos]] は mewgit からは外せません".to_string());
-    }
+    // 持たない側」）。外せる側には `[u] 指定を解除` が出ている。
+    lines.extend(cannot_remove(*source));
     lines
+}
+
+/// mewgit から外せない**指定**なら、その 1 行。
+///
+/// **`Single` / `Probe` は `None`。** [`AccountSource::is_unsettable`] が偽なのは
+/// 同じだが、あちらは mewgit が選んだ結果で**直す場所そのものが無い** ——
+/// `is_unsettable` を条件に使うと「ログインが 1 つだけ は外せません」と出る。
+///
+/// **網羅 `match` で書く**（`modals::render` が `_` を使わないのと同じ理由）。
+/// `_ =>` を置くと、`AccountSource` を 1 つ足したときにどちらの側へ落ちても
+/// コンパイルエラーにならない。
+fn cannot_remove(source: AccountSource) -> Option<String> {
+    match source {
+        AccountSource::RepoRule => Some(format!(
+            "{} は mewgit からは外せません",
+            source_label(source)
+        )),
+        AccountSource::GitConfig | AccountSource::Single | AccountSource::Probe => None,
+    }
 }
 
 /// [`AccountSource`] を画面に出す語（04 の手順 1〜4）。
 ///
 /// **明示指定の 2 つを別々に出す。** どちらを直せば変わるかが違ううえ、
 /// `.git/config` のほうは `u` でその場で外せる（`AccountSource` の doc）。
-fn source_label(source: AccountSource) -> &'static str {
+///
+/// **置き場所を書くのはここ 1 本。** [`degraded_body`] の
+/// `ConfiguredUnavailable` も [`repick_body`] もこれを呼ぶ —— 手で書くと、
+/// `AccountSource` を 1 つ足したときに直す場所が増える（しかも
+/// [`MEWGIT_USER`] を literal で書き直すことになる。[`saves_to`] の doc）。
+fn source_label(source: AccountSource) -> String {
     match source {
-        AccountSource::GitConfig => ".git/config の mewgit.user",
-        AccountSource::RepoRule => "設定ファイルの [[repos]]",
-        AccountSource::Single => "ログインが 1 つだけ",
-        AccountSource::Probe => "届いたのが 1 つだけ",
+        AccountSource::GitConfig => format!(".git/config の {MEWGIT_USER}"),
+        AccountSource::RepoRule => "設定ファイルの [[repos]]".to_string(),
+        AccountSource::Single => "ログインが 1 つだけ".to_string(),
+        AccountSource::Probe => "届いたのが 1 つだけ".to_string(),
     }
 }
 
@@ -171,8 +220,6 @@ fn degraded_body(reason: &DegradedReason) -> Vec<String> {
         ],
         // **どちらの指定かを出す。** `AccountSource` を運ぶようにしたのはこのため
         // （両方を並べる形は #73 で出荷して「選び直せない」を拾われた）。
-        // **`GitConfig` なら `u` で外せる**ので、外での直し方は書かない
-        // （#65 の「指示を足すのは、その操作を持たない側」）。
         DegradedReason::ConfiguredUnavailable {
             login,
             source,
@@ -180,12 +227,9 @@ fn degraded_body(reason: &DegradedReason) -> Vec<String> {
         } => vec![
             format!("設定が指す {login} のトークンがありません"),
             message.clone(),
-            match source {
-                AccountSource::GitConfig => {
-                    format!("{MEWGIT_USER} は .git/config にあります")
-                }
-                _ => "設定ファイルの [[repos]] を直してください".to_string(),
-            },
+            // **置き場所は [`source_label`] の 1 本から引く。** ここで手書きすると
+            // `MEWGIT_USER` を literal で書くことになる（[`saves_to`] の doc）。
+            format!("{} を直してください", source_label(*source)),
         ],
         // **「権限が無い」と読ませない。** 全部が「確かめられなかった」形もここに来る
         // （04）ので、1 件ずつの理由をそのまま並べる。
@@ -246,7 +290,7 @@ fn candidate_line(login: &GhLogin) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, row_is_reversed, state_with_modal};
+    use crate::test_util::{draw, row_is_reversed, row_of, state_with_modal};
     use mewgit_core::app::{AccountListing, AccountView, AppState, Modal, Repick, TermSize};
     use mewgit_core::auth::{
         AccountSource, AttemptFailure, DegradedReason, LoginState, ProbeAttempt,
@@ -317,6 +361,9 @@ mod tests {
         assert!(text.contains("候補を読み込んでいます"), "{text}");
         // **待っているあいだは選べない**ので `[Enter]` を出さない（候補が空）。
         assert!(!text.contains("[Enter]"), "{text}");
+        // **枠は「選ぶ」のまま。** 0.95 秒で候補が出るものを「選べません」と
+        // 名乗って書き換えるほうが読めない（07）。
+        assert!(text.contains("GitHub アカウントを選ぶ"), "{text}");
     }
 
     #[test]
@@ -355,12 +402,9 @@ mod tests {
 
         let rows = draw(&state, SIZE);
         // **探すのは `[u]` だけ。** 文言そのものを鍵にすると、案内を伸ばして
-        // 折り返させたときに「行が見つからない」で落ちてしまい、**この見張りが
+        // 溢れさせたときに「行が見つからない」で落ちてしまい、**この見張りが
         // 幅を見ているのか綴りを見ているのか判らなくなる**。
-        let hint = rows
-            .iter()
-            .find(|row| row.contains("[u]"))
-            .unwrap_or_else(|| panic!("{}", rows.join("\n")));
+        let hint = &rows[row_of(&rows, "[u]") as usize];
 
         assert!(
             hint.contains("[Esc]"),
@@ -396,6 +440,13 @@ mod tests {
         assert!(text.contains("候補を読み込めませんでした"), "{text}");
         assert!(text.contains("gh が見つかりませんでした"), "{text}");
         assert!(!text.contains("[Enter]"), "{text}");
+        // **待ちとは枠が違う。** 引けなかったのは待てば変わる状態ではないので、
+        // 「選ぶ」と名乗らない（`title` の doc）。
+        assert!(!text.contains("GitHub アカウントを選ぶ"), "{text}");
+        // **次の一手を出す。** 引き直しは mewgit が持っている操作なので、
+        // 行き止まりにしない（#65）。`A` はモーダル表示中には効かないので、
+        // 閉じてから、と書く（#53）。
+        assert!(text.contains("Esc で閉じてから A で引き直せます"), "{text}");
     }
 
     #[test]
@@ -410,7 +461,10 @@ mod tests {
 
         let text = draw(&state, SIZE).join("\n");
 
-        assert!(text.contains("mewgit.user は .git/config"), "{text}");
+        assert!(
+            text.contains(".git/config の mewgit.user を直して"),
+            "{text}"
+        );
         assert!(!text.contains("[[repos]]"), "{text}");
         // **外せるので `u` を出す**（`AccountView::is_unsettable` が degraded でも
         // 真になる唯一の腕）。

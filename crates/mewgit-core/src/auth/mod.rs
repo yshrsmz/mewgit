@@ -255,9 +255,9 @@ pub enum DegradedReason {
 impl DegradedReason {
     /// 選ばせてよい候補。[`Ambiguous`](Self::Ambiguous) 以外は空。
     ///
-    /// **読み手が 4 人いるので 1 本にする** —— `Modal::AccountPicker` の描画（タイトルと
-    /// キーの案内もこれで割れる）、カーソル移動、`Enter` の確定（01 の
-    /// 「アカウントの選び直し」）、それにヘッダが `A` に添える文言（`A で選ぶ` /
+    /// **読み手が散っているので 1 本にする** —— `AccountView::candidates`（そこから
+    /// `Modal::AccountPicker` の描画とカーソル移動と `Enter` の確定へ広がる。01 の
+    /// 「アカウントの選び直し」）と、ヘッダが `A` に添える文言（`A で選ぶ` /
     /// `A で詳細`。07）。別々に `matches!` を書くと、`NoAccess` を選ばせない約束を
     /// 誰かが守り損ねる。
     ///
@@ -272,6 +272,26 @@ impl DegradedReason {
             | DegradedReason::NotLoggedIn { .. }
             | DegradedReason::ConfiguredUnavailable { .. }
             | DegradedReason::NoAccess { .. } => &[],
+        }
+    }
+
+    /// 明示指定が原因で degraded になったなら、その指定の出どころ。
+    ///
+    /// **網羅 `match` で書く**（[`candidates`](Self::candidates) と同じ形）。
+    /// `_ =>` の受け皿を置くと、**出どころを運ぶ変種を将来足したときに黙って
+    /// `None` になる** —— 読み手は `A` の `u`（指定の解除）が効くかどうかなので、
+    /// 効くはずの画面で何も起きない形が、コンパイルエラーにならずに通る。
+    pub fn configured_source(&self) -> Option<AccountSource> {
+        match self {
+            DegradedReason::ConfiguredUnavailable { source, .. } => Some(*source),
+            // **`gh` が居ない・古い・答えないはプロセス全体の条件**で、
+            // `mewgit.user` を外しても変わらない（`resolve` の `configured_failed`）。
+            DegradedReason::GhMissing
+            | DegradedReason::GhTooOld { .. }
+            | DegradedReason::Unusable { .. }
+            | DegradedReason::NotLoggedIn { .. }
+            | DegradedReason::NoAccess { .. }
+            | DegradedReason::Ambiguous { .. } => None,
         }
     }
 }

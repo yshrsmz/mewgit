@@ -103,7 +103,7 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
 `cargo update --workspace` を叩いた場合は誰も担保しない。**
 
 - **認証付きリクエストは同時 4 本まで（`Semaphore`）。まだ入れていない。**
-  いま並ぶのは `checks` の 2 本（check-runs と commit status）だけで、**上限 4 の
+  いま並ぶのは `checks`（check-runs と commit status）だけで、**上限 4 の
   内側なので `Semaphore` が働く場面がまだ無い**。扇形に広がるのは
   `ui::panes::prs`（PR ごとに checks / reviews を引く）なので、そこで入れる
 - **一覧は `Link` の `rel="next"` を辿って全ページ集める。** `per_page=100` で

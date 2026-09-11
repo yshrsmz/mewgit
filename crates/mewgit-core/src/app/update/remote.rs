@@ -665,7 +665,8 @@ mod tests {
     fn a_pruned_tracking_ref_still_pushes_to_the_configured_upstream() {
         // **`upstream`（短縮名）で決めていると、ここで `-u` の提案に落ちる**。
         // `fetch --prune` のあとに `P` を押しただけで追跡先が別のリモートへ
-        // 向け替わる（02 の「ブランチ一覧」が数えている `None` の 4 つ目）。
+        // 向け替わる（02 の「ブランチ一覧」が挙げる `None` の理由のうち
+        // 「設定はあるが追跡 ref が消えている」）。
         let mut state = state_for_push(
             &["origin", "fork"],
             Branch {
@@ -998,7 +999,7 @@ mod tests {
         assert_eq!(*on_yes, Cmd::Exec(push_op("origin", "topic", true)));
     }
 
-    /// `push_plan` が断った理由。断る腕は 4 つあるので、キーを押す形ではなく
+    /// `push_plan` が断った理由。断る腕が複数あるので、キーを押す形ではなく
     /// 純粋関数を直に呼ぶ（`Refused` を返した理由がそのまま読める）。
     fn refusal(remotes: &[&str], branches: Option<Vec<Branch>>) -> String {
         let mut state = state_with_commits(2);

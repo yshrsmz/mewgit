@@ -520,8 +520,7 @@ pub(super) fn status_loaded(
         Cmd::LoadStatus
     };
 
-    // **`clamp` のあとに見る。** 書き込みで選んでいたファイルが別の区画へ移ると
-    // diff の対象も変わる（01 の「diff の遅延取得」）。
+    // **`clamp` のあとに見る**（01 の「diff の遅延取得」）。
     //
     // 続きを頼む: 落とされたぶんの status の追いつきと、区画が変わった diff。
     Cmd::batch([again, load_diff(state)])

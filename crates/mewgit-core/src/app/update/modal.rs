@@ -6,7 +6,7 @@
 
 use crate::git_exec::GitOp;
 
-use super::account::account_picked;
+use super::account::{account_picked, account_unset};
 use super::remote::remote_picked;
 use super::worktree::commit_message_key;
 use super::{edit_key, submit_exec};
@@ -21,7 +21,7 @@ pub(super) fn modal_key(state: &mut AppState, key: Key) -> Cmd {
         // **一覧から 1 つ選ぶモーダルは骨格が同じ**（`j` / `k` / `Esc`）。
         // 違うのは `Enter` で出す `Cmd` だけなので、そこだけ各モーダルが持つ。
         Some(Modal::RemotePicker { .. }) => picker_key(state, key, remote_picked),
-        Some(Modal::AccountPicker { .. }) => picker_key(state, key, account_picked),
+        Some(Modal::AccountPicker { .. }) => account_key(state, key),
         // 他のモーダルはそれぞれのタスクで実装する。閉じる道だけ開けておく。
         Some(_) => {
             if key == Key::new(KeyCode::Esc) {
@@ -81,6 +81,20 @@ fn picker_key(state: &mut AppState, key: Key, on_enter: fn(&mut AppState) -> Cmd
         }
         _ => Cmd::None,
     }
+}
+
+/// [`Modal::AccountPicker`] のキー処理。骨格は [`picker_key`] に委ね、`u` だけを
+/// 自分で受ける（01 の「アカウントの選び直し」）。
+///
+/// **`u` を [`picker_key`] に足さない。** [`Modal::RemotePicker`] には外す対象が
+/// 無いので、共通の骨格に置くと片方でしか意味を持たないキーが増える。
+/// **効くかどうかは `AccountView::is_unsettable` の 1 本**で、キーの案内を出す
+/// `ui` 側も同じものを読む（#53）。
+fn account_key(state: &mut AppState, key: Key) -> Cmd {
+    if key == Key::new(KeyCode::Char('u')) {
+        return account_unset(state);
+    }
+    picker_key(state, key, account_picked)
 }
 
 fn move_modal_cursor(state: &mut AppState, delta: isize) {

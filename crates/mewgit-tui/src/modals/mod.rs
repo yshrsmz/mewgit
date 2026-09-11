@@ -32,8 +32,8 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
             remotes,
             cursor,
         } => remote_picker::render(frame, area, reason, remotes, *cursor),
-        Modal::AccountPicker { reason, cursor } => {
-            account_picker::render(frame, area, reason, *cursor);
+        Modal::AccountPicker { view, cursor } => {
+            account_picker::render(frame, area, view, *cursor);
         }
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
         Modal::RebaseEditor { .. } | Modal::PrCreate { .. } | Modal::Help => {}

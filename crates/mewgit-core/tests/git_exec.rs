@@ -162,6 +162,58 @@ async fn set_account_writes_where_the_resolver_reads() {
 }
 
 #[tokio::test]
+async fn unset_account_removes_what_set_account_wrote() {
+    // **読み手を通して確かめる**（`set_account_writes_where_the_resolver_reads` と
+    // 同じ理由）。`git config --get` で読み返すと、`--unset` が別の段を消した形を
+    // 見張れない。
+    let repo = TestRepo::init();
+    let runner = repo.runner();
+    runner
+        .run(&GitOp::SetAccount {
+            login: "taro".into(),
+        })
+        .await
+        .expect("mewgit.user を書けませんでした");
+
+    runner
+        .run(&GitOp::UnsetAccount)
+        .await
+        .expect("mewgit.user を外せませんでした");
+
+    // 一覧が空なので、`mewgit.user` が残っていれば手順 1 で
+    // `ConfiguredUnavailable` になる。外せていれば手順 2 の `NotLoggedIn`。
+    let backend = Fake::new(Vec::new());
+    let resolved = resolve(&fake_target(), repo.path(), &backend, &Config::default()).await;
+
+    assert!(
+        matches!(&resolved, Err(DegradedReason::NotLoggedIn { .. })),
+        "{resolved:?}"
+    );
+}
+
+#[tokio::test]
+async fn unsetting_an_account_that_was_never_set_fails_without_saying_why() {
+    // **exit 5 を stderr 空で返す**（03 の実測表）。01 が「書き込みのあとは成否に
+    // 関わらず解決をやり直す」と決めた根拠がこれ —— 失敗から「いま何が設定されて
+    // いるか」は読めない。**実物の git で確かめる**（設計書の断定を叩き直す側）。
+    let repo = TestRepo::init();
+
+    let err = repo
+        .runner()
+        .run(&GitOp::UnsetAccount)
+        .await
+        .expect_err("設定されていないのに成功した");
+
+    match err {
+        ExecError::Failed { code, stderr, .. } => {
+            assert_eq!(code, Some(5));
+            assert!(stderr.is_empty(), "{stderr:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_dashed_file_name_is_not_read_as_an_option() {
     let repo = TestRepo::init();
     repo.commit("first");

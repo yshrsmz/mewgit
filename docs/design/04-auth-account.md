@@ -289,7 +289,7 @@ git 自身も fetch でエラーにする。
 // `Resolving` は `Cmd::ResolveAccount` を出す前に置く値（01）。
 pub enum AccountState {
     Resolving,                         // まだ頼んでいない。`resolve` は返さない（型でそうなっている）
-    Resolved(Account),                 // { host, login, token, source: Config | Probe | Single }
+    Resolved(Account),                 // { host, login, token, source: GitConfig | RepoRule | Single | Probe }
     Degraded(DegradedReason),
 }
 
@@ -407,9 +407,14 @@ pub async fn resolve<B: Backend + Sync>(
 
 手順:
 
-1. 明示指定があれば、その login のトークンを取得して `Resolved(source: Config)`。優先順は
-   1. `.git/config` の `mewgit.user`。`auth` が git2 の `Config` で読む（`config` モジュールは `.git/config` を見ない。08 参照）
-   2. 設定ファイルの `[[repos]]` マッチ。`cfg.account_for(&target.host, &target.owner, &target.repo)`
+1. 明示指定があれば、その login のトークンを取得して `Resolved`。優先順は
+   1. `.git/config` の `mewgit.user` → `AccountSource::GitConfig`。`auth` が git2 の `Config` で読む（`config` モジュールは `.git/config` を見ない。08 参照）
+   2. 設定ファイルの `[[repos]]` マッチ → `AccountSource::RepoRule`。`cfg.account_for(&target.host, &target.owner, &target.repo)`
+   - **どちらで当たったかを `AccountSource` に残す。** 1 本の `Config` に畳むと、
+     `A` のモーダルが「mewgit から外せるか」を答えられない —— `.git/config` は
+     `git config --unset` で外せるが、設定ファイルの `[[repos]]` は外せない
+     （08 の境目の裏側）。**畳んだまま両方の置き場所を案内に並べる形は #73 で出荷して
+     いて、`/code-review` に「選び直せない」を拾われた**（01 の「アカウントの選び直し」）
    - **一覧を引かない。** `gh auth status` は候補のトークンをホストへ検証しに行くので、
      答えが決まっているのに 0.24 秒払うことになる
    - **トークンが取れなかったら手順 2 へ落とさない。** `ConfiguredUnavailable` で止める
@@ -439,9 +444,12 @@ pub async fn resolve<B: Backend + Sync>(
    - 成功が複数 → `Degraded(Ambiguous)`。`A` で開くモーダルが選ばせ、選んだ login を
      `.git/config` の `mewgit.user` に書く（`GitOp::SetAccount`。01 の「アカウントの
      選び直し」）。**書いたあとは解決をやり直す**ので、以後は手順 1 で
-     `Resolved(source: Config)` になり probe を通らない。
-     **`Vec<GhLogin>` を運ぶので、選び直すときに `auth_status` を呼び直さなくてよい**
-     （実測 0.95 秒。#61）。**並べるのは除外できなかった候補**（通ったもの +
+     `Resolved(source: GitConfig)` になり probe を通らない。
+     **`Vec<GhLogin>` を運ぶので、`Ambiguous` から選ぶときは `auth_status` を
+     呼び直さなくてよい**（実測 0.95 秒。#61）。**効くのはここだけ** ——
+     決まったあと（`Resolved`）に `A` で選び直すときは候補が state のどこにも
+     残っていないので、そちらは `Cmd::ListAccounts` で引き直す（01 の
+     「候補の取り直し」）。**引き直した候補は probe しない**（同）。**並べるのは除外できなかった候補**（通ったもの +
      `Undetermined`）—— 断られたものを混ぜると、選べるアカウントとして 401 の
      ログインを出すことになる。**候補ごとの probe の結果は運んでいない。ピッカーのタスクで数え直して、
      据え置くと決めた** —— 運ぶこと自体は安い（`passed` と `unchecked` は
@@ -548,7 +556,12 @@ degraded でも案内する**のは、ヘッダが落としたものを出す画
 | `NoAccess` | 件数だけ + `A で詳細` | `attempts` を 1 件ずつ（login とその `AttemptFailure`）。**選ばせない** |
 | `Unusable` / `ConfiguredUnavailable` | 畳んだ 1 行 + `A で詳細` | `message` そのまま |
 | `GhMissing` / `GhTooOld` / `NotLoggedIn` | 1 行で足りる + `A で詳細` | 同じ 1 行 + 外での直し方 |
+| `Resolved`（degraded ではない） | `login @ host` だけ | 決め方と、取り直した候補。`Enter` で選び直し、`GitConfig` なら `u` で解除（01） |
 
+**最後の行だけヘッダが `A` を案内しない。** degraded の 1 行はヘッダが情報を落として
+いるので「続きはあちら」と言う必要があるが、`Resolved` の `login @ host` は落として
+いない —— 添えると、**リポジトリ名とスピナーと分け合う 1 行**（#73 で詰めた側）が
+毎回 `A で選び直す` のぶんだけ痩せる。キーの一覧は `Modal::Help`（M6）が出す。
 **件数の文言はヘッダとモーダルで 1 本**（`ui::degraded`）。残る 5 腕は共有できない
 —— あちらは `[gh: …]` の中に置く前提で主語が `gh` なので、単体で読むと文にならない
 （`GhMissing` は「ありません」）。

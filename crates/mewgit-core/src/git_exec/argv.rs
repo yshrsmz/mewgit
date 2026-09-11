@@ -245,6 +245,16 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
             crate::auth::MEWGIT_USER.into(),
             login.clone(),
         ]),
+        // **`--` は `--unset` より後ろ。** 前に置くと `--unset` 自体がキーとして
+        // 読まれ、`key does not contain a section: --unset` で exit 2 になる
+        // （git 2.55 で実測。03 の表）。
+        GitOp::UnsetAccount => argv.extend([
+            "config".into(),
+            "--local".into(),
+            "--unset".into(),
+            "--".into(),
+            crate::auth::MEWGIT_USER.into(),
+        ]),
     }
 
     Ok(GitCommand { argv, stdin })
@@ -350,7 +360,7 @@ impl GitOp {
             | GitOp::StashApply(_)
             | GitOp::StashPop(_)
             | GitOp::StashDrop(_) => "stash",
-            GitOp::SetAccount { .. } => "config",
+            GitOp::SetAccount { .. } | GitOp::UnsetAccount => "config",
         }
     }
 }
@@ -404,13 +414,14 @@ mod tests {
             GitOp::StashPop(_) => "StashPop",
             GitOp::StashDrop(_) => "StashDrop",
             GitOp::SetAccount { .. } => "SetAccount",
+            GitOp::UnsetAccount => "UnsetAccount",
         }
     }
 
     /// [`variant`] のアームの数。`GitOp` に変種を足すと `variant` の網羅 `match` が
     /// コンパイルエラーになり、ここに来る。アームと一緒にこの数と [`cases`] も足す
     /// （足し忘れは `covers_every_variant` が落とす）。
-    const VARIANT_COUNT: usize = 31;
+    const VARIANT_COUNT: usize = 32;
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
     fn cases() -> Vec<(GitOp, Vec<&'static str>)> {
@@ -654,6 +665,10 @@ mod tests {
                     login: "taro_acme".into(),
                 },
                 vec!["config", "--local", "--", "mewgit.user", "taro_acme"],
+            ),
+            (
+                GitOp::UnsetAccount,
+                vec!["config", "--local", "--unset", "--", "mewgit.user"],
             ),
         ]
     }

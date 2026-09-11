@@ -164,6 +164,20 @@ pub enum GitOp {
     SetAccount {
         login: String,
     },
+    /// 憶えたアカウントを `.git/config` から外す（`Modal::AccountPicker` の `u`。
+    /// 01 の「アカウントの選び直し」）。
+    ///
+    /// **外すのは `.git/config` の [`auth::MEWGIT_USER`] だけ。** 設定ファイルの
+    /// `[[repos]]` は `git config` の手が届かないので、`u` 自体が
+    /// [`AccountSource::is_unsettable`] のときしか出ない。
+    ///
+    /// **設定されていないキーに当てると exit 5 を stderr 空で返す**（03 の実測表）。
+    /// 成否から「いま何が設定されているか」は読めないので、書き込みのあとは結果に
+    /// 関わらず解決をやり直す（01）。
+    ///
+    /// [`auth::MEWGIT_USER`]: crate::auth::MEWGIT_USER
+    /// [`AccountSource::is_unsettable`]: crate::auth::AccountSource::is_unsettable
+    UnsetAccount,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

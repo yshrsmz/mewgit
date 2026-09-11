@@ -1,6 +1,6 @@
 //! `update` に入力されるイベント。設計は `docs/design/01-app-core.md`。
 
-use crate::auth::{Account, DegradedReason, ResolvedTarget};
+use crate::auth::{Account, AuthError, DegradedReason, GhLogin, ResolvedTarget};
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp,
@@ -137,6 +137,14 @@ pub enum Msg {
     /// すると、その約束を見張るのは doc の 1 文だけになる（01 の `AccountResolved`）。
     /// [`update`](super::update) が `Ok` を `Resolved`、`Err` を `Degraded` に写す。
     AccountResolved(Result<Account, DegradedReason>),
+    /// 選び直しの候補（01 の「候補の取り直し」）。`auth::Backend::logins` の戻り値
+    /// そのまま。
+    ///
+    /// **`Err` を [`DegradedReason`] に畳まない。** 畳むと `auth::resolve` の外に
+    /// [`AccountState`](crate::auth::AccountState) の産出元ができ、04 が決めた境目が
+    /// 消える。受けるのは [`Modal::AccountPicker`](crate::app::Modal::AccountPicker)
+    /// だけで、`state.account` は動かさない。
+    AccountsListed(Result<Vec<GhLogin>, AuthError>),
     PrLoaded(Box<Result<Option<PullRequest>, GithubError>>),
     ChecksLoaded(Result<Vec<Check>, GithubError>),
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),

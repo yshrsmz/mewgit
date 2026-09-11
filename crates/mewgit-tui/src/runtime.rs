@@ -12,6 +12,9 @@ use mewgit_core::app::{
 };
 use mewgit_core::auth::ssh::{effective_ssh_from_env, SshCommand};
 use mewgit_core::auth::{self, RepoTarget};
+// `logins` を呼ぶためだけの import。**名前は入れない** —— `ratatui::backend::Backend`
+// と衝突する。
+use mewgit_core::auth::Backend as _;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
 use mewgit_core::git_read::{GitReadError, ReaderHandle};
@@ -346,8 +349,11 @@ impl Runtime {
 
             // `gh` の起動と GitHub API は `AccountBackend` の中（04）。ここは待って
             // 結果を `Msg` にするだけ。**`GhCli::detect` もタスクの中で走らせる** ——
-            // 起動時に 1 回だけなので、`gh --version` の往復を最初のフレームの前に
-            // 置く理由が無い。
+            // 最初のフレームの前に `gh --version` の往復を置かずに済むうえ、
+            // **`Runtime` に写しを持たないので、外で `gh` を入れ直した回に古い
+            // `Err(GhMissing)` を掴んだまま固まらない**（下の `ListAccounts` も
+            // 同じ理由で毎回 detect する。実測 0.03〜0.04 秒で、待っている
+            // `gh auth status` の 0.95 秒に比べれば小さい）。
             Cmd::ResolveAccount(target) => {
                 // **材料は `AppState` から取る。** 起動時に決まってから変わらない値
                 // （08。実行中は設定を読み直さない）なので `Runtime` に写しを持つことも
@@ -361,6 +367,20 @@ impl Runtime {
                     let backend = AccountBackend::detect(&config.general.gh_bin).await;
                     let result = auth::resolve(&target, &repo_path, &backend, &config).await;
                     let _ = tx.send(Msg::AccountResolved(result));
+                });
+                ControlFlow::Continue(())
+            }
+
+            // 選び直しの候補（01 の「候補の取り直し」）。**`auth::resolve` は通さない**
+            // —— 引くのは一覧だけで、degraded の理由を作り直すのは
+            // `Cmd::ResolveAccount` の仕事（畳むと `AccountState` の産出元が増える。04）。
+            Cmd::ListAccounts(host) => {
+                // **`detect` は上の腕と同じく毎回走らせる**（理由もあちらに書いてある）。
+                let gh_bin = state.config.general.gh_bin.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let backend = AccountBackend::detect(&gh_bin).await;
+                    let _ = tx.send(Msg::AccountsListed(backend.logins(&host).await));
                 });
                 ControlFlow::Continue(())
             }
@@ -404,8 +424,8 @@ fn not_implemented(state: &mut AppState, kind: JobKind, name: &str) -> ControlFl
 mod tests {
     use super::*;
     use futures::stream;
-    use mewgit_core::app::{Pane, TermSize};
-    use mewgit_core::auth::{AccountState, DegradedReason};
+    use mewgit_core::app::{AccountListing, AccountView, Modal, Pane, Repick, TermSize};
+    use mewgit_core::auth::{AccountSource, AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::HeadInfo;
     use mewgit_core::test_util::{fake_target, wait_for_pid, BareRepo, TestRepo};
@@ -813,6 +833,57 @@ mod tests {
         );
         // 畳んでいないと、2 回目の `Cmd::ResolveAccount` が `issue` に落とされる。
         assert!(!state.jobs.is_running(JobKind::ResolveAccount));
+    }
+
+    /// `Cmd::ListAccounts` が `AccountBackend::logins` を通って `Msg` で返る（01 の
+    /// 「候補の取り直し」）。
+    ///
+    /// **`gh` は存在しないパスに向けてある**ので、答えは `GhMissing` に決まる。
+    /// **`state.account` は動かない**（`Err` を `DegradedReason` に畳まないと
+    /// 決めてある。04 の境目）ことも、ここで一緒に見張る —— 畳むと
+    /// `auth::resolve` の外に `AccountState` の産出元ができる。
+    #[tokio::test]
+    async fn listing_accounts_fills_the_modal_without_touching_the_account() {
+        let repo = TestRepo::init();
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+        // 返信の行き先。`A` が開くのと同じ形。
+        state.modal = Some(Modal::AccountPicker {
+            view: AccountView::Repick(Repick {
+                login: "taro".to_string(),
+                host: "github.com".to_string(),
+                source: AccountSource::Probe,
+                logins: AccountListing::Waiting,
+            }),
+            cursor: 0,
+        });
+
+        let cmd = state.issue(Cmd::ListAccounts("github.com".to_string()));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        let Some(Modal::AccountPicker {
+            view: AccountView::Repick(repick),
+            ..
+        }) = &state.modal
+        else {
+            panic!("{:?}", state.modal);
+        };
+        assert!(
+            matches!(&repick.logins, AccountListing::Failed(message) if message.contains("gh")),
+            "{:?}",
+            repick.logins
+        );
+        // **`Degraded` に落ちない。** `Err` を `DegradedReason` に畳むと、ここが
+        // `Degraded(GhMissing)` になる（`opened` が置く初期値は `Resolving`）。
+        assert!(
+            matches!(state.account, AccountState::Resolving),
+            "{:?}",
+            state.account
+        );
+        // 畳んでいないと、次に `A` を押した `Cmd` が `issue` に落とされる。
+        assert!(!state.jobs.is_running(JobKind::ListAccounts));
     }
 
     #[tokio::test]

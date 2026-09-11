@@ -63,10 +63,10 @@ pub async fn resolve<B: Backend + Sync>(
 ) -> Result<Account, DegradedReason> {
     // 手順 1。**明示指定があれば一覧を引かない** —— `gh auth status` は全候補の
     // トークンをホストへ検証しに行くので、答えが決まっているのに 0.24 秒払うことになる。
-    if let Some(login) = explicit_login(target, repo_path, cfg).await {
+    if let Some((login, source)) = explicit_login(target, repo_path, cfg).await {
         return match backend.token(&target.host, &login).await {
-            Ok(token) => resolved(target, login, token, AccountSource::Config),
-            Err(err) => Err(configured_failed(login, err)),
+            Ok(token) => resolved(target, login, token, source),
+            Err(err) => Err(configured_failed(login, source, err)),
         };
     }
 
@@ -169,12 +169,19 @@ pub async fn resolve<B: Backend + Sync>(
 }
 
 /// 手順 1 の明示指定。`.git/config` の `mewgit.user` が設定ファイルより強い。
-async fn explicit_login(target: &RepoTarget, repo_path: &Path, cfg: &Config) -> Option<String> {
+///
+/// **どちらで当たったかを返す。** 1 本の `Config` に畳むと、`A` のモーダルが
+/// 「mewgit から外せるか」を答えられない（[`AccountSource`] の doc）。
+async fn explicit_login(
+    target: &RepoTarget,
+    repo_path: &Path,
+    cfg: &Config,
+) -> Option<(String, AccountSource)> {
     if let Some(login) = configured_user(repo_path).await {
-        return Some(login);
+        return Some((login, AccountSource::GitConfig));
     }
     cfg.account_for(&target.host, &target.owner, &target.repo)
-        .map(str::to_string)
+        .map(|login| (login.to_string(), AccountSource::RepoRule))
 }
 
 /// `.git/config` の `mewgit.user`。
@@ -242,12 +249,17 @@ fn reason_for(err: AuthError) -> DegradedReason {
 /// 一緒くたにすると「`mewgit.user` を直してください」と案内しながら、UI の
 /// `GhTooOld`（「2.81.0 以上に上げてください」）の腕が一度も発火しなくなる。
 /// **手順 1 は手順 2 を意図的に飛ばすので、`gh` の失敗の入口はここにもある。**
-fn configured_failed(login: String, err: AuthError) -> DegradedReason {
+///
+/// **どちらの指定だったかを一緒に運ぶ。** 案内の文面が変わるだけでなく、
+/// `.git/config` のほうは `A` の `u` でその場で外せる（[`DegradedReason::
+/// ConfiguredUnavailable`] の doc）。
+fn configured_failed(login: String, source: AccountSource, err: AuthError) -> DegradedReason {
     match err {
         // `gh auth token --user <login>` が非 0 で終わったもの。実測の文言は
         // `no oauth token found for <host> account <login>`（04 の表）。
         AuthError::GhFailed { .. } => DegradedReason::ConfiguredUnavailable {
             login,
+            source,
             message: err.to_string(),
         },
         other => reason_for(other),
@@ -345,7 +357,9 @@ mod tests {
 
         let account = account(&state);
         assert_eq!(account.login, "taro");
-        assert_eq!(account.source, AccountSource::Config);
+        // **出どころまで見る。** `.git/config` は `A` の `u` で外せる唯一の指定で、
+        // `[[repos]]`（下のテスト）と畳むと外せるかどうかを答えられなくなる。
+        assert_eq!(account.source, AccountSource::GitConfig);
         assert_eq!(account.host, "github.com");
         assert_eq!(secret(account), "token-for-taro");
         // **一覧を引かない**（04）。`gh auth status` は候補のトークンをホストへ
@@ -363,7 +377,7 @@ mod tests {
 
         let account = account(&state);
         assert_eq!(account.login, "taro_acme");
-        assert_eq!(account.source, AccountSource::Config);
+        assert_eq!(account.source, AccountSource::RepoRule);
     }
 
     #[tokio::test]
@@ -375,7 +389,11 @@ mod tests {
 
         let state = resolve(&fake_target(), repo.path(), &backend, &config).await;
 
-        assert_eq!(account(&state).login, "taro");
+        let account = account(&state);
+        assert_eq!(account.login, "taro");
+        // **どちらが勝ったかは `source` にも出る。** login だけ見ていると、優先順を
+        // 入れ替えたときに `[[repos]]` 側が同じ名前を返す設定で通ってしまう。
+        assert_eq!(account.source, AccountSource::GitConfig);
     }
 
     #[tokio::test]
@@ -402,8 +420,15 @@ mod tests {
         let state = resolve_configured(&backend).await;
 
         match reason(&state) {
-            DegradedReason::ConfiguredUnavailable { login, message } => {
+            DegradedReason::ConfiguredUnavailable {
+                login,
+                source,
+                message,
+            } => {
                 assert_eq!(login, "taro");
+                // **degraded に落ちても出どころは残る。** 残さないと、壊れた
+                // `mewgit.user` を `A` の `u` で外せない（`AccountView::is_unsettable`）。
+                assert_eq!(*source, AccountSource::GitConfig);
                 assert!(message.contains("no oauth token found"), "{message}");
             }
             other => panic!("{other:?}"),

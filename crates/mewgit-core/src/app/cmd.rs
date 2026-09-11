@@ -100,6 +100,20 @@ pub enum Cmd {
     /// いるのは [`Cmd::Exec`]（`GitOp` が 96 バイト）で、[`RepoTarget`] は 80 バイト。
     /// 箱に入れても 96 のまま（実測）なので、ヒープ確保と間接参照が増えるだけになる。
     ResolveAccount(RepoTarget),
+    /// そのホストの login 一覧だけを引き直す（01 の「候補の取り直し」）。
+    ///
+    /// **[`Cmd::ResolveAccount`] とは別の `Cmd`。** あちらは 04 の手順 1〜4 を通して
+    /// [`AccountState`](crate::auth::AccountState) を作り直すもので、こちらは
+    /// `gh auth status` を 1 回叩くだけ。畳むと、選び直しのモーダルを開くたびに
+    /// アカウントが `Resolving` に戻る（ヘッダから `[gh: …]` が消える）。
+    ///
+    /// **運ぶのはホスト名だけ。** `auth::Backend::logins` が要るのが `host` だけで、
+    /// [`RepoTarget`] を渡すと `owner` / `repo` を読まない引数が付く（「導出できる値を
+    /// 引数に取らせない」）。
+    ///
+    /// **返事の受け手はモーダルだけ**（[`Msg::AccountsListed`](super::Msg::AccountsListed)）。
+    /// `state.account` は動かさない。
+    ListAccounts(String),
     FetchPr,
     FetchChecks,
     FetchPrList,
@@ -158,6 +172,7 @@ impl Cmd {
             Cmd::Exec(op) => Some((JobKind::Exec, op.verb())),
             Cmd::ResolveTarget(_) => Some((JobKind::ResolveTarget, "remote")),
             Cmd::ResolveAccount(_) => Some((JobKind::ResolveAccount, "account")),
+            Cmd::ListAccounts(_) => Some((JobKind::ListAccounts, "logins")),
             Cmd::FetchPr => Some((JobKind::FetchPr, "pr")),
             Cmd::FetchChecks => Some((JobKind::FetchChecks, "checks")),
             Cmd::FetchPrList => Some((JobKind::FetchPrList, "pr list")),

@@ -631,8 +631,16 @@ pub fn fake_login(login: &str) -> GhLogin {
 /// 手で組めるようにしておくと、**出荷される形を測らないまま緑になる**。
 pub fn fake_ambiguous(logins: &[&str]) -> DegradedReason {
     DegradedReason::Ambiguous {
-        candidates: logins.iter().map(|login| fake_login(login)).collect(),
+        candidates: fake_logins(logins),
     }
+}
+
+/// ログイン一覧。`gh auth status` が返したぶんの代わり。
+///
+/// **`test_util` に置くのは 2 人目（`update::account` の選び直し）が出たから。**
+/// 1 人目は [`fake_ambiguous`]。
+pub fn fake_logins(logins: &[&str]) -> Vec<GhLogin> {
+    logins.iter().map(|login| fake_login(login)).collect()
 }
 
 /// リモート 1 件。URL は使う側が見ないので、名前から作った偽物でよい。

@@ -1116,10 +1116,13 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
   （`Ambiguous` の `candidates`）も内訳（`NoAccess` の `attempts`、`Unusable` の
   `message`）もそこから引ける。**`Vec<GhLogin>` を写さない** —— 写すと同じ候補が
   `state.account` と `state.modal` の 2 箇所にでき、`ui` と `update` がどちらを読むかで
-  答えが割れうる（「導出できる値を引数に取らせない」）。**開いているあいだ
-  `state.account` は動かない**（`Degraded` は解決が終わった形で、2 度目の
-  `Cmd::ResolveAccount` はモーダルを閉じたあとにしか出ない）ので、写しでも導出でも
-  結果は同じ。少ないほうを採る
+  答えが割れうる（「導出できる値を引数に取らせない」）。**ここも写しが古くなりうる**
+  —— `Enter` で保存したあと、`git` が走っているあいだに `A` を押せば、消える運命の
+  `DegradedReason` を持ったモーダルが開き直せる（`Repick` と同じ経路）。下の
+  「写しの寿命」が同じ 1 箇所で両方を閉じる。**かつて「開いているあいだ
+  `state.account` は動かない」と書いていたが嘘で、`Repick` 側だけ直して
+  ここに前提が生き残っていた**（独立したレビューが拾った。#54 の「節をまたぐと、
+  直した節の隣で前提が生き残る」）
 - `AccountView::Repick(Repick)` —— いまのアカウント（`login` / `host` / `source`）と、
   取り直した候補（下）。候補の `AccountListing` は `Waiting` /
   `Listed(Vec<GhLogin>)` / `Failed(String)` の 3 値。
@@ -1192,8 +1195,12 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
   —— `submit_exec` は `git` を走らせる**前に**モーダルを閉じ、`A` には実行中の
   断りが無いので、走っているあいだに**書き込み前の写しを持ったモーダルを開き直せる**。
   閉じないと、外した直後の画面が `[u] 指定を解除` を出したままになり、押すと既に
-  無いキーへ `git config --unset` が飛ぶ（**exit 5 で stderr は空**なので通知には
-  何も出ない。03 の実測表）。**写しを禁じるのではなく、写しの寿命を切る** ——
+  無いキーへ `git config --unset` が飛ぶ。**そのとき出るのは argv だけの赤い通知**
+  —— `exec_finished` は `Err` を必ず通知に積むが、`exec_advice` は
+  `ExecErrorKind::Other` に案内を持たず、**exit 5 は stderr が空**（03 の実測表）
+  なので、`ExecError::Failed` の `Display`（= 実行した argv）しか残らない。
+  **「通知が出ない」ではなく「理由が出ない」** —— 不変ルール 4 の経路は効いていて、
+  効いていないのは案内のほう。**写しを禁じるのではなく、写しの寿命を切る** ——
   `ui` のモーダル描画は `Modal` しか受け取らないので写し自体は要る
 - **一覧が 0 件で返ることがある。** `gh auth status` は 0 件を失敗にせず `Ok` で返し、
   空を `NotLoggedIn` に畳むのは `auth::resolve` の仕事なので、`Cmd::ListAccounts` は

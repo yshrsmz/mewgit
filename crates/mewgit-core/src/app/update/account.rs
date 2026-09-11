@@ -260,7 +260,19 @@ pub(super) fn account_resolved(
 
 /// `.git/config` にアカウントを書いたあとの読み直し（01 の「アカウントの選び直し」）。
 ///
-/// **`Cmd::ResolveAccount` の 2 つ目の発行元**（1 つ目は [`target_resolved`]）。
+/// **`Cmd::ResolveAccount` のもう 1 つの発行元**（片方は [`target_resolved`]）。
+///
+/// **開いている [`Modal::AccountPicker`] は閉じる。** [`Repick`] は
+/// [`AppState::account`] の写しを持っていて、ここから先その写しは嘘になる ——
+/// `submit_exec` は `git` を走らせる**前に**モーダルを閉じるので、走っている
+/// あいだに `A` をもう一度押せば、**書き込み前の写しを持ったモーダルが開き直せる**
+/// （`A` に実行中の断りは無い）。閉じないと、外した直後の画面が
+/// `[u] 指定を解除` を出したままになり、押すと既に無いキーへ
+/// `git config --unset` が飛ぶ（**exit 5 で stderr は空**なので、通知には何も
+/// 出ない。03 の実測表）。`/code-review` が拾った。
+///
+/// **写しを禁じるのではなく、写しの寿命を切る。** `ui` のモーダル描画は `Modal`
+/// しか受け取らないので写し自体は要る（[`Repick`] の doc）。
 pub(super) fn resolve_again(state: &mut AppState) -> Cmd {
     // **`target` が無ければ何もしない。** `Degraded` は `target` が決まったあとにしか
     // 出ないのでここには来ないが、来たときに `Resolving` へ落とすと
@@ -268,6 +280,11 @@ pub(super) fn resolve_again(state: &mut AppState) -> Cmd {
     let Some(target) = state.repo.target.resolved().cloned() else {
         return Cmd::None;
     };
+    // **`target` を読めなかったときは閉じない。** そのときは `account` も動かさない
+    // ので、開いている写しはまだ本当のことを言っている。
+    if matches!(state.modal, Some(Modal::AccountPicker { .. })) {
+        state.modal = None;
+    }
     state.account = AccountState::Resolving;
     Cmd::ResolveAccount(target)
 }
@@ -800,6 +817,34 @@ mod tests {
                 assert_eq!(cmd, Cmd::None, "{source:?}");
                 assert!(state.modal.is_some(), "{source:?}: 効かないのに閉じた");
             }
+        }
+    }
+
+    #[test]
+    fn a_picker_reopened_while_the_write_runs_does_not_outlive_the_write() {
+        // **`Repick` は `state.account` の写し**なので、`account` が動く瞬間に
+        // 閉じないと嘘を出したまま残る。`submit_exec` は `git` を走らせる**前に**
+        // 閉じ、`A` には実行中の断りが無いので、**走っているあいだに写しを持った
+        // モーダルを開き直せる**（`/code-review` が拾った）。
+        //
+        // **回すのは `Reload::Account` の 2 つ。** 押せるキーは `u` だけだが
+        // （`Enter` は候補が届いていないと効かない）、閉じる判断は `resolve_again`
+        // の 1 箇所なので、出口の側を両方通す。
+        for op in account_writes() {
+            let mut state = state_resolved(AccountSource::GitConfig);
+            let _ = press(&mut state, 'A');
+            let _ = state.issue(Cmd::Exec(op.clone()));
+
+            // 走っているあいだに開き直す。**書き込み前の写しが入る。**
+            let _ = press(&mut state, 'A');
+            assert!(state.modal.is_some(), "{op:?}: 開けない前提になっている");
+
+            let _ = update(&mut state, exec_done_of(op.clone(), Ok(fake_output())));
+
+            // 閉じないと、外した直後の画面が `[u] 指定を解除` を出したままになり、
+            // 押すと既に無いキーへ `git config --unset` が飛ぶ（exit 5 / stderr 空）。
+            assert!(state.modal.is_none(), "{op:?}: 古い写しが残った");
+            assert!(matches!(state.account, AccountState::Resolving), "{op:?}");
         }
     }
 

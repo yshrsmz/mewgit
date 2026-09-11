@@ -131,6 +131,18 @@ fn repick_body(repick: &Repick) -> Vec<String> {
         // **待っていることを出す。** 出さないと、0.95 秒のあいだ「候補が 1 つも
         // 無い」と読める（`Failed` と同じ見た目になる）。
         AccountListing::Waiting => lines.push("候補を読み込んでいます…".to_string()),
+        // **0 件は `Ok` で返る**（`gh auth status` は 0 件を失敗にしない。
+        // 空を `NotLoggedIn` に畳むのは `auth::resolve` の仕事で、`Cmd::ListAccounts`
+        // はそこを通らない）。**起動後に外で `gh auth logout` すると踏める** ——
+        // 保存先だけを出すと、**選べる行が 1 つも無い画面が「選ぶと保存します」と
+        // 言う**（`/code-review` が拾った）。`NotLoggedIn` の degraded と同じ案内に
+        // 落とす。
+        AccountListing::Listed(logins) if logins.is_empty() => {
+            lines.push(format!("{host} にログインしていません"));
+            lines.push(format!(
+                "gh auth login --hostname {host} でログインしてください"
+            ));
+        }
         AccountListing::Listed(_) => lines.push(saves_to()),
         // **`gh` の失敗をここで出す。** `DegradedReason` に畳まないと決めてあるので
         // （01 の「候補の取り直し」）、`state.account` は `Resolved` のまま。
@@ -390,11 +402,16 @@ mod tests {
 
     #[test]
     fn the_hint_with_u_still_fits_one_row_of_the_box() {
-        // **`[u]` を足した案内がいちばん長い**（57 セル。箱の内側と同じ）。
+        // **`[u]` を足した案内がいちばん長い**（57 セル。`WIDTH` 60 から枠 2 と
+        // `RIGHT_MARGIN` 1 を引いた箱の内側と**ちょうど同じ**で、余白は無い）。
         // 溢れると `modals::place` が案内に取る 1 行の右端で**切れて**、最後の
         // `[Esc]` が消える（確認を挟まずに閉じるキーなので、押す前に見えている
         // 必要がある）。**`contains` だけでは 1 行に収まったかを見ていない**ので、
         // 行そのものを取り出して確かめる（#73 の「余白が残るか」）。
+        //
+        // **端末を狭めたときの境目は実測で 53 桁**（52 桁で `[Esc]` が切れる。
+        // `[u]` を足す前は 36 桁まで保っていた）。いま見張るのは 80 桁だけで、
+        // 狭い端末は M6 の「端末幅 < 100 のレイアウト」が持つ。
         let state = state_with_repick(
             AccountSource::GitConfig,
             AccountListing::Listed(vec![fake_login("taro")]),
@@ -410,6 +427,23 @@ mod tests {
             hint.contains("[Esc]"),
             "案内が 1 行に収まっていない: {hint}"
         );
+    }
+
+    #[test]
+    fn a_repick_with_no_logins_left_does_not_promise_to_save_anything() {
+        // **0 件は `Ok` で返る**（`gh auth status` は 0 件を失敗にしない）。起動後に
+        // 外で `gh auth logout` すると踏める。**保存先だけを出すと、選べる行が
+        // 1 つも無い画面が「選ぶと保存します」と言う**（`/code-review` が拾った）。
+        let state = state_with_repick(AccountSource::Probe, AccountListing::Listed(Vec::new()));
+
+        let text = draw(&state, SIZE).join("\n");
+
+        assert!(!text.contains("選ぶと"), "{text}");
+        assert!(text.contains("github.com にログインしていません"), "{text}");
+        assert!(text.contains("gh auth login"), "{text}");
+        // 選べる相手がいないので枠も案内も「選ぶ」と名乗らない。
+        assert!(!text.contains("GitHub アカウントを選ぶ"), "{text}");
+        assert!(!text.contains("[Enter]"), "{text}");
     }
 
     #[test]

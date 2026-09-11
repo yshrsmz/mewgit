@@ -1125,10 +1125,8 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
   `Listed(Vec<GhLogin>)` / `Failed(String)` の 3 値。
   **`login` / `host` / `source` は `AppState::account` の写し** —— `ui` のモーダル
   描画は `Modal` しか受け取らないので、ここに無い値は画面に出せない
-  （`Modal::RemotePicker` が `remotes` を写しているのと同じ形）。**写して安全なのは、
-  開いているあいだ `account` が動かないから** —— `Cmd::ResolveAccount` を出す
-  `target_resolved` はリポジトリごとに 1 回、`resolve_again` は書き込みのあとで、
-  そのときモーダルは閉じている
+  （`Modal::RemotePicker` が `remotes` を写しているのと同じ形）。**写しが古くなる
+  瞬間は在るので、下の「写しの寿命」で切る**
 
 **選べる候補は `view` の 1 本の述語から出す**（`AccountView::candidates`）。`Degraded`
 なら `DegradedReason::candidates`、`Repick` なら `Listed` のときだけ中身で、残りは空。
@@ -1189,6 +1187,19 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
 - **`submit_exec`（1 行入力と同じ確定の経路）を通す。** ほかの `git` が走って
   いるあいだは**モーダルを閉じない**（閉じてから `Cmd` が落とされると、選んだのに
   何も起きない）
+- **`account` を動かすときに、開いている `AccountPicker` を閉じる**（`resolve_again`）。
+  **「開いているあいだ `account` は動かない」は嘘だった**（`/code-review` が拾った）
+  —— `submit_exec` は `git` を走らせる**前に**モーダルを閉じ、`A` には実行中の
+  断りが無いので、走っているあいだに**書き込み前の写しを持ったモーダルを開き直せる**。
+  閉じないと、外した直後の画面が `[u] 指定を解除` を出したままになり、押すと既に
+  無いキーへ `git config --unset` が飛ぶ（**exit 5 で stderr は空**なので通知には
+  何も出ない。03 の実測表）。**写しを禁じるのではなく、写しの寿命を切る** ——
+  `ui` のモーダル描画は `Modal` しか受け取らないので写し自体は要る
+- **一覧が 0 件で返ることがある。** `gh auth status` は 0 件を失敗にせず `Ok` で返し、
+  空を `NotLoggedIn` に畳むのは `auth::resolve` の仕事なので、`Cmd::ListAccounts` は
+  そこを通らない（起動後に外で `gh auth logout` すると踏める）。**保存先だけを出すと、
+  選べる行が 1 つも無い画面が「選ぶと保存します」と言う**ので、`NotLoggedIn` の
+  degraded と同じ案内（`gh auth login --hostname <host>`）に落とす
 - **書き込みのあとは結果に関わらず `Cmd::ResolveAccount` を出し、`account` を
   `Resolving` に戻す。** 成功だけを見ない —— 中断（`ExecError::Canceled`）では
   **書けたかどうか判らない**（#56 の「失敗なら ref は元のまま」が中断では成り立たない、と

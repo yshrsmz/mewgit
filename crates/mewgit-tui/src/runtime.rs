@@ -424,8 +424,8 @@ fn not_implemented(state: &mut AppState, kind: JobKind, name: &str) -> ControlFl
 mod tests {
     use super::*;
     use futures::stream;
-    use mewgit_core::app::{Pane, TermSize};
-    use mewgit_core::auth::{AccountState, DegradedReason};
+    use mewgit_core::app::{AccountListing, AccountView, Modal, Pane, Repick, TermSize};
+    use mewgit_core::auth::{AccountSource, AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::HeadInfo;
     use mewgit_core::test_util::{fake_target, wait_for_pid, BareRepo, TestRepo};
@@ -833,6 +833,57 @@ mod tests {
         );
         // 畳んでいないと、2 回目の `Cmd::ResolveAccount` が `issue` に落とされる。
         assert!(!state.jobs.is_running(JobKind::ResolveAccount));
+    }
+
+    /// `Cmd::ListAccounts` が `AccountBackend::logins` を通って `Msg` で返る（01 の
+    /// 「候補の取り直し」）。
+    ///
+    /// **`gh` は存在しないパスに向けてある**ので、答えは `GhMissing` に決まる。
+    /// **`state.account` は動かない**（`Err` を `DegradedReason` に畳まないと
+    /// 決めてある。04 の境目）ことも、ここで一緒に見張る —— 畳むと
+    /// `auth::resolve` の外に `AccountState` の産出元ができる。
+    #[tokio::test]
+    async fn listing_accounts_fills_the_modal_without_touching_the_account() {
+        let repo = TestRepo::init();
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+        // 返信の行き先。`A` が開くのと同じ形。
+        state.modal = Some(Modal::AccountPicker {
+            view: AccountView::Repick(Repick {
+                login: "taro".to_string(),
+                host: "github.com".to_string(),
+                source: AccountSource::Probe,
+                logins: AccountListing::Waiting,
+            }),
+            cursor: 0,
+        });
+
+        let cmd = state.issue(Cmd::ListAccounts("github.com".to_string()));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        let Some(Modal::AccountPicker {
+            view: AccountView::Repick(repick),
+            ..
+        }) = &state.modal
+        else {
+            panic!("{:?}", state.modal);
+        };
+        assert!(
+            matches!(&repick.logins, AccountListing::Failed(message) if message.contains("gh")),
+            "{:?}",
+            repick.logins
+        );
+        // **`Degraded` に落ちない。** `Err` を `DegradedReason` に畳むと、ここが
+        // `Degraded(GhMissing)` になる（`opened` が置く初期値は `Resolving`）。
+        assert!(
+            matches!(state.account, AccountState::Resolving),
+            "{:?}",
+            state.account
+        );
+        // 畳んでいないと、次に `A` を押した `Cmd` が `issue` に落とされる。
+        assert!(!state.jobs.is_running(JobKind::ListAccounts));
     }
 
     #[tokio::test]

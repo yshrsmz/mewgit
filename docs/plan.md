@@ -149,12 +149,19 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       件数しか出していない（04 の「解決結果は画面上部に」）。**開くのは共通キー `A`**
       で、`Degraded` 以外は通知に落とす（01 の「アカウントの選び直し」）。保存は
       `GitOp::SetAccount`（`git config --local`）で、書いたあとに解決をやり直す
-- [ ] 保存したアカウントの選び直しと指定の解除。**`A` は `Resolved` では通知しか
+- [x] 保存したアカウントの選び直しと指定の解除。**`A` は `Resolved` では通知しか
       出せず、`.git/config` に書いた `mewgit.user` を mewgit から外せない**
       （`/code-review` が拾った。01 の「アカウントの選び直し」）。要るのは
       **候補一覧の取り直し**（`gh auth status` をもう一度）と、
       **`AccountSource::Config` を出どころで割ること**（`.git/config` は `--unset`
       できるが設定ファイルの `[[repos]]` は外せないので、同じ案内を出せない）
+- [ ] degraded を外で直したあとの再解決。**`gh auth login` してから `A` を押しても
+      内訳が出るだけ**で、`Cmd::ResolveAccount` を出す経路は `target_resolved` と
+      `GitOp::SetAccount` / `UnsetAccount` のあとの 2 箇所しかない（01 の
+      「アカウントの選び直し」）。**`Cmd::ListAccounts` では塞がらない** —— 一覧を
+      引き直すことと、手順 1〜4 を通して `AccountState` を作り直すことは別。塞ぐには
+      `Modal::AccountPicker` の `Degraded` 側に「もう一度解決する」の入口を足し、
+      `Resolving` に戻すあいだモーダルをどうするかを決める
 - [ ] `ui::panes::prs` — 現ブランチ PR、チェック一覧、一覧タブ、ブラウザで開く。
       **レートリミット残量の受け渡しもここ** —— ヘッダ表示のタスクへ送られていたが、
       あちらで API を叩くのは起動時の probe だけで、常時出す残量の産出元にならない

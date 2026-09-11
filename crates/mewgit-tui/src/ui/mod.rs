@@ -458,7 +458,7 @@ mod tests {
     use super::{degraded_label, file_row, pane_area, window, wrapped};
     use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
     use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TargetState, TermSize};
-    use mewgit_core::auth::{AccountState, DegradedReason, RepoTarget};
+    use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::test_util::{fake_account, fake_ambiguous, fake_snapshot};
     use ratatui::style::{Color, Modifier};
@@ -712,6 +712,7 @@ mod tests {
             },
             DegradedReason::ConfiguredUnavailable {
                 login: "taro".to_string(),
+                source: AccountSource::GitConfig,
                 message: "no oauth token found".to_string(),
             },
             DegradedReason::NoAccess {

@@ -12,6 +12,9 @@ use mewgit_core::app::{
 };
 use mewgit_core::auth::ssh::{effective_ssh_from_env, SshCommand};
 use mewgit_core::auth::{self, RepoTarget};
+// `logins` を呼ぶためだけの import。**名前は入れない** —— `ratatui::backend::Backend`
+// と衝突する。
+use mewgit_core::auth::Backend as _;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
 use mewgit_core::git_read::{GitReadError, ReaderHandle};
@@ -361,6 +364,19 @@ impl Runtime {
                     let backend = AccountBackend::detect(&config.general.gh_bin).await;
                     let result = auth::resolve(&target, &repo_path, &backend, &config).await;
                     let _ = tx.send(Msg::AccountResolved(result));
+                });
+                ControlFlow::Continue(())
+            }
+
+            // 選び直しの候補（01 の「候補の取り直し」）。**`auth::resolve` は通さない**
+            // —— 引くのは一覧だけで、degraded の理由を作り直すのは
+            // `Cmd::ResolveAccount` の仕事（畳むと `AccountState` の産出元が増える。04）。
+            Cmd::ListAccounts(host) => {
+                let gh_bin = state.config.general.gh_bin.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let backend = AccountBackend::detect(&gh_bin).await;
+                    let _ = tx.send(Msg::AccountsListed(backend.logins(&host).await));
                 });
                 ControlFlow::Continue(())
             }

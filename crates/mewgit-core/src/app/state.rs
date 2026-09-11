@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use crate::auth::{AccountState, DegradedReason, RepoTarget};
+use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
@@ -151,6 +151,7 @@ impl AppState {
             | JobKind::LoadDiff
             | JobKind::ResolveTarget
             | JobKind::ResolveAccount
+            | JobKind::ListAccounts
             | JobKind::FetchPr
             | JobKind::FetchChecks
             | JobKind::FetchPrList => return,
@@ -1252,6 +1253,7 @@ pub enum JobKind {
     Exec,
     ResolveTarget,
     ResolveAccount,
+    ListAccounts,
     FetchPr,
     FetchChecks,
     FetchPrList,
@@ -1286,6 +1288,8 @@ impl JobKind {
             // リモート URL と `~/.ssh/config` で、どちらも git の書き込みで動かない。
             | JobKind::ResolveTarget
             | JobKind::ResolveAccount
+            // `gh auth status` が読むのは gh 自身の設定で、git の書き込みで動かない。
+            | JobKind::ListAccounts
             | JobKind::FetchPr
             | JobKind::FetchChecks
             | JobKind::FetchPrList => None,
@@ -1344,19 +1348,11 @@ pub enum Modal {
         draft: bool,
     },
     /// アカウント解決の内訳を出し、選べるなら選ばせる（01 の
-    /// 「アカウントの選び直し」）。`A` で開く。
+    /// 「アカウントの選び直し」）。`A` で開く。中身は [`AccountView`] が割る。
     ///
-    /// **持つのは [`DegradedReason`] そのもの。** 選べる候補
-    /// （[`DegradedReason::candidates`]）も内訳（`NoAccess` の `attempts`、
-    /// `Unusable` の `message`）もそこから引けるので、`Vec<GhLogin>` を写すと
-    /// 同じ候補が [`AppState::account`] と 2 箇所にでき、`ui` と `update` が
-    /// どちらを読むかで答えが割れうる。**開いているあいだ `account` は動かない**
-    /// （`Degraded` は解決が終わった形で、2 度目の `Cmd::ResolveAccount` は
-    /// モーダルを閉じたあとにしか出ない）ので、写しでも導出でも結果は同じ。
-    ///
-    /// **`Resolved` / `Resolving` では開かない**（通知に落とす。01 の表）。
+    /// **`Resolving` では開かない**（通知に落とす。01 の表）。
     AccountPicker {
-        reason: DegradedReason,
+        view: AccountView,
         cursor: usize,
     },
     /// fetch するリモートを一覧から選ぶ（01 の「決まらないときの逃げ道」）。
@@ -1396,8 +1392,8 @@ impl Modal {
             } => *cursor = stepped_index(*cursor, remotes.len(), delta),
             // **選べない degraded では候補が空**なので、`stepped_index` が 0 を返して
             // 動かない（`NoAccess` の内訳は本文に出る。07）。
-            Modal::AccountPicker { reason, cursor } => {
-                *cursor = stepped_index(*cursor, reason.candidates().len(), delta);
+            Modal::AccountPicker { view, cursor } => {
+                *cursor = stepped_index(*cursor, view.candidates().len(), delta);
             }
             Modal::Confirm { .. }
             | Modal::Input { .. }
@@ -1405,6 +1401,101 @@ impl Modal {
             | Modal::RebaseEditor { .. }
             | Modal::PrCreate { .. }
             | Modal::Help => {}
+        }
+    }
+}
+
+/// [`Modal::AccountPicker`] が出す 2 つの中身（01 の「アカウントの選び直し」）。
+///
+/// **`A` は `Resolved` でも `Degraded` でも開く**ので、出すものが 2 つある ——
+/// 解決に失敗した内訳と、決まっているアカウントの選び直し。どちらも「一覧から
+/// 1 つ選ぶ」骨格を共有するが、候補の出どころが違う。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountView {
+    /// degraded の内訳。
+    ///
+    /// **持つのは [`DegradedReason`] そのもの。** 選べる候補
+    /// （[`DegradedReason::candidates`]）も内訳（`NoAccess` の `attempts`、
+    /// `Unusable` の `message`）もそこから引けるので、`Vec<GhLogin>` を写すと
+    /// 同じ候補が [`AppState::account`] と 2 箇所にでき、`ui` と `update` が
+    /// どちらを読むかで答えが割れうる。
+    Degraded(DegradedReason),
+    /// 決まっているアカウントの選び直し。
+    Repick(Repick),
+}
+
+/// 決まっているアカウントを選び直す画面の中身（01 の「候補の取り直し」）。
+///
+/// **`login` / `host` / `source` は [`AppState::account`] の写し。** `ui` の
+/// モーダル描画は `Modal` しか受け取らない（`modals::render`）ので、ここに無い値は
+/// 画面に出せない。**写して安全なのは、開いているあいだ `account` が動かないから**
+/// —— `Cmd::ResolveAccount` の発行元は 2 つだけで、1 つ目（`target_resolved`）は
+/// リポジトリごとに 1 回、2 つ目（`resolve_again`）は書き込みのあとで、そのときは
+/// モーダルが閉じている（01）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repick {
+    pub login: String,
+    pub host: String,
+    /// いまの決め方。**`u` を出すかどうかもここから引く**
+    /// （[`AccountSource::is_unsettable`]）。
+    pub source: AccountSource,
+    pub logins: AccountListing,
+}
+
+/// 取り直した候補一覧（01 の「候補の取り直し」）。
+///
+/// **3 値にする。** `Option<Vec<GhLogin>>` だと「待っている」と「引けなかった」が
+/// 同じ `None` になり、本文に理由を出せない（「`None` の理由を 2 つ以上持たせない」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountListing {
+    /// `Cmd::ListAccounts` の返事待ち。**開いた直後は必ずここ** —— `gh auth status` は
+    /// 0.95 秒かかるので（#61 の実測）、待ってから開くと `A` が 1 秒無反応になる。
+    Waiting,
+    Listed(Vec<GhLogin>),
+    /// `gh` を呼べなかった理由。
+    ///
+    /// **[`DegradedReason`] に畳まない。** 畳むと `auth::resolve` の外に
+    /// [`AccountState`] の産出元ができ、04 が決めた境目が消える（01）。
+    Failed(String),
+}
+
+impl AccountView {
+    /// `Enter` で選べる候補。
+    ///
+    /// **読み手が 3 人いるので 1 本にする** —— `ui`（一覧の行・タイトル・キーの案内）、
+    /// `Modal::move_cursor`、`Enter` の確定。別々に `matches!` を書くと、選ばせない
+    /// はずの画面で `Enter` だけが効く。
+    ///
+    /// **`Waiting` と `Failed` が空なのは意図。** 候補が届いていない画面で `Enter` を
+    /// 効かせる相手がいない。
+    pub fn candidates(&self) -> &[GhLogin] {
+        match self {
+            AccountView::Degraded(reason) => reason.candidates(),
+            AccountView::Repick(repick) => match &repick.logins {
+                AccountListing::Listed(logins) => logins,
+                AccountListing::Waiting | AccountListing::Failed(_) => &[],
+            },
+        }
+    }
+
+    /// `u`（指定の解除）が効くか。
+    ///
+    /// **キーの案内（`[u] 指定を解除`）もこれを読む。** 別々に見ると、効かない画面に
+    /// 案内だけが出る（#53）。
+    ///
+    /// **degraded でも 1 つだけ真になる。** [`DegradedReason::ConfiguredUnavailable`]
+    /// は明示指定のトークンが取れなかった形で、**外す対象は在る** —— ここを偽に
+    /// すると、壊れた `mewgit.user` を憶えたまま `A` が案内しか出せない行き止まりが
+    /// 残る（塞ぎたかった `Resolved` 側の穴の、degraded に落ちた版）。残りの degraded
+    /// が偽なのは、`gh` が居ない・古い・ログインしていないが**プロセス全体の条件**で、
+    /// `mewgit.user` を外しても変わらないから（04 の `configured_failed`）。
+    pub fn is_unsettable(&self) -> bool {
+        match self {
+            AccountView::Degraded(DegradedReason::ConfiguredUnavailable { source, .. }) => {
+                source.is_unsettable()
+            }
+            AccountView::Degraded(_) => false,
+            AccountView::Repick(repick) => repick.source.is_unsettable(),
         }
     }
 }

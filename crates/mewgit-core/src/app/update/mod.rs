@@ -17,7 +17,7 @@ use crate::git_exec::{GitOp, PullMode};
 use super::{
     AppState, Cmd, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, TextBuffer,
 };
-use account::{account_resolved, open_account, repo_info_loaded, target_resolved};
+use account::{account_resolved, accounts_listed, open_account, repo_info_loaded, target_resolved};
 use branches::{branches_key, branches_loaded};
 use diff::{diff_key, diff_loaded, load_diff};
 use exec::exec_finished;
@@ -147,6 +147,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::ProgressDetected(_) => Cmd::None,
         Msg::TargetResolved(resolved) => target_resolved(state, *resolved),
         Msg::AccountResolved(result) => account_resolved(state, result),
+        Msg::AccountsListed(result) => accounts_listed(state, result),
         Msg::PrLoaded(_) => Cmd::None,
         Msg::ChecksLoaded(_) => Cmd::None,
         Msg::PrListLoaded(_) => Cmd::None,

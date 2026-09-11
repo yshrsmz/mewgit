@@ -120,7 +120,7 @@ pub enum Modal {
     CommitMessage { buf: TextBuffer, amend: bool },
     RebaseEditor { plan: RebasePlan, cursor: usize },
     PrCreate { title: TextBuffer, body: TextBuffer, base: String, draft: bool },
-    AccountPicker { reason: DegradedReason, cursor: usize },
+    AccountPicker { view: AccountView, cursor: usize },
     Help,
 }
 ```
@@ -1088,15 +1088,21 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
 居るかと関係が無い。ペイン専用にすると「案内にキーを書いたら、その案内が出ている画面で
 そのキーが効くか」で詰む（#53）。
 
-**開くのは `Degraded` のときだけ。** 残る 2 つは通知に落とす —— 出す中身が 1 行で、
-モーダルにしても選ぶものが無い。
+**開くのは `Degraded` と `Resolved` の 2 つ。** 通知に落ちるのは `Resolving` だけで、
+あれは待てば変わるので出す中身が 1 行しかない。
 
 | `state.account` | `A` |
 |---|---|
-| `Degraded(_)` | モーダルを開く |
-| `Resolved(_)` | 通知「`<login> @ <host>` を使用（決め方）」。`Config` のときは**どこの指定かも出す**（`設定: mewgit.user / [[repos]]`） |
+| `Degraded(_)` | モーダルを開く（内訳を出し、`Ambiguous` なら選ばせる） |
+| `Resolved(_)` | モーダルを開く（選び直し。`GitConfig` なら `u` で解除も） |
 | `Resolving` かつ `target` が `Unavailable` | 通知「GitHub のリポジトリとして特定できません」 |
 | `Resolving`（それ以外） | 通知「アカウントを解決しています」 |
+
+**`Resolved` を出どころで割らない。** `Config` 由来のときだけ開く形にすると、
+`Single` / `Probe` で決まった相手は mewgit から変えられないまま残る。塞ぎたいのは
+「保存した指定が外せない」ではなく**「mewgit が選んだアカウントを mewgit から
+変えられない」**のほうで、出どころで変わるのは**外せるかどうか**だけ（下の `u`）。
+腕を分けると、分けた意味を持たない `Single` / `Probe` に行き止まりが残る。
 
 **これが 04 の送った「`AccountState::Resolving` を割るか」の答え。割らない。**
 `Resolving` が兼ねている 2 つ（走っている最中 / 永久に頼まれない）を見分けるのは
@@ -1104,44 +1110,86 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
 `Unavailable`）にしてある。割ると同じ事実が 2 箇所に出て、`TargetState::Unavailable`
 を立てた側と `AccountState` を割った側が食い違いうる。
 
-**モーダルが持つのは `DegradedReason` そのもの。** 選べる候補（`Ambiguous` の
-`candidates`）も内訳（`NoAccess` の `attempts`、`Unusable` の `message`）もそこから
-引ける。**`Vec<GhLogin>` を写さない** —— 写すと同じ候補が `state.account` と
-`state.modal` の 2 箇所にでき、`ui` と `update` がどちらを読むかで答えが割れうる
-（「導出できる値を引数に取らせない」）。**開いているあいだ `state.account` は動かない**
-（`Degraded` は解決が終わった形で、2 度目の `Cmd::ResolveAccount` はモーダルを
-閉じたあとにしか出ない）ので、写しでも導出でも結果は同じ。少ないほうを採る。
+**モーダルは `Modal::AccountPicker { view, cursor }`。** `view` が 2 つの中身を割る。
 
-**`Enter` で選べるのは `Ambiguous` のときだけ。** `NoAccess` は理由を並べるが選ばせない
-（どれも動かない状態でアカウントを選んでも何も直らない。04 の手順 4）。候補が無いときの
-`Enter` は何もしない —— キーの案内も `[Esc] 閉じる` だけになる。
+- `AccountView::Degraded(DegradedReason)` —— **理由そのものを持つ。** 選べる候補
+  （`Ambiguous` の `candidates`）も内訳（`NoAccess` の `attempts`、`Unusable` の
+  `message`）もそこから引ける。**`Vec<GhLogin>` を写さない** —— 写すと同じ候補が
+  `state.account` と `state.modal` の 2 箇所にでき、`ui` と `update` がどちらを読むかで
+  答えが割れうる（「導出できる値を引数に取らせない」）。**開いているあいだ
+  `state.account` は動かない**（`Degraded` は解決が終わった形で、2 度目の
+  `Cmd::ResolveAccount` はモーダルを閉じたあとにしか出ない）ので、写しでも導出でも
+  結果は同じ。少ないほうを採る
+- `AccountView::Repick(Listing)` —— 取り直した候補（下）。`Listing` は
+  `Waiting` / `Listed(Vec<GhLogin>)` / `Failed(String)` の 3 値
+
+**選べる候補は `view` の 1 本の述語から出す**（`AccountView::candidates`）。`Degraded`
+なら `DegradedReason::candidates`、`Repick` なら `Listed` のときだけ中身で、残りは空。
+読み手は `ui`（行とタイトルとキーの案内）、カーソル移動、`Enter` の確定の 3 人。
+
+**`Enter` で選べるのは、その述語が空でないときだけ。** `NoAccess` は理由を並べるが
+選ばせない（どれも動かない状態でアカウントを選んでも何も直らない。04 の手順 4）。
+`Waiting` と `Failed` も同じ扱いで、`Enter` は何もしない —— キーの案内も
+`[Esc] 閉じる` だけになる。
+
+#### 候補の取り直し
+
+`Resolved` で `A` を押したとき、**候補は state のどこにも無い** —— `Ambiguous` が
+運んでいた `Vec<GhLogin>` は `Resolved` には無く、`Account` は決まった 1 つしか
+持たない。`gh auth status` をもう一度叩く（`Cmd::ListAccounts(host)` →
+`Msg::AccountsListed`）。
+
+- **モーダルを先に開く。** `gh auth status` は 0.95 秒かかる（#61 の実測）ので、
+  返信を待ってから開くと `A` が 1 秒無反応になる。先に開いて `Waiting` を出し、
+  返信で差し替える
+- **運ぶのはホスト名だけ。** `Backend::logins` が要るのは `host` で、`RepoTarget` を
+  渡すと `owner` / `repo` を読まない引数が付く（「導出できる値を引数に取らせない」）
+- **取り直した候補は probe しない。** `resolve` の手順 4 と違って断られる login も
+  並ぶ —— ここで選ぶのは**上書きの指定**で、mewgit が絞り込んだ結果ではない。probe を
+  通すと候補ごとに 1 往復増えるうえ、「403 で断られたが SSO を承認すれば通る」相手を
+  選べなくなる。**gh の検証結果（`LoginState`）は行に出す**ので、選ぶ材料はある
+- **`gh auth status` の失敗を `DegradedReason` に畳まない。** 畳むと `resolve` の外に
+  `AccountState` の産出元がもう 1 つでき、04 が「degraded の理由を作るのは `resolve`
+  だけ」と決めた境目が消える（`Backend` の TLS 初期化を `Unusable` に落とさないのと
+  同じ数え方）。`Failed(String)` として本文に出すだけにして、`state.account` は動かさない
+- **返信を採るのは、モーダルがまだ `Repick(Waiting)` のときだけ。** 0.95 秒のあいだに
+  `Esc` で閉じられるし、別のモーダルも開く。**もう一度 `A` を押された形も通る** ——
+  2 度目の `Cmd` は `AppState::issue` が落とすので、遅れて届いた 1 通が**新しいほうの
+  モーダル**を埋める。だから見るのは**モーダルの形**であって「自分が頼んだか」ではない
 
 選んだ login は `.git/config` の `mewgit.user` に書く（`GitOp::SetAccount`。03）。
+`u` で外す（`GitOp::UnsetAccount`）。
 
-- **確認モーダルは挟まない。** 不変ルール 5 の破壊的操作ではなく、書き換わるのは
-  `mewgit.user` の 1 行だけ。**ただし書き込み先は本文に出す** ——
+- **`u` が効くのは `AccountSource::GitConfig` のときだけ。** `[[repos]]` は mewgit の
+  設定ファイルにあり、`git config --unset` では外せない（08 が「`config` モジュールは
+  `.git/config` を見ない」と割った境目の裏側）。**キーの案内も同じ述語から出す** ——
+  別々に見ると、効かない画面に `[u]` が出る（#53）
+- **`RepoRule` でも選び直しはできる。** 手順 1 の優先順は `.git/config` >
+  `[[repos]]` なので、書けば勝つ。本文には `[[repos]]` を mewgit からは外せないことを
+  出す —— 外での直し方を書いてよいのは、**その操作を持たない側**だから（#65）
+- **確認モーダルは挟まない**（`Enter` も `u` も）。不変ルール 5 の破壊的操作ではなく、
+  書き換わるのは `mewgit.user` の 1 行だけ。**ただし書き込み先は本文に出す** ——
   「`.git/config` を黙って変えない」（上の「決まらないときの逃げ道」）は
   `f` が追跡設定を書かない理由でもあり、**書くなら行き先を見せる**がその裏返し
-- **保存したあと、mewgit から選び直す手段はまだ無い**（`/code-review` が拾った）。
-  保存すると手順 1 で `Resolved(source: Config)` に落ち着き、`A` は通知だけを出す。
-  **latch は `.git/config` にあるので、外さない限り probe も走らない** ——
-  間違った login を選ぶと、そのアカウントで PR が立つ状態が続く。
-  **通知に置き場所（`mewgit.user` か `[[repos]]`）を出す**のは、いま出せる案内が
-  それだけだから（指示を足すのは、その操作を持たない側。#65）。
-  **選び直し / 指定を外すは次のタスクへ送る**（`docs/plan.md` の M4）。
-  塞ぐには 2 つ要る —— **候補一覧を取り直す**（`Ambiguous` が運んでいた
-  `Vec<GhLogin>` はもう無いので `gh auth status` をもう一度）と、
-  **`AccountSource::Config` が 2 つの出どころを兼ねている**のを割ること
-  （`.git/config` なら `--unset` できるが、設定ファイルの `[[repos]]` は外せない）
 - **`submit_exec`（1 行入力と同じ確定の経路）を通す。** ほかの `git` が走って
   いるあいだは**モーダルを閉じない**（閉じてから `Cmd` が落とされると、選んだのに
   何も起きない）
 - **書き込みのあとは結果に関わらず `Cmd::ResolveAccount` を出し、`account` を
   `Resolving` に戻す。** 成功だけを見ない —— 中断（`ExecError::Canceled`）では
   **書けたかどうか判らない**（#56 の「失敗なら ref は元のまま」が中断では成り立たない、と
-  同じ形）。読み直せば `.git/config` の実物が答えるので、成否で分岐する理由が無い
-- 保存後は 04 の手順 1（明示指定）に当たるので `Resolved(source: Config)` になり、
-  **以後は probe を通らない**（起動のたびの 1 往復も消える）
+  同じ形）。**`UnsetAccount` も同じ** —— 外そうとしたキーが既に無ければ
+  `git config --unset` は **exit 5 を stderr 空**で返す（03 の実測表）ので、成否から
+  「いま何が設定されているか」は読めない。読み直せば `.git/config` の実物が答えるので、
+  どちらも成否で分岐する理由が無い
+- 保存後は 04 の手順 1（明示指定）に当たるので `Resolved(source: GitConfig)` になり、
+  **以後は probe を通らない**（起動のたびの 1 往復も消える）。外したあとは手順 2 以降へ
+  落ちるので、`NotLoggedIn` / `Single` / `Probe` / `Ambiguous` / `NoAccess` のどれかに戻る
+- **degraded を外で直したときの再解決はまだ無い。** `gh auth login` してから `A` を
+  押しても、`Degraded` の腕は内訳を出すだけで `Cmd::ResolveAccount` を出さない
+  （出すのは `target_resolved` と書き込みのあとの 2 箇所だけ）。**`Cmd::ListAccounts`
+  を足したこの PR でも塞いでいない** —— 一覧を取り直すことと、degraded の理由を
+  作り直すことは別（`resolve` の手順 1〜4 を通さないと `AccountState` は変わらない）。
+  **次のタスクへ送る**（`docs/plan.md` の M4）
 
 ### push の行き先
 
@@ -1530,6 +1578,7 @@ pub enum Msg {
     // auth / github
     TargetResolved(Box<ResolvedTarget>),  // { target, unnormalized }。上の「RepoInfo.target を埋める」
     AccountResolved(Result<Account, DegradedReason>),
+    AccountsListed(Result<Vec<GhLogin>, AuthError>),  // 選び直しの候補。上の「候補の取り直し」
     PrLoaded(Box<Result<Option<PullRequest>, GithubError>>),
     ChecksLoaded(Result<Vec<Check>, GithubError>),
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),
@@ -1557,6 +1606,11 @@ pub enum Msg {
 `AuthError` と `DegradedReason` が同じ失敗を二重に表現し、`update` に手書きの
 マッピングが生えるため。`AuthError` は `gh` / `ssh` 実行の内部エラーに留め、
 `resolve` の中で `DegradedReason` に畳む。
+
+`AccountsListed` は `auth::Backend::logins` の戻り値をそのまま運ぶ。**`Err` を
+`DegradedReason` に畳まない** —— 畳むと `resolve` の外に `AccountState` の産出元が
+でき、04 が決めた境目が消える（上の「候補の取り直し」）。受けるのはモーダルだけで、
+`state.account` は動かさない。
 
 **`AccountState` は運ばない**（04 の「送った判断」をここで畳んだ）。あの型には
 `Resolving`（まだ頼んでいない）があり、`resolve` はそれを返さない ——
@@ -1616,6 +1670,7 @@ pub enum Cmd {
     CancelExec,                        // 走っている Exec を中断する（上の「キャンセル」）
     ResolveTarget(RemoteUrl),          // 既定リモートの URL → RepoTarget（上の「RepoInfo.target を埋める」）
     ResolveAccount(RepoTarget),        // どのリポジトリのアカウントを決めるか（04 の手順 1〜4）
+    ListAccounts(String),              // そのホストの login 一覧だけを取り直す（上の「候補の取り直し」）
     FetchPr, FetchChecks, FetchPrList,
     Quit,
 }
@@ -1627,6 +1682,12 @@ pub enum Cmd {
 出さない）。**`Box` には載せない** —— `Msg` と違って `Cmd` の大きさを決めているのは
 `Exec(GitOp)`（96 バイト）で、`RepoTarget`（80 バイト）を箱に入れても 96 のまま
 （実測）。`ResolveTarget` が運ぶ `RemoteUrl`（80 バイト）も同じ理由で裸で載せている。
+
+**`ListAccounts` が運ぶのはホスト名だけ。** `auth::Backend::logins` が要るのが `host`
+だけで、`RepoTarget` を渡すと `owner` / `repo` を読まない引数が付く（「導出できる値を
+引数に取らせない」）。**`ResolveAccount` とは別の `Cmd`** —— あちらは手順 1〜4 を
+通して `AccountState` を作り直すもので、こちらは一覧を引くだけ。畳むと、選び直しの
+モーダルを開くたびにアカウントが `Resolving` に戻る。
 
 ## 起動時の読み込み
 

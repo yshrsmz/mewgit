@@ -181,7 +181,10 @@ impl Reload {
             // （`ExecError::Canceled`）では**書けたかどうか判らない**（#56 の
             // 「失敗なら ref は元のまま」が中断では成り立たない、と同じ形）。
             // 読み直せば `.git/config` の実物が答えるので、成否で分岐する理由が無い。
-            GitOp::SetAccount { .. } => Reload::Account,
+            // **`UnsetAccount` も同じ腕。** 外そうとしたキーが既に無ければ
+            // `git config --unset` は exit 5 を stderr 空で返す（03 の実測表）ので、
+            // 成否から「いま何が設定されているか」は読めない。
+            GitOp::SetAccount { .. } | GitOp::UnsetAccount => Reload::Account,
 
             // walk に入るコミットの集合が変わる。**失敗しても途中まで ref が
             // 動いていることがある**ので成否を見ない。fetch / pull は一部の ref だけ

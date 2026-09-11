@@ -142,14 +142,34 @@ pub struct Account {
 }
 
 /// どうやってアカウントが決まったか。UI の説明に使う。
+///
+/// **明示指定の 2 つ（[`GitConfig`](Self::GitConfig) /
+/// [`RepoRule`](Self::RepoRule)）を畳まない。** どちらも 04 の手順 1 で決まるが、
+/// **mewgit から外せるのは前者だけ** —— `.git/config` は `GitOp::UnsetAccount` で
+/// 消せて、設定ファイルの `[[repos]]` は `git config` の手が届かない（08 が
+/// 「`config` モジュールは `.git/config` を見ない」と割った境目の裏側）。1 本に
+/// 畳んだまま両方の置き場所を案内に並べる形は #73 で出荷していて、「選び直せない」を
+/// `/code-review` に拾われた（01 の「アカウントの選び直し」）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountSource {
-    /// `.git/config` の `mewgit.user` か設定ファイルの `[[repos]]`。
-    Config,
+    /// `.git/config` の `mewgit.user`。**`u` で外せる唯一の出どころ。**
+    GitConfig,
+    /// 設定ファイルの `[[repos]]` マッチ。**mewgit からは外せない。**
+    RepoRule,
     /// そのホストのログインが 1 つだけだった。
     Single,
     /// 候補トークンで `GET /repos/{owner}/{repo}` を試して 1 つに絞れた。
     Probe,
+}
+
+impl AccountSource {
+    /// `GitOp::UnsetAccount` で外せるか（01 の「アカウントの選び直し」）。
+    ///
+    /// **キーの案内（`[u] 指定を解除`）と `u` の受け口が同じ述語を読む。** 別々に
+    /// `matches!` を書くと、効かない画面に案内だけが出る（#53）。
+    pub fn is_unsettable(self) -> bool {
+        matches!(self, AccountSource::GitConfig)
+    }
 }
 
 /// アカウント解決の状態。`Degraded` でも Git 機能は動かす。
@@ -200,8 +220,14 @@ pub enum DegradedReason {
     /// ほうなので、どの login を指していたかを案内に出す。**手順 2 へ落とさない**
     /// のも同じ理由 —— 指定を無視して別のアカウントを選ぶと、EMU と個人アカウントを
     /// 取り違える。
+    ///
+    /// **[`AccountSource`] を運ぶ。** 直す先が `.git/config` か設定ファイルの
+    /// `[[repos]]` かで案内が変わるうえ、**前者は `A` の `u` でその場で外せる** ——
+    /// 運ばないと、壊れた指定を憶えたまま `A` が案内しか出せない行き止まりが残る
+    /// （これは `Resolved` 側と同じ穴の、degraded に落ちた版）。
     ConfiguredUnavailable {
         login: String,
+        source: AccountSource,
         message: String,
     },
     /// 届いたことを確かめられた候補が 1 つも無かった。

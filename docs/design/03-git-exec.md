@@ -96,6 +96,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `StashPush { .. }` | `stash push [--include-untracked] [--message <m>] [-- <paths>]` |
 | `StashApply(i)` / `Pop` / `Drop` | `stash apply` / `pop` / `drop` `stash@{i}` |
 | `SetAccount { login }` | `config --local -- mewgit.user <login>` |
+| `UnsetAccount` | `config --local --unset -- mewgit.user` |
 
 決めたことと理由:
 
@@ -115,11 +116,27 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   | `config --local mewgit.user <値>`（`--` 無し） | 値が `--global` / `--unset` / `--list` / `-4` でも**そのまま値として書かれる**（exit 0） |
   | `config --local -- mewgit.user <値>` | **同じ結果。** `git config` はキーより後ろをオプションとして読まない |
   | linked worktree での `--local` | 共有の `.git/config` に書く（`config.worktree` は作られない）= 読み側の git2 `ConfigLevel::Local` と同じ段 |
+  | `mewgit.user` に値が 2 つあるとき `config --local -- mewgit.user <値>` | **exit 5**（`cannot overwrite multiple values with a single value`）。mewgit は `--add` しないので手で書いたときだけ。**畳まない**（`--replace-all` にすると、手で書いた別の値を黙って消す） |
 
   **`--` は守りになっていない**（上の 2 行目）。それでも置くのは、外したときの根拠が
   「いまの git はそう読まない」だけになるから —— `git branch --move` はまさにそれで
   足をすくわれた（下の項）。**「守っている」と書かない**のが `--` を置くことより大事で、
   書くと `-` 始まりの login をここで弾いたつもりになる
+- **`UnsetAccount` は `.git/config` から `mewgit.user` を外す**（`Modal::AccountPicker`
+  の `u`。01 の「アカウントの選び直し」）。**`--` は `--unset` より後ろ**に置く。
+  実測（git 2.55、`env -i` の一時リポジトリ）:
+
+  | 確かめたこと | 結果 |
+  |---|---|
+  | `config --local --unset -- mewgit.user` | exit 0。値が 1 つだけ残っていた `[mewgit]` は**節ごと消える** |
+  | `config --local -- --unset mewgit.user` | `error: key does not contain a section: --unset` で **exit 2**。`--` より後ろは全部キーと値として読まれる |
+  | 設定されていないキーに `--unset` | **exit 5、stderr は空** |
+  | 値が 2 つあるキーに `--unset` | exit 5（`warning: mewgit.user has multiple values`）。`--unset-all` にはしない —— 手で書いた別の値を黙って消す |
+
+  **3 行目が 01 の「成否で分岐しない」の根拠。** 断りの文言が出ないので、失敗から
+  「いま何が設定されているか」は読めない —— 読み直して `.git/config` の実物に
+  答えさせる。**`--` は `SetAccount` と形を揃えて置くだけ**で、ここでも守っていない
+  （`UnsetAccount` は値を取らず、人が打った文字も外から来た名前も positional に載らない）
 - **パスの前には必ず `--` を置く。** `-n` や `HEAD` という名前のファイルがオプションや
   revision として解釈されるのを防ぐ
 - **人が打った文字や外から来た名前が positional に載るところにも `--` を置く。**

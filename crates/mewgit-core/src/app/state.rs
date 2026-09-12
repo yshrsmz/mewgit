@@ -1504,10 +1504,8 @@ impl AccountView {
     /// `r`（解決し直す）が効くか。**キーの案内（`[r] 解決し直す`）もこれを読む**
     /// （`is_unsettable` と同じ理由。#53）。
     ///
-    /// **`Repick` では偽。** あちらは行き止まりではない —— 候補を選んで保存すれば
-    /// 書き込みのあとの `update::account::resolve_again` を通るし、候補の取り直しは
-    /// `A` の押し直しで効く。明示指定で決まっている相手は手順 1 で同じ答えに戻るので、
-    /// 押せるのに何も変わらないキーが増える（01 の「外で直したあとの再解決」）。
+    /// **degraded だけ。** `Repick` を外してある理由は 01 の「外で直したあとの
+    /// 再解決」にある。
     pub fn is_reresolvable(&self) -> bool {
         matches!(self, AccountView::Degraded(_))
     }

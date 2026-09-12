@@ -635,6 +635,20 @@ pub fn fake_ambiguous(logins: &[&str]) -> DegradedReason {
     }
 }
 
+/// `.git/config` の指定が原因で degraded になった形。
+///
+/// **`[u]`（指定の解除）と `[r]`（解決し直す）が両方出る degraded。**
+/// `DegradedReason::configured_source` が `Some` を返す変種なので、外す対象が在る。
+/// 3 人目（`update::account` の `u`、`modals::account_picker` の 2 本）が出たので
+/// ここへ寄せた。
+pub fn fake_configured_unavailable() -> DegradedReason {
+    DegradedReason::ConfiguredUnavailable {
+        login: "taro".to_string(),
+        source: AccountSource::GitConfig,
+        message: "no oauth token found".to_string(),
+    }
+}
+
 /// ログイン一覧。`gh auth status` が返したぶんの代わり。
 ///
 /// **`test_util` に置くのは 2 人目（`update::account` の選び直し）が出たから。**

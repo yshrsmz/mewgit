@@ -71,16 +71,29 @@ fn account_view(account: &AccountState, target: &TargetState) -> Result<AccountV
     }
 }
 
+/// 開いている [`Modal::AccountPicker`] の中身。
+///
+/// **キーを受ける 3 本が同じ分解を書いていたので寄せた**（`CLAUDE.md` の「2 つ目の
+/// 利用者が出た時点で共有先を作る」）。`None` の腕は**どれも踏めない** ——
+/// [`modal_key`](super::modal_key) が `Modal::AccountPicker` に一致したときだけ
+/// この 3 本を呼ぶ。踏めない腕を 3 本に散らさないためでもある。
+fn account_picker(state: &AppState) -> Option<(&AccountView, usize)> {
+    match state.modal.as_ref() {
+        Some(Modal::AccountPicker { view, cursor }) => Some((view, *cursor)),
+        _ => None,
+    }
+}
+
 /// [`Modal::AccountPicker`] の `Enter`。選んだ login を `.git/config` に書く。
 ///
 /// **選べるのは候補が在るときだけ**（[`AccountView::candidates`] が空なら何もしない）。
 /// `NoAccess` を選ばせないのは、どれも届かない状態でアカウントを選んでも何も直らない
 /// から（04 の手順 4）。一覧の取り直しが終わっていないあいだも同じ扱いになる。
 pub(super) fn account_picked(state: &mut AppState) -> Cmd {
-    let Some(Modal::AccountPicker { view, cursor }) = state.modal.as_ref() else {
+    let Some((view, cursor)) = account_picker(state) else {
         return Cmd::None;
     };
-    let Some(login) = view.candidates().get(*cursor).map(|c| c.login.clone()) else {
+    let Some(login) = view.candidates().get(cursor).map(|c| c.login.clone()) else {
         return Cmd::None;
     };
     // **[`submit_exec`] を通す。** ほかの `git` が走っているあいだは閉じない
@@ -95,7 +108,7 @@ pub(super) fn account_picked(state: &mut AppState) -> Cmd {
 /// 出る（#53）。設定ファイルの `[[repos]]` は `git config` の手が届かないので、
 /// そちらは本文で外の直し方を案内する（#65 の「指示を足すのは、その操作を持たない側」）。
 pub(super) fn account_unset(state: &mut AppState) -> Cmd {
-    let Some(Modal::AccountPicker { view, .. }) = state.modal.as_ref() else {
+    let Some((view, _)) = account_picker(state) else {
         return Cmd::None;
     };
     if !view.is_unsettable() {
@@ -104,24 +117,16 @@ pub(super) fn account_unset(state: &mut AppState) -> Cmd {
     submit_exec(state, GitOp::UnsetAccount)
 }
 
-/// [`Modal::AccountPicker`] の `r`。外で直したあとの再解決（01 の
-/// 「外で直したあとの再解決」）。
+/// [`Modal::AccountPicker`] の `r`。外で直したあとの再解決。
 ///
-/// **`gh auth login` も `gh` の入れ替えも mewgit の外で起きる**ので、変わったことを
-/// 知る手掛かりが無い —— 押されたときに手順 1〜4 を通し直す以外にない。
 /// 効く条件は [`AccountView::is_reresolvable`] の 1 本で、キーの案内
-/// （`[r] 解決し直す`）も同じものを読む（#53）。
-///
-/// **ほかの `git` が走っているあいだは断る**（[`submit_exec`] と同じ [`exec_busy`]。
-/// **モーダルは閉じない**）。ここは**書き込みの最中に [`Cmd::ResolveAccount`] を
-/// 飛ばせる初めての経路**で、断らないと `Ambiguous` で `Enter` →（`git config` が
-/// 走っているあいだに）`A` → `r` で**書き込み前の `.git/config` を読む解決**が先に
-/// 走る。[`exec_finished`](super::exec_finished) の [`resolve_again`] が出す 2 通目は
-/// [`AppState::issue`](crate::app::AppState::issue) が同種として落とすので、**古い結果が
-/// そのまま最終になり、選んだ login が黙って無視される**（#51 と同じ「どの順序なら
-/// 拾えるか」——合図を出した順ではなく届く順で決まる）。
+/// （`[r] 解決し直す`）も同じものを読む（#53）。**ほかの `git` が走っている
+/// あいだは断る**（[`submit_exec`] と同じ [`exec_busy`]。**モーダルは閉じない**）——
+/// 書き込みを追い越すと、選んだ login が黙って無視される。**理由は 01 の
+/// 「外で直したあとの再解決」**（踏む手順は
+/// `r_is_refused_while_the_write_it_would_overtake_is_running`）。
 pub(super) fn account_reresolve(state: &mut AppState) -> Cmd {
-    let Some(Modal::AccountPicker { view, .. }) = state.modal.as_ref() else {
+    let Some((view, _)) = account_picker(state) else {
         return Cmd::None;
     };
     if !view.is_reresolvable() || exec_busy(state) {
@@ -255,8 +260,8 @@ fn resolve_target(state: &mut AppState) -> Cmd {
 /// 諦める**（04）。
 pub(super) fn target_resolved(state: &mut AppState, resolved: ResolvedTarget) -> Cmd {
     state.jobs.finish(JobKind::ResolveTarget);
-    // **ここが最初の発行元。** あとは [`resolve_again`]（外の世界が変わったあと）。
-    // `init` からは出せない —— `auth::resolve` は `RepoTarget` を要るので、
+    // **起動時の 1 本目はここが直接出す**（読み直す前の状態が無いので
+    // [`resolve_again`] を通せない）。`init` からは出せない —— `auth::resolve` は `RepoTarget` を要るので、
     // `Msg::RepoInfoLoaded` → `Cmd::ResolveTarget` → ここ、と 2 往復待ってからでないと
     // 材料が揃わない（01 の「`RepoInfo.target` を埋める」）。
     let account = Cmd::ResolveAccount(resolved.target.clone());
@@ -286,10 +291,8 @@ pub(super) fn account_resolved(
 
 /// 04 の手順 1〜4 を通し直す（01 の「アカウントの選び直し」）。
 ///
-/// **呼ぶのは、決めたときの材料が変わったあと。** `.git/config` に書いた
-/// （`GitOp::SetAccount` / `UnsetAccount` の [`exec_finished`](super::exec_finished)）か、
-/// 外の世界が変わったと人が言った（[`account_reresolve`]）か。**起動時の 1 本目だけは
-/// [`target_resolved`] が直接出す** —— あちらには読み直す前の状態が無い。
+/// **呼ぶ条件は 1 つ** —— `target` が決まっていて、決めたときの材料が変わったあと。
+/// 誰が呼ぶかはここに書かない（`resolve_again` で grep すれば出る）。
 ///
 /// **開いている [`Modal::AccountPicker`] は閉じる。** [`Repick`] は
 /// [`AppState::account`] の写しを持っていて、ここから先その写しは嘘になる ——
@@ -336,7 +339,9 @@ mod tests {
     use crate::git_exec::ExecError;
     use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote};
 
-    use crate::test_util::{fake_account, fake_ambiguous, fake_logins, fake_target, reply};
+    use crate::test_util::{
+        fake_account, fake_ambiguous, fake_configured_unavailable, fake_logins, fake_target, reply,
+    };
 
     /// リモートを載せた `RepoInfoLoaded` を 1 通届ける。
     ///
@@ -517,8 +522,8 @@ mod tests {
 
     #[test]
     fn a_repository_that_is_not_on_github_never_asks_for_an_account() {
-        // **どの発行元も `target` が決まっていることを要る**（`target_resolved` は
-        // その返信そのもの、`resolve_again` は `resolved()` で断る）。既定リモートが
+        // **`Cmd::ResolveAccount` は `target` が決まっていないと出ない**（`target_resolved`
+        // はその返信そのもの、`resolve_again` は `resolved()` で断る）。既定リモートが
         // 決まらないリポジトリでは `target` が `Unavailable` に落ちるので、アカウントは
         // 一度も頼まれず `Resolving` のまま残る（ヘッダは何も出さない。07）。
         let mut state = state();
@@ -941,11 +946,7 @@ mod tests {
         // **degraded に落ちた指定も外せる。** ここを塞がないと、壊れた
         // `mewgit.user` を憶えたまま `A` が案内しか出せない（`Resolved` 側と
         // 同じ穴の degraded 版）。
-        let mut state = state_degraded(DegradedReason::ConfiguredUnavailable {
-            login: "taro".to_string(),
-            source: AccountSource::GitConfig,
-            message: "no oauth token found".to_string(),
-        });
+        let mut state = state_degraded(fake_configured_unavailable());
         let _ = press(&mut state, 'A');
 
         let cmd = press(&mut state, 'u');
@@ -992,10 +993,7 @@ mod tests {
 
     #[test]
     fn r_does_nothing_on_the_repick() {
-        // **`Repick` は行き止まりではない** —— 選んで保存すれば書き込みのあとの
-        // `resolve_again` を通るし、候補の取り直しは `A` の押し直しで効く。
-        // 明示指定なら手順 1 で同じ答えに戻るので、押せるのに何も変わらない
-        // キーになる（01 の「外で直したあとの再解決」）。
+        // **`Repick` を外してある理由は 01 の「外で直したあとの再解決」。**
         let mut state = state_resolved(AccountSource::GitConfig);
         let _ = press(&mut state, 'A');
 
@@ -1008,11 +1006,10 @@ mod tests {
 
     #[test]
     fn r_is_refused_while_the_write_it_would_overtake_is_running() {
-        // **`r` は書き込みの最中に `Cmd::ResolveAccount` を飛ばせる初めての経路。**
-        // 断らないと、**書き込み前の `.git/config` を読む解決**が先に走り、
+        // **これが `exec_busy` を置いた理由の踏む手順**（01 の「外で直したあとの
+        // 再解決」）。断らないと書き込み前の `.git/config` を読む解決が先に走り、
         // `exec_finished` が出す 2 通目は `issue` に同種として落とされるので、
-        // **古い結果がそのまま最終になり、選んだ login が黙って無視される**
-        // （#51 と同じ「どの順序なら拾えるか」）。
+        // 選んだ login が黙って無視される。
         let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
         let _ = press(&mut state, 'A');
 
@@ -1104,9 +1101,8 @@ mod tests {
 
     #[test]
     fn writing_the_account_asks_for_the_resolution_again() {
-        // **`resolve_again` へ来る出口のうち、書き込みのほう**（もう一方は `r`。
-        // `r_resolves_again_after_the_outside_was_fixed`）。書いた `mewgit.user` は
-        // 手順 1 で読まれるので `Resolved(GitConfig)` に、外したあとは手順 2 以降へ落ちる。
+        // 書き込みは `resolve_again` を通る。書いた `mewgit.user` は手順 1 で読まれるので
+        // `Resolved(GitConfig)` に、外したあとは手順 2 以降へ落ちる。
         for op in account_writes() {
             let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
 

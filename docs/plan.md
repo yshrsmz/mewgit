@@ -155,13 +155,14 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       **候補一覧の取り直し**（`gh auth status` をもう一度）と、
       **`AccountSource::Config` を出どころで割ること**（`.git/config` は `--unset`
       できるが設定ファイルの `[[repos]]` は外せないので、同じ案内を出せない）
-- [ ] degraded を外で直したあとの再解決。**`gh auth login` してから `A` を押しても
-      内訳が出るだけ**で、`Cmd::ResolveAccount` を出す経路は `target_resolved` と
-      `GitOp::SetAccount` / `UnsetAccount` のあとの 2 箇所しかない（01 の
-      「アカウントの選び直し」）。**`Cmd::ListAccounts` では塞がらない** —— 一覧を
-      引き直すことと、手順 1〜4 を通して `AccountState` を作り直すことは別。塞ぐには
-      `Modal::AccountPicker` の `Degraded` 側に「もう一度解決する」の入口を足し、
-      `Resolving` に戻すあいだモーダルをどうするかを決める
+- [x] degraded を外で直したあとの再解決。`Modal::AccountPicker` の `Degraded` 側に
+      `r` を足し、`resolve_again` をそのまま呼ぶ（モーダルは閉じる。開いたまま
+      差し替えると `Repick` で塞いだ「書き込み前の写し」の罠を開け直す）。
+      **`Repick` には出さない** —— あちらは選んで保存すれば書き込みのあとの
+      `resolve_again` を通るので行き止まりではない。**`git` 実行中は断る** ——
+      `r` は書き込みの最中に `Cmd::ResolveAccount` を飛ばせる初めての経路で、
+      断らないと書き込み前の `.git/config` を読む解決が追い越す（01 の
+      「外で直したあとの再解決」）
 - [ ] `ui::panes::prs` — 現ブランチ PR、チェック一覧、一覧タブ、ブラウザで開く。
       **レートリミット残量の受け渡しもここ** —— ヘッダ表示のタスクへ送られていたが、
       あちらで API を叩くのは起動時の probe だけで、常時出す残量の産出元にならない

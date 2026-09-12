@@ -1071,10 +1071,12 @@ Msg::RepoInfoLoaded → update が default_remote で URL を選び RemoteUrl::p
 待ってからでないと出せない。`Cmd` に `RepoTarget` を載せてあるのはこのため
 （下の「Cmd」）。
 
-**発行元は 2 箇所ある。** ここ（`target_resolved`）と、`GitOp::SetAccount` が
-終わったあとの `exec_finished`（下の「アカウントの選び直し」）。**2 箇所目は
-`.git/config` を書き換えた直後で、材料はもう `state.repo.target` にある** ——
-`RepoTarget` は latch されるので、2 度目も同じ対象を渡す。
+**ここは最初の発行元で、唯一ではない。** もう一方は `resolve_again`（下の
+「アカウントの選び直し」）で、`GitOp::SetAccount` / `UnsetAccount` が終わったあとの
+`exec_finished` と `Modal::AccountPicker` の `r` がそこへ入る。**どれも
+`.git/config` を書いたあと、あるいは外の世界が変わったあとで、材料はもう
+`state.repo.target` にある** —— `RepoTarget` は latch されるので、2 度目も同じ対象を
+渡す。**一覧はここに書かない**（`Cmd::ResolveAccount` で grep すれば出る）。
 
 **`TargetState::Unavailable` に落ちたリポジトリでは一度も出さない。** GitHub の
 リポジトリとして特定できないので解決する対象が無く、`account` は `Resolving` の
@@ -1119,7 +1121,8 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
   答えが割れうる（「導出できる値を引数に取らせない」）。**ここも写しが古くなりうる**
   —— `Enter` で保存したあと、`git` が走っているあいだに `A` を押せば、消える運命の
   `DegradedReason` を持ったモーダルが開き直せる（`Repick` と同じ経路）。下の
-  「写しの寿命」が同じ 1 箇所で両方を閉じる。**かつて「開いているあいだ
+  「写しの寿命」が同じ 1 箇所で両方を閉じる。**その開き直した画面では `r` も
+  押せる**ので、あちらは別に断る（下の「外で直したあとの再解決」）。**かつて「開いているあいだ
   `state.account` は動かない」と書いていたが嘘で、`Repick` 側だけ直して
   ここに前提が生き残っていた**（独立したレビューが拾った。#54 の「節をまたぐと、
   直した節の隣で前提が生き残る」）
@@ -1137,8 +1140,9 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
 
 **`Enter` で選べるのは、その述語が空でないときだけ。** `NoAccess` は理由を並べるが
 選ばせない（どれも動かない状態でアカウントを選んでも何も直らない。04 の手順 4）。
-`Waiting` と `Failed` も同じ扱いで、`Enter` は何もしない —— キーの案内も
-`[Esc] 閉じる` だけになる。
+`Waiting` と `Failed` も同じ扱いで、`Enter` は何もしない —— キーの案内から
+`[j/k]` と `[Enter]` が落ちる（残るのは、その画面で効くほかのキー ——
+degraded なら `[r]`、`.git/config` 由来なら `[u]`、どちらも無ければ `[Esc]` だけ）。
 
 #### 候補の取り直し
 
@@ -1217,12 +1221,35 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
 - 保存後は 04 の手順 1（明示指定）に当たるので `Resolved(source: GitConfig)` になり、
   **以後は probe を通らない**（起動のたびの 1 往復も消える）。外したあとは手順 2 以降へ
   落ちるので、`NotLoggedIn` / `Single` / `Probe` / `Ambiguous` / `NoAccess` のどれかに戻る
-- **degraded を外で直したときの再解決はまだ無い。** `gh auth login` してから `A` を
-  押しても、`Degraded` の腕は内訳を出すだけで `Cmd::ResolveAccount` を出さない
-  （出すのは `target_resolved` と書き込みのあとの 2 箇所だけ）。**`Cmd::ListAccounts`
-  を足したこの PR でも塞いでいない** —— 一覧を取り直すことと、degraded の理由を
-  作り直すことは別（`resolve` の手順 1〜4 を通さないと `AccountState` は変わらない）。
-  **次のタスクへ送る**（`docs/plan.md` の M4）
+
+#### 外で直したあとの再解決
+
+`Degraded` の画面で `r` を押すと、もう一度 `resolve` の手順 1〜4 を通す
+（`resolve_again`）。**`gh auth login` や `gh` の入れ替えは mewgit の外で起きる**ので、
+それを知る手掛かりが mewgit には無い —— 押されたときに読み直す以外にない。
+
+- **`Degraded` にだけ置く。** `Repick` は行き止まりではない ——
+  候補を選んで保存すれば書き込みのあとの `resolve_again` を通るし、候補の取り直しは
+  `A` の押し直しで効く。`Config` 由来なら手順 1 で同じ答えに戻るだけなので、
+  押せるのに何も変わらないキーが増える。**効く条件とキーの案内は
+  `AccountView` の 1 本の述語から出す**（#53。`is_unsettable` の隣）
+- **押したらモーダルを閉じる。** `resolve_again` をそのまま呼ぶ ——
+  **`account` を動かすときに開いている `AccountPicker` を閉じる 1 箇所を増やさない**。
+  開いたまま「解決しています」に差し替える形にすると、`Repick` で塞いだ
+  「書き込み前の写しを持ったモーダル」の罠（上の「写しの寿命」）を degraded 側に
+  開け直すことになる。閉じたあとの手掛かりはヘッダで、`Resolving` のあいだ
+  `[gh: …]` が消え、決まると戻る（07）
+- **ほかの `git` が走っているあいだは断る**（`submit_exec` と同じ `exec_busy`。
+  **モーダルは閉じない**）。`r` は**書き込みの最中に `Cmd::ResolveAccount` を
+  飛ばせる初めての経路**で、断らないと `Ambiguous` で `Enter` →（`git config` が
+  走っているあいだに）`A` → `r` で**書き込み前の `.git/config` を読む解決**が先に
+  走る。`exec_finished` の `resolve_again` が出す 2 通目は `AppState::issue` が
+  同種として落とすので、**古い結果がそのまま最終になり、選んだ `mewgit.user` が
+  黙って無視される**。#51 の「どの順序なら拾えるか」と同じ形 ——
+  合図を出した順ではなく、**届く順**で決まる
+- **通知は出さない。** `Enter` / `u` のあとも通知なしで閉じて解決し直しており、
+  degraded はヘッダに出る（`account_resolved` が「2 箇所で言わない」と決めたのと
+  同じ数え方）。断ったときだけ `exec_busy` が「ほかの git 実行が終わるまで」を出す
 
 ### push の行き先
 

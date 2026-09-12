@@ -6,7 +6,7 @@
 
 use crate::git_exec::GitOp;
 
-use super::account::{account_picked, account_unset};
+use super::account::{account_picked, account_reresolve, account_unset};
 use super::remote::remote_picked;
 use super::worktree::commit_message_key;
 use super::{edit_key, submit_exec};
@@ -83,16 +83,19 @@ fn picker_key(state: &mut AppState, key: Key, on_enter: fn(&mut AppState) -> Cmd
     }
 }
 
-/// [`Modal::AccountPicker`] のキー処理。骨格は [`picker_key`] に委ね、`u` だけを
+/// [`Modal::AccountPicker`] のキー処理。骨格は [`picker_key`] に委ね、`u` と `r` を
 /// 自分で受ける（01 の「アカウントの選び直し」）。
 ///
-/// **`u` を [`picker_key`] に足さない。** [`Modal::RemotePicker`] には外す対象が
-/// 無いので、共通の骨格に置くと片方でしか意味を持たないキーが増える。
-/// **効くかどうかは `AccountView::is_unsettable` の 1 本**で、キーの案内を出す
-/// `ui` 側も同じものを読む（#53）。
+/// **どちらも [`picker_key`] に足さない。** [`Modal::RemotePicker`] には外す対象も
+/// 解決し直す相手も無いので、共通の骨格に置くと片方でしか意味を持たないキーが増える。
+/// **効くかどうかは `AccountView` の述語 1 本ずつ**（`is_unsettable` /
+/// `is_reresolvable`）で、キーの案内を出す `ui` 側も同じものを読む（#53）。
 fn account_key(state: &mut AppState, key: Key) -> Cmd {
     if key == Key::new(KeyCode::Char('u')) {
         return account_unset(state);
+    }
+    if key == Key::new(KeyCode::Char('r')) {
+        return account_reresolve(state);
     }
     picker_key(state, key, account_picked)
 }

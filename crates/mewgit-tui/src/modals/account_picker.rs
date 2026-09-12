@@ -34,6 +34,15 @@ const HINT_UNSET: &str = "[u] 指定を解除";
 /// `r` の案内。**出すのは [`AccountView::is_reresolvable`] が真のときだけ**（同上）。
 const HINT_RERESOLVE: &str = "[r] 解決し直す";
 
+/// 外での直し方が mewgit の設定ファイルを指すときに添える 1 行。
+///
+/// **`r` が読み直すのは `gh` と `.git/config` だけ。** 設定ファイルは起動時に固まる
+/// （08。`config` は `AppState` が持ち、`Cmd::ResolveAccount` はその写しを使う）ので、
+/// `general.gh_bin` や `[[repos]]` を直しても `r` では拾えない（pty で実測）。
+/// **`[r] 解決し直す` を出した画面で、効かない直し方だけを案内しないため**
+/// （07 の「外での直し方が設定ファイルを指すなら」）。
+const RESTART_FOR_CONFIG: &str = "設定ファイルを直したときは mewgit の再起動が要ります";
+
 /// 保存先。**黙って `.git/config` を変えない**（01 の「アカウントの選び直し」）。
 ///
 /// **キーの名前は [`MEWGIT_USER`] から引く。** 書く側（`GitOp::SetAccount` の argv）
@@ -226,6 +235,7 @@ fn degraded_body(reason: &DegradedReason) -> Vec<String> {
         DegradedReason::GhMissing => vec![
             "gh が見つかりません".to_string(),
             "PATH に gh を入れるか、設定の general.gh_bin にパスを書いてください".to_string(),
+            RESTART_FOR_CONFIG.to_string(),
         ],
         DegradedReason::GhTooOld { found } => vec![
             format!("gh {found} は古すぎます（{} 以上が必要です）", gh::REQUIRED),
@@ -246,13 +256,21 @@ fn degraded_body(reason: &DegradedReason) -> Vec<String> {
             login,
             source,
             message,
-        } => vec![
-            format!("設定が指す {login} のトークンがありません"),
-            message.clone(),
-            // **置き場所は [`source_label`] の 1 本から引く。** ここで手書きすると
-            // `MEWGIT_USER` を literal で書くことになる（[`saves_to`] の doc）。
-            format!("{} を直してください", source_label(*source)),
-        ],
+        } => {
+            let mut lines = vec![
+                format!("設定が指す {login} のトークンがありません"),
+                message.clone(),
+                // **置き場所は [`source_label`] の 1 本から引く。** ここで手書きすると
+                // `MEWGIT_USER` を literal で書くことになる（[`saves_to`] の doc）。
+                format!("{} を直してください", source_label(*source)),
+            ];
+            // **`.git/config` には添えない。** `auth::resolve` が毎回 git2 で開き直すので
+            // `r` で拾える —— 添えると、要らない再起動を案内することになる。
+            if source == &AccountSource::RepoRule {
+                lines.push(RESTART_FOR_CONFIG.to_string());
+            }
+            lines
+        }
         // **「権限が無い」と読ませない。** 全部が「確かめられなかった」形もここに来る
         // （04）ので、1 件ずつの理由をそのまま並べる。
         DegradedReason::NoAccess { attempts } => {
@@ -470,6 +488,32 @@ mod tests {
 
             assert!(row.contains(&want), "案内が 1 行に収まっていない: {row}");
         }
+    }
+
+    #[test]
+    fn a_fix_that_lives_in_the_config_file_says_a_restart_is_needed() {
+        // **`r` が読み直すのは `gh` と `.git/config` だけ。** 設定ファイルは起動時に
+        // 固まる（08）ので、`[r] 解決し直す` を出した画面が `general.gh_bin` や
+        // `[[repos]]` を直せと言うだけでは、**押しても変わらない案内**になる
+        // （pty で実測: 走行中に `config.toml` を直して `r` を押しても
+        // 「gh が見つかりません」のまま）。
+        let needs_restart = [
+            DegradedReason::GhMissing,
+            DegradedReason::ConfiguredUnavailable {
+                login: "taro".to_string(),
+                source: AccountSource::RepoRule,
+                message: "no oauth token found".to_string(),
+            },
+        ];
+        for reason in needs_restart {
+            let text = draw(&state_with_reason(reason.clone()), SIZE).join("\n");
+            assert!(text.contains("再起動"), "{reason:?}: {text}");
+        }
+
+        // **`.git/config` には添えない。** `auth::resolve` が毎回 git2 で開き直すので
+        // `r` で拾える —— 添えると要らない再起動を案内する。
+        let text = draw(&state_with_reason(fake_configured_unavailable()), SIZE).join("\n");
+        assert!(!text.contains("再起動"), "{text}");
     }
 
     #[test]

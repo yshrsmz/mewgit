@@ -2245,6 +2245,8 @@ mod tests {
 
         assert_eq!(state.graph.cursor, 0);
         assert_eq!(state.graph.selection(), GraphSelection::Wip);
+        // 窓もずらさない。ずらすと 1 行しか無い画面が空白のまま流れる。
+        assert_eq!(state.graph.scroll, 0);
     }
 
     #[test]

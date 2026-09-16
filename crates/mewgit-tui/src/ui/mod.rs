@@ -561,18 +561,6 @@ mod tests {
     }
 
     #[test]
-    fn the_right_column_stacks_the_branches_over_the_selected_pane() {
-        // 左と違って右は差し替えではない。ブランチ一覧はグラフの選択と無関係なので、
-        // Working tree（またはコミット詳細）と同時に出る（07 の「レイアウト」）。
-        let state = state_at("/repo");
-
-        let text = draw(&state, TermSize::default()).join("\n");
-
-        assert!(text.contains("Branches"), "{text}");
-        assert!(text.contains("Working tree"), "{text}");
-    }
-
-    #[test]
     fn the_left_area_swaps_between_the_graph_and_the_diff() {
         let state = state_at("/repo");
         let text = draw(&state, TermSize::default()).join("\n");

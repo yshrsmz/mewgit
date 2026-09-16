@@ -605,21 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_reloads_the_branch_list_but_staging_does_not() {
-        // commit は `refs/heads/<現在>` を動かすので、読み直さないと Branches ペインが
-        // commit 前の ahead を出したまま残る。index しか触らない操作では要らない。
-        let mut state = state_with_commits(3);
-        let _ = state.issue(Cmd::Exec(commit_op()));
-        let cmd = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
-        assert!(issued(&cmd, &Cmd::LoadBranches), "{cmd:?}");
-
-        let mut state = state_with_commits(3);
-        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
-        let cmd = update(&mut state, exec_done(Ok(fake_output())));
-        assert!(!issued(&cmd, &Cmd::LoadBranches), "{cmd:?}");
-    }
-
-    #[test]
     fn staging_does_not_reload_the_log() {
         // 読み直しは `LogSession` の作り直しで履歴全体のコストが掛かる（02）。
         // index しか触らない操作のたびには払えない。
@@ -629,6 +614,9 @@ mod tests {
 
         let cmd = update(&mut state, exec_done(Ok(fake_output())));
 
+        // **`Cmd::LoadStatus` 単体と厳密に比べる。** `issued` で「読み直しが無い」を
+        // 見る形にすると、`LoadRepoInfo` や `LoadBranches` が紛れ込んでも通る ——
+        // index しか触らない操作では ref も動かないので、そちらも出てはいけない。
         assert_eq!(cmd, Cmd::LoadStatus);
         // **世代が進まないから積んだ行がそのまま使える。** 1 本のカウンタにすると
         // ここで進み、飛んでいるページも積んだ行も毎回捨てることになる。

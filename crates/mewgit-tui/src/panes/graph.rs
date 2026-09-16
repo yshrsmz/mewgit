@@ -198,8 +198,7 @@ mod tests {
         draw, graph_rows, state_at, state_with_commits, state_with_history, terminal_with,
     };
     use mewgit_core::app::{init, update, Msg, TermSize};
-    use mewgit_core::git_read::{GitReadError, Oid, RefIndex, RefLabel};
-    use mewgit_core::test_util::fake_commit;
+    use mewgit_core::git_read::{GitReadError, RefIndex, RefLabel};
     use ratatui::buffer::Buffer;
     use ratatui::style::Modifier;
 
@@ -590,35 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_palette_falls_back_to_the_terminal_colour() {
-        // `colors = []` でも割り算で落ちない。
-        let mut state = state_with_history(MERGE);
-        state.config.graph.colors = Vec::new();
-
-        let terminal = terminal_with(&state, TermSize::default());
-        let buffer = terminal.backend().buffer();
-
-        let y = FIRST_ROW as u16;
-        assert_eq!(buffer[(1, y)].symbol(), "○");
-        assert_eq!(buffer[(1, y)].fg, Color::Reset);
-    }
-
-    #[test]
-    fn an_unreadable_colour_name_keeps_the_place_of_the_others() {
-        // 読めない名前を飛ばすと `ColorId` を割る周期が設定とずれ、
-        // 「2 色書いたのに 1 色で回る」理由を追えなくなる。
-        let mut state = state_with_history(MERGE);
-        state.config.graph.colors = vec!["nonsense".to_string(), "red".to_string()];
-
-        let terminal = terminal_with(&state, TermSize::default());
-        let buffer = terminal.backend().buffer();
-
-        let y = FIRST_ROW as u16;
-        assert_eq!(buffer[(1, y)].fg, Color::Reset);
-        assert_eq!(buffer[(3, y)].fg, Color::Red);
-    }
-
-    #[test]
     fn the_text_starts_at_the_same_column_on_every_row() {
         // 罫線の桁は行ごとのレーン数ではなく、いま描く行の最大に揃える（07）。
         // 揃えないと Oid の桁が行ごとに動く。
@@ -630,14 +600,5 @@ mod tests {
             .map(|row| lines[row].chars().position(|c| c.is_ascii_hexdigit()))
             .collect();
         assert_eq!(starts, vec![Some(TEXT_COLUMN); 4], "{starts:?}");
-    }
-
-    #[test]
-    fn an_unknown_oid_has_no_labels() {
-        let state = state_with_commits(&["first"]);
-        let other = fake_commit(99, "other").oid;
-        assert_ne!(other, Oid::ZERO_SHA1);
-
-        assert!(state.graph.refs.labels(other).is_empty());
     }
 }

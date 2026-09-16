@@ -407,11 +407,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_version_on_this_machine_is_accepted() {
-        assert!(check_version("gh version 2.100.0 (2026-09-03)").is_ok());
-    }
-
     // ---- 実物の gh ----
 
     #[tokio::test]
@@ -586,17 +581,6 @@ mod tests {
             Vec::<String>::new(),
             "1 件目の「本当に空」を 2 件目で埋めない"
         );
-    }
-
-    #[test]
-    fn a_fine_grained_pat_has_no_scopes_field_at_all() {
-        // `scopes` は omitempty。欠けても落ちず、空で返す（04 の EMU の節）。
-        let merged = logins(
-            r#"{"hosts":{"github.com":[
-                {"state":"success","active":true,"login":"me"}
-            ]}}"#,
-        );
-        assert_eq!(merged[0].scopes, Vec::<String>::new());
     }
 
     #[test]

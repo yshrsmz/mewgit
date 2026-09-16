@@ -72,7 +72,10 @@ async fn a_restart_reopens_a_session_that_was_already_read_to_the_end() {
     let reader = spawn(&repo);
 
     assert!(reader.log_page(10, false).await.unwrap().done);
-    assert!(reader.log_page(10, false).await.unwrap().commits.is_empty());
+    // 読み切ったらセッションを手放すが、次の要求で履歴全体を読み直したりはしない。
+    let after = reader.log_page(10, false).await.unwrap();
+    assert!(after.commits.is_empty());
+    assert!(after.done, "読み切ったあとも done のまま");
 
     let restarted = reader.log_page(10, true).await.unwrap();
 
@@ -119,22 +122,6 @@ async fn log_page_continues_where_the_previous_page_ended() {
     assert!(!first.done);
     assert!(!second.done);
     assert!(third.done, "最後のページで done が立っていません");
-}
-
-#[tokio::test]
-async fn log_page_after_the_last_page_stays_done() {
-    // 読み切ったらセッションを手放すが、次の要求で履歴全体を読み直したりはしない。
-    let repo = TestRepo::init();
-    repo.commit("first");
-    let reader = spawn(&repo);
-
-    let first = reader.log_page(10, false).await.unwrap();
-    let second = reader.log_page(10, false).await.unwrap();
-
-    assert_eq!(first.commits.len(), 1);
-    assert!(first.done);
-    assert!(second.commits.is_empty());
-    assert!(second.done);
 }
 
 #[tokio::test]

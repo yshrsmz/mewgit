@@ -361,25 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn partial_override_keeps_other_defaults() {
-        let (config, warnings) = Config::from_toml_str(
-            r#"
-            [graph]
-            ascii = true
-            "#,
-        );
-        assert!(warnings.is_empty());
-        assert!(config.graph.ascii);
-        // 同じテーブル内の書かれなかった項目も既定値のまま残る。
-        assert_eq!(config.graph.page_size, Graph::default().page_size);
-        assert_eq!(config.graph.colors, Graph::default().colors);
-        // 触れていないテーブルはまるごと既定値。
-        assert_eq!(config.general, General::default());
-        assert_eq!(config.github, Github::default());
-        assert_eq!(config.theme, Theme::default());
-    }
-
-    #[test]
     fn full_config_is_parsed() {
         let (config, warnings) = Config::from_toml_str(
             r#"

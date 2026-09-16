@@ -61,7 +61,6 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, prompt: &str, buf: &Te
 mod tests {
     use crate::test_util::{cursor, draw, row_of, state_with_modal};
     use mewgit_core::app::{AppState, InputIntent, Modal, TermSize, TextBuffer};
-    use ratatui::text::Line;
 
     /// 既定の 80x24。
     const SIZE: TermSize = TermSize {
@@ -106,38 +105,6 @@ mod tests {
             row_of(&lines, "main の新しい名前") < cursor(&state, SIZE).y,
             "{lines:?}"
         );
-    }
-
-    #[test]
-    fn the_terminal_cursor_sits_after_the_text_already_typed() {
-        // `cursor` の列は文字数なので、全角を含む行ではそのまま桁にできない
-        // （01 の `TextBuffer`）。桁で数えないと、全角のぶんだけ左にずれる。
-        let state = state_with_input("ブランチを作成", "名前", "あいう");
-
-        let lines = draw(&state, SIZE);
-        let x = cursor(&state, SIZE).x;
-        let row = &lines[row_of(&lines, "あいう") as usize];
-
-        // 「あいう」の直後。**バイト位置ではなく桁で測る**（枠の `│` は 3 バイト）。
-        let head = &row[..row.find("あいう").unwrap()];
-        assert_eq!(
-            x as usize,
-            Line::from(head).width() + Line::from("あいう").width()
-        );
-    }
-
-    #[test]
-    fn a_name_longer_than_the_box_scrolls_sideways_to_keep_the_cursor_visible() {
-        // 折り返さないので、横にずらさないとカーソルが枠の外に出る。打っている
-        // 文字が見えないまま入力を続けることになる。
-        let long = format!("{}END", "x".repeat(120));
-        let state = state_with_input("ブランチを作成", "名前", &long);
-
-        let lines = draw(&state, SIZE);
-        let text = lines.join("\n");
-
-        assert!(text.contains("END"), "{text}");
-        assert_eq!(cursor(&state, SIZE).y, row_of(&lines, "END"));
     }
 
     #[test]

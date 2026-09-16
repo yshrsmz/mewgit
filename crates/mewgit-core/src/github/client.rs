@@ -840,18 +840,39 @@ mod tests {
     // ---- エラー ----
 
     #[tokio::test]
-    async fn a_404_becomes_not_found() {
-        let body = json!({ "message": "Not Found" });
-        let response = ResponseTemplate::new(404).set_body_json(body);
-        assert_eq!(repo_err(response).await, GithubError::NotFound);
-    }
+    async fn the_status_alone_decides_these_errors() {
+        // **ヘッダを読まずにステータスだけで決まる腕をまとめて回す。** 1 本ずつ
+        // 書くと、同じ `repo_err` に 1 回渡して `assert_eq!` するだけの関数が
+        // 並び、そのたびに `MockServer` が立つ。
+        //
+        // ヘッダで分かれる 403 と、reset を持たない 429 は下の別のテストが持つ
+        // （あちらは分類の根拠がステータスではないので混ぜない）。
+        let cases = [
+            (
+                404,
+                ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })),
+                GithubError::NotFound,
+            ),
+            (401, ResponseTemplate::new(401), GithubError::Unauthorized),
+            (
+                429,
+                ResponseTemplate::new(429).insert_header("x-ratelimit-reset", "42"),
+                GithubError::RateLimited { reset_at: Some(42) },
+            ),
+            (
+                500,
+                ResponseTemplate::new(500).set_body_string("boom"),
+                // 案内に出せる手掛かりが本文しか無いので、頭を残す。
+                GithubError::Api {
+                    status: 500,
+                    body_head: "boom".into(),
+                },
+            ),
+        ];
 
-    #[tokio::test]
-    async fn a_401_becomes_unauthorized() {
-        assert_eq!(
-            repo_err(ResponseTemplate::new(401)).await,
-            GithubError::Unauthorized
-        );
+        for (status, response, want) in cases {
+            assert_eq!(repo_err(response).await, want, "HTTP {status}");
+        }
     }
 
     #[tokio::test]
@@ -896,27 +917,6 @@ mod tests {
         assert!(
             matches!(repo_err(response).await, GithubError::Forbidden { .. }),
             "残量があるなら待っても直らない"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_429_is_rate_limited() {
-        let response = ResponseTemplate::new(429).insert_header("x-ratelimit-reset", "42");
-        assert_eq!(
-            repo_err(response).await,
-            GithubError::RateLimited { reset_at: Some(42) }
-        );
-    }
-
-    #[tokio::test]
-    async fn other_statuses_keep_the_head_of_the_body() {
-        let response = ResponseTemplate::new(500).set_body_string("boom");
-        assert_eq!(
-            repo_err(response).await,
-            GithubError::Api {
-                status: 500,
-                body_head: "boom".into()
-            }
         );
     }
 

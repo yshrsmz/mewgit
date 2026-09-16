@@ -409,20 +409,6 @@ async fn switch_never_takes_the_target_as_a_path() {
 }
 
 #[tokio::test]
-async fn switch_moves_head_to_a_branch() {
-    let repo = TestRepo::init();
-    repo.commit("first");
-    repo.git(&["branch", "topic"]);
-
-    repo.runner()
-        .run(&GitOp::Switch("topic".into()))
-        .await
-        .expect("ブランチを切り替えられませんでした");
-
-    assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "topic");
-}
-
-#[tokio::test]
 async fn a_rename_target_starting_with_a_dash_never_becomes_an_option() {
     // **`git branch` は parse-options なので、`--` が無いと `-` 始まりの `to` を
     // オプションとして拾う。** `git branch --move topic --force` は「`--force` へ
@@ -451,6 +437,8 @@ async fn a_rename_target_starting_with_a_dash_never_becomes_an_option() {
 
 #[tokio::test]
 async fn branch_create_switch_delete_and_rename() {
+    // **`Switch` が効いていることもここで出る。** 切り替わっていなければ、最後の
+    // `BranchDelete` を git が断る（チェックアウト中のブランチは消せない）。
     let repo = TestRepo::init();
     repo.commit("first");
     let runner = repo.runner();

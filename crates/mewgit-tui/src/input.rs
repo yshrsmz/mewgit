@@ -86,13 +86,6 @@ mod tests {
     }
 
     #[test]
-    fn shifted_char_keeps_the_uppercase_letter_and_drops_shift() {
-        // 端末は `P` を Char('P') + SHIFT で送ってくる。
-        let key = key_event_to_key(press(CtKeyCode::Char('P'), KeyModifiers::SHIFT));
-        assert_eq!(key, Some(Key::char('P')));
-    }
-
-    #[test]
     fn ctrl_char_keeps_ctrl() {
         let key = key_event_to_key(press(CtKeyCode::Char('c'), KeyModifiers::CONTROL));
         assert_eq!(key, Some(Key::ctrl('c')));

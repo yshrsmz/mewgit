@@ -46,19 +46,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // **右列の上は Branches と PRs のタブ。** 左の選択では入れ替わらないので、
     // 上を先に置いて残りを下のペインに渡す（07 の「レイアウト」）。
     // **組むのはここ 1 回**で、高さの決定と描画の両方に回す。
-    let [top, right] = split_right(state, right);
-    match state.right_tab {
-        Pane::Prs => {
-            let view = panes::prs::lines(state);
-            panes::prs::render(frame, top, state, view);
-        }
-        // `right_tab` は `Branches` か `Prs` のどちらかしか入らない（01 の
-        // 「右上のタブ」）。ほかの値は `Branches` と同じに描く。
-        _ => {
-            let view = panes::branches::lines(state);
-            panes::branches::render(frame, top, state, view);
-        }
-    }
+    let top_pane = panes::TopPane::build(state);
+    let [top, right] = split_right(state, &top_pane, right);
+    top_pane.render(frame, top, state);
     // **右列の下は Working tree とコミット詳細の差し替え。** どちらを描くかはグラフの
     // 選択だけで決まる（07）。`focus` で決めると、Graph にフォーカスした瞬間に
     // 右が消える。
@@ -85,14 +75,10 @@ fn split_body(area: Rect) -> [Rect; 2] {
 /// 右列を上のタブ（Branches / PRs）と、その下のペイン（Working tree / コミット詳細）に
 /// 割る。
 ///
-/// **割る位置を決めるのは上のペイン自身**（`panes::*::rows`）。行数から出すので、
-/// ここで高さを書くと規則が 2 本になる。**組んだ行を 2 度組むことになるが、
-/// タブごとに `View` の型が違う**ので受け渡しは `render` の側に寄せた。
-fn split_right(state: &AppState, right: Rect) -> [Rect; 2] {
-    let rows = match state.right_tab {
-        Pane::Prs => panes::prs::rows(&panes::prs::lines(state), state, right.height),
-        _ => panes::branches::rows(&panes::branches::lines(state), state, right.height),
-    };
+/// **割る位置を決めるのは上のペイン自身**（`panes::TopPane::height`）。組んだ行から
+/// 出すので、ここで高さを書くと規則が 2 本になる。
+fn split_right(state: &AppState, top: &panes::TopPane, right: Rect) -> [Rect; 2] {
+    let rows = top.height(state, right.height);
     Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(right)
 }
 
@@ -199,7 +185,7 @@ pub fn pane_area(pane: Pane, size: TermSize, state: &AppState) -> Rect {
     let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
     let [left, right] = split_body(body);
     // 右列は上のタブとその下に割れている。割る位置も実際の関数から出す。
-    let [top, below] = split_right(state, right);
+    let [top, below] = split_right(state, &panes::TopPane::build(state), right);
     match pane {
         // **Branches と PRs も同じ領域を差し替えで使う**（07 の「右上のタブ」）。
         Pane::Branches | Pane::Prs => top,

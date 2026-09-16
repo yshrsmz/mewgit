@@ -38,13 +38,13 @@ pub struct AppState {
     pub prs: PrState,
     pub progress: Option<InProgressOp>,
     pub focus: Pane,
-    /// 右列の上に出すタブ。[`Pane::Branches`] か [`Pane::Prs`] のどちらか。
+    /// 右列の上に出すタブ。
     ///
     /// **`focus` だけで決めない**（01 の「PR ペイン › 右上のタブ」）。左の領域
     /// （Graph / Diff）は `focus` で決まるが、右上で同じにすると**チェックの結果を
     /// 見ながら `j` でグラフを辿った瞬間に消える**。揃えるのは
     /// [`reseat_focus`](AppState::reseat_focus) の 1 箇所。
-    pub right_tab: Pane,
+    pub right_tab: RightTab,
     pub modal: Option<Modal>,
     pub jobs: JobTracker,
     /// エラー・情報のトースト。積むのは [`AppState::push_notice`]。
@@ -98,7 +98,7 @@ impl AppState {
             prs: PrState::default(),
             progress: None,
             focus: Pane::default(),
-            right_tab: Pane::Branches,
+            right_tab: RightTab::default(),
             modal: None,
             jobs: JobTracker::default(),
             notices: VecDeque::new(),
@@ -233,7 +233,7 @@ impl AppState {
     /// 読む場所は [`AppState::new`] の 1 つで、以後は `account` が答える（01 の
     /// 「GitHub 機能を切る」）。
     fn pick(&self, with_prs: &'static [Pane], without: &'static [Pane]) -> &'static [Pane] {
-        if matches!(self.account, AccountState::Disabled) {
+        if self.account.is_disabled() {
             without
         } else {
             with_prs
@@ -271,8 +271,8 @@ impl AppState {
         if !self.focus_candidates().contains(&self.focus) {
             self.focus = Pane::Graph;
         }
-        if matches!(self.focus, Pane::Branches | Pane::Prs) {
-            self.right_tab = self.focus;
+        if let Some(tab) = RightTab::of(self.focus) {
+            self.right_tab = tab;
         }
     }
 
@@ -325,16 +325,22 @@ impl AppState {
         }
     }
 
+    /// いま画面に出ている PR。持っている答えが古ければ `None`。
+    ///
+    /// **鍵の突き合わせはここ 1 つ。** 次に何を頼むかを決める `update` と、中身を
+    /// 描くか文言を出すかを決める `ui` が同じものを使う（[`AppState::wanted_diff`] や
+    /// [`GraphState::fresh_detail`] と同じ形）。写すと、鮮度の規則を変えたときに
+    /// **`update` は古いと判断して引き直すのに `ui` は出し続ける**形が組める。
+    pub fn current_pr(&self) -> Option<&PullRequest> {
+        self.prs.fresh(self.wanted_pr())?.loaded()?.as_ref()
+    }
+
     /// いまチェックを引くべき head の sha。引くものが無ければ `None`。
     ///
     /// **`checks` に鍵を別に持たせない。** sha は `current` から導けるので、離れた
     /// 場所に写しを置かない（01 の「何を引くか」）。
     pub fn wanted_checks(&self) -> Option<&str> {
-        if self.prs.branch.as_deref() != self.wanted_pr() {
-            return None;
-        }
-        let pr = self.prs.current.loaded()?.as_ref()?;
-        Some(&pr.head.sha)
+        Some(&self.current_pr()?.head.sha)
     }
 
     /// 出している diff を**直近の書き込みより後に**読めているか。
@@ -447,6 +453,38 @@ impl Default for TermSize {
         Self {
             width: 80,
             height: 24,
+        }
+    }
+}
+
+/// 右列の上に出せるタブ（01 の「PR ペイン › 右上のタブ」）。
+///
+/// **[`Pane`] をそのまま持たない。** 入りうる値は 2 つだけなので、`Pane` で持つと
+/// 読む側が「ほかの値は来ない」という注釈付きの `_ =>` を置くことになり、
+/// **M5 で `Stash` が 3 枚目に入ったときにコンパイラが何も言わない**（`Branches` が
+/// 黙って描かれる）。写像は [`of`](Self::of) の 1 本だけ。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RightTab {
+    #[default]
+    Branches,
+    Prs,
+}
+
+impl RightTab {
+    /// そのペインにフォーカスが来たとき、追随するタブ。右列の上でなければ `None`。
+    pub fn of(pane: Pane) -> Option<RightTab> {
+        match pane {
+            Pane::Branches => Some(RightTab::Branches),
+            Pane::Prs => Some(RightTab::Prs),
+            Pane::Graph | Pane::Stash | Pane::Worktree | Pane::CommitDetail | Pane::Diff => None,
+        }
+    }
+
+    /// このタブを出しているときにキーを受けるペイン。
+    pub fn pane(self) -> Pane {
+        match self {
+            RightTab::Branches => Pane::Branches,
+            RightTab::Prs => Pane::Prs,
         }
     }
 }
@@ -1144,8 +1182,11 @@ impl BranchState {
 ///
 /// **`Option` や空の `Vec` で代用しない。** 「まだ頼んでいない」「引けたが中身が
 /// 無い」「引けなかった」が畳まる。05 が [`PullRequest::review`] / `checks` を
-/// `Option` にしたのと同じ理由（「レビュー 0 件」と区別できない）の 1 段深い版で、
-/// [`BranchState`] の `load` を 3 状態の enum にしたのと同じ形。
+/// `Option` にしたのと同じ理由（「レビュー 0 件」と区別できない）の 1 段深い版。
+///
+/// **[`BranchState`] の `load` とは形が違う。** 3 状態にした理由は同じだが、あちらは
+/// **値を持たない旗**で、失敗しても読めていた一覧を捨てない（[`BranchLoad`] の doc）。
+/// こちらは失敗すると値が無い。畳めないので、どちらかに寄せようとしないこと。
 ///
 /// **利用者が 2 つ出たので共有先にしてある**（PR 本体とチェック一覧）。
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1186,17 +1227,28 @@ pub struct PrState {
 }
 
 impl PrState {
-    /// `branch` についての答えを入れ直す。チェックは巻き添えで捨てる。
+    /// `wanted` のブランチについての答え。鍵が合っていなければ `None`。
     ///
-    /// **`current` を差し替えたら `checks` は必ず落ちる。** あれは `current` の
-    /// head sha に紐付いていて、鍵を別に持たせていない（sha は `current` から
-    /// 導ける。01 の「何を引くか」）。
+    /// **`Fetch` ごと返す。** 描く側は `Unasked` / `Loaded(None)` / `Failed` を
+    /// 出し分ける（07 の「PRs ペイン」）ので、中身だけを返すと理由が消える。
+    pub fn fresh(&self, wanted: Option<&str>) -> Option<&Fetch<Option<PullRequest>>> {
+        // **`wanted` が `None` なら鍵は合わない。** 出すべきブランチが無いときに
+        // 「持っていない」と合致させると、detached HEAD で古い PR を出すことになる。
+        let wanted = wanted?;
+        (self.branch.as_deref() == Some(wanted)).then_some(&self.current)
+    }
+
     /// チェック一覧のカーソルを動かす。行が 1 つも無ければ据え置く。
     pub(super) fn move_cursor(&mut self, delta: isize) {
         let len = self.checks.loaded().map_or(0, Vec::len);
         self.cursor = stepped_index(self.cursor, len, delta);
     }
 
+    /// `branch` についての答えを入れ直す。チェックは巻き添えで捨てる。
+    ///
+    /// **`current` を差し替えたら `checks` は必ず落ちる。** あれは `current` の
+    /// head sha に紐付いていて、鍵を別に持たせていない（sha は `current` から
+    /// 導ける。01 の「何を引くか」）。
     pub(super) fn set_current(&mut self, branch: String, current: Fetch<Option<PullRequest>>) {
         self.branch = Some(branch);
         self.current = current;

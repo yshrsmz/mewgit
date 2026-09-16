@@ -355,7 +355,7 @@ mod tests {
         state_with_page, ROWS,
     };
     use super::*;
-    use crate::app::{Modal, TermSize};
+    use crate::app::{Modal, RightTab, TermSize};
 
     use crate::git_exec::ExecError;
 
@@ -382,7 +382,7 @@ mod tests {
 
         // **タブは離れても残る。** `focus` が右列の上を離れても `right_tab` は
         // 最後に見ていたほうのまま（01 の「右上のタブ」）。
-        assert_eq!(state.right_tab, Pane::Prs);
+        assert_eq!(state.right_tab, RightTab::Prs);
 
         // 同じ `j` が worktree のカーソルに効く。グラフは動かない。
         let _ = press(&mut state, 'j');
@@ -394,7 +394,7 @@ mod tests {
         }
         assert_eq!(state.focus, Pane::Graph);
         // 逆回りで Branches を通ったので、タブはそちらに戻っている。
-        assert_eq!(state.right_tab, Pane::Branches);
+        assert_eq!(state.right_tab, RightTab::Branches);
     }
 
     #[test]

@@ -5,52 +5,14 @@
 
 use std::borrow::Cow;
 
-use mewgit_core::app::{AppState, Fetch, Pane};
+use mewgit_core::app::{AppState, Fetch};
 use mewgit_core::auth::AccountState;
 use mewgit_core::github::{Check, CheckState, PrStatus, PullRequest};
-use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Block;
-use ratatui::Frame;
 
+use super::Rows;
 use crate::ui::{self, theme};
-
-/// 右列のうち PRs ペインに割く行数。枠の上下を含む。
-///
-/// **Branches ペインと同じ規則**（必要なぶん、ただし右列の半分まで）。同じ領域を
-/// 分け合う相手が同じなので、上限を別に決めると片方だけ潰れる。
-pub fn rows(view: &View, state: &AppState, available: u16) -> u16 {
-    let border_rows = usize::from(border_rows(state));
-    ui::capped_rows(view.lines.len() + border_rows, available)
-}
-
-/// 組んだ行。高さを決めるのと描くのに使う（`panes::branches::View` と同じ形）。
-pub struct View {
-    lines: Vec<Line<'static>>,
-    /// カーソルが何行目か。窓の切り出しに渡す。
-    cursor: usize,
-}
-
-/// 枠が食う行数。
-fn border_rows(state: &AppState) -> u16 {
-    let probe = Rect::new(0, 0, 0, u16::MAX);
-    probe.height - block(state).inner(probe).height
-}
-
-/// このペインの枠。行数を測るときと描くときで同じものを組む。
-fn block(state: &AppState) -> Block<'static> {
-    ui::pane_block(super::right_tabs(state), state.focus == Pane::Prs)
-}
-
-/// PRs ペインを描く。領域の高さは [`rows`] が決める。
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, view: View) {
-    let block = block(state);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    ui::render_rows(frame, inner, view.lines, view.cursor..view.cursor + 1);
-}
 
 /// タブ見出しに出すこのペインの名前。
 ///
@@ -62,9 +24,9 @@ pub(super) fn title() -> &'static str {
 /// 行と、カーソルが何行目か。
 ///
 /// PR が出せないときは文言 1 行（カーソルはその行）。
-pub fn lines(state: &AppState) -> View {
-    let Some(pr) = current(state) else {
-        return View {
+pub(super) fn lines(state: &AppState) -> Rows {
+    let Some(pr) = state.current_pr() else {
+        return Rows {
             lines: vec![Line::raw(placeholder(state))],
             cursor: 0,
         };
@@ -72,18 +34,12 @@ pub fn lines(state: &AppState) -> View {
 
     // 見出し 2 行のあとにチェックを並べる。カーソルはチェックの側にしかない。
     let mut lines = vec![headline(pr, state), refs_line(pr)];
-    let checks = check_lines(state, state.config.graph.ascii);
-    let cursor = lines.len() + state.prs.cursor.min(checks.len().saturating_sub(1));
-    lines.extend(checks);
-    View { lines, cursor }
-}
-
-/// いま出す PR。鍵が合っていなければ `None`（01 の「PR ペイン」）。
-fn current(state: &AppState) -> Option<&PullRequest> {
-    if state.prs.branch.as_deref() != state.wanted_pr() {
-        return None;
-    }
-    state.prs.current.loaded()?.as_ref()
+    // **カーソルをここで丸めない。** 範囲に収めるのは `PrState::move_cursor` の
+    // 1 箇所（同じ判定を 2 箇所に書かない）。チェックが無いときの 0 は
+    // 文言 1 行を指す。
+    let cursor = lines.len() + state.prs.cursor;
+    lines.extend(check_lines(state, state.config.graph.ascii));
+    Rows { lines, cursor }
 }
 
 /// `#123 OPEN  Add adaptive layout`。
@@ -210,15 +166,18 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
         // それでも文言を置くのは、網羅 `match` の腕を `unreachable!()` にすると
         // 描画の途中で落ちるため。
         AccountState::Disabled => "GitHub 機能は切ってあります".into(),
+        // **鍵より先に見る。** detached / unborn では `wanted_pr()` が `None` を返し、
+        // `fresh` も `None` になるので、下へ落とすと「読み込み中…」に化ける。
         AccountState::Resolved(_) if state.wanted_pr().is_none() => {
             "ブランチに居ません（detached / コミットがありません）".into()
         }
-        AccountState::Resolved(_) => match &state.prs.current {
-            // 鍵が合っていれば `current` を読む。合っていなければ引いている最中。
-            _ if state.prs.branch.as_deref() != state.wanted_pr() => ui::LOADING.into(),
-            Fetch::Unasked => ui::LOADING.into(),
-            Fetch::Loaded(_) => "このブランチの PR はありません".into(),
-            Fetch::Failed(err) => format!("PR を読み込めませんでした: {err}").into(),
+        // 鍵の突き合わせは [`PrState::fresh`] の 1 つ。まだ頼んでいない（`None` /
+        // `Unasked`）と、引けたが PR が無い、引けなかったを出し分ける。
+        AccountState::Resolved(_) => match state.prs.fresh(state.wanted_pr()) {
+            None | Some(Fetch::Unasked) => ui::LOADING.into(),
+            // `Loaded(Some(_))` はここへ来ない（`lines` が先に返す）。
+            Some(Fetch::Loaded(_)) => "このブランチの PR はありません".into(),
+            Some(Fetch::Failed(err)) => format!("PR を読み込めませんでした: {err}").into(),
         },
     }
 }
@@ -227,12 +186,12 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
 mod tests {
     use super::*;
     use crate::test_util::{draw, pane_text, state_at};
-    use mewgit_core::app::{Cmd, Msg, TargetState, TermSize};
+    use mewgit_core::app::{Cmd, Msg, Pane, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::git_read::HeadInfo;
     use mewgit_core::github::GithubError;
     use mewgit_core::test_util::{
-        fake_account, fake_check, fake_oid, fake_pull_request, fake_target, reply,
+        checks_loaded, fake_check, fake_oid, fake_pull_request, pr_loaded, put_on_branch, reply,
     };
 
     const SIZE: TermSize = TermSize {
@@ -243,12 +202,7 @@ mod tests {
     /// PRs タブを開いた状態。アカウントと対象は決まっている。
     fn on_prs_tab() -> AppState {
         let mut state = state_at("/repo");
-        state.repo.target = TargetState::Resolved(fake_target());
-        state.account = AccountState::Resolved(fake_account("taro"));
-        state.repo.head = Some(HeadInfo::Branch {
-            name: "feat/x".to_string(),
-            oid: fake_oid(0),
-        });
+        put_on_branch(&mut state, "feat/x");
         state.focus = Pane::Prs;
         // **タブは `reseat_focus` が揃える**（01 の「右上のタブ」）。直に置くと
         // 実物では出ない画面を見張ることになる。
@@ -264,19 +218,9 @@ mod tests {
             Cmd::FetchPr {
                 branch: "feat/x".to_string(),
             },
-            Msg::PrLoaded {
-                branch: "feat/x".to_string(),
-                result: Box::new(Ok(Some(fake_pull_request(82, "feat/x", "headsha")))),
-            },
+            pr_loaded("feat/x", Some(fake_pull_request(82, "feat/x", "headsha"))),
         );
-        let _ = reply(
-            &mut state,
-            next,
-            Msg::ChecksLoaded {
-                sha: "headsha".to_string(),
-                result: Ok(checks),
-            },
-        );
+        let _ = reply(&mut state, next, checks_loaded("headsha", checks));
         state
     }
 
@@ -310,6 +254,9 @@ mod tests {
         let text = pane_text(&state, SIZE, Pane::Prs);
 
         assert!(text.contains("#82 OPEN"), "{text}");
+        // **切れていることも見る。** 切れない幅なら並び順を入れ替えても通るので、
+        // この見張りが何を踏んでいるか判らなくなる。
+        assert!(!text.contains(&"と".repeat(60)), "{text}");
     }
 
     #[test]
@@ -327,10 +274,7 @@ mod tests {
             Cmd::FetchPr {
                 branch: "feat/x".to_string(),
             },
-            Msg::PrLoaded {
-                branch: "feat/x".to_string(),
-                result: Box::new(Ok(Some(fake_pull_request(82, "feat/x", "headsha")))),
-            },
+            pr_loaded("feat/x", Some(fake_pull_request(82, "feat/x", "headsha"))),
         );
         let text = pane_text(&state, SIZE, Pane::Prs);
         assert!(text.contains("読み込み中"), "{text}");
@@ -352,15 +296,15 @@ mod tests {
             Cmd::FetchPr {
                 branch: "feat/x".to_string(),
             },
-            Msg::PrLoaded {
-                branch: "feat/x".to_string(),
-                result: Box::new(Ok(None)),
-            },
+            pr_loaded("feat/x", None),
         );
         let text = pane_text(&none, SIZE, Pane::Prs);
         assert!(text.contains("PR はありません"), "{text}");
-        // **`N`（PR 作成）を案内しない。** まだ無いキーなので（01）。
-        assert!(!text.contains("N"), "{text}");
+        // **`N`（PR 作成）を案内しない。** まだ無いキーなので（01）。**キーの案内の
+        // 形で見る** —— 素の `N` を見ると、いつかタイトルや login に `N` が入った
+        // だけで落ちる。
+        assert!(!text.contains("N で"), "{text}");
+        assert!(!text.contains("[N]"), "{text}");
 
         let mut failed = on_prs_tab();
         let _ = reply(

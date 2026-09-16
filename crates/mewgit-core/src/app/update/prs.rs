@@ -33,7 +33,7 @@ pub(super) fn prs_key(state: &mut AppState, key: Key) -> Cmd {
 /// **PR が無いときに `N`（PR 作成）を案内しない。** `Modal::PrCreate` は次のタスクなので、
 /// いま書くと存在しないキーを案内することになる（#63）。
 fn open_pr(state: &mut AppState) -> Cmd {
-    match current_pr(state) {
+    match state.current_pr() {
         Some(pr) => Cmd::OpenPr { number: pr.number },
         None => {
             state.push_notice(
@@ -46,30 +46,15 @@ fn open_pr(state: &mut AppState) -> Cmd {
     }
 }
 
-/// いま画面に出ている PR。鍵が合っていなければ `None`。
-///
-/// **`prs.current` を直に読まない。** 持っている答えが**いまの**ブランチのものかは
-/// [`AppState::wanted_pr`] と突き合わせないと判らず、その突き合わせは
-/// [`AppState::wanted_checks`] と同じ 1 つの問い。
-pub fn current_pr(state: &AppState) -> Option<&PullRequest> {
-    if state.prs.branch.as_deref() != state.wanted_pr() {
-        return None;
-    }
-    state.prs.current.loaded()?.as_ref()
-}
-
 /// 持っている答えがいまのブランチのものでなければ引き直す。
 ///
 /// **`account_resolved` から呼ぶ。** アカウントが決まるまで [`AppState::wanted_pr`] は
 /// `None` を返すので、決まった瞬間が 1 本目の入口になる。
 pub(super) fn refresh(state: &AppState) -> Cmd {
-    let Some(branch) = state.wanted_pr() else {
-        return Cmd::None;
-    };
-    if state.prs.branch.as_deref() != Some(branch) {
-        return Cmd::FetchPr {
-            branch: branch.to_string(),
-        };
+    // **`Cmd::FetchPr` を組むのは [`reload`] の 1 箇所。** 鍵の作り方を変えたときに
+    // 片方だけ直せる形にしない。
+    if state.prs.fresh(state.wanted_pr()).is_none() {
+        return reload(state);
     }
     fetch_checks(state)
 }
@@ -138,7 +123,9 @@ pub(super) fn checks_loaded(
         Ok(checks) => Fetch::Loaded(checks),
         Err(err) => Fetch::Failed(err),
     };
-    state.prs.cursor = 0;
+    // **カーソルは戻さない。** ここへ来た時点で必ず 0 —— `set_current` が 0 にして
+    // `checks` を `Unasked` に落としており、`move_cursor` が動かせるのは `Loaded` の
+    // あいだだけ（`PrState`）。書くと「ここでも戻している」という嘘の保険が残る。
     Cmd::None
 }
 
@@ -165,30 +152,15 @@ mod tests {
     use crate::git_read::HeadInfo;
     use crate::github::CheckState;
     use crate::test_util::{
-        fake_account, fake_check, fake_oid, fake_pull_request, fake_target, reply,
+        checks_loaded, fake_account, fake_check, fake_oid, fake_pull_request, fake_target,
+        pr_loaded as pr_loaded_msg, put_on_branch, reply,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。PR はまだ引いていない。
-    ///
-    /// **`Msg` を通さずに置く。** ここまで運ぶには `Msg::RepoInfoLoaded` と
-    /// `Msg::AccountResolved` の両方が要り、**その 2 本の順序そのものを見張るテストが
-    /// 下にある**。土台が片方の順序を焼き込むと、そちらが空振りする。
     fn state_on_branch(branch: &str) -> AppState {
         let mut state = state_with_commits(2);
-        state.repo.target = TargetState::Resolved(fake_target());
-        state.account = AccountState::Resolved(fake_account("taro"));
-        state.repo.head = Some(HeadInfo::Branch {
-            name: branch.to_string(),
-            oid: fake_oid(0),
-        });
+        put_on_branch(&mut state, branch);
         state
-    }
-
-    fn pr_loaded_msg(branch: &str, pr: Option<PullRequest>) -> Msg {
-        Msg::PrLoaded {
-            branch: branch.to_string(),
-            result: Box::new(Ok(pr)),
-        }
     }
 
     #[test]
@@ -342,10 +314,7 @@ mod tests {
         let _ = reply(
             &mut state,
             next,
-            Msg::ChecksLoaded {
-                sha: "oldsha".to_string(),
-                result: Ok(vec![fake_check("build", CheckState::Success)]),
-            },
+            checks_loaded("oldsha", vec![fake_check("build", CheckState::Success)]),
         );
         assert!(
             matches!(state.prs.checks, Fetch::Unasked),
@@ -367,10 +336,7 @@ mod tests {
         let _ = reply(
             &mut state,
             next,
-            Msg::ChecksLoaded {
-                sha: "headsha".to_string(),
-                result: Ok(vec![fake_check("build", CheckState::Success)]),
-            },
+            checks_loaded("headsha", vec![fake_check("build", CheckState::Success)]),
         );
         assert!(matches!(state.prs.checks, Fetch::Loaded(_)));
 
@@ -467,13 +433,13 @@ mod tests {
         let _ = reply(
             &mut state,
             next,
-            Msg::ChecksLoaded {
-                sha: "headsha".to_string(),
-                result: Ok(vec![
+            checks_loaded(
+                "headsha",
+                vec![
                     fake_check("build", CheckState::Success),
                     fake_check("test", CheckState::Failure),
-                ]),
-            },
+                ],
+            ),
         );
         state.focus = Pane::Prs;
 

@@ -198,6 +198,17 @@ pub enum AccountState {
     Disabled,
 }
 
+impl AccountState {
+    /// GitHub 機能が設定で切ってあるか（01 の「GitHub 機能を切る」）。
+    ///
+    /// **網羅 `match` の腕とは別の問い。** あちらは「この状態で何を出すか」を読み手
+    /// ごとに選ばせるためのもので、こちらは「GitHub を使うか」の 1 つの問い。読むのは
+    /// 巡回候補（`Pane::Prs` を入れるか）と `Cmd::ResolveAccount` の発行の 2 人。
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, AccountState::Disabled)
+    }
+}
+
 /// GitHub 機能を degraded にする理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DegradedReason {

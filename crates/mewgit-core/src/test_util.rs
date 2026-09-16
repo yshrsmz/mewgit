@@ -62,16 +62,16 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
-use crate::app::{update, AppState, Cmd, Msg};
+use crate::app::{update, AppState, Cmd, Msg, TargetState};
 use crate::auth::ssh::SshCommand;
 use crate::auth::{
-    Account, AccountSource, AttemptFailure, AuthError, Backend, DegradedReason, GhLogin,
-    LoginState, RepoTarget,
+    Account, AccountSource, AccountState, AttemptFailure, AuthError, Backend, DegradedReason,
+    GhLogin, LoginState, RepoTarget,
 };
 use crate::git_exec::{GitOp, Runner};
 use crate::git_read::{
-    Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
-    Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
+    Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
+    LineOrigin, Oid, Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
 };
 use crate::github::{Check, CheckState, PrStatus, PullRequest, RefSpec, RepoRef};
 use secrecy::SecretString;
@@ -848,6 +848,39 @@ pub fn fake_check(name: &str, state: CheckState) -> Check {
         state,
         url: None,
     }
+}
+
+/// [`Msg::PrLoaded`] を組む。
+///
+/// **`ui` からも使う**（[`fake_pull_request`] と同じ理由）。`Msg` の形を変えたときに
+/// 直す場所を、クレートをまたいで散らさない。
+pub fn pr_loaded(branch: &str, pr: Option<PullRequest>) -> Msg {
+    Msg::PrLoaded {
+        branch: branch.to_string(),
+        result: Box::new(Ok(pr)),
+    }
+}
+
+/// [`Msg::ChecksLoaded`] を組む。
+pub fn checks_loaded(sha: &str, checks: Vec<Check>) -> Msg {
+    Msg::ChecksLoaded {
+        sha: sha.to_string(),
+        result: Ok(checks),
+    }
+}
+
+/// アカウントと対象が決まり、HEAD が `branch` に居る状態にする。
+///
+/// **`Msg` を通さずに置く。** ここまで運ぶには `Msg::RepoInfoLoaded` と
+/// `Msg::AccountResolved` の両方が要り、**その 2 本の順序そのものを見張るテストが
+/// `app::update::prs` にある**。土台が片方の順序を焼き込むと、そちらが空振りする。
+pub fn put_on_branch(state: &mut AppState, branch: &str) {
+    state.repo.target = TargetState::Resolved(fake_target());
+    state.account = AccountState::Resolved(fake_account("taro"));
+    state.repo.head = Some(HeadInfo::Branch {
+        name: branch.to_string(),
+        oid: fake_oid(0),
+    });
 }
 
 /// `cmd` を発行してから、その返信を届ける。

@@ -3,59 +3,12 @@
 //! 右列の上に置く。下の Working tree / コミット詳細と違い、**左の選択では
 //! 入れ替わらない**（ブランチ一覧はグラフで何を選んでいるかと無関係）。
 
-use mewgit_core::app::{AppState, BranchLoad, Pane};
+use mewgit_core::app::{AppState, BranchLoad};
 use mewgit_core::git_read::Branch;
-use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Block;
-use ratatui::Frame;
 
+use super::Rows;
 use crate::ui::{self, theme};
-
-/// 右列のうち Branches ペインに割く行数。枠の上下を含む。
-///
-/// **上限は右列の半分**（07）。無いとブランチの多いリポジトリで下のペインが潰れる。
-///
-/// **行数は組んだ行から数える**ので、組んだものを受け取る。別の式で数えると、文言や
-/// 見出しの入れ方を変えたときに片方だけ直しても通り、枠からはみ出すか余白が残る
-/// （#22 で実際に起きた形）。**組むのは 1 フレームに 1 回**で、`ui::render` が組んだ
-/// ものを高さの決定と描画の両方に回す（`panes::commit` が 1 回で済ませているのと
-/// 同じ形。あちらは高さを決めるのも描くのも `render` の中なので受け渡しが要らない）。
-pub fn rows(view: &View, state: &AppState, available: u16) -> u16 {
-    let border_rows = usize::from(border_rows(state));
-    ui::capped_rows(view.lines.len() + border_rows, available)
-}
-
-/// 組んだ一覧。高さを決めるのと描くのに使う。
-pub struct View {
-    lines: Vec<Line<'static>>,
-    /// カーソルが何行目か。窓の切り出しに渡す。
-    cursor: usize,
-}
-
-/// 枠が食う行数。
-///
-/// **`+ 2` と手で書かない**（`modals::place` と同じ理由）。あとで `Padding` を足すと、
-/// 割く高さだけが古いまま残り、最後の 1 行が黙って消える。高さの判る当て木を
-/// [`Block::inner`] に通して差を取る。
-fn border_rows(state: &AppState) -> u16 {
-    let probe = Rect::new(0, 0, 0, u16::MAX);
-    probe.height - block(state).inner(probe).height
-}
-
-/// このペインの枠。行数を測るときと描くときで同じものを組む。
-fn block(state: &AppState) -> Block<'static> {
-    ui::pane_block(super::right_tabs(state), state.focus == Pane::Branches)
-}
-
-/// Branches ペインを描く。領域の高さは [`rows`] が決める。
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, view: View) {
-    let block = block(state);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    ui::render_rows(frame, inner, view.lines, view.cursor..view.cursor + 1);
-}
 
 /// タブ見出しに出すこのペインの名前。件数は出せるときだけ添える。
 ///
@@ -71,11 +24,12 @@ pub(super) fn title(state: &AppState) -> String {
 /// 一覧の行と、カーソルが何行目か。
 ///
 /// 一覧が出せないときは文言 1 行（カーソルはその行）。**行を組むのはここ 1 本**で、
-/// 割く高さもこの行数から出す（`panes::commit::files_lines` と同じ）。
-pub fn lines(state: &AppState) -> View {
+/// 割く高さもこの行数から出す（`panes::commit::files_lines` と同じ）。枠と高さの
+/// 規則は `Prs` と共有する（[`super::TopPane`]）。
+pub(super) fn lines(state: &AppState) -> Rows {
     let branches = &state.branches.branches;
     if branches.is_empty() {
-        return View {
+        return Rows {
             lines: vec![Line::raw(placeholder(state))],
             cursor: 0,
         };
@@ -94,7 +48,7 @@ pub fn lines(state: &AppState) -> View {
             }
         })
         .collect();
-    View {
+    Rows {
         lines,
         cursor: state.branches.cursor,
     }

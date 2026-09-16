@@ -392,7 +392,7 @@ impl Runtime {
             // 持たず、載せると `Cmd` を比べるテストが全部書けなくなる。不変ルール 3）。
             Cmd::FetchPr { branch } => {
                 let Some((target, api)) = github_for(state) else {
-                    return fold(state, JobKind::FetchPr);
+                    return no_material(state, JobKind::FetchPr, "PR の取得");
                 };
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
@@ -416,7 +416,7 @@ impl Runtime {
 
             Cmd::FetchChecks { sha } => {
                 let Some((target, api)) = github_for(state) else {
-                    return fold(state, JobKind::FetchChecks);
+                    return no_material(state, JobKind::FetchChecks, "チェックの取得");
                 };
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
@@ -432,7 +432,7 @@ impl Runtime {
             // **`gh` は毎回 detect する**（上の `ResolveAccount` と同じ理由）。
             Cmd::OpenPr { number } => {
                 let Some(target) = state.repo.target.resolved().cloned() else {
-                    return fold(state, JobKind::OpenPr);
+                    return no_material(state, JobKind::OpenPr, "PR を開く操作");
                 };
                 let gh_bin = state.config.general.gh_bin.clone();
                 let tx = self.tx.clone();
@@ -466,18 +466,6 @@ async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> 
     })
 }
 
-/// 材料が揃っていなかったジョブを畳む。
-///
-/// **ここへは来ない。** `update` は [`AppState::wanted_pr`] が `Some` のときしか
-/// `Cmd::FetchPr` / `FetchChecks` を出さず、その述語が `target` と `account` の両方を
-/// 見る（01 の「PR ペイン › 何を引くか」）。`OpenPr` も PR が出ている画面からしか
-/// 押せない。**それでも畳むのは、掴んだままにすると以後の同じ `Cmd` が
-/// [`AppState::issue`] に黙って落とされるから**（`not_implemented` の doc と同じ形）。
-fn fold(state: &mut AppState, kind: JobKind) -> ControlFlow<()> {
-    state.jobs.finish(kind);
-    ControlFlow::Continue(())
-}
-
 /// `GithubClient` を組む材料。**`dispatch` は `AppState` を読んでよい**（01 のランタイム）。
 ///
 fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, GithubError>)> {
@@ -494,17 +482,34 @@ fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, Gith
 
 /// 未実装の `Cmd` を通知に積む。黙って捨てると開発中に気付けない。
 ///
-/// 登録済みのジョブもここで畳む。`update` の出口（`AppState::issue`）が登録したまま
-/// 誰も完了させないと、2 回目以降の同じ `Cmd` が通知も出さずに捨てられ、
-/// 「1 回だけ警告が出てあとは無反応」になる。`dispatch` が `notices` 以外に書く
-/// 唯一の場所で、`Cmd` を実装するたびに 1 行ずつ消えていく。
+/// `Cmd` を実装するたびに 1 行ずつ消えていく。
 fn not_implemented(state: &mut AppState, kind: JobKind, name: &str) -> ControlFlow<()> {
+    dropped(state, kind, format!("未実装のコマンドです: {name}"))
+}
+
+/// 材料が揃わず走らせなかった `Cmd` を通知に積む。
+///
+/// **`update` が出さない形なので、ここへは来ないはず。** `Cmd::FetchPr` /
+/// `FetchChecks` は [`AppState::wanted_pr`] が `Some` のときしか出ず、その述語が
+/// `target` と `account` の両方を見る（01 の「PR ペイン › 何を引くか」）。
+/// `OpenPr` も PR が出ている画面からしか押せない。
+///
+/// **それでも黙らない。** 黙る版を別に置くと、`not_implemented` の doc が言う
+/// 「黙って捨てると開発中に気付けない」を同じファイルの中で覆すことになり、
+/// **到達不能と書いた腕が壊れても誰も気付けない**（`CLAUDE.md`）。
+fn no_material(state: &mut AppState, kind: JobKind, name: &str) -> ControlFlow<()> {
+    dropped(state, kind, format!("{name}に必要な材料が揃っていません"))
+}
+
+/// 走らせなかった `Cmd` のジョブを畳んで通知を積む。
+///
+/// **畳むのが要る。** `update` の出口（[`AppState::issue`]）が登録したまま誰も完了
+/// させないと、2 回目以降の同じ `Cmd` が通知も出さずに捨てられ、「1 回だけ警告が出て
+/// あとは無反応」になる。`dispatch` が `notices` 以外に書いてよい唯一の場所（01 の
+/// ランタイム）。
+fn dropped(state: &mut AppState, kind: JobKind, message: String) -> ControlFlow<()> {
     state.jobs.finish(kind);
-    state.push_notice(
-        NoticeLevel::Warn,
-        format!("未実装のコマンドです: {name}"),
-        None,
-    );
+    state.push_notice(NoticeLevel::Warn, message, None);
     ControlFlow::Continue(())
 }
 
@@ -1002,8 +1007,11 @@ mod tests {
             matches!(*result, Err(GithubError::InvalidHost { .. })),
             "{result:?}"
         );
+        // **畳むのは `update`（`prs::pr_loaded`）の側で、`dispatch` ではない。**
+        // ここが見ているのは「返信が `update` を通ればジョブが残らない」こと ——
+        // 材料が無いときに `dispatch` が畳む腕（`no_material`）は**この経路を
+        // 通らない**ので、別の見張りが要る（`every_notice_that_a_missing_material…`）。
         let _ = update(&mut state, Msg::PrLoaded { branch, result });
-        // 畳んでいないと、2 回目の `Cmd::FetchPr` が `issue` に落とされる。
         assert!(!state.jobs.is_running(JobKind::FetchPr));
     }
 
@@ -1028,9 +1036,37 @@ mod tests {
             "{msg:?}"
         );
         let _ = update(&mut state, msg);
-        // **失敗は通知に出す**（不変ルール 4 と同じ趣旨）。
+        // **失敗は通知に出す**（不変ルール 4 と同じ趣旨）。畳むのも `update` の側。
         assert_eq!(state.notices.len(), 1);
         assert!(!state.jobs.is_running(JobKind::OpenPr));
+    }
+
+    /// `no_material` が出す通知がステータスバーに収まる（01 の「失敗の案内文」の 72 セル）。
+    ///
+    /// **通知の新しい産出元なので、既存の見張りは自分では拾わない**（`CLAUDE.md` の
+    /// 「共有した見張りは新しい産出元を自分では拾わない」）。**範囲は実装側の集合から
+    /// 導かずに並べる**（#54 の裏返し）—— 腕を足したらここにも足す。
+    #[test]
+    fn every_notice_that_a_missing_material_prints_fits_the_status_bar() {
+        let repo = TestRepo::init();
+        let (mut state, _reader) = opened(&repo);
+        let cases = [
+            (JobKind::FetchPr, "PR の取得"),
+            (JobKind::FetchChecks, "チェックの取得"),
+            (JobKind::OpenPr, "PR を開く操作"),
+        ];
+
+        for (kind, name) in cases {
+            state.notices.clear();
+            let _ = no_material(&mut state, kind, name);
+            let message = state.notices[0].message.clone();
+            // **収まることを直に見る。** `contains` は末尾が切れても通る（#80）。
+            let last = crate::test_util::draw(&state, TermSize::default())
+                .pop()
+                .expect("最下行がある");
+            assert!(last.contains(&message), "{name}: {last:?}");
+            assert!(last.contains("q:quit"), "{name}: {last:?}");
+        }
     }
 
     #[tokio::test]

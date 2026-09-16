@@ -206,7 +206,12 @@ pub(super) fn repo_info_loaded(
             // 成功しても `Unasked` ではなくなっているので二度と頼まない
             // （`TargetState` の doc が言う「決められなかった」は読めなかったことでは
             // ない）。`/code-review` が拾った。
-            resolve_target(state)
+            // **PR は鍵が同じでも引き直す**（`prs::reload` の doc）。ref が動いた
+            // あとは同じブランチでもチェックの結果やマージ済みかが変わっている。
+            // **`Ok` のときだけ** —— `Err` の直後は `head` を更新していないので、
+            // 引き直しても同じ答えを 3 往復ぶん買うだけになる（`resolve_target` を
+            // `Ok` の側だけで呼ぶのと同じ理由）。
+            Cmd::batch([resolve_target(state), prs::reload(state)])
         }
         Err(err) => {
             state.push_notice(NoticeLevel::Warn, err.to_string(), None);
@@ -222,9 +227,7 @@ pub(super) fn repo_info_loaded(
         Cmd::LoadRepoInfo
     };
     // 続きを頼む: 落とされたぶんの `LoadRepoInfo` の追いつき。
-    // **PR は鍵が同じでも引き直す**（`prs::reload` の doc）。ref が動いたあとは
-    // 同じブランチでもチェックの結果やマージ済みかが変わっている。
-    Cmd::batch([again, resolve, prs::reload(state)])
+    Cmd::batch([again, resolve])
 }
 
 /// 既定リモートの URL から [`Cmd::ResolveTarget`] を組む（01 の
@@ -278,7 +281,7 @@ pub(super) fn target_resolved(state: &mut AppState, resolved: ResolvedTarget) ->
     // 足りる —— [`resolve_again`] へ入る 2 本（`Modal::AccountPicker` の `r` と
     // `GitOp::SetAccount` / `UnsetAccount` の後始末）は、どちらもそのモーダルを
     // 開いたあとにしかなく、`Disabled` では [`account_view`] が通知に落とす。
-    let account = if matches!(state.account, AccountState::Disabled) {
+    let account = if state.account.is_disabled() {
         Cmd::None
     } else {
         Cmd::ResolveAccount(resolved.target.clone())

@@ -19,6 +19,6 @@ pub use state::{
     AccountListing, AccountView, AppState, BranchLoad, BranchState, CommitFiles, DiffCursor,
     DiffState, DiffView, Fetch, GraphLine, GraphSelection, GraphState, InputIntent, Job, JobKind,
     JobTracker, Modal, Motion, Notice, NoticeLevel, Pane, PrState, PushRejection, Region, Repick,
-    RepoInfo, TargetState, TermSize, TextBuffer, WorktreeState,
+    RepoInfo, RightTab, TargetState, TermSize, TextBuffer, WorktreeState,
 };
 pub use update::{init, update};

@@ -38,7 +38,7 @@ pub struct AppState {
     pub prs: PrState,                 // 現ブランチ PR、一覧、チェック（下の「PR ペイン」）
     pub progress: Option<InProgressOp>, // Rebase | CherryPick | Revert | Merge
     pub focus: Pane,
-    pub right_tab: Pane,              // 右列の上に出すタブ。Branches か Prs（下の「右上のタブ」）
+    pub right_tab: RightTab,          // 右列の上に出すタブ（下の「右上のタブ」）
     pub modal: Option<Modal>,
     pub jobs: JobTracker,             // 実行中の非同期タスク（表示用）
     pub notices: VecDeque<Notice>,    // エラー・情報のトースト
@@ -964,6 +964,17 @@ pub enum Fetch<T> { Unasked, Loaded(T), Failed(GithubError) }
 まさにこの 2 本の順序で答えが変わり、latch したせいで二度と直らなかった。**こちらは
 latch しない** —— 鍵が合わなければ次の返信で引き直す。
 
+**`Msg::RepoInfoLoaded` の側は `Ok` の腕だけが頼む。** `Err` の直後は `head` を
+更新していないので、引き直しても同じ答えを **HTTP 3 往復**（PR 1 本 + チェックの
+2 本）ぶん買うだけになる（`resolve_target` を `Ok` の側だけで呼ぶのと同じ理由）。
+
+**それでも、ref を動かさない書き込みでは引きすぎる。** `BranchCreate` / `BranchDelete`
+のように HEAD の PR が変わりようのない操作でも 3 往復払う。**引き金を `GitOp` の判る
+`exec_finished` へ移す形は採っていない** —— `f`（fetch）と `P`（push）は**ローカルの
+HEAD を動かさない**のに GitHub 側の head sha と CI は動くので、`Reload` の 3 値からは
+選べず、`GitOp` ごとの一覧をもう 1 本作ることになる。`core` の予算は 5000/時
+（05 の実測表）なので、いまはこの無駄を選んでいる。
+
 **返信は鍵で採る。** `Msg::PrLoaded { branch, result }` と
 `Msg::ChecksLoaded { sha, result }` が頼んだ鍵をそのまま運び、届いた時点の `wanted_*`
 と違えば捨てる。**運ぶのは頼んだときの鍵であって、届いた値から取り直したものではない**
@@ -1008,8 +1019,11 @@ latch しない** —— 鍵が合わなければ次の返信で引き直す。
   右上で同じにすると**チェックの結果を見ながら `j` でグラフを辿った瞬間に消える**。
   07 が右下ペインについて「`focus` で決めると Graph にフォーカスした瞬間に右が消える」と
   断ったのと同じ形
-- **`right_tab` は `Pane` をそのまま持つ**（値は `Branches` か `Prs` のどちらか）。
-  別の enum にすると、`focus` と突き合わせるたびに写像が 1 本増える
+- **`right_tab` は `Pane` をそのまま持たない**（`enum RightTab { Branches, Prs }`）。
+  `Pane` で持つと、読む側が「ほかの値は来ない」という注釈付きの `_ =>` を置くことに
+  なり、**M5 で `Stash` が 3 枚目に入ったときにコンパイラが何も言わない**（`Branches`
+  が黙って描かれる）。写像は `RightTab::of(Pane)` の 1 本だけで、置くのは
+  `reseat_focus`。**注釈をコメントではなく型にする**
 - **書き込む場所は座り直しと同じ 1 箇所**（`update` の出口）。`focus ∈ {Branches, Prs}`
   なら `right_tab = focus` を必ず通すので、`focus` と食い違ったまま残らない
 - **タブの集合を非同期の状態に依らせない。** `Prs` が候補から落ちるのは

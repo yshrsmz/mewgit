@@ -86,6 +86,11 @@ Rust の toolchain は `rust-toolchain.toml` が SoT。rustup がこれを読ん
   人が `cargo update --workspace` を叩いた場合は誰も担保しない、という穴は残る。
   数え方は `git diff origin/main -- Cargo.lock` から新規の crate を出して 1 件ずつ
   crates.io に当たり、14 日未満は `cargo update -p <crate> --precise <版>` で落とす
+- **`cargo test --workspace` が返るまでの経過時間は、テストの実行時間ではない。**
+  #82 で測ったところ、cargo が報告する実行時間（出力の `finished in`）の合計は
+  **3.4 秒**（lib の 470 件で 0.16 秒）なのに、**ビルド済みでも経過時間は 20 秒**だった。
+  差はほぼ cargo 自身のオーバーヘッドで、テストを減らしても動かない。
+  **速さを根拠に何かを決めるなら `finished in` のほうを見る。**
 
 ## コマンド
 
@@ -406,6 +411,28 @@ env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/d
 - **「この見張りは本当に落ちるか」を実装を壊して確かめるとき、`cargo test --workspace` は
   最初に失敗したターゲットで打ち切る。** 後続クレートの結果が出ないまま「落ちなかった」と
   誤読する。`--no-fail-fast` を付けるか、`-p <crate> --lib <テスト名>` で対象を絞る
+- **テストを削るとき、「生存側が同じ失敗を捕まえる」を読んで決めない。生存側を残した
+  まま実装を壊し、落ちることを確かめる。** 上の項目はどれも「足す・残す見張り」の話で、
+  **削る側にこれを向けたことが無かった。** #82 で 27 本を削ったうち、読みだけで決めた
+  2 本が外れた。**`auth/ssh.rs`** —— `assert_eq!(resolve_with(Opaque, ..),
+  resolve_with(default(), ..))` を「どちらの腕も同じ `SSH_BIN` から同じ文字列を組むので
+  **自分自身と比べているだけ**」と読んで等価 assert に置き換えたが、比べているのは
+  2 つの**実行**で、`Opaque` 側だけが独立に失敗しうる（落とし先を起動できない値に
+  変えると、置き換えた側では 19 本とも緑のまま通った）。**`modals/input.rs`** —— 削った
+  2 本が唯一の見張りで、`.scroll((0, scroll_x))` を外しても `x: input_area.x +
+  cursor_col` を外しても tui の 197 本が全部通った。**どちらも変異を 1 回入れれば
+  見えた。** 逆に、変異で確かめてから削ったもの（`Reload` の両方向・
+  `worktree_is_current`・`REQUIRED`）は 1 件も外れていない。
+  **削除の PR では、生存側を名指しするコメントを書いた時点でそれを叩く。**
+- **共有ヘルパが試されていることは、その戻り値を使う配線が試されていることではない。**
+  同じ #82 で、`modals::cursor_col` に単体テストが 2 本あるのを根拠に `Input` モーダルの
+  横スクロールとカーソル桁のテストを削ったが、**戻り値を `Paragraph::scroll` と
+  `set_cursor_position` に渡す配線は `render` ごとに別**で、`Input` 側はその 2 本が
+  唯一の見張りだった（`CommitMessage` の同名テストは別の `render` を見ている。あちらの
+  `a_tiny_terminal_does_not_panic` のコメントが「編集中のモーダルごとに 1 本ずつ見る」と
+  既に書いていた）。コーディング規約の「共有先に寄せるときは、その基盤の暗黙の前提が
+  新しい利用者にも成り立つかを確かめる」の**裏側** —— あちらはヘルパの前提、
+  こちらは**呼ぶ側の数**。
 - `mewgit-core` の git 系は `tempfile` に実リポジトリを作って統合テスト。helper は
   `crates/mewgit-core/src/test_util.rs` の `TestRepo`。`test-util` feature でのみコンパイル
   され、`mewgit-core` は自分自身を dev-dependency に書いて有効にしている。ここを使う

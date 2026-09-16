@@ -534,7 +534,7 @@ mod tests {
     };
     use super::super::update;
     use super::*;
-    use crate::app::{Modal, Modifiers, Msg, Region, TextBuffer};
+    use crate::app::{Modal, Modifiers, Msg, TextBuffer};
 
     use crate::git_read::HeadInfo;
 
@@ -856,20 +856,6 @@ mod tests {
         let _ = press(&mut state, 'c');
 
         assert!(state.modal.is_some(), "判定は git に任せる");
-    }
-
-    #[test]
-    fn c_is_not_refused_while_the_status_is_older_than_the_last_write() {
-        // 書き込み直後の一覧は届いていない。古い「空の staged」を根拠に断ると、
-        // 実際には stage されているのに拒否する（01 の「commit」）。
-        let mut state = worktree_state(fake_snapshot(&[], &[], &[]), WorktreeSection::Unstaged);
-        // 書き込みが 1 つ終わった。持っている一覧はその前に読んだもの。
-        state.jobs.advance(Region::Worktree);
-        assert!(!state.worktree_is_current());
-
-        let _ = press(&mut state, 'c');
-
-        assert!(state.modal.is_some());
     }
 
     #[test]

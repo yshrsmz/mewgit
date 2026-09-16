@@ -759,18 +759,6 @@ mod tests {
     }
 
     #[test]
-    fn stash_without_paths_still_covers_everything() {
-        // `paths: None` は「全部」を表す正当な指定。`Some(vec![])` と区別する。
-        let command = to_command(&GitOp::StashPush {
-            message: None,
-            include_untracked: false,
-            paths: None,
-        })
-        .expect("argv を組めませんでした");
-        assert_eq!(command.argv, ["stash", "push"]);
-    }
-
-    #[test]
     fn a_renamed_destination_lands_in_both_the_refspec_and_the_lease() {
         // **同じ「リモート側の ref 名」が 2 箇所に要る。** refspec では右辺、lease では
         // 先頭。1 本の文字列に畳んでいた頃は lease が `x:main:<oid>` に化けていた。

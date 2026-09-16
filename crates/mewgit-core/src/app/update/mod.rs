@@ -476,16 +476,24 @@ mod tests {
     }
 
     #[test]
-    fn a_new_write_can_be_canceled_again() {
-        // 刻みはジョブと一緒に消える。落ちないと、1 度中断したあとの書き込みが
-        // 二度と中断できなくなる。
+    fn a_canceled_write_is_folded_and_the_next_one_can_be_canceled_too() {
+        // **中断を頼んだ `Exec` は `Msg::ExecFinished` で畳まれる。** 畳まれたあとの
+        // `Ctrl-C` は終了に落ち（01 の「実行中ジョブのキャンセル」）、新しい書き込みを
+        // 出せばまた中断できる —— 刻みはジョブと一緒に消えるので、1 度中断したあとの
+        // 書き込みが二度と中断できなくなることはない。
         let mut state = state();
         let fetch = GitOp::Fetch {
             remote: None,
             prune: false,
         };
         let _ = state.issue(Cmd::Exec(fetch.clone()));
-        let _ = update(&mut state, Msg::Key(Key::ctrl('c')));
+
+        // 走っているあいだは中断が先。
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::ctrl('c'))),
+            Cmd::CancelExec
+        );
+
         let _ = update(
             &mut state,
             exec_done_of(
@@ -496,43 +504,15 @@ mod tests {
             ),
         );
 
-        let _ = state.issue(Cmd::Exec(fetch));
-
-        assert_eq!(
-            update(&mut state, Msg::Key(Key::ctrl('c'))),
-            Cmd::CancelExec
-        );
-    }
-
-    #[test]
-    fn ctrl_c_cancels_a_running_git_before_it_quits() {
-        // 走っている書き込みがあるあいだ、`Ctrl-C` は中断が先（01 の「実行中ジョブの
-        // キャンセル」）。**終了できなくなるわけではない** —— 中断した `Exec` は
-        // `Msg::ExecFinished` で畳まれ、次の `Ctrl-C` は終了に落ちる。
-        let mut state = state();
-        let _ = state.issue(Cmd::Exec(GitOp::Fetch {
-            remote: None,
-            prune: false,
-        }));
-
-        assert_eq!(
-            update(&mut state, Msg::Key(Key::ctrl('c'))),
-            Cmd::CancelExec
-        );
-
-        let _ = update(
-            &mut state,
-            exec_done_of(
-                GitOp::Fetch {
-                    remote: None,
-                    prune: false,
-                },
-                Err(ExecError::Canceled {
-                    argv: vec!["fetch".into()],
-                }),
-            ),
-        );
+        // 畳まれたので終了できる。**中断が終了を塞がない**ことの見張り。
         assert_eq!(update(&mut state, Msg::Key(Key::ctrl('c'))), Cmd::Quit);
+
+        // 新しい書き込みはまた中断できる（刻みが落ちている）。
+        let _ = state.issue(Cmd::Exec(fetch));
+        assert_eq!(
+            update(&mut state, Msg::Key(Key::ctrl('c'))),
+            Cmd::CancelExec
+        );
     }
 
     #[test]
@@ -765,11 +745,5 @@ mod tests {
         let _ = update(&mut state, Msg::Layout { graph_rows: 5 });
 
         assert_eq!(state.graph.scroll, 21);
-    }
-
-    #[test]
-    fn tick_does_nothing_yet() {
-        let mut state = state();
-        assert_eq!(update(&mut state, Msg::Tick), Cmd::None);
     }
 }

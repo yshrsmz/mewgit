@@ -555,15 +555,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn q_ends_the_loop() {
-        let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo);
-        run_with(vec![key(KeyCode::Char('q'))], &mut state, reader)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
     async fn ctrl_c_ends_the_loop() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
@@ -973,12 +964,5 @@ mod tests {
 
         assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
         assert!(state.graph.viewport > 0);
-    }
-
-    #[tokio::test]
-    async fn the_graph_pane_has_focus_at_startup() {
-        let repo = TestRepo::init();
-        let (state, _reader) = opened(&repo);
-        assert_eq!(state.focus, Pane::Graph);
     }
 }

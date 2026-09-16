@@ -387,6 +387,10 @@ mod tests {
     fn each_alternative_of_a_pattern_pair_is_enough() {
         // 実際の git / GitHub の文面は両方の語を含むことが多い。片方だけを含む
         // 入力（一部は作り物）を通して、選択肢の両側が生きていることを見る。
+        //
+        // **`Conflict` の 2 択はここには無い。** `CONFLICT` 側は
+        // `merge_conflict_is_found_on_stdout` が、`could not apply` 側は
+        // `classifies_by_pattern` が既に片方だけの入力で踏んでいる。
         assert_eq!(
             classify(
                 "",
@@ -405,17 +409,6 @@ mod tests {
         assert_eq!(
             classify("", "error: the update is a non-fast-forward"),
             ExecErrorKind::NonFastForward
-        );
-        assert_eq!(
-            classify(
-                "Auto-merging f\nCONFLICT (content): Merge conflict in f\n",
-                ""
-            ),
-            ExecErrorKind::Conflict
-        );
-        assert_eq!(
-            classify("", "error: could not apply d0f6d2f... side"),
-            ExecErrorKind::Conflict
         );
     }
 

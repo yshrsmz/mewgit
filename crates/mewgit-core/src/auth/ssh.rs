@@ -384,6 +384,12 @@ mod tests {
         // `Opaque` は値を持たない単位ヴァリアントなので、落とし先は素の `ssh`（04 の表）。
         // **見張れるのは「素の ssh と同じ結果になる」ことだけ** —— 分岐を残しても
         // どちらのランチャを通ったかは観測できないので、腕ごと畳んである。
+        //
+        // **自分自身と比べているのではない。** 比べているのは 2 つの**実行**で、
+        // `Opaque` 側だけが独立に失敗しうる —— `resolve_with` の
+        // `SshCommand::Opaque => SSH_BIN` を起動できない値に変えると、この
+        // `unwrap()` が落ちる（実測。等価な定数の assert に置き換えたときは
+        // **同じ破壊で 19 本とも緑のまま通った**）。
         let (_dir, path) = crate::test_util::temp_file("config", GH_WORK);
         assert_eq!(
             resolve_with(&SshCommand::Opaque, Some(&path), "gh-work")

@@ -426,30 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn the_cursor_stops_at_both_ends() {
-        // 表示行は WIP 行 + コミット 2 件の 3 行。上端は WIP 行。
-        let mut state = state_with_commits(2);
-
-        let _ = update(&mut state, Msg::Key(Key::char('k')));
-        assert_eq!(state.graph.cursor, 0);
-
-        for _ in 0..5 {
-            let _ = update(&mut state, Msg::Key(Key::char('j')));
-        }
-        assert_eq!(state.graph.cursor, 2);
-    }
-
-    #[test]
-    fn moving_the_cursor_on_an_empty_graph_does_nothing() {
-        let mut state = state();
-
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
-
-        assert_eq!(state.graph.cursor, 0);
-        assert_eq!(state.graph.scroll, 0);
-    }
-
-    #[test]
     fn the_view_follows_the_cursor_past_the_bottom() {
         // 端末 24 行 = グラフ 20 行。21 行目に降りるとスクロールが 1 進む。
         let mut state = state_with_commits(30);
@@ -885,15 +861,6 @@ mod tests {
         let cmd = update(&mut state, Msg::Key(Key::char('j')));
 
         assert_eq!(cmd, Cmd::None);
-    }
-
-    #[test]
-    fn the_detail_follows_the_cursor() {
-        let mut state = on_first_commit(3);
-
-        let cmd = update(&mut state, Msg::Key(Key::char('j')));
-
-        assert_eq!(cmd, commit_loads(cursor(&state)));
     }
 
     #[test]

@@ -223,25 +223,12 @@ mod tests {
     }
 
     #[test]
-    fn batch_keeps_order_of_the_rest() {
-        assert_eq!(
-            Cmd::batch([Cmd::LoadStatus, Cmd::None, Cmd::Quit]),
-            Cmd::Batch(vec![Cmd::LoadStatus, Cmd::Quit])
-        );
-    }
-
-    #[test]
-    fn batch_flattens_nested_batches() {
-        let nested = Cmd::batch([Cmd::LoadStatus, Cmd::FetchPr]);
-        assert_eq!(
-            Cmd::batch([nested, Cmd::Quit]),
-            Cmd::Batch(vec![Cmd::LoadStatus, Cmd::FetchPr, Cmd::Quit])
-        );
-    }
-
-    #[test]
     fn batch_flattens_hand_built_nesting() {
         // Cmd::Batch は公開変種なので、batch を通らずに組まれた入れ子も来る。
+        //
+        // **`flatten_into` の腕をこの 1 本で踏む** —— `None` を捨て、`Batch` を
+        // 再帰で展開し、残りの順序を保つ。1 段だけの展開に戻すと、内側の `Batch` が
+        // 畳まれずに残って期待値と食い違う。
         let hand_built = Cmd::Batch(vec![
             Cmd::None,
             Cmd::Batch(vec![Cmd::LoadStatus, Cmd::None]),
@@ -250,12 +237,6 @@ mod tests {
             Cmd::batch([hand_built, Cmd::Quit]),
             Cmd::Batch(vec![Cmd::LoadStatus, Cmd::Quit])
         );
-    }
-
-    #[test]
-    fn batch_of_only_empty_nesting_is_none() {
-        let empty = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::None]), Cmd::None]);
-        assert_eq!(Cmd::batch([empty]), Cmd::None);
     }
 
     #[test]

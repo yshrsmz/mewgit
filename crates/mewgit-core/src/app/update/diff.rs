@@ -570,26 +570,13 @@ mod tests {
     }
 
     #[test]
-    fn a_binary_file_falls_back_to_the_whole_file() {
-        // `binary` が立つとハンクは空になるが、`hunks` を見るだけでは
-        // 「mode だけの変更」と区別が付かない。旗のほうで落とす。
-        let binary = FileDiff {
-            binary: true,
-            ..fake_file_diff("a.png", vec![real_hunk(1)])
-        };
-        let mut state = diff_pane(WorktreeSection::Unstaged, &["a.png"], vec![binary]);
-
-        assert_eq!(
-            press(&mut state, 's'),
-            Cmd::Exec(GitOp::Stage(vec!["a.png".into()]))
-        );
-    }
-
-    #[test]
     fn a_file_level_fallback_is_not_refused_by_the_freshness_guard() {
         // **断るのはハンク単位のときだけ**（07）。ハンクにできないファイルへの `s` は
         // 古いパッチを一切使わないので、読み直しを待たせる理由が無い。ペイン名で
         // ガードを書くとここまで塞ぐ。
+        //
+        // **`binary` の旗でファイル単位に落ちること自体もここで見る。** 鮮度の
+        // 新しい状態で同じことを見る腕を別に置くと、この 1 本の上位互換になる。
         let binary = FileDiff {
             binary: true,
             ..fake_file_diff("a.png", vec![real_hunk(1)])

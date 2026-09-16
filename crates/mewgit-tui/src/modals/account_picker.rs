@@ -31,6 +31,18 @@ const HINT_SHOW: &str = "[Esc] 閉じる";
 /// `update::account_key` が受けるかどうかを同じ述語から出す（#53）。
 const HINT_UNSET: &str = "[u] 指定を解除";
 
+/// `r` の案内。**出すのは [`AccountView::is_reresolvable`] が真のときだけ**（同上）。
+const HINT_RERESOLVE: &str = "[r] 解決し直す";
+
+/// 外での直し方が mewgit の設定ファイルを指すときに添える 1 行。
+///
+/// **`r` が読み直すのは `gh` と `.git/config` だけ。** 設定ファイルは起動時に固まる
+/// （08。`config` は `AppState` が持ち、`Cmd::ResolveAccount` はその写しを使う）ので、
+/// `general.gh_bin` や `[[repos]]` を直しても `r` では拾えない（pty で実測）。
+/// **`[r] 解決し直す` を出した画面で、効かない直し方だけを案内しないため**
+/// （07 の「外での直し方が設定ファイルを指すなら」）。
+const RESTART_FOR_CONFIG: &str = "設定ファイルを直したときは mewgit の再起動が要ります";
+
 /// 保存先。**黙って `.git/config` を変えない**（01 の「アカウントの選び直し」）。
 ///
 /// **キーの名前は [`MEWGIT_USER`] から引く。** 書く側（`GitOp::SetAccount` の argv）
@@ -85,7 +97,8 @@ fn waiting(view: &AccountView) -> bool {
     )
 }
 
-/// キーの案内。**`u` は [`AccountView::is_unsettable`] が真のときだけ足す** ——
+/// キーの案内。**`u` と `r` はそれぞれの述語が真のときだけ足す**
+/// （[`AccountView::is_unsettable`] / [`AccountView::is_reresolvable`]）——
 /// 出す条件と `update::account_key` が受ける条件が同じ 1 本の述語から出る（#53）。
 ///
 /// **`pick` を引数に取らない。** 呼ぶ側が計算して渡す形にすると、候補が無いのに
@@ -96,11 +109,16 @@ fn hint(view: &AccountView) -> String {
     } else {
         HINT_PICK
     };
+    // **その画面にしか無いキーを先に置く**（07）。`[Esc]` はどこでも効くので末尾。
+    let mut parts = Vec::new();
     if view.is_unsettable() {
-        format!("{HINT_UNSET}   {base}")
-    } else {
-        base.to_string()
+        parts.push(HINT_UNSET);
     }
+    if view.is_reresolvable() {
+        parts.push(HINT_RERESOLVE);
+    }
+    parts.push(base);
+    parts.join("   ")
 }
 
 /// 本文。[`AccountView`] の 2 つで分かれる。
@@ -217,6 +235,7 @@ fn degraded_body(reason: &DegradedReason) -> Vec<String> {
         DegradedReason::GhMissing => vec![
             "gh が見つかりません".to_string(),
             "PATH に gh を入れるか、設定の general.gh_bin にパスを書いてください".to_string(),
+            RESTART_FOR_CONFIG.to_string(),
         ],
         DegradedReason::GhTooOld { found } => vec![
             format!("gh {found} は古すぎます（{} 以上が必要です）", gh::REQUIRED),
@@ -237,13 +256,21 @@ fn degraded_body(reason: &DegradedReason) -> Vec<String> {
             login,
             source,
             message,
-        } => vec![
-            format!("設定が指す {login} のトークンがありません"),
-            message.clone(),
-            // **置き場所は [`source_label`] の 1 本から引く。** ここで手書きすると
-            // `MEWGIT_USER` を literal で書くことになる（[`saves_to`] の doc）。
-            format!("{} を直してください", source_label(*source)),
-        ],
+        } => {
+            let mut lines = vec![
+                format!("設定が指す {login} のトークンがありません"),
+                message.clone(),
+                // **置き場所は [`source_label`] の 1 本から引く。** ここで手書きすると
+                // `MEWGIT_USER` を literal で書くことになる（[`saves_to`] の doc）。
+                format!("{} を直してください", source_label(*source)),
+            ];
+            // **`.git/config` には添えない。** `auth::resolve` が毎回 git2 で開き直すので
+            // `r` で拾える —— 添えると、要らない再起動を案内することになる。
+            if source == &AccountSource::RepoRule {
+                lines.push(RESTART_FOR_CONFIG.to_string());
+            }
+            lines
+        }
         // **「権限が無い」と読ませない。** 全部が「確かめられなかった」形もここに来る
         // （04）ので、1 件ずつの理由をそのまま並べる。
         DegradedReason::NoAccess { attempts } => {
@@ -303,12 +330,13 @@ fn candidate_line(login: &GhLogin) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
+    use super::{hint, HINT_RERESOLVE};
     use crate::test_util::{draw, row_is_reversed, row_of, state_with_modal};
     use mewgit_core::app::{AccountListing, AccountView, AppState, Modal, Repick, TermSize};
     use mewgit_core::auth::{
         AccountSource, AttemptFailure, DegradedReason, LoginState, ProbeAttempt,
     };
-    use mewgit_core::test_util::fake_login;
+    use mewgit_core::test_util::{fake_configured_unavailable, fake_login};
 
     const SIZE: TermSize = TermSize {
         width: 80,
@@ -322,15 +350,23 @@ mod tests {
         })
     }
 
+    /// 決まっているアカウントを選び直す画面の中身。
+    ///
+    /// **`AccountView` で返す。** 幅の見張りは `hint(&view)` を組み直すので、
+    /// `AppState` まで包んだものからは取り出せない。
+    fn repick(source: AccountSource, logins: AccountListing) -> AccountView {
+        AccountView::Repick(Repick {
+            login: "taro".to_string(),
+            host: "github.com".to_string(),
+            source,
+            logins,
+        })
+    }
+
     /// 決まっているアカウントを選び直す画面。
     fn state_with_repick(source: AccountSource, logins: AccountListing) -> AppState {
         state_with_modal(Modal::AccountPicker {
-            view: AccountView::Repick(Repick {
-                login: "taro".to_string(),
-                host: "github.com".to_string(),
-                source,
-                logins,
-            }),
+            view: repick(source, logins),
             cursor: 0,
         })
     }
@@ -402,32 +438,102 @@ mod tests {
     }
 
     #[test]
-    fn the_hint_with_u_still_fits_one_row_of_the_box() {
-        // **`[u]` を足した案内がいちばん長い**（57 セル。`WIDTH` 60 から枠 2 と
-        // `RIGHT_MARGIN` 1 を引いた箱の内側と**ちょうど同じ**で、余白は無い）。
-        // 溢れると `modals::place` が案内に取る 1 行の右端で**切れて**、最後の
-        // `[Esc]` が消える（確認を挟まずに閉じるキーなので、押す前に見えている
-        // 必要がある）。**`contains` だけでは 1 行に収まったかを見ていない**ので、
+    fn the_longest_hints_still_fit_one_row_of_the_box() {
+        // 案内が溢れると `modals::place` が案内に取る 1 行の右端で**切れて**、
+        // 最後の `[Esc]` が消える（確認を挟まずに閉じるキーなので、押す前に見えて
+        // いる必要がある）。**`contains` だけでは 1 行に収まったかを見ていない**ので、
         // 行そのものを取り出して確かめる（#73 の「余白が残るか」）。
+        //
+        // **`[u]` か `[r]` を足した案内が箱の内側とちょうど同じ 57 セル**
+        // （`WIDTH` 60 から枠 2 と `RIGHT_MARGIN` 1 を引いた値）で、**余白は無い**。
+        // `[u] 指定を解除` と `[r] 解決し直す` はどちらも 14 セルなので、選ばせる
+        // 画面ではどちらを足しても同じ幅になる（実測）。
+        //
+        // **産出元が増えたら回す画面を足す**（共有した見張りは新しい産出元を自分では
+        // 拾わない。`CLAUDE.md`）—— `[r]` を足したときに degraded 側が抜けていると、
+        // `[u]` を出す画面だけで緑のままになる。
         //
         // **端末を狭めたときの境目は実測で 53 桁**（52 桁で `[Esc]` が切れる。
         // `[u]` を足す前は 36 桁まで保っていた）。いま見張るのは 80 桁だけで、
         // 狭い端末は M6 の「端末幅 < 100 のレイアウト」が持つ。
-        let state = state_with_repick(
-            AccountSource::GitConfig,
-            AccountListing::Listed(vec![fake_login("taro")]),
-        );
+        //
+        // **行を探すのは案内の先頭トークン、収まったかを見るのは [`hint`] が組んだ
+        // 文字列そのもの。** 綴りを手で書くと、案内を伸ばして溢れさせたときに「行が
+        // 見つからない」で落ちてしまい、**幅を見ているのか綴りを見ているのかが
+        // 判らなくなる**。**`[Esc]` を `contains` で探す形では浅い** —— 切れるのは
+        // 行末からなので、5 セル溢れても `[Esc] やめ` が残って素通りする（実測）。
+        let cases = [
+            // `[u]` + 選ばせる案内。
+            repick(
+                AccountSource::GitConfig,
+                AccountListing::Listed(vec![fake_login("taro")]),
+            ),
+            // `[r]` + 選ばせる案内（`Ambiguous` は候補を運ぶので選ばせる側に出る）。
+            AccountView::Degraded(ambiguous(vec![fake_login("taro_acme"), fake_login("taro")])),
+            // **`[u]` と `[r]` が同居する形。** `ConfiguredUnavailable` は出どころを
+            // 持つので `[u]` も出る。候補を運ばないので**いまは 46 セル**だが、
+            // **運ぶようになれば 74 セルで入らなくなる** —— その回を拾うのはこの腕だけ。
+            AccountView::Degraded(fake_configured_unavailable()),
+        ];
 
-        let rows = draw(&state, SIZE);
-        // **探すのは `[u]` だけ。** 文言そのものを鍵にすると、案内を伸ばして
-        // 溢れさせたときに「行が見つからない」で落ちてしまい、**この見張りが
-        // 幅を見ているのか綴りを見ているのか判らなくなる**。
-        let hint = &rows[row_of(&rows, "[u]") as usize];
+        for view in cases {
+            let want = hint(&view);
+            // **鍵は `want` から導く**（「導出できる値を引数に取らせない」）。案内の
+            // 並び順を変えても、直す場所が増えない。
+            let marker = want.split(' ').next().expect("案内が空");
+            let state = state_with_modal(Modal::AccountPicker { view, cursor: 0 });
 
-        assert!(
-            hint.contains("[Esc]"),
-            "案内が 1 行に収まっていない: {hint}"
-        );
+            let rows = draw(&state, SIZE);
+            let row = &rows[row_of(&rows, marker) as usize];
+
+            assert!(row.contains(&want), "案内が 1 行に収まっていない: {row}");
+        }
+    }
+
+    #[test]
+    fn a_fix_that_lives_in_the_config_file_says_a_restart_is_needed() {
+        // **`r` が読み直すのは `gh` と `.git/config` だけ。** 設定ファイルは起動時に
+        // 固まる（08）ので、`[r] 解決し直す` を出した画面が `general.gh_bin` や
+        // `[[repos]]` を直せと言うだけでは、**押しても変わらない案内**になる
+        // （pty で実測: 走行中に `config.toml` を直して `r` を押しても
+        // 「gh が見つかりません」のまま）。
+        let needs_restart = [
+            DegradedReason::GhMissing,
+            DegradedReason::ConfiguredUnavailable {
+                login: "taro".to_string(),
+                source: AccountSource::RepoRule,
+                message: "no oauth token found".to_string(),
+            },
+        ];
+        for reason in needs_restart {
+            let text = draw(&state_with_reason(reason.clone()), SIZE).join("\n");
+            assert!(text.contains("再起動"), "{reason:?}: {text}");
+        }
+
+        // **`.git/config` には添えない。** `auth::resolve` が毎回 git2 で開き直すので
+        // `r` で拾える —— 添えると要らない再起動を案内する。
+        let text = draw(&state_with_reason(fake_configured_unavailable()), SIZE).join("\n");
+        assert!(!text.contains("再起動"), "{text}");
+    }
+
+    #[test]
+    fn r_is_offered_only_where_resolving_again_can_change_the_answer() {
+        // **案内と `update::account_key` が同じ述語（`AccountView::is_reresolvable`）を
+        // 読む**（#53）。`Repick` に出さないのは、あちらが行き止まりではないから ——
+        // 選んで保存すれば書き込みのあとの `resolve_again` を通る（01 の
+        // 「外で直したあとの再解決」）。
+        let degraded = draw(&state_with_reason(DegradedReason::GhMissing), SIZE).join("\n");
+        assert!(degraded.contains(HINT_RERESOLVE), "{degraded}");
+
+        let repick = draw(
+            &state_with_repick(
+                AccountSource::GitConfig,
+                AccountListing::Listed(vec![fake_login("taro")]),
+            ),
+            SIZE,
+        )
+        .join("\n");
+        assert!(!repick.contains(HINT_RERESOLVE), "{repick}");
     }
 
     #[test]
@@ -488,11 +594,7 @@ mod tests {
     fn a_broken_configured_login_says_which_of_the_two_settings_it_came_from() {
         // **`AccountSource` を運ぶようにした効き目。** 両方を並べる形は #73 で
         // 出荷していて、「選び直せない」を `/code-review` に拾われた。
-        let state = state_with_reason(DegradedReason::ConfiguredUnavailable {
-            login: "taro".to_string(),
-            source: AccountSource::GitConfig,
-            message: "no oauth token found".to_string(),
-        });
+        let state = state_with_reason(fake_configured_unavailable());
 
         let text = draw(&state, SIZE).join("\n");
 

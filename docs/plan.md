@@ -155,13 +155,10 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       **候補一覧の取り直し**（`gh auth status` をもう一度）と、
       **`AccountSource::Config` を出どころで割ること**（`.git/config` は `--unset`
       できるが設定ファイルの `[[repos]]` は外せないので、同じ案内を出せない）
-- [ ] degraded を外で直したあとの再解決。**`gh auth login` してから `A` を押しても
-      内訳が出るだけ**で、`Cmd::ResolveAccount` を出す経路は `target_resolved` と
-      `GitOp::SetAccount` / `UnsetAccount` のあとの 2 箇所しかない（01 の
-      「アカウントの選び直し」）。**`Cmd::ListAccounts` では塞がらない** —— 一覧を
-      引き直すことと、手順 1〜4 を通して `AccountState` を作り直すことは別。塞ぐには
-      `Modal::AccountPicker` の `Degraded` 側に「もう一度解決する」の入口を足し、
-      `Resolving` に戻すあいだモーダルをどうするかを決める
+- [x] degraded を外で直したあとの再解決。`Modal::AccountPicker` の `Degraded` 側に
+      `r` を足し、`resolve_again` をそのまま呼ぶ。**決めたことは 01 の
+      「外で直したあとの再解決」**（`Repick` に出さない理由、モーダルを閉じる理由、
+      `git` 実行中に断る理由）
 - [ ] `ui::panes::prs` — 現ブランチ PR、チェック一覧、一覧タブ、ブラウザで開く。
       **レートリミット残量の受け渡しもここ** —— ヘッダ表示のタスクへ送られていたが、
       あちらで API を叩くのは起動時の probe だけで、常時出す残量の産出元にならない
@@ -204,11 +201,31 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       `ui::pane_block` に `Padding::right(1)` を足す（`modals::block` は
       `Modal::AccountPicker` のタスクで入れた。07 の「モーダル」）。
       **モーダルのキーの案内が切れる境目もここで見る** —— `AccountPicker` の
-      いちばん長い案内（`[u] 指定を解除` 付き）は 57 セルで、箱の内側
+      いちばん長い案内（`[u] 指定を解除` 付きと `[r] 解決し直す` 付き。どちらも
+      14 セルなので並ぶ）は 57 セルで、箱の内側
       （`WIDTH` 60 − 枠 2 − `RIGHT_MARGIN` 1）と**ちょうど同じ**。`modals::place` は
       折り返さずに切るので、**実測で 52 桁から `[Esc]` が消える**（53 桁までは残る。
       `[u]` を足す前は 36 桁まで保っていた）。`Esc` は確認を挟まずに閉じるキーなので、
-      狭い端末の案内をどう畳むかをこのタスクで決める
+      狭い端末の案内をどう畳むかをこのタスクで決める。
+      **`[u]` と `[r]` と選ばせる案内が同居する形は 74 セルで、80 桁の端末でも入らない**
+      （実測）。いま出ないのは `[u]` を出す degraded が候補を運ばないからで、
+      **`Repick` に `r` を出せない理由の 2 つ目がこれ**（01 の「外で直したあとの
+      再解決」）。案内を畳む形を決めたら、`Repick` にも `r` を出せるか数え直す ——
+      **`Single` で決まった相手が外のログイン追加で `Ambiguous` に変わったことは、
+      いまの `A`（候補の取り直し）では拾えない**
+- [ ] アカウント書き込み中の `A` を断る。**いまは書き込みが走っているあいだに
+      `A` を押せて、`state.account` の書き込み前の写しを持ったモーダルが開き直せる**
+      （閉じるのは `resolve_again` の側。01 の「写しの寿命」）。そのせいで `r` は
+      `exec_busy` で断っており、**借りている通知が書き込み向けの文言**
+      （「ほかの git 実行が終わるまで待ってください（Ctrl-C で中断）」）で、
+      読み取りである `r` にはずれている。塞ぐ形は `account_picked` / `account_unset` が
+      `Cmd::Exec` を返したときに `AccountState::Resolving` へ落とすこと ——
+      `A` は `Resolving` では通知に落ちるので開き直せなくなり、`r` の `exec_busy` も
+      要らなくなる。**#78 が足した見張り
+      （`a_picker_reopened_while_the_write_runs_does_not_outlive_the_write`）の前提が
+      消える**ので、あれが何を守っていたかを読んでから書き換える。
+      **`JobKind::region()` のコメント「どちらも git の書き込みで動かない」も同じ行で
+      直す** —— #78 以降は嘘で、`SetAccount` が `ResolveAccount` の読む鍵を書く
 - [ ] ロケール（`LC_ALL` / `LC_CTYPE` / `LANG`）から `graph.ascii` の既定を決める
       （曖昧幅を全角扱いする端末は UTF-8 でもずれる。06 の「ASCII フォールバック」）
 - [ ] `app/state.rs` を割るかを決める。**`update.rs` を割ったので workspace で

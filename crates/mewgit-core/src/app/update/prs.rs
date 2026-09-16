@@ -48,8 +48,9 @@ fn open_pr(state: &mut AppState) -> Cmd {
 
 /// 持っている答えがいまのブランチのものでなければ引き直す。
 ///
-/// **`account_resolved` から呼ぶ。** アカウントが決まるまで [`AppState::wanted_pr`] は
-/// `None` を返すので、決まった瞬間が 1 本目の入口になる。
+/// **呼ぶのは返信を採ったあとだけ**（[`pr_loaded`] / [`checks_loaded`]）。**材料が
+/// 変わった入口からは [`reload`] を通す** —— 鍵はブランチ名しか見ないので、
+/// **アカウントが変わっても「合っている」と答える**（独立したレビューが拾った）。
 pub(super) fn refresh(state: &AppState) -> Cmd {
     // **`Cmd::FetchPr` を組むのは [`reload`] の 1 箇所。** 鍵の作り方を変えたときに
     // 片方だけ直せる形にしない。
@@ -59,14 +60,18 @@ pub(super) fn refresh(state: &AppState) -> Cmd {
     fetch_checks(state)
 }
 
-/// ref が動いたので引き直す。
+/// 材料が変わったので、鍵が同じでも引き直す。
 ///
-/// **鍵が同じでも頼み直す。** commit / push / fetch のあとは、同じブランチでも PR の
-/// 状態（チェックの結果、マージ済みか）が変わっている。**ここが失敗からの唯一の
-/// 出口でもある** —— 引けなかった答えは [`refresh`] では鍵が合ってしまって捨てられない
-/// ので、`f` を押せば（fetch → `Msg::RepoInfoLoaded`）引き直せる形にしておく
+/// **入口は 2 つで、材料も 2 つ。** ref（`Msg::RepoInfoLoaded`。commit / push / fetch
+/// のあとは同じブランチでもチェックの結果やマージ済みかが変わる）と、**どのアカウント
+/// で引いたか**（`Msg::AccountResolved`。`A` で選び直すと、前のトークンでは見えなかった
+/// PR が見える）。
+///
+/// **ここが失敗からの出口でもある。** 引けなかった答えは [`refresh`] では鍵が合って
+/// しまって捨てられないので、`f` を押すか `A` で選び直せば引き直せる形にしておく
 /// （`CLAUDE.md` の「状態を消すのが『その状態を根拠に断つキー』の先にあるなら、
-/// 断つ前に消し方を数える」）。
+/// 断つ前に消し方を数える」）。**材料を 1 本しか数えていなかったので、`A` で
+/// 選び直しても失敗の文言が戻る穴が開いていた**（独立したレビューが拾った）。
 pub(super) fn reload(state: &AppState) -> Cmd {
     match state.wanted_pr() {
         Some(branch) => Cmd::FetchPr {
@@ -95,10 +100,11 @@ pub(super) fn pr_loaded(
     branch: String,
     result: Result<Option<PullRequest>, GithubError>,
 ) -> Cmd {
-    state.jobs.finish(JobKind::FetchPr);
+    let asked = state.jobs.finish(JobKind::FetchPr);
     if state.wanted_pr() != Some(branch.as_str()) {
-        // **捨てたあとに `refresh` を通す。** ここで返さないと、落とされた要求の
-        // ぶんを誰も頼み直さない（01 の「実行中ジョブ › 世代」の (a)）。
+        // **捨てたあとに `refresh` を通す。** ここで返さないと、鍵が食い違って
+        // 捨てたぶんを誰も頼み直さない（01 の「実行中ジョブ › 世代」の (a)）。
+        // 続きを頼む: 鍵の合わなかった返信のぶん。
         return refresh(state);
     }
     let fetched = match result {
@@ -106,7 +112,15 @@ pub(super) fn pr_loaded(
         Err(err) => Fetch::Failed(err),
     };
     state.prs.set_current(branch, fetched);
-    fetch_checks(state)
+    // **採ったうえで頼み直す**（`repo_info_loaded` と同じ形。01 の「実行中ジョブ ›
+    // 世代」）。書き込みの最中に飛んでいた要求の答えは**書き込み前の GitHub の状態**
+    // だが、出せるものは出したままにして裏で引き直す。
+    // 続きを頼む: 書き込みに追い越された `FetchPr`。
+    if state.jobs.is_fresh(JobKind::FetchPr, asked) {
+        fetch_checks(state)
+    } else {
+        reload(state)
+    }
 }
 
 /// 頼んだ head sha のチェック一覧が届いた。
@@ -115,9 +129,16 @@ pub(super) fn checks_loaded(
     sha: String,
     result: Result<Vec<Check>, GithubError>,
 ) -> Cmd {
-    state.jobs.finish(JobKind::FetchChecks);
+    let asked = state.jobs.finish(JobKind::FetchChecks);
     if state.wanted_checks() != Some(sha.as_str()) {
+        // 続きを頼む: 鍵の合わなかった返信のぶん。
         return refresh(state);
+    }
+    if !state.jobs.is_fresh(JobKind::FetchChecks, asked) {
+        // **PR ごと引き直す。** チェックの鍵（head sha）は `current` から導くので、
+        // 書き込みで PR の側が進んでいれば古い sha を頼み直しても同じものが返る。
+        // 続きを頼む: 書き込みに追い越された `FetchChecks`。
+        return reload(state);
     }
     state.prs.checks = match result {
         Ok(checks) => Fetch::Loaded(checks),
@@ -143,10 +164,10 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{press, state, state_with_commits};
+    use super::super::test_support::{cells, press, state, state_with_commits};
     use super::super::update;
     use super::*;
-    use crate::app::{Msg, NoticeLevel, TargetState};
+    use crate::app::{Msg, NoticeLevel, Region, TargetState};
     use crate::auth::{AccountState, DegradedReason};
     use crate::config::Config;
     use crate::git_read::HeadInfo;
@@ -355,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_fetch_is_remembered_and_only_the_refs_ask_again() {
+    fn a_failed_fetch_is_remembered_and_the_material_that_changed_asks_again() {
         // **失敗を状態に持つ**（01 の「失敗の記憶」）。鍵が合っているので `refresh`
         // は頼み直さない —— 回すと「失敗 → 再読込 → 失敗」になる。
         let mut state = state_on_branch("feat/x");
@@ -371,10 +392,100 @@ mod tests {
         assert!(matches!(state.prs.current, Fetch::Failed(_)));
         assert_eq!(refresh(&state), Cmd::None, "失敗を頼み直している");
 
-        // **出口はここ 1 つ。** `f` が ref を読み直せば（`Msg::RepoInfoLoaded`）
+        // **出口は材料が変わったとき。** `f`（ref）でも `A`（アカウント）でも
         // 引き直せる（`reload` の doc）。
         assert_eq!(
             reload(&state),
+            Cmd::FetchPr {
+                branch: "feat/x".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn picking_another_account_asks_for_the_pr_again() {
+        // **鍵はブランチ名しか見ない**ので、`refresh` に通すと「合っている」と
+        // 答えて前のトークンで引けなかった答えが残る（独立したレビューが拾った）。
+        // **`A` の流れからは、そこを抜ける手掛かりが 1 つも無い。**
+        let mut state = state_on_branch("feat/x");
+        let ask = reload(&state);
+        let _ = reply(
+            &mut state,
+            ask,
+            Msg::PrLoaded {
+                branch: "feat/x".to_string(),
+                result: Box::new(Err(GithubError::NotFound)),
+            },
+        );
+        assert!(matches!(state.prs.current, Fetch::Failed(_)));
+
+        // `A` → 選び直し → `GitOp::SetAccount` → `resolve_again` → 解決し直し。
+        let cmd = update(&mut state, Msg::AccountResolved(Ok(fake_account("hanako"))));
+
+        assert!(
+            issued_pr(
+                &cmd,
+                &Cmd::FetchPr {
+                    branch: "feat/x".to_string()
+                }
+            ),
+            "アカウントが変わったのに頼み直していない: {cmd:?}"
+        );
+    }
+
+    #[test]
+    fn a_fetch_overtaken_by_a_write_is_asked_again() {
+        // **鍵が合っていても古いことがある。** 書き込みの最中に飛んでいた要求の答えは
+        // 書き込み**前**の GitHub の状態で、そのあとの引き直しは `AppState::issue` に
+        // 落とされている（通知も出ない）。刻印で拾う（01 の「実行中ジョブ › 世代」）。
+        let mut state = state_on_branch("feat/x");
+        // 1 本目が飛んでいる。**返信はまだ届けない。**
+        let _ = state.issue(reload(&state));
+        assert!(state.jobs.is_running(JobKind::FetchPr));
+
+        // 書き込みが終わって ref が動いた。ここで出る `Cmd::FetchPr` は落とされる。
+        state.jobs.advance(Region::Refs);
+        let dropped = state.issue(reload(&state));
+        assert_eq!(dropped, Cmd::None, "落とされていない");
+
+        // 1 本目の答えが届く。**採ったうえで頼み直す。**
+        let next = update(
+            &mut state,
+            pr_loaded_msg("feat/x", Some(fake_pull_request(82, "feat/x", "headsha"))),
+        );
+
+        assert!(state.current_pr().is_some(), "出せるものを捨てている");
+        assert_eq!(
+            next,
+            Cmd::FetchPr {
+                branch: "feat/x".to_string()
+            },
+            "追いついていない"
+        );
+    }
+
+    #[test]
+    fn checks_overtaken_by_a_write_ask_for_the_pr_again() {
+        let mut state = state_on_branch("feat/x");
+        let ask = reload(&state);
+        let next = reply(
+            &mut state,
+            ask,
+            pr_loaded_msg("feat/x", Some(fake_pull_request(82, "feat/x", "headsha"))),
+        );
+        let _ = state.issue(next);
+        assert!(state.jobs.is_running(JobKind::FetchChecks));
+
+        state.jobs.advance(Region::Refs);
+        let again = update(
+            &mut state,
+            checks_loaded("headsha", vec![fake_check("build", CheckState::Success)]),
+        );
+
+        // **PR ごと引き直す。** head sha が進んでいれば、古い sha を頼み直しても
+        // 同じものが返る。
+        assert_eq!(
+            again,
             Cmd::FetchPr {
                 branch: "feat/x".to_string()
             }
@@ -399,6 +510,35 @@ mod tests {
             pr_loaded_msg("feat/x", Some(fake_pull_request(82, "feat/x", "headsha"))),
         );
         assert_eq!(press(&mut state, 'o'), Cmd::OpenPr { number: 82 });
+    }
+
+    #[test]
+    fn pressing_o_while_the_browser_is_starting_says_so_instead_of_nothing() {
+        // **`gh browse` は起動したブラウザが終わるまで返らない**（gh 2.100.0 で実測。
+        // `BROWSER` に 5 秒眠るスクリプトを置くと 5.06 秒）。端末ブラウザや自分で
+        // 抜けないラッパーを `BROWSER` にしている環境では、そのあいだ `o` が
+        // 無反応になる（#63 の「無反応よりまし」で止めない）。
+        let mut state = state_on_branch("feat/x");
+        let ask = reload(&state);
+        let _ = reply(
+            &mut state,
+            ask,
+            pr_loaded_msg("feat/x", Some(fake_pull_request(82, "feat/x", "headsha"))),
+        );
+        state.focus = Pane::Prs;
+
+        // 1 回目は出る（`press` は `update` の出口を通るので登録まで済む）。
+        assert_eq!(press(&mut state, 'o'), Cmd::OpenPr { number: 82 });
+        assert!(state.jobs.is_running(JobKind::OpenPr));
+        state.notices.clear();
+
+        // 2 回目は落とされる。**黙らない。**
+        assert_eq!(press(&mut state, 'o'), Cmd::None);
+        assert_eq!(state.notices.len(), 1, "黙って落としている");
+        let message = state.notices[0].message.clone();
+        assert!(message.contains("ブラウザ"), "{message}");
+        // ステータスバーの予算（01 の「失敗の案内文」）。
+        assert!(cells(&message) <= 72, "{} セル: {message}", cells(&message));
     }
 
     #[test]

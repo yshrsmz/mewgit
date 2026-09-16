@@ -168,8 +168,13 @@ impl AppState {
             | JobKind::ListAccounts
             | JobKind::FetchPr
             | JobKind::FetchChecks
-            | JobKind::FetchPrList
-            | JobKind::OpenPr => return,
+            | JobKind::FetchPrList => return,
+            // **黙って落とさない。** `gh browse` は**起動したブラウザが終わるまで
+            // 返らない**（gh 2.100.0 で実測。`BROWSER` に 5 秒眠るスクリプトを
+            // 置くと 5.06 秒）。端末ブラウザや自分で抜けないラッパーを `BROWSER` に
+            // している環境では、そのあいだ `o` が無反応になる（#63 の「無反応より
+            // まし」で止めない）。
+            JobKind::OpenPr => "ブラウザの起動を待っています",
         };
         self.push_notice(NoticeLevel::Warn, message.to_string(), None);
     }
@@ -311,8 +316,10 @@ impl AppState {
     /// 同じものを読む（[`AppState::wanted_diff`] と同じ形）。分けて書くと、片方だけ
     /// 直したときに別のブランチの PR を出したままにできてしまう。
     ///
-    /// **`Unborn` では `None`。** 名前はあるがコミットが 1 つも無いので、そのブランチを
-    /// head にした PR は存在しえない。**`Detached` も `None`** —— API が要るのは
+    /// **`Unborn` では `None`。** 名前はあるがコミットが 1 つも無いので、**このワーク
+    /// ツリーから出した PR は無い**。同名のリモートブランチに PR がある可能性は
+    /// 否定できないが、それはここの HEAD の PR ではない（独立したレビューの指摘で
+    /// 「存在しえない」から書き直した）。**`Detached` も `None`** —— API が要るのは
     /// ブランチ名で、切り離された HEAD には無い。
     pub fn wanted_pr(&self) -> Option<&str> {
         self.repo.target.resolved()?;
@@ -1476,9 +1483,17 @@ impl JobKind {
             // ref から導かれる値。`LoadHeadMessage` もここ —— commit / amend が
             // 走っているあいだに `C` を押すと、書き込み前の本文で amend の入力欄が
             // 埋まる。
-            JobKind::LoadRepoInfo | JobKind::LoadBranches | JobKind::LoadHeadMessage => {
-                Some(Region::Refs)
-            }
+            // **PR とチェックもここ。** 鍵（ブランチ名 / head sha）は**選択が動いた**
+            // ことしか言えず、**同じブランチのまま PR の側が変わる**（commit / push で
+            // head sha が進み、チェックが回り直す）のは ref の書き込みで起きる。
+            // 鍵だけにすると、書き込みの最中に飛んでいた要求の答え（書き込み前の
+            // GitHub の状態）が鍵だけ合って採られ、そのあとの引き直しは
+            // `AppState::issue` に落とされたまま誰も拾わない。
+            JobKind::LoadRepoInfo
+            | JobKind::LoadBranches
+            | JobKind::LoadHeadMessage
+            | JobKind::FetchPr
+            | JobKind::FetchChecks => Some(Region::Refs),
             // 積んだログの行。ref が動いて walk に入る集合が変わったときだけ古くなる。
             JobKind::LoadLog => Some(Region::Log),
             // 書き込みそのものと、Oid で追いつくもの、リポジトリの外から来るもの。
@@ -1491,11 +1506,8 @@ impl JobKind {
             | JobKind::ResolveAccount
             // `gh auth status` が読むのは gh 自身の設定で、git の書き込みで動かない。
             | JobKind::ListAccounts
-            // **PR とチェックは鍵のほうが世代より強い。** ブランチ名と head sha を
-            // `Msg` が運び、届いた時点の `wanted_*` と突き合わせる（01 の「PR ペイン ›
-            // 何を引くか」）。`OpenPr` はそもそも値を読まない。
-            | JobKind::FetchPr
-            | JobKind::FetchChecks
+            // **`OpenPr` は値を読まない**（ブラウザに渡すだけ）。`FetchPrList` は
+            // 2/2 のタスクで決める。
             | JobKind::FetchPrList
             | JobKind::OpenPr => None,
         }

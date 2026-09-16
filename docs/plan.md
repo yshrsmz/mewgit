@@ -237,7 +237,7 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       `RebaseEditor`、ステータスバーの通知履歴で `Modal` と `Notice` に手が入るので、
       そこで数え直す
 - [ ] `git_exec::argv` の `VARIANT_COUNT` を消す。**`variant()` の網羅 `match` から
-      離れた場所に「いま 32 ある」のコピーが置いてある**（CLAUDE.md の「離れた場所に、
+      離れた場所に変種の本数のコピーが置いてある**（CLAUDE.md の「離れた場所に、
       コードの『いま N ある』を書かない」）。**ただの削除では済まない** ——
       `covers_every_variant` は「`to_argv` は全 `GitOp` をカバーする」（同じく CLAUDE.md）
       の見張りなので、消すとカバー要求のほうが破れる。塞ぐ形は、各変種の代表値を返す

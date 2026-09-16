@@ -379,19 +379,25 @@ mod tests {
         assert!(err.to_string().contains("-4"), "{err}");
     }
 
-    #[test]
-    fn git_ssh_falls_back_to_plain_ssh() {
-        // **`Opaque` を直起動する腕は `resolve_with` に置いていない**（あちらの doc）。
-        // 落とし先が [`SshCommand::default`] と同じ値だから畳んである。
+    #[tokio::test]
+    async fn git_ssh_falls_back_to_plain_ssh() {
+        // `Opaque` は値を持たない単位ヴァリアントなので、落とし先は素の `ssh`（04 の表）。
+        // **見張れるのは「素の ssh と同じ結果になる」ことだけ** —— 分岐を残しても
+        // どちらのランチャを通ったかは観測できないので、腕ごと畳んである。
         //
-        // **実物の `ssh` は叩かない。** 両方を走らせて結果を比べる形にしていたが、
-        // どちらの腕も同じ `SSH_BIN` から同じコマンド文字列を組むので、**自分自身と
-        // 比べているだけ**で落ちようが無かった（「守りを根拠に書く前に、その守りが
-        // 何を守っているかを数える」）。畳んでよい根拠は 2 つの値が等しいことなので、
-        // それを直に見る。
+        // **自分自身と比べているのではない。** 比べているのは 2 つの**実行**で、
+        // `Opaque` 側だけが独立に失敗しうる —— `resolve_with` の
+        // `SshCommand::Opaque => SSH_BIN` を起動できない値に変えると、この
+        // `unwrap()` が落ちる（実測。等価な定数の assert に置き換えたときは
+        // **同じ破壊で 19 本とも緑のまま通った**）。
+        let (_dir, path) = crate::test_util::temp_file("config", GH_WORK);
         assert_eq!(
-            SshCommand::default(),
-            SshCommand::Shell(SSH_BIN.to_string())
+            resolve_with(&SshCommand::Opaque, Some(&path), "gh-work")
+                .await
+                .unwrap(),
+            resolve_with(&SshCommand::default(), Some(&path), "gh-work")
+                .await
+                .unwrap(),
         );
     }
 }

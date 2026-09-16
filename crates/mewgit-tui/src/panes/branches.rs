@@ -45,7 +45,7 @@ fn border_rows(state: &AppState) -> u16 {
 
 /// このペインの枠。行数を測るときと描くときで同じものを組む。
 fn block(state: &AppState) -> Block<'static> {
-    ui::pane_block(title(state), state.focus == Pane::Branches)
+    ui::pane_block(super::right_tabs(state), state.focus == Pane::Branches)
 }
 
 /// Branches ペインを描く。領域の高さは [`rows`] が決める。
@@ -57,11 +57,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, view: View) {
     ui::render_rows(frame, inner, view.lines, view.cursor..view.cursor + 1);
 }
 
-/// 枠のタイトル。件数は出せるときだけ添える。
+/// タブ見出しに出すこのペインの名前。件数は出せるときだけ添える。
 ///
 /// 読み込み中や失敗のときに `(0)` を出すと、ブランチが 1 本も無いリポジトリと
 /// 同じ見た目になる（本文で出し分けているのと同じ理由）。
-fn title(state: &AppState) -> String {
+pub(super) fn title(state: &AppState) -> String {
     match state.branches.branches.len() {
         0 => "Branches".to_string(),
         len => format!("Branches ({len})"),

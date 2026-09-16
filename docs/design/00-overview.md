@@ -59,21 +59,25 @@ crates/
     graph/      lane.rs
     git_read/   repo.rs   log.rs  diff.rs  status.rs  thread.rs
     git_exec/   argv.rs   runner.rs patch.rs  〔rebase.rs〕
-    github/     client.rs wire.rs  account.rs  〔pr.rs  checks.rs〕
+    github/     client.rs wire.rs  account.rs
     auth/       gh.rs     resolve.rs probe.rs  ssh.rs  url.rs
     config/     mod.rs
   mewgit-tui/src/
     main.rs   runtime.rs  input.rs
     ui/       mod.rs    lanes.rs  theme.rs  time.rs
-    panes/    graph.rs  worktree.rs  diff.rs  commit.rs  branches.rs
+    panes/    graph.rs  worktree.rs  diff.rs  commit.rs  branches.rs  prs.rs
     modals/   confirm.rs  input.rs  commit_message.rs  picker.rs
               remote_picker.rs  account_picker.rs
 ```
 
-**〔〕はまだ無いファイル**（`rebase.rs` は M5、`pr.rs` / `checks.rs` は M4 の
-`ui::panes::prs`）。**印を付けるのは、実在する行と混ざると木全体が信用できなく
-なるため** —— 「この構成に合わせて置く」の意味と「ここに在る」の意味が同じ字で
-書いてあると、読む側は確かめるまでどちらか判らない。
+**〔〕はまだ無いファイル**（`rebase.rs` は M5）。**印を付けるのは、実在する行と
+混ざると木全体が信用できなくなるため** —— 「この構成に合わせて置く」の意味と
+「ここに在る」の意味が同じ字で書いてあると、読む側は確かめるまでどちらか判らない。
+
+**`github/` に `pr.rs` / `checks.rs` を置く予定は取り下げた。** PR とチェックの
+取得は `client.rs`（リクエストの組み立て）と `wire.rs`（応答の型）に既に入って
+いて（#59）、**割る理由になる関心事が増えていない**。`ui::panes::prs` で増えるのは
+描く側で、そちらは `mewgit-tui/src/panes/prs.rs`。
 
 **`update` を割ってあるのは関心事の数のほうで、行数ではない**（Rust に行数の目安は
 無く、`clippy::too_many_lines` は `allow` 既定の**関数**単位）。1 ファイル = 1 つの

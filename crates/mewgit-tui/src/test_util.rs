@@ -90,7 +90,7 @@ pub fn row_is_reversed(state: &AppState, size: TermSize, needle: &str) -> bool {
 /// そのペインの領域だけを取り出した描画結果。
 ///
 /// **画面全体の `contains` で見ない。** 文言はペインをまたいで共有しているので
-/// （`ui::LOADING` は 5 つのペインが出す）、全体を見ると**別のペインが出した同じ
+/// （`ui::LOADING` はどのペインも出す）、全体を見ると**別のペインが出した同じ
 /// 文字で通ってしまう**。Branches ペインを足した時点で、Worktree と Diff の
 /// 「読み込み中…」の見張りが実際に死んだ（`draw` の全画面 `contains` が、まだ届いて
 /// いないブランチ一覧の文言を拾っていた）。

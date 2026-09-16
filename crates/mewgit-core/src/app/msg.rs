@@ -145,9 +145,25 @@ pub enum Msg {
     /// 消える。受けるのは [`Modal::AccountPicker`](crate::app::Modal::AccountPicker)
     /// だけで、`state.account` は動かさない。
     AccountsListed(Result<Vec<GhLogin>, AuthError>),
-    PrLoaded(Box<Result<Option<PullRequest>, GithubError>>),
-    ChecksLoaded(Result<Vec<Check>, GithubError>),
+    /// 頼んだブランチの PR（01 の「PR ペイン › 何を引くか」）。
+    ///
+    /// **`branch` は頼んだときの鍵**で、届いた `PullRequest` から取り直したものでは
+    /// ない。取り直すと、読む側と書く側で鍵の出どころが 2 本になる（しかも
+    /// 「PR が無い」のときは取りようが無い）。
+    PrLoaded {
+        branch: String,
+        result: Box<Result<Option<PullRequest>, GithubError>>,
+    },
+    /// 頼んだ head sha のチェック一覧。
+    ChecksLoaded {
+        sha: String,
+        result: Result<Vec<Check>, GithubError>,
+    },
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),
+    /// `gh browse` の結果。`Err` は通知に出す（01 の「`o`（ブラウザで開く）」）。
+    ///
+    /// **`Ok` でも何も出さない。** ブラウザが前に出てくるので、画面に足す言葉が無い。
+    OpenPrFinished(Result<(), AuthError>),
 }
 
 /// [`Msg::RepoInfoLoaded`] の中身。

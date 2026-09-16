@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::auth::split_scopes;
 use crate::auth::url::valid_host;
+use crate::auth::RepoTarget;
 
 use super::wire::{
     summarize_reviews, WireCheckRuns, WireCombinedStatus, WirePull, WireRepo, WireReview,
@@ -141,6 +142,23 @@ fn shared_http() -> Result<reqwest::Client, GithubError> {
 }
 
 impl GithubClient {
+    /// 決まった対象とトークンからクライアントを作る。
+    ///
+    /// **トークンは中身を写す。** secrecy 0.10 の `SecretString` は `SecretBox<str>` で
+    /// `Clone` を持たない（`str` が `CloneableSecret` でない）ので、`expose_secret()`
+    /// から作り直すしかない。
+    ///
+    /// **[`new`](Self::new) の引数 3 つを [`RepoTarget`] から引く形をここに寄せてある。**
+    /// 呼ぶ側が 2 つある（`auth::Backend` の probe と、ランタイムの PR 取得）ので、
+    /// 写し方と引数の対応を 2 箇所に書かない。
+    pub fn with_token(target: &RepoTarget, token: &SecretString) -> Result<Self, GithubError> {
+        Self::new(
+            &target.host,
+            target.port,
+            SecretString::from(token.expose_secret().to_string()),
+        )
+    }
+
     /// ホスト名からクライアントを作る。
     ///
     /// `port` は **https の非既定ポート**（`auth::RepoTarget::port`）。ssh の port は

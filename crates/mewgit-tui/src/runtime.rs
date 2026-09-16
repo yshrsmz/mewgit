@@ -14,11 +14,13 @@ use mewgit_core::auth::ssh::{effective_ssh_from_env, SshCommand};
 use mewgit_core::auth::{self, RepoTarget};
 // `logins` を呼ぶためだけの import。**名前は入れない** —— `ratatui::backend::Backend`
 // と衝突する。
+use mewgit_core::auth::gh::GhCli;
+use mewgit_core::auth::AccountState;
 use mewgit_core::auth::Backend as _;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
 use mewgit_core::git_read::{GitReadError, ReaderHandle};
-use mewgit_core::github::AccountBackend;
+use mewgit_core::github::{AccountBackend, GithubClient, GithubError};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
 use ratatui::Terminal;
@@ -385,9 +387,69 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
-            // M4 以降で実装する。
-            Cmd::FetchPr => not_implemented(state, JobKind::FetchPr, "FetchPr"),
-            Cmd::FetchChecks => not_implemented(state, JobKind::FetchChecks, "FetchChecks"),
+            // **材料は `AppState` から取る**（`Cmd::ResolveAccount` と同じ理由で、
+            // トークンは `Cmd` に載せない —— `SecretString` は `Clone` も `PartialEq` も
+            // 持たず、載せると `Cmd` を比べるテストが全部書けなくなる。不変ルール 3）。
+            Cmd::FetchPr { branch } => {
+                let Some((target, api)) = github_for(state) else {
+                    return fold(state, JobKind::FetchPr);
+                };
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = match api {
+                        // **`head_owner` は `target.owner`。** fork 側の owner を出す
+                        // 材料が `RepoInfo.target` に無いので、いまは同一リポジトリの
+                        // PR しか出ない（05 の `head_owner`。plan.md に送ってある）。
+                        Ok(api) => {
+                            api.pr_for_branch(&target.owner, &target.repo, &target.owner, &branch)
+                                .await
+                        }
+                        Err(err) => Err(err),
+                    };
+                    let _ = tx.send(Msg::PrLoaded {
+                        branch,
+                        result: Box::new(result),
+                    });
+                });
+                ControlFlow::Continue(())
+            }
+
+            Cmd::FetchChecks { sha } => {
+                let Some((target, api)) = github_for(state) else {
+                    return fold(state, JobKind::FetchChecks);
+                };
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = match api {
+                        Ok(api) => api.checks(&target.owner, &target.repo, &sha).await,
+                        Err(err) => Err(err),
+                    };
+                    let _ = tx.send(Msg::ChecksLoaded { sha, result });
+                });
+                ControlFlow::Continue(())
+            }
+
+            // **`gh` は毎回 detect する**（上の `ResolveAccount` と同じ理由）。
+            Cmd::OpenPr { number } => {
+                let Some(target) = state.repo.target.resolved().cloned() else {
+                    return fold(state, JobKind::OpenPr);
+                };
+                let gh_bin = state.config.general.gh_bin.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = match GhCli::detect(gh_bin).await {
+                        Ok(gh) => {
+                            gh.browse(&target.host, &target.owner, &target.repo, number)
+                                .await
+                        }
+                        Err(err) => Err(err),
+                    };
+                    let _ = tx.send(Msg::OpenPrFinished(result));
+                });
+                ControlFlow::Continue(())
+            }
+
+            // M4 の 2/2（一覧タブ）で実装する。
             Cmd::FetchPrList => not_implemented(state, JobKind::FetchPrList, "FetchPrList"),
         }
     }
@@ -402,6 +464,32 @@ async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> 
         head: reader.head().await?,
         refs: reader.refs().await?,
     })
+}
+
+/// 材料が揃っていなかったジョブを畳む。
+///
+/// **ここへは来ない。** `update` は [`AppState::wanted_pr`] が `Some` のときしか
+/// `Cmd::FetchPr` / `FetchChecks` を出さず、その述語が `target` と `account` の両方を
+/// 見る（01 の「PR ペイン › 何を引くか」）。`OpenPr` も PR が出ている画面からしか
+/// 押せない。**それでも畳むのは、掴んだままにすると以後の同じ `Cmd` が
+/// [`AppState::issue`] に黙って落とされるから**（`not_implemented` の doc と同じ形）。
+fn fold(state: &mut AppState, kind: JobKind) -> ControlFlow<()> {
+    state.jobs.finish(kind);
+    ControlFlow::Continue(())
+}
+
+/// `GithubClient` を組む材料。**`dispatch` は `AppState` を読んでよい**（01 のランタイム）。
+///
+fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, GithubError>)> {
+    let target = state.repo.target.resolved()?.clone();
+    let AccountState::Resolved(account) = &state.account else {
+        return None;
+    };
+    // **組むのはここ（同期）。** トークンを `tokio::spawn` の向こうへ運ぶには
+    // `SecretString` を写すことになり、写し方が `GithubClient::with_token` と
+    // 2 箇所に割れる。組み立ての失敗（`InvalidHost` / TLS）はそのまま `Msg` に載せる。
+    let api = GithubClient::with_token(&target, &account.token);
+    Some((target, api))
 }
 
 /// 未実装の `Cmd` を通知に積む。黙って捨てると開発中に気付けない。
@@ -424,11 +512,13 @@ fn not_implemented(state: &mut AppState, kind: JobKind, name: &str) -> ControlFl
 mod tests {
     use super::*;
     use futures::stream;
-    use mewgit_core::app::{AccountListing, AccountView, Modal, Pane, Repick, TermSize};
+    use mewgit_core::app::{
+        AccountListing, AccountView, Modal, Pane, Repick, TargetState, TermSize,
+    };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::HeadInfo;
-    use mewgit_core::test_util::{fake_target, wait_for_pid, BareRepo, TestRepo};
+    use mewgit_core::test_util::{fake_account, fake_target, wait_for_pid, BareRepo, TestRepo};
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -762,7 +852,7 @@ mod tests {
         let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
         // Quit の後ろは実行しない。未実装 notice が 1 件だけであることで確かめる。
-        let batch = Cmd::Batch(vec![Cmd::FetchPr, Cmd::Quit, Cmd::FetchChecks]);
+        let batch = Cmd::Batch(vec![Cmd::FetchPrList, Cmd::Quit, Cmd::FetchPrList]);
         assert!(runtime.dispatch(&mut state, batch).is_break());
         assert_eq!(state.notices.len(), 1);
     }
@@ -773,12 +863,12 @@ mod tests {
         let (mut state, reader) = opened(&repo);
         let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
-        assert!(runtime.dispatch(&mut state, Cmd::FetchPr).is_continue());
+        assert!(runtime.dispatch(&mut state, Cmd::FetchPrList).is_continue());
 
         assert_eq!(state.notices.len(), 1);
         let notice = &state.notices[0];
         assert_eq!(notice.level, NoticeLevel::Warn);
-        assert!(notice.message.contains("FetchPr"));
+        assert!(notice.message.contains("FetchPrList"));
     }
 
     #[test]
@@ -789,11 +879,11 @@ mod tests {
         let (mut state, reader) = opened(&repo);
         let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
-        let cmd = state.issue(Cmd::FetchPr);
+        let cmd = state.issue(Cmd::FetchPrList);
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
-        assert!(!state.jobs.is_running(JobKind::FetchPr));
+        assert!(!state.jobs.is_running(JobKind::FetchPrList));
 
-        let again = state.issue(Cmd::FetchPr);
+        let again = state.issue(Cmd::FetchPrList);
         assert!(runtime.dispatch(&mut state, again).is_continue());
         assert_eq!(state.notices.len(), 2);
     }
@@ -877,13 +967,79 @@ mod tests {
         assert!(!state.jobs.is_running(JobKind::ListAccounts));
     }
 
+    /// `Cmd::FetchPr` が `GithubClient` を通って `Msg::PrLoaded` で返る（01 の
+    /// 「PR ペイン › 何を引くか」）。
+    ///
+    /// **ホストを組めない値に向けてある**ので、答えは `InvalidHost` に決まり、実 API へ
+    /// 出ない。**見張るのは配線** —— `github_for` が `AppState` から材料を取り、
+    /// 頼んだ鍵（ブランチ名）がそのまま返り、ジョブが畳まれること。組み立ての失敗を
+    /// `Msg` に載せる腕もここを通る。
+    #[tokio::test]
+    async fn fetching_a_pr_carries_the_branch_back_and_folds_the_job() {
+        let repo = TestRepo::init();
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+        state.repo.target = TargetState::Resolved(RepoTarget {
+            // `valid_host` が弾く形（04）。`GithubClient::new` が最後の関門になる。
+            host: "-bad".to_string(),
+            port: None,
+            owner: "yshrsmz".to_string(),
+            repo: "mewgit".to_string(),
+        });
+        state.account = AccountState::Resolved(fake_account("taro"));
+
+        let cmd = state.issue(Cmd::FetchPr {
+            branch: "feat/x".to_string(),
+        });
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+
+        let Msg::PrLoaded { branch, result } = msg else {
+            panic!("{msg:?}");
+        };
+        assert_eq!(branch, "feat/x", "頼んだ鍵が返っていない");
+        assert!(
+            matches!(*result, Err(GithubError::InvalidHost { .. })),
+            "{result:?}"
+        );
+        let _ = update(&mut state, Msg::PrLoaded { branch, result });
+        // 畳んでいないと、2 回目の `Cmd::FetchPr` が `issue` に落とされる。
+        assert!(!state.jobs.is_running(JobKind::FetchPr));
+    }
+
+    /// `Cmd::OpenPr` が `GhCli::browse` を通って `Msg::OpenPrFinished` で返る（01 の
+    /// 「`o`（ブラウザで開く）」）。
+    ///
+    /// **`gh` は存在しないパスに向けてある**（`offline_config`）ので、答えは
+    /// `GhMissing` に決まり、ブラウザは開かない。
+    #[tokio::test]
+    async fn opening_a_pr_goes_through_gh_and_folds_the_job() {
+        let repo = TestRepo::init();
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+        state.repo.target = TargetState::Resolved(fake_target());
+
+        let cmd = state.issue(Cmd::OpenPr { number: 82 });
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+
+        assert!(
+            matches!(&msg, Msg::OpenPrFinished(Err(err)) if err.to_string().contains("gh")),
+            "{msg:?}"
+        );
+        let _ = update(&mut state, msg);
+        // **失敗は通知に出す**（不変ルール 4 と同じ趣旨）。
+        assert_eq!(state.notices.len(), 1);
+        assert!(!state.jobs.is_running(JobKind::OpenPr));
+    }
+
     #[tokio::test]
     async fn nested_batch_is_dispatched() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
         let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
-        let nested = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::FetchPr]), Cmd::FetchChecks]);
+        let nested = Cmd::Batch(vec![Cmd::Batch(vec![Cmd::FetchPrList]), Cmd::FetchPrList]);
         assert!(runtime.dispatch(&mut state, nested).is_continue());
         assert_eq!(state.notices.len(), 2);
     }

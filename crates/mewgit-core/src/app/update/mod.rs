@@ -25,6 +25,7 @@ use graph::{
     commit_detail_key, commit_detail_loaded, commit_files_loaded, graph_key, load_more, log_loaded,
 };
 use modal::modal_key;
+use prs::{checks_loaded, open_pr_finished, pr_loaded, prs_key};
 use remote::{fetch, push};
 use worktree::{head_message_loaded, status_loaded, worktree_key};
 
@@ -34,6 +35,7 @@ mod diff;
 mod exec;
 mod graph;
 mod modal;
+mod prs;
 mod remote;
 #[cfg(test)]
 mod test_support;
@@ -148,8 +150,9 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::TargetResolved(resolved) => target_resolved(state, *resolved),
         Msg::AccountResolved(result) => account_resolved(state, result),
         Msg::AccountsListed(result) => accounts_listed(state, result),
-        Msg::PrLoaded(_) => Cmd::None,
-        Msg::ChecksLoaded(_) => Cmd::None,
+        Msg::PrLoaded { branch, result } => pr_loaded(state, branch, *result),
+        Msg::ChecksLoaded { sha, result } => checks_loaded(state, sha, result),
+        Msg::OpenPrFinished(result) => open_pr_finished(state, result),
         Msg::PrListLoaded(_) => Cmd::None,
     }
 }
@@ -239,9 +242,10 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         Pane::Worktree => worktree_key(state, key),
         Pane::CommitDetail => commit_detail_key(state, key),
         Pane::Diff => diff_key(state, key),
-        // 各ペインのキー処理は対応するマイルストーンで足す。巡回の候補
+        Pane::Prs => prs_key(state, key),
+        // Stash ペインのキー処理は M5 で足す。巡回の候補
         // （`AppState::focus_candidates`）に入っていないので、いまここには来ない。
-        Pane::Stash | Pane::Prs => Cmd::None,
+        Pane::Stash => Cmd::None,
     }
 }
 
@@ -367,20 +371,30 @@ mod tests {
         // WIP 行に戻す。コミットを選んでいるあいだ Worktree は巡回に入らない（01）。
         let _ = press(&mut state, 'k');
 
-        // 巡回の並びは `Pane` の宣言順なので、Graph の次は Branches（01）。
+        // 巡回の並びは `Pane` の宣言順なので、Graph の次は Branches、その次が
+        // Prs（01 の「右上のタブ」）。
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
         assert_eq!(state.focus, Pane::Branches);
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
+        assert_eq!(state.focus, Pane::Prs);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
         assert_eq!(state.focus, Pane::Worktree);
+
+        // **タブは離れても残る。** `focus` が右列の上を離れても `right_tab` は
+        // 最後に見ていたほうのまま（01 の「右上のタブ」）。
+        assert_eq!(state.right_tab, Pane::Prs);
 
         // 同じ `j` が worktree のカーソルに効く。グラフは動かない。
         let _ = press(&mut state, 'j');
         assert_eq!(state.graph.cursor, 0);
         assert_eq!(state.worktree.cursor, 1);
 
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::BackTab)));
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::BackTab)));
+        for _ in 0..3 {
+            let _ = update(&mut state, Msg::Key(Key::new(KeyCode::BackTab)));
+        }
         assert_eq!(state.focus, Pane::Graph);
+        // 逆回りで Branches を通ったので、タブはそちらに戻っている。
+        assert_eq!(state.right_tab, Pane::Branches);
     }
 
     #[test]

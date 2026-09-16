@@ -73,6 +73,7 @@ use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
     Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
 };
+use crate::github::{Check, CheckState, PrStatus, PullRequest, RefSpec, RepoRef};
 use secrecy::SecretString;
 use tempfile::TempDir;
 
@@ -807,6 +808,46 @@ pub fn fake_oid(index: u8) -> Oid {
     let mut bytes = [0u8; 20];
     bytes[19] = index;
     Oid::from_bytes(&bytes).expect("20 バイトなので Oid になる")
+}
+
+/// 現ブランチの PR 1 件（[`fake_target`] のリポジトリ）。
+///
+/// **`ui` からも使う。** PRs ペインの描画を見張るのに同じ値が要るので、
+/// `#[cfg(test)] mod tests` ではなくここに置く（下の [`reply`] と同じ理由）。
+pub fn fake_pull_request(number: u64, branch: &str, sha: &str) -> PullRequest {
+    let repo = Some(RepoRef {
+        owner: fake_target().owner,
+        repo: fake_target().repo,
+    });
+    PullRequest {
+        number,
+        title: "Add adaptive layout".to_string(),
+        state: PrStatus::Open,
+        draft: false,
+        head: RefSpec {
+            repo: repo.clone(),
+            branch: branch.to_string(),
+            sha: sha.to_string(),
+        },
+        base: RefSpec {
+            repo,
+            branch: "main".to_string(),
+            sha: "basesha".to_string(),
+        },
+        url: format!("https://github.com/yshrsmz/mewgit/pull/{number}"),
+        author: "yshrsmz".to_string(),
+        review: None,
+        checks: None,
+    }
+}
+
+/// チェック 1 件。
+pub fn fake_check(name: &str, state: CheckState) -> Check {
+    Check {
+        name: name.to_string(),
+        state,
+        url: None,
+    }
 }
 
 /// `cmd` を発行してから、その返信を届ける。

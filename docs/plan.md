@@ -159,10 +159,22 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       `r` を足し、`resolve_again` をそのまま呼ぶ。**決めたことは 01 の
       「外で直したあとの再解決」**（`Repick` に出さない理由、モーダルを閉じる理由、
       `git` 実行中に断る理由）
-- [ ] `ui::panes::prs` — 現ブランチ PR、チェック一覧、一覧タブ、ブラウザで開く。
-      **レートリミット残量の受け渡しもここ** —— ヘッダ表示のタスクへ送られていたが、
-      あちらで API を叩くのは起動時の probe だけで、常時出す残量の産出元にならない
-      （05 の「まだ実装していない」）
+- [x] `ui::panes::prs`（1/2）現ブランチ PR — `PrState.current` / `checks` を埋め、
+      右上を `Branches | PRs` のタブにし、`o` で `gh browse`。**`config.github.enabled`
+      が何を止める旗かもここで決める**（`AccountState::Disabled`。04）。
+      **実装済みの API だけで組む** —— `pr_for_branch` / `checks` / `reviews` と
+      `Link` のページ辿りは #59 で入っている
+- [ ] `ui::panes::prs`（2/2）一覧タブ — `GithubClient::pr_list`（`/search/issues`）、
+      同時 4 本の `Semaphore`、レートリミット残量の受け渡しとヘッダ表示。
+      **レートリミット残量がここなのは、扇形に広がるのが一覧だから** —— ヘッダ表示の
+      タスクへ送られていたが、あちらで API を叩くのは起動時の probe だけで常時出す
+      残量の産出元にならず、1/2 でも叩くのは 1 ブランチぶんの 3 本で動かない
+      （05 の「レートリミット残量の受け渡し」）。**`core` と `search` でバケットが
+      別**なのも一覧を入れて初めて両方が動く（05 の実測表）
+- [ ] fork の PR — `pr_for_branch` の `head_owner` に fork 側の owner を渡す。
+      **1/2 では `target.owner` 固定**（同一リポジトリの PR しか出ない）。塞ぐには
+      ブランチの push 先リモート（`branch.<name>.remote`）を `RemoteUrl` に通して
+      owner を出す経路が要る（05 の「`head_owner`」）
 - [ ] `Modal::PrCreate` と `create_pr`
 - [ ] PR チェックアウト（同一リポジトリ / fork）
 - [ ] 403 の `needed_scopes` 案内

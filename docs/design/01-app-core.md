@@ -29,15 +29,16 @@ ratatui / crossterm には依存しない（不変ルール 6）。`ui` は下�
 ```rust
 pub struct AppState {
     pub repo: RepoInfo,               // パス、リモート一覧、正規化済みホスト
-    pub account: AccountState,        // Resolved(login, host) | Degraded(reason) | Resolving
+    pub account: AccountState,        // Resolved(login, host) | Degraded(reason) | Resolving | Disabled
     pub graph: GraphState,            // 読込済みコミット、レーン、選択位置、スクロール
     pub worktree: WorktreeState,      // staged / unstaged / untracked と選択
     pub diff: DiffState,              // 表示中の diff と、その鮮度
     pub branches: BranchState,     // ローカルブランチの一覧と選択（下の「ブランチ一覧」）
     pub stashes: Vec<StashEntry>,
-    pub prs: PrState,                 // 現ブランチ PR、一覧、チェック
+    pub prs: PrState,                 // 現ブランチ PR、一覧、チェック（下の「PR ペイン」）
     pub progress: Option<InProgressOp>, // Rebase | CherryPick | Revert | Merge
     pub focus: Pane,
+    pub right_tab: Pane,              // 右列の上に出すタブ。Branches か Prs（下の「右上のタブ」）
     pub modal: Option<Modal>,
     pub jobs: JobTracker,             // 実行中の非同期タスク（表示用）
     pub notices: VecDeque<Notice>,    // エラー・情報のトースト
@@ -127,10 +128,12 @@ pub enum Modal {
 
 巡回に入れるのは実装済みで、**かついま画面に出ているペインだけ**（07）。一覧は定数では
 なく `AppState::focus_candidates()` が状態から返す。グラフが WIP 行を選んでいれば
-`[Graph, Branches, Worktree, Diff]`、コミットを選んでいれば
-`[Graph, Branches, CommitDetail, Diff]`（**WIP 側の `Diff` は下の条件で落ちる**）。
-並びは `Pane` の宣言順。**`Branches` は
-どちらにも入る**（右列の上に常に出ていて、左の選択で中身が変わらないため）。
+`[Graph, Branches, Prs, Worktree, Diff]`、コミットを選んでいれば
+`[Graph, Branches, Prs, CommitDetail, Diff]`（**WIP 側の `Diff` は下の条件で落ちる**）。
+並びは `Pane` の宣言順。**`Branches` と `Prs` はどちらにも入る**（右列の上に常に出て
+いて、左の選択で中身が変わらないため）。**`Prs` が落ちるのは
+`config.github.enabled = false` のときだけ**で、`AccountState` では変えない
+（下の「右上のタブ」）。
 **`Diff` はどちらの一覧にも並ぶが、出る diff は違う**（ワーキングツリーのファイルか、
 コミットのファイルか）。決めるのは `AppState::wanted_diff()` の 1 つで、`focus` と
 選択の両方を見る（下の「diff の遅延取得」）。**「並ぶ」と「候補に残る」は別で、
@@ -170,10 +173,14 @@ WIP 行の側が Worktree ペインと**同じスナップショット**を読�
 ツリーの行を移って `Diff` が出入りするときもある**（上の「見るのは区画ではなく行」）。
 経路ごとに書くと足し忘れが静かに通る。
 
-**`Graph` を選ぶのは「どちらの選択でも候補にある」からだけではない。** そちらの条件を
-満たすのは `Graph` と `Branches` の 2 つで（`Diff` は WIP 側で落ちることがある）、
-`Branches` は「グラフの行を選び直したら一覧に飛ぶ」という説明の付かない動きになる。
+**`Graph` を選ぶのは「どちらの選択でも候補にある」からだけではない。** そちらの条件は
+`Branches` と `Prs` も満たす（落ちることがあるのは `Diff` だけ）が、どちらも右列の上に
+あり、「グラフの行を選び直したら右の一覧に飛ぶ」という説明の付かない動きになる。
 座り直しはユーザーが選んでいない移動なので、いま見ている左の領域に戻す（07）。
+
+**同じ出口で `right_tab` も揃える**（下の「PR ペイン › 右上のタブ」）。`focus` が
+`Branches` か `Prs` に居るなら `right_tab` はそれと同じでなければならず、書く場所を
+2 つに割ると食い違った状態が残る。
 
 **`Pane::Diff` は左の領域を `Graph` と差し替えで使う**ので、どちらを描くかは `focus`
 だけで決まり、「いまどちらを見せているか」を別に持たない（07）。**`Pane::CommitDetail`
@@ -909,6 +916,124 @@ pub struct BranchState {
   （上の `update::Reload`）、カーソルを HEAD に戻すだけだと、別のブランチを見ながら
   commit した人のカーソルが毎回飛ぶ
 
+## PR ペイン
+
+右列の上を `Branches | PRs` のタブにする（07 の「右上のタブ」）。`PrState` が持つのは
+**1 つのブランチについての答え**で、HEAD が動いたら捨てる。
+
+```rust
+pub struct PrState {
+    /// `current` と `checks` が指すブランチ。`AppState::wanted_pr()` と違えば古い。
+    pub branch: Option<String>,
+    pub current: Fetch<Option<PullRequest>>,
+    pub checks: Fetch<Vec<Check>>,
+    pub cursor: usize,
+}
+
+pub enum Fetch<T> { Unasked, Loaded(T), Failed(GithubError) }
+```
+
+- **`Option<PullRequest>` を裸で持たない。** 「まだ頼んでいない」「このブランチに PR が
+  無い」「引けなかった」の 3 つが `None` に畳まる。`BranchState.load` を 3 状態の enum に
+  したのと同じ形で、05 が `PullRequest.review` / `checks` を `Option` にした理由
+  （「レビュー 0 件」と区別できない）の 1 つ深い版
+- **`Fetch<T>` を 2 つで共有する。** チェック一覧も同じ 3 つを持つ（`Vec` が空なのは
+  「チェックが 0 件」であって「まだ引いていない」ではない）。**利用者が 2 つ出た時点で
+  共有先を作る**（コーディング規約）
+- **鍵は構造体に 1 つだけ置く。** `branch` は `current` と `checks` の両方に掛かる
+  ので、`Fetch` の腕ごとに持たせない。`Unasked` の腕だけ鍵を持てない形になり、
+  「どのブランチについて頼んでいないか」という答えの無い問いが型に残る
+- **カーソルはチェック一覧のもの。** 一覧タブのカーソルは 2/2 で足す（`Vec` を
+  持っていないうちから添字を 2 つ置くと、どちらが動くかを読む側が決められない）
+
+### 何を引くか
+
+**2 つの `wanted_*` が決める。** 頼む側と、届いた返信を採るかどうかを決める側の両方が
+これを読む（`AppState::wanted_diff()` と同じ形。**同じ判定を 2 箇所に書かない**）。
+
+- `AppState::wanted_pr() -> Option<&str>` — PR を出すべきブランチ。
+  `TargetState::Resolved` かつ `AccountState::Resolved` かつ HEAD がブランチに
+  居るときだけ `Some`
+- `AppState::wanted_checks() -> Option<&str>` — チェックを引くべき head の sha。
+  `prs.branch` が `wanted_pr()` と一致していて、`current` が PR を持っているときだけ
+  `Some`。**`checks` に別の鍵を置かない** —— sha は `current` から導ける
+  （**導出できる値を、元から離れた場所に置かない**）
+
+**頼む場所は 2 つ**（`Msg::AccountResolved` と `Msg::RepoInfoLoaded`）。**どちらが先に
+届くかは決まらない**ので、両方の順序を回すテストを書く。#63 の `RepoInfo.target` は
+まさにこの 2 本の順序で答えが変わり、latch したせいで二度と直らなかった。**こちらは
+latch しない** —— 鍵が合わなければ次の返信で引き直す。
+
+**返信は鍵で採る。** `Msg::PrLoaded { branch, result }` と
+`Msg::ChecksLoaded { sha, result }` が頼んだ鍵をそのまま運び、届いた時点の `wanted_*`
+と違えば捨てる。**運ぶのは頼んだときの鍵であって、届いた値から取り直したものではない**
+（取り直すと、読む側と書く側で出どころが 2 本になる）。
+
+**`JobKind::FetchPr` / `FetchChecks` の `region()` は `None`。** 鍵のほうが世代より
+強い（コミット詳細の Oid と同じ。下の「実行中ジョブ › 世代」）。
+
+**HEAD がブランチに居ないこと（detached / unborn）を `Fetch` に持たせない。**
+`RepoInfo.head` から導ける。持たせると `wanted_pr()` が `None` を返す理由が状態にも
+写り、どちらが正かが決まらなくなる。
+
+### `o`（ブラウザで開く）
+
+`gh browse <番号> -R <host>/<owner>/<repo>` を起動する。**URL を自分で組んで
+`open` / `xdg-open` を呼ばない** —— 不変ルール 7 が外部プロセスを `git` `gh` `ssh` に
+限っている。
+
+- **`gh browse` が出すのは issue の URL**（実測 2026-09-16、gh 2.100.0:
+  `gh browse -n 123 -R github.com/cli/cli` → `https://github.com/cli/cli/issues/123`）。
+  GitHub がそれを `302` で `https://github.com/cli/cli/pull/123` に飛ばす
+  （`curl -sI` の `location` で実測）。**GHES で同じかは確かめていない**（手元に無い）
+- **`PullRequest.url` は使わない。** 値としては持っているが、`gh browse` は URL を
+  引数に取らない（`<number> | <path> | <commit-sha>` だけ。`gh browse --help`）
+- `Cmd::OpenPr { number }` と `JobKind::OpenPr`。**`Cmd::Exec` に相乗りさせない**
+  —— git の実行中に押せなくなるうえ、`Ctrl-C` の中断（下の「キャンセル」）が
+  git 以外のプロセスに効くことになる
+- 失敗は通知に出す。`AuthError::GhFailed` が argv と出力を持っている（04）。
+  **gh がそのホストにログインしていないと落ちる**（実測: `env -i` で
+  `gh browse -n 123 -R github.com/cli/cli` が exit 4、
+  `To get started with GitHub CLI, please run:  gh auth login`）
+- **PR が無いときに `N` を案内しない。** `Modal::PrCreate` は次のタスクなので、いま
+  書くと**存在しないキーを案内する**（#63 の「案内が求める操作を、そもそも自分が
+  持っているか」）
+
+### 右上のタブ
+
+`Branches` と `Prs` は**どちらも巡回候補**に入り、`focus` がそのどちらかに来たときだけ
+`right_tab` が追随する。`focus` が左や下にあるあいだは、最後に見ていたタブが残る。
+
+- **`focus` だけで決めない。** 左の領域（Graph / Diff）は `focus` で決める（07）が、
+  右上で同じにすると**チェックの結果を見ながら `j` でグラフを辿った瞬間に消える**。
+  07 が右下ペインについて「`focus` で決めると Graph にフォーカスした瞬間に右が消える」と
+  断ったのと同じ形
+- **`right_tab` は `Pane` をそのまま持つ**（値は `Branches` か `Prs` のどちらか）。
+  別の enum にすると、`focus` と突き合わせるたびに写像が 1 本増える
+- **書き込む場所は座り直しと同じ 1 箇所**（`update` の出口）。`focus ∈ {Branches, Prs}`
+  なら `right_tab = focus` を必ず通すので、`focus` と食い違ったまま残らない
+- **タブの集合を非同期の状態に依らせない。** `Prs` が候補から落ちるのは
+  `config.github.enabled = false` のときだけで、`AccountState` では変えない。変えると
+  **起動直後に解決が返った瞬間に `Tab` の行き先が増える**（WIP 行を変更の有無で
+  隠さないのと同じ理由。07）
+
+### GitHub 機能を切る（`config.github.enabled = false`）
+
+**`AccountState` に 4 つ目の腕 `Disabled` を足す。** `AppState::new` が
+`config.github.enabled` を見て入れ、以後この値は変わらない（08。実行中は設定を
+読み直さない）。
+
+- **`Resolving` のまま放置しない。** あれは「まだ頼んでいない / 走っている最中」なので、
+  `A` の「解決中です」も右端のスピナーの説明も嘘になる
+- **旗を読み手ごとに見に行かない。** `AccountState` を網羅 `match` している読み手
+  （ヘッダの `account_span`、`A`、`Modal::AccountPicker`、`resolve_again`）が、腕が
+  増えた時点でそれぞれ何を出すかを選ばされる
+- 止まるのは `Cmd::ResolveAccount` の発行（**`gh` を一度も起動しない**）、ヘッダの
+  `[gh: …]`、`Prs` の巡回候補入りとタブ見出し
+- **`Cmd::ResolveTarget` は止めない。** `RepoInfo.target` はヘッダの `owner/repo` が
+  読んでいて（07 の「ヘッダ」）、GitHub API を一度も叩かない（`ssh -G` だけ。
+  下の「`RepoInfo.target` を埋める」）
+
 ## リモート操作（fetch / pull / push）
 
 `f` / `p` / `P` はペインに依らない共通キー（07 のキー表）。`update_key` では
@@ -1595,6 +1720,8 @@ impl JobKind {
 が `oid` を、`Msg::DiffLoaded` が `target` を運ぶ形も残す。**値そのものが鍵を持っている
 なら、そちらのほうが強い**（世代は「リポジトリが変わった」しか言えず、「選択が動いた」を
 言えない）。だから `LoadCommitDetail` / `LoadCommitFiles` は `region()` が `None`。
+**`FetchPr` / `FetchChecks` も同じ理由で `None`** —— ブランチ名と head sha という鍵を
+`Msg` が運ぶ（上の「PR ペイン › 何を引くか」）。`OpenPr` は値を読まないので `None`。
 
 **残るもの**: 落ちた要求の追いつき（(a)）は世代では解けない。`JobKind` の粒度を対象まで
 含めるかは、`LoadDiff` の要求が実際に落ちて困る形が出てから決める。
@@ -1659,8 +1786,9 @@ pub enum Msg {
     TargetResolved(Box<ResolvedTarget>),  // { target, unnormalized }。上の「RepoInfo.target を埋める」
     AccountResolved(Result<Account, DegradedReason>),
     AccountsListed(Result<Vec<GhLogin>, AuthError>),  // 選び直しの候補。上の「候補の取り直し」
-    PrLoaded(Box<Result<Option<PullRequest>, GithubError>>),
-    ChecksLoaded(Result<Vec<Check>, GithubError>),
+    PrLoaded { branch: String, result: Box<Result<Option<PullRequest>, GithubError>> },
+    ChecksLoaded { sha: String, result: Result<Vec<Check>, GithubError> },
+    OpenPrFinished(Result<(), AuthError>),            // gh browse の結果。Err は通知に出す
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),
 }
 ```
@@ -1751,7 +1879,10 @@ pub enum Cmd {
     ResolveTarget(RemoteUrl),          // 既定リモートの URL → RepoTarget（上の「RepoInfo.target を埋める」）
     ResolveAccount(RepoTarget),        // どのリポジトリのアカウントを決めるか（04 の手順 1〜4）
     ListAccounts(String),              // そのホストの login 一覧だけを取り直す（上の「候補の取り直し」）
-    FetchPr, FetchChecks, FetchPrList,
+    FetchPr { branch: String },        // そのブランチの PR（上の「PR ペイン › 何を引くか」）
+    FetchChecks { sha: String },       // その head sha のチェック一覧
+    FetchPrList,
+    OpenPr { number: u64 },            // gh browse。上の「o（ブラウザで開く）」
     Quit,
 }
 ```

@@ -26,7 +26,7 @@ page_size = 300                                                  # 0 なら既�
 colors = ["blue", "magenta", "cyan", "green", "yellow", "red"]   # 読めない色名は端末既定色
 
 [github]
-enabled = true
+enabled = true    # false で GitHub 機能を丸ごと切る（gh を起動しない）
 concurrency = 4
 
 # リポジトリごとのアカウント指定（アカウント解決の最優先）
@@ -61,6 +61,19 @@ pr_closed = "red"
 並びに残す**。飛ばすと `ColorId % colors.len()` の周期が設定の見た目と変わり、
 「6 色書いたのに 5 色で回る」理由をユーザーが追えない。色名の解釈は
 `ui::theme::color` を共有する。
+
+### `github.enabled`
+
+**`false` は「GitHub 機能を丸ごと切る」**（01 の「GitHub 機能を切る」に、どの読み手が
+何をやめるかがある）。**`AppState::new` が `AccountState::Disabled` に写す**ので、
+`config` を読む場所はここ 1 箇所。
+
+- **起動時に固まる。** ほかの設定と同じく実行中は読み直さない（下の「読み込み順」）
+- **`ssh -G` は走る。** ヘッダの `owner/repo` は `RepoInfo.target` から出ていて、
+  GitHub API も `gh` も通らない（01）。**「GitHub を切ったのにリポジトリ名が出る」は
+  意図した形**で、あれはリモート URL の話
+- **`concurrency` はここでは効かない。** 同時リクエスト数の上限は `Semaphore` を
+  入れる 2/2 のタスクで読む（05）
 
 ## リポジトリ固有設定
 

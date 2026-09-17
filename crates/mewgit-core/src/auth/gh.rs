@@ -1,7 +1,8 @@
 //! `gh` CLI の呼び出し。設計は `docs/design/04-auth-account.md` の「gh との連携」。
 //!
-//! **JSON しか読まない。** `gh auth status --json hosts` は [`REQUIRED`] で入った。
+//! **出力は JSON しか読まない。** `gh auth status --json hosts` は [`REQUIRED`] で入った。
 //! それ未満は [`AuthError::GhTooOld`] に落とし、テキスト出力は解析しない（04 に理由）。
+//! 例外は [`GhCli::browse`] で、あれは**出力を読まない**（ブラウザを開くだけ）。
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -89,6 +90,40 @@ impl GhCli {
         // トークンを載せた平のバッファがもう 1 本増える。
         out.truncate(out.trim_end().len());
         Ok(SecretString::from(out))
+    }
+
+    /// PR をブラウザで開く（01 の「`o`（ブラウザで開く）」）。
+    ///
+    /// **URL は渡せない。** `gh browse` の引数は `<number> | <path> | <commit-sha>` だけ
+    /// （gh 2.100.0 の `--help`）なので、`PullRequest.url` があっても番号で頼む。
+    /// 出すのは issue の URL（実測: `gh browse -n 123 -R github.com/cli/cli` →
+    /// `https://github.com/cli/cli/issues/123`）だが、GitHub がそれを `302` で
+    /// `/pull/123` に飛ばす（2026-09-16 に `curl -sI` で実測。**GHES では
+    /// 確かめていない**）。
+    ///
+    /// **`-R` にホストを載せる。** `[HOST/]OWNER/REPO` の形で、載せないと gh は
+    /// カレントディレクトリの git リポジトリを探す（実測: リポジトリの外では
+    /// `unable to determine base repository`）。
+    ///
+    /// **`--` は置かない。** `gh browse` は `-R` の値も positional もオプションとして
+    /// 読み直さないが、**それを守りだと書かない**ためにそもそも置かない
+    /// （#73 で `git config` の `--` が何も守っていなかったのと同じ形）。ここへ来る
+    /// `host` / `owner` / `repo` は [`RepoTarget`](super::RepoTarget) の値で、
+    /// `auth::url::valid_host` を通っている。
+    ///
+    /// **どのブラウザを起動するかは gh が決める**（`GH_BROWSER` / `BROWSER`。
+    /// `gh help environment`）。mewgit は端末を渡さない。
+    pub async fn browse(
+        &self,
+        host: &str,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<(), AuthError> {
+        let repo_flag = format!("{host}/{owner}/{repo}");
+        let number = number.to_string();
+        self.run(&["browse", &number, "-R", &repo_flag]).await?;
+        Ok(())
     }
 
     /// `gh` を起動して stdout を返す。

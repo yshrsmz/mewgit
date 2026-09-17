@@ -247,7 +247,7 @@ mod tests {
         let _ = update(&mut state, Msg::Key(Key::char('j')));
         assert!(state.jobs.is_running(JobKind::LoadCommitDetail));
 
-        // **このペインの中だけを見る。** `ui::LOADING` は 5 つのペインが共有して
+        // **このペインの中だけを見る。** `ui::LOADING` はどのペインも共有して
         // いるので、画面全体を見ると別のペインの「読み込み中…」で通ってしまう。
         let text = pane_text(&state, WIDE, Pane::CommitDetail);
 

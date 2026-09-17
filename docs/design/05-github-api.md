@@ -19,7 +19,7 @@ impl GithubClient {
     pub async fn pr_for_branch(&self, owner, repo, head_owner, branch) -> Result<Option<PullRequest>>;  // 実装済み
     pub async fn checks(&self, owner, repo, sha: &str) -> Result<Vec<Check>>;           // 実装済み
     pub async fn reviews(&self, owner, repo, number: u64) -> Result<ReviewSummary>;     // 実装済み
-    pub async fn pr_list(&self, owner, repo, filter: PrFilter) -> Result<Vec<PullRequest>>;  // `ui::panes::prs` のタスク
+    pub async fn pr_list(&self, owner, repo, filter: PrFilter) -> Result<Vec<PullRequest>>;  // `ui::panes::prs`（2/2）
     pub async fn create_pr(&self, owner, repo, input: CreatePr) -> Result<PullRequest>;      // `Modal::PrCreate` のタスク
 }
 ```
@@ -27,6 +27,11 @@ impl GithubClient {
 - **`new` は `Result`。** ベース URL を組めないホストがある（下の「ベース URL」）。
 - **`pr_for_branch` は `head` を 2 つに割って受ける。** API が求めるのは
   `{owner}:{branch}` で、fork なら fork 側の owner。`:` を挟むのを 1 箇所にする。
+  **いま呼ぶ側は `target.owner` を渡す**（`ui::panes::prs` の 1/2）—— fork 側の owner を
+  出す材料が `RepoInfo.target` に無いので、**同一リポジトリの PR しか出ない**。
+  塞ぐには `branch.<name>.remote` のリモート URL を `RemoteUrl` に通して owner を
+  取り出す経路が要る（plan.md の「fork の PR」）。**`head_owner` を引数から消さない**
+  —— 消すと fork を足すときに `:` を挟む場所が呼び出し側へ戻る
 - **`repo` は probe 兼用**なので、返り値を捨てて「届いたか」だけを見る呼び出しがある。
   probe 専用に `()` を返す関数は作らない。**`auth::resolve` が直に呼ぶのではない**
   —— `github` は `auth` の上段なので、`auth::Backend` を実装する側
@@ -105,7 +110,7 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
 - **認証付きリクエストは同時 4 本まで（`Semaphore`）。まだ入れていない。**
   いま並ぶのは `checks`（check-runs と commit status）だけで、**上限 4 の
   内側なので `Semaphore` が働く場面がまだ無い**。扇形に広がるのは
-  `ui::panes::prs`（PR ごとに checks / reviews を引く）なので、そこで入れる
+  `ui::panes::prs`（2/2）の一覧タブ（PR ごとに checks / reviews を引く）なので、そこで入れる
 - **一覧は `Link` の `rel="next"` を辿って全ページ集める。** `per_page=100` で
   止めない。**切り捨てが答えを変えるものがある** —— `reviews` の配列は古い順なので、
   1 ページ目だけ見ると「変更要求のあと承認した人」を `changes_requested` と数える。
@@ -115,13 +120,32 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
   OS の TCP タイムアウトまで（分単位）回り続ける。#56 のスピナーは出るが、
   `Ctrl-C` が止められるのは `Cmd::Exec`（git）だけで HTTP は止まらない。
   1 リクエスト 30 秒、接続確立 10 秒
+- **`o`（ブラウザで開く）はここを通らない。** PR を開くのは `gh browse` で、
+  `PullRequest.url` は使わない（01 の「`o`（ブラウザで開く）」）。不変ルール 7 が
+  外部プロセスを `git` `gh` `ssh` に限っているので、URL を自分で開く経路が無い
+- **レートリミットのバケットは 1 つではない。** `core`（`GET /repos/…` などの REST）と
+  `search`（`GET /search/issues`）は別に数え、どちらのものかは応答の
+  `x-ratelimit-resource` に出る。実測（2026-09-16、`gh api -i`、github.com の
+  個人アカウント）。
+
+  | 叩いたもの | `x-ratelimit-resource` | `x-ratelimit-limit` |
+  |---|---|---|
+  | `/rate_limit` | `core` | 5000 |
+  | `/search/issues?q=repo:cli/cli+is:pr&per_page=1` | `search` | 30 |
+
+  **数字を 1 つだけヘッダに出すと、2 つの別物を混ぜる。** `search` のほうが 2 桁
+  小さいので、`core` の残量だけ出していると一覧タブが**残量たっぷりに見えたまま
+  止まる**。どちらを出すか（あるいは両方）は 2/2 のタスクで決める
 - **レートリミット残量の受け渡しはまだ。** ヘッダの `x-ratelimit-*` は
   [`GithubError::RateLimited`] を組むときにしか読んでいない。**「ヘッダの Degraded
   表示」のタスクへ送っていたが、そこでは足さなかった** —— あのタスクで API を叩くのは
   `auth::resolve` の probe だけで、しかも**候補が複数あるリポジトリの起動時 1 回**。
   常時出す残量の産出元にならず、`AppState` に「いつのものか判らない数」を 1 つ
-  増やすだけになる。**送り先は `ui::panes::prs`** —— PR / checks / reviews を
-  引き始めると残量が実際に動き、読む側（ヘッダ）に出す意味が出る
+  増やすだけになる。**送り先は `ui::panes::prs`（2/2）** —— PR / checks / reviews を
+  引き始めると残量が実際に動き、読む側（ヘッダ）に出す意味が出る。
+  **タスクは 2 本に割れた**（plan.md）ので、送り先は **2/2（一覧タブ）**。
+  1/2（現ブランチの PR）で叩くのは 1 ブランチぶんの `pulls` / `check-runs` /
+  `status` だけで、扇形に広がらず `Semaphore` も働かない
 
 ## エンドポイント対応
 

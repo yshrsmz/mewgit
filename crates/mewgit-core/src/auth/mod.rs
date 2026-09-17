@@ -185,6 +185,28 @@ pub enum AccountState {
     Resolving,
     Resolved(Account),
     Degraded(DegradedReason),
+    /// `config.github.enabled = false`。**`AppState::new` だけが入れる**（01 の
+    /// 「GitHub 機能を切る」）。
+    ///
+    /// **[`DegradedReason`] に腕を足さない。** あちらは「GitHub を使いたいのに
+    /// 使えない」理由の一覧で、直し方を案内する相手が居る。切ってあるのはそう設定した
+    /// 結果なので、混ぜると `Modal::AccountPicker` が直し方を並べる相手を失う（04）。
+    ///
+    /// **[`Resolving`](Self::Resolving) で代用しない。** あれは「まだ頼んでいない /
+    /// 走っている最中」なので、`A` の「解決しています」も右端のスピナーの説明も嘘に
+    /// なる。
+    Disabled,
+}
+
+impl AccountState {
+    /// GitHub 機能が設定で切ってあるか（01 の「GitHub 機能を切る」）。
+    ///
+    /// **網羅 `match` の腕とは別の問い。** あちらは「この状態で何を出すか」を読み手
+    /// ごとに選ばせるためのもので、こちらは「GitHub を使うか」の 1 つの問い。読むのは
+    /// 巡回候補（`Pane::Prs` を入れるか）と `Cmd::ResolveAccount` の発行の 2 人。
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, AccountState::Disabled)
+    }
 }
 
 /// GitHub 機能を degraded にする理由。

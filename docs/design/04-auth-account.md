@@ -16,6 +16,7 @@ impl GhCli {
     pub async fn detect(bin: impl Into<PathBuf>) -> Result<Self, AuthError>;   // gh --version
     pub async fn auth_status(&self, host: &str) -> Result<Vec<GhLogin>, AuthError>;
     pub async fn token(&self, host: &str, user: &str) -> Result<SecretString, AuthError>;
+    pub async fn browse(&self, host: &str, owner: &str, repo: &str, number: u64) -> Result<(), AuthError>;
 }
 
 pub struct GhLogin { pub host, pub login, pub active: bool, pub scopes: Vec<String>, pub state: LoginState }
@@ -33,6 +34,20 @@ pub enum LoginState { Success, Timeout, Error }
   `GH_CONFIG_DIR` でしか受けず、`ssh -F` に当たる argv が無い。あわせて
   `GH_TOKEN` / `GITHUB_TOKEN` も空で上書きしないと、隔離した config に無い
   ログインが 1 件生える
+- **`browse` だけ JSON を読まない。** `gh browse <番号> -R <host>/<owner>/<repo>` は
+  ブラウザを開くだけで、こちらは出力を捨てる。**ここに置くのは、`gh` を起動する場所を
+  1 つにしておくため** —— `bin` と `env` を持っているのはこの型だけで、別の場所から
+  `Command::new` を叩くと `general.gh_bin` と `MEWGIT_GH_BIN` の経路が 2 本になる。
+  `gh browse` に URL は渡せない（引数は `<number> | <path> | <commit-sha>`。
+  gh 2.100.0 の `--help`）ので、`PullRequest.url` があっても番号で頼む（01 の
+  「`o`（ブラウザで開く）」）
+- **`browse` も [`REQUIRED`] の関門を通る**（`detect` でしか `GhCli` を作れないため）。
+  **緩めない** —— PRs ペインは `AccountState::Resolved` でしか PR を出さず、そこへ
+  辿り着いた時点で 2.81.0 は満たしている。緩めると、**到達できない腕**が 1 つ増える
+- **開く相手はブラウザで、mewgit は端末を渡さない。** どのブラウザを起動するかは
+  `gh` が `GH_BROWSER` / `BROWSER` から決める（`gh help environment`）。**テストは
+  ここを使う** —— argv を記録するスクリプトを `BROWSER` に置けば、実際に窓を開かずに
+  組んだ URL を見張れる
 - **`auth_status` は `--hostname` で絞る。** 付けないと gh は**全ホストのトークンを
   検証**し、到達できないホストが 1 つあるだけで待ち時間がそれに引きずられる
   （実測: 絞ると 0.24 秒、絞らないと **30.2 秒**。gh に待ち時間を縮めるフラグは無い）。
@@ -291,6 +306,7 @@ pub enum AccountState {
     Resolving,                         // まだ頼んでいない。`resolve` は返さない（型でそうなっている）
     Resolved(Account),                 // { host, login, token, source: GitConfig | RepoRule | Single | Probe }
     Degraded(DegradedReason),
+    Disabled,                          // config.github.enabled = false。`resolve` は返さない
 }
 
 pub enum DegradedReason {
@@ -468,6 +484,19 @@ N×(トークン取得 + RTT) を起動のたびに払う。tokio には動的�
 無く、`JoinSet` は `'static` を要求して `&Backend` を借りる future を載せられないので、
 `futures` の `join_all` を使う（`mewgit-tui` が既に使っている版と同じ）。
 **逐次に戻すと開かない関所**（`Barrier` + `timeout`）で見張る。
+
+### `Disabled` は `resolve` の外から入る
+
+`config.github.enabled = false` のとき、`AppState::new` が `AccountState::Disabled` を
+置き、`Cmd::ResolveAccount` は一度も出ない（01 の「GitHub 機能を切る」）。
+
+- **`DegradedReason` に腕を足さない。** あれは「GitHub を使いたいのに使えない」理由の
+  一覧で、直し方を案内する相手が居る。切ってあるのは**そう設定した結果**なので、
+  同じ場所に混ぜると `Modal::AccountPicker` が「直す方法」を並べる相手を失う
+- **`Resolving` で代用しない。** あれは走っている最中を指すので、`A` の「解決中です」も
+  スピナーの説明も嘘になる（01）
+- **`resolve` は `Disabled` を返さない。** `Resolving` と同じく、型に載らないことで
+  「`resolve` を通っていない値」だと判る
 
 ### `resolve` の戻り値は `Result<Account, DegradedReason>`
 

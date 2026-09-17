@@ -9,6 +9,7 @@ use crate::auth::{Account, AccountState, AuthError, DegradedReason, GhLogin, Res
 use crate::git_exec::GitOp;
 use crate::git_read::GitReadError;
 
+use super::prs;
 use super::remote::conventional_remote;
 use super::{exec_busy, submit_exec};
 use crate::app::{
@@ -68,6 +69,13 @@ fn account_view(account: &AccountState, target: &TargetState) -> Result<AccountV
                 "アカウントを解決しています".to_string()
             }
         }),
+        // **直す先は設定ファイルなので、外でやってくださいと書いてよい。** mewgit に
+        // 設定を書き換える操作は無い（#65 の「指示を足すのはその操作を持たない側」の
+        // 素直な側）。**再起動が要ることも書く** —— 実行中に設定は読み直さない（08）
+        // ので、書けば効くと読めると押しても変わらない直し方を案内することになる。
+        AccountState::Disabled => Err(
+            "GitHub 機能は config.toml の github.enabled で切ってあります（要再起動）".to_string(),
+        ),
     }
 }
 
@@ -198,7 +206,12 @@ pub(super) fn repo_info_loaded(
             // 成功しても `Unasked` ではなくなっているので二度と頼まない
             // （`TargetState` の doc が言う「決められなかった」は読めなかったことでは
             // ない）。`/code-review` が拾った。
-            resolve_target(state)
+            // **PR は鍵が同じでも引き直す**（`prs::reload` の doc）。ref が動いた
+            // あとは同じブランチでもチェックの結果やマージ済みかが変わっている。
+            // **`Ok` のときだけ** —— `Err` の直後は `head` を更新していないので、
+            // 引き直しても同じ答えを 3 往復ぶん買うだけになる（`resolve_target` を
+            // `Ok` の側だけで呼ぶのと同じ理由）。
+            Cmd::batch([resolve_target(state), prs::reload(state)])
         }
         Err(err) => {
             state.push_notice(NoticeLevel::Warn, err.to_string(), None);
@@ -264,7 +277,15 @@ pub(super) fn target_resolved(state: &mut AppState, resolved: ResolvedTarget) ->
     // [`resolve_again`] を通せない）。`init` からは出せない —— `auth::resolve` は `RepoTarget` を要るので、
     // `Msg::RepoInfoLoaded` → `Cmd::ResolveTarget` → ここ、と 2 往復待ってからでないと
     // 材料が揃わない（01 の「`RepoInfo.target` を埋める」）。
-    let account = Cmd::ResolveAccount(resolved.target.clone());
+    // **`gh` を一度も起動しない**（01 の「GitHub 機能を切る」）。断るのはここ 1 箇所で
+    // 足りる —— [`resolve_again`] へ入る 2 本（`Modal::AccountPicker` の `r` と
+    // `GitOp::SetAccount` / `UnsetAccount` の後始末）は、どちらもそのモーダルを
+    // 開いたあとにしかなく、`Disabled` では [`account_view`] が通知に落とす。
+    let account = if state.account.is_disabled() {
+        Cmd::None
+    } else {
+        Cmd::ResolveAccount(resolved.target.clone())
+    };
     state.repo.target = TargetState::Resolved(resolved.target);
     if let Some(reason) = resolved.unnormalized {
         state.push_notice(NoticeLevel::Warn, reason.to_string(), None);
@@ -286,7 +307,14 @@ pub(super) fn account_resolved(
         Ok(account) => AccountState::Resolved(account),
         Err(reason) => AccountState::Degraded(reason),
     };
-    Cmd::None
+    // **アカウントが決まるまで `wanted_pr()` は `None`** なので、ここが PR を頼む
+    // 2 本目の入口（もう 1 本は `repo_info_loaded`）。**どちらが先に届くかは
+    // 決まらない**（01 の「PR ペイン › 何を引くか」）。
+    //
+    // **`refresh` ではなく `reload`。** 鍵はブランチ名しか見ないので、`A` で
+    // アカウントを選び直しても「鍵は合っている」と答えてしまい、前のトークンで
+    // 引けなかった答えがそのまま残る（`prs::reload` の doc）。
+    prs::reload(state)
 }
 
 /// 04 の手順 1〜4 を通し直す（01 の「アカウントの選び直し」）。
@@ -662,15 +690,16 @@ mod tests {
         // **新しい産出元**なので、`exec_advice` を回している見張りは自分では拾わない
         // （CLAUDE.md の「共有した見張りは新しい産出元を自分では拾わない」）。
         //
-        // **回すのは `Resolving` の 2 つだけ。** `A` が通知に落とすのはここだけに
-        // なった（`Resolved` はモーダルを開く）ので、**残った腕を数え直してある** ——
-        // 範囲を実装側から導かずに並べているのはこのため（#54 の裏返し）。
+        // **回すのは通知に落ちる腕を並べたもの。** `Resolved` と `Degraded` は
+        // モーダルを開くので出てこない。**範囲を実装側の集合から導かずに並べている**
+        // のは #54 の裏返しで、腕を足したらここにも足す。
         let cases = [
             (AccountState::Resolving, TargetState::Unavailable),
             (
                 AccountState::Resolving,
                 TargetState::Resolved(fake_target()),
             ),
+            (AccountState::Disabled, TargetState::Unasked),
         ];
         // **`Resolved` は 1 件も通知を出さない。** 出せば予算の外で伸びる文言が
         // 生えるので、ここで押さえる。

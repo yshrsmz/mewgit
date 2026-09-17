@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 
 use crate::auth::gh::GhCli;
 use crate::auth::{AttemptFailure, AuthError, Backend, GhLogin, RepoTarget};
@@ -60,26 +60,12 @@ impl Backend for AccountBackend {
         // **`new` の失敗も同じ関数を通す。** ベース URL を組めない（`InvalidHost`）、
         // TLS バックエンドを初期化できない（`shared_http`）はどちらも
         // 「断られてはいないが確かめられなかった」で、`attempt` の最後の 3 行と同じ扱い。
-        let result = match client(target, token) {
+        let result = match GithubClient::with_token(target, token) {
             Ok(client) => client.repo(&target.owner, &target.repo).await,
             Err(err) => Err(err),
         };
         attempt(result)
     }
-}
-
-/// 候補 1 件ぶんのクライアント。
-///
-/// **トークンは中身を写して渡す。** secrecy 0.10 の `SecretString` は
-/// `SecretBox<str>` で `Clone` を持たない（`str` が `CloneableSecret` でない）ので、
-/// `expose_secret()` から作り直すしかない。`resolve` は probe に使ったトークンを
-/// そのまま `Account` に載せる（04 の手順 4）ので、こちらが借りるだけでは足りない。
-fn client(target: &RepoTarget, token: &SecretString) -> Result<GithubClient, GithubError> {
-    GithubClient::new(
-        &target.host,
-        target.port,
-        SecretString::from(token.expose_secret().to_string()),
-    )
 }
 
 /// `GET /repos/{owner}/{repo}` の結果を「このアカウントで届いたか」に落とす（04 の表）。

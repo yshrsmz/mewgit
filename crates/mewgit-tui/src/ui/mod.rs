@@ -43,12 +43,12 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     } else {
         panes::graph::render(frame, left, state);
     }
-    // **右列の上は Branches。** 左の選択でも `focus` でも入れ替わらないので、
-    // 一覧を先に置いて残りを下のペインに渡す（07 の「レイアウト」）。
+    // **右列の上は Branches と PRs のタブ。** 左の選択では入れ替わらないので、
+    // 上を先に置いて残りを下のペインに渡す（07 の「レイアウト」）。
     // **組むのはここ 1 回**で、高さの決定と描画の両方に回す。
-    let view = panes::branches::lines(state);
-    let [branches, right] = split_right(state, &view, right);
-    panes::branches::render(frame, branches, state, view);
+    let top_pane = panes::TopPane::build(state);
+    let [top, right] = split_right(state, &top_pane, right);
+    top_pane.render(frame, top, state);
     // **右列の下は Working tree とコミット詳細の差し替え。** どちらを描くかはグラフの
     // 選択だけで決まる（07）。`focus` で決めると、Graph にフォーカスした瞬間に
     // 右が消える。
@@ -72,12 +72,13 @@ fn split_body(area: Rect) -> [Rect; 2] {
     Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area)
 }
 
-/// 右列を Branches と、その下のペイン（Working tree / コミット詳細）に割る。
+/// 右列を上のタブ（Branches / PRs）と、その下のペイン（Working tree / コミット詳細）に
+/// 割る。
 ///
-/// **割る位置を決めるのは Branches ペイン自身**（`panes::branches::rows`）。一覧の
-/// 行数から出すので、ここで高さを書くと規則が 2 本になる。
-fn split_right(state: &AppState, view: &panes::branches::View, right: Rect) -> [Rect; 2] {
-    let rows = panes::branches::rows(view, state, right.height);
+/// **割る位置を決めるのは上のペイン自身**（`panes::TopPane::height`）。組んだ行から
+/// 出すので、ここで高さを書くと規則が 2 本になる。
+fn split_right(state: &AppState, top: &panes::TopPane, right: Rect) -> [Rect; 2] {
+    let rows = top.height(state, right.height);
     Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(right)
 }
 
@@ -86,9 +87,11 @@ fn split_right(state: &AppState, view: &panes::branches::View, right: Rect) -> [
 /// **フォーカスのあるペインは枠を強調する**（07）。どちらがキーを受けるか判らないと、
 /// `s` や `x` が別のペインに飛んだように見える。枠の内側の大きさは強調の有無で
 /// 変わらないので、レイアウトの計算は `focused` を偽で呼んでよい。
-pub fn pane_block(title: impl Into<Cow<'static, str>>, focused: bool) -> Block<'static> {
+pub fn pane_block(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
     // **`&'static str` も受ける。** グラフの枠は行数を測るのに `runtime::layout` から
     // ループのたびに組まれるので、そこで毎回 `String` を確保しない。
+    // **`Line` も受ける**のは、右上のタブが見出しの中で 2 枚を描き分けるため
+    // （`panes::right_tabs`。07 の「右上のタブ」）。
     let block = Block::default().borders(Borders::ALL).title(title.into());
     if focused {
         block.border_style(Style::default().add_modifier(Modifier::BOLD))
@@ -181,13 +184,14 @@ pub fn pick_charset(glyphs: (&'static str, &'static str), ascii: bool) -> &'stat
 pub fn pane_area(pane: Pane, size: TermSize, state: &AppState) -> Rect {
     let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
     let [left, right] = split_body(body);
-    // 右列は Branches とその下に割れている。割る位置も実際の関数から出す。
-    let [branches, below] = split_right(state, &panes::branches::lines(state), right);
+    // 右列は上のタブとその下に割れている。割る位置も実際の関数から出す。
+    let [top, below] = split_right(state, &panes::TopPane::build(state), right);
     match pane {
-        Pane::Branches => branches,
+        // **Branches と PRs も同じ領域を差し替えで使う**（07 の「右上のタブ」）。
+        Pane::Branches | Pane::Prs => top,
         Pane::Worktree | Pane::CommitDetail => below,
         // **Graph と Diff は同じ領域を差し替えで使う**（07）ので同じ Rect を返す。
-        // Stash / PRs はまだ描かないので、来たら左を返すだけ。
+        // Stash はまだ描かないので、来たら左を返すだけ。
         _ => left,
     }
 }
@@ -218,7 +222,7 @@ pub fn path_label(path: &Path, old_path: Option<&Path>) -> String {
 /// 非同期の読み取りを待っているあいだの文言。
 ///
 /// **ペインごとに書かない。** グラフ・ワーキングツリー・diff・コミット詳細・
-/// ファイル一覧が同じ状態を出すので、散らすと文言を変えたときに揃わなくなる。
+/// ファイル一覧・PR が同じ状態を出すので、散らすと文言を変えたときに揃わなくなる。
 /// 何を読んでいるかは枠のタイトルが示す。
 pub const LOADING: &str = "読み込み中…";
 
@@ -325,7 +329,10 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
 /// ここに来るので、GitHub と関係のないリポジトリには何も出ない（01）。
 fn account_span(account: &AccountState) -> Option<Span<'_>> {
     match account {
-        AccountState::Resolving => None,
+        // **`Disabled` でも何も出さない**（07 の「ヘッダ」）。自分で切った設定を毎
+        // フレーム言い返すことになるうえ、1 行しかないヘッダで `owner/repo` と
+        // スピナーの予算を食う。`A` を押せば理由が通知に出る。
+        AccountState::Resolving | AccountState::Disabled => None,
         AccountState::Resolved(account) => Some(Span::raw(format!(
             "[gh: {} @ {}]",
             account.login, account.host
@@ -370,7 +377,7 @@ fn degraded_label(reason: &DegradedReason) -> String {
 /// 書く（あちらは箱の中で折り返せる）。揃えると、ここを詰めるたびにあちらが痩せる。
 /// **内訳も出さない。** `NoAccess` の `attempts` は 1 件ずつ理由を持っているが、
 /// 並べるのは `Modal::AccountPicker`（04）。
-fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
+pub(crate) fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
     match reason {
         DegradedReason::GhMissing => "ありません".into(),
         // 要求版は定数から引く。`GhTooOld` は値として持っていない（04）。
@@ -545,6 +552,12 @@ mod tests {
         for &focus in candidates {
             let mut state = base();
             state.focus = focus;
+            // **`focus` を置いたら `reseat_focus` を通す。** 右上のタブは `focus` と
+            // 揃っていなければならず、揃えるのは `update` の出口の 1 箇所（01 の
+            // 「右上のタブ」）。直に置くだけだと `focus == Prs` なのに Branches を
+            // 描いている**実物では出ない画面**を見張ることになる（隣の
+            // `the_left_area_swaps_between_the_graph_and_the_diff` と同じ理由）。
+            state.reseat_focus();
             let terminal = terminal_with(&state, size);
             let buffer = terminal.backend().buffer();
 

@@ -62,17 +62,18 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
-use crate::app::{update, AppState, Cmd, Msg};
+use crate::app::{update, AppState, Cmd, Msg, TargetState};
 use crate::auth::ssh::SshCommand;
 use crate::auth::{
-    Account, AccountSource, AttemptFailure, AuthError, Backend, DegradedReason, GhLogin,
-    LoginState, RepoTarget,
+    Account, AccountSource, AccountState, AttemptFailure, AuthError, Backend, DegradedReason,
+    GhLogin, LoginState, RepoTarget,
 };
 use crate::git_exec::{GitOp, Runner};
 use crate::git_read::{
-    Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, Hunk, HunkLine, LineOrigin, Oid,
-    Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
+    Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
+    LineOrigin, Oid, Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
 };
+use crate::github::{Check, CheckState, PrStatus, PullRequest, RefSpec, RepoRef};
 use secrecy::SecretString;
 use tempfile::TempDir;
 
@@ -807,6 +808,79 @@ pub fn fake_oid(index: u8) -> Oid {
     let mut bytes = [0u8; 20];
     bytes[19] = index;
     Oid::from_bytes(&bytes).expect("20 バイトなので Oid になる")
+}
+
+/// 現ブランチの PR 1 件（[`fake_target`] のリポジトリ）。
+///
+/// **`ui` からも使う。** PRs ペインの描画を見張るのに同じ値が要るので、
+/// `#[cfg(test)] mod tests` ではなくここに置く（下の [`reply`] と同じ理由）。
+pub fn fake_pull_request(number: u64, branch: &str, sha: &str) -> PullRequest {
+    let repo = Some(RepoRef {
+        owner: fake_target().owner,
+        repo: fake_target().repo,
+    });
+    PullRequest {
+        number,
+        title: "Add adaptive layout".to_string(),
+        state: PrStatus::Open,
+        draft: false,
+        head: RefSpec {
+            repo: repo.clone(),
+            branch: branch.to_string(),
+            sha: sha.to_string(),
+        },
+        base: RefSpec {
+            repo,
+            branch: "main".to_string(),
+            sha: "basesha".to_string(),
+        },
+        url: format!("https://github.com/yshrsmz/mewgit/pull/{number}"),
+        author: "yshrsmz".to_string(),
+        review: None,
+        checks: None,
+    }
+}
+
+/// チェック 1 件。
+pub fn fake_check(name: &str, state: CheckState) -> Check {
+    Check {
+        name: name.to_string(),
+        state,
+        url: None,
+    }
+}
+
+/// [`Msg::PrLoaded`] を組む。
+///
+/// **`ui` からも使う**（[`fake_pull_request`] と同じ理由）。`Msg` の形を変えたときに
+/// 直す場所を、クレートをまたいで散らさない。
+pub fn pr_loaded(branch: &str, pr: Option<PullRequest>) -> Msg {
+    Msg::PrLoaded {
+        branch: branch.to_string(),
+        result: Box::new(Ok(pr)),
+    }
+}
+
+/// [`Msg::ChecksLoaded`] を組む。
+pub fn checks_loaded(sha: &str, checks: Vec<Check>) -> Msg {
+    Msg::ChecksLoaded {
+        sha: sha.to_string(),
+        result: Ok(checks),
+    }
+}
+
+/// アカウントと対象が決まり、HEAD が `branch` に居る状態にする。
+///
+/// **`Msg` を通さずに置く。** ここまで運ぶには `Msg::RepoInfoLoaded` と
+/// `Msg::AccountResolved` の両方が要り、**その 2 本の順序そのものを見張るテストが
+/// `app::update::prs` にある**。土台が片方の順序を焼き込むと、そちらが空振りする。
+pub fn put_on_branch(state: &mut AppState, branch: &str) {
+    state.repo.target = TargetState::Resolved(fake_target());
+    state.account = AccountState::Resolved(fake_account("taro"));
+    state.repo.head = Some(HeadInfo::Branch {
+        name: branch.to_string(),
+        oid: fake_oid(0),
+    });
 }
 
 /// `cmd` を発行してから、その返信を届ける。

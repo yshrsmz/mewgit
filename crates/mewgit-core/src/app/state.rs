@@ -11,7 +11,7 @@ use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
     RefIndex, Remote, StashEntry, WorktreeSection, WorktreeSnapshot,
 };
-use crate::github::{Check, PullRequest};
+use crate::github::{Check, GithubError, PullRequest};
 use crate::graph::{GraphRow, LaneState};
 
 use crate::config::Config;
@@ -38,6 +38,13 @@ pub struct AppState {
     pub prs: PrState,
     pub progress: Option<InProgressOp>,
     pub focus: Pane,
+    /// 右列の上に出すタブ。
+    ///
+    /// **`focus` だけで決めない**（01 の「PR ペイン › 右上のタブ」）。左の領域
+    /// （Graph / Diff）は `focus` で決まるが、右上で同じにすると**チェックの結果を
+    /// 見ながら `j` でグラフを辿った瞬間に消える**。揃えるのは
+    /// [`reseat_focus`](AppState::reseat_focus) の 1 箇所。
+    pub right_tab: RightTab,
     pub modal: Option<Modal>,
     pub jobs: JobTracker,
     /// エラー・情報のトースト。積むのは [`AppState::push_notice`]。
@@ -75,7 +82,13 @@ impl AppState {
     pub fn new(repo: RepoInfo, config: Config) -> Self {
         Self {
             repo,
-            account: AccountState::default(),
+            // **旗を読む場所はここ 1 つ**（01 の「GitHub 機能を切る」）。以後の読み手は
+            // `AccountState` を網羅 `match` するので、腕が増えれば何を出すか選ばされる。
+            account: if config.github.enabled {
+                AccountState::default()
+            } else {
+                AccountState::Disabled
+            },
             graph: GraphState::default(),
             worktree: WorktreeState::default(),
             diff: DiffState::default(),
@@ -85,6 +98,7 @@ impl AppState {
             prs: PrState::default(),
             progress: None,
             focus: Pane::default(),
+            right_tab: RightTab::default(),
             modal: None,
             jobs: JobTracker::default(),
             notices: VecDeque::new(),
@@ -155,6 +169,12 @@ impl AppState {
             | JobKind::FetchPr
             | JobKind::FetchChecks
             | JobKind::FetchPrList => return,
+            // **黙って落とさない。** `gh browse` は**起動したブラウザが終わるまで
+            // 返らない**（gh 2.100.0 で実測。`BROWSER` に 5 秒眠るスクリプトを
+            // 置くと 5.06 秒）。端末ブラウザや自分で抜けないラッパーを `BROWSER` に
+            // している環境では、そのあいだ `o` が無反応になる（#63 の「無反応より
+            // まし」で止めない）。
+            JobKind::OpenPr => "ブラウザの起動を待っています",
         };
         self.push_notice(NoticeLevel::Warn, message.to_string(), None);
     }
@@ -188,7 +208,7 @@ impl AppState {
             // 頼み直しへ入れなくなる。** WIP 行の側が Worktree ペインと同じ
             // スナップショットを読む（無い状態はペインが既に出している）のに対し、
             // コミット側は 2 つ目の遅延読み込みを待つ、という違い。
-            GraphSelection::Commit(_) => Pane::COMMIT_FOCUS,
+            GraphSelection::Commit(_) => self.pick(Pane::COMMIT_FOCUS, Pane::COMMIT_FOCUS_NO_PRS),
             // **差分で表せる行を選んでいないなら `Diff` は候補から外す。** 巡回に
             // 入れるのは「実装済みで、かついま画面に出ているペインだけ」（07）で、
             // `Diff` は左の領域を Graph と差し替えて出す。相手がいないまま入れると、
@@ -204,10 +224,24 @@ impl AppState {
             // `None` を返すので、入る前は必ず `None`（入れるかを問う相手にならない）。
             //
             // **末尾で照合する。** 添字で削ると、並びを変えたときに別のペインが落ちる。
-            GraphSelection::Wip if self.wanted_worktree_diff().is_none() => Pane::WIP_FOCUS
-                .strip_suffix(&[Pane::Diff])
-                .unwrap_or(Pane::WIP_FOCUS),
-            GraphSelection::Wip => Pane::WIP_FOCUS,
+            GraphSelection::Wip if self.wanted_worktree_diff().is_none() => {
+                let all = self.pick(Pane::WIP_FOCUS, Pane::WIP_FOCUS_NO_PRS);
+                all.strip_suffix(&[Pane::Diff]).unwrap_or(all)
+            }
+            GraphSelection::Wip => self.pick(Pane::WIP_FOCUS, Pane::WIP_FOCUS_NO_PRS),
+        }
+    }
+
+    /// `Prs` を含む一覧と含まない一覧のどちらを使うか。
+    ///
+    /// **見るのは [`AccountState::Disabled`] で、`config` を直に読まない。** 旗を
+    /// 読む場所は [`AppState::new`] の 1 つで、以後は `account` が答える（01 の
+    /// 「GitHub 機能を切る」）。
+    fn pick(&self, with_prs: &'static [Pane], without: &'static [Pane]) -> &'static [Pane] {
+        if self.account.is_disabled() {
+            without
+        } else {
+            with_prs
         }
     }
 
@@ -225,8 +259,14 @@ impl AppState {
     ///
     /// グラフのカーソルが WIP 行を出入りすると候補が入れ替わる。戻す先を `Graph` に
     /// するのは、**座り直しがユーザーの選んでいない移動**だから。どちらの選択でも
-    /// 候補にあるペインは `Graph` / `Branches` / `Diff` の 3 つあるが、いま見ている
-    /// 左の領域に戻すのが説明の付く動き（07 の「ペインとフォーカス」）。
+    /// 候補に残るペインはほかにもあるが（落ちることがあるのは `Diff` だけ）、
+    /// `Branches` と `Prs` は右列の上なので「グラフの行を選び直したら右の一覧に飛ぶ」
+    /// という説明の付かない動きになる。いま見ている左の領域に戻すのが説明の付く動き
+    /// （07 の「ペインとフォーカス」）。
+    ///
+    /// **同じ出口で [`right_tab`](AppState::right_tab) も揃える。** `focus` が
+    /// `Branches` か `Prs` に居るならタブはそれと同じでなければならず、書く場所を
+    /// 2 つに割ると食い違った状態が残る（01 の「右上のタブ」）。
     ///
     /// **フォーカスを動かすキーが通る `update::focus` は経由しない。** あちらは
     /// 「見えるようになった diff を頼む」ためのもので、ここが移す先は必ず `Graph`
@@ -235,6 +275,9 @@ impl AppState {
     pub fn reseat_focus(&mut self) {
         if !self.focus_candidates().contains(&self.focus) {
             self.focus = Pane::Graph;
+        }
+        if let Some(tab) = RightTab::of(self.focus) {
+            self.right_tab = tab;
         }
     }
 
@@ -265,6 +308,46 @@ impl AppState {
                 })
             }
         }
+    }
+
+    /// いま PR を出すべきブランチ。出せないなら `None`（01 の「PR ペイン」）。
+    ///
+    /// **判定はここ 1 つ。** 頼む側（`update`）と、届いた返信を採るかどうかを決める側が
+    /// 同じものを読む（[`AppState::wanted_diff`] と同じ形）。分けて書くと、片方だけ
+    /// 直したときに別のブランチの PR を出したままにできてしまう。
+    ///
+    /// **`Unborn` では `None`。** 名前はあるがコミットが 1 つも無いので、**このワーク
+    /// ツリーから出した PR は無い**。同名のリモートブランチに PR がある可能性は
+    /// 否定できないが、それはここの HEAD の PR ではない（独立したレビューの指摘で
+    /// 「存在しえない」から書き直した）。**`Detached` も `None`** —— API が要るのは
+    /// ブランチ名で、切り離された HEAD には無い。
+    pub fn wanted_pr(&self) -> Option<&str> {
+        self.repo.target.resolved()?;
+        if !matches!(self.account, AccountState::Resolved(_)) {
+            return None;
+        }
+        match self.repo.head.as_ref()? {
+            HeadInfo::Branch { name, .. } => Some(name),
+            HeadInfo::Detached(_) | HeadInfo::Unborn { .. } => None,
+        }
+    }
+
+    /// いま画面に出ている PR。持っている答えが古ければ `None`。
+    ///
+    /// **鍵の突き合わせはここ 1 つ。** 次に何を頼むかを決める `update` と、中身を
+    /// 描くか文言を出すかを決める `ui` が同じものを使う（[`AppState::wanted_diff`] や
+    /// [`GraphState::fresh_detail`] と同じ形）。写すと、鮮度の規則を変えたときに
+    /// **`update` は古いと判断して引き直すのに `ui` は出し続ける**形が組める。
+    pub fn current_pr(&self) -> Option<&PullRequest> {
+        self.prs.fresh(self.wanted_pr())?.loaded()?.as_ref()
+    }
+
+    /// いまチェックを引くべき head の sha。引くものが無ければ `None`。
+    ///
+    /// **`checks` に鍵を別に持たせない。** sha は `current` から導けるので、離れた
+    /// 場所に写しを置かない（01 の「何を引くか」）。
+    pub fn wanted_checks(&self) -> Option<&str> {
+        Some(&self.current_pr()?.head.sha)
     }
 
     /// 出している diff を**直近の書き込みより後に**読めているか。
@@ -381,6 +464,38 @@ impl Default for TermSize {
     }
 }
 
+/// 右列の上に出せるタブ（01 の「PR ペイン › 右上のタブ」）。
+///
+/// **[`Pane`] をそのまま持たない。** 入りうる値は 2 つだけなので、`Pane` で持つと
+/// 読む側が「ほかの値は来ない」という注釈付きの `_ =>` を置くことになり、
+/// **M5 で `Stash` が 3 枚目に入ったときにコンパイラが何も言わない**（`Branches` が
+/// 黙って描かれる）。写像は [`of`](Self::of) の 1 本だけ。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RightTab {
+    #[default]
+    Branches,
+    Prs,
+}
+
+impl RightTab {
+    /// そのペインにフォーカスが来たとき、追随するタブ。右列の上でなければ `None`。
+    pub fn of(pane: Pane) -> Option<RightTab> {
+        match pane {
+            Pane::Branches => Some(RightTab::Branches),
+            Pane::Prs => Some(RightTab::Prs),
+            Pane::Graph | Pane::Stash | Pane::Worktree | Pane::CommitDetail | Pane::Diff => None,
+        }
+    }
+
+    /// このタブを出しているときにキーを受けるペイン。
+    pub fn pane(self) -> Pane {
+        match self {
+            RightTab::Branches => Pane::Branches,
+            RightTab::Prs => Pane::Prs,
+        }
+    }
+}
+
 /// フォーカスできるペイン。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Pane {
@@ -399,7 +514,21 @@ impl Pane {
     ///
     /// **まだ実装していないペインは入れない**（07）。移れてしまうと、キーを受ける先の
     /// 無い画面に入り込む。ペインを実装したらここに足す。並びは `Pane` の宣言順。
-    const WIP_FOCUS: &'static [Pane] = &[Pane::Graph, Pane::Branches, Pane::Worktree, Pane::Diff];
+    const WIP_FOCUS: &'static [Pane] = &[
+        Pane::Graph,
+        Pane::Branches,
+        Pane::Prs,
+        Pane::Worktree,
+        Pane::Diff,
+    ];
+
+    /// `config.github.enabled = false` のときの [`WIP_FOCUS`](Self::WIP_FOCUS)。
+    ///
+    /// **`Prs` は真ん中にあるので末尾で落とせない。** `Diff` のように
+    /// `strip_suffix` で削る形にすると並びの意味が 2 通りになるので、一覧をもう 1 本
+    /// 置く（`Prs` が落ちる条件は起動時に固まるので、揺れるのは `Diff` だけ）。
+    const WIP_FOCUS_NO_PRS: &'static [Pane] =
+        &[Pane::Graph, Pane::Branches, Pane::Worktree, Pane::Diff];
 
     /// コミットを選んでいるあいだの巡回先。右は [`GraphSelection::right_pane`] が決める。
     ///
@@ -414,9 +543,21 @@ impl Pane {
     /// [`AppState::focus_candidates`] が末尾を落として候補から外すため。こちらの
     /// 一覧は落とさないので、並びの制約は無い。
     ///
-    /// **`Branches` も両方に入る。** 右列の上に常に出ていて、左の選択で中身が
-    /// 変わらないため（07 の「レイアウト」）。
-    const COMMIT_FOCUS: &'static [Pane] =
+    /// **`Branches` と `Prs` も両方に入る。** どちらも右列の上に出ていて、左の選択で
+    /// 中身が変わらないため（07 の「レイアウト」）。`Prs` が落ちるのは
+    /// `config.github.enabled = false` のときだけで、**`AccountState` では変えない**
+    /// —— 変えると起動直後に解決が返った瞬間に `Tab` の行き先が増える（01 の
+    /// 「右上のタブ」）。
+    const COMMIT_FOCUS: &'static [Pane] = &[
+        Pane::Graph,
+        Pane::Branches,
+        Pane::Prs,
+        Pane::CommitDetail,
+        Pane::Diff,
+    ];
+
+    /// `config.github.enabled = false` のときの [`COMMIT_FOCUS`](Self::COMMIT_FOCUS)。
+    const COMMIT_FOCUS_NO_PRS: &'static [Pane] =
         &[Pane::Graph, Pane::Branches, Pane::CommitDetail, Pane::Diff];
 
     /// `panes` の並びのうち `delta` 個先。端では反対側に回る。
@@ -1044,17 +1185,83 @@ impl BranchState {
     }
 }
 
-/// PR ペインの状態。
+/// 外から引いてきた値の 3 状態（01 の「PR ペイン」）。
+///
+/// **`Option` や空の `Vec` で代用しない。** 「まだ頼んでいない」「引けたが中身が
+/// 無い」「引けなかった」が畳まる。05 が [`PullRequest::review`] / `checks` を
+/// `Option` にしたのと同じ理由（「レビュー 0 件」と区別できない）の 1 段深い版。
+///
+/// **[`BranchState`] の `load` とは形が違う。** 3 状態にした理由は同じだが、あちらは
+/// **値を持たない旗**で、失敗しても読めていた一覧を捨てない（[`BranchLoad`] の doc）。
+/// こちらは失敗すると値が無い。畳めないので、どちらかに寄せようとしないこと。
+///
+/// **利用者が 2 つ出たので共有先にしてある**（PR 本体とチェック一覧）。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum Fetch<T> {
+    #[default]
+    Unasked,
+    Loaded(T),
+    Failed(GithubError),
+}
+
+impl<T> Fetch<T> {
+    /// 引けた中身。頼んでいない / 失敗したときは `None`。
+    pub fn loaded(&self) -> Option<&T> {
+        match self {
+            Fetch::Loaded(value) => Some(value),
+            Fetch::Unasked | Fetch::Failed(_) => None,
+        }
+    }
+}
+
+/// PR ペインの状態（01 の「PR ペイン」）。
+///
+/// **中身は 1 つのブランチについての答え**で、HEAD が動いたら捨てる。鍵の
+/// [`branch`](Self::branch) は構造体に 1 つだけ置く —— `current` と `checks` の
+/// 両方に掛かるので、[`Fetch`] の腕ごとに持たせると `Unasked` だけ鍵を持てない形に
+/// なり、「どのブランチについて頼んでいないか」という答えの無い問いが型に残る。
 #[derive(Debug, Default)]
 pub struct PrState {
-    /// 現在のブランチに対応する PR。
-    pub current: Option<PullRequest>,
-    /// 一覧タブの中身。各行のバッジには `PullRequest.checks`（集計）を使う。
-    pub list: Vec<PullRequest>,
-    /// `current` のチェック一覧。空でなければ `current.checks`（集計）より優先する。
-    /// 一覧が取れているならそちらが新しいため。
-    pub checks: Vec<Check>,
+    /// `current` と `checks` が指すブランチ。[`AppState::wanted_pr`] と違えば古い。
+    pub branch: Option<String>,
+    /// そのブランチの PR。`Loaded(None)` は「PR が無い」。
+    pub current: Fetch<Option<PullRequest>>,
+    /// `current` の head sha のチェック一覧。`Loaded(vec![])` は「チェックが 0 件」。
+    pub checks: Fetch<Vec<Check>>,
+    /// チェック一覧のカーソル。**一覧タブのカーソルはここに足さない** —— `Vec` を
+    /// 持っていないうちから添字を 2 つ置くと、どちらが動くかを読む側が決められない。
     pub cursor: usize,
+}
+
+impl PrState {
+    /// `wanted` のブランチについての答え。鍵が合っていなければ `None`。
+    ///
+    /// **`Fetch` ごと返す。** 描く側は `Unasked` / `Loaded(None)` / `Failed` を
+    /// 出し分ける（07 の「PRs ペイン」）ので、中身だけを返すと理由が消える。
+    pub fn fresh(&self, wanted: Option<&str>) -> Option<&Fetch<Option<PullRequest>>> {
+        // **`wanted` が `None` なら鍵は合わない。** 出すべきブランチが無いときに
+        // 「持っていない」と合致させると、detached HEAD で古い PR を出すことになる。
+        let wanted = wanted?;
+        (self.branch.as_deref() == Some(wanted)).then_some(&self.current)
+    }
+
+    /// チェック一覧のカーソルを動かす。行が 1 つも無ければ据え置く。
+    pub(super) fn move_cursor(&mut self, delta: isize) {
+        let len = self.checks.loaded().map_or(0, Vec::len);
+        self.cursor = stepped_index(self.cursor, len, delta);
+    }
+
+    /// `branch` についての答えを入れ直す。チェックは巻き添えで捨てる。
+    ///
+    /// **`current` を差し替えたら `checks` は必ず落ちる。** あれは `current` の
+    /// head sha に紐付いていて、鍵を別に持たせていない（sha は `current` から
+    /// 導ける。01 の「何を引くか」）。
+    pub(super) fn set_current(&mut self, branch: String, current: Fetch<Option<PullRequest>>) {
+        self.branch = Some(branch);
+        self.current = current;
+        self.checks = Fetch::Unasked;
+        self.cursor = 0;
+    }
 }
 
 /// 世代を数える領域。**書き込みが何を古くするか**で分ける。
@@ -1257,6 +1464,7 @@ pub enum JobKind {
     FetchPr,
     FetchChecks,
     FetchPrList,
+    OpenPr,
 }
 
 impl JobKind {
@@ -1275,9 +1483,17 @@ impl JobKind {
             // ref から導かれる値。`LoadHeadMessage` もここ —— commit / amend が
             // 走っているあいだに `C` を押すと、書き込み前の本文で amend の入力欄が
             // 埋まる。
-            JobKind::LoadRepoInfo | JobKind::LoadBranches | JobKind::LoadHeadMessage => {
-                Some(Region::Refs)
-            }
+            // **PR とチェックもここ。** 鍵（ブランチ名 / head sha）は**選択が動いた**
+            // ことしか言えず、**同じブランチのまま PR の側が変わる**（commit / push で
+            // head sha が進み、チェックが回り直す）のは ref の書き込みで起きる。
+            // 鍵だけにすると、書き込みの最中に飛んでいた要求の答え（書き込み前の
+            // GitHub の状態）が鍵だけ合って採られ、そのあとの引き直しは
+            // `AppState::issue` に落とされたまま誰も拾わない。
+            JobKind::LoadRepoInfo
+            | JobKind::LoadBranches
+            | JobKind::LoadHeadMessage
+            | JobKind::FetchPr
+            | JobKind::FetchChecks => Some(Region::Refs),
             // 積んだログの行。ref が動いて walk に入る集合が変わったときだけ古くなる。
             JobKind::LoadLog => Some(Region::Log),
             // 書き込みそのものと、Oid で追いつくもの、リポジトリの外から来るもの。
@@ -1290,9 +1506,10 @@ impl JobKind {
             | JobKind::ResolveAccount
             // `gh auth status` が読むのは gh 自身の設定で、git の書き込みで動かない。
             | JobKind::ListAccounts
-            | JobKind::FetchPr
-            | JobKind::FetchChecks
-            | JobKind::FetchPrList => None,
+            // **`OpenPr` は値を読まない**（ブラウザに渡すだけ）。`FetchPrList` は
+            // 2/2 のタスクで決める。
+            | JobKind::FetchPrList
+            | JobKind::OpenPr => None,
         }
     }
 }

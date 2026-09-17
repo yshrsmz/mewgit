@@ -11,7 +11,7 @@ use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
     RefIndex, Remote, StashEntry, WorktreeSection, WorktreeSnapshot,
 };
-use crate::github::{Check, GithubError, PullRequest};
+use crate::github::{GithubError, PullRequest};
 use crate::graph::{GraphRow, LaneState};
 
 use crate::config::Config;
@@ -166,8 +166,6 @@ impl AppState {
             | JobKind::ResolveTarget
             | JobKind::ResolveAccount
             | JobKind::ListAccounts
-            | JobKind::FetchPr
-            | JobKind::FetchChecks
             | JobKind::FetchPrList => return,
             // **黙って落とさない。** `gh browse` は**起動したブラウザが終わるまで
             // 返らない**（gh 2.100.0 で実測。`BROWSER` に 5 秒眠るスクリプトを
@@ -310,44 +308,24 @@ impl AppState {
         }
     }
 
-    /// いま PR を出すべきブランチ。出せないなら `None`（01 の「PR ペイン」）。
+    /// PR の一覧を引いてよいか（01 の「PR ペイン › 何を引くか」）。
     ///
-    /// **判定はここ 1 つ。** 頼む側（`update`）と、届いた返信を採るかどうかを決める側が
-    /// 同じものを読む（[`AppState::wanted_diff`] と同じ形）。分けて書くと、片方だけ
-    /// 直したときに別のブランチの PR を出したままにできてしまう。
+    /// **読むのは `update` だけ。** `ui` は「何を描くか」を [`PrState::load`] と
+    /// [`AccountState`] の腕から出す（07 の「PRs ペイン」）—— 材料が揃うことと、
+    /// 揃わない理由をどう言うかは別の問いで、後者は述語では答えられない。
     ///
-    /// **`Unborn` では `None`。** 名前はあるがコミットが 1 つも無いので、**このワーク
-    /// ツリーから出した PR は無い**。同名のリモートブランチに PR がある可能性は
-    /// 否定できないが、それはここの HEAD の PR ではない（独立したレビューの指摘で
-    /// 「存在しえない」から書き直した）。**`Detached` も `None`** —— API が要るのは
-    /// ブランチ名で、切り離された HEAD には無い。
-    pub fn wanted_pr(&self) -> Option<&str> {
-        self.repo.target.resolved()?;
-        if !matches!(self.account, AccountState::Resolved(_)) {
-            return None;
-        }
-        match self.repo.head.as_ref()? {
-            HeadInfo::Branch { name, .. } => Some(name),
-            HeadInfo::Detached(_) | HeadInfo::Unborn { .. } => None,
-        }
+    /// **HEAD は材料ではない。** 一覧はブランチに紐づかないので、detached でも
+    /// unborn でも同じものが出る。
+    pub fn wanted_pr_list(&self) -> bool {
+        self.repo.target.resolved().is_some() && matches!(self.account, AccountState::Resolved(_))
     }
 
-    /// いま画面に出ている PR。持っている答えが古ければ `None`。
+    /// 一覧のうち、いま居るブランチの PR（01 の「現ブランチの PR」）。
     ///
-    /// **鍵の突き合わせはここ 1 つ。** 次に何を頼むかを決める `update` と、中身を
-    /// 描くか文言を出すかを決める `ui` が同じものを使う（[`AppState::wanted_diff`] や
-    /// [`GraphState::fresh_detail`] と同じ形）。写すと、鮮度の規則を変えたときに
-    /// **`update` は古いと判断して引き直すのに `ui` は出し続ける**形が組める。
+    /// **状態に持たない。** `prs.list` と `repo` から毎回導く —— 写しを置くと、
+    /// どちらかが更新されたときに片方だけ古くなる。
     pub fn current_pr(&self) -> Option<&PullRequest> {
-        self.prs.fresh(self.wanted_pr())?.loaded()?.as_ref()
-    }
-
-    /// いまチェックを引くべき head の sha。引くものが無ければ `None`。
-    ///
-    /// **`checks` に鍵を別に持たせない。** sha は `current` から導けるので、離れた
-    /// 場所に写しを置かない（01 の「何を引くか」）。
-    pub fn wanted_checks(&self) -> Option<&str> {
-        Some(&self.current_pr()?.head.sha)
+        current_row(&self.repo, &self.prs.list)
     }
 
     /// 出している diff を**直近の書き込みより後に**読めているか。
@@ -1185,82 +1163,137 @@ impl BranchState {
     }
 }
 
-/// 外から引いてきた値の 3 状態（01 の「PR ペイン」）。
+/// 一覧のうち、いま居るブランチの PR（01 の「現ブランチの PR」）。
 ///
-/// **`Option` や空の `Vec` で代用しない。** 「まだ頼んでいない」「引けたが中身が
-/// 無い」「引けなかった」が畳まる。05 が [`PullRequest::review`] / `checks` を
-/// `Option` にしたのと同じ理由（「レビュー 0 件」と区別できない）の 1 段深い版。
+/// **[`AppState::current_pr`] と [`PrState::loaded`] の両方がここを通る。** 座り直す
+/// 先を決める側と描く側で照合の規則が割れると、カーソルが座っていない行を
+/// 「現ブランチの PR」として扱える。
 ///
-/// **[`BranchState`] の `load` とは形が違う。** 3 状態にした理由は同じだが、あちらは
-/// **値を持たない旗**で、失敗しても読めていた一覧を捨てない（[`BranchLoad`] の doc）。
-/// こちらは失敗すると値が無い。畳めないので、どちらかに寄せようとしないこと。
-///
-/// **利用者が 2 つ出たので共有先にしてある**（PR 本体とチェック一覧）。
-#[derive(Debug, Default, PartialEq, Eq)]
-pub enum Fetch<T> {
-    #[default]
-    Unasked,
-    Loaded(T),
-    Failed(GithubError),
-}
-
-impl<T> Fetch<T> {
-    /// 引けた中身。頼んでいない / 失敗したときは `None`。
-    pub fn loaded(&self) -> Option<&T> {
-        match self {
-            Fetch::Loaded(value) => Some(value),
-            Fetch::Unasked | Fetch::Failed(_) => None,
-        }
-    }
+/// **fork のブランチでは合致しない。** 照合に使えるのはローカルのブランチ名だけで、
+/// その PR の head がどの fork にあるかを知らないため（plan.md の「fork のブランチで
+/// 現ブランチの PR を当てる」）。
+pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Option<&'a PullRequest> {
+    let target = repo.target.resolved()?;
+    let HeadInfo::Branch { name, .. } = repo.head.as_ref()? else {
+        // **`Detached` も `Unborn` も `None`。** 切り離された HEAD には名前が無く、
+        // コミットが 1 つも無いブランチから出した PR は無い。
+        return None;
+    };
+    list.iter().find(|pr| {
+        pr.head.branch == *name
+            && pr.head.repo.as_ref().is_some_and(|repo| {
+                // **リポジトリ名まで見る。** owner だけだと、同じ owner の下に作った
+                // fork（`acme/app` → `acme/app-fork`）から出た他人の PR が
+                // 「現ブランチの PR」に当たる。
+                repo.owner == target.owner && repo.repo == target.repo
+            })
+    })
 }
 
 /// PR ペインの状態（01 の「PR ペイン」）。
 ///
-/// **中身は 1 つのブランチについての答え**で、HEAD が動いたら捨てる。鍵の
-/// [`branch`](Self::branch) は構造体に 1 つだけ置く —— `current` と `checks` の
-/// 両方に掛かるので、[`Fetch`] の腕ごとに持たせると `Unasked` だけ鍵を持てない形に
-/// なり、「どのブランチについて頼んでいないか」という答えの無い問いが型に残る。
+/// **中身はこのリポジトリで開いている PR の一覧**で、ブランチにもコミットにも
+/// 紐づかない。**鍵を持たない**のはそのため —— 鍵が答えるのは「選択が動いたか」で、
+/// 一覧には対応する問いが無い。追いつきは世代（[`JobKind::FetchPrList`] の
+/// `region()`）だけで足りる。
+///
+/// **形は [`BranchState`] に揃えてある**（値 + 段階）。引けた値そのものを 3 状態の
+/// enum に入れると、**読み直しが 1 回転けただけで読めていた一覧が画面から消える**
+/// （`BranchState::failed` の doc が言う「捨てると画面から消えるだけになる」）。
+/// 一覧を引き直すのは ref を動かす書き込みのたびなので、この差は毎コミット効く。
 #[derive(Debug, Default)]
 pub struct PrState {
-    /// `current` と `checks` が指すブランチ。[`AppState::wanted_pr`] と違えば古い。
-    pub branch: Option<String>,
-    /// そのブランチの PR。`Loaded(None)` は「PR が無い」。
-    pub current: Fetch<Option<PullRequest>>,
-    /// `current` の head sha のチェック一覧。`Loaded(vec![])` は「チェックが 0 件」。
-    pub checks: Fetch<Vec<Check>>,
-    /// チェック一覧のカーソル。**一覧タブのカーソルはここに足さない** —— `Vec` を
-    /// 持っていないうちから添字を 2 つ置くと、どちらが動くかを読む側が決められない。
+    /// 開いている PR。API が返した順（更新の新しい順）そのまま。
+    pub list: Vec<PullRequest>,
+    /// 一覧のカーソル。
     pub cursor: usize,
+    /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分けるのに要る。
+    load: PrLoad,
+}
+
+/// PR 一覧の読み込みがどこまで進んだか。
+///
+/// **`bool` を 2 つにしない**（[`BranchLoad`] と同じ理由）。
+///
+/// **[`BranchLoad`] と違って `Failed` が理由を持つ。** 案内に出すのが「読み込めません
+/// でした」だけでは足りない —— 401 / 403 / レート制限は**次に何をするかが違う**ので、
+/// [`GithubError`] をそのまま運んで `ui` に出させる（07 の「PRs ペイン」）。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum PrLoad {
+    /// まだ届いていない。
+    #[default]
+    Pending,
+    Loaded,
+    Failed(GithubError),
 }
 
 impl PrState {
-    /// `wanted` のブランチについての答え。鍵が合っていなければ `None`。
-    ///
-    /// **`Fetch` ごと返す。** 描く側は `Unasked` / `Loaded(None)` / `Failed` を
-    /// 出し分ける（07 の「PRs ペイン」）ので、中身だけを返すと理由が消える。
-    pub fn fresh(&self, wanted: Option<&str>) -> Option<&Fetch<Option<PullRequest>>> {
-        // **`wanted` が `None` なら鍵は合わない。** 出すべきブランチが無いときに
-        // 「持っていない」と合致させると、detached HEAD で古い PR を出すことになる。
-        let wanted = wanted?;
-        (self.branch.as_deref() == Some(wanted)).then_some(&self.current)
-    }
-
-    /// チェック一覧のカーソルを動かす。行が 1 つも無ければ据え置く。
+    /// カーソルを動かす。行が 1 つも無ければ据え置く。
     pub(super) fn move_cursor(&mut self, delta: isize) {
-        let len = self.checks.loaded().map_or(0, Vec::len);
-        self.cursor = stepped_index(self.cursor, len, delta);
+        self.cursor = stepped_index(self.cursor, self.list.len(), delta);
     }
 
-    /// `branch` についての答えを入れ直す。チェックは巻き添えで捨てる。
+    /// いまカーソルが指している PR。
+    pub fn selected(&self) -> Option<&PullRequest> {
+        self.list.get(self.cursor)
+    }
+
+    /// 読み込みの段階。一覧が空のときに `ui` が出す文言をここから決める
+    /// （07 の「PRs ペイン」）。
     ///
-    /// **`current` を差し替えたら `checks` は必ず落ちる。** あれは `current` の
-    /// head sha に紐付いていて、鍵を別に持たせていない（sha は `current` から
-    /// 導ける。01 の「何を引くか」）。
-    pub(super) fn set_current(&mut self, branch: String, current: Fetch<Option<PullRequest>>) {
-        self.branch = Some(branch);
-        self.current = current;
-        self.checks = Fetch::Unasked;
+    /// **`ui` が見るのは一覧が空のときだけ。** 中身があるならそれを描く ——
+    /// 読み直しが失敗しても読めていた一覧は捨てない（[`BranchState::load`] と同じ）。
+    pub fn load(&self) -> &PrLoad {
+        &self.load
+    }
+
+    /// 届いた一覧で置き換える。
+    ///
+    /// **カーソルは PR の番号で座り直す。** 一覧は `sort=updated` で引くので、
+    /// **ref を動かす書き込みのたびに並びが変わる** —— 添字を保つと、自分が commit
+    /// した瞬間にカーソルが別の PR を指す（`BranchState::loaded` が名前で座り直すのと
+    /// 同じ理由）。
+    ///
+    /// **座り直す先は 2 つ。** いま選んでいる PR の番号か、それが無ければ `fallback`
+    /// が新しい一覧から選ぶ番号（起動直後は「いま居るブランチの PR」。01 の
+    /// 「現ブランチの PR」）。どちらも見つからなければ先頭。**`fallback` が新しい
+    /// 一覧を受け取るのは、その答えが一覧の中身から決まるから** —— 呼ぶ側に
+    /// 座り直しの手順を出すと、添字のまま座る形が外から書けるようになる。
+    pub(super) fn loaded(
+        &mut self,
+        list: Vec<PullRequest>,
+        fallback: impl FnOnce(&[PullRequest]) -> Option<u64>,
+    ) {
+        let wanted = self
+            .selected()
+            .map(|pr| pr.number)
+            .or_else(|| fallback(&list));
+        self.cursor = wanted
+            .and_then(|number| list.iter().position(|pr| pr.number == number))
+            // 選んでいたものが open から消えた（マージ / クローズ）か、まだ何も
+            // 選んでいない。
+            .unwrap_or(0);
+        self.list = list;
+        self.load = PrLoad::Loaded;
+    }
+
+    /// 読み込みが失敗した。**読めていた一覧は捨てない**（`BranchState::failed` と
+    /// 同じ理由。捨てると画面から消えるだけになる）。
+    pub(super) fn failed(&mut self, err: GithubError) {
+        self.load = PrLoad::Failed(err);
+    }
+
+    /// アカウントが決まっていない状態に戻す。
+    ///
+    /// **一覧はどのアカウントで引いたかに紐づく。** `A` で選び直したり degraded に
+    /// 落ちたりした後に前のトークンで引いた一覧を出したままにすると、`*` / `R` の印
+    /// （login で決まる）だけが黙って消えた一覧が残る。**`Pending` に戻すのは、
+    /// `AccountState` が `Resolved` に戻れば `prs::reload` が引き直すから**
+    /// （01 の「何を引くか」）。
+    pub(super) fn forget(&mut self) {
+        self.list.clear();
         self.cursor = 0;
+        self.load = PrLoad::Pending;
     }
 }
 
@@ -1461,8 +1494,6 @@ pub enum JobKind {
     ResolveTarget,
     ResolveAccount,
     ListAccounts,
-    FetchPr,
-    FetchChecks,
     FetchPrList,
     OpenPr,
 }
@@ -1483,17 +1514,15 @@ impl JobKind {
             // ref から導かれる値。`LoadHeadMessage` もここ —— commit / amend が
             // 走っているあいだに `C` を押すと、書き込み前の本文で amend の入力欄が
             // 埋まる。
-            // **PR とチェックもここ。** 鍵（ブランチ名 / head sha）は**選択が動いた**
-            // ことしか言えず、**同じブランチのまま PR の側が変わる**（commit / push で
-            // head sha が進み、チェックが回り直す）のは ref の書き込みで起きる。
-            // 鍵だけにすると、書き込みの最中に飛んでいた要求の答え（書き込み前の
-            // GitHub の状態）が鍵だけ合って採られ、そのあとの引き直しは
-            // `AppState::issue` に落とされたまま誰も拾わない。
+            // **PR の一覧もここ。** 一覧は選択に紐づかないので鍵が無く、**世代だけ**が
+            // 「書き込みで中身が変わった」を言う（commit / push で head sha が進み、
+            // CI が回り直し、マージすれば open から消える）。世代を見ないと、書き込みの
+            // 最中に飛んでいた要求の答え（書き込み前の GitHub の状態）が採られ、
+            // そのあとの引き直しは `AppState::issue` に落とされたまま誰も拾わない。
             JobKind::LoadRepoInfo
             | JobKind::LoadBranches
             | JobKind::LoadHeadMessage
-            | JobKind::FetchPr
-            | JobKind::FetchChecks => Some(Region::Refs),
+            | JobKind::FetchPrList => Some(Region::Refs),
             // 積んだログの行。ref が動いて walk に入る集合が変わったときだけ古くなる。
             JobKind::LoadLog => Some(Region::Log),
             // 書き込みそのものと、Oid で追いつくもの、リポジトリの外から来るもの。
@@ -1506,9 +1535,7 @@ impl JobKind {
             | JobKind::ResolveAccount
             // `gh auth status` が読むのは gh 自身の設定で、git の書き込みで動かない。
             | JobKind::ListAccounts
-            // **`OpenPr` は値を読まない**（ブラウザに渡すだけ）。`FetchPrList` は
-            // 2/2 のタスクで決める。
-            | JobKind::FetchPrList
+            // **`OpenPr` は値を読まない**（ブラウザに渡すだけ）。
             | JobKind::OpenPr => None,
         }
     }
@@ -2534,7 +2561,7 @@ mod tests {
     fn job_tracker_allows_different_kinds() {
         let mut jobs = JobTracker::default();
         assert!(jobs.start(job(JobKind::LoadStatus)));
-        assert!(jobs.start(job(JobKind::FetchPr)));
+        assert!(jobs.start(job(JobKind::FetchPrList)));
         assert_eq!(jobs.iter().count(), 2);
     }
 
@@ -2590,7 +2617,7 @@ mod tests {
         let mut jobs = JobTracker::default();
         jobs.start(job(JobKind::LoadLog));
 
-        jobs.finish(JobKind::FetchPr);
+        jobs.finish(JobKind::FetchPrList);
         assert!(jobs.is_running(JobKind::LoadLog));
     }
 }

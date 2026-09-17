@@ -35,6 +35,10 @@ pub struct PullRequest {
     pub base: RefSpec,
     pub url: String,
     pub author: String,
+    /// レビューを依頼されている login。**チーム宛ての依頼（`requested_teams`）は
+    /// 入らない** —— チームの一員かどうかを答えるにはチームの数だけ membership を
+    /// 叩くことになる（07 の「PRs ペイン」で受け入れた穴）。
+    pub requested_reviewers: Vec<String>,
     /// レビューは別リクエスト（`reviews`）なので、未取得なら `None`。
     /// **`ReviewSummary::default()` を入れない** —— 「レビュー 0 件」と
     /// 区別できなくなる。`checks` と対称にしてある。

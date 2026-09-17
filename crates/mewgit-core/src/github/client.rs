@@ -14,7 +14,7 @@ use crate::auth::RepoTarget;
 use super::wire::{
     summarize_reviews, WireCheckRuns, WireCombinedStatus, WirePull, WireRepo, WireReview,
 };
-use super::{Check, GithubError, PrStatus, PullRequest, RepoMeta, ReviewSummary};
+use super::{Check, GithubError, PullRequest, RepoMeta, ReviewSummary};
 
 /// `X-GitHub-Api-Version`。GitHub は「日付で固定せよ」と言っている。
 const API_VERSION: &str = "2022-11-28";
@@ -183,28 +183,25 @@ impl GithubClient {
         Ok(wire.into())
     }
 
-    /// ブランチに紐づく PR を 1 件返す。無ければ `None`。
+    /// 開いている PR の一覧。更新の新しい順。
     ///
-    /// `head` は API の求める `{owner}:{branch}` の形で、**fork なら fork 側の
-    /// owner**。`:` を挟むのをここ 1 箇所にするため、呼ぶ側は 2 つに分けて渡す。
+    /// **絞り込みは引数に取らない**（05 の「クライアント」）。誰の PR かの振り分けは
+    /// 呼ぶ側が [`PullRequest::author`] と [`PullRequest::requested_reviewers`] から
+    /// 行う。
     ///
-    /// `state=all` で引くので閉じた PR も返る。**開いているものを優先**し、
-    /// 無ければ API が返した最初のものを採る。
-    pub async fn pr_for_branch(
-        &self,
-        owner: &str,
-        repo: &str,
-        head_owner: &str,
-        branch: &str,
-    ) -> Result<Option<PullRequest>, GithubError> {
+    /// **`/search/issues` は使わない。** サーバ側で `author:@me` を絞れる代わりに
+    /// 返るのが issue 形で `head` が無く、チェックを引く鍵（head sha）を作れない
+    /// （05。実測 2026-09-17）。
+    ///
+    /// **閉じた PR は返らない。** `state=all` にすると辿るページが 2 桁増え、
+    /// PR ごとの集計が現実的な大きさに収まらない（01 の「現ブランチの PR」）。
+    pub async fn pr_list(&self, owner: &str, repo: &str) -> Result<Vec<PullRequest>, GithubError> {
         let url = self.endpoint(&["repos", owner, repo, "pulls"]);
-        let head = format!("{head_owner}:{branch}");
         let wire: Vec<WirePull> = self
             .get_paged(
                 url,
                 &[
-                    ("head", head.as_str()),
-                    ("state", "all"),
+                    ("state", "open"),
                     ("sort", "updated"),
                     ("direction", "desc"),
                     ("per_page", PER_PAGE),
@@ -212,13 +209,7 @@ impl GithubClient {
                 |page: Vec<WirePull>| page,
             )
             .await?;
-        // **選んでから変換する。** 全件を値型にすると、採らない PR の `String` まで
-        // 確保したうえで採った 1 件を clone することになる。
-        let at = wire
-            .iter()
-            .position(|w| w.status() == PrStatus::Open)
-            .unwrap_or(0);
-        Ok(wire.into_iter().nth(at).map(Into::into))
+        Ok(wire.into_iter().map(Into::into).collect())
     }
 
     /// コミットのチェック一覧。
@@ -471,7 +462,9 @@ fn header_i64(response: &Response, name: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::{CheckState, RepoRef};
+    // **テストからしか届かない名前はここに置く**（`cargo fix` がヘッダから落とす。
+    // `CLAUDE.md` の「`cargo fix` は…」）。
+    use crate::github::{CheckState, PrStatus, RepoRef};
     use serde_json::json;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -653,28 +646,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pr_for_branch_builds_the_owner_colon_branch_head() {
+    async fn pr_list_asks_for_the_open_ones_newest_first() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/repos/o/r/pulls"))
-            .and(query_param("head", "fork-owner:feat/x"))
-            .and(query_param("state", "all"))
+            .and(query_param("state", "open"))
+            .and(query_param("sort", "updated"))
+            .and(query_param("direction", "desc"))
             .and(query_param("per_page", PER_PAGE))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([pull(1, "open", None)])))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([pull(10, "open", None), pull(9, "open", None),])),
+            )
             .mount(&server)
             .await;
 
-        let pr = client(&server)
-            .pr_for_branch("o", "r", "fork-owner", "feat/x")
-            .await
-            .unwrap()
-            .expect("PR が 1 件");
-        assert_eq!(pr.number, 1);
-        assert_eq!(pr.state, PrStatus::Open);
+        let prs = client(&server).pr_list("o", "r").await.unwrap();
+        // **並べ替えない。** 並びは API が決める（07 の「PRs ペイン」）。
+        assert_eq!(
+            prs.iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            vec![10, 9]
+        );
+        assert_eq!(prs[0].state, PrStatus::Open);
     }
 
     #[tokio::test]
-    async fn pr_for_branch_reports_none_when_there_is_no_pr() {
+    async fn pr_list_comes_back_empty_when_there_is_no_open_pr() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/repos/o/r/pulls"))
@@ -682,53 +679,58 @@ mod tests {
             .mount(&server)
             .await;
 
-        assert!(client(&server)
-            .pr_for_branch("o", "r", "o", "x")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(client(&server).pr_list("o", "r").await.unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn pr_for_branch_prefers_the_open_one_over_a_closed_one() {
+    async fn pr_list_carries_the_requested_reviewers() {
+        // レビュー依頼の印（07 の `R`）はこれだけを見る。**チーム宛ての依頼
+        // （`requested_teams`）は運ばない**ので、同じ本文に入れても出てこない。
         let server = MockServer::start().await;
+        let mut body = pull(4, "open", None);
+        body["requested_reviewers"] = json!([{ "login": "hanako" }, { "login": "taro" }]);
+        body["requested_teams"] = json!([{ "slug": "reviewers" }]);
         Mock::given(method("GET"))
             .and(path("/repos/o/r/pulls"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-                pull(9, "closed", Some("2026-01-01T00:00:00Z")),
-                pull(10, "open", None),
-            ])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([body])))
             .mount(&server)
             .await;
 
-        let pr = client(&server)
-            .pr_for_branch("o", "r", "o", "x")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(pr.number, 10, "開いているほうを採る");
-        assert_eq!(pr.state, PrStatus::Open);
+        let prs = client(&server).pr_list("o", "r").await.unwrap();
+        assert_eq!(prs[0].requested_reviewers, vec!["hanako", "taro"]);
+    }
+
+    #[tokio::test]
+    async fn a_pull_without_requested_reviewers_carries_an_empty_list() {
+        // **`requested_reviewers` が無い応答でも落ちない**（`serde(default)`）。
+        // GHES の版差でフィールドが欠けても `Decode` にしない。
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([pull(5, "open", None)])))
+            .mount(&server)
+            .await;
+
+        let prs = client(&server).pr_list("o", "r").await.unwrap();
+        assert!(prs[0].requested_reviewers.is_empty());
     }
 
     #[tokio::test]
     async fn a_merged_pr_is_merged_not_closed() {
+        // `state` だけでは merge と close を区別できない（`WirePull::status`）。
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/repos/o/r/pulls"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([pull(
-                7,
-                "closed",
-                Some("2026-01-01T00:00:00Z")
-            )])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                pull(7, "closed", Some("2026-01-01T00:00:00Z")),
+                pull(8, "closed", None),
+            ])))
             .mount(&server)
             .await;
 
-        let pr = client(&server)
-            .pr_for_branch("o", "r", "o", "x")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(pr.state, PrStatus::Merged);
+        let prs = client(&server).pr_list("o", "r").await.unwrap();
+        assert_eq!(prs[0].state, PrStatus::Merged);
+        assert_eq!(prs[1].state, PrStatus::Closed);
     }
 
     #[tokio::test]
@@ -742,11 +744,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let pr = client(&server)
-            .pr_for_branch("o", "r", "o", "x")
-            .await
-            .unwrap()
-            .unwrap();
+        let prs = client(&server).pr_list("o", "r").await.unwrap();
+        let pr = &prs[0];
         assert_eq!(
             pr.head.repo, None,
             "消えた fork は None で表す（空文字にしない）"

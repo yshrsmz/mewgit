@@ -87,6 +87,26 @@ pub fn row_is_reversed(state: &AppState, size: TermSize, needle: &str) -> bool {
     (0..size.width).any(|x| buffer[(x, row)].modifier.contains(Modifier::REVERSED))
 }
 
+/// `needle` を含む行が、**そのペインの中で**反転しているか。
+///
+/// **[`row_is_reversed`] は行の全幅を見る。** 右列のペインでは 1 行目が左のグラフの
+/// カーソル行（反転している）と同じ端末行に来るので、**反転していなくても真になる**。
+/// 左のペインを使う見張りは全幅で足りるが、右列では桁も絞らないと空振りする。
+pub fn pane_row_is_reversed(state: &AppState, size: TermSize, pane: Pane, needle: &str) -> bool {
+    let area = ui::pane_area(pane, size, state);
+    let row = area.y
+        + row_of(
+            &pane_text(state, size, pane)
+                .lines()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            needle,
+        );
+    let terminal = terminal_with(state, size);
+    let buffer = terminal.backend().buffer();
+    (area.x..area.right()).any(|x| buffer[(x, row)].modifier.contains(Modifier::REVERSED))
+}
+
 /// そのペインの領域だけを取り出した描画結果。
 ///
 /// **画面全体の `contains` で見ない。** 文言はペインをまたいで共有しているので

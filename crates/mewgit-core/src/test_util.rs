@@ -73,7 +73,7 @@ use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
     LineOrigin, Oid, Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
 };
-use crate::github::{Check, CheckState, PrStatus, PullRequest, RefSpec, RepoRef};
+use crate::github::{PrStatus, PullRequest, RefSpec, RepoRef};
 use secrecy::SecretString;
 use tempfile::TempDir;
 
@@ -836,37 +836,18 @@ pub fn fake_pull_request(number: u64, branch: &str, sha: &str) -> PullRequest {
         },
         url: format!("https://github.com/yshrsmz/mewgit/pull/{number}"),
         author: "yshrsmz".to_string(),
+        requested_reviewers: Vec::new(),
         review: None,
         checks: None,
     }
 }
 
-/// チェック 1 件。
-pub fn fake_check(name: &str, state: CheckState) -> Check {
-    Check {
-        name: name.to_string(),
-        state,
-        url: None,
-    }
-}
-
-/// [`Msg::PrLoaded`] を組む。
+/// [`Msg::PrListLoaded`] を組む。
 ///
 /// **`ui` からも使う**（[`fake_pull_request`] と同じ理由）。`Msg` の形を変えたときに
 /// 直す場所を、クレートをまたいで散らさない。
-pub fn pr_loaded(branch: &str, pr: Option<PullRequest>) -> Msg {
-    Msg::PrLoaded {
-        branch: branch.to_string(),
-        result: Box::new(Ok(pr)),
-    }
-}
-
-/// [`Msg::ChecksLoaded`] を組む。
-pub fn checks_loaded(sha: &str, checks: Vec<Check>) -> Msg {
-    Msg::ChecksLoaded {
-        sha: sha.to_string(),
-        result: Ok(checks),
-    }
+pub fn pr_list_loaded(list: Vec<PullRequest>) -> Msg {
+    Msg::PrListLoaded(Ok(list))
 }
 
 /// アカウントと対象が決まり、HEAD が `branch` に居る状態にする。

@@ -114,20 +114,13 @@ pub enum Cmd {
     /// **返事の受け手はモーダルだけ**（[`Msg::AccountsListed`](super::Msg::AccountsListed)）。
     /// `state.account` は動かさない。
     ListAccounts(String),
-    /// そのブランチの PR を 1 件引く（01 の「PR ペイン › 何を引くか」）。
+    /// 開いている PR の一覧を引く（01 の「PR ペイン › 何を引くか」）。
     ///
-    /// **鍵（ブランチ名）を運ぶ。** [`Msg::PrLoaded`](super::Msg::PrLoaded) が同じものを
-    /// 返し、届いた時点の [`AppState::wanted_pr`](super::AppState::wanted_pr) と
-    /// 違えば捨てる。`owner` / `repo` / トークンは運ばない —— `dispatch` が
+    /// **鍵を運ばない。** 一覧はブランチにもコミットにも紐づかないので、返信を
+    /// 突き合わせる相手が無い。追いつきは世代（[`JobKind::FetchPrList`] の
+    /// `region()`）が見る。`owner` / `repo` / トークンも運ばない —— `dispatch` が
     /// `state.repo.target` と `state.account` から読む（[`Cmd::ResolveAccount`] が
     /// `config` を読ませているのと同じ）。
-    FetchPr {
-        branch: String,
-    },
-    /// その head sha のチェック一覧。
-    FetchChecks {
-        sha: String,
-    },
     FetchPrList,
     /// `gh browse <番号>` でブラウザに渡す（01 の「`o`（ブラウザで開く）」）。
     ///
@@ -192,8 +185,6 @@ impl Cmd {
             Cmd::ResolveTarget(_) => Some((JobKind::ResolveTarget, "remote")),
             Cmd::ResolveAccount(_) => Some((JobKind::ResolveAccount, "account")),
             Cmd::ListAccounts(_) => Some((JobKind::ListAccounts, "logins")),
-            Cmd::FetchPr { .. } => Some((JobKind::FetchPr, "pr")),
-            Cmd::FetchChecks { .. } => Some((JobKind::FetchChecks, "checks")),
             Cmd::FetchPrList => Some((JobKind::FetchPrList, "pr list")),
             Cmd::OpenPr { .. } => Some((JobKind::OpenPr, "browse")),
         }
@@ -269,13 +260,7 @@ mod tests {
         assert_eq!(Cmd::CancelExec.job_kind(), None);
 
         assert_eq!(Cmd::LoadStatus.job_kind(), Some(JobKind::LoadStatus));
-        assert_eq!(
-            Cmd::FetchPr {
-                branch: "main".into()
-            }
-            .job_kind(),
-            Some(JobKind::FetchPr)
-        );
+        assert_eq!(Cmd::FetchPrList.job_kind(), Some(JobKind::FetchPrList));
         assert_eq!(
             Cmd::Exec(GitOp::RebaseAbort).job_kind(),
             Some(JobKind::Exec)

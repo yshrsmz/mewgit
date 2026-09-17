@@ -206,10 +206,10 @@ pub(super) fn repo_info_loaded(
             // 成功しても `Unasked` ではなくなっているので二度と頼まない
             // （`TargetState` の doc が言う「決められなかった」は読めなかったことでは
             // ない）。`/code-review` が拾った。
-            // **PR は鍵が同じでも引き直す**（`prs::reload` の doc）。ref が動いた
-            // あとは同じブランチでもチェックの結果やマージ済みかが変わっている。
+            // **PR の一覧も引き直す**（`prs::reload` の doc）。ref が動いたあとは
+            // GitHub 側の PR も CI も動いており、マージされていれば open から消える。
             // **`Ok` のときだけ** —— `Err` の直後は `head` を更新していないので、
-            // 引き直しても同じ答えを 3 往復ぶん買うだけになる（`resolve_target` を
+            // 引き直しても同じ答えを 1 往復ぶん買うだけになる（`resolve_target` を
             // `Ok` の側だけで呼ぶのと同じ理由）。
             Cmd::batch([resolve_target(state), prs::reload(state)])
         }
@@ -305,15 +305,21 @@ pub(super) fn account_resolved(
     state.jobs.finish(JobKind::ResolveAccount);
     state.account = match result {
         Ok(account) => AccountState::Resolved(account),
-        Err(reason) => AccountState::Degraded(reason),
+        Err(reason) => {
+            // **前のアカウントで引いた一覧を残さない**（`PrState::forget`）。
+            // `Degraded` では `prs::reload` が `Cmd::None` を返すので、落とす経路が
+            // ここしか無い —— 残すと `*` / `R` の印（login で決まる）だけが黙って
+            // 消えた一覧が出たままになる。
+            state.prs.forget();
+            AccountState::Degraded(reason)
+        }
     };
-    // **アカウントが決まるまで `wanted_pr()` は `None`** なので、ここが PR を頼む
+    // **アカウントが決まるまで `wanted_pr_list()` は偽**なので、ここが PR 一覧を頼む
     // 2 本目の入口（もう 1 本は `repo_info_loaded`）。**どちらが先に届くかは
     // 決まらない**（01 の「PR ペイン › 何を引くか」）。
     //
-    // **`refresh` ではなく `reload`。** 鍵はブランチ名しか見ないので、`A` で
-    // アカウントを選び直しても「鍵は合っている」と答えてしまい、前のトークンで
-    // 引けなかった答えがそのまま残る（`prs::reload` の doc）。
+    // **鍵が同じでも引き直す、ではなく鍵が無い。** 一覧は選択に紐づかないので、
+    // `A` でアカウントを選び直したらそのまま引き直す（`prs::reload` の doc）。
     prs::reload(state)
 }
 
@@ -349,6 +355,9 @@ pub(super) fn resolve_again(state: &mut AppState) -> Cmd {
     if matches!(state.modal, Some(Modal::AccountPicker { .. })) {
         state.modal = None;
     }
+    // **一覧も落とす**（`account_resolved` の `Err` と同じ理由）。解決し直しているあいだ
+    // 出したままにすると、`*` / `R` の印だけが消えた前のアカウントの一覧が残る。
+    state.prs.forget();
     state.account = AccountState::Resolving;
     Cmd::ResolveAccount(target)
 }

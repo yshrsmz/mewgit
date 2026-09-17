@@ -35,7 +35,7 @@ pub struct AppState {
     pub diff: DiffState,              // 表示中の diff と、その鮮度
     pub branches: BranchState,     // ローカルブランチの一覧と選択（下の「ブランチ一覧」）
     pub stashes: Vec<StashEntry>,
-    pub prs: PrState,                 // 現ブランチ PR、一覧、チェック（下の「PR ペイン」）
+    pub prs: PrState,                 // 開いている PR の一覧とカーソル（下の「PR ペイン」）
     pub progress: Option<InProgressOp>, // Rebase | CherryPick | Revert | Merge
     pub focus: Pane,
     pub right_tab: RightTab,          // 右列の上に出すタブ（下の「右上のタブ」）
@@ -919,92 +919,87 @@ pub struct BranchState {
 ## PR ペイン
 
 右列の上を `Branches | PRs` のタブにする（07 の「右上のタブ」）。`PrState` が持つのは
-**1 つのブランチについての答え**で、HEAD が動いたら捨てる。
+**このリポジトリで開いている PR の一覧**で、対象（`RepoInfo.target`）とアカウントが
+決まってから引く。
 
 ```rust
 pub struct PrState {
-    /// `current` と `checks` が指すブランチ。`AppState::wanted_pr()` と違えば古い。
-    pub branch: Option<String>,
-    pub current: Fetch<Option<PullRequest>>,
-    pub checks: Fetch<Vec<Check>>,
+    pub list: Fetch<Vec<PullRequest>>,
     pub cursor: usize,
 }
 
 pub enum Fetch<T> { Unasked, Loaded(T), Failed(GithubError) }
 ```
 
-- **`Option<PullRequest>` を裸で持たない。** 「まだ頼んでいない」「このブランチに PR が
-  無い」「引けなかった」の 3 つが `None` に畳まる。`BranchState.load` を 3 状態の enum に
+- **`Vec` を裸で持たない。** 「まだ頼んでいない」「開いている PR が 1 件も無い」
+  「引けなかった」の 3 つが空の `Vec` に畳まる。`BranchState.load` を 3 状態の enum に
   したのと同じ形で、05 が `PullRequest.review` / `checks` を `Option` にした理由
   （「レビュー 0 件」と区別できない）の 1 つ深い版
-- **`Fetch<T>` を 2 つで共有する。** チェック一覧も同じ 3 つを持つ（`Vec` が空なのは
-  「チェックが 0 件」であって「まだ引いていない」ではない）。**利用者が 2 つ出た時点で
-  共有先を作る**（コーディング規約）
-- **鍵は構造体に 1 つだけ置く。** `branch` は `current` と `checks` の両方に掛かる
-  ので、`Fetch` の腕ごとに持たせない。`Unasked` の腕だけ鍵を持てない形になり、
-  「どのブランチについて頼んでいないか」という答えの無い問いが型に残る
-- **カーソルはチェック一覧のもの。** 一覧タブのカーソルは 2/2 で足す（`Vec` を
-  持っていないうちから添字を 2 つ置くと、どちらが動くかを読む側が決められない）
+- **鍵を持たない。** 一覧は「いまのリポジトリの open な PR 全部」で、**ブランチにも
+  コミットにも紐づかない**。`PrState.branch`（HEAD のブランチの PR 1 件を持っていた
+  ころの鍵）は、一覧には対応する問いが無いので消えた。追いつきは世代
+  （`JobKind::FetchPrList` の `region()` は `Region::Refs`）だけで足りる
+- **カーソルは PR の番号で座り直す。** 一覧は `sort=updated` で引くので、**ref を
+  動かす書き込みのたびに並びが変わる** —— 添字で座り直すと、自分が commit した
+  瞬間にカーソルが別の PR を指す。見つからなければ（マージされて open から消えた）
+  先頭。Branches ペインが名前で座り直すのと同じ理由
 
 ### 何を引くか
 
-**2 つの `wanted_*` が決める。** 頼む側と、届いた返信を採るかどうかを決める側の両方が
-これを読む（`AppState::wanted_diff()` と同じ形。**同じ判定を 2 箇所に書かない**）。
+**材料は 2 つ。** `TargetState::Resolved` と `AccountState::Resolved` の両方が揃って
+いれば引く。**HEAD は材料ではない** —— 一覧はブランチに紐づかないので、detached でも
+unborn でも同じものが出る。
 
-- `AppState::wanted_pr() -> Option<&str>` — PR を出すべきブランチ。
-  `TargetState::Resolved` かつ `AccountState::Resolved` かつ HEAD がブランチに
-  居るときだけ `Some`
-- `AppState::wanted_checks() -> Option<&str>` — チェックを引くべき head の sha。
-  `prs.branch` が `wanted_pr()` と一致していて、`current` が PR を持っているときだけ
-  `Some`。**`checks` に別の鍵を置かない** —— sha は `current` から導ける
-  （**導出できる値を、元から離れた場所に置かない**）
-
-**頼む場所は 2 つで、材料も 2 つ。** ref（`Msg::RepoInfoLoaded`）と、**どのアカウントで
-引いたか**（`Msg::AccountResolved`）。**どちらの入口も鍵が同じでも引き直す** ——
-鍵はブランチ名しか見ないので、`A` で選び直しても「合っている」と答えてしまい、
-**前のトークンで引けなかった答えがそのまま残る**（独立したレビューが拾った。`A` の
-流れからはそこを抜ける手掛かりが 1 つも無い）。
-
-**頼む場所は 2 つ**（`Msg::AccountResolved` と `Msg::RepoInfoLoaded`）。**どちらが先に
-届くかは決まらない**ので、両方の順序を回すテストを書く。#63 の `RepoInfo.target` は
-まさにこの 2 本の順序で答えが変わり、latch したせいで二度と直らなかった。**こちらは
-latch しない** —— 鍵が合わなければ次の返信で引き直す。
+**頼む場所も 2 つ。** ref（`Msg::RepoInfoLoaded`）と、**どのアカウントで引いたか**
+（`Msg::AccountResolved`）。**どちらが先に届くかは決まらない**ので、両方の順序を回す
+テストを書く。#63 の `RepoInfo.target` はまさにこの 2 本の順序で答えが変わり、
+latch したせいで二度と直らなかった。**こちらは latch しない。**
 
 **`Msg::RepoInfoLoaded` の側は `Ok` の腕だけが頼む。** `Err` の直後は `head` を
-更新していないので、引き直しても同じ答えを **HTTP 3 往復**（PR 1 本 + チェックの
-2 本）ぶん買うだけになる（`resolve_target` を `Ok` の側だけで呼ぶのと同じ理由）。
+更新していないので、引き直しても同じ答えを 1 往復ぶん買うだけになる
+（`resolve_target` を `Ok` の側だけで呼ぶのと同じ理由）。
 
 **それでも、ref を動かさない書き込みでは引きすぎる。** `BranchCreate` / `BranchDelete`
-のように HEAD の PR が変わりようのない操作でも 3 往復払う。**引き金を `GitOp` の判る
-`exec_finished` へ移す形は採っていない** —— `f`（fetch）と `P`（push）は**ローカルの
-HEAD を動かさない**のに GitHub 側の head sha と CI は動くので、`Reload` の 3 値からは
-選べず、`GitOp` ごとの一覧をもう 1 本作ることになる。`core` の予算は 5000/時
-（05 の実測表）なので、いまはこの無駄を選んでいる。
+のように GitHub 側の PR が変わりようのない操作でも 1 往復払う。**引き金を `GitOp` の
+判る `exec_finished` へ移す形は採っていない** —— `f`（fetch）と `P`（push）は
+**ローカルの HEAD を動かさない**のに GitHub 側の PR とその CI は動くので、`Reload` の
+3 値からは選べず、`GitOp` ごとの一覧をもう 1 本作ることになる。`core` の予算は
+5000/時（05 の実測表）なので、いまはこの無駄を選んでいる。
 
-**返信は鍵で採る。** `Msg::PrLoaded { branch, result }` と
-`Msg::ChecksLoaded { sha, result }` が頼んだ鍵をそのまま運び、届いた時点の `wanted_*`
-と違えば捨てる。**運ぶのは頼んだときの鍵であって、届いた値から取り直したものではない**
-（取り直すと、読む側と書く側で出どころが 2 本になる）。
+**返信に鍵は要らないが、世代は要る。** 鍵が答えるのは「選択が動いたか」で、一覧は
+選択に紐づかないから要らない。**世代が答えるのは別のこと** —— 書き込みの最中に飛んで
+いた要求の答え（書き込み前の GitHub の状態）が採られ、そのあとの引き直しが
+`AppState::issue` に落とされたまま誰も拾わない形は、鍵の有無と関係なく残る
+（`FetchPrList` は落ちても通知が出ない）。
 
-**鍵と世代の両方が要る。** `JobKind::FetchPr` / `FetchChecks` の `region()` は
-`Region::Refs`（下の「実行中ジョブ › 世代」）。**鍵が言えるのは「選択が動いた」まで**で、
-**同じブランチのまま PR の側が変わる**（commit / push で head sha が進み、チェックが
-回り直す）のは ref の書き込みで起きる。コミット詳細が Oid だけで足りるのは、あの中身が
-書き込みで変わらないから —— PR は変わる。
+**アカウントが決まっていないことを `Fetch` に持たせない。** `AccountState` から
+導ける。持たせると `Unasked` の理由が状態にも写り、どちらが正かが決まらなくなる。
 
-鍵だけにすると、**書き込みの最中に飛んでいた要求の答え（書き込み前の GitHub の状態）が
-鍵だけ合って採られ、そのあとの引き直しは `AppState::issue` に落とされたまま誰も
-拾わない**（独立したレビューが拾った。`FetchPr` は落ちても通知が出ない）。
+### 現ブランチの PR
 
-**HEAD がブランチに居ないこと（detached / unborn）を `Fetch` に持たせない。**
-`RepoInfo.head` から導ける。持たせると `wanted_pr()` が `None` を返す理由が状態にも
-写り、どちらが正かが決まらなくなる。
+**一覧の 1 行として出す。** `RepoInfo.head` がブランチに居て、その名前と同じ
+`head.branch` を持ち、かつ `head.repo` の owner が `target.owner` と同じ PR が
+それ。**起動直後のカーソルはその行に座る。**
+
+- **状態に持たない。** `list` と `RepoInfo.head` から毎回導ける。持つと、どちらかが
+  更新されたときに片方だけ古くなる（**導出できる値を、元から離れた場所に置かない**）
+- **fork のブランチでは合致しない。** 一覧には fork からの PR も出る（05）が、
+  こちらが持っているのはローカルのブランチ名だけで、**その PR の head がどの fork に
+  あるかを知らない**。`branch.<name>.remote` のリモート URL から owner を出す経路が
+  要る（plan.md の「fork の PR」）。**合致しないとカーソルが先頭に座るだけ**で、
+  PR そのものは一覧に出ている
+- **マージ済み / クローズ済みの PR は出ない。** 一覧は `state=open` だけを引くので、
+  **PR がマージされた瞬間にその行は消える**。HEAD のブランチの PR を `MERGED` として
+  出していた経路（`pr_for_branch` と `Cmd::FetchPr`）は、一覧に変えたときに消した。
+  `o` もカーソル行しか開けないので、**mewgit から閉じた PR を見る手段は無い** ——
+  **受け入れた穴**で、一覧に `state=all` を混ぜると辿るページが 2 桁増え、2/2 の扇形
+  （PR ごとに checks / reviews を引く）が現実的な大きさに収まらない
 
 ### `o`（ブラウザで開く）
 
-`gh browse <番号> -R <host>/<owner>/<repo>` を起動する。**URL を自分で組んで
-`open` / `xdg-open` を呼ばない** —— 不変ルール 7 が外部プロセスを `git` `gh` `ssh` に
-限っている。
+`gh browse <番号> -R <host>/<owner>/<repo>` を起動する。**開くのはカーソル行の PR**。
+**URL を自分で組んで `open` / `xdg-open` を呼ばない** —— 不変ルール 7 が外部プロセスを
+`git` `gh` `ssh` に限っている。
 
 - **`gh browse` が出すのは issue の URL**（実測 2026-09-16、gh 2.100.0:
   `gh browse -n 123 -R github.com/cli/cli` → `https://github.com/cli/cli/issues/123`）。
@@ -1025,7 +1020,7 @@ HEAD を動かさない**のに GitHub 側の head sha と CI は動くので、
   **gh がそのホストにログインしていないと落ちる**（実測: `env -i` で
   `gh browse -n 123 -R github.com/cli/cli` が exit 4、
   `To get started with GitHub CLI, please run:  gh auth login`）
-- **PR が無いときに `N` を案内しない。** `Modal::PrCreate` は次のタスクなので、いま
+- **一覧が空のときに `N` を案内しない。** `Modal::PrCreate` はまだ無いので、いま
   書くと**存在しないキーを案内する**（#63 の「案内が求める操作を、そもそも自分が
   持っているか」）
 
@@ -1753,10 +1748,10 @@ impl JobKind {
 が `oid` を、`Msg::DiffLoaded` が `target` を運ぶ形も残す。**値そのものが鍵を持っている
 なら、そちらのほうが強い**（世代は「リポジトリが変わった」しか言えず、「選択が動いた」を
 言えない）。だから `LoadCommitDetail` / `LoadCommitFiles` は `region()` が `None`。
-**`FetchPr` / `FetchChecks` は逆に両方要る** —— 鍵（ブランチ名 / head sha）が
-「選択が動いた」を、世代が「書き込みで中身が変わった」を言う。**コミットの中身は
-書き込みで変わらないが、PR の中身は変わる**（上の「PR ペイン › 何を引くか」）。
-`OpenPr` は値を読まないので `None`。
+**`FetchPrList` は逆に、鍵が無くて世代だけ要る** —— 一覧は選択に紐づかないので
+「選択が動いた」を言う鍵がそもそも無く、**世代だけが「書き込みで中身が変わった」を
+言う**。**コミットの中身は書き込みで変わらないが、PR の中身は変わる**（上の
+「PR ペイン › 何を引くか」）。`OpenPr` は値を読まないので `None`。
 
 **残るもの**: 落ちた要求の追いつき（(a)）は世代では解けない。`JobKind` の粒度を対象まで
 含めるかは、`LoadDiff` の要求が実際に落ちて困る形が出てから決める。
@@ -1914,9 +1909,7 @@ pub enum Cmd {
     ResolveTarget(RemoteUrl),          // 既定リモートの URL → RepoTarget（上の「RepoInfo.target を埋める」）
     ResolveAccount(RepoTarget),        // どのリポジトリのアカウントを決めるか（04 の手順 1〜4）
     ListAccounts(String),              // そのホストの login 一覧だけを取り直す（上の「候補の取り直し」）
-    FetchPr { branch: String },        // そのブランチの PR（上の「PR ペイン › 何を引くか」）
-    FetchChecks { sha: String },       // その head sha のチェック一覧
-    FetchPrList,
+    FetchPrList,                       // 開いている PR の一覧（上の「PR ペイン › 何を引くか」）
     OpenPr { number: u64 },            // gh browse。上の「o（ブラウザで開く）」
     Quit,
 }

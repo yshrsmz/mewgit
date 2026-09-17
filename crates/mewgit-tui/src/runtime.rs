@@ -390,41 +390,17 @@ impl Runtime {
             // **材料は `AppState` から取る**（`Cmd::ResolveAccount` と同じ理由で、
             // トークンは `Cmd` に載せない —— `SecretString` は `Clone` も `PartialEq` も
             // 持たず、載せると `Cmd` を比べるテストが全部書けなくなる。不変ルール 3）。
-            Cmd::FetchPr { branch } => {
+            Cmd::FetchPrList => {
                 let Some((target, api)) = github_for(state) else {
-                    return no_material(state, JobKind::FetchPr, "PR の取得");
+                    return no_material(state, JobKind::FetchPrList, "PR 一覧の取得");
                 };
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
                     let result = match api {
-                        // **`head_owner` は `target.owner`。** fork 側の owner を出す
-                        // 材料が `RepoInfo.target` に無いので、いまは同一リポジトリの
-                        // PR しか出ない（05 の `head_owner`。plan.md に送ってある）。
-                        Ok(api) => {
-                            api.pr_for_branch(&target.owner, &target.repo, &target.owner, &branch)
-                                .await
-                        }
+                        Ok(api) => api.pr_list(&target.owner, &target.repo).await,
                         Err(err) => Err(err),
                     };
-                    let _ = tx.send(Msg::PrLoaded {
-                        branch,
-                        result: Box::new(result),
-                    });
-                });
-                ControlFlow::Continue(())
-            }
-
-            Cmd::FetchChecks { sha } => {
-                let Some((target, api)) = github_for(state) else {
-                    return no_material(state, JobKind::FetchChecks, "チェックの取得");
-                };
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let result = match api {
-                        Ok(api) => api.checks(&target.owner, &target.repo, &sha).await,
-                        Err(err) => Err(err),
-                    };
-                    let _ = tx.send(Msg::ChecksLoaded { sha, result });
+                    let _ = tx.send(Msg::PrListLoaded(result));
                 });
                 ControlFlow::Continue(())
             }
@@ -448,9 +424,6 @@ impl Runtime {
                 });
                 ControlFlow::Continue(())
             }
-
-            // M4 の 2/2（一覧タブ）で実装する。
-            Cmd::FetchPrList => not_implemented(state, JobKind::FetchPrList, "FetchPrList"),
         }
     }
 }
@@ -480,23 +453,15 @@ fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, Gith
     Some((target, api))
 }
 
-/// 未実装の `Cmd` を通知に積む。黙って捨てると開発中に気付けない。
-///
-/// `Cmd` を実装するたびに 1 行ずつ消えていく。
-fn not_implemented(state: &mut AppState, kind: JobKind, name: &str) -> ControlFlow<()> {
-    dropped(state, kind, format!("未実装のコマンドです: {name}"))
-}
-
 /// 材料が揃わず走らせなかった `Cmd` を通知に積む。
 ///
-/// **`update` が出さない形なので、ここへは来ないはず。** `Cmd::FetchPr` /
-/// `FetchChecks` は [`AppState::wanted_pr`] が `Some` のときしか出ず、その述語が
-/// `target` と `account` の両方を見る（01 の「PR ペイン › 何を引くか」）。
-/// `OpenPr` も PR が出ている画面からしか押せない。
+/// **`update` が出さない形なので、ここへは来ないはず。** `Cmd::FetchPrList` は
+/// [`AppState::wanted_pr_list`] が真のときしか出ず、その述語が `target` と `account` の
+/// 両方を見る（01 の「PR ペイン › 何を引くか」）。`OpenPr` も一覧が出ている画面からしか
+/// 押せない。
 ///
-/// **それでも黙らない。** 黙る版を別に置くと、`not_implemented` の doc が言う
-/// 「黙って捨てると開発中に気付けない」を同じファイルの中で覆すことになり、
-/// **到達不能と書いた腕が壊れても誰も気付けない**（`CLAUDE.md`）。
+/// **それでも黙らない。** 黙って捨てると、**到達不能と書いた腕が壊れても誰も
+/// 気付けない**（`CLAUDE.md`）。
 fn no_material(state: &mut AppState, kind: JobKind, name: &str) -> ControlFlow<()> {
     dropped(state, kind, format!("{name}に必要な材料が揃っていません"))
 }
@@ -856,14 +821,19 @@ mod tests {
         let (mut state, reader) = opened(&repo);
         let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
-        // Quit の後ろは実行しない。未実装 notice が 1 件だけであることで確かめる。
+        // Quit の後ろは実行しない。材料が無い `Cmd` の notice が 1 件だけである
+        // ことで確かめる（`opened` は対象もアカウントも決まっていない）。
         let batch = Cmd::Batch(vec![Cmd::FetchPrList, Cmd::Quit, Cmd::FetchPrList]);
         assert!(runtime.dispatch(&mut state, batch).is_break());
         assert_eq!(state.notices.len(), 1);
     }
 
+    /// 材料の無い `Cmd` は黙って消えない（`no_material`）。
+    ///
+    /// **`update` が出さない形なので、ここへは来ないはず** —— それでも黙らせない
+    /// 理由は `no_material` の doc にある。
     #[tokio::test]
-    async fn unimplemented_cmd_warns_instead_of_disappearing() {
+    async fn a_cmd_without_its_material_warns_instead_of_disappearing() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
         let (mut runtime, _msgs) = runtime_for(&repo, reader);
@@ -873,11 +843,11 @@ mod tests {
         assert_eq!(state.notices.len(), 1);
         let notice = &state.notices[0];
         assert_eq!(notice.level, NoticeLevel::Warn);
-        assert!(notice.message.contains("FetchPrList"));
+        assert!(notice.message.contains("PR 一覧の取得"), "{notice:?}");
     }
 
     #[test]
-    fn an_unimplemented_cmd_does_not_hold_on_to_its_job() {
+    fn a_cmd_without_its_material_does_not_hold_on_to_its_job() {
         // 掴んだままだと、2 回目以降の同じ `Cmd` が `issue` に落とされて
         // 通知も出ない（「1 回だけ警告が出てあとは無反応」になる）。
         let repo = TestRepo::init();
@@ -972,15 +942,15 @@ mod tests {
         assert!(!state.jobs.is_running(JobKind::ListAccounts));
     }
 
-    /// `Cmd::FetchPr` が `GithubClient` を通って `Msg::PrLoaded` で返る（01 の
-    /// 「PR ペイン › 何を引くか」）。
+    /// `Cmd::FetchPrList` が `GithubClient` を通って `Msg::PrListLoaded` で返る
+    /// （01 の「PR ペイン › 何を引くか」）。
     ///
     /// **ホストを組めない値に向けてある**ので、答えは `InvalidHost` に決まり、実 API へ
     /// 出ない。**見張るのは配線** —— `github_for` が `AppState` から材料を取り、
-    /// 頼んだ鍵（ブランチ名）がそのまま返り、ジョブが畳まれること。組み立ての失敗を
-    /// `Msg` に載せる腕もここを通る。
+    /// 返信が `update` を通ればジョブが畳まれること。組み立ての失敗を `Msg` に
+    /// 載せる腕もここを通る。
     #[tokio::test]
-    async fn fetching_a_pr_carries_the_branch_back_and_folds_the_job() {
+    async fn fetching_the_pr_list_comes_back_and_folds_the_job() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
         let (mut runtime, mut msgs) = runtime_for(&repo, reader);
@@ -993,26 +963,23 @@ mod tests {
         });
         state.account = AccountState::Resolved(fake_account("taro"));
 
-        let cmd = state.issue(Cmd::FetchPr {
-            branch: "feat/x".to_string(),
-        });
+        let cmd = state.issue(Cmd::FetchPrList);
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
         let msg = msgs.recv().await.expect("Msg が返りませんでした");
 
-        let Msg::PrLoaded { branch, result } = msg else {
+        let Msg::PrListLoaded(result) = msg else {
             panic!("{msg:?}");
         };
-        assert_eq!(branch, "feat/x", "頼んだ鍵が返っていない");
         assert!(
-            matches!(*result, Err(GithubError::InvalidHost { .. })),
+            matches!(result, Err(GithubError::InvalidHost { .. })),
             "{result:?}"
         );
-        // **畳むのは `update`（`prs::pr_loaded`）の側で、`dispatch` ではない。**
+        // **畳むのは `update`（`prs::pr_list_loaded`）の側で、`dispatch` ではない。**
         // ここが見ているのは「返信が `update` を通ればジョブが残らない」こと ——
         // 材料が無いときに `dispatch` が畳む腕（`no_material`）は**この経路を
         // 通らない**ので、別の見張りが要る（`every_notice_that_a_missing_material…`）。
-        let _ = update(&mut state, Msg::PrLoaded { branch, result });
-        assert!(!state.jobs.is_running(JobKind::FetchPr));
+        let _ = update(&mut state, Msg::PrListLoaded(result));
+        assert!(!state.jobs.is_running(JobKind::FetchPrList));
     }
 
     /// `Cmd::OpenPr` が `GhCli::browse` を通って `Msg::OpenPrFinished` で返る（01 の
@@ -1051,8 +1018,7 @@ mod tests {
         let repo = TestRepo::init();
         let (mut state, _reader) = opened(&repo);
         let cases = [
-            (JobKind::FetchPr, "PR の取得"),
-            (JobKind::FetchChecks, "チェックの取得"),
+            (JobKind::FetchPrList, "PR 一覧の取得"),
             (JobKind::OpenPr, "PR を開く操作"),
         ];
 

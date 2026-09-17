@@ -6,7 +6,7 @@ use crate::git_read::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp,
     LogPage, Oid, RefIndex, Remote, WorktreeSnapshot,
 };
-use crate::github::{Check, GithubError, PullRequest};
+use crate::github::{GithubError, PullRequest};
 
 use super::{Key, TermSize};
 
@@ -145,20 +145,10 @@ pub enum Msg {
     /// 消える。受けるのは [`Modal::AccountPicker`](crate::app::Modal::AccountPicker)
     /// だけで、`state.account` は動かさない。
     AccountsListed(Result<Vec<GhLogin>, AuthError>),
-    /// 頼んだブランチの PR（01 の「PR ペイン › 何を引くか」）。
+    /// 開いている PR の一覧（01 の「PR ペイン › 何を引くか」）。
     ///
-    /// **`branch` は頼んだときの鍵**で、届いた `PullRequest` から取り直したものでは
-    /// ない。取り直すと、読む側と書く側で鍵の出どころが 2 本になる（しかも
-    /// 「PR が無い」のときは取りようが無い）。
-    PrLoaded {
-        branch: String,
-        result: Box<Result<Option<PullRequest>, GithubError>>,
-    },
-    /// 頼んだ head sha のチェック一覧。
-    ChecksLoaded {
-        sha: String,
-        result: Result<Vec<Check>, GithubError>,
-    },
+    /// **鍵を運ばない。** 一覧は選択に紐づかないので突き合わせる相手が無く、
+    /// 追いつきは世代が見る（01 の「実行中ジョブ › 世代」）。
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),
     /// `gh browse` の結果。`Err` は通知に出す（01 の「`o`（ブラウザで開く）」）。
     ///

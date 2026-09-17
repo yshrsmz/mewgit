@@ -25,7 +25,7 @@ use graph::{
     commit_detail_key, commit_detail_loaded, commit_files_loaded, graph_key, load_more, log_loaded,
 };
 use modal::modal_key;
-use prs::{checks_loaded, open_pr_finished, pr_loaded, prs_key};
+use prs::{open_pr_finished, pr_list_loaded, prs_key};
 use remote::{fetch, push};
 use worktree::{head_message_loaded, status_loaded, worktree_key};
 
@@ -150,10 +150,8 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::TargetResolved(resolved) => target_resolved(state, *resolved),
         Msg::AccountResolved(result) => account_resolved(state, result),
         Msg::AccountsListed(result) => accounts_listed(state, result),
-        Msg::PrLoaded { branch, result } => pr_loaded(state, branch, *result),
-        Msg::ChecksLoaded { sha, result } => checks_loaded(state, sha, result),
+        Msg::PrListLoaded(result) => pr_list_loaded(state, result),
         Msg::OpenPrFinished(result) => open_pr_finished(state, result),
-        Msg::PrListLoaded(_) => Cmd::None,
     }
 }
 

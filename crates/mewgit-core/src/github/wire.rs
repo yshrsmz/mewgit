@@ -46,6 +46,11 @@ pub(super) struct WirePull {
     pub user: Option<WireUser>,
     pub head: WirePullRef,
     pub base: WirePullRef,
+    /// **一覧（`GET /repos/{o}/{r}/pulls`）にも入っている。** レビュー依頼の印は
+    /// ここから出す（07 の「PRs ペイン」）。GHES の版差で欠けても落ちないよう
+    /// `default` を付ける。
+    #[serde(default)]
+    pub requested_reviewers: Vec<WireUser>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +111,7 @@ impl From<WirePull> for PullRequest {
             url: w.html_url,
             // Ghost user（アカウント削除）では `user` が `null` になる。
             author: w.user.map(|u| u.login).unwrap_or_default(),
+            requested_reviewers: w.requested_reviewers.into_iter().map(|u| u.login).collect(),
             // レビューもチェックも別リクエスト（`reviews` / `checks`）なので未取得。
             // **`ReviewSummary::default()` を入れない** —— 「0 件」と区別できない。
             review: None,

@@ -16,22 +16,25 @@ pub struct GithubClient { http: reqwest::Client, base: Url, token: SecretString 
 impl GithubClient {
     pub fn new(host: &str, port: Option<u16>, token: SecretString) -> Result<Self>;      // 実装済み
     pub async fn repo(&self, owner, repo) -> Result<RepoMeta>;                          // 実装済み（probe 兼用）
-    pub async fn pr_for_branch(&self, owner, repo, head_owner, branch) -> Result<Option<PullRequest>>;  // 実装済み
     pub async fn checks(&self, owner, repo, sha: &str) -> Result<Vec<Check>>;           // 実装済み
     pub async fn reviews(&self, owner, repo, number: u64) -> Result<ReviewSummary>;     // 実装済み
-    pub async fn pr_list(&self, owner, repo, filter: PrFilter) -> Result<Vec<PullRequest>>;  // `ui::panes::prs`（2/2）
+    pub async fn pr_list(&self, owner, repo) -> Result<Vec<PullRequest>>;               // `ui::panes::prs`（2/2）
     pub async fn create_pr(&self, owner, repo, input: CreatePr) -> Result<PullRequest>;      // `Modal::PrCreate` のタスク
 }
 ```
 
 - **`new` は `Result`。** ベース URL を組めないホストがある（下の「ベース URL」）。
-- **`pr_for_branch` は `head` を 2 つに割って受ける。** API が求めるのは
-  `{owner}:{branch}` で、fork なら fork 側の owner。`:` を挟むのを 1 箇所にする。
-  **いま呼ぶ側は `target.owner` を渡す**（`ui::panes::prs` の 1/2）—— fork 側の owner を
-  出す材料が `RepoInfo.target` に無いので、**同一リポジトリの PR しか出ない**。
-  塞ぐには `branch.<name>.remote` のリモート URL を `RemoteUrl` に通して owner を
-  取り出す経路が要る（plan.md の「fork の PR」）。**`head_owner` を引数から消さない**
-  —— 消すと fork を足すときに `:` を挟む場所が呼び出し側へ戻る
+- **`pr_list` は絞り込みを引数に取らない。** `state=open` / `sort=updated` /
+  `direction=desc` は常に同じで、**誰の PR か**の振り分けは `app` が
+  `user.login` と `requested_reviewers` から行う（07 の「PRs ペイン」）。
+  設計に書いていた `PrFilter` は**作らない** —— 絞り込みがサーバ側に無い以上、
+  引数にすると「API に渡る」と読める名前だけが残る
+- **`pr_for_branch` は消した**（`ui::panes::prs` の 2/2）。PRs ペインが
+  「HEAD のブランチの PR 1 件」から「open な PR の一覧」に変わって読み手が
+  いなくなったため。**fork の PR は `pr_list` にそのまま出る** ——
+  `/repos/{o}/{r}/pulls` は fork からの PR も返し、`head.repo.owner` が fork 側の
+  owner を運ぶ。`head` を `{owner}:{branch}` に組む場所ごと消えたので、
+  `head_owner` を引数で運ぶ話も無くなった
 - **`repo` は probe 兼用**なので、返り値を捨てて「届いたか」だけを見る呼び出しがある。
   probe 専用に `()` を返す関数は作らない。**`auth::resolve` が直に呼ぶのではない**
   —— `github` は `auth` の上段なので、`auth::Backend` を実装する側
@@ -78,7 +81,7 @@ port だけ足すと self-hosted では全部 404」という警告は、パス�
 
 ### TLS とルート証明書
 
-**`reqwest` は 0.13.4。** 0.13.5 は 2026-09-08 公開なので 14 日ルールに掛かる。
+**`reqwest` は 0.13.5**（#81 の lock file maintenance で 0.13.4 から上がった）。
 feature は `json` / `query` / `rustls`。
 
 - **`rustls`**（aws-lc-rs + `rustls-platform-verifier` = OS のトラストストア）。
@@ -107,10 +110,22 @@ feature は `json` / `query` / `rustls`。
 Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
 `cargo update --workspace` を叩いた場合は誰も担保しない。**
 
+**任せた先にも穴がある。** Renovate の `lockFileMaintenance` は
+`minimumReleaseAge` を継承しないので、**`Cargo.toml` に書いた直接依存でも、
+キャレットの範囲内なら公開 14 日未満で lock に入る**。#81 が `reqwest` を
+0.13.5（公開 2026-09-08 20:55 UTC）に上げたのがそれで、2026-09-17 の時点で
+8.6 日だった。**担保しているのは「直接依存かどうか」ではなく、lock を書き換える
+側の設定のほう。**
+
 - **認証付きリクエストは同時 4 本まで（`Semaphore`）。まだ入れていない。**
   いま並ぶのは `checks`（check-runs と commit status）だけで、**上限 4 の
   内側なので `Semaphore` が働く場面がまだ無い**。扇形に広がるのは
-  `ui::panes::prs`（2/2）の一覧タブ（PR ごとに checks / reviews を引く）なので、そこで入れる
+  `ui::panes::prs`（2/2）の集計（PR ごとに checks / reviews を引く）なので、そこで入れる。
+  **置くのはクライアントの中で、`Cmd` を N 本出す形にはできない** —— `JobTracker` は
+  種別単位なので、同じ `JobKind` の 2 本目以降は `AppState::issue` が黙って落とす
+  （01 の「実行中ジョブ」）。**扇形は 1 ジョブ**（対象の `Vec<(number, sha)>` を運ぶ
+  `Cmd` 1 本）にして、その中で `Semaphore` が同時本数を抑える。`checks` は
+  `try_join!` で 2 本取るが、上限 4 の内側なので入れ子で詰まることはない
 - **一覧は `Link` の `rel="next"` を辿って全ページ集める。** `per_page=100` で
   止めない。**切り捨てが答えを変えるものがある** —— `reviews` の配列は古い順なので、
   1 ページ目だけ見ると「変更要求のあと承認した人」を `changes_requested` と数える。
@@ -123,19 +138,27 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
 - **`o`（ブラウザで開く）はここを通らない。** PR を開くのは `gh browse` で、
   `PullRequest.url` は使わない（01 の「`o`（ブラウザで開く）」）。不変ルール 7 が
   外部プロセスを `git` `gh` `ssh` に限っているので、URL を自分で開く経路が無い
+- **`/search/issues` は使わないと決めた**（`ui::panes::prs` の 2/2）。一覧の絞り込みを
+  サーバ側でやれる代わりに、**返るのが issue 形で `head` が無い** ——
+  `PullRequest.head.sha` が埋まらないので、チェックを引く鍵を作れない。
+  `advanced_search=true` を付けても形は変わらない（実測 2026-09-17、`gh api`、
+  github.com。`search_type` は `lexical` のまま、キー集合も同じ）。代わりに
+  `/repos/{o}/{r}/pulls` を引き、**誰の PR かの振り分けは手元で行う**
+  （`user.login` と `requested_reviewers` が本文に入っている）。
 - **レートリミットのバケットは 1 つではない。** `core`（`GET /repos/…` などの REST）と
   `search`（`GET /search/issues`）は別に数え、どちらのものかは応答の
-  `x-ratelimit-resource` に出る。実測（2026-09-16、`gh api -i`、github.com の
-  個人アカウント）。
+  `x-ratelimit-resource` に出る。実測（2026-09-16 / 2026-09-17、`gh api -i`、
+  github.com の個人アカウント）。
 
   | 叩いたもの | `x-ratelimit-resource` | `x-ratelimit-limit` |
   |---|---|---|
   | `/rate_limit` | `core` | 5000 |
+  | `/repos/{o}/{r}/pulls?state=open&per_page=1` | `core` | 5000 |
   | `/search/issues?q=repo:cli/cli+is:pr&per_page=1` | `search` | 30 |
 
-  **数字を 1 つだけヘッダに出すと、2 つの別物を混ぜる。** `search` のほうが 2 桁
-  小さいので、`core` の残量だけ出していると一覧タブが**残量たっぷりに見えたまま
-  止まる**。どちらを出すか（あるいは両方）は 2/2 のタスクで決める
+  **いま mewgit が触るのは `core` だけ**なので、ヘッダに出す数も 1 つで足りる。
+  **表は過去形の記録として残す** —— `search` を使う経路が戻ってきたときに、
+  2 桁小さい上限を数え直さずに済む
 - **レートリミット残量の受け渡しはまだ。** ヘッダの `x-ratelimit-*` は
   [`GithubError::RateLimited`] を組むときにしか読んでいない。**「ヘッダの Degraded
   表示」のタスクへ送っていたが、そこでは足さなかった** —— あのタスクで API を叩くのは
@@ -143,17 +166,16 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
   常時出す残量の産出元にならず、`AppState` に「いつのものか判らない数」を 1 つ
   増やすだけになる。**送り先は `ui::panes::prs`（2/2）** —— PR / checks / reviews を
   引き始めると残量が実際に動き、読む側（ヘッダ）に出す意味が出る。
-  **タスクは 2 本に割れた**（plan.md）ので、送り先は **2/2（一覧タブ）**。
-  1/2（現ブランチの PR）で叩くのは 1 ブランチぶんの `pulls` / `check-runs` /
-  `status` だけで、扇形に広がらず `Semaphore` も働かない
+  **タスクは 2 本に割れた**（plan.md）ので、送り先は **2/2（PR ごとの集計）**。
+  1 本目（一覧を出すだけ）で叩くのは `pulls` 1 本で、扇形に広がらず `Semaphore` も
+  働かない。**出す数は `core` の 1 つ**（上の「`/search/issues` は使わない」）
 
 ## エンドポイント対応
 
 | 機能 | API |
 |---|---|
 | probe / メタ | `GET /repos/{o}/{r}` |
-| ブランチの PR | `GET /repos/{o}/{r}/pulls?head={o}:{branch}&state=all`（fork の場合 `head` に fork owner） |
-| PR 一覧 | `GET /search/issues?q=is:pr+repo:{o}/{r}+author:@me` / `review-requested:@me` |
+| PR 一覧 | `GET /repos/{o}/{r}/pulls?state=open&sort=updated&direction=desc`（fork からの PR も返る） |
 | チェック | `GET /repos/{o}/{r}/commits/{sha}/check-runs` + `GET /commits/{sha}/status`（両方をマージ） |
 | レビュー | `GET /repos/{o}/{r}/pulls/{n}/reviews` を最新レビュー/ユーザーで集約 |
 | PR 作成 | `POST /repos/{o}/{r}/pulls` |
@@ -163,7 +185,7 @@ GraphQL は MVP では使わない（1 画面に必要な情報は REST 数本�
 ## モデル
 
 ```rust
-pub struct PullRequest { number, title, state: PrStatus, draft, head: RefSpec, base: RefSpec, url, author, review: Option<ReviewSummary>, checks: Option<CheckSummary> }
+pub struct PullRequest { number, title, state: PrStatus, draft, head: RefSpec, base: RefSpec, url, author, requested_reviewers: Vec<String>, review: Option<ReviewSummary>, checks: Option<CheckSummary> }
 pub enum PrStatus { Open, Closed, Merged }   // app::PrState（画面の状態）と紛らわしいので Status
 pub struct RefSpec { repo: Option<RepoRef>, branch: String, sha: String }
 pub struct RepoRef { owner: String, repo: String }
@@ -171,6 +193,10 @@ pub enum CheckState { Success, Failure, Pending, Skipped, Neutral }
 pub struct Check { name, state: CheckState, url: Option<String> }
 ```
 
+- **`requested_reviewers` は一覧の本文に入っている。** `/repos/{o}/{r}/pulls` が
+  返すので、レビュー依頼の印（07 の `R`）に往復が要らない。**`requested_teams` は
+  入れない** —— チーム宛ての依頼を自分宛てに読むには、チームの数だけ
+  `/orgs/{org}/teams/{team}/memberships/{login}` を叩くことになる（07 で受け入れた穴）
 - **`review` と `checks` はどちらも `Option`。** 別リクエストなので、PR 一覧を
   引いた直後はどちらも未取得。`review` に `ReviewSummary::default()` を入れると
   **「レビュー 0 件」と区別できない**ので、2 つは対称にする。

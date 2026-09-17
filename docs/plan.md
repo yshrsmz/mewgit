@@ -164,20 +164,41 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       が何を止める旗かもここで決める**（`AccountState::Disabled`。04）。
       **実装済みの API だけで組む** —— `pr_for_branch` / `checks` / `reviews` と
       `Link` のページ辿りは #59 で入っている
-- [ ] `ui::panes::prs`（2/2）一覧タブ — `GithubClient::pr_list`（`/search/issues`）、
-      同時 4 本の `Semaphore`、レートリミット残量の受け渡しとヘッダ表示。
-      **レートリミット残量がここなのは、扇形に広がるのが一覧だから** —— ヘッダ表示の
-      タスクへ送られていたが、あちらで API を叩くのは起動時の probe だけで常時出す
-      残量の産出元にならず、1/2 でも叩くのは 1 ブランチぶんの 3 本で動かない
-      （05 の「レートリミット残量の受け渡し」）。**`core` と `search` でバケットが
-      別**なのも一覧を入れて初めて両方が動く（05 の実測表）
-- [ ] fork の PR — `pr_for_branch` の `head_owner` に fork 側の owner を渡す。
-      **1/2 では `target.owner` 固定**（同一リポジトリの PR しか出ない）。塞ぐには
-      ブランチの push 先リモート（`branch.<name>.remote`）を `RemoteUrl` に通して
-      owner を出す経路が要る（05 の「`head_owner`」）
+- [x] `ui::panes::prs`（2/2 の 1 本目）PRs ペインを open な PR の一覧にする —
+      `GithubClient::pr_list`（`GET /repos/{o}/{r}/pulls?state=open&sort=updated&direction=desc`）、
+      `PrState` を `Fetch<Vec<PullRequest>>` 1 本にし、行頭の印（`*` 自分の PR /
+      `R` レビュー依頼）まで。**`/search/issues` は使わないと決めた** —— 返るのが
+      issue 形で `head` が無く、チェックを引く鍵を作れない（05。実測 2026-09-17）。
+      **`pr_for_branch` と `Cmd::FetchPr` / `Cmd::FetchChecks` は消す**（01 の
+      「現ブランチの PR」）
+- [ ] `ui::panes::prs`（2/2 の 2 本目）PR ごとのチェック集計 — 一覧の各 PR に
+      `checks` / `reviews` を引く扇形、同時 4 本の `Semaphore`、レートリミット残量の
+      受け渡しとヘッダ表示。**扇形は 1 ジョブにする** —— `JobTracker` は種別単位なので、
+      `Cmd` を N 本出すと `AppState::issue` が 2 本目以降を黙って落とす（05 の
+      「`Semaphore`」）。**残量は `core` だけ**（`search` を使わないと決めたので
+      バケットが 1 本になった。05 の実測表）
+- [ ] fork のブランチで現ブランチの PR を当てる — **一覧には fork からの PR も出る**
+      （`/repos/{o}/{r}/pulls` が返す）が、起動時にカーソルを座らせる照合が
+      `head.repo.owner == target.owner` なので、**fork のブランチでは合致せず先頭に
+      座る**（01 の「現ブランチの PR」）。塞ぐにはブランチの push 先リモート
+      （`branch.<name>.remote`）を `RemoteUrl` に通して owner を出す経路が要る
+- [ ] 閉じた PR を見る経路 — 一覧は `state=open` だけを引くので、**マージされた
+      瞬間にその行は消え、mewgit から辿る手段が無い**（01 の「現ブランチの PR」で
+      受け入れた穴）。塞ぐなら「一覧に `state=all` を混ぜる」ではなく、**別の入口**
+      （番号を入れて開く / 閉じたものを出すトグル）にする —— 全件を引くと辿るページが
+      2 桁増え、PR ごとの扇形が現実的な大きさに収まらない
 - [ ] `Modal::PrCreate` と `create_pr`
 - [ ] PR チェックアウト（同一リポジトリ / fork）
 - [ ] 403 の `needed_scopes` 案内
+
+`ui::panes::prs`（2/2）を 2 本に割った理由。1 本目は**新しい往復を 1 つも増やさずに
+画面から触れるものが増える** —— いままで HEAD のブランチの PR 1 件しか出なかった枠に、
+open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を引く扇形で、
+**同時本数（`Semaphore`）とレートリミット残量という別の関心事**が入る。1 本にすると
+「一覧が出るか」と「扇形が何本走るか」が同じ差分に混ざる。
+
+**1/2（#83）が入れた「HEAD のブランチの PR 1 件」は、1 本目で一覧に置き換わる。**
+`PrState.current` / `checks` と `pr_for_branch` は消える（01 の「現ブランチの PR」）。
 
 ## M5: 履歴操作
 

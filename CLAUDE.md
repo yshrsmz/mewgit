@@ -131,10 +131,20 @@ python3 scripts/screen.py out.txt 80 24
 いるあいだの `Ctrl-C` は中断で、終了しない**（#56）ので、そのときは 2 回送る。`Esc` で
 閉じてから `q` を送ると、`screen.py` が出すのは閉じたあとの 1 枚になる。
 
-**pty で確かめられないものが 1 つある。`\t`（Tab）を送ってもフォーカスが移らない。**
-`Tab` → `s`（stage）を送っても何も起きず、通知も出ない。**ペインをまたぐ操作は pty では
-踏めない**ので、共通キー（`f` / `p` / `P` / `Ctrl-C`）で確かめるか、状態を作って
-`update` / `layout` を直に呼ぶ。原因は未調査。
+**`\t`（Tab）は効く。ペインをまたぐ操作も pty で踏める。** ここには以前
+「送ってもフォーカスが移らない」「`Tab` → `s`（stage）を送っても何も起きない」と
+書いてあったが、**移らなかったのではなく行き先が違っていた** —— 巡回順は
+`AppState::focus_candidates()`（`Pane::WIP_FOCUS` の並び）で、**Graph の次は
+Branches**。`Tab` 1 回で `s` を押しても Worktree には居ないので何も起きない。
+実測（2026-09-17、80x24、WIP 行を選択、`config.github.enabled` は既定）—— `Tab` を
+**3 回**送ると Worktree に届き、`s` が `git add` を実行した
+（`git status --short` が ` M a.txt` → `M  a.txt`）。`Tab` 2 回で PRs ペインに入り、
+`j` でカーソルの反転が追随することも生出力の SGR で確かめた。
+**何回送るかは `focus_candidates()` の並びから数える** —— 選んでいる行（WIP /
+コミット）と `config.github.enabled` で候補が変わるので、固定の回数を書かない。
+
+**`screen.py` は色を落とす。** 反転や太字を確かめたいときは `out.txt` の生の
+エスケープを見る（`\033[...m` のうち `7` を含む区間が反転）。
 
 **確認用の一時リポジトリは `env -i` で環境を切って作る。** `GIT_CONFIG_NOSYSTEM` などの
 ために `HOME` をそのリポジトリに向けたまま python などを走らせると、macOS が

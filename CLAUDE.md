@@ -410,7 +410,11 @@ env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/d
   ことが、その守りが空振りだというサインになる。
 - **「この見張りは本当に落ちるか」を実装を壊して確かめるとき、`cargo test --workspace` は
   最初に失敗したターゲットで打ち切る。** 後続クレートの結果が出ないまま「落ちなかった」と
-  誤読する。`--no-fail-fast` を付けるか、`-p <crate> --lib <テスト名>` で対象を絞る
+  誤読する。`--no-fail-fast` を付けるか、`-p <crate> --lib <テスト名>` で対象を絞る。
+  **ただし `mewgit-tui` はその形で絞れない** —— ディレクトリ名は `crates/mewgit-tui` だが
+  **パッケージ名は `mewgit`** で、しかも lib ターゲットが無い（bin だけ）。`-p mewgit-tui`
+  は `did not match any packages`、`-p mewgit --lib` は `no library targets found` で落ちる。
+  こちらは **`cargo test -p mewgit --bin mewgit <テスト名>`**
 - **テストを削るとき、「生存側が同じ失敗を捕まえる」を読んで決めない。生存側を残した
   まま実装を壊し、落ちることを確かめる。** 上の項目はどれも「足す・残す見張り」の話で、
   **削る側にこれを向けたことが無かった。** #82 で 27 本を削ったうち、読みだけで決めた
@@ -460,7 +464,11 @@ env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/d
 - **その戻しに `git checkout <file>` を使わない。** 戻る先は**コミット**であって、
   壊す直前の状態ではない。同じファイルに未コミットの修正（レビュー指摘の適用など）が
   あると丸ごと消える。#68 では `/simplify` の適用を全部消して replay する羽目になった。
-  `cp` で退避して `cp` で戻し、戻したあと `touch` する（上の項）
+  `cp` で退避して `cp` で戻し、戻したあと `touch` する（上の項）。
+  **戻し方はループの中で 1 つに揃える。** #83 で 2 回目を踏んだのは、変異を連続で回す
+  **1 つのコマンドの中で 4 件を `cp` で戻しながら、最後の 1 件だけ `git checkout` を
+  書いた**から —— コミット済みの直前のコミットまで戻り、`/simplify` で入れた共有先が
+  丸ごと消えた。**規則を知っていても、戻し方が混ざっていると踏む。**
 - `Path` 同士の `assert_eq!` は末尾の区切りを無視するので、パスの正規化はテストできない。
   git2 の `workdir()` / `path()` は `/…/repo/` と末尾を付けて返すため、正規化を確かめる
   ときは `to_string_lossy()` で文字列に直して見る

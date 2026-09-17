@@ -18,7 +18,7 @@ impl GithubClient {
     pub async fn repo(&self, owner, repo) -> Result<RepoMeta>;                          // 実装済み（probe 兼用）
     pub async fn checks(&self, owner, repo, sha: &str) -> Result<Vec<Check>>;           // 実装済み
     pub async fn reviews(&self, owner, repo, number: u64) -> Result<ReviewSummary>;     // 実装済み
-    pub async fn pr_list(&self, owner, repo) -> Result<Vec<PullRequest>>;               // `ui::panes::prs`（2/2）
+    pub async fn pr_list(&self, owner, repo) -> Result<Vec<PullRequest>>;               // 実装済み
     pub async fn create_pr(&self, owner, repo, input: CreatePr) -> Result<PullRequest>;      // `Modal::PrCreate` のタスク
 }
 ```
@@ -126,11 +126,17 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
   （01 の「実行中ジョブ」）。**扇形は 1 ジョブ**（対象の `Vec<(number, sha)>` を運ぶ
   `Cmd` 1 本）にして、その中で `Semaphore` が同時本数を抑える。`checks` は
   `try_join!` で 2 本取るが、上限 4 の内側なので入れ子で詰まることはない
-- **一覧は `Link` の `rel="next"` を辿って全ページ集める。** `per_page=100` で
-  止めない。**切り捨てが答えを変えるものがある** —— `reviews` の配列は古い順なので、
-  1 ページ目だけ見ると「変更要求のあと承認した人」を `changes_requested` と数える。
-  check-runs もマトリクスビルドが 100 を超えると、2 ページ目の失敗が見えないまま
-  緑に見える。`Link` が輪を作っても止まるよう 10 ページ（1000 件）で打ち切る
+- **一覧は `Link` の `rel="next"` を辿る。** `per_page=100` で止めない。
+  **切り捨てが答えを変えるものがある** —— `reviews` の配列は古い順なので、1 ページ目
+  だけ見ると「変更要求のあと承認した人」を `changes_requested` と数える。check-runs も
+  マトリクスビルドが 100 を超えると、2 ページ目の失敗が見えないまま緑に見える。
+- **辿るのは 10 ページ（1000 件）まで。** `Link` が輪を作っても止まるための上限だが、
+  **超えたことは呼ぶ側に伝わらない**（`get_paged` が黙って `Ok` を返す）。「全ページ
+  集める」ではない —— open PR が 1000 件を超えるリポジトリでは**いちばん古い側が
+  落ちる**（`pr_list` は `sort=updated&direction=desc`）ので、放置した自分の PR が
+  一覧から消え、`AppState::current_pr` も当たらなくなる。**画面には何も出ない。**
+  打ち切りを知らせる経路を足すかは、実際にそういうリポジトリが出てから決める
+  （plan.md）
 - **タイムアウトを付ける。** `reqwest` の既定は**無制限**で、GHES が固まると
   OS の TCP タイムアウトまで（分単位）回り続ける。#56 のスピナーは出るが、
   `Ctrl-C` が止められるのは `Cmd::Exec`（git）だけで HTTP は止まらない。
@@ -157,6 +163,9 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
   | `/search/issues?q=repo:cli/cli+is:pr&per_page=1` | `search` | 30 |
 
   **いま mewgit が触るのは `core` だけ**なので、ヘッダに出す数も 1 つで足りる。
+  **1 回の引き直しで払うのは 1 ページぶん**が普通（実測 2026-09-17: `cli/cli` の
+  open PR は 62 件で `Link` の `next` が付かず 1 リクエスト）。100 件を超えると
+  ページの数だけ**逐次**に増える。
   **表は過去形の記録として残す** —— `search` を使う経路が戻ってきたときに、
   2 桁小さい上限を数え直さずに済む
 - **レートリミット残量の受け渡しはまだ。** ヘッダの `x-ratelimit-*` は

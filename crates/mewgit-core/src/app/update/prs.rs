@@ -7,7 +7,8 @@ use crate::auth::AuthError;
 use crate::github::{GithubError, PullRequest};
 
 use super::focus;
-use crate::app::{AppState, Cmd, Fetch, JobKind, Key, KeyCode, NoticeLevel, Pane};
+use crate::app::state::current_row;
+use crate::app::{AppState, Cmd, JobKind, Key, KeyCode, NoticeLevel, Pane};
 
 /// PRs ペインのキー処理。
 pub(super) fn prs_key(state: &mut AppState, key: Key) -> Cmd {
@@ -69,23 +70,29 @@ pub(super) fn reload(state: &AppState) -> Cmd {
 /// **鍵は無いが世代は見る**（01 の「何を引くか」）。書き込みの最中に飛んでいた要求の
 /// 答えは**書き込み前の GitHub の状態**だが、出せるものは出したままにして裏で引き直す
 /// （`repo_info_loaded` と同じ形）。
+///
+/// **失敗しても読めていた一覧は捨てない**（`PrState::failed`）。引き直すのは ref を
+/// 動かす書き込みのたびなので、捨てると commit 直後に 1 回転けただけでペインが
+/// エラー 1 行になる。
 pub(super) fn pr_list_loaded(
     state: &mut AppState,
     result: Result<Vec<PullRequest>, GithubError>,
 ) -> Cmd {
     let asked = state.jobs.finish(JobKind::FetchPrList);
-    // **入れ替える前のカーソル行を憶える。** 並びは `sort=updated` なので、ref を
-    // 動かす書き込みのあとは添字が別の PR を指す（`PrState::set_list`）。
-    let keep = state.prs.selected().map(|pr| pr.number);
-    let fetched = match result {
-        Ok(list) => Fetch::Loaded(list),
-        Err(err) => Fetch::Failed(err),
-    };
-    state.prs.set_list(fetched);
-    // **座り直す先は 2 つ。** 既に一覧を持っていたならカーソル行の PR、初めて持った
-    // （起動直後 / 失敗のあと）ならいま居るブランチの PR（01 の「現ブランチの PR」）。
-    let seat = keep.or_else(|| state.current_pr().map(|pr| pr.number));
-    state.prs.seat(seat);
+    match result {
+        // **座り直す先は `PrState::loaded` が決める。** 呼ぶ側が渡すのは「いま選んで
+        // いる PR が消えていたときの行き先」だけで、それは新しい一覧といまの HEAD から
+        // 決まる（01 の「現ブランチの PR」）。
+        Ok(list) => {
+            // **`repo` だけを借りる。** `state.prs` を書き換えながら `state.repo` を
+            // 読むので、閉包が掴むのを 1 フィールドに絞る（Rust 2021 の分割キャプチャ）。
+            let repo = &state.repo;
+            state
+                .prs
+                .loaded(list, |list| current_row(repo, list).map(|pr| pr.number))
+        }
+        Err(err) => state.prs.failed(err),
+    }
     if state.jobs.is_fresh(JobKind::FetchPrList, asked) {
         Cmd::None
     } else {
@@ -108,13 +115,15 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{cells, press, state, state_with_commits};
+    use super::super::test_support::{
+        cells, issued, press, repo_snapshot, state, state_with_commits,
+    };
     use super::super::update;
     use super::*;
-    use crate::app::{Msg, NoticeLevel, Region, RepoSnapshot, TargetState};
+    use crate::app::{Msg, NoticeLevel, PrLoad, Region, RepoSnapshot, TargetState};
     use crate::auth::{AccountState, DegradedReason};
     use crate::config::Config;
-    use crate::git_read::{HeadInfo, RefIndex};
+    use crate::git_read::HeadInfo;
     use crate::github::RepoRef;
     use crate::test_util::{
         fake_account, fake_oid, fake_pull_request, fake_target, pr_list_loaded as list_msg,
@@ -126,14 +135,6 @@ mod tests {
         let mut state = state_with_commits(2);
         put_on_branch(&mut state, branch);
         state
-    }
-
-    /// `Cmd::Batch` の中も見る。
-    fn issued(cmd: &Cmd, wanted: &Cmd) -> bool {
-        match cmd {
-            Cmd::Batch(cmds) => cmds.iter().any(|c| c == wanted),
-            other => other == wanted,
-        }
     }
 
     /// 一覧を届けて、カーソルの座り先まで進める。
@@ -197,12 +198,11 @@ mod tests {
         let cmd = update(
             &mut state,
             Msg::RepoInfoLoaded(Box::new(Ok(RepoSnapshot {
-                remotes: Vec::new(),
                 head: HeadInfo::Branch {
                     name: "feat/x".to_string(),
                     oid: fake_oid(0),
                 },
-                refs: RefIndex::default(),
+                ..repo_snapshot()
             }))),
         );
         assert!(issued(&cmd, &Cmd::FetchPrList), "{cmd:?}");
@@ -293,30 +293,40 @@ mod tests {
 
         assert_eq!(state.current_pr(), None, "fork の PR に合致している");
         assert_eq!(state.prs.cursor, 0);
-        assert_eq!(state.prs.list.loaded().map(Vec::len), Some(2), "消えている");
+        assert_eq!(state.prs.list.len(), 2, "消えている");
     }
 
     #[test]
     fn an_empty_list_is_not_the_same_as_an_unfetched_one() {
         // **`Fetch` の 3 状態**（01）。空の `Vec` は「開いている PR が 1 件も無い」。
         let mut state = state_on_branch("feat/x");
-        assert!(matches!(state.prs.list, Fetch::Unasked));
+        assert_eq!(state.prs.load(), &PrLoad::Pending);
+        assert!(state.prs.list.is_empty());
 
         deliver(&mut state, Vec::new());
-        assert!(matches!(&state.prs.list, Fetch::Loaded(list) if list.is_empty()));
+        assert_eq!(state.prs.load(), &PrLoad::Loaded);
+        assert!(state.prs.list.is_empty());
     }
 
     #[test]
     fn a_failed_fetch_is_remembered_and_the_material_that_changed_asks_again() {
         // **失敗を状態に持つ**（01 の「失敗の記憶」）。
         let mut state = state_on_branch("feat/x");
+        deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
+
         let ask = reload(&state);
-        let _ = reply(
+        let next = reply(
             &mut state,
             ask,
             Msg::PrListLoaded(Err(GithubError::NotFound)),
         );
-        assert!(matches!(state.prs.list, Fetch::Failed(_)));
+        // **自分では頼み直さない。** 回すと「失敗 → 再読込 → 失敗」になる
+        // （01 の「失敗の記憶」）。
+        assert_eq!(next, Cmd::None, "失敗を頼み直している");
+        assert!(matches!(state.prs.load(), PrLoad::Failed(_)));
+        // **読めていた一覧は捨てない**（`PrState::failed`）。捨てると、commit 直後の
+        // 引き直しが 1 回転けただけでペインがエラー 1 行になる。
+        assert_eq!(state.prs.list.len(), 1, "読めていた一覧を捨てている");
 
         // **出口は材料が変わったとき。** `f`（ref）でも `A`（アカウント）でも
         // 引き直せる（`reload` の doc）。
@@ -334,7 +344,7 @@ mod tests {
             ask,
             Msg::PrListLoaded(Err(GithubError::NotFound)),
         );
-        assert!(matches!(state.prs.list, Fetch::Failed(_)));
+        assert!(matches!(state.prs.load(), PrLoad::Failed(_)));
 
         // `A` → 選び直し → `GitOp::SetAccount` → `resolve_again` → 解決し直し。
         let cmd = update(&mut state, Msg::AccountResolved(Ok(fake_account("hanako"))));
@@ -389,6 +399,53 @@ mod tests {
         );
         // **カーソル行を開く。** 起動直後は現ブランチの PR に座っている。
         assert_eq!(press(&mut state, 'o'), Cmd::OpenPr { number: 82 });
+
+        // **動かしてからも押す。** 先頭で押すだけだと「カーソル行を開く」ではなく
+        // 「先頭を開く」でも通る。
+        state.jobs.finish(JobKind::OpenPr);
+        let _ = press(&mut state, 'j');
+        assert_eq!(press(&mut state, 'o'), Cmd::OpenPr { number: 90 });
+    }
+
+    #[test]
+    fn losing_the_account_drops_the_list_it_was_fetched_with() {
+        // **印（`*` / `R`）は login で決まる。** 残すと、印だけが黙って消えた
+        // 前のアカウントの一覧が出たままになる（`PrState::forget`）。
+        // **`Degraded` では `reload` が `Cmd::None` を返す**ので、落とす経路は
+        // `account_resolved` の `Err` しか無い。
+        let mut state = state_on_branch("feat/x");
+        deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
+        assert_eq!(state.prs.list.len(), 1);
+
+        let cmd = update(
+            &mut state,
+            Msg::AccountResolved(Err(DegradedReason::GhMissing)),
+        );
+        assert_eq!(cmd, Cmd::None, "degraded なのに頼んでいる");
+        assert!(
+            state.prs.list.is_empty(),
+            "前のアカウントの一覧が残っている"
+        );
+        assert_eq!(state.prs.load(), &PrLoad::Pending);
+        assert_eq!(state.prs.cursor, 0);
+    }
+
+    #[test]
+    fn resolving_again_drops_the_list_until_the_account_comes_back() {
+        // `A` → 選び直しの最中も同じ（`resolve_again`）。**戻ってきたら引き直す**ので、
+        // 落としたままにはならない。
+        let mut state = state_on_branch("feat/x");
+        deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
+
+        let cmd = super::super::account::resolve_again(&mut state);
+        assert!(matches!(cmd, Cmd::ResolveAccount(_)));
+        assert!(state.prs.list.is_empty(), "解決し直しの最中に残っている");
+
+        let again = update(&mut state, Msg::AccountResolved(Ok(fake_account("taro"))));
+        assert!(
+            issued(&again, &Cmd::FetchPrList),
+            "引き直していない: {again:?}"
+        );
     }
 
     #[test]

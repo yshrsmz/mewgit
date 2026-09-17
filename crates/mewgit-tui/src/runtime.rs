@@ -462,19 +462,17 @@ fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, Gith
 ///
 /// **それでも黙らない。** 黙って捨てると、**到達不能と書いた腕が壊れても誰も
 /// 気付けない**（`CLAUDE.md`）。
+/// **ジョブを畳むのが要る。** `update` の出口（[`AppState::issue`]）が登録したまま
+/// 誰も完了させないと、2 回目以降の同じ `Cmd` が通知も出さずに捨てられ、「1 回だけ
+/// 警告が出てあとは無反応」になる。`dispatch` が `notices` 以外に書いてよい唯一の
+/// 場所（01 のランタイム）。
 fn no_material(state: &mut AppState, kind: JobKind, name: &str) -> ControlFlow<()> {
-    dropped(state, kind, format!("{name}に必要な材料が揃っていません"))
-}
-
-/// 走らせなかった `Cmd` のジョブを畳んで通知を積む。
-///
-/// **畳むのが要る。** `update` の出口（[`AppState::issue`]）が登録したまま誰も完了
-/// させないと、2 回目以降の同じ `Cmd` が通知も出さずに捨てられ、「1 回だけ警告が出て
-/// あとは無反応」になる。`dispatch` が `notices` 以外に書いてよい唯一の場所（01 の
-/// ランタイム）。
-fn dropped(state: &mut AppState, kind: JobKind, message: String) -> ControlFlow<()> {
     state.jobs.finish(kind);
-    state.push_notice(NoticeLevel::Warn, message, None);
+    state.push_notice(
+        NoticeLevel::Warn,
+        format!("{name}に必要な材料が揃っていません"),
+        None,
+    );
     ControlFlow::Continue(())
 }
 

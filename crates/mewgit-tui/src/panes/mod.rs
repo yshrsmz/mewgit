@@ -32,9 +32,14 @@ pub struct TopPane {
 }
 
 /// 組んだ行と、カーソルが何行目か。
+///
+/// **`cursor` が `Option` なのは、選べる行が無い状態があるから。** 一覧が空のときに
+/// 出すのは文言 1 行で、そこは選択肢ではない —— `0` で表すと「先頭の行を選んでいる」と
+/// 同じ値になり、反転させる側が「文言を反転してよいか」を答えられなくなる
+/// （`CLAUDE.md` の「`None` の理由を 2 つ以上持たせない」）。
 pub struct Rows {
     pub lines: Vec<Line<'static>>,
-    pub cursor: usize,
+    pub cursor: Option<usize>,
 }
 
 impl TopPane {
@@ -72,13 +77,23 @@ impl TopPane {
     }
 
     /// 描く。領域の高さは [`height`](Self::height) が決める。
+    ///
+    /// **カーソル行の反転はここ 1 箇所。** `Branches` と `Prs` は同じ [`Rows`] を
+    /// 出すので、ペインごとに `theme::selected()` を当てると片方だけ落ちる
+    /// （実際に落ちた —— PRs ペインを一覧に書き直したときに反転が消え、`j` / `k` を
+    /// 押しても画面が変わらないまま `o` がカーソル行を開いていた）。
     pub fn render(self, frame: &mut Frame, area: Rect, state: &AppState) {
         let block = self.block(state);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let cursor = self.rows.cursor;
-        ui::render_rows(frame, inner, self.rows.lines, cursor..cursor + 1);
+        let Rows { mut lines, cursor } = self.rows;
+        if let Some(line) = cursor.and_then(|at| lines.get_mut(at)) {
+            line.style = theme::selected();
+        }
+        // 選べる行が無いときは先頭を見せる（文言 1 行しか無い）。
+        let at = cursor.unwrap_or(0);
+        ui::render_rows(frame, inner, lines, at..at + 1);
     }
 }
 

@@ -924,21 +924,32 @@ pub struct BranchState {
 
 ```rust
 pub struct PrState {
-    pub list: Fetch<Vec<PullRequest>>,
+    pub list: Vec<PullRequest>,
     pub cursor: usize,
+    load: PrLoad,
 }
 
-pub enum Fetch<T> { Unasked, Loaded(T), Failed(GithubError) }
+pub enum PrLoad { Pending, Loaded, Failed(GithubError) }
 ```
 
-- **`Vec` を裸で持たない。** 「まだ頼んでいない」「開いている PR が 1 件も無い」
-  「引けなかった」の 3 つが空の `Vec` に畳まる。`BranchState.load` を 3 状態の enum に
-  したのと同じ形で、05 が `PullRequest.review` / `checks` を `Option` にした理由
-  （「レビュー 0 件」と区別できない）の 1 つ深い版
+- **`BranchState` と同じ形（値 + 段階）にする。** 引けた値そのものを 3 状態の enum に
+  入れると、**読み直しが 1 回転けただけで読めていた一覧が画面から消える** ——
+  一覧を引き直すのは ref を動かす書き込みのたびなので、この差は毎コミット効く
+  （`BranchState::failed` の「捨てると画面から消えるだけになる」）
+- **旗を `bool` 2 つにしない。** 「まだ届いていないのに失敗した」が表現できてしまう
+  （`BranchLoad` と同じ理由）
+- **`Failed` だけ理由を持つ。** `BranchLoad` は値を持たないが、GitHub の失敗は
+  401 / 403 / レート制限で**次に何をするかが違う**ので `GithubError` を運んで `ui` に
+  出させる（07）
 - **鍵を持たない。** 一覧は「いまのリポジトリの open な PR 全部」で、**ブランチにも
-  コミットにも紐づかない**。`PrState.branch`（HEAD のブランチの PR 1 件を持っていた
-  ころの鍵）は、一覧には対応する問いが無いので消えた。追いつきは世代
+  コミットにも紐づかない**。HEAD のブランチの PR 1 件を持っていたころの鍵は、
+  一覧には対応する問いが無いので消えた。追いつきは世代
   （`JobKind::FetchPrList` の `region()` は `Region::Refs`）だけで足りる
+- **一覧はアカウントに紐づく。** `*` / `R` の印は login で決まるので、`A` で選び直す
+  あいだと degraded に落ちたときは一覧ごと落とす（`PrState::forget`）。残すと
+  **印だけが黙って消えた前のアカウントの一覧**が出たままになる。**`Degraded` では
+  `reload` が何も出さない**ので、落とす経路は `account_resolved` の `Err` と
+  `resolve_again` の 2 つしかない
 - **カーソルは PR の番号で座り直す。** 一覧は `sort=updated` で引くので、**ref を
   動かす書き込みのたびに並びが変わる** —— 添字で座り直すと、自分が commit した
   瞬間にカーソルが別の PR を指す。見つからなければ（マージされて open から消えた）
@@ -1816,10 +1827,8 @@ pub enum Msg {
     TargetResolved(Box<ResolvedTarget>),  // { target, unnormalized }。上の「RepoInfo.target を埋める」
     AccountResolved(Result<Account, DegradedReason>),
     AccountsListed(Result<Vec<GhLogin>, AuthError>),  // 選び直しの候補。上の「候補の取り直し」
-    PrLoaded { branch: String, result: Box<Result<Option<PullRequest>, GithubError>> },
-    ChecksLoaded { sha: String, result: Result<Vec<Check>, GithubError> },
+    PrListLoaded(Result<Vec<PullRequest>, GithubError>),  // 開いている PR の一覧。上の「PR ペイン」
     OpenPrFinished(Result<(), AuthError>),            // gh browse の結果。Err は通知に出す
-    PrListLoaded(Result<Vec<PullRequest>, GithubError>),
 }
 ```
 
@@ -1888,9 +1897,11 @@ diff がいま選んでいるファイルのものかを判定するのに要る
 1 通にまとめると本文だけ見えていれば足りる時点でも一覧を待つことになる
 （上の「コミットのファイル一覧」）。
 
-`ExecFinished` と `PrLoaded` と `CommitDetailLoaded` と `CommitFilesLoaded` と `StatusLoaded` と `DiffLoaded` は payload を `Box` に入れる。入れないと `Msg` が
-数百バイトになり、1 打鍵ごとに作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。
-これらを Box すると 96 バイトに収まる。上限は `msg.rs` のテスト（128 バイト）で見張る。
+大きい payload は `Box` に入れる。入れないと `Msg` が数百バイトになり、1 打鍵ごとに
+作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。**どれを `Box` するかを
+ここに並べない** —— 並べた一覧は実物と割れる（実際に `BranchesLoaded` と
+`TargetResolved` が漏れたまま残っていた）。**見張りは `msg.rs` のテスト（128 バイト）**
+で、超えた変種はそこで落ちる。
 
 ## Cmd
 

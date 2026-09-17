@@ -31,26 +31,18 @@ pub(super) fn lines(state: &AppState) -> Rows {
     if branches.is_empty() {
         return Rows {
             lines: vec![Line::raw(placeholder(state))],
-            cursor: 0,
+            // 文言 1 行は選択肢ではない（[`Rows::cursor`]）。
+            cursor: None,
         };
     }
 
     let ascii = state.config.graph.ascii;
-    let lines = branches
-        .iter()
-        .enumerate()
-        .map(|(index, branch)| {
-            let line = row(branch, ascii);
-            if index == state.branches.cursor {
-                line.style(theme::selected())
-            } else {
-                line
-            }
-        })
-        .collect();
+    // **カーソル行の反転はここで当てない。** [`super::TopPane::render`] が `cursor` を
+    // 見て 1 箇所で当てる（`Prs` と共有）。
+    let lines = branches.iter().map(|branch| row(branch, ascii)).collect();
     Rows {
         lines,
-        cursor: state.branches.cursor,
+        cursor: Some(state.branches.cursor),
     }
 }
 

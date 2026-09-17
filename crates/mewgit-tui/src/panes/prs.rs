@@ -5,8 +5,9 @@
 
 use std::borrow::Cow;
 
-use mewgit_core::app::{AppState, Fetch};
+use mewgit_core::app::{AppState, PrLoad};
 use mewgit_core::auth::AccountState;
+use mewgit_core::config::Theme;
 use mewgit_core::github::{PrStatus, PullRequest};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -17,54 +18,54 @@ use crate::ui::{self, theme};
 /// タブ見出しに出すこのペインの名前。
 ///
 /// **件数を添えない。** 一覧が届くまで数が無く、`(0)` を先に出すと「開いている PR が
-/// 無い」と読める（`Fetch::Unasked` と `Loaded(vec![])` を畳むのと同じ誤り。01）。
+/// 無い」と読める（`PrLoad::Pending` と空の一覧を畳むのと同じ誤り。01）。
 pub(super) fn title() -> &'static str {
     "PRs"
 }
 
 /// 行と、カーソルが何行目か。
 ///
-/// 一覧を出せないときは文言 1 行（カーソルはその行）。
+/// 一覧を出せないときは文言 1 行（選べる行は無いので `cursor` は `None`）。
+///
+/// **アカウントが決まっていなければ一覧を出さない。** 印（`*` / `R`）は login で
+/// 決まるので、`Resolved` でないまま一覧を描くと**印だけが黙って消えた前のアカウントの
+/// 一覧**になる。落とすのは `update` の側（`PrState::forget`）だが、**描く側でも門に
+/// する** —— どちらか一方だと、片方を直したときにもう片方が前提を失う。
 pub(super) fn lines(state: &AppState) -> Rows {
-    let Some(list) = open_prs(state) else {
-        return Rows {
-            lines: vec![Line::raw(placeholder(state))],
-            cursor: 0,
-        };
+    let placeholder = || Rows {
+        lines: vec![Line::raw(placeholder(state))],
+        cursor: None,
     };
+    let AccountState::Resolved(account) = &state.account else {
+        return placeholder();
+    };
+    if state.prs.list.is_empty() {
+        return placeholder();
+    }
 
     // **状態の桁は出す行から導く。** `OPEN` と `DRAFT` で 1 桁違うので、揃えないと
     // タイトルの開始位置がずれる。**定数に書かない** —— 語を足したときに片方だけ
     // 古くなる（`CLAUDE.md` の「離れた場所に『いま N ある』を書かない」）。
     // 語はすべて ASCII なので `len()` がそのまま表示幅。
-    let width = list
+    let width = state
+        .prs
+        .list
         .iter()
         .map(|pr| status_label(pr).len())
         .max()
         .unwrap_or(0);
-    let login = my_login(state);
+    let theme = &state.config.theme;
     Rows {
-        lines: list
+        lines: state
+            .prs
+            .list
             .iter()
-            .map(|pr| pr_row(pr, state, login, width))
+            .map(|pr| pr_row(pr, theme, &account.login, width))
             .collect(),
         // **カーソルをここで丸めない。** 範囲に収めるのは `PrState::move_cursor` と
-        // `PrState::seat` の側（同じ判定を 2 箇所に書かない）。
-        cursor: state.prs.cursor,
-    }
-}
-
-/// 出す一覧。1 件も無ければ `None`（文言に落とす）。
-fn open_prs(state: &AppState) -> Option<&[PullRequest]> {
-    let list = state.prs.list.loaded()?;
-    (!list.is_empty()).then_some(list.as_slice())
-}
-
-/// いま使っているアカウントの login。決まっていなければ `None`。
-fn my_login(state: &AppState) -> Option<&str> {
-    match &state.account {
-        AccountState::Resolved(account) => Some(&account.login),
-        AccountState::Resolving | AccountState::Degraded(_) | AccountState::Disabled => None,
+        // `PrState::loaded` の側（同じ判定を 2 箇所に書かない）。**反転を当てるのも
+        // ここではない** —— `super::TopPane::render` が 1 箇所で当てる。
+        cursor: Some(state.prs.cursor),
     }
 }
 
@@ -73,38 +74,39 @@ fn my_login(state: &AppState) -> Option<&str> {
 /// **印と状態をタイトルより前に置く。** 右列は端末幅の 40% しかなく、ratatui は行の
 /// 右端で切るので、末尾に置くと**そこだけが黙って消える**（実測: 幅 100 の右列 38 桁で
 /// `MERGED` が出なかった）。行の左端は切られない。
-fn pr_row(pr: &PullRequest, state: &AppState, login: Option<&str>, width: usize) -> Line<'static> {
+///
+/// **`AppState` ごとは受け取らない。** 要るのは `theme` と `login` の 2 つで、
+/// `AppState` を渡すと「状態から引いた login と、引数の login が食い違う対」が型として
+/// 組める（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
+fn pr_row(pr: &PullRequest, theme: &Theme, login: &str, width: usize) -> Line<'static> {
     let label = status_label(pr);
     Line::from(vec![
-        Span::styled(format!(" {}", mark(pr, login)), theme::muted()),
+        Span::styled(mark(pr, login), theme::muted()),
         Span::raw(format!("#{} ", pr.number)),
-        Span::styled(format!("{label:width$}"), status_style(pr, state)),
+        Span::styled(format!("{label:width$}"), status_style(pr, theme)),
         Span::raw(format!("  {}", pr.title)),
     ])
 }
 
-/// 行頭の印（07 の「PRs ペイン」）。
+/// 行頭の印（07 の「PRs ペイン」）。先頭の 1 セルは余白。
 ///
 /// **`*` と `R` は衝突しない** —— 自分の PR のレビューを自分に依頼することはできない。
 ///
 /// **`R` が見るのは `requested_reviewers` だけ。** チーム宛ての依頼
 /// （`requested_teams`）には印が付かない —— 自分がそのチームに居るかを答えるには
 /// チームの数だけ membership を叩くことになる（05 で受け入れた穴）。
-///
-/// login が決まっていなければ（`Resolved` 以外）どちらの印も付かない。
-fn mark(pr: &PullRequest, login: Option<&str>) -> char {
-    let Some(login) = login else { return ' ' };
+fn mark(pr: &PullRequest, login: &str) -> &'static str {
     // GitHub の login は ASCII で、大小を区別しない。
     if pr.author.eq_ignore_ascii_case(login) {
-        '*'
+        " *"
     } else if pr
         .requested_reviewers
         .iter()
         .any(|reviewer| reviewer.eq_ignore_ascii_case(login))
     {
-        'R'
+        " R"
     } else {
-        ' '
+        "  "
     }
 }
 
@@ -112,9 +114,9 @@ fn mark(pr: &PullRequest, login: Option<&str>) -> char {
 /// 2 列に分けるとタイトルの桁を食う。
 ///
 /// **`MERGED` / `CLOSED` はこの一覧に出ない**（`state=open` だけを引く。01 の
-/// 「現ブランチの PR」）。**それでも腕は残す** —— [`PullRequest`] は
-/// [`PrStatus`] を運んでおり、出ない腕を削ると `Modal::PrCreate` や PR チェックアウトが
-/// 同じ写像をもう 1 本書くことになる。
+/// 「現ブランチの PR」）。[`PrStatus`] が 3 値なので腕は網羅 `match` が要求しており、
+/// 選べるのは**出ない腕に何と書くか**だけ。`Modal::PrCreate` や PR チェックアウトが
+/// 同じ写像をもう 1 本書かずに済むよう、4 語とも本来の語にしてある。
 fn status_label(pr: &PullRequest) -> &'static str {
     match (pr.state, pr.draft) {
         (PrStatus::Open, true) => "DRAFT",
@@ -126,8 +128,7 @@ fn status_label(pr: &PullRequest) -> &'static str {
 
 /// **色名はここに書かない**（07）。`[theme]` の `pr_open` / `pr_merged` /
 /// `pr_closed` を通す。`draft` の色は分けない —— 08 にキーが無く、足すなら設定の側。
-fn status_style(pr: &PullRequest, state: &AppState) -> Style {
-    let theme = &state.config.theme;
+fn status_style(pr: &PullRequest, theme: &Theme) -> Style {
     theme::style(match pr.state {
         PrStatus::Open => &theme.pr_open,
         PrStatus::Merged => &theme.pr_merged,
@@ -137,7 +138,7 @@ fn status_style(pr: &PullRequest, state: &AppState) -> Style {
 
 /// 一覧を出せない理由。
 ///
-/// **消去法で導かない。** `AccountState` と [`Fetch`] の腕から出す（01 の
+/// **消去法で導かない。** [`AccountState`] と [`PrLoad`] の腕から出す（01 の
 /// 「失敗の記憶」と同じ理由）。**`ui::LOADING` を使う** —— 文言を自分で組むと、
 /// 既にある「読み込み中…」の見張りがこの産出元を拾えない。
 ///
@@ -145,20 +146,24 @@ fn status_style(pr: &PullRequest, state: &AppState) -> Style {
 /// 押せないキーを案内することになる（01 の「`o`（ブラウザで開く）」）。
 fn placeholder(state: &AppState) -> Cow<'static, str> {
     match &state.account {
+        // **既定リモートが GitHub でないときもここに落ちる**（`TargetState::Unavailable`
+        // なら `Cmd::ResolveAccount` が出ないので `Resolving` のまま）。理由を出せる
+        // のは `A` だけで、このペインでは「読み込み中…」のまま留まる。**枠の内側は
+        // 80x24 で 30 セル**しか無く、理由（`A` が出す「既定リモートから GitHub の
+        // リポジトリを特定できません」）が入らない。畳み方は plan.md に送ってある。
         AccountState::Resolving => ui::LOADING.into(),
         AccountState::Degraded(reason) => format!("GitHub: {}（A）", ui::degraded(reason)).into(),
         // **巡回候補にもタブにも出ないのでここへは来ない**（01 の「右上のタブ」）。
         // それでも文言を置くのは、網羅 `match` の腕を `unreachable!()` にすると
         // 描画の途中で落ちるため。
         AccountState::Disabled => "GitHub 機能は切ってあります".into(),
-        // まだ頼んでいない（`Unasked`）と、引けたが 1 件も無い、引けなかったを
-        // 出し分ける。**対象がまだ決まっていない間も `Unasked`** なので、そこも
-        // 「読み込み中…」に落ちる（`wanted_pr_list` が両方を見る。01）。
-        AccountState::Resolved(_) => match &state.prs.list {
-            Fetch::Unasked => ui::LOADING.into(),
-            // 空でないときはここへ来ない（`lines` が先に返す）。
-            Fetch::Loaded(_) => "開いている PR はありません".into(),
-            Fetch::Failed(err) => format!("PR を読み込めませんでした: {err}").into(),
+        // まだ頼んでいない・引けたが 1 件も無い・引けなかったを出し分ける。
+        // **一覧が空のときしか来ない**（`lines` が先に返す）ので、`Failed` でも
+        // 読めていた一覧があればそちらが出る。
+        AccountState::Resolved(_) => match state.prs.load() {
+            PrLoad::Pending => ui::LOADING.into(),
+            PrLoad::Loaded => "開いている PR はありません".into(),
+            PrLoad::Failed(err) => format!("PR を読み込めませんでした: {err}").into(),
         },
     }
 }
@@ -166,7 +171,7 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, pane_text, state_at};
+    use crate::test_util::{draw, pane_row_is_reversed, pane_text, state_at};
     use mewgit_core::app::{Cmd, Msg, Pane, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::github::GithubError;
@@ -195,17 +200,23 @@ mod tests {
         state
     }
 
-    #[test]
-    fn the_pane_lists_the_open_prs_with_their_number_and_state() {
-        // **右列は 80x24 で 32 桁**しかないので、桁を見る見張りと混ざらないよう
-        // タイトルは切れない長さにする（切れることは下の
-        // `the_number_and_state_survive_a_narrow_pane…` が見る）。
+    /// `#82 OPEN "Lanes"` と `#90 DRAFT "Bump"` の 2 件。
+    ///
+    /// **右列は 80x24 で 32 桁**しかないので、桁を見る見張りと混ざらないようタイトルは
+    /// 切れない長さにする（切れることは
+    /// `the_number_and_state_survive_a_narrow_pane…` が見る）。
+    fn open_and_draft() -> Vec<PullRequest> {
         let mut open = fake_pull_request(82, "feat/x", "headsha");
         open.title = "Lanes".to_string();
         let mut draft = fake_pull_request(90, "other", "othersha");
         draft.draft = true;
         draft.title = "Bump".to_string();
-        let state = with_list(vec![open, draft]);
+        vec![open, draft]
+    }
+
+    #[test]
+    fn the_pane_lists_the_open_prs_with_their_number_and_state() {
+        let state = with_list(open_and_draft());
 
         // **このペインの中だけを見る**（`ui::LOADING` などの文言は他のペインも出す）。
         let text = pane_text(&state, SIZE, Pane::Prs);
@@ -222,12 +233,7 @@ mod tests {
     fn the_status_column_lines_the_titles_up() {
         // **桁は出す行から導く**（`lines`）。`OPEN` と `DRAFT` で 1 桁違うので、
         // 揃えないとタイトルの開始位置がずれる。
-        let mut open = fake_pull_request(82, "feat/x", "headsha");
-        open.title = "Lanes".to_string();
-        let mut draft = fake_pull_request(90, "other", "othersha");
-        draft.draft = true;
-        draft.title = "Bump".to_string();
-        let state = with_list(vec![open, draft]);
+        let state = with_list(open_and_draft());
 
         let text = pane_text(&state, SIZE, Pane::Prs);
         let open = text
@@ -301,6 +307,81 @@ mod tests {
         // **切れていることも見る。** 切れない幅なら並び順を入れ替えても通るので、
         // この見張りが何を踏んでいるか判らなくなる。
         assert!(!text.contains(&"と".repeat(60)), "{text}");
+    }
+
+    #[test]
+    fn the_cursor_row_is_highlighted() {
+        // **ペインの桁だけを見る。** 全幅を見る `row_is_reversed` だと、右列の 1 行目が
+        // 左のグラフのカーソル行と同じ端末行に来るので、反転していなくても真になる
+        // （`pane_row_is_reversed` の doc）。
+        let state = with_list(open_and_draft());
+        assert_eq!(state.prs.cursor, 0, "現ブランチの PR に座っている");
+        assert!(
+            pane_row_is_reversed(&state, SIZE, Pane::Prs, "#82"),
+            "カーソル行が反転していない"
+        );
+        assert!(
+            !pane_row_is_reversed(&state, SIZE, Pane::Prs, "#90"),
+            "座っていない行が反転している"
+        );
+
+        let mut moved = with_list(open_and_draft());
+        moved.prs.cursor = 1;
+        assert!(
+            pane_row_is_reversed(&moved, SIZE, Pane::Prs, "#90"),
+            "カーソルを動かしても反転が付いてこない"
+        );
+        assert!(!pane_row_is_reversed(&moved, SIZE, Pane::Prs, "#82"));
+    }
+
+    #[test]
+    fn the_placeholder_row_is_not_highlighted() {
+        // 文言 1 行は選択肢ではない（`Rows::cursor` が `None`）。反転させると
+        // 「選べる行がある」と読める。
+        let empty = with_list(Vec::new());
+        assert!(!pane_row_is_reversed(
+            &empty,
+            SIZE,
+            Pane::Prs,
+            "開いている PR はありません"
+        ));
+    }
+
+    #[test]
+    fn losing_the_account_takes_the_list_off_the_screen() {
+        // **印（`*` / `R`）は login で決まる**ので、`Resolved` でないまま一覧を描くと
+        // 印だけが黙って消えた前のアカウントの一覧になる。**状態の側でも落としている**
+        // （`PrState::forget`）が、描く側でも門にする。
+        let mut state = with_list(open_and_draft());
+        assert!(
+            pane_text(&state, SIZE, Pane::Prs).contains("#82"),
+            "前提が崩れている"
+        );
+
+        // 状態を落とさずにアカウントだけ degraded にする（描く側の門を直に踏む）。
+        state.account = AccountState::Degraded(DegradedReason::GhMissing);
+        let text = pane_text(&state, SIZE, Pane::Prs);
+        assert!(
+            !text.contains("#82"),
+            "前のアカウントの一覧が出ている: {text}"
+        );
+        assert!(text.contains("GitHub"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_list_that_was_already_on_the_screen() {
+        // 引き直しは ref を動かす書き込みのたびに来るので、捨てると commit 直後に
+        // 1 回転けただけでペインがエラー 1 行になる（`PrState::failed`）。
+        let mut state = with_list(open_and_draft());
+        let _ = reply(
+            &mut state,
+            Cmd::FetchPrList,
+            Msg::PrListLoaded(Err(GithubError::NotFound)),
+        );
+
+        let text = pane_text(&state, SIZE, Pane::Prs);
+        assert!(text.contains("#82"), "読めていた一覧が消えた: {text}");
+        assert!(!text.contains("読み込めませんでした"), "{text}");
     }
 
     #[test]

@@ -837,8 +837,6 @@ pub fn fake_pull_request(number: u64, branch: &str, sha: &str) -> PullRequest {
         url: format!("https://github.com/yshrsmz/mewgit/pull/{number}"),
         author: "yshrsmz".to_string(),
         requested_reviewers: Vec::new(),
-        review: None,
-        checks: None,
     }
 }
 

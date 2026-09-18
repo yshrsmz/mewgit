@@ -2,7 +2,7 @@
 //!
 //! `ui` はここにある値を描画するだけで、更新は [`update`](crate::app::update) が行う。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
@@ -11,7 +11,7 @@ use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
     RefIndex, Remote, StashEntry, WorktreeSection, WorktreeSnapshot,
 };
-use crate::github::{GithubError, PullRequest};
+use crate::github::{GithubError, PrDetail, PullRequest};
 use crate::graph::{GraphRow, LaneState};
 
 use crate::config::Config;
@@ -166,7 +166,8 @@ impl AppState {
             | JobKind::ResolveTarget
             | JobKind::ResolveAccount
             | JobKind::ListAccounts
-            | JobKind::FetchPrList => return,
+            | JobKind::FetchPrList
+            | JobKind::FetchPrDetails => return,
             // **黙って落とさない。** `gh browse` は**起動したブラウザが終わるまで
             // 返らない**（gh 2.100.0 で実測。`BROWSER` に 5 秒眠るスクリプトを
             // 置くと 5.06 秒）。端末ブラウザや自分で抜けないラッパーを `BROWSER` に
@@ -1209,6 +1210,28 @@ pub struct PrState {
     pub cursor: usize,
     /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分けるのに要る。
     load: PrLoad,
+    /// PR ごとの集計。鍵は番号（01 の「PR ペイン › 集計」）。
+    details: HashMap<u64, PrDetailEntry>,
+}
+
+/// PR 1 行ぶんの集計と、どの head sha について引いたか。
+///
+/// **「まだ引いていない」はこの型で表さない** —— 表に**居ないこと**がそれ
+/// （`CLAUDE.md` の「`None` の理由を 2 つ以上持たせない」）。居ない行には必ず
+/// 扇形が飛ぶか、飛んだ扇形の答えが入るので、`ui` は不在を「読み込み中」として描く。
+///
+/// **`sha` を持つのは、答えがどのコミットのものかが鍵だから。** 一覧は
+/// `sort=updated` で並びが変わり、PR の head も push で動く。番号だけを鍵にすると、
+/// push で sha が進んだ PR に**前のコミットのチェック結果**が出たままになる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrDetailEntry {
+    /// 引いた（引いている）対象の head sha。
+    pub sha: String,
+    /// 集計か、その PR を引けなかった理由。
+    ///
+    /// **`Result` のまま持つ。** 失敗の理由は PR ごとに違う（404 は fork の削除、
+    /// 403 はスコープ、レート制限は待てば直る）ので、畳むと `ui` が案内を選べない。
+    pub result: Result<PrDetail, GithubError>,
 }
 
 /// PR 一覧の読み込みがどこまで進んだか。
@@ -1273,6 +1296,13 @@ impl PrState {
             // 選んでいたものが open から消えた（マージ / クローズ）か、まだ何も
             // 選んでいない。
             .unwrap_or(0);
+        // **集計は `(番号, head sha)` が一致する行だけ残す。** push で head が
+        // 進んだ行のチェックは前のコミットのもので、一覧から消えた行のものは
+        // 誰も読まない（05 の「扇形は毎回引き直さない」）。
+        self.details.retain(|number, entry| {
+            list.iter()
+                .any(|pr| pr.number == *number && pr.head.sha == entry.sha)
+        });
         self.list = list;
         self.load = PrLoad::Loaded;
     }
@@ -1281,6 +1311,65 @@ impl PrState {
     /// 同じ理由。捨てると画面から消えるだけになる）。
     pub(super) fn failed(&mut self, err: GithubError) {
         self.load = PrLoad::Failed(err);
+    }
+
+    /// この PR の集計。**居なければ「まだ引いていない」**（[`PrDetailEntry`]）。
+    pub fn detail(&self, number: u64) -> Option<&PrDetailEntry> {
+        self.details.get(&number)
+    }
+
+    /// まだ集計を持っていない行の `(番号, head sha)`。
+    ///
+    /// **持っている行は引き直さない。** PR 1 件に 3 リクエスト（check-runs /
+    /// commit status / reviews）かかるので、ref を動かす書き込みのたびに全件引くと
+    /// `1 + 3N` になる（05 の実測）。憶えた集計を落とすのは
+    /// [`loaded`](Self::loaded)（head sha が動いた行）と [`forget`](Self::forget)
+    /// （アカウントが変わった）だけ。
+    pub(super) fn wanted_details(&self) -> Vec<(u64, String)> {
+        self.list
+            .iter()
+            .filter(|pr| !self.details.contains_key(&pr.number))
+            .map(|pr| (pr.number, pr.head.sha.clone()))
+            .collect()
+    }
+
+    /// 扇形の答えが 1 件届いた。
+    ///
+    /// **鍵は `(番号, sha)`。** 飛んでいるあいだに push で head が進んだ PR の答えは
+    /// **前のコミットのもの**なので捨てる（捨てた行は集計を持たないままなので、
+    /// 次の [`wanted_details`](Self::wanted_details) が拾い直す）。
+    /// **一覧から消えた PR の答えも捨てる** —— 入れると、居ない行の集計が
+    /// `details` に溜まる。
+    pub(super) fn detail_loaded(
+        &mut self,
+        number: u64,
+        sha: String,
+        result: Result<PrDetail, GithubError>,
+    ) {
+        if !self
+            .list
+            .iter()
+            .any(|pr| pr.number == number && pr.head.sha == sha)
+        {
+            return;
+        }
+        self.details.insert(number, PrDetailEntry { sha, result });
+    }
+
+    /// 扇形が打ち切られた。**残っている行を理由ごと埋める。**
+    ///
+    /// 埋めないと、その行は「まだ引いていない」のまま
+    /// [`wanted_details`](Self::wanted_details) に拾われ、**同じ失敗を買い直す輪**に
+    /// なる（01 の「`Err` から再発行してよいのは対象が違うときだけ」）。
+    pub(super) fn details_aborted(&mut self, err: &GithubError) {
+        for pr in &self.list {
+            self.details
+                .entry(pr.number)
+                .or_insert_with(|| PrDetailEntry {
+                    sha: pr.head.sha.clone(),
+                    result: Err(err.clone()),
+                });
+        }
     }
 
     /// アカウントが決まっていない状態に戻す。
@@ -1294,6 +1383,9 @@ impl PrState {
         self.list.clear();
         self.cursor = 0;
         self.load = PrLoad::Pending;
+        // **集計も落とす。** 残すと、次のアカウントで引き直した一覧に**前の
+        // トークンで見えた集計**が番号だけで当たる。
+        self.details.clear();
     }
 }
 
@@ -1495,6 +1587,7 @@ pub enum JobKind {
     ResolveAccount,
     ListAccounts,
     FetchPrList,
+    FetchPrDetails,
     OpenPr,
 }
 
@@ -1525,8 +1618,17 @@ impl JobKind {
             | JobKind::FetchPrList => Some(Region::Refs),
             // 積んだログの行。ref が動いて walk に入る集合が変わったときだけ古くなる。
             JobKind::LoadLog => Some(Region::Log),
+            // **PR ごとの集計は鍵のほうが強い。** 答えは `(番号, head sha)` を
+            // 運び、受け取り側が**いまの一覧**と突き合わせる（`PrState::detail_loaded`）
+            // ので、書き込みの最中に飛んでいた答えは head sha が進んだ時点で捨てられる。
+            // **世代を足しても増える守りが無い** —— 世代で「古い」と判じたところで、
+            // 集計を憶えている行は `PrState::wanted_details` が拾わないので頼み直しが
+            // 出ない。**sha が変わらないまま中身が変わる**（レビューが付く / CI が
+            // 回り直す）のは世代でも鍵でも拾えず、そこは受け入れた穴として明示的な
+            // 引き直しへ送ってある（05、plan.md）。
+            JobKind::FetchPrDetails
             // 書き込みそのものと、Oid で追いつくもの、リポジトリの外から来るもの。
-            JobKind::Exec
+            | JobKind::Exec
             | JobKind::LoadCommitDetail
             | JobKind::LoadCommitFiles
             // `ssh -G` はリポジトリの ref を読まない。読むのは `.git/config` の

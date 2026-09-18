@@ -6,7 +6,7 @@ use crate::git_read::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp,
     LogPage, Oid, RefIndex, Remote, WorktreeSnapshot,
 };
-use crate::github::{GithubError, PullRequest};
+use crate::github::{GithubError, PrDetail, PullRequest};
 
 use super::{Key, TermSize};
 
@@ -150,6 +150,24 @@ pub enum Msg {
     /// **鍵を運ばない。** 一覧は選択に紐づかないので突き合わせる相手が無く、
     /// 追いつきは世代が見る（01 の「実行中ジョブ › 世代」）。
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),
+    /// 扇形の答えが 1 件（01 の「PR ペイン › 集計」）。
+    ///
+    /// **1 ジョブから何度も届く。** 60 件を同時 4 本で引くと全部揃うまで数秒かかる
+    /// ので、揃うのを待たずに届いた行から出す。ジョブを畳むのは
+    /// [`Msg::PrDetailsFinished`] のほう。
+    ///
+    /// **鍵は `(number, sha)`。** 飛んでいるあいだに push で head が進んだ PR の
+    /// 答えは前のコミットのものなので、受け取り側が捨てる。
+    PrDetailLoaded {
+        number: u64,
+        sha: String,
+        result: Result<PrDetail, GithubError>,
+    },
+    /// 扇形が終わった。**ジョブを畳むのはここ。**
+    ///
+    /// `Some(err)` は**打ち切った**という意味（レート制限）。残りを頼まなかったので、
+    /// 答えの無い行はこの理由で埋まる（01 の「PR ペイン › 集計」）。
+    PrDetailsFinished(Option<GithubError>),
     /// `gh browse` の結果。`Err` は通知に出す（01 の「`o`（ブラウザで開く）」）。
     ///
     /// **`Ok` でも何も出さない。** ブラウザが前に出てくるので、画面に足す言葉が無い。

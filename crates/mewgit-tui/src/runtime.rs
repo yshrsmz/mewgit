@@ -2,6 +2,8 @@
 
 use std::ops::ControlFlow;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -25,6 +27,7 @@ use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
 use ratatui::Terminal;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 
 use crate::input::event_to_msg;
 use crate::ui;
@@ -401,6 +404,72 @@ impl Runtime {
                         Err(err) => Err(err),
                     };
                     let _ = tx.send(Msg::PrListLoaded(result));
+                });
+                ControlFlow::Continue(())
+            }
+
+            // **扇形。`Cmd` 1 本のまま PR ごとに引く**（01 の「PR ペイン › 集計」）。
+            // 同時本数を抑えるのは `github` の中（05 の「`Semaphore`」）なので、
+            // ここは**対象のぶんだけタスクを起こすだけ**でよい。
+            Cmd::FetchPrDetails { targets } => {
+                let Some((target, api)) = github_for(state) else {
+                    return no_material(state, JobKind::FetchPrDetails, "PR の集計");
+                };
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    // 組み立てに失敗したら 1 件も引けない。**打ち切りとして返す** ——
+                    // 黙って終わると、答えの無い行が「読み込み中」のまま残る。
+                    let api = match api {
+                        Ok(api) => Arc::new(api),
+                        Err(err) => {
+                            let _ = tx.send(Msg::PrDetailsFinished(Some(err)));
+                            return;
+                        }
+                    };
+                    // **1 件でもレート制限で断られたら、残りは頼まない**（05）。
+                    // 同じ失敗を N 回買ううえ、二次制限を踏みに行く。
+                    let tripped = Arc::new(AtomicBool::new(false));
+                    let mut set = JoinSet::new();
+                    for (number, sha) in targets {
+                        let api = Arc::clone(&api);
+                        let tripped = Arc::clone(&tripped);
+                        let tx = tx.clone();
+                        let target = target.clone();
+                        set.spawn(async move {
+                            if tripped.load(Ordering::Relaxed) {
+                                // 頼まなかった行は**答えを送らない**。
+                                // `PrDetailsFinished` が理由ごと埋める。
+                                return None;
+                            }
+                            let result = api
+                                .pr_detail(&target.owner, &target.repo, number, &sha)
+                                .await;
+                            let limited = match &result {
+                                Err(err @ GithubError::RateLimited { .. }) => Some(err.clone()),
+                                _ => None,
+                            };
+                            if limited.is_some() {
+                                tripped.store(true, Ordering::Relaxed);
+                            }
+                            // **届いた行から出す。** 60 件を同時 4 本で引くと全部
+                            // 揃うまで数秒かかる（05 の予算）。
+                            let _ = tx.send(Msg::PrDetailLoaded {
+                                number,
+                                sha,
+                                result,
+                            });
+                            limited
+                        });
+                    }
+                    let mut aborted = None;
+                    while let Some(joined) = set.join_next().await {
+                        if let Ok(Some(err)) = joined {
+                            aborted = Some(err);
+                        }
+                    }
+                    // **全部の答えを送ったあとに送る。** ジョブを畳むのはこちらで、
+                    // 畳む前に届いた答えだけが一覧に当たる（`update::prs`）。
+                    let _ = tx.send(Msg::PrDetailsFinished(aborted));
                 });
                 ControlFlow::Continue(())
             }
@@ -978,6 +1047,41 @@ mod tests {
         // 通らない**ので、別の見張りが要る（`every_notice_that_a_missing_material…`）。
         let _ = update(&mut state, Msg::PrListLoaded(result));
         assert!(!state.jobs.is_running(JobKind::FetchPrList));
+    }
+
+    /// `Cmd::FetchPrDetails` の扇形が終端まで返る（01 の「PR ペイン › 集計」）。
+    ///
+    /// **クライアントを組めない形に向けてある**ので、1 件も叩かずに
+    /// `Msg::PrDetailsFinished(Some(..))` が返る。**見張るのはそこ** —— 黙って
+    /// 終わると、答えの無い行が**永久に「読み込み中」のまま**残る（`PrDetailEntry` は
+    /// 不在を「まだ引いていない」として描く）。
+    #[tokio::test]
+    async fn a_fan_out_that_cannot_build_a_client_comes_back_as_an_abort() {
+        let repo = TestRepo::init();
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+        state.repo.target = TargetState::Resolved(RepoTarget {
+            // `valid_host` が弾く形（04）。`GithubClient::new` が最後の関門になる。
+            host: "-bad".to_string(),
+            port: None,
+            owner: "yshrsmz".to_string(),
+            repo: "mewgit".to_string(),
+        });
+        state.account = AccountState::Resolved(fake_account("taro"));
+
+        let cmd = state.issue(Cmd::FetchPrDetails {
+            targets: vec![(82, "headsha".to_string())],
+        });
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+
+        let Msg::PrDetailsFinished(Some(err)) = msg else {
+            panic!("打ち切りとして返っていない: {msg:?}");
+        };
+        assert!(matches!(err, GithubError::InvalidHost { .. }), "{err:?}");
+        // 畳むのは `update`（`prs::pr_details_finished`）の側。
+        let _ = update(&mut state, Msg::PrDetailsFinished(Some(err)));
+        assert!(!state.jobs.is_running(JobKind::FetchPrDetails));
     }
 
     /// `Cmd::OpenPr` が `GhCli::browse` を通って `Msg::OpenPrFinished` で返る（01 の

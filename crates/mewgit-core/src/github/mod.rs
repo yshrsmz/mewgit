@@ -39,12 +39,18 @@ pub struct PullRequest {
     /// 入らない** —— チームの一員かどうかを答えるにはチームの数だけ membership を
     /// 叩くことになる（07 の「PRs ペイン」で受け入れた穴）。
     pub requested_reviewers: Vec<String>,
-    /// レビューは別リクエスト（`reviews`）なので、未取得なら `None`。
-    /// **`ReviewSummary::default()` を入れない** —— 「レビュー 0 件」と
-    /// 区別できなくなる。`checks` と対称にしてある。
-    pub review: Option<ReviewSummary>,
-    /// チェックは別リクエストなので、未取得なら `None`。
-    pub checks: Option<CheckSummary>,
+}
+
+/// PR 1 件ぶんの集計（チェックとレビュー）。[`GithubClient::pr_detail`] が返す。
+///
+/// **[`PullRequest`] には入れない。** 一覧（`pulls`）はこれを返さないので、
+/// `Option` で持たせると「まだ引いていない」と「引いたが失敗した」が同じ `None` に
+/// 落ちる（`CLAUDE.md` の「`None` の理由を 2 つ以上持たせない」）。
+/// 段階を持つのは `app::PrState` の側で、失敗の理由（[`GithubError`]）もそちらが運ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrDetail {
+    pub checks: CheckSummary,
+    pub review: ReviewSummary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,12 +98,38 @@ pub enum CheckState {
     Neutral,
 }
 
-/// チェックの集計。ヘッダとブランチ一覧に出す。
+/// チェックの集計。PRs ペインの各行に出す（07 の「PRs ペイン」）。
+///
+/// **[`CheckState`] と同じ 5 値を数える。3 つに畳まない** —— `Skipped` と `Neutral`
+/// を成功か失敗のどちらかに足すと**どちらも嘘になる**（07）。数える側で畳むと、
+/// 畳んだことが `ui` から見えないまま「全部緑」に見える。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CheckSummary {
     pub success: usize,
     pub failure: usize,
     pub pending: usize,
+    pub skipped: usize,
+    pub neutral: usize,
+}
+
+impl CheckSummary {
+    /// チェック 1 件を数える。
+    pub fn add(&mut self, state: CheckState) {
+        let slot = match state {
+            CheckState::Success => &mut self.success,
+            CheckState::Failure => &mut self.failure,
+            CheckState::Pending => &mut self.pending,
+            CheckState::Skipped => &mut self.skipped,
+            CheckState::Neutral => &mut self.neutral,
+        };
+        *slot += 1;
+    }
+
+    /// 数えた件数の合計。**0 件と「引いていない」は別**（引いていないことは
+    /// `app::PrState` の段階が持つ）。
+    pub fn total(&self) -> usize {
+        self.success + self.failure + self.pending + self.skipped + self.neutral
+    }
 }
 
 /// レビューの集計。ユーザーごとに最新のレビューだけを数える。

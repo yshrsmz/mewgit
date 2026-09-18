@@ -18,7 +18,8 @@ pub use msg::{ExecDone, Msg, RepoSnapshot};
 pub use state::{
     AccountListing, AccountView, AppState, BranchLoad, BranchState, CommitFiles, DiffCursor,
     DiffState, DiffView, GraphLine, GraphSelection, GraphState, InputIntent, Job, JobKind,
-    JobTracker, Modal, Motion, Notice, NoticeLevel, Pane, PrLoad, PrState, PushRejection, Region,
-    Repick, RepoInfo, RightTab, TargetState, TermSize, TextBuffer, WorktreeState,
+    JobTracker, Modal, Motion, Notice, NoticeLevel, Pane, PrDetailEntry, PrLoad, PrState,
+    PushRejection, Region, Repick, RepoInfo, RightTab, TargetState, TermSize, TextBuffer,
+    WorktreeState,
 };
 pub use update::{init, update};

@@ -122,6 +122,20 @@ pub enum Cmd {
     /// `state.repo.target` と `state.account` から読む（[`Cmd::ResolveAccount`] が
     /// `config` を読ませているのと同じ）。
     FetchPrList,
+    /// 一覧の各 PR について、チェックとレビューの集計を引く（01 の
+    /// 「PR ペイン › 集計」）。
+    ///
+    /// **扇形でも `Cmd` は 1 本。** [`JobTracker`](super::JobTracker) は種別単位なので、
+    /// PR ごとに `Cmd` を出すと 2 本目以降を [`AppState::issue`](super::AppState::issue)
+    /// が黙って落とす。同時本数を抑えるのは `github` の中（05 の「`Semaphore`」）。
+    ///
+    /// **運ぶのは `(番号, head sha)`。** チェックはコミットに紐づくので、鍵には
+    /// sha が要る（push で head が進んだ PR に前のコミットの結果を出さないため）。
+    /// **一覧そのものは運ばない** —— `dispatch` が必要とするのは叩く先だけで、
+    /// `PullRequest` を丸ごと渡すと `Cmd` を比べるテストが一覧の中身に依存する。
+    FetchPrDetails {
+        targets: Vec<(u64, String)>,
+    },
     /// `gh browse <番号>` でブラウザに渡す（01 の「`o`（ブラウザで開く）」）。
     ///
     /// **[`Cmd::Exec`] に相乗りさせない。** git の実行中に押せなくなるうえ、
@@ -186,6 +200,7 @@ impl Cmd {
             Cmd::ResolveAccount(_) => Some((JobKind::ResolveAccount, "account")),
             Cmd::ListAccounts(_) => Some((JobKind::ListAccounts, "logins")),
             Cmd::FetchPrList => Some((JobKind::FetchPrList, "pr list")),
+            Cmd::FetchPrDetails { .. } => Some((JobKind::FetchPrDetails, "pr checks")),
             Cmd::OpenPr { .. } => Some((JobKind::OpenPr, "browse")),
         }
     }

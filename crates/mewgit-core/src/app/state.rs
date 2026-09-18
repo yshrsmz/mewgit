@@ -1440,14 +1440,11 @@ impl PrState {
 
     /// 応答が言った残量を憶える。
     ///
-    /// **新しいほうだけ残す**（[`RateLimit::newer`]）。ジョブは同時に走り、`Msg` が
+    /// **新しいほうだけ残す**（[`RateLimit::keep_newer`]）。ジョブは同時に走り、`Msg` が
     /// 届く順は応答の新しさの順ではない —— 一覧の答えが扇形の最中に返れば、扇形が
     /// もっと減らしたあとの数を上書きしてしまう。
     pub(super) fn rate_limit_seen(&mut self, seen: RateLimit) {
-        self.rate_limit = Some(match self.rate_limit {
-            Some(held) => held.newer(seen),
-            None => seen,
-        });
+        RateLimit::keep_newer(&mut self.rate_limit, seen);
     }
 
     /// アカウントが決まっていない状態に戻す。

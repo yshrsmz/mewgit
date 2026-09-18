@@ -73,7 +73,7 @@ use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
     LineOrigin, Oid, Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
 };
-use crate::github::{GithubError, PrDetail, PrStatus, PullRequest, RefSpec, RepoRef};
+use crate::github::{GithubError, PrDetail, PrStatus, PullRequest, RateLimit, RefSpec, RepoRef};
 use secrecy::SecretString;
 use tempfile::TempDir;
 
@@ -846,6 +846,18 @@ pub fn fake_pull_request(number: u64, branch: &str, sha: &str) -> PullRequest {
 /// 直す場所を、クレートをまたいで散らさない。
 pub fn pr_list_loaded(list: Vec<PullRequest>) -> Msg {
     Msg::PrListLoaded(Ok(list))
+}
+
+/// 残量 1 件ぶん。上限は github.com の個人トークンの値（05 の実測表）。
+///
+/// **`ui` からも使う**（[`fake_pull_request`] と同じ理由）。上限を書く場所が
+/// クレートごとに割れると、`is_low` の境目を別々の数で見張ることになる。
+pub fn fake_rate_limit(remaining: u32, reset: i64) -> RateLimit {
+    RateLimit {
+        limit: 5000,
+        remaining,
+        reset,
+    }
 }
 
 /// `answers` の対象を、**いまの世代で**頼む `Cmd`。

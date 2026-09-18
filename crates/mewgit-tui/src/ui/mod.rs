@@ -30,12 +30,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let [header, body, status] = split(frame.area());
     let [left, right] = split_body(body);
 
-    // **スピナーは先に組む。** ヘッダの残りを数えるのに幅が要る（`header_line`）。
-    let spinner = spinner_line(state);
-    frame.render_widget(header_line(state, header.width, spinner.as_ref()), header);
+    frame.render_widget(header_line(state, header.width), header);
     // **スピナーは同じ領域に右寄せで重ねる。** `Paragraph` は既定のスタイルで
     // 領域を塗り直すだけなので、左に描いたリポジトリ名は消えない。
-    if let Some(spinner) = spinner {
+    if let Some(spinner) = spinner_line(state) {
         frame.render_widget(Paragraph::new(spinner).right_aligned(), header);
     }
     // **左は Graph と Diff の差し替え。** どちらを描くかは `focus` だけで決まる（07）。
@@ -303,20 +301,20 @@ pub fn graph_rows(term: TermSize) -> usize {
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
 ///
-/// **幅とスピナーを受けるのは残量のため**（下の `[api: …]`）。重ねて描く相手の
-/// 幅を知らないと、「余っているか」を数えられない。
-fn header_line<'a>(state: &'a AppState, width: u16, spinner: Option<&Line<'_>>) -> Paragraph<'a> {
+/// **幅を受けるのは残量のため**（下の `[api: …]`）。同じ領域に重ねて描くスピナーの
+/// ぶんを引かないと、「余っているか」を数えられない。
+fn header_line(state: &AppState, width: u16) -> Paragraph<'_> {
     let mut spans = vec![Span::styled(
         repo_label(state),
         Style::default().add_modifier(Modifier::BOLD),
     )];
 
     if let Some(target) = state.repo.target.resolved() {
-        spans.push(Span::raw(format!("  {}/{}", target.owner, target.repo)));
+        spans.push(Span::raw(format!("{SEP}{}/{}", target.owner, target.repo)));
     }
 
     if let Some(account) = account_span(&state.account) {
-        spans.push(Span::raw("  "));
+        spans.push(Span::raw(SEP));
         spans.push(account);
     }
 
@@ -328,8 +326,9 @@ fn header_line<'a>(state: &'a AppState, width: u16, spinner: Option<&Line<'_>>) 
         // 「無い」より悪い。**
         // **譲るのは新しく足したほう** —— `owner/repo` と `[gh: …]` が食われる形は
         // 足す前からあり、落とす順序を全体で決めるのは M6（07）。
+        let spinner = spinner_line(state).as_ref().map_or(0, Line::width);
         if quota_fits(&spans, &quota, spinner, width) {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(SEP));
             spans.push(quota);
         }
     }
@@ -337,24 +336,20 @@ fn header_line<'a>(state: &'a AppState, width: u16, spinner: Option<&Line<'_>>) 
     Paragraph::new(Line::from(spans))
 }
 
-/// 残量を足しても、右端のスピナーと隙間が残るか。
+/// 残量を足しても、右端のスピナーとのあいだに [`SEP`] が残るか。
 ///
-/// **隙間は 2 セル取る。** ヘッダの区切りが 2 セルなので、1 セルだと隣の語と
-/// 地続きに見える。**`contains` だけの見張りでは余白ゼロが通る**（#73）ので、
-/// ここで数えるのも余白まで。
-fn quota_fits(
-    spans: &[Span<'_>],
-    quota: &Span<'_>,
-    spinner: Option<&Line<'_>>,
-    width: u16,
-) -> bool {
+/// **数えるのは余白まで。** **`contains` だけの見張りでは余白ゼロが通る**（#73）ので、
+/// 「入った」の基準を隣の語と地続きにならないところに置く。
+fn quota_fits(spans: &[Span<'_>], quota: &Span<'_>, spinner: usize, width: u16) -> bool {
     let left: usize = spans.iter().map(Span::width).sum();
-    let spinner = spinner.map_or(0, Line::width);
-    left + GAP + quota.width() + GAP + spinner <= width as usize
+    left + SEP.len() + quota.width() + SEP.len() + spinner <= width as usize
 }
 
-/// ヘッダの要素のあいだに取る隙間。
-const GAP: usize = 2;
+/// ヘッダの要素の区切り。**1 セルだと隣の語と地続きに見える。**
+///
+/// 組む側（`Span::raw(SEP)`）と数える側（[`quota_fits`]）が同じものを読む ——
+/// 幅だけを定数にすると、区切りを広げたときに数えるほうが 2 のまま残る。
+const SEP: &str = "  ";
 
 /// ヘッダの `[api: …]`。GitHub API の残量（07 の「ヘッダ」）。
 ///
@@ -532,8 +527,10 @@ mod tests {
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::github::RateLimit;
-    use mewgit_core::test_util::{fake_account, fake_ambiguous, fake_snapshot};
+    use mewgit_core::github::GithubError;
+    use mewgit_core::test_util::{
+        fake_account, fake_ambiguous, fake_rate_limit, fake_snapshot, fetch_pr_details,
+    };
     use ratatui::style::{Color, Modifier};
 
     #[test]
@@ -861,11 +858,7 @@ mod tests {
             &mut state,
             Msg::RateLimitSeen {
                 epoch,
-                seen: RateLimit {
-                    limit: 5000,
-                    remaining,
-                    reset: 1789703295,
-                },
+                seen: fake_rate_limit(remaining, 1789703295),
             },
         );
         state
@@ -876,10 +869,11 @@ mod tests {
         let mut state = shipping_header_state();
         state.jobs.finish(JobKind::LoadBranches);
         state.account = resolved_account();
-        let _ = state.issue(Cmd::FetchPrDetails {
-            epoch: state.prs.epoch(),
-            targets: vec![(1, "sha".to_string())],
-        });
+        // **世代は `fetch_pr_details` に書かせる**（`PrState::forget` が進めたあとの
+        // 状態でも「古い返信」を組めるようにするため）。答えは届けないので、ここが
+        // 要るのは「扇形が走っている」ことだけ —— スピナーが `pr checks` になる。
+        let ask = fetch_pr_details(&state, &[(1, "sha", Err(GithubError::NotFound))]);
+        let _ = state.issue(ask);
         state
     }
 

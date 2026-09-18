@@ -475,19 +475,11 @@ impl GithubClient {
     /// **新しいほうだけ残す**（[`RateLimit::newer`]）。同時に飛んだ 4 本は届く順が
     /// 新しさの順ではない。
     fn note_rate_limit(&self, response: &Response) {
-        let Some(seen) = RateLimit::from_parts(
-            header_str(response, "x-ratelimit-resource"),
-            header_i64(response, "x-ratelimit-limit"),
-            header_i64(response, "x-ratelimit-remaining"),
-            header_i64(response, "x-ratelimit-reset"),
-        ) else {
+        let Some(seen) = rate_limit_of(response) else {
             return;
         };
         let mut slot = self.rate.lock().expect("rate の Mutex は毒されない");
-        *slot = Some(match *slot {
-            Some(held) => held.newer(seen),
-            None => seen,
-        });
+        RateLimit::keep_newer(&mut slot, seen);
     }
 
     /// このクライアントが見たうちで新しいほうの残量。1 度も見ていなければ `None`。
@@ -608,6 +600,30 @@ fn needed_scopes(response: &Response) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 応答の `x-ratelimit-*` から残量を組む。**どれか 1 つでも欠けたら `None`**。
+///
+/// **`x-ratelimit-resource` が `core` でなければ採らない。** 上限が 2 桁小さい
+/// `search` の数をヘッダに出すと、残量が突然 30 になる（05 の実測表）。**いま mewgit が
+/// 叩くエンドポイントは全部 `core`** なので、この腕を踏ませられるのは
+/// wiremock のテストだけ。
+///
+/// **ヘッダごと無いこともある。** レートリミットを切った GHES がそれで、そのときは
+/// 残量を出さない（`None`）だけで、エラーにはしない。
+///
+/// **読むのはここ。** 3 つとも同じ型の `Option<i64>` なので、[`RateLimit`] 側に
+/// 引数で渡す形だと入れ替えても誰も気付かない（`CLAUDE.md` の「導出できる値を引数に
+/// 取らせない」）。ヘッダの読み方は [`header_i64`] と同じ場所に置く。
+fn rate_limit_of(response: &Response) -> Option<RateLimit> {
+    if header_str(response, "x-ratelimit-resource").is_some_and(|bucket| bucket != "core") {
+        return None;
+    }
+    Some(RateLimit {
+        limit: u32::try_from(header_i64(response, "x-ratelimit-limit")?).ok()?,
+        remaining: u32::try_from(header_i64(response, "x-ratelimit-remaining")?).ok()?,
+        reset: header_i64(response, "x-ratelimit-reset")?,
+    })
+}
+
 fn header_str<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
     response.headers().get(name)?.to_str().ok()
 }
@@ -647,6 +663,24 @@ mod tests {
             .mount(&server)
             .await;
         client(&server).repo("o", "r").await.unwrap_err()
+    }
+
+    /// `/repos/o/r` が返す本文。**`repo` を代表に選んだテストが全部これを使う**
+    /// （[`repo_err`] と同じ理由で、一番引数の少ない API が土台になっている）。
+    fn repo_body() -> serde_json::Value {
+        json!({
+            "owner": { "login": "o" },
+            "name": "r",
+            "default_branch": "main",
+        })
+    }
+
+    /// 応答にヘッダを載せる。
+    fn with_headers(mut response: ResponseTemplate, headers: &[(&str, &str)]) -> ResponseTemplate {
+        for (name, value) in headers {
+            response = response.insert_header(*name, *value);
+        }
+        response
     }
 
     // ---- ベース URL ----
@@ -787,11 +821,7 @@ mod tests {
             .and(header("authorization", "Bearer t0ken"))
             .and(header("accept", "application/vnd.github+json"))
             .and(header("x-github-api-version", API_VERSION))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "name": "r",
-                "owner": { "login": "o" },
-                "default_branch": "main",
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(repo_body()))
             .mount(&server)
             .await;
 
@@ -1145,24 +1175,59 @@ mod tests {
 
     // ---- レートリミット残量 ----
 
-    /// `/repos/o/r` にこのヘッダを載せて返させ、クライアントが憶えた残量を取る。
-    async fn rate_after_repo(headers: &[(&str, &str)]) -> Option<RateLimit> {
-        let server = MockServer::start().await;
-        let mut response = ResponseTemplate::new(200).set_body_json(json!({
-            "owner": { "login": "o" },
-            "name": "r",
-            "default_branch": "main",
-        }));
-        for (name, value) in headers {
-            response = response.insert_header(*name, *value);
-        }
+    /// `x-ratelimit-*` の 3 つ。**欠けた形を踏むテストだけが手で並べる。**
+    fn quota_headers(
+        limit: &'static str,
+        remaining: &'static str,
+        reset: &'static str,
+    ) -> [(&'static str, &'static str); 3] {
+        [
+            ("x-ratelimit-limit", limit),
+            ("x-ratelimit-remaining", remaining),
+            ("x-ratelimit-reset", reset),
+        ]
+    }
+
+    /// `/repos/o/r` にこのヘッダを載せた 200 を返させる。
+    async fn mount_repo(server: &MockServer, headers: &[(&str, &str)]) {
         Mock::given(method("GET"))
             .and(path("/repos/o/r"))
-            .respond_with(response)
+            .respond_with(with_headers(
+                ResponseTemplate::new(200).set_body_json(repo_body()),
+                headers,
+            ))
+            .mount(server)
+            .await;
+    }
+
+    /// `repo` を 1 本叩いたあとにクライアントが憶えた残量。
+    async fn rate_after_repo(headers: &[(&str, &str)]) -> Option<RateLimit> {
+        let server = MockServer::start().await;
+        mount_repo(&server, headers).await;
+        let api = client(&server);
+        api.repo("o", "r").await.expect("repo");
+        api.rate_limit()
+    }
+
+    /// `repo` → `pr_list` と続けて叩いたあとに憶えた残量。**畳み方を見る形**で、
+    /// 2 本目のほうが必ずあとに返る。
+    async fn rate_after_repo_then_list(
+        repo: &[(&str, &str)],
+        pulls: &[(&str, &str)],
+    ) -> Option<RateLimit> {
+        let server = MockServer::start().await;
+        mount_repo(&server, repo).await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(with_headers(
+                ResponseTemplate::new(200).set_body_json(json!([])),
+                pulls,
+            ))
             .mount(&server)
             .await;
         let api = client(&server);
         api.repo("o", "r").await.expect("repo");
+        api.pr_list("o", "r").await.expect("pr_list");
         api.rate_limit()
     }
 
@@ -1170,12 +1235,7 @@ mod tests {
     async fn the_remaining_quota_comes_from_the_response_headers() {
         // **`/rate_limit` は叩かない。** 同じセッションで連続して叩いても数が合わず、
         // `reset` は後ろを返した（05 の実測表）。
-        let seen = rate_after_repo(&[
-            ("x-ratelimit-limit", "5000"),
-            ("x-ratelimit-remaining", "4984"),
-            ("x-ratelimit-reset", "1789703295"),
-        ])
-        .await;
+        let seen = rate_after_repo(&quota_headers("5000", "4984", "1789703295")).await;
 
         assert_eq!(
             seen,
@@ -1207,16 +1267,10 @@ mod tests {
     async fn a_quota_from_another_bucket_is_not_recorded() {
         // `search` は上限が 2 桁小さい（05 の実測表）。混ぜると残量が突然 30 になる。
         // **いま叩くエンドポイントは全部 `core`** なので、この腕を踏めるのはここだけ。
-        assert_eq!(
-            rate_after_repo(&[
-                ("x-ratelimit-resource", "search"),
-                ("x-ratelimit-limit", "30"),
-                ("x-ratelimit-remaining", "28"),
-                ("x-ratelimit-reset", "1789703295"),
-            ])
-            .await,
-            None
-        );
+        let mut headers = vec![("x-ratelimit-resource", "search")];
+        headers.extend(quota_headers("30", "28", "1789703295"));
+
+        assert_eq!(rate_after_repo(&headers).await, None);
     }
 
     #[tokio::test]
@@ -1226,12 +1280,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/repos/o/r"))
-            .respond_with(
-                ResponseTemplate::new(403)
-                    .insert_header("x-ratelimit-limit", "5000")
-                    .insert_header("x-ratelimit-remaining", "0")
-                    .insert_header("x-ratelimit-reset", "1789703295"),
-            )
+            .respond_with(with_headers(
+                ResponseTemplate::new(403),
+                &quota_headers("5000", "0", "1789703295"),
+            ))
             .mount(&server)
             .await;
         let api = client(&server);
@@ -1246,40 +1298,14 @@ mod tests {
     async fn the_newer_of_two_responses_wins_even_when_it_comes_first() {
         // **届く順は新しさの順ではない**（扇形は同時 4 本）。あとから届いた
         // 「残量の多い」応答で上書きすると、ヘッダの数が増えたり減ったりする。
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({
-                        "owner": { "login": "o" },
-                        "name": "r",
-                        "default_branch": "main",
-                    }))
-                    .insert_header("x-ratelimit-limit", "5000")
-                    .insert_header("x-ratelimit-remaining", "4900")
-                    .insert_header("x-ratelimit-reset", "1789703295"),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r/pulls"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!([]))
-                    .insert_header("x-ratelimit-limit", "5000")
-                    .insert_header("x-ratelimit-remaining", "4950")
-                    .insert_header("x-ratelimit-reset", "1789703295"),
-            )
-            .mount(&server)
-            .await;
-        let api = client(&server);
-
-        api.repo("o", "r").await.expect("repo");
-        api.pr_list("o", "r").await.expect("pr_list");
+        let seen = rate_after_repo_then_list(
+            &quota_headers("5000", "4900", "1789703295"),
+            &quota_headers("5000", "4950", "1789703295"),
+        )
+        .await;
 
         assert_eq!(
-            api.rate_limit().map(|seen| seen.remaining),
+            seen.map(|seen| seen.remaining),
             Some(4900),
             "あとから届いた古い応答で上書きした"
         );
@@ -1288,39 +1314,13 @@ mod tests {
     #[tokio::test]
     async fn a_response_from_the_next_window_wins_even_with_more_left() {
         // 窓が変われば残量は戻る。**比べるのは `(reset, used)`** で、`reset` が先。
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({
-                        "owner": { "login": "o" },
-                        "name": "r",
-                        "default_branch": "main",
-                    }))
-                    .insert_header("x-ratelimit-limit", "5000")
-                    .insert_header("x-ratelimit-remaining", "12")
-                    .insert_header("x-ratelimit-reset", "1789703295"),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r/pulls"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!([]))
-                    .insert_header("x-ratelimit-limit", "5000")
-                    .insert_header("x-ratelimit-remaining", "5000")
-                    .insert_header("x-ratelimit-reset", "1789706895"),
-            )
-            .mount(&server)
-            .await;
-        let api = client(&server);
+        let seen = rate_after_repo_then_list(
+            &quota_headers("5000", "12", "1789703295"),
+            &quota_headers("5000", "5000", "1789706895"),
+        )
+        .await;
 
-        api.repo("o", "r").await.expect("repo");
-        api.pr_list("o", "r").await.expect("pr_list");
-
-        assert_eq!(api.rate_limit().map(|seen| seen.remaining), Some(5000));
+        assert_eq!(seen.map(|seen| seen.remaining), Some(5000));
     }
 
     #[tokio::test]

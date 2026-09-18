@@ -237,8 +237,8 @@ mod tests {
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
-        deliver_pr_details, fake_account, fake_oid, fake_pull_request, fake_target,
-        fetch_pr_details, pr_list_loaded as list_msg, put_on_branch, reply,
+        deliver_pr_details, fake_account, fake_oid, fake_pull_request, fake_rate_limit,
+        fake_target, fetch_pr_details, pr_list_loaded as list_msg, put_on_branch, reply,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -782,15 +782,6 @@ mod tests {
         );
     }
 
-    /// 残量 1 件ぶん。上限は github.com の個人トークンの値（05 の実測表）。
-    fn quota(remaining: u32, reset: i64) -> RateLimit {
-        RateLimit {
-            limit: 5000,
-            remaining,
-            reset,
-        }
-    }
-
     #[test]
     fn the_newer_quota_wins_whichever_order_it_arrives_in() {
         // **`Msg` の届く順は応答の新しさの順ではない。** 一覧と扇形は同時に走り、
@@ -803,19 +794,19 @@ mod tests {
             &mut state,
             Msg::RateLimitSeen {
                 epoch,
-                seen: quota(4900, 100),
+                seen: fake_rate_limit(4900, 100),
             },
         );
         let _ = update(
             &mut state,
             Msg::RateLimitSeen {
                 epoch,
-                seen: quota(4950, 100),
+                seen: fake_rate_limit(4950, 100),
             },
         );
         assert_eq!(
             state.prs.rate_limit(),
-            Some(quota(4900, 100)),
+            Some(fake_rate_limit(4900, 100)),
             "あとから届いた古い数で上書きした"
         );
 
@@ -824,10 +815,10 @@ mod tests {
             &mut state,
             Msg::RateLimitSeen {
                 epoch,
-                seen: quota(5000, 200),
+                seen: fake_rate_limit(5000, 200),
             },
         );
-        assert_eq!(state.prs.rate_limit(), Some(quota(5000, 200)));
+        assert_eq!(state.prs.rate_limit(), Some(fake_rate_limit(5000, 200)));
     }
 
     #[test]
@@ -841,7 +832,7 @@ mod tests {
             &mut state,
             Msg::RateLimitSeen {
                 epoch: stale,
-                seen: quota(4900, 100),
+                seen: fake_rate_limit(4900, 100),
             },
         );
         assert!(state.prs.rate_limit().is_some());
@@ -862,7 +853,7 @@ mod tests {
             &mut state,
             Msg::RateLimitSeen {
                 epoch: stale,
-                seen: quota(10, 100),
+                seen: fake_rate_limit(10, 100),
             },
         );
         assert_eq!(

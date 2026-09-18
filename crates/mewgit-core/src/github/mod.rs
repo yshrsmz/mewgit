@@ -148,7 +148,7 @@ pub struct ReviewSummary {
 /// 要るのは [`RateLimit::newer`] の中だけ。
 ///
 /// **バケットは `core` の 1 つ。** `search` を使う経路は無いと決めてある（05）ので、
-/// 別のバケットの数が混ざる形は [`RateLimit::from_parts`] が入口で断る。
+/// 別のバケットの数が混ざる形は、応答ヘッダを読む `client::rate_limit_of` が入口で断る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimit {
     /// 窓あたりの上限。`x-ratelimit-limit`。
@@ -160,31 +160,6 @@ pub struct RateLimit {
 }
 
 impl RateLimit {
-    /// 応答ヘッダの 3 つから組む。**どれか 1 つでも欠けたら `None`**。
-    ///
-    /// **`resource` が `core` でなければ採らない。** 上限が 2 桁小さい `search` の
-    /// 数をヘッダに出すと、残量が突然 30 になる（05 の実測表）。**いま mewgit が叩く
-    /// エンドポイントは全部 `core`** なので、この腕を踏ませられるのは
-    /// wiremock のテストだけ。
-    ///
-    /// **ヘッダごと無いこともある。** レートリミットを切った GHES がそれで、
-    /// そのときは残量を出さない（`None`）だけで、エラーにはしない。
-    pub fn from_parts(
-        resource: Option<&str>,
-        limit: Option<i64>,
-        remaining: Option<i64>,
-        reset: Option<i64>,
-    ) -> Option<Self> {
-        if resource.is_some_and(|resource| resource != "core") {
-            return None;
-        }
-        Some(RateLimit {
-            limit: u32::try_from(limit?).ok()?,
-            remaining: u32::try_from(remaining?).ok()?,
-            reset: reset?,
-        })
-    }
-
     /// 2 つのうち新しいほう。
     ///
     /// **並行に飛んだ応答は届く順が新しさの順ではない**（扇形は同時 4 本。05）。
@@ -193,8 +168,8 @@ impl RateLimit {
     /// 窓が変われば `reset` が先へ動く。
     ///
     /// **判定はここ 1 本。** 同時に飛んだ応答を畳む [`GithubClient`] と、ジョブを
-    /// またいで届く返信を畳む `app::PrState` の両方がこれを呼ぶ（`CLAUDE.md` の
-    /// 「同じ判定を 2 箇所に書かない」）。
+    /// またいで届く返信を畳む `app::PrState` の両方が、[`RateLimit::keep_newer`] を
+    /// 通してこれを呼ぶ（`CLAUDE.md` の「同じ判定を 2 箇所に書かない」）。
     pub fn newer(self, other: Self) -> Self {
         let key = |limit: &Self| (limit.reset, limit.limit.saturating_sub(limit.remaining));
         if key(&other) > key(&self) {
@@ -202,6 +177,16 @@ impl RateLimit {
         } else {
             self
         }
+    }
+
+    /// 憶えている残量を、新しいほうで置き換える。**まだ何も無ければそのまま入れる。**
+    ///
+    /// **`Option` ごと共有先にする。** 畳む側は 2 人 —— 同じジョブの中を畳む
+    /// [`GithubClient`] と、ジョブをまたぐ `app::PrState` —— で、どちらも
+    /// 「1 度目は無条件、2 度目からは [`RateLimit::newer`]」を書いていた
+    /// （`CLAUDE.md` の「2 つ目の利用者が出た時点で共有先を作る」）。
+    pub fn keep_newer(slot: &mut Option<Self>, seen: Self) {
+        *slot = Some(slot.map_or(seen, |held| held.newer(seen)));
     }
 
     /// 残量が乏しいか（上限の 10% 以下）。ヘッダの色を決める（07）。

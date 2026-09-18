@@ -57,6 +57,12 @@ fn open_pr(state: &mut AppState) -> Cmd {
 /// **ここが失敗からの出口でもある。** 引けなかった答えは自分では落ちないので、
 /// `f` を押すか `A` で選び直せば引き直せる形にしておく（`CLAUDE.md` の「状態を消すのが
 /// 『その状態を根拠に断つキー』の先にあるなら、断つ前に消し方を数える」）。
+///
+/// **出口は一覧だけでなく集計にも要る。** 集計を落とすのは `PrState::loaded`（届いた
+/// 一覧で `Err` の行を捨てる）と `PrState::forget`（アカウントが変わった）で、
+/// **どちらもこの経路の先にある** —— 一覧を引き直さないと集計の失敗も落ちない。
+/// 集計の失敗は通知に出ないので（07 で受け入れた穴）、ここが塞がると行の `!` が
+/// 消えない行き止まりになる。
 pub(super) fn reload(state: &AppState) -> Cmd {
     if state.wanted_pr_list() {
         Cmd::FetchPrList
@@ -117,21 +123,32 @@ fn fan_out(state: &AppState) -> Cmd {
     if targets.is_empty() {
         Cmd::None
     } else {
-        Cmd::FetchPrDetails { targets }
+        Cmd::FetchPrDetails {
+            epoch: state.prs.epoch(),
+            targets,
+        }
     }
 }
 
 /// 扇形の答えが 1 件届いた。
 ///
 /// **ジョブは畳まない。** 1 つの `Cmd::FetchPrDetails` から何度も届くので、畳むのは
-/// [`pr_details_finished`] のほう。**追いつきは鍵**（`(番号, sha)`）で、世代は見ない
-/// （[`JobKind::region`] にその理由がある）。
+/// [`pr_details_finished`] のほう。
+///
+/// **追いつきは 2 つ要る。** `(番号, sha)` は「一覧のどの行に当てるか」を答え
+/// （[`JobKind::region`] に世代を使わない理由がある）、世代は「**どのアカウントで
+/// 引いたか**」を答える —— アカウントを切り替えても番号も head も変わらないので、
+/// 鍵だけでは前のトークンの答えが新しい一覧に入る。
 pub(super) fn pr_detail_loaded(
     state: &mut AppState,
+    epoch: u64,
     number: u64,
     sha: String,
     result: Result<PrDetail, GithubError>,
 ) -> Cmd {
+    if !state.prs.is_current(epoch) {
+        return Cmd::None;
+    }
     state.prs.detail_loaded(number, sha, result);
     Cmd::None
 }
@@ -139,7 +156,7 @@ pub(super) fn pr_detail_loaded(
 /// 扇形が終わった。
 ///
 /// **打ち切りは残りの行に書く。** `Some(err)` はレート制限で残りを頼まなかったという
-/// 意味で、埋めずに返すと答えの無い行が [`PrState::wanted_details`] に拾われ、**同じ
+/// 意味で、埋めずに返すと答えの無い行が `PrState::wanted_details` に拾われ、**同じ
 /// 失敗を買い直す輪**になる（01 の「`Err` から再発行してよいのは対象が違うときだけ」）。
 ///
 /// **打ち切ったときだけ通知を出す。** 行に出せるのは「引けなかった」という印 1 つ
@@ -149,17 +166,33 @@ pub(super) fn pr_detail_loaded(
 ///
 /// **1 件ごとの失敗では出さない。** fork が消えた PR の 404 は行ごとの事情で、
 /// 一覧ぶん通知を積んでも次に何をするかが変わらない。
-pub(super) fn pr_details_finished(state: &mut AppState, aborted: Option<GithubError>) -> Cmd {
+pub(super) fn pr_details_finished(
+    state: &mut AppState,
+    epoch: u64,
+    aborted: Option<(GithubError, Vec<(u64, String)>)>,
+) -> Cmd {
+    // **ジョブは世代に関係なく畳む。** 走っていたのはこのジョブなので、畳まないと
+    // 以後の `Cmd::FetchPrDetails` が `AppState::issue` に落とされ続ける。
     state.jobs.finish(JobKind::FetchPrDetails);
-    if let Some(err) = aborted {
-        state.prs.details_aborted(&err);
-        state.push_notice(
-            NoticeLevel::Warn,
-            format!("PR の集計を打ち切りました: {err}"),
-            None,
-        );
+    // **効果のほうは世代で門にする。** 前のアカウントで頼んだ扇形の打ち切りを
+    // 新しい一覧に書くと、`PrState::forget` が落とした集計をそのまま書き戻す。
+    if state.prs.is_current(epoch) {
+        if let Some((err, targets)) = aborted {
+            state.prs.details_aborted(&targets, &err);
+            // **理由は `detail` に載せる。** 要約行に `GithubError` の `Display` を
+            // 混ぜると **72 セルを超えて `q:quit` が押し出される** ——
+            // `InvalidHost` はホスト名をそのまま持ち、**ホスト名に上限が無い**
+            // （`-bad` の 4 文字でちょうど 72 セル。実測 2026-09-18）。
+            // `exec_finished` が argv と stderr を `detail` に載せるのと同じ形で、
+            // **描くのは M6 のステータスバーのタスク**（01 の「通知」）。
+            state.push_notice(
+                NoticeLevel::Warn,
+                "PR の集計を中断しました".to_string(),
+                Some(err.to_string()),
+            );
+        }
     }
-    // 続きを頼む: 扇形が走っているあいだに一覧へ増えた行。
+    // 続きを頼む: 扇形が走っているあいだに一覧へ増えた行と、世代が変わって捨てた行。
     fan_out(state)
 }
 
@@ -190,7 +223,7 @@ mod tests {
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
         deliver_pr_details, fake_account, fake_oid, fake_pull_request, fake_target,
-        pr_list_loaded as list_msg, put_on_branch, reply,
+        fetch_pr_details, pr_list_loaded as list_msg, put_on_branch, reply,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -221,14 +254,17 @@ mod tests {
     fn fan_out_after(state: &mut AppState, list: Vec<PullRequest>) -> Cmd {
         let ask = reload(state);
         let out = reply(state, ask, list_msg(list));
+        // **知らない形は panic させる。** `Cmd::None` に畳むと、`assert_eq!(x,
+        // Cmd::None)` 型の見張り（持っている行を引き直さない / 輪にならない）が
+        // **別の何かが出ていた場合も緑**になる。
         match out {
-            Cmd::Batch(ref cmds) => cmds
-                .iter()
-                .find(|cmd| matches!(cmd, Cmd::FetchPrDetails { .. }))
-                .cloned()
-                .unwrap_or(Cmd::None),
+            Cmd::None => Cmd::None,
             cmd @ Cmd::FetchPrDetails { .. } => cmd,
-            _ => Cmd::None,
+            Cmd::Batch(cmds) => cmds
+                .into_iter()
+                .find(|cmd| matches!(cmd, Cmd::FetchPrDetails { .. }))
+                .unwrap_or(Cmd::None),
+            other => panic!("一覧の返信がこれを出した: {other:?}"),
         }
     }
 
@@ -487,6 +523,7 @@ mod tests {
         assert_eq!(
             ask,
             Cmd::FetchPrDetails {
+                epoch: 0,
                 targets: vec![(82, "sha82".to_string()), (83, "sha83".to_string())],
             },
             "初回は全件"
@@ -528,6 +565,7 @@ mod tests {
         assert_eq!(
             ask,
             Cmd::FetchPrDetails {
+                epoch: 0,
                 targets: vec![(82, "new".to_string())],
             }
         );
@@ -546,8 +584,12 @@ mod tests {
             "前のコミットの結果を採っている"
         );
 
-        // 一覧から消えた PR の答えも採らない。
-        let ask = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "new")]);
+        // 一覧から消えた PR の答えも採らない。**`ask` は終端が返した続きを使う**
+        // —— そこで既に頼み直しているので、一覧を届け直すと `AppState::issue` に
+        // 落とされて `Cmd::None` が返る。
+        let again = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "new")]);
+        assert_eq!(again, Cmd::None, "ジョブが走っているのに二重に出た");
+        let ask = fetch_pr_details(&state, &[(99, "sha99", Ok(detail(1)))]);
         let _ = deliver_pr_details(&mut state, ask, &[(99, "sha99", Ok(detail(1)))], None);
         assert!(state.prs.detail(99).is_none(), "居ない行の集計が溜まった");
     }
@@ -582,12 +624,128 @@ mod tests {
         // レート制限は待てば直るものなので、出さないと行き止まりになる。
         let notice = state.notices.back().expect("通知");
         assert_eq!(notice.level, NoticeLevel::Warn);
-        assert!(notice.message.contains("レート制限"), "{}", notice.message);
+        assert!(notice.message.contains("中断"), "{}", notice.message);
+        // **理由は要約行ではなく `detail` に入る**（上限の無いホスト名を要約行に
+        // 混ぜると 72 セルを超える）。
+        assert!(
+            notice
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("レート制限"),
+            "{:?}",
+            notice.detail
+        );
+        // **ステータスバーの予算**（01 の「失敗の案内文」）。**見張りは複数あって、
+        // 新しい産出元を自分では拾わない**（`CLAUDE.md`）—— `exec_advice` も `A` も
+        // `o` も別々に見ているので、通知を出す場所を足したらここにも足す。
+        // **本文に `GithubError` の `Display` が乗る**ので、腕を足したときに超えうる。
+        assert!(
+            cells(&notice.message) <= 72,
+            "{} セル: {}",
+            cells(&notice.message),
+            notice.message
+        );
 
+        // **終端では頼み直さない。** ここで出すと「失敗 → 再取得 → 失敗」の輪になる。
         assert_eq!(next, Cmd::None, "終端が頼み直している: {next:?}");
-        // **同じ一覧がもう一度届いても頼み直さない**（輪にならない）。
+
+        // **一覧を引き直せば出口がある。** `f` や書き込みのあとに届く一覧で
+        // 引けなかった記憶は落ち、もう一度頼む —— 落ちないと、回線が 1 回切れた
+        // だけでセッション中ずっと `!` のままになる。
         let again = fan_out_after(&mut state, list);
-        assert_eq!(again, Cmd::None, "同じ失敗を買い直した: {again:?}");
+        assert_eq!(
+            again,
+            Cmd::FetchPrDetails {
+                epoch: 0,
+                targets: vec![(82, "sha82".to_string()), (83, "sha83".to_string())],
+            },
+            "失敗からの出口が無い"
+        );
+    }
+
+    #[test]
+    fn an_abort_does_not_poison_rows_it_never_asked_for() {
+        // **埋める相手は頼んだ対象で、いまの一覧ではない。** 扇形が走っているあいだに
+        // 増えた行は `AppState::issue` に落とされて頼まれていないので、そこへ理由を
+        // 書くと次の `fan_out` も空になり、**一度も叩いていない行が二度と引かれない**。
+        let mut state = state_on_branch("feat/x");
+        let ask = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "sha82")]);
+
+        // 走っているあいだに commit などで一覧が増える。**この `Cmd` は落とされる。**
+        let grown = vec![
+            fake_pull_request(82, "feat/x", "sha82"),
+            fake_pull_request(91, "other", "sha91"),
+        ];
+        let dropped = fan_out_after(&mut state, grown);
+        assert_eq!(dropped, Cmd::None, "ジョブが走っているのに二重に出た");
+
+        let limited = GithubError::RateLimited { reset_at: None };
+        let next = deliver_pr_details(&mut state, ask, &[], Some(limited.clone()));
+
+        assert_eq!(*state.prs.detail(82).unwrap(), Err(limited));
+        assert!(
+            state.prs.detail(91).is_none(),
+            "頼んでいない行を塞いだ: {:?}",
+            state.prs.detail(91)
+        );
+        // 続きは終端が数え直す。
+        assert_eq!(
+            next,
+            Cmd::FetchPrDetails {
+                epoch: 0,
+                targets: vec![(91, "sha91".to_string())],
+            }
+        );
+    }
+
+    #[test]
+    fn an_abort_from_the_previous_account_does_not_touch_the_new_list() {
+        // **鍵では足りない。** アカウントを切り替えても番号も head も変わらないので、
+        // 前のトークンで飛んでいた扇形の答えが新しい一覧にそのまま当たる ——
+        // `PrState::forget` が落とすと言っている守りを、走っている扇形が外から破る。
+        let mut state = state_on_branch("feat/x");
+        let list = vec![fake_pull_request(82, "feat/x", "sha82")];
+        let stale = fan_out_after(&mut state, list.clone());
+
+        // degraded → 別アカウントで解決し直し → 同じ一覧が届く。
+        let _ = update(
+            &mut state,
+            Msg::AccountResolved(Err(DegradedReason::GhMissing)),
+        );
+        let _ = update(&mut state, Msg::AccountResolved(Ok(fake_account("hanako"))));
+        // **新しいぶんは `AppState::issue` に落ちる** —— 前の扇形のジョブがまだ
+        // 走っているため。頼み直すのはその終端。
+        let dropped = fan_out_after(&mut state, list);
+        assert_eq!(dropped, Cmd::None, "ジョブが走っているのに二重に出た");
+
+        // **前のトークンの扇形が、いま届く。**
+        let limited = GithubError::RateLimited { reset_at: None };
+        let before = state.notices.len();
+        let next = deliver_pr_details(
+            &mut state,
+            stale,
+            &[(82, "sha82", Ok(detail(9)))],
+            Some(limited),
+        );
+
+        assert!(
+            state.prs.detail(82).is_none(),
+            "前のアカウントの答えが入った: {:?}",
+            state.prs.detail(82)
+        );
+        assert_eq!(state.notices.len(), before, "前のアカウントの理由を出した");
+        // **ジョブは畳む**（畳まないと以後の扇形が落ち続ける）ので、新しい
+        // アカウントぶんはここで出る。
+        assert_eq!(
+            next,
+            Cmd::FetchPrDetails {
+                epoch: state.prs.epoch(),
+                targets: vec![(82, "sha82".to_string())],
+            },
+            "新しいアカウントで頼み直していない"
+        );
+        assert_ne!(state.prs.epoch(), 0, "世代が進んでいない");
     }
 
     #[test]

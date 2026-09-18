@@ -46,7 +46,8 @@ const MAX_PAGES: usize = 10;
 /// dispatch のたびにクライアントを組み直すぶんだけ上限が増える（一覧の引き直しと
 /// PR ごとの扇形が並ぶと 2 倍になる）。
 ///
-/// **permit を取るのは [`GithubClient::get_page`] の 1 箇所だけ。** PR ごとにも取ると
+/// **permit を取るのは HTTP が実際に出るところ（[`GithubClient::get_page`]）だけ。**
+/// 上の段でも取ると
 /// **デッドロックする** —— [`GithubClient::checks`] は `try_join!` で 2 本張るので、
 /// 外側の permit を握ったまま内側が permit を待つ形になる（05）。
 static PERMITS: Semaphore = Semaphore::const_new(4);
@@ -288,8 +289,8 @@ impl GithubClient {
 
     /// PR 1 件ぶんの集計（チェックとレビュー）。
     ///
-    /// **2 本は独立なので並べる。** permit を取るのは [`Self::get_page`] の中だけ
-    /// なので、ここで `try_join!` しても入れ子で詰まらない（[`PERMITS`]）。
+    /// **2 本は独立なので並べる。** permit を取るのは `get_page` の中だけなので、
+    /// ここで `try_join!` しても入れ子で詰まらない（`PERMITS`）。
     ///
     /// **`sha` は PR の head。** チェックはコミットに紐づくので、呼ぶ側は
     /// `(番号, head sha)` を鍵に憶えて、変わっていない行を引き直さない
@@ -333,7 +334,7 @@ impl GithubClient {
     /// `a_fan_out_stops_asking_after_a_failure_that_repeats` で、**`return` を
     /// 外すと落ちる**）。
     ///
-    /// **[`FAN_OUT`] で有界にするのは別の理由** —— 対象が多いときに future を
+    /// **`FAN_OUT` で有界にするのは別の理由** —— 対象が多いときに future を
     /// 全部組み立てないためと、**permit の列を短く保つ**ため。tokio の
     /// [`Semaphore`] は FIFO（`tokio-1.53.1/src/sync/semaphore.rs` の
     /// 「permits are given out in the order they were requested」）なので、
@@ -427,7 +428,7 @@ impl GithubClient {
 
     /// 1 リクエスト送って、本文と `Link` ヘッダを返す。
     ///
-    /// **同時本数を抑えるのはここだけ**（[`PERMITS`]）。**permit は応答を読み切る
+    /// **同時本数を抑えるのはここだけ**（`PERMITS`）。**permit は応答を読み切る
     /// まで握る** —— 本文を読み終える前に返すと、次のリクエストが同時に飛ぶ。
     async fn get_page(
         &self,

@@ -1212,12 +1212,23 @@ pub struct PrState {
     load: PrLoad,
     /// PR ごとの集計。鍵は番号（01 の「PR ペイン › 集計」）。
     details: HashMap<u64, PrDetailEntry>,
+    /// どのアカウントの一覧に対する集計か。[`PrState::forget`] が進める。
+    ///
+    /// **`(番号, head sha)` の鍵では足りない。** アカウントを切り替えても PR の番号も
+    /// head も変わらないので、**前のトークンで飛んでいた扇形の答えが新しい一覧に
+    /// そのまま当たる**（`forget` の doc が落とすと言っている守りを、走っている扇形が
+    /// 外から破る）。鍵が答えるのは「どの行に当てるか」で、**「どのアカウントで
+    /// 引いたか」には答えられない**。
+    ///
+    /// **[`JobTracker`] の世代とは別物。** あちらは git の書き込みが何を古くするかを
+    /// 数えるもので、アカウントの切り替えでは進まない。
+    epoch: u64,
 }
 
 /// PR 1 行ぶんの集計と、どの head sha について引いたか。
 ///
 /// **外へは出さない**（[`PrState::detail`] が `result` だけを貸す）。`sha` を持つのは
-/// 一覧と突き合わせるためで、読むのは [`in_list`] を呼ぶ 2 箇所だけ。一覧は
+/// 一覧と突き合わせるためで、読むのは [`in_list`] を呼ぶところだけ。一覧は
 /// `sort=updated` で並びが変わり、PR の head も push で動くので、番号だけを鍵に
 /// すると push で sha が進んだ PR に**前のコミットのチェック結果**が残る。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1300,11 +1311,18 @@ impl PrState {
             // 選んでいたものが open から消えた（マージ / クローズ）か、まだ何も
             // 選んでいない。
             .unwrap_or(0);
-        // **集計は `(番号, head sha)` が一致する行だけ残す。** push で head が
-        // 進んだ行のチェックは前のコミットのもので、一覧から消えた行のものは
-        // 誰も読まない（05 の「扇形は毎回引き直さない」）。
+        // **残すのは「引けた」集計のうち、`(番号, head sha)` が一致する行だけ。**
+        // push で head が進んだ行のチェックは前のコミットのもので、一覧から消えた行の
+        // ものは誰も読まない（05 の「扇形は毎回引き直さない」）。
+        //
+        // **引けなかった行（`Err`）はここで落とす。** 残すと `wanted_details` が
+        // 二度と拾わず、**回線が 1 回切れただけでセッション中ずっと `!` のまま**に
+        // なる。一覧を引き直すのは `f` と書き込みのあとなので、ここが
+        // 「失敗からの出口」（01 の「何を引くか」が `reload` について言っているのと
+        // 同じ形）。**輪にはならない** —— 1 回の扇形の中では答えが入って
+        // `wanted_details` が空になり、次に頼むのは新しい一覧が届いたときだけ。
         self.details
-            .retain(|number, entry| in_list(&list, *number, &entry.sha));
+            .retain(|number, entry| entry.result.is_ok() && in_list(&list, *number, &entry.sha));
         self.list = list;
         self.load = PrLoad::Loaded;
     }
@@ -1324,7 +1342,7 @@ impl PrState {
     ///
     /// 居ない行には必ず扇形が飛ぶか、飛んだ扇形の答えが入る（`update::prs` の
     /// `fan_out`）。**どの sha について引いたかは外へ出さない** —— 突き合わせるのは
-    /// [`detail_loaded`](Self::detail_loaded) と [`loaded`](Self::loaded) の中だけで、
+    /// `detail_loaded` と `loaded` の中だけで、
     /// 出すと「表示している行と違う sha の集計」を読む形が外から書ける。
     pub fn detail(&self, number: u64) -> Option<&Result<PrDetail, GithubError>> {
         self.details.get(&number).map(|entry| &entry.result)
@@ -1364,20 +1382,44 @@ impl PrState {
         self.details.insert(number, PrDetailEntry { sha, result });
     }
 
-    /// 扇形が打ち切られた。**残っている行を理由ごと埋める。**
+    /// 扇形が打ち切られた。**頼んだのに答えの返らなかった行を理由ごと埋める。**
     ///
     /// 埋めないと、その行は「まだ引いていない」のまま
     /// [`wanted_details`](Self::wanted_details) に拾われ、**同じ失敗を買い直す輪**に
     /// なる（01 の「`Err` から再発行してよいのは対象が違うときだけ」）。
-    pub(super) fn details_aborted(&mut self, err: &GithubError) {
-        for pr in &self.list {
+    ///
+    /// **埋める相手は `targets` であって、いまの一覧ではない。** 一覧のほうを舐めると、
+    /// **その扇形が一度も対象にしていない行まで塞ぐ** —— 扇形が走っているあいだに
+    /// commit などで一覧が増えると、増えた行は `AppState::issue` に落とされて頼まれて
+    /// おらず、そこへ打ち切りの理由を書くと次の `fan_out` も空になって二度と引かれない。
+    ///
+    /// **いまの一覧に居ない対象は捨てる**（[`in_list`]）。頼んだあとに head が動いた
+    /// 行を埋めても、その集計は次の [`loaded`](Self::loaded) が落とす。
+    pub(super) fn details_aborted(&mut self, targets: &[(u64, String)], err: &GithubError) {
+        for (number, sha) in targets {
+            if !in_list(&self.list, *number, sha) {
+                continue;
+            }
             self.details
-                .entry(pr.number)
+                .entry(*number)
                 .or_insert_with(|| PrDetailEntry {
-                    sha: pr.head.sha.clone(),
+                    sha: sha.clone(),
                     result: Err(err.clone()),
                 });
         }
+    }
+
+    /// いまの世代。扇形を頼むときに刻み、返信で突き合わせる。
+    ///
+    /// **`ui` は読まない。** 読むのは `update::prs`（頼むとき）と `test_util`
+    /// （頼む `Cmd` を組むとき）。
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// その返信は、いまのアカウントの一覧に対するものか。
+    pub(super) fn is_current(&self, epoch: u64) -> bool {
+        self.epoch == epoch
     }
 
     /// アカウントが決まっていない状態に戻す。
@@ -1394,6 +1436,10 @@ impl PrState {
         // **集計も落とす。** 残すと、次のアカウントで引き直した一覧に**前の
         // トークンで見えた集計**が番号だけで当たる。
         self.details.clear();
+        // **飛んでいる扇形の答えも当たらなくする。** 落とすだけでは足りない ——
+        // 番号も head も変わらないので、前のトークンで頼んだ答えが新しい一覧に
+        // そのまま入る（上の `epoch`）。
+        self.epoch = self.epoch.wrapping_add(1);
     }
 }
 

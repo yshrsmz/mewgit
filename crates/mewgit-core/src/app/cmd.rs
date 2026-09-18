@@ -134,6 +134,9 @@ pub enum Cmd {
     /// **一覧そのものは運ばない** —— `dispatch` が必要とするのは叩く先だけで、
     /// `PullRequest` を丸ごと渡すと `Cmd` を比べるテストが一覧の中身に依存する。
     FetchPrDetails {
+        /// どのアカウントの一覧に対する要求か（`PrState::epoch`）。返信がこれを
+        /// 持ち帰り、アカウントが切り替わっていれば捨てられる。
+        epoch: u64,
         targets: Vec<(u64, String)>,
     },
     /// `gh browse <番号>` でブラウザに渡す（01 の「`o`（ブラウザで開く）」）。

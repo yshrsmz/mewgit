@@ -152,11 +152,12 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::AccountsListed(result) => accounts_listed(state, result),
         Msg::PrListLoaded(result) => pr_list_loaded(state, result),
         Msg::PrDetailLoaded {
+            epoch,
             number,
             sha,
             result,
-        } => pr_detail_loaded(state, number, sha, result),
-        Msg::PrDetailsFinished(aborted) => pr_details_finished(state, aborted),
+        } => pr_detail_loaded(state, epoch, number, sha, result),
+        Msg::PrDetailsFinished { epoch, aborted } => pr_details_finished(state, epoch, aborted),
         Msg::OpenPrFinished(result) => open_pr_finished(state, result),
     }
 }

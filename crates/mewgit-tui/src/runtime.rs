@@ -409,25 +409,31 @@ impl Runtime {
             // 同時本数と打ち切りは `github` の中（05 の「`Semaphore`」）—— ここは
             // 答えを `Msg` に載せるだけで、**どの失敗で止めるかを判じない**
             // （`GithubError::repeats_for_every_target`）。
-            Cmd::FetchPrDetails { targets } => {
+            Cmd::FetchPrDetails { epoch, targets } => {
                 let Some((target, api)) = github_for(state) else {
                     return no_material(state, JobKind::FetchPrDetails, "PR の集計");
                 };
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
+                    // **頼んだ対象を控える。** 打ち切ったときに埋めるのはこれで、
+                    // いまの一覧ではない（`PrState::details_aborted`）。
+                    let asked = targets.clone();
                     // 組み立てに失敗したら 1 件も引けない。**打ち切りとして返す** ——
                     // 黙って終わると、答えの無い行が「読み込み中」のまま残る。
                     let api = match api {
                         Ok(api) => api,
                         Err(err) => {
-                            let _ = tx.send(Msg::PrDetailsFinished(Some(err)));
+                            let _ = tx.send(Msg::PrDetailsFinished {
+                                epoch,
+                                aborted: Some((err, asked)),
+                            });
                             return;
                         }
                     };
                     let send = |number, sha, result| {
-                        // **届いた行から出す。** 60 件を同時に引いても全部揃うまで
-                        // 数秒かかる（05 の予算）。
+                        // **届いた行から出す。** 全部揃うまで待たない（05 の予算）。
                         let _ = tx.send(Msg::PrDetailLoaded {
+                            epoch,
                             number,
                             sha,
                             result,
@@ -437,7 +443,10 @@ impl Runtime {
                         .pr_details(&target.owner, &target.repo, targets, send)
                         .await;
                     // **答えを全部送ったあとに送る。** ジョブを畳むのはこちら。
-                    let _ = tx.send(Msg::PrDetailsFinished(aborted));
+                    let _ = tx.send(Msg::PrDetailsFinished {
+                        epoch,
+                        aborted: aborted.map(|err| (err, asked)),
+                    });
                 });
                 ControlFlow::Continue(())
             }
@@ -1048,17 +1057,31 @@ mod tests {
         aim_at_a_host_that_cannot_be_built(&mut state);
 
         let cmd = state.issue(Cmd::FetchPrDetails {
+            epoch: 0,
             targets: vec![(82, "headsha".to_string())],
         });
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
         let msg = msgs.recv().await.expect("Msg が返りませんでした");
 
-        let Msg::PrDetailsFinished(Some(err)) = msg else {
+        let Msg::PrDetailsFinished {
+            epoch: 0,
+            aborted: Some((err, asked)),
+        } = msg
+        else {
             panic!("打ち切りとして返っていない: {msg:?}");
         };
         assert!(matches!(err, GithubError::InvalidHost { .. }), "{err:?}");
+        // **頼んだ対象を持ち帰る。** 埋める相手はいまの一覧ではない
+        // （`PrState::details_aborted`）。
+        assert_eq!(asked, vec![(82, "headsha".to_string())]);
         // 畳むのは `update`（`prs::pr_details_finished`）の側。
-        let _ = update(&mut state, Msg::PrDetailsFinished(Some(err)));
+        let _ = update(
+            &mut state,
+            Msg::PrDetailsFinished {
+                epoch: 0,
+                aborted: Some((err, asked)),
+            },
+        );
         assert!(!state.jobs.is_running(JobKind::FetchPrDetails));
     }
 
@@ -1099,6 +1122,7 @@ mod tests {
         let (mut state, _reader) = opened(&repo);
         let cases = [
             (JobKind::FetchPrList, "PR 一覧の取得"),
+            (JobKind::FetchPrDetails, "PR の集計"),
             (JobKind::OpenPr, "PR を開く操作"),
         ];
 

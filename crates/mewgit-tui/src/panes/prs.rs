@@ -57,26 +57,23 @@ pub(super) fn lines(state: &AppState) -> Rows {
     let theme = &state.config.theme;
     let ascii = state.config.graph.ascii;
     // **集計の桁も出す行から導く。** 中身は行ごとに違う（引けていない行は待ちの印 1 つ、
-    // 引けた行は記号 0〜n 個）ので、揃えないとタイトルの開始位置が行ごとにずれる。
+    // 引けた行は記号が並ぶ）ので、揃えないとタイトルの開始位置が行ごとにずれる。
     // **どの行も出すものが無ければ桁ごと消える** —— CI もレビューも無いリポジトリで
     // 意味の無い余白を置かないため（07 の「桁を先に確保しない」）。
-    let cells: Vec<(String, String)> = state
-        .prs
-        .list
-        .iter()
-        .map(|pr| summary_cells(state.prs.detail(pr.number), ascii))
-        .collect();
-    let checks = column(cells.iter().map(|(cell, _)| cell));
-    let reviews = column(cells.iter().map(|(_, cell)| cell));
+    let cells = column(
+        state
+            .prs
+            .list
+            .iter()
+            .map(|pr| summary_cell(state.prs.detail(pr.number), ascii)),
+    );
     Rows {
         lines: state
             .prs
             .list
             .iter()
-            .zip(checks.iter().zip(&reviews))
-            .map(|(pr, (checks, reviews))| {
-                pr_row(pr, theme, &account.login, width, checks, reviews)
-            })
+            .zip(&cells)
+            .map(|(pr, cell)| pr_row(pr, theme, &account.login, width, cell))
             .collect(),
         // **カーソルをここで丸めない。** 範囲に収めるのは `PrState::move_cursor` と
         // `PrState::loaded` の側（同じ判定を 2 箇所に書かない）。**反転を当てるのも
@@ -89,23 +86,31 @@ pub(super) fn lines(state: &AppState) -> Rows {
 ///
 /// **どれも空なら詰めない。** 幅 0 に詰めると区切りの 2 桁だけが残り、タイトルが
 /// そのぶん右へずれる。
-fn column<'a>(cells: impl Iterator<Item = &'a String> + Clone) -> Vec<String> {
+fn column(cells: impl Iterator<Item = String>) -> Vec<String> {
+    let cells: Vec<String> = cells.collect();
     let width = cells
-        .clone()
+        .iter()
         .map(|cell| cell.chars().count())
         .max()
         .unwrap_or(0);
     if width == 0 {
-        return cells.map(|_| String::new()).collect();
+        return cells;
     }
-    cells.map(|cell| format!("  {cell:width$}")).collect()
+    cells
+        .into_iter()
+        .map(|cell| format!("  {cell:width$}"))
+        .collect()
 }
 
-/// `*#123 OPEN   ✓2 ✗1  A1  Add adaptive layout`。
+/// `*#123 OPEN   ✓3 ✗1 A1  Add adaptive layout`。
 ///
 /// **印と状態と集計をタイトルより前に置く。** 右列は端末幅の 40% しかなく、ratatui は
 /// 行の右端で切るので、末尾に置くと**そこだけが黙って消える**（実測: 幅 100 の右列
 /// 38 桁で `MERGED` が出なかった）。行の左端は切られない。
+///
+/// **その守りは自分にも返る。** 集計の桁を無制限に伸ばすと、今度は**タイトルが
+/// 1 文字も出なくなる**（80x24 の右列は内側 30 セルしかない）。伸びないように
+/// するのは `SUMMARY_BUDGET` のほう。
 ///
 /// **`AppState` ごとは受け取らない。** 要るのは `theme` と `login` と組み終えたセル
 /// だけで、`AppState` を渡すと「状態から引いた login と、引数の login が食い違う対」が
@@ -117,25 +122,20 @@ fn pr_row(
     theme: &Theme,
     login: &str,
     width: usize,
-    checks: &str,
-    reviews: &str,
+    summary: &str,
 ) -> Line<'static> {
     let label = status_label(pr);
-    let mut spans = vec![
+    Line::from(vec![
         Span::styled(mark(pr, login), theme::muted()),
         Span::raw(format!("#{} ", pr.number)),
         Span::styled(format!("{label:width$}"), status_style(pr, theme)),
-    ];
-    for cell in [checks, reviews] {
-        if !cell.is_empty() {
-            spans.push(Span::styled(cell.to_string(), theme::muted()));
-        }
-    }
-    spans.push(Span::raw(format!("  {}", pr.title)));
-    Line::from(spans)
+        // **空なら 1 セルも描かれない**ので、幅 0 の桁はここで消える。
+        Span::styled(summary.to_string(), theme::muted()),
+        Span::raw(format!("  {}", pr.title)),
+    ])
 }
 
-/// 1 行ぶんの `(チェック, レビュー)`（07 の「PRs ペイン」）。
+/// 1 行ぶんの集計（07 の「PRs ペイン」）。
 ///
 /// **3 つの意味を 1 箇所で分ける。** 集計が**居ない**のは「まだ引いていない」
 /// （`PrState::detail`）、`Err` は「引けなかった」、`Ok` は数えた結果。
@@ -145,57 +145,76 @@ fn pr_row(
 /// **`&AppState` も `&PullRequest` も取らない。** 引くのは呼ぶ側（一覧を回っている
 /// ところ）で、ここが自分で引くと**一覧に居ない PR を渡された対**が型として組め、
 /// 黙って「まだ引いていない」を描く。
-fn summary_cells(detail: Option<&Result<PrDetail, GithubError>>, ascii: bool) -> (String, String) {
+///
+/// **チェックとレビューを 1 本の桁にする。** 別々の桁にすると区切りの 2 セルが
+/// もう 1 組要り、30 セルしかない右列ではそれだけでタイトルが消える。
+fn summary_cell(detail: Option<&Result<PrDetail, GithubError>>, ascii: bool) -> String {
     match detail {
-        None => (
-            ui::pick_charset(CHECK_WAIT, ascii).to_string(),
-            String::new(),
-        ),
+        None => ui::pick_charset(CHECK_WAIT, ascii).to_string(),
         // **理由はここに出ない。** 枠の内側に入らないので、出せるのは「引けなかった」
         // ことだけ（07 で受け入れた穴）。打ち切りの理由は通知に出る。
-        Some(Err(_)) => (
-            ui::pick_charset(CHECK_ERROR, ascii).to_string(),
-            String::new(),
-        ),
+        Some(Err(_)) => ui::pick_charset(CHECK_ERROR, ascii).to_string(),
         Some(Ok(detail)) => {
             let checks = &detail.checks;
             let review = &detail.review;
-            (
-                counts(&[
-                    (checks.success, ui::pick_charset(CHECK_OK, ascii)),
-                    (checks.failure, ui::pick_charset(CHECK_FAIL, ascii)),
-                    (checks.pending, ui::pick_charset(CHECK_PENDING, ascii)),
-                    (checks.skipped, ui::pick_charset(CHECK_SKIPPED, ascii)),
-                    (checks.neutral, ui::pick_charset(CHECK_NEUTRAL, ascii)),
-                ]),
+            counts(&[
+                (checks.success, ui::pick_charset(CHECK_OK, ascii)),
+                (checks.failure, ui::pick_charset(CHECK_FAIL, ascii)),
+                (checks.pending, ui::pick_charset(CHECK_PENDING, ascii)),
+                (checks.skipped, ui::pick_charset(CHECK_SKIPPED, ascii)),
+                (checks.neutral, ui::pick_charset(CHECK_NEUTRAL, ascii)),
                 // **`commented` は出さない** —— 承認でも変更要求でもないコメントは、
                 // 出しても次に何をするかが変わらない。**値は捨てていない**ので、出す
                 // 場所ができたときに数え直さずに済む。
-                counts(&[
-                    (review.approved, REVIEW_APPROVED),
-                    (review.changes_requested, REVIEW_CHANGES),
-                ]),
-            )
+                (review.approved, REVIEW_APPROVED),
+                (review.changes_requested, REVIEW_CHANGES),
+            ])
         }
     }
 }
 
-/// `✓2 ✗1`。**0 のものは出さない**（Branches ペインの `↑` `↓` と同じ）。
+/// `✓2 ✗1 A1`。**0 のものは出さない**（Branches ペインの `↑` `↓` と同じ）。
 /// 1 件も無ければ空文字で、桁ごと消える。
+///
+/// **`SUMMARY_BUDGET` を超えたら後ろを落として `+` を付ける。** 落とすのは
+/// 並びの後ろから —— 前に置いてあるほど「次に何をするか」が変わる（成功と失敗が
+/// いちばん前、レビューがいちばん後ろ）。**`+` を付けるのは、落としたことを
+/// 言わずに消すと「それ以上は無い」と読めるから。**
 fn counts(items: &[(usize, &str)]) -> String {
     let mut out = String::new();
+    let mut dropped = false;
     for (count, glyph) in items {
         if *count == 0 {
             continue;
         }
-        if !out.is_empty() {
+        let group = format!("{glyph}{count}");
+        let sep = usize::from(!out.is_empty());
+        // `+` のぶんを 1 セル残して測る。
+        if out.chars().count() + sep + group.chars().count() > SUMMARY_BUDGET - 1 {
+            dropped = true;
+            continue;
+        }
+        if sep == 1 {
             out.push(' ');
         }
-        out.push_str(glyph);
-        out.push_str(&count.to_string());
+        out.push_str(&group);
+    }
+    if dropped {
+        out.push('+');
     }
     out
 }
+
+/// 集計の桁に許す幅。
+///
+/// **80x24 で測って決めた**（2026-09-18）。右列は端末幅の 40% で、80 桁なら枠の内側が
+/// 30 セル。行頭の印と `#<番号>` と状態で 11 セル、集計の前後の区切りで 4 セル使うので、
+/// ここを 10 にするとタイトルに 5 セル残る。**これを外すとタイトルが 1 文字も出ない
+/// 行ができる**（`✓12 ✗3 ○2 ⊘5 ·1` は 17 セル）。
+///
+/// **狭い端末で何をどう畳むかは M6 のレイアウトのタスク**（07）。ここでやっているのは
+/// 「いちばん前だけは必ず出す」ことだけ。
+const SUMMARY_BUDGET: usize = 10;
 
 /// チェックの記号。`(UTF-8, ASCII)`。**`config.graph.ascii` を通す**
 /// （Branches ペインの `↑` `↓` と同じ理由で、同じ端末で一部だけ化けるのを避ける）。
@@ -304,7 +323,8 @@ mod tests {
     use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::github::{CheckSummary, ReviewSummary};
     use mewgit_core::test_util::{
-        deliver_pr_details, fake_pull_request, pr_list_loaded, put_on_branch, reply,
+        deliver_pr_details, fake_pull_request, fetch_pr_details, pr_list_loaded, put_on_branch,
+        reply,
     };
 
     const SIZE: TermSize = TermSize {
@@ -351,12 +371,20 @@ mod tests {
         answers: &[(u64, &str, Result<PrDetail, GithubError>)],
     ) -> AppState {
         let mut state = with_list(list);
-        let targets = answers
-            .iter()
-            .map(|(number, sha, _)| (*number, (*sha).to_string()))
-            .collect();
-        let _ = deliver_pr_details(&mut state, Cmd::FetchPrDetails { targets }, answers, None);
+        let ask = fetch_pr_details(&state, answers);
+        let _ = deliver_pr_details(&mut state, ask, answers, None);
         state
+    }
+
+    /// `needle` が何**セル**目から始まるか。
+    ///
+    /// **`str::find` を使わない。** あれが返すのは**バイト**位置で、記号が多バイトの
+    /// 行と ASCII だけの行を比べると、揃っているのにずれて見える（実際に踏んだ）。
+    fn column_of(row: &str, needle: &str) -> usize {
+        let at = row
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} がありません: {row}"));
+        row[..at].chars().count()
     }
 
     /// [`CheckState`](mewgit_core::github::CheckState) の腕を全部踏む集計。
@@ -374,22 +402,105 @@ mod tests {
     }
 
     #[test]
-    fn the_row_shows_every_check_state_and_does_not_fold_them() {
+    fn every_check_state_gets_its_own_glyph_and_none_is_folded_into_another() {
         // **`Skipped` と `Neutral` を成功か失敗に足すとどちらも嘘になる**（07）。
-        // 腕を 1 つでも畳むと、ここで記号が 1 つ消える。
-        let state = with_details(open_and_draft(), &[(82, "headsha", Ok(every_state()))]);
+        // **1 腕ずつ回す** —— 5 つ同時に出す行は `SUMMARY_BUDGET` で後ろが落ちるので、
+        // 畳んだのか予算で落ちたのかが見分けられない。
+        let mut seen = Vec::new();
+        for (name, summary) in [
+            (
+                "success",
+                CheckSummary {
+                    success: 7,
+                    ..CheckSummary::default()
+                },
+            ),
+            (
+                "failure",
+                CheckSummary {
+                    failure: 7,
+                    ..CheckSummary::default()
+                },
+            ),
+            (
+                "pending",
+                CheckSummary {
+                    pending: 7,
+                    ..CheckSummary::default()
+                },
+            ),
+            (
+                "skipped",
+                CheckSummary {
+                    skipped: 7,
+                    ..CheckSummary::default()
+                },
+            ),
+            (
+                "neutral",
+                CheckSummary {
+                    neutral: 7,
+                    ..CheckSummary::default()
+                },
+            ),
+        ] {
+            let detail = PrDetail {
+                checks: summary,
+                review: ReviewSummary::default(),
+            };
+            let state = with_details(open_and_draft(), &[(82, "headsha", Ok(detail))]);
+            let row = pane_row(&state, SIZE, Pane::Prs, "#82");
+            let glyph = row
+                .split_whitespace()
+                .find(|word| word.ends_with('7'))
+                .unwrap_or_else(|| panic!("{name} の記号が出ていません: {row}"))
+                .to_string();
+            seen.push((name, glyph));
+        }
+        // **腕の数だけ違う記号が出る。** 畳むとここで重複が出る。
+        let mut glyphs: Vec<&str> = seen.iter().map(|(_, g)| g.as_str()).collect();
+        glyphs.sort_unstable();
+        glyphs.dedup();
+        assert_eq!(glyphs.len(), seen.len(), "記号が重なっている: {seen:?}");
+    }
 
-        let row = pane_row(&state, SIZE, Pane::Prs, "#82");
-        assert!(row.contains("✓2"), "{row}");
-        assert!(row.contains("✗1"), "{row}");
-        assert!(row.contains("○1"), "{row}");
-        assert!(row.contains("⊘1"), "{row}");
-        assert!(row.contains("·1"), "{row}");
+    #[test]
+    fn a_pr_with_many_checks_does_not_eat_the_whole_title() {
+        // **`pr_row` の doc が「末尾に置くと黙って消える」を理由に集計を前へ置いた
+        // その守りが、桁を足したことで自分に返る。** 80x24 の右列は内側 30 セルしか
+        // ないので、集計を伸ばし放題にすると**タイトルが 1 文字も出ない**
+        // （実測: `✓12 ✗3 ○2 ⊘5 ·1` は 17 セル）。
+        let detail = PrDetail {
+            checks: CheckSummary {
+                success: 12,
+                failure: 3,
+                pending: 2,
+                skipped: 5,
+                neutral: 1,
+            },
+            review: ReviewSummary {
+                approved: 2,
+                changes_requested: 1,
+                commented: 0,
+            },
+        };
+        let state = with_details(open_and_draft(), &[(82, "headsha", Ok(detail))]);
+
+        let wide = pane_row(&state, SIZE, Pane::Prs, "#82");
+        assert!(wide.contains("Lanes"), "タイトルが消えた: {wide}");
+        // **落としたことを言う。** 黙って消すと「それ以上は無い」と読める。
+        assert!(wide.contains('+'), "落としたことを言っていない: {wide}");
+        // **いちばん前は残す** —— 次に何をするかが変わるのはそちら。
+        assert!(wide.contains("✓12"), "{wide}");
+        // **巻き添えにしない。** 幅は一覧の最大から決まるので、広い行が 1 つあると
+        // 狭い行のタイトルまで押し出される。
+        let narrow = pane_row(&state, SIZE, Pane::Prs, "#90");
+        assert!(narrow.contains("Bump"), "巻き添えで消えた: {narrow}");
     }
 
     #[test]
     fn a_row_tells_apart_not_asked_yet_from_could_not_be_read() {
-        // **3 つの意味が 1 つの桁に載る**（`checks_cell`）。同じ見た目にすると、
+        // **3 つの意味が 1 つの桁に載る**（`summary_cell`）。同じ見た目にすると、
         // CI の無い PR と CI を読めなかった PR が区別できない。
         let state = with_details(
             open_and_draft(),
@@ -467,8 +578,8 @@ mod tests {
         let wide = pane_row(&state, SIZE, Pane::Prs, "#82");
         let narrow = pane_row(&state, SIZE, Pane::Prs, "#90");
         assert_eq!(
-            wide.find("Lanes"),
-            narrow.find("Bump"),
+            column_of(&wide, "Lanes"),
+            column_of(&narrow, "Bump"),
             "揃っていない\n{wide}\n{narrow}"
         );
     }

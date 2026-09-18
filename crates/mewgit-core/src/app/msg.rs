@@ -159,15 +159,23 @@ pub enum Msg {
     /// **鍵は `(number, sha)`。** 飛んでいるあいだに push で head が進んだ PR の
     /// 答えは前のコミットのものなので、受け取り側が捨てる。
     PrDetailLoaded {
+        /// 要求に刻んだ世代（`AppState::prs` の `epoch`）。アカウントが切り替わって
+        /// いれば捨てる —— `(number, sha)` は「どの行に当てるか」しか答えない。
+        epoch: u64,
         number: u64,
         sha: String,
         result: Result<PrDetail, GithubError>,
     },
     /// 扇形が終わった。**ジョブを畳むのはここ。**
     ///
-    /// `Some(err)` は**打ち切った**という意味（レート制限）。残りを頼まなかったので、
-    /// 答えの無い行はこの理由で埋まる（01 の「PR ペイン › 集計」）。
-    PrDetailsFinished(Option<GithubError>),
+    /// `aborted` が `Some` なら**打ち切った**という意味で、理由と**頼んだ対象**を
+    /// 運ぶ。答えの返らなかった対象はその理由で埋まる（01 の「PR ペイン › 集計」）。
+    /// **対象を運ぶのは、いまの一覧を舐めると頼んでいない行まで塞ぐから** ——
+    /// 扇形が走っているあいだに増えた行がそれ。
+    PrDetailsFinished {
+        epoch: u64,
+        aborted: Option<(GithubError, Vec<(u64, String)>)>,
+    },
     /// `gh browse` の結果。`Err` は通知に出す（01 の「`o`（ブラウザで開く）」）。
     ///
     /// **`Ok` でも何も出さない。** ブラウザが前に出てくるので、画面に足す言葉が無い。

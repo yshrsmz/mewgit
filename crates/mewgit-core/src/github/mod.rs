@@ -197,12 +197,77 @@ impl GithubError {
             // クライアントを組めない。どの対象でも組めない。
             GithubError::InvalidHost { .. } => true,
             // 対象ごとに違いうる。`Network` と `Decode` も**その 1 本だけ**の事故と
-            // して扱う —— 回線が落ちていれば残りも同じように落ちるが、それは通知に
-            // 出るだけで、諦めても叩いても払う往復は変わらない。
+            // して扱う —— 回線が落ちていれば残りも同じように落ちるが、諦めても
+            // 叩いても払う往復は変わらない。
+            //
+            // **1 件ごとの失敗は通知に出ない。** 出るのは行の印だけ（07 で受け入れた
+            // 穴）。行き止まりにならないのは、**引けなかった記憶が次に一覧を引いた
+            // ときに落ちる**から（`app::PrState::loaded`）—— `f` を押せば引き直す。
             GithubError::NotFound
             | GithubError::Network { .. }
             | GithubError::Decode { .. }
             | GithubError::Api { .. } => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_failures_that_are_the_whole_process_stop_the_fan_out() {
+        // **腕ごとに理由が違う。** `NotFound` は「その PR の fork が消えた」のような
+        // 行ごとの事情なので偽 —— 真にすると、**1 つの消えた fork が一覧ぜんぶの
+        // 集計を落とす**。`Unauthorized` / `Forbidden` はトークンの問題なので真で、
+        // 偽にすると同じ 401 を行の数だけ買う。
+        //
+        // **腕を 1 つずつ並べる。** 真偽をまとめて 2 本の `assert` にすると、腕を
+        // 足したときに**どちらにも入れないまま**通る。
+        let cases: [(GithubError, bool); 8] = [
+            (GithubError::RateLimited { reset_at: None }, true),
+            (GithubError::Unauthorized, true),
+            (
+                GithubError::Forbidden {
+                    needed_scopes: Vec::new(),
+                    saml: false,
+                    body_head: String::new(),
+                },
+                true,
+            ),
+            (
+                GithubError::InvalidHost {
+                    host: "-bad".to_string(),
+                },
+                true,
+            ),
+            (GithubError::NotFound, false),
+            (
+                GithubError::Network {
+                    message: "eof".to_string(),
+                },
+                false,
+            ),
+            (
+                GithubError::Decode {
+                    message: "eof".to_string(),
+                },
+                false,
+            ),
+            (
+                GithubError::Api {
+                    status: 500,
+                    body_head: String::new(),
+                },
+                false,
+            ),
+        ];
+        for (err, wanted) in cases {
+            assert_eq!(
+                err.repeats_for_every_target(),
+                wanted,
+                "{err:?} の判断が違う"
+            );
         }
     }
 }

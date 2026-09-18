@@ -30,6 +30,7 @@
 | git がサブプロセスに何を渡すか | `core.sshCommand` にダンプ用のスクリプトを噛ませて argv を見る（`git -c core.sshCommand='sh dump.sh' ls-remote <url>`） |
 | ブラウザを開くコマンドが何を渡すか | `BROWSER`（`gh` は `GH_BROWSER` も見る）にダンプ用のスクリプトを置いて argv を見る。**窓は開かない**（`BROWSER="sh dump.sh" gh browse 1 -R <host>/<owner>/<repo>`） |
 | 手元のツールが内部で何をしているか | バイナリを `strings` に通して grep する（設定ファイルに何を書くか、どのシーケンスを送るかが読める） |
+| 他の TUI がどう並べているか | `script` + `stty` で実機を撮る（`CLAUDE.md` の pty の節）。**`q` で終わると復元シーケンスまで録れる**ので `ESC[?1049l` の手前で切る。`scripts/screen.py` は部分再描画するアプリだとフレームが混ざるので、必要なら仮想画面を自前で起こす。スピナーの桁は生の `ESC[<行>;<桁>H` から読む |
 | 依存クレートの挙動 | `~/.cargo/registry/src/*/<crate>-<version>/` のソースを読む。ドキュメントより実装が正しい |
 | 手元に無いプラットフォームでのビルド | 依存更新だけを積んだ draft PR を立てて CI を回す。手元は macOS しか無い |
 

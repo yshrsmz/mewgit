@@ -18,6 +18,7 @@ use crate::{modals, panes};
 use mewgit_core::app::{AppState, GraphSelection, Pane, TermSize};
 use mewgit_core::auth::{gh, AccountState, DegradedReason};
 use mewgit_core::git_read::{FileEntry, FileStatus};
+use mewgit_core::github::RateLimit;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -29,7 +30,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let [header, body, status] = split(frame.area());
     let [left, right] = split_body(body);
 
-    frame.render_widget(header_line(state), header);
+    frame.render_widget(header_line(state, header.width), header);
     // **スピナーは同じ領域に右寄せで重ねる。** `Paragraph` は既定のスタイルで
     // 領域を塗り直すだけなので、左に描いたリポジトリ名は消えない。
     if let Some(spinner) = spinner_line(state) {
@@ -299,22 +300,82 @@ pub fn graph_rows(term: TermSize) -> usize {
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
-fn header_line(state: &AppState) -> Paragraph<'_> {
+///
+/// **幅を受けるのは残量のため**（下の `[api: …]`）。同じ領域に重ねて描くスピナーの
+/// ぶんを引かないと、「余っているか」を数えられない。
+fn header_line(state: &AppState, width: u16) -> Paragraph<'_> {
     let mut spans = vec![Span::styled(
         repo_label(state),
         Style::default().add_modifier(Modifier::BOLD),
     )];
 
     if let Some(target) = state.repo.target.resolved() {
-        spans.push(Span::raw(format!("  {}/{}", target.owner, target.repo)));
+        spans.push(Span::raw(format!("{SEP}{}/{}", target.owner, target.repo)));
     }
 
     if let Some(account) = account_span(&state.account) {
-        spans.push(Span::raw("  "));
+        spans.push(Span::raw(SEP));
         spans.push(account);
     }
 
+    if let Some(limit) = state.prs.rate_limit() {
+        let quota = rate_limit_span(limit);
+        // **入らなければ出さない。** 右端のスピナーは同じ領域に重ねて描くので、
+        // はみ出した `[api: 4984]` は **`[api: 49` として残り、桁の減った数が
+        // そのまま読める**（実測。07 のヘッダに幅の表がある）。**切れた数は
+        // 「無い」より悪い。**
+        // **譲るのは新しく足したほう** —— `owner/repo` と `[gh: …]` が食われる形は
+        // 足す前からあり、落とす順序を全体で決めるのは M6（07）。
+        let spinner = spinner_line(state).as_ref().map_or(0, Line::width);
+        if quota_fits(&spans, &quota, spinner, width) {
+            spans.push(Span::raw(SEP));
+            spans.push(quota);
+        }
+    }
+
     Paragraph::new(Line::from(spans))
+}
+
+/// 残量を足しても、右端のスピナーとのあいだに [`SEP`] が残るか。
+///
+/// **数えるのは余白まで。** **`contains` だけの見張りでは余白ゼロが通る**（#73）ので、
+/// 「入った」の基準を隣の語と地続きにならないところに置く。
+fn quota_fits(spans: &[Span<'_>], quota: &Span<'_>, spinner: usize, width: u16) -> bool {
+    // **区切りもセル幅で数える。** `SEP.len()` はバイト数なので、いまの `"  "` では
+    // 同じ値になるが、区切りを非 ASCII にした瞬間に組む側とずれる。
+    let sep = Span::raw(SEP).width();
+    let left: usize = spans.iter().map(Span::width).sum();
+    left + sep + quota.width() + sep + spinner <= width as usize
+}
+
+/// ヘッダの要素の区切り。**1 セルだと隣の語と地続きに見える。**
+///
+/// 組む側（`Span::raw(SEP)`）と数える側（[`quota_fits`]）が同じものを読む ——
+/// 幅だけを定数にすると、区切りを広げたときに数えるほうが 2 のまま残る。
+const SEP: &str = "  ";
+
+/// ヘッダの `[api: …]`。GitHub API の残量（07 の「ヘッダ」）。
+///
+/// **1 度でも応答が届いたら出し続ける。** 閾値を割ったときだけ出す形は、**出ていない
+/// あいだ減り具合が見えない** —— 一覧 1 本と PR ごとの扇形で 1 回の引き直しに
+/// 100 往復を超えることがあり（05 の実測）、出たときにはもう遅い。
+///
+/// **乏しいときだけ色を付ける。** 割合で見るのは [`RateLimit::is_low`] で、上限は
+/// トークンの種類で変わる。
+///
+/// **上限は添えない。** `[api: 4984/5000]` は 18 セルで、80 桁では `owner/repo` が
+/// 現実的な長さでもスピナーに重なる（実測。07 のヘッダ）。
+///
+/// **`[gh: …]` の degraded とは同時に出ない。** degraded なら [`PrState::forget`] が残量を
+/// 落としており、`Resolving` では一度も引いていない —— 出るのは
+/// `[gh: login @ host]` の隣だけ。
+fn rate_limit_span(limit: RateLimit) -> Span<'static> {
+    let text = format!("[api: {}]", limit.remaining);
+    if limit.is_low() {
+        Span::styled(text, theme::warn())
+    } else {
+        Span::raw(text)
+    }
 }
 
 /// ヘッダの `[gh: …]`。まだ決まっていなければ `None`（07）。
@@ -464,10 +525,15 @@ fn repo_label(state: &AppState) -> String {
 mod tests {
     use super::{degraded_label, file_row, pane_area, window, wrapped};
     use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
-    use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TargetState, TermSize};
+    use mewgit_core::app::{
+        update, AppState, Cmd, JobKind, Msg, NoticeLevel, Pane, TargetState, TermSize,
+    };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::test_util::{fake_account, fake_ambiguous, fake_snapshot};
+    use mewgit_core::github::GithubError;
+    use mewgit_core::test_util::{
+        fake_account, fake_ambiguous, fake_rate_limit, fake_snapshot, fetch_pr_details,
+    };
     use ratatui::style::{Color, Modifier};
 
     #[test]
@@ -634,7 +700,11 @@ mod tests {
     /// **バッファを見る。** `draw` の文字列にはスタイルが残らないので、黄色で出して
     /// いるかは色を読まないと判らない（`row_is_reversed` と同じ理由でここに置く）。
     fn header_color_at(state: &AppState, needle: &str) -> Color {
-        let size = TermSize::default();
+        header_color_at_size(state, needle, TermSize::default())
+    }
+
+    /// 幅を指定して [`header_color_at`] と同じことをする。
+    fn header_color_at_size(state: &AppState, needle: &str, size: TermSize) -> Color {
         let line = header(state, size);
         let col = line
             .find(needle)
@@ -776,6 +846,148 @@ mod tests {
         });
         let _ = state.issue(Cmd::LoadBranches);
         state
+    }
+
+    /// 残量まで出ている出荷形の状態（アカウント解決済み + 扇形が走っている最中）。
+    ///
+    /// **`[api: …]` が出るのはこの形だけ。** degraded では [`PrState::forget`] が
+    /// 残量を落としており、`Resolving` では一度も引いていない。**スピナーも
+    /// 扇形のもの**（`pr checks`）—— 数が動くのはそのあいだだけなので、同時に
+    /// 出るのはこの組み合わせ（#73 の「出荷される形を測る」）。
+    fn state_with_quota(remaining: u32) -> AppState {
+        let mut state = state_fetching_details();
+        let epoch = state.prs.epoch();
+        let _ = update(
+            &mut state,
+            Msg::RateLimitSeen {
+                epoch,
+                seen: fake_rate_limit(remaining, 1789703295),
+            },
+        );
+        state
+    }
+
+    /// 残量が届く前の同じ形。**足したことで他が変わっていないか**を比べる相手。
+    fn state_fetching_details() -> AppState {
+        let mut state = shipping_header_state();
+        state.jobs.finish(JobKind::LoadBranches);
+        state.account = resolved_account();
+        // **世代は `fetch_pr_details` に書かせる**（`PrState::forget` が進めたあとの
+        // 状態でも「古い返信」を組めるようにするため）。答えは届けないので、ここが
+        // 要るのは「扇形が走っている」ことだけ —— スピナーが `pr checks` になる。
+        let ask = fetch_pr_details(&state, &[(1, "sha", Err(GithubError::NotFound))]);
+        let _ = state.issue(ask);
+        state
+    }
+
+    #[test]
+    fn the_header_shows_the_api_quota_next_to_the_account() {
+        // **出荷形で測る。** 左に `owner/repo` と `[gh: …]`、右端に扇形のスピナーが
+        // 重なる（07 のヘッダ）。**左の区切りごと綴じる** —— `SEP` を落とすと
+        // `github.com][api: 4984]` と地続きになるが、`[api: 4984]` だけを見る形では
+        // それが通る（実測 2026-09-18、`SEP` を外して 226 本とも緑だった）。
+        //
+        // **右の余白はここでは見張れない。** 幅 100 ではスピナーとのあいだが 6 セル
+        // 余っているので、`quota_fits` が取る隙間を 2 セルから 0 に緩めても通る。
+        // 隙間を見張るのは `a_quota_that_does_not_fit_is_dropped_whole_not_cut` の
+        // 境目（95 / 96）。
+        let size = TermSize {
+            width: 100,
+            height: 24,
+        };
+        let line = header(&state_with_quota(4984), size);
+
+        assert!(
+            line.contains("[gh: user_shortcode @ github.com]  [api: 4984]"),
+            "header: {line:?}"
+        );
+        assert!(line.contains("pr checks"), "スピナーが出ていない: {line:?}");
+    }
+
+    #[test]
+    fn the_quota_turns_warn_when_little_is_left() {
+        // **割合で見る**（`RateLimit::is_low`）。上限はトークンの種類で変わるので、
+        // 固定の本数だと上限 60 のトークンでは最初から点く。
+        let size = TermSize {
+            width: 100,
+            height: 24,
+        };
+
+        assert_eq!(
+            header_color_at_size(&state_with_quota(4984), "[api:", size),
+            Color::Reset
+        );
+        assert_eq!(
+            header_color_at_size(&state_with_quota(500), "[api:", size),
+            Color::Yellow,
+            "上限の 10% は乏しい"
+        );
+    }
+
+    #[test]
+    fn the_header_says_nothing_about_the_quota_before_the_first_response() {
+        // **応答が 1 度も届いていなければ出さない。** レートリミットを切った GHES は
+        // ヘッダごと返さないので、ここから動かない（05）。
+        let mut state = shipping_header_state();
+        state.account = resolved_account();
+
+        let line = header(&state, TermSize::default());
+
+        assert!(!line.contains("[api:"), "header: {line:?}");
+    }
+
+    #[test]
+    fn a_quota_that_does_not_fit_is_dropped_whole_not_cut() {
+        // **切れた数は「無い」より悪い。** 右端にはスピナーが重なるので、はみ出した
+        // `[api: 4984]` は `[api: 49` として残り、**桁の減った数がそのまま読める**
+        // 形になる（#89 の「桁を足した瞬間に予算が自分へ返る」の、返り先が
+        // 自分の数だった版）。
+        //
+        // **幅は実測で選ぶ**（2026-09-18、扇形のスピナー `pr checks` が走っている
+        // 最中）—— `anthropics/claude-code` + `user_shortcode` の左群は 70 セル、
+        // スピナーは 11 セル。**80 では測れない** —— 残量の始まる 72 桁目が
+        // スピナーの下（69 桁目から）に丸ごと隠れるので、**門を外しても画面が
+        // 変わらない**（この見張りは最初その幅で書いて、変異で素通りした）。
+        // **切れた数が読めるのは幅 90〜92**（`[api: 4`／`[api: 49`／`[api: 498`）。
+        // 幅 84〜89 は `[api: ` までで桁が 1 つも出ず、幅 93〜95 は数が全部読める
+        // （うち 93 だけは `]` も食われ、94〜95 は隙間が 2 セルに足りないだけ）。
+        // 出るのは**幅 96 以上**（隙間 2 セルを両側に取るため。`quota_fits`）。
+        let narrow = TermSize {
+            width: 90,
+            height: 24,
+        };
+        let line = header(&state_with_quota(4984), narrow);
+
+        assert!(!line.contains("[api:"), "切れた数を出した: {line:?}");
+        // **足したことで他の要素が 1 セルも動かない。** 幅が足りない回は、残量が
+        // 届く前とまったく同じヘッダになる。
+        assert_eq!(
+            line,
+            header(&state_fetching_details(), narrow),
+            "残量を落とすのに他がずれた"
+        );
+
+        // **境目の両側を踏む。** 幅 90 の側だけでは「隙間 2 セル」を見張れない ——
+        // `quota_fits` から右の `sep` を外すと門は幅 94 へ下がるが、幅 90 では
+        // 相変わらず落ち、幅 96 では相変わらず出るので**両方とも通る**
+        // （実測 2026-09-18、外して 226 本とも緑）。1 セル手前の 95 を踏む。
+        let just_short = TermSize {
+            width: 95,
+            height: 24,
+        };
+        assert!(
+            !header(&state_with_quota(4984), just_short).contains("[api:"),
+            "スピナーとの隙間が 1 セルしか無いのに出した"
+        );
+
+        let wide = TermSize {
+            width: 96,
+            height: 24,
+        };
+        assert!(
+            header(&state_with_quota(4984), wide).contains("[api: 4984]"),
+            "余地があるのに出さない"
+        );
     }
 
     #[test]

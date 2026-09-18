@@ -137,6 +137,67 @@ pub struct ReviewSummary {
     pub commented: usize,
 }
 
+/// レートリミットの残量。**自分が出したリクエストの応答ヘッダから採る**（05）。
+///
+/// **`/rate_limit` は産出元にしない。** 同じセッションで連続して叩いても数が合わず、
+/// `reset` は後ろを返した（05 の実測表。2026-09-18）。1 往復を余分に払ったうえで
+/// 嘘を出すことになる。
+///
+/// **`used` は持たない。** `limit - remaining` で出るので、持つと同じ値の置き場所が
+/// 2 つになる（`CLAUDE.md` の「導出できる値を引数に取らせない」）。新しさの比較に
+/// 要るのは [`RateLimit::newer`] の中だけ。
+///
+/// **バケットは `core` の 1 つ。** `search` を使う経路は無いと決めてある（05）ので、
+/// 別のバケットの数が混ざる形は、応答ヘッダを読む `client::rate_limit_of` が入口で断る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimit {
+    /// 窓あたりの上限。`x-ratelimit-limit`。
+    pub limit: u32,
+    /// 残り。`x-ratelimit-remaining`。
+    pub remaining: u32,
+    /// 窓が戻る時刻（UNIX 秒）。`x-ratelimit-reset`。
+    pub reset: i64,
+}
+
+impl RateLimit {
+    /// 2 つのうち新しいほう。
+    ///
+    /// **並行に飛んだ応答は届く順が新しさの順ではない**（扇形は同時 4 本。05）。
+    /// 比べるのは `(reset, used)` で、`used` は `limit - remaining` ——
+    /// 同じ窓のあいだ残量は減る一方なので、**残量の少ないほうが新しい**。
+    /// 窓が変われば `reset` が先へ動く。
+    ///
+    /// **判定はここ 1 本。** 同時に飛んだ応答を畳む [`GithubClient`] と、ジョブを
+    /// またいで届く返信を畳む `app::PrState` の両方が、[`RateLimit::keep_newer`] を
+    /// 通してこれを呼ぶ（`CLAUDE.md` の「同じ判定を 2 箇所に書かない」）。
+    pub fn newer(self, other: Self) -> Self {
+        let key = |limit: &Self| (limit.reset, limit.limit.saturating_sub(limit.remaining));
+        if key(&other) > key(&self) {
+            other
+        } else {
+            self
+        }
+    }
+
+    /// 憶えている残量を、新しいほうで置き換える。**まだ何も無ければそのまま入れる。**
+    ///
+    /// **`Option` ごと共有先にする。** 畳む側は 2 人 —— 同じジョブの中を畳む
+    /// [`GithubClient`] と、ジョブをまたぐ `app::PrState` —— で、どちらも
+    /// 「1 度目は無条件、2 度目からは [`RateLimit::newer`]」を書いていた
+    /// （`CLAUDE.md` の「2 つ目の利用者が出た時点で共有先を作る」）。
+    pub fn keep_newer(slot: &mut Option<Self>, seen: Self) {
+        *slot = Some(slot.map_or(seen, |held| held.newer(seen)));
+    }
+
+    /// 残量が乏しいか（上限の 10% 以下）。ヘッダの色を決める（07）。
+    ///
+    /// **割合で見る。** 上限は GHES や App のトークンで変わるので、固定の本数だと
+    /// 上限 60 のトークンでは最初から乏しく、5000 では最後まで点かない。
+    pub fn is_low(&self) -> bool {
+        self.remaining <= self.limit / 10
+    }
+}
+
 /// GitHub API のエラー。403 / 404 は握りつぶさず本文の先頭を残す。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GithubError {

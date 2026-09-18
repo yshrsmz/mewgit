@@ -5,7 +5,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use reqwest::{Response, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
@@ -16,7 +16,9 @@ use crate::auth::RepoTarget;
 use super::wire::{
     summarize_reviews, WireCheckRuns, WireCombinedStatus, WirePull, WireRepo, WireReview,
 };
-use super::{Check, CheckSummary, GithubError, PrDetail, PullRequest, RepoMeta, ReviewSummary};
+use super::{
+    Check, CheckSummary, GithubError, PrDetail, PullRequest, RateLimit, RepoMeta, ReviewSummary,
+};
 
 /// `X-GitHub-Api-Version`。GitHub は「日付で固定せよ」と言っている。
 const API_VERSION: &str = "2022-11-28";
@@ -124,6 +126,42 @@ pub struct GithubClient {
     http: reqwest::Client,
     base: Url,
     token: SecretString,
+    /// 直近の応答が言ったレートリミット残量（05 の「残量の受け渡し」）。
+    ///
+    /// **`&self` のまま書けるように `Mutex` を噛ませる。** 扇形は 1 つの
+    /// クライアントから同時 4 本まで飛び（`PERMITS`）、どれが新しいかは届く順では
+    /// 決まらないので、畳むのは [`RateLimit::newer`]。
+    ///
+    /// **持ち主はジョブ 1 本。** [`GithubClient`] は `Cmd` を捌くたびに組み直すので
+    /// （`runtime::github_for`）、ジョブをまたいで新しさを比べるのは受け取る側
+    /// （`app::PrState`）の仕事になる。
+    rate: Mutex<Option<RateLimit>>,
+}
+
+/// 既定ヘッダとタイムアウトを載せた builder。
+///
+/// **プロセスで 1 つのクライアント（[`shared_http`]）と、テストが 1 件ずつ組む
+/// 使い捨てのクライアント（`tests::client`）が同じ設定を読む。** 分けると、
+/// テストが見ているヘッダと出荷されるヘッダが割れる
+/// （`repo_sends_the_auth_and_version_headers`）。
+fn http_builder() -> reqwest::ClientBuilder {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/vnd.github+json"),
+    );
+    headers.insert(
+        "X-GitHub-Api-Version",
+        HeaderValue::from_static(API_VERSION),
+    );
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static(concat!("mewgit/", env!("CARGO_PKG_VERSION"))),
+    );
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
 }
 
 /// プロセスで 1 つの [`reqwest::Client`]。
@@ -139,28 +177,8 @@ pub struct GithubClient {
 /// 呼び直しても変わらない。
 fn shared_http() -> Result<reqwest::Client, GithubError> {
     static HTTP: OnceLock<Result<reqwest::Client, GithubError>> = OnceLock::new();
-    HTTP.get_or_init(|| {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/vnd.github+json"),
-        );
-        headers.insert(
-            "X-GitHub-Api-Version",
-            HeaderValue::from_static(API_VERSION),
-        );
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static(concat!("mewgit/", env!("CARGO_PKG_VERSION"))),
-        );
-        reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(REQUEST_TIMEOUT)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-            .map_err(network)
-    })
-    .clone()
+    HTTP.get_or_init(|| http_builder().build().map_err(network))
+        .clone()
 }
 
 impl GithubClient {
@@ -191,11 +209,17 @@ impl GithubClient {
 
     /// ベース URL を直に与える。テストがモックサーバを指すための seam。
     fn with_base_url(base: Url, token: SecretString) -> Result<Self, GithubError> {
-        Ok(GithubClient {
-            http: shared_http()?,
+        Ok(Self::with_http(shared_http()?, base, token))
+    }
+
+    /// HTTP クライアントごと与える。**テストが接続の使い回しを切るための seam。**
+    fn with_http(http: reqwest::Client, base: Url, token: SecretString) -> Self {
+        GithubClient {
+            http,
             base,
             token,
-        })
+            rate: Mutex::new(None),
+        }
     }
 
     /// リポジトリのメタ情報。`auth::resolve` の probe 兼用。
@@ -448,10 +472,33 @@ impl GithubClient {
             .send()
             .await
             .map_err(network)?;
+        // **状態を見る前に採る。** 残量が 0 の応答は 403 / 429 で返ってくるので、
+        // [`check_status`] の後ろに置くと**いちばん出したい数だけが採れない**。
+        self.note_rate_limit(&response);
         let response = check_status(response).await?;
         let link = header_str(&response, "link").map(str::to_string);
         let body = response.text().await.map_err(network)?;
         Ok((body, link))
+    }
+
+    /// 応答が言ったレートリミット残量を憶える。
+    ///
+    /// **新しいほうだけ残す**（[`RateLimit::newer`]）。同時に飛んだ 4 本は届く順が
+    /// 新しさの順ではない。
+    fn note_rate_limit(&self, response: &Response) {
+        let Some(seen) = rate_limit_of(response) else {
+            return;
+        };
+        let mut slot = self.rate.lock().expect("rate の Mutex は毒されない");
+        RateLimit::keep_newer(&mut slot, seen);
+    }
+
+    /// このクライアントが見たうちで新しいほうの残量。1 度も見ていなければ `None`。
+    ///
+    /// **読むのはランタイム。** `github` は `Msg` を知らないので、`app` へ運ぶのは
+    /// 呼ぶ側（05 の「残量の受け渡し」）。
+    pub fn rate_limit(&self) -> Option<RateLimit> {
+        *self.rate.lock().expect("rate の Mutex は毒されない")
     }
 }
 
@@ -564,6 +611,30 @@ fn needed_scopes(response: &Response) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 応答の `x-ratelimit-*` から残量を組む。**どれか 1 つでも欠けたら `None`**。
+///
+/// **`x-ratelimit-resource` が `core` でなければ採らない。** 上限が 2 桁小さい
+/// `search` の数をヘッダに出すと、残量が突然 30 になる（05 の実測表）。**いま mewgit が
+/// 叩くエンドポイントは全部 `core`** なので、この腕を踏ませられるのは
+/// wiremock のテストだけ。
+///
+/// **ヘッダごと無いこともある。** レートリミットを切った GHES がそれで、そのときは
+/// 残量を出さない（`None`）だけで、エラーにはしない。
+///
+/// **読むのはここ。** 3 つとも同じ型の `Option<i64>` なので、[`RateLimit`] 側に
+/// 引数で渡す形だと入れ替えても誰も気付かない（`CLAUDE.md` の「導出できる値を引数に
+/// 取らせない」）。ヘッダの読み方は [`header_i64`] と同じ場所に置く。
+fn rate_limit_of(response: &Response) -> Option<RateLimit> {
+    if header_str(response, "x-ratelimit-resource").is_some_and(|bucket| bucket != "core") {
+        return None;
+    }
+    Some(RateLimit {
+        limit: u32::try_from(header_i64(response, "x-ratelimit-limit")?).ok()?,
+        remaining: u32::try_from(header_i64(response, "x-ratelimit-remaining")?).ok()?,
+        reset: header_i64(response, "x-ratelimit-reset")?,
+    })
+}
+
 fn header_str<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
     response.headers().get(name)?.to_str().ok()
 }
@@ -586,9 +657,24 @@ mod tests {
     };
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+    /// モックサーバを指すクライアント。
+    ///
+    /// **接続を使い回さない**（`pool_max_idle_per_host(0)`）。出荷される
+    /// [`shared_http`] はプロセスで 1 つなので、**死んだ [`MockServer`] 宛ての
+    /// idle 接続がプールに残り、OS が同じポートを次のサーバに割り当てると
+    /// そこへ送って `error sending request` で落ちる**。実測（2026-09-18、macOS）
+    /// —— 本文の変更を入れずにテストを 7 本足しただけで
+    /// `pr_detail_counts_every_check_state_and_does_not_fold_them` が
+    /// **15 回中 2 回**落ち、`pool_max_idle_per_host(0)` で 12 回中 0 回になった
+    /// （main は 6 回中 0 回）。**サーバが死なない出荷側では起きない**ので、
+    /// 切るのはこちらだけ。
     fn client(server: &MockServer) -> GithubClient {
         let base = Url::parse(&format!("{}/", server.uri())).expect("mock server の URI");
-        GithubClient::with_base_url(base, SecretString::from("t0ken")).expect("クライアント")
+        let http = http_builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .expect("テスト用のクライアント");
+        GithubClient::with_http(http, base, SecretString::from("t0ken"))
     }
 
     /// `/repos/o/r` にこの応答を返させ、`repo` が返すエラーを取る。
@@ -603,6 +689,24 @@ mod tests {
             .mount(&server)
             .await;
         client(&server).repo("o", "r").await.unwrap_err()
+    }
+
+    /// `/repos/o/r` が返す本文。**`repo` を代表に選んだテストが全部これを使う**
+    /// （[`repo_err`] と同じ理由で、一番引数の少ない API が土台になっている）。
+    fn repo_body() -> serde_json::Value {
+        json!({
+            "owner": { "login": "o" },
+            "name": "r",
+            "default_branch": "main",
+        })
+    }
+
+    /// 応答にヘッダを載せる。
+    fn with_headers(mut response: ResponseTemplate, headers: &[(&str, &str)]) -> ResponseTemplate {
+        for (name, value) in headers {
+            response = response.insert_header(*name, *value);
+        }
+        response
     }
 
     // ---- ベース URL ----
@@ -743,11 +847,7 @@ mod tests {
             .and(header("authorization", "Bearer t0ken"))
             .and(header("accept", "application/vnd.github+json"))
             .and(header("x-github-api-version", API_VERSION))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "name": "r",
-                "owner": { "login": "o" },
-                "default_branch": "main",
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(repo_body()))
             .mount(&server)
             .await;
 
@@ -1097,6 +1197,156 @@ mod tests {
         // 即座に叩き直す。
         let err = repo_err(ResponseTemplate::new(429)).await;
         assert_eq!(err, GithubError::RateLimited { reset_at: None });
+    }
+
+    // ---- レートリミット残量 ----
+
+    /// `x-ratelimit-*` の 3 つ。**欠けた形を踏むテストだけが手で並べる。**
+    fn quota_headers(
+        limit: &'static str,
+        remaining: &'static str,
+        reset: &'static str,
+    ) -> [(&'static str, &'static str); 3] {
+        [
+            ("x-ratelimit-limit", limit),
+            ("x-ratelimit-remaining", remaining),
+            ("x-ratelimit-reset", reset),
+        ]
+    }
+
+    /// `/repos/o/r` にこのヘッダを載せた 200 を返させる。
+    async fn mount_repo(server: &MockServer, headers: &[(&str, &str)]) {
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(with_headers(
+                ResponseTemplate::new(200).set_body_json(repo_body()),
+                headers,
+            ))
+            .mount(server)
+            .await;
+    }
+
+    /// `repo` を 1 本叩いたあとにクライアントが憶えた残量。
+    async fn rate_after_repo(headers: &[(&str, &str)]) -> Option<RateLimit> {
+        let server = MockServer::start().await;
+        mount_repo(&server, headers).await;
+        let api = client(&server);
+        api.repo("o", "r").await.expect("repo");
+        api.rate_limit()
+    }
+
+    /// `repo` → `pr_list` と続けて叩いたあとに憶えた残量。**畳み方を見る形**で、
+    /// 2 本目のほうが必ずあとに返る。
+    async fn rate_after_repo_then_list(
+        repo: &[(&str, &str)],
+        pulls: &[(&str, &str)],
+    ) -> Option<RateLimit> {
+        let server = MockServer::start().await;
+        mount_repo(&server, repo).await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(with_headers(
+                ResponseTemplate::new(200).set_body_json(json!([])),
+                pulls,
+            ))
+            .mount(&server)
+            .await;
+        let api = client(&server);
+        api.repo("o", "r").await.expect("repo");
+        api.pr_list("o", "r").await.expect("pr_list");
+        api.rate_limit()
+    }
+
+    #[tokio::test]
+    async fn the_remaining_quota_comes_from_the_response_headers() {
+        // **`/rate_limit` は叩かない。** 同じセッションで連続して叩いても数が合わず、
+        // `reset` は後ろを返した（05 の実測表）。
+        let seen = rate_after_repo(&quota_headers("5000", "4984", "1789703295")).await;
+
+        assert_eq!(
+            seen,
+            Some(RateLimit {
+                limit: 5000,
+                remaining: 4984,
+                reset: 1789703295,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_without_the_headers_leaves_the_quota_unknown() {
+        // レートリミットを切った GHES がこの形。**エラーにはしない** ——
+        // 出さないだけ（07 のヘッダ）。
+        assert_eq!(rate_after_repo(&[]).await, None);
+        // 3 つのうち 1 つでも欠けたら組まない。
+        assert_eq!(
+            rate_after_repo(&[
+                ("x-ratelimit-limit", "5000"),
+                ("x-ratelimit-remaining", "4984"),
+            ])
+            .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quota_from_another_bucket_is_not_recorded() {
+        // `search` は上限が 2 桁小さい（05 の実測表）。混ぜると残量が突然 30 になる。
+        // **いま叩くエンドポイントは全部 `core`** なので、この腕を踏めるのはここだけ。
+        let mut headers = vec![("x-ratelimit-resource", "search")];
+        headers.extend(quota_headers("30", "28", "1789703295"));
+
+        assert_eq!(rate_after_repo(&headers).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_response_still_records_the_quota() {
+        // **状態を見る前に採る。** 残量 0 は 403 / 429 で返ってくるので、
+        // `check_status` の後ろで採ると**いちばん出したい数だけが採れない**。
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(with_headers(
+                ResponseTemplate::new(403),
+                &quota_headers("5000", "0", "1789703295"),
+            ))
+            .mount(&server)
+            .await;
+        let api = client(&server);
+
+        let err = api.repo("o", "r").await.unwrap_err();
+
+        assert!(matches!(err, GithubError::RateLimited { .. }), "{err:?}");
+        assert_eq!(api.rate_limit().map(|seen| seen.remaining), Some(0));
+    }
+
+    #[tokio::test]
+    async fn the_newer_of_two_responses_wins_even_when_it_comes_first() {
+        // **届く順は新しさの順ではない**（扇形は同時 4 本）。あとから届いた
+        // 「残量の多い」応答で上書きすると、ヘッダの数が増えたり減ったりする。
+        let seen = rate_after_repo_then_list(
+            &quota_headers("5000", "4900", "1789703295"),
+            &quota_headers("5000", "4950", "1789703295"),
+        )
+        .await;
+
+        assert_eq!(
+            seen.map(|seen| seen.remaining),
+            Some(4900),
+            "あとから届いた古い応答で上書きした"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_from_the_next_window_wins_even_with_more_left() {
+        // 窓が変われば残量は戻る。**比べるのは `(reset, used)`** で、`reset` が先。
+        let seen = rate_after_repo_then_list(
+            &quota_headers("5000", "12", "1789703295"),
+            &quota_headers("5000", "5000", "1789706895"),
+        )
+        .await;
+
+        assert_eq!(seen.map(|seen| seen.remaining), Some(5000));
     }
 
     #[tokio::test]

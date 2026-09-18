@@ -35,7 +35,7 @@ pub struct AppState {
     pub diff: DiffState,              // 表示中の diff と、その鮮度
     pub branches: BranchState,     // ローカルブランチの一覧と選択（下の「ブランチ一覧」）
     pub stashes: Vec<StashEntry>,
-    pub prs: PrState,                 // 開いている PR の一覧とカーソル（下の「PR ペイン」）
+    pub prs: PrState,                 // 開いている PR の一覧・カーソル・API の残量（下の「PR ペイン」）
     pub progress: Option<InProgressOp>, // Rebase | CherryPick | Revert | Merge
     pub focus: Pane,
     pub right_tab: RightTab,          // 右列の上に出すタブ（下の「右上のタブ」）
@@ -1057,6 +1057,30 @@ latch したせいで二度と直らなかった。**こちらは latch しな�
   **行き止まりにはならない** —— 引けなかった記憶は次に一覧が届いたときに落ちるので、
   `f` で引き直せる（上の項目）
 
+### 残量（レートリミット）
+
+GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出元は PR の 2 本だけ**
+（一覧と扇形）で、**採るのは自分が出したリクエストの応答ヘッダ**（05）。
+
+- **置き場所は `PrState`。** 落とす引き金（`PrState::forget`）と、突き合わせる世代
+  （`PrState::epoch`）が両方そこにある。`AppState` の直下に置くと、**落とす責務だけが
+  別の場所に離れる** —— アカウントが変わったときに落とすものが 2 つになった時点で
+  共有先は 1 つにする（`CLAUDE.md`）
+- **世代で弾く。** 残量は**そのトークンの予算**なので、アカウントを切り替えたあとに
+  前のトークンの扇形が返す数は嘘になる。`(reset, used)` は「どちらの応答が新しいか」
+  しか答えられない（#89 の「鍵が答えられる問いを数える」）。`Msg::RateLimitSeen` が
+  世代を運び、`forget` が残量を落として世代を進める
+- **届いた順で上書きしない。** 一覧と扇形は同時に走り、扇形の中でも 4 本が並ぶので、
+  `Msg` の届く順は応答の新しさの順ではない。畳むのは `RateLimit::newer`（05）
+- **`auth::resolve` の probe の残量は運ばない。** クライアント自身は応答ヘッダから
+  憶えるが（`get_page` は全員が通る）、`Msg::RateLimitSeen` を送るのはランタイムの
+  PR の腕だけで、probe のクライアントは `auth` の中で使い捨てになる。**運ぶと
+  「選ばれなかった人の予算」がヘッダに出る** —— probe は**まだ誰のトークンか
+  決まっていない候補**を 1 件ずつ試すので
+- **ジョブは持たない。** 走っているのは一覧か扇形のジョブで、残量はその途中に何度でも
+  流れる。**扇形は 1 件ごとに送る** —— 60 件の扇形は数秒かかるので、終端まで待つと
+  **いちばん減っているあいだ**ヘッダが古い数を出し続ける
+
 ### 現ブランチの PR
 
 **一覧の 1 行として出す。** `RepoInfo.head` がブランチに居て、その名前と同じ
@@ -1899,8 +1923,9 @@ pub enum Msg {
     AccountResolved(Result<Account, DegradedReason>),
     AccountsListed(Result<Vec<GhLogin>, AuthError>),  // 選び直しの候補。上の「候補の取り直し」
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),  // 開いている PR の一覧。上の「PR ペイン」
-    PrDetailLoaded { number: u64, sha: String, result: Result<PrDetail, GithubError> },  // 上の「集計」
-    PrDetailsFinished(Option<GithubError>),  // 扇形の終端。Some は打ち切り
+    PrDetailLoaded { epoch: u64, number: u64, sha: String, result: Result<PrDetail, GithubError> },  // 上の「集計」
+    PrDetailsFinished { epoch: u64, aborted: Option<(GithubError, Vec<(u64, String)>)> },  // 扇形の終端
+    RateLimitSeen { epoch: u64, seen: RateLimit },    // API の残量。下の「残量」
     OpenPrFinished(Result<(), AuthError>),            // gh browse の結果。Err は通知に出す
 }
 ```

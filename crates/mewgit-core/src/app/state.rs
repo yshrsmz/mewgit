@@ -11,7 +11,7 @@ use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
     RefIndex, Remote, StashEntry, WorktreeSection, WorktreeSnapshot,
 };
-use crate::github::{GithubError, PrDetail, PullRequest};
+use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 use crate::graph::{GraphRow, LaneState};
 
 use crate::config::Config;
@@ -1223,6 +1223,19 @@ pub struct PrState {
     /// **[`JobTracker`] の世代とは別物。** あちらは git の書き込みが何を古くするかを
     /// 数えるもので、アカウントの切り替えでは進まない。
     epoch: u64,
+    /// GitHub API の残量。ヘッダに出す（07 の「ヘッダ」）。
+    ///
+    /// **置き場所がここなのは、落とす引き金と突き合わせる世代が両方ここにあるから。**
+    /// 残量は**そのトークンの予算**なので、アカウントが変われば嘘になる ——
+    /// 落とすのは [`PrState::forget`]、飛んでいる扇形の答えを弾くのは同じ `epoch`。
+    /// `AppState` の直下に置くと、落とす責務だけが別の場所に離れる。
+    ///
+    /// **ここへ届くのは PR の 2 本だけ**（一覧と扇形）。`auth::resolve` の probe が
+    /// 使うクライアントも応答ヘッダから残量を憶えるが、**運ぶ経路が無い** ——
+    /// `Msg::RateLimitSeen` を送るのはランタイムの PR の腕だけで、probe の
+    /// クライアントは `auth` の中で使い捨てになる。**まだ誰のトークンか決まって
+    /// いない候補の予算**を出さないため（05 の「残量の受け渡し」）。
+    rate_limit: Option<RateLimit>,
 }
 
 /// PR 1 行ぶんの集計と、どの head sha について引いたか。
@@ -1422,6 +1435,20 @@ impl PrState {
         self.epoch == epoch
     }
 
+    /// いま判っている残量。ヘッダが読む（07）。
+    pub fn rate_limit(&self) -> Option<RateLimit> {
+        self.rate_limit
+    }
+
+    /// 応答が言った残量を憶える。
+    ///
+    /// **新しいほうだけ残す**（[`RateLimit::keep_newer`]）。ジョブは同時に走り、`Msg` が
+    /// 届く順は応答の新しさの順ではない —— 一覧の答えが扇形の最中に返れば、扇形が
+    /// もっと減らしたあとの数を上書きしてしまう。
+    pub(super) fn rate_limit_seen(&mut self, seen: RateLimit) {
+        RateLimit::keep_newer(&mut self.rate_limit, seen);
+    }
+
     /// アカウントが決まっていない状態に戻す。
     ///
     /// **一覧はどのアカウントで引いたかに紐づく。** `A` で選び直したり degraded に
@@ -1440,6 +1467,9 @@ impl PrState {
         // 番号も head も変わらないので、前のトークンで頼んだ答えが新しい一覧に
         // そのまま入る（上の `epoch`）。
         self.epoch = self.epoch.wrapping_add(1);
+        // **残量も落とす。** あれは**そのトークンの予算**で、次のアカウントの残量では
+        // ない。残すと、ヘッダの `[gh: …]` だけが変わって数が前のまま残る。
+        self.rate_limit = None;
     }
 }
 

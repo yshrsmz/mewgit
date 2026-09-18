@@ -4,7 +4,7 @@
 //! 一覧を描くかを決める `ui` の両方がそれを読む**。
 
 use crate::auth::AuthError;
-use crate::github::{GithubError, PrDetail, PullRequest};
+use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 
 use super::focus;
 use crate::app::state::current_row;
@@ -196,6 +196,21 @@ pub(super) fn pr_details_finished(
     fan_out(state)
 }
 
+/// 応答が言ったレートリミット残量が届いた。
+///
+/// **世代で門にする。** 残量は**そのトークンの予算**なので、アカウントを切り替えた
+/// あとに前のトークンの扇形が返す数は嘘になる。`(reset, used)` は「どちらの応答が
+/// 新しいか」しか答えられない（#89 の「鍵が答えられる問いを数える」）。
+///
+/// **ジョブは畳まない。** 走っているのは一覧か扇形のジョブで、これはその途中に
+/// 何度でも流れる（[`Msg::RateLimitSeen`](crate::app::Msg::RateLimitSeen)）。
+pub(super) fn rate_limit_seen(state: &mut AppState, epoch: u64, seen: RateLimit) -> Cmd {
+    if state.prs.is_current(epoch) {
+        state.prs.rate_limit_seen(seen);
+    }
+    Cmd::None
+}
+
 /// `gh browse` が終わった。
 ///
 /// **`Ok` では何も出さない。** ブラウザが前に出てくるので、画面に足す言葉が無い。
@@ -222,8 +237,8 @@ mod tests {
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
-        deliver_pr_details, fake_account, fake_oid, fake_pull_request, fake_target,
-        fetch_pr_details, pr_list_loaded as list_msg, put_on_branch, reply,
+        deliver_pr_details, fake_account, fake_oid, fake_pull_request, fake_rate_limit,
+        fake_target, fetch_pr_details, pr_list_loaded as list_msg, put_on_branch, reply,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -764,6 +779,87 @@ mod tests {
         assert!(
             state.prs.detail(82).is_none(),
             "前のアカウントの集計が残った"
+        );
+    }
+
+    #[test]
+    fn the_newer_quota_wins_whichever_order_it_arrives_in() {
+        // **`Msg` の届く順は応答の新しさの順ではない。** 一覧と扇形は同時に走り、
+        // 扇形の中でも 4 本が並ぶ（05 の `Semaphore`）。あとから届いた古い数で
+        // 上書きすると、ヘッダの残量が増えたり減ったりする。
+        let mut state = state_on_branch("feat/x");
+        let epoch = state.prs.epoch();
+
+        let _ = update(
+            &mut state,
+            Msg::RateLimitSeen {
+                epoch,
+                seen: fake_rate_limit(4900, 100),
+            },
+        );
+        let _ = update(
+            &mut state,
+            Msg::RateLimitSeen {
+                epoch,
+                seen: fake_rate_limit(4950, 100),
+            },
+        );
+        assert_eq!(
+            state.prs.rate_limit(),
+            Some(fake_rate_limit(4900, 100)),
+            "あとから届いた古い数で上書きした"
+        );
+
+        // **窓が変われば残量は戻る。** 比べるのは `(reset, used)` で `reset` が先。
+        let _ = update(
+            &mut state,
+            Msg::RateLimitSeen {
+                epoch,
+                seen: fake_rate_limit(5000, 200),
+            },
+        );
+        assert_eq!(state.prs.rate_limit(), Some(fake_rate_limit(5000, 200)));
+    }
+
+    #[test]
+    fn the_quota_of_the_previous_account_is_dropped_and_does_not_come_back() {
+        // **残量はそのトークンの予算。** `(reset, used)` は「どちらの応答が新しいか」
+        // しか答えないので、アカウントを切り替えたら世代で弾くしかない
+        // （#89 の「鍵が答えられる問いを数える」）。
+        let mut state = state_on_branch("feat/x");
+        let stale = state.prs.epoch();
+        let _ = update(
+            &mut state,
+            Msg::RateLimitSeen {
+                epoch: stale,
+                seen: fake_rate_limit(4900, 100),
+            },
+        );
+        assert!(state.prs.rate_limit().is_some());
+
+        let _ = update(
+            &mut state,
+            Msg::AccountResolved(Err(DegradedReason::GhMissing)),
+        );
+        assert_eq!(
+            state.prs.rate_limit(),
+            None,
+            "前のトークンの残量が残った（ヘッダの `[gh: …]` だけが変わる）"
+        );
+
+        let _ = update(&mut state, Msg::AccountResolved(Ok(fake_account("hanako"))));
+        // **前のトークンで飛んでいた扇形が、いま返す。**
+        let _ = update(
+            &mut state,
+            Msg::RateLimitSeen {
+                epoch: stale,
+                seen: fake_rate_limit(10, 100),
+            },
+        );
+        assert_eq!(
+            state.prs.rate_limit(),
+            None,
+            "前のトークンの残量が新しいアカウントに入った"
         );
     }
 

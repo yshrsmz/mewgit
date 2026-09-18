@@ -366,7 +366,7 @@ const SEP: &str = "  ";
 /// **上限は添えない。** `[api: 4984/5000]` は 18 セルで、80 桁では `owner/repo` が
 /// 現実的な長さでもスピナーに重なる（実測。07 のヘッダ）。
 ///
-/// **`[gh: …]` と同時には出ない。** degraded なら [`PrState::forget`] が残量を
+/// **`[gh: …]` の degraded とは同時に出ない。** degraded なら [`PrState::forget`] が残量を
 /// 落としており、`Resolving` では一度も引いていない —— 出るのは
 /// `[gh: login @ host]` の隣だけ。
 fn rate_limit_span(limit: RateLimit) -> Span<'static> {
@@ -883,15 +883,24 @@ mod tests {
     #[test]
     fn the_header_shows_the_api_quota_next_to_the_account() {
         // **出荷形で測る。** 左に `owner/repo` と `[gh: …]`、右端に扇形のスピナーが
-        // 重なる（07 のヘッダ）。**余白まで見る** —— スピナーと隙間なく並んだ状態で
-        // 通ると、`owner/repo` が 1 桁伸びた瞬間に残量が欠ける（#73）。
+        // 重なる（07 のヘッダ）。**左の区切りごと綴じる** —— `SEP` を落とすと
+        // `github.com][api: 4984]` と地続きになるが、`[api: 4984]` だけを見る形では
+        // それが通る（実測 2026-09-18、`SEP` を外して 226 本とも緑だった）。
+        //
+        // **右の余白はここでは見張れない。** 幅 100 ではスピナーとのあいだが 6 セル
+        // 余っているので、`quota_fits` が取る隙間を 2 セルから 0 に緩めても通る。
+        // 隙間を見張るのは `a_quota_that_does_not_fit_is_dropped_whole_not_cut` の
+        // 境目（95 / 96）。
         let size = TermSize {
             width: 100,
             height: 24,
         };
         let line = header(&state_with_quota(4984), size);
 
-        assert!(line.contains("[api: 4984]  "), "header: {line:?}");
+        assert!(
+            line.contains("[gh: user_shortcode @ github.com]  [api: 4984]"),
+            "header: {line:?}"
+        );
         assert!(line.contains("pr checks"), "スピナーが出ていない: {line:?}");
     }
 
@@ -939,8 +948,10 @@ mod tests {
         // スピナーは 11 セル。**80 では測れない** —— 残量の始まる 72 桁目が
         // スピナーの下（69 桁目から）に丸ごと隠れるので、**門を外しても画面が
         // 変わらない**（この見張りは最初その幅で書いて、変異で素通りした）。
-        // 切れた数が見えるのは**幅 84〜93**で、出るのは**幅 96 以上**
-        // （隙間 2 セルを両側に取るため。`quota_fits`）。
+        // **切れた数が読めるのは幅 90〜92**（`[api: 4`／`[api: 49`／`[api: 498`）。
+        // 幅 84〜89 は `[api: ` までで桁が 1 つも出ず、幅 93〜95 は数が丸ごと残って
+        // `]` と隙間だけが欠ける。出るのは**幅 96 以上**（隙間 2 セルを両側に取る
+        // ため。`quota_fits`）。
         let narrow = TermSize {
             width: 90,
             height: 24,
@@ -954,6 +965,19 @@ mod tests {
             line,
             header(&state_fetching_details(), narrow),
             "残量を落とすのに他がずれた"
+        );
+
+        // **境目の両側を踏む。** 幅 90 の側だけでは「隙間 2 セル」を見張れない ——
+        // `quota_fits` から右の `sep` を外すと門は幅 94 へ下がるが、幅 90 では
+        // 相変わらず落ち、幅 96 では相変わらず出るので**両方とも通る**
+        // （実測 2026-09-18、外して 226 本とも緑）。1 セル手前の 95 を踏む。
+        let just_short = TermSize {
+            width: 95,
+            height: 24,
+        };
+        assert!(
+            !header(&state_with_quota(4984), just_short).contains("[api:"),
+            "スピナーとの隙間が 1 セルしか無いのに出した"
         );
 
         let wide = TermSize {

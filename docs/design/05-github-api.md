@@ -211,8 +211,11 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
   2 桁小さい上限を数え直さずに済む
 - **レートリミット残量は応答ヘッダから採り、`Msg` で `app` へ運ぶ。**
   [`GithubClient`] が `get_page` のたびに `x-ratelimit-limit` / `-remaining` /
-  `-reset` を読んで **`Mutex<Option<RateLimit>>`** に畳み、ランタイムがジョブの
-  区切りで `Msg::RateLimitSeen { epoch, seen }` に載せる。**採るのは `check_status`
+  `-reset` を読んで **`Mutex<Option<RateLimit>>`** に畳み、ランタイムが
+  `Msg::RateLimitSeen { epoch, seen }` に載せる。**扇形は 1 件ごと、一覧はジョブの
+  終わりに 1 回**（01 の「PR ペイン › 残量」）—— 60 件の扇形は数秒かかるので、
+  終端まで待つと**いちばん減っているあいだ**ヘッダが古い数を出し続ける。
+  **採るのは `check_status`
   の手前** —— 残量 0 の応答は 403 / 429 で返るので、後ろに置くと**いちばん出したい
   数だけが採れない**。
   - **畳み方は `(reset, used)` の大きいほう**（`RateLimit::newer`）。扇形は同時 4 本

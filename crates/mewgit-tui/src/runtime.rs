@@ -1065,10 +1065,34 @@ mod tests {
         // 通らない**ので、別の見張りが要る（`every_notice_that_a_missing_material…`）。
         let _ = update(&mut state, Msg::PrListLoaded(result));
         assert!(!state.jobs.is_running(JobKind::FetchPrList));
-        // **残量は 1 度も見ていないので何も送らない**（`send_rate_limit`）。
-        // レートリミットを切った GHES も同じ形で、`Msg::RateLimitSeen` が
-        // 空の値で流れると `app` の「まだ判らない」が消える。
+        // **この腕が流す `Msg` は 1 本だけ。** ここは `github_for` が `Err` を返す形
+        // なので、**[`send_rate_limit`] はそもそも呼ばれない** —— 「1 度も見ていない
+        // なら送らない」を見張っているのはこの行ではなく
+        // [`send_rate_limit_says_nothing_before_the_first_response`]（`if let Some` を
+        // 無条件の `send` に変えると、この行は通ったままあちらだけが落ちる。
+        // 実測 2026-09-18）。
         assert!(msgs.try_recv().is_err(), "余計な Msg が流れた");
+    }
+
+    /// [`send_rate_limit`] は、**応答を 1 度も見ていないクライアントでは何も送らない**
+    /// （レートリミットを切った GHES がこの形。05）。
+    ///
+    /// **クライアントを直に組む。** `GithubClient::with_token` はベース URL を組んで
+    /// プロセス共有の `reqwest::Client` を借りるだけで、**リクエストは 1 本も出ない**。
+    /// 送ってしまうと `app` の「まだ判らない」が消え、ヘッダに嘘の数（既定値）が出る。
+    ///
+    /// **逆向き（見た数を送る）はここでは見張れない。** 残量を入れるには応答が要るが、
+    /// `base_url` は https しか組まず `with_base_url` は `mewgit-core` の中の seam なので、
+    /// `mewgit-tui` からモックサーバへ向けられない（05 の「運ぶのはランタイム」）。
+    #[test]
+    fn send_rate_limit_says_nothing_before_the_first_response() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let account = fake_account("taro");
+        let api = GithubClient::with_token(&fake_target(), &account.token).expect("クライアント");
+
+        send_rate_limit(&tx, 7, &api);
+
+        assert!(rx.try_recv().is_err(), "残量を見ていないのに送った");
     }
 
     /// `Cmd::FetchPrDetails` の扇形が終端まで返る（01 の「PR ペイン › 集計」）。

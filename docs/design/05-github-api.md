@@ -231,9 +231,13 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
     あとに前のトークンの扇形が返す数は嘘になる。`(reset, used)` は「どちらの応答が
     新しいか」しか答えない（01 の「PR ペイン › 残量」）
   - **運ぶのはランタイム。** `github` は `Msg` を知らない（`pr_details` の `on_each`
-    が同期なのと同じ理由）。**この配線には見張りが無い** —— `GithubClient` は
-    https のベース URL しか組まず（`base_url`）、`with_base_url` は
-    `mewgit-core` の中の seam なので、`mewgit-tui` からモックサーバへ向けられない。
+    が同期なのと同じ理由）。**見張れるのは「送らない」側だけ** ——
+    1 度も見ていなければ何も送らないことは
+    `runtime::tests::send_rate_limit_says_nothing_before_the_first_response` が踏む
+    （クライアントを組むだけならリクエストは出ない）。**見た数を運ぶ側には見張りが
+    無い** —— `GithubClient` は https のベース URL しか組まず（`base_url`）、
+    `with_base_url` は `mewgit-core` の中の seam なので、`mewgit-tui` から
+    モックサーバへ向けられない。
     両端（クライアントが憶える / `app` が畳んで弾く / `ui` が描く）は見張ってある
 - **残量は自分が出したリクエストのヘッダから採る。`/rate_limit` は別の数を返す。**
   実測（2026-09-18、`gh api -i`、github.com の個人アカウント。**同じセッションで

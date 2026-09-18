@@ -283,6 +283,11 @@ mod tests {
     ///
     /// **回数を書かない。** 巡回の並びはグラフの選択と `config.github.enabled` で
     /// 変わるので、固定の回数は別の状態で黙って外れる（`CLAUDE.md`）。
+    ///
+    /// **途中の回の `Cmd` は捨てる。** 通過するペインが何かを頼む状態で使うと、
+    /// そのジョブが `AppState::issue` に登録されたまま残り、**後続の
+    /// `assert_eq!(…, Cmd::None)` が門ではなく「落とされた」で通る**（#38 の形）。
+    /// 集計の無い行を持ったまま通過させるテストを書くときは、ここも受け取って見る。
     fn tab_to(state: &mut AppState, pane: Pane) -> Cmd {
         for _ in 0..state.focus_candidates().len() {
             let cmd = press_code(state, KeyCode::Tab);
@@ -599,24 +604,6 @@ mod tests {
     }
 
     #[test]
-    fn a_list_arriving_after_the_tab_was_opened_asks_for_the_summaries() {
-        // **キーと返信のどちらが先でも同じ答えにする**（`CLAUDE.md` の「非同期の返信が
-        // 2 本あるならテストは両方の順序を回す」の、片方がキーの版）。**逆の順序
-        // （一覧が先、タブが後）は [`nothing_is_asked_for_until_the_prs_tab_is_opened`]
-        // が丸ごと踏む**ので、ここは残りの片方だけを見る。
-        let mut state = state_on_prs_tab("feat/x");
-        let after_list = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "sha82")]);
-        assert_eq!(
-            after_list,
-            Cmd::FetchPrDetails {
-                epoch: 0,
-                targets: vec![(82, "sha82".to_string())],
-            },
-            "タブが先だと引かない"
-        );
-    }
-
-    #[test]
     fn the_tab_keeps_fetching_while_the_focus_is_back_on_the_graph() {
         // **門が見るのは「タブが見えているか」で、フォーカスの居場所ではない。**
         // `Esc` で Graph に戻ってもタブは残る（01 の「右上のタブ」）ので、画面に
@@ -678,6 +665,12 @@ mod tests {
     fn the_fan_out_asks_only_for_the_rows_that_have_no_summary() {
         // **1 件ぶんの往復が PR の数だけ積む**ので、毎回全件引くと `core` の予算に
         // 対して重すぎる（数は 05 の「扇形は毎回引き直さない」）。
+        //
+        // **順序の片方（タブが先 → 一覧が後）を踏むのもここ。** 逆
+        // （一覧が先 → タブが後）は `nothing_is_asked_for_until_the_prs_tab_is_opened`
+        // にある（`CLAUDE.md` の「非同期の返信が 2 本あるならテストは両方の順序を
+        // 回す」の、片方がキーの版）。**専用の 1 本は置かない** —— 置いてみたが、
+        // こちらと別に単独で落ちる変異が無かった（実測）。
         let mut state = state_on_prs_tab("feat/x");
         let list = vec![
             fake_pull_request(82, "feat/x", "sha82"),

@@ -267,10 +267,12 @@ impl AppState {
     /// `Branches` か `Prs` に居るならタブはそれと同じでなければならず、書く場所を
     /// 2 つに割ると食い違った状態が残る（01 の「右上のタブ」）。
     ///
-    /// **フォーカスを動かすキーが通る `update::focus` は経由しない。** あちらは
-    /// 「見えるようになった diff を頼む」ためのもので、ここが移す先は必ず `Graph`
-    /// （`wanted_diff()` が `None` になる側）なので頼むものが無い。通しても必ず
-    /// `Cmd::None` が返る腕が 1 つ増えるだけになる。
+    /// **フォーカスを動かすキーが通る `update::focus` は経由しない。** ここは
+    /// `update` の**出口**なので `Cmd` を返す先が無い。`update::focus` は
+    /// 「見えるようになったものを頼む」ためのもので、移す先が `Graph` でも
+    /// **PRs タブは残るので `prs::fan_out` は出うる**（`wanted_details` の門は
+    /// `focus` ではなく見えているタブを見る）—— 通すと、その `Cmd` を捨てる形に
+    /// なる。座り直しに要るのは `focus` の代入だけ。
     pub fn reseat_focus(&mut self) {
         if !self.focus_candidates().contains(&self.focus) {
             self.focus = Pane::Graph;

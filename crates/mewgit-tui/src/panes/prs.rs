@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use mewgit_core::app::{AppState, PrLoad};
 use mewgit_core::auth::AccountState;
 use mewgit_core::config::Theme;
-use mewgit_core::github::{CheckSummary, PrStatus, PullRequest, ReviewSummary};
+use mewgit_core::github::{GithubError, PrDetail, PrStatus, PullRequest};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -57,40 +57,25 @@ pub(super) fn lines(state: &AppState) -> Rows {
     let theme = &state.config.theme;
     let ascii = state.config.graph.ascii;
     // **集計の桁も出す行から導く。** 中身は行ごとに違う（引けていない行は待ちの印 1 つ、
-    // 引けた行は 0〜5 個の記号）ので、揃えないとタイトルの開始位置が行ごとにずれる。
-    // **空なら桁ごと消える** —— CI もレビューも無いリポジトリで意味の無い余白を
-    // 置かないため（07 の「桁を先に確保しない」）。
+    // 引けた行は記号 0〜n 個）ので、揃えないとタイトルの開始位置が行ごとにずれる。
+    // **どの行も出すものが無ければ桁ごと消える** —— CI もレビューも無いリポジトリで
+    // 意味の無い余白を置かないため（07 の「桁を先に確保しない」）。
     let cells: Vec<(String, String)> = state
         .prs
         .list
         .iter()
-        .map(|pr| (checks_cell(state, pr, ascii), reviews_cell(state, pr)))
+        .map(|pr| summary_cells(state.prs.detail(pr.number), ascii))
         .collect();
-    let checks_width = cells
-        .iter()
-        .map(|(c, _)| c.chars().count())
-        .max()
-        .unwrap_or(0);
-    let reviews_width = cells
-        .iter()
-        .map(|(_, r)| r.chars().count())
-        .max()
-        .unwrap_or(0);
+    let checks = column(cells.iter().map(|(cell, _)| cell));
+    let reviews = column(cells.iter().map(|(_, cell)| cell));
     Rows {
         lines: state
             .prs
             .list
             .iter()
-            .zip(&cells)
-            .map(|(pr, cell)| {
-                pr_row(
-                    pr,
-                    theme,
-                    &account.login,
-                    width,
-                    cell,
-                    (checks_width, reviews_width),
-                )
+            .zip(checks.iter().zip(&reviews))
+            .map(|(pr, (checks, reviews))| {
+                pr_row(pr, theme, &account.login, width, checks, reviews)
             })
             .collect(),
         // **カーソルをここで丸めない。** 範囲に収めるのは `PrState::move_cursor` と
@@ -100,122 +85,107 @@ pub(super) fn lines(state: &AppState) -> Rows {
     }
 }
 
-/// `*#123 OPEN   Add adaptive layout`。
+/// 桁 1 本ぶんのセルを、いちばん広いものに合わせて詰める。
 ///
-/// **印と状態をタイトルより前に置く。** 右列は端末幅の 40% しかなく、ratatui は行の
-/// 右端で切るので、末尾に置くと**そこだけが黙って消える**（実測: 幅 100 の右列 38 桁で
-/// `MERGED` が出なかった）。行の左端は切られない。
+/// **どれも空なら詰めない。** 幅 0 に詰めると区切りの 2 桁だけが残り、タイトルが
+/// そのぶん右へずれる。
+fn column<'a>(cells: impl Iterator<Item = &'a String> + Clone) -> Vec<String> {
+    let width = cells
+        .clone()
+        .map(|cell| cell.chars().count())
+        .max()
+        .unwrap_or(0);
+    if width == 0 {
+        return cells.map(|_| String::new()).collect();
+    }
+    cells.map(|cell| format!("  {cell:width$}")).collect()
+}
+
+/// `*#123 OPEN   ✓2 ✗1  A1  Add adaptive layout`。
 ///
-/// **`AppState` ごとは受け取らない。** 要るのは `theme` と `login` の 2 つで、
-/// `AppState` を渡すと「状態から引いた login と、引数の login が食い違う対」が型として
-/// 組める（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
+/// **印と状態と集計をタイトルより前に置く。** 右列は端末幅の 40% しかなく、ratatui は
+/// 行の右端で切るので、末尾に置くと**そこだけが黙って消える**（実測: 幅 100 の右列
+/// 38 桁で `MERGED` が出なかった）。行の左端は切られない。
+///
+/// **`AppState` ごとは受け取らない。** 要るのは `theme` と `login` と組み終えたセル
+/// だけで、`AppState` を渡すと「状態から引いた login と、引数の login が食い違う対」が
+/// 型として組める（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
+/// **セルも組み終えたものを受ける** —— 幅は一覧ぜんぶから決まるので、1 行だけ見て
+/// 出せない。
 fn pr_row(
     pr: &PullRequest,
     theme: &Theme,
     login: &str,
     width: usize,
-    cell: &(String, String),
-    cells: (usize, usize),
+    checks: &str,
+    reviews: &str,
 ) -> Line<'static> {
     let label = status_label(pr);
-    let (checks, reviews) = cell;
-    let (checks_width, reviews_width) = cells;
     let mut spans = vec![
         Span::styled(mark(pr, login), theme::muted()),
         Span::raw(format!("#{} ", pr.number)),
         Span::styled(format!("{label:width$}"), status_style(pr, theme)),
     ];
-    // **幅 0 の桁は区切りごと出さない。** `format!("{:0$}", 0)` は空文字を返すが、
-    // 区切りの空白は残るので、ここで畳まないと CI もレビューも無いリポジトリで
-    // タイトルが 2 桁ぶん右へずれる。
-    if checks_width > 0 {
-        spans.push(Span::styled(
-            format!("  {checks:checks_width$}"),
-            theme::muted(),
-        ));
-    }
-    if reviews_width > 0 {
-        spans.push(Span::styled(
-            format!("  {reviews:reviews_width$}"),
-            theme::muted(),
-        ));
+    for cell in [checks, reviews] {
+        if !cell.is_empty() {
+            spans.push(Span::styled(cell.to_string(), theme::muted()));
+        }
     }
     spans.push(Span::raw(format!("  {}", pr.title)));
     Line::from(spans)
 }
 
-/// チェックの集計 1 行ぶん（07 の「PRs ペイン」）。
+/// 1 行ぶんの `(チェック, レビュー)`（07 の「PRs ペイン」）。
 ///
-/// **3 つの意味を 1 つの桁に載せる。** 集計が**居ない**のは「まだ引いていない」
-/// （`app::PrDetailEntry` の doc）、`Err` は「引けなかった」、`Ok` は数えた結果。
+/// **3 つの意味を 1 箇所で分ける。** 集計が**居ない**のは「まだ引いていない」
+/// （`PrState::detail`）、`Err` は「引けなかった」、`Ok` は数えた結果。
 /// **どれも同じ見た目にしない** —— 引けなかった行を「チェック 0 件」と同じに
 /// 見せると、CI の無い PR と CI を読めなかった PR が区別できなくなる。
 ///
-/// **`CheckState` の 5 値を 3 つに畳まない**（07）。`Skipped` と `Neutral` を成功か
-/// 失敗のどちらかに足すとどちらも嘘になる。
-fn checks_cell(state: &AppState, pr: &PullRequest, ascii: bool) -> String {
-    let Some(entry) = state.prs.detail(pr.number) else {
-        return ui::pick_charset(CHECK_WAIT, ascii).to_string();
-    };
-    match &entry.result {
+/// **`&AppState` も `&PullRequest` も取らない。** 引くのは呼ぶ側（一覧を回っている
+/// ところ）で、ここが自分で引くと**一覧に居ない PR を渡された対**が型として組め、
+/// 黙って「まだ引いていない」を描く。
+fn summary_cells(detail: Option<&Result<PrDetail, GithubError>>, ascii: bool) -> (String, String) {
+    match detail {
+        None => (
+            ui::pick_charset(CHECK_WAIT, ascii).to_string(),
+            String::new(),
+        ),
         // **理由はここに出ない。** 枠の内側に入らないので、出せるのは「引けなかった」
         // ことだけ（07 で受け入れた穴）。打ち切りの理由は通知に出る。
-        Err(_) => CHECK_ERROR.to_string(),
-        Ok(detail) => check_counts(&detail.checks, ascii),
+        Some(Err(_)) => (
+            ui::pick_charset(CHECK_ERROR, ascii).to_string(),
+            String::new(),
+        ),
+        Some(Ok(detail)) => {
+            let checks = &detail.checks;
+            let review = &detail.review;
+            (
+                counts(&[
+                    (checks.success, ui::pick_charset(CHECK_OK, ascii)),
+                    (checks.failure, ui::pick_charset(CHECK_FAIL, ascii)),
+                    (checks.pending, ui::pick_charset(CHECK_PENDING, ascii)),
+                    (checks.skipped, ui::pick_charset(CHECK_SKIPPED, ascii)),
+                    (checks.neutral, ui::pick_charset(CHECK_NEUTRAL, ascii)),
+                ]),
+                // **`commented` は出さない** —— 承認でも変更要求でもないコメントは、
+                // 出しても次に何をするかが変わらない。**値は捨てていない**ので、出す
+                // 場所ができたときに数え直さずに済む。
+                counts(&[
+                    (review.approved, REVIEW_APPROVED),
+                    (review.changes_requested, REVIEW_CHANGES),
+                ]),
+            )
+        }
     }
 }
 
 /// `✓2 ✗1`。**0 のものは出さない**（Branches ペインの `↑` `↓` と同じ）。
 /// 1 件も無ければ空文字で、桁ごと消える。
-fn check_counts(checks: &CheckSummary, ascii: bool) -> String {
+fn counts(items: &[(usize, &str)]) -> String {
     let mut out = String::new();
-    for (count, glyphs) in [
-        (checks.success, CHECK_OK),
-        (checks.failure, CHECK_FAIL),
-        (checks.pending, CHECK_PENDING),
-        (checks.skipped, CHECK_SKIPPED),
-        (checks.neutral, CHECK_NEUTRAL),
-    ] {
-        if count == 0 {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(ui::pick_charset(glyphs, ascii));
-        out.push_str(&count.to_string());
-    }
-    out
-}
-
-/// レビューの集計 1 行ぶん。`A2 C1`。
-///
-/// **記号ではなく英字にする。** `✓` / `✗` はチェックの語彙で、同じ記号を使うと
-/// 「CI が通った」と「人が承認した」が同じ見た目になる（07）。
-///
-/// **`commented` は出さない。** 承認でも変更要求でもないコメントは、出しても次に
-/// 何をするかが変わらない。**引いた値は捨てていない**（`ReviewSummary` が持っている）
-/// ので、出す場所ができたときに数え直さずに済む。
-///
-/// **まだ引いていない行と引けなかった行では空にする** —— 待ちの印も失敗の印も
-/// チェックの桁が出しており、同じことを 2 桁が言う必要が無い。
-fn reviews_cell(state: &AppState, pr: &PullRequest) -> String {
-    let Some(entry) = state.prs.detail(pr.number) else {
-        return String::new();
-    };
-    match &entry.result {
-        Err(_) => String::new(),
-        Ok(detail) => review_counts(&detail.review),
-    }
-}
-
-fn review_counts(review: &ReviewSummary) -> String {
-    let mut out = String::new();
-    for (count, glyph) in [
-        (review.approved, REVIEW_APPROVED),
-        (review.changes_requested, REVIEW_CHANGES),
-    ] {
-        if count == 0 {
+    for (count, glyph) in items {
+        if *count == 0 {
             continue;
         }
         if !out.is_empty() {
@@ -229,6 +199,9 @@ fn review_counts(review: &ReviewSummary) -> String {
 
 /// チェックの記号。`(UTF-8, ASCII)`。**`config.graph.ascii` を通す**
 /// （Branches ペインの `↑` `↓` と同じ理由で、同じ端末で一部だけ化けるのを避ける）。
+///
+/// **中身が同じものも組にしておく**（`CHECK_ERROR`）—— そうしておけば「門を
+/// 通し忘れた記号」と「意図して同じにした記号」が型で見分けられる。
 const CHECK_OK: (&str, &str) = ("✓", "+");
 const CHECK_FAIL: (&str, &str) = ("✗", "x");
 const CHECK_PENDING: (&str, &str) = ("○", "o");
@@ -236,9 +209,10 @@ const CHECK_SKIPPED: (&str, &str) = ("⊘", "-");
 const CHECK_NEUTRAL: (&str, &str) = ("·", "~");
 /// まだ集計を引いていない行。
 const CHECK_WAIT: (&str, &str) = ("…", ".");
-/// 集計を引けなかった行。**ASCII とそうでない版を分けない** —— どちらも `!`。
-const CHECK_ERROR: &str = "!";
-/// レビューの記号。**英字**（上の `reviews_cell` の doc）。
+/// 集計を引けなかった行。
+const CHECK_ERROR: (&str, &str) = ("!", "!");
+/// レビューの記号。**英字にする** —— `✓` / `✗` はチェックの語彙で、同じ記号を使うと
+/// 「CI が通った」と「人が承認した」が同じ見た目になる（07）。
 const REVIEW_APPROVED: &str = "A";
 const REVIEW_CHANGES: &str = "C";
 
@@ -325,12 +299,13 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, pane_row_is_reversed, pane_text, state_at};
-    use mewgit_core::app::update;
+    use crate::test_util::{draw, pane_row, pane_row_is_reversed, pane_text, state_at};
     use mewgit_core::app::{Cmd, Msg, Pane, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason};
-    use mewgit_core::github::{GithubError, PrDetail};
-    use mewgit_core::test_util::{fake_pull_request, pr_list_loaded, put_on_branch, reply};
+    use mewgit_core::github::{CheckSummary, ReviewSummary};
+    use mewgit_core::test_util::{
+        deliver_pr_details, fake_pull_request, pr_list_loaded, put_on_branch, reply,
+    };
 
     const SIZE: TermSize = TermSize {
         width: 80,
@@ -369,10 +344,8 @@ mod tests {
         vec![open, draft]
     }
 
-    /// 集計まで届いた状態。
-    ///
-    /// **`Cmd` を `AppState::issue` に通してから `Msg` を届ける**（`test_util::reply`
-    /// と同じ理由）。通さないと、ジョブの登録されていない実物では起きない形になる。
+    /// 集計まで届いた状態。**手順は core の `test_util` が持つ**（クレートごとに
+    /// 書くと、片方だけが実物では起きない形に退化しても両方緑になる）。
     fn with_details(
         list: Vec<PullRequest>,
         answers: &[(u64, &str, Result<PrDetail, GithubError>)],
@@ -382,22 +355,11 @@ mod tests {
             .iter()
             .map(|(number, sha, _)| (*number, (*sha).to_string()))
             .collect();
-        let _ = state.issue(Cmd::FetchPrDetails { targets });
-        for (number, sha, result) in answers {
-            let _ = update(
-                &mut state,
-                Msg::PrDetailLoaded {
-                    number: *number,
-                    sha: (*sha).to_string(),
-                    result: result.clone(),
-                },
-            );
-        }
-        let _ = update(&mut state, Msg::PrDetailsFinished(None));
+        let _ = deliver_pr_details(&mut state, Cmd::FetchPrDetails { targets }, answers, None);
         state
     }
 
-    /// 5 値をすべて 1 件ずつ持つ集計。
+    /// [`CheckState`](mewgit_core::github::CheckState) の腕を全部踏む集計。
     fn every_state() -> PrDetail {
         PrDetail {
             checks: CheckSummary {
@@ -414,14 +376,10 @@ mod tests {
     #[test]
     fn the_row_shows_every_check_state_and_does_not_fold_them() {
         // **`Skipped` と `Neutral` を成功か失敗に足すとどちらも嘘になる**（07）。
-        // 5 値のうち 1 つでも畳むと、ここで記号が 1 つ消える。
+        // 腕を 1 つでも畳むと、ここで記号が 1 つ消える。
         let state = with_details(open_and_draft(), &[(82, "headsha", Ok(every_state()))]);
 
-        let text = pane_text(&state, SIZE, Pane::Prs);
-        let row = text
-            .lines()
-            .find(|line| line.contains("#82"))
-            .expect("#82 の行");
+        let row = pane_row(&state, SIZE, Pane::Prs, "#82");
         assert!(row.contains("✓2"), "{row}");
         assert!(row.contains("✗1"), "{row}");
         assert!(row.contains("○1"), "{row}");
@@ -438,15 +396,8 @@ mod tests {
             &[(82, "headsha", Err(GithubError::NotFound))],
         );
 
-        let text = pane_text(&state, SIZE, Pane::Prs);
-        let failed = text
-            .lines()
-            .find(|line| line.contains("#82"))
-            .expect("#82 の行");
-        let waiting = text
-            .lines()
-            .find(|line| line.contains("#90"))
-            .expect("#90 の行");
+        let failed = pane_row(&state, SIZE, Pane::Prs, "#82");
+        let waiting = pane_row(&state, SIZE, Pane::Prs, "#90");
         assert!(failed.contains('!'), "引けなかった行: {failed}");
         assert!(waiting.contains('…'), "まだ引いていない行: {waiting}");
     }
@@ -457,20 +408,13 @@ mod tests {
         let mut state = with_details(open_and_draft(), &[(82, "headsha", Ok(every_state()))]);
         state.config.graph.ascii = true;
 
-        let text = pane_text(&state, SIZE, Pane::Prs);
-        let row = text
-            .lines()
-            .find(|line| line.contains("#82"))
-            .expect("#82 の行");
+        let row = pane_row(&state, SIZE, Pane::Prs, "#82");
         assert!(row.contains("+2"), "{row}");
         assert!(row.contains("x1"), "{row}");
         assert!(row.contains("o1"), "{row}");
         assert!(!row.contains('✓'), "{row}");
         // まだ引いていない行の待ちの印も同じ設定に従う。
-        let waiting = text
-            .lines()
-            .find(|line| line.contains("#90"))
-            .expect("#90 の行");
+        let waiting = pane_row(&state, SIZE, Pane::Prs, "#90");
         assert!(!waiting.contains('…'), "{waiting}");
     }
 
@@ -488,11 +432,7 @@ mod tests {
         };
         let state = with_details(open_and_draft(), &[(82, "headsha", Ok(detail))]);
 
-        let text = pane_text(&state, SIZE, Pane::Prs);
-        let row = text
-            .lines()
-            .find(|line| line.contains("#82"))
-            .expect("#82 の行");
+        let row = pane_row(&state, SIZE, Pane::Prs, "#82");
         assert!(row.contains("A1"), "{row}");
         assert!(row.contains("C2"), "{row}");
         // **`commented` は出さない** —— 出しても次に何をするかが変わらない。
@@ -512,11 +452,7 @@ mod tests {
             &[(82, "headsha", Ok(empty)), (90, "othersha", Ok(empty))],
         );
 
-        let text = pane_text(&state, SIZE, Pane::Prs);
-        let row = text
-            .lines()
-            .find(|line| line.contains("#82"))
-            .expect("#82 の行");
+        let row = pane_row(&state, SIZE, Pane::Prs, "#82");
         // `OPEN ` は `DRAFT` に合わせた 1 桁の詰めぶんで、そのあとは区切りの 2 桁。
         // 集計の桁が残っていればここに割り込む。
         assert!(row.contains("#82 OPEN   Lanes"), "桁が残っている: {row}");
@@ -528,15 +464,8 @@ mod tests {
         // 開始位置がずれる。
         let state = with_details(open_and_draft(), &[(82, "headsha", Ok(every_state()))]);
 
-        let text = pane_text(&state, SIZE, Pane::Prs);
-        let wide = text
-            .lines()
-            .find(|line| line.contains("#82"))
-            .expect("#82 の行");
-        let narrow = text
-            .lines()
-            .find(|line| line.contains("#90"))
-            .expect("#90 の行");
+        let wide = pane_row(&state, SIZE, Pane::Prs, "#82");
+        let narrow = pane_row(&state, SIZE, Pane::Prs, "#90");
         assert_eq!(
             wide.find("Lanes"),
             narrow.find("Bump"),
@@ -565,15 +494,8 @@ mod tests {
         // 揃えないとタイトルの開始位置がずれる。
         let state = with_list(open_and_draft());
 
-        let text = pane_text(&state, SIZE, Pane::Prs);
-        let open = text
-            .lines()
-            .find(|line| line.contains("#82"))
-            .expect("#82 の行");
-        let drafted = text
-            .lines()
-            .find(|line| line.contains("#90"))
-            .expect("#90 の行");
+        let open = pane_row(&state, SIZE, Pane::Prs, "#82");
+        let drafted = pane_row(&state, SIZE, Pane::Prs, "#90");
 
         assert_eq!(
             open.find("Lanes"),

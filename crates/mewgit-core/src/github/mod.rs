@@ -100,9 +100,12 @@ pub enum CheckState {
 
 /// チェックの集計。PRs ペインの各行に出す（07 の「PRs ペイン」）。
 ///
-/// **[`CheckState`] と同じ 5 値を数える。3 つに畳まない** —— `Skipped` と `Neutral`
-/// を成功か失敗のどちらかに足すと**どちらも嘘になる**（07）。数える側で畳むと、
+/// **[`CheckState`] の腕ごとに 1 つ数える。畳まない** —— `Skipped` と `Neutral` を
+/// 成功か失敗のどちらかに足すと**どちらも嘘になる**（07）。数える側で畳むと、
 /// 畳んだことが `ui` から見えないまま「全部緑」に見える。
+///
+/// 腕を足したときにここも足させるのは [`CheckSummary::add`] の網羅 `match` で、
+/// **enforcement はそこ 1 つ**。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CheckSummary {
     pub success: usize,
@@ -123,12 +126,6 @@ impl CheckSummary {
             CheckState::Neutral => &mut self.neutral,
         };
         *slot += 1;
-    }
-
-    /// 数えた件数の合計。**0 件と「引いていない」は別**（引いていないことは
-    /// `app::PrState` の段階が持つ）。
-    pub fn total(&self) -> usize {
-        self.success + self.failure + self.pending + self.skipped + self.neutral
     }
 }
 
@@ -177,4 +174,35 @@ pub enum GithubError {
     Decode { message: String },
     #[error("GitHub API: {status}: {body_head}")]
     Api { status: u16, body_head: String },
+}
+
+impl GithubError {
+    /// **この失敗は、同じトークンで叩くどの対象でも同じように起きるか。**
+    ///
+    /// 扇形（[`GithubClient::pr_details`]）が 1 件目で受けたときに残りを頼むかを
+    /// これで決める。**答えられるのは `github` だけ**なので、呼ぶ側で
+    /// `matches!(err, GithubError::RateLimited { .. })` と書かない（`CLAUDE.md` の
+    /// 「層をまたぐ述語は、その名前が約束している問いに誰が答えられるかで置き場所を
+    /// 決める」）。**腕を足したときに選ばせる**ため網羅 `match` にしてある。
+    ///
+    /// 真にするのは**プロセス全体の条件**だけ。`NotFound` は「その PR の fork が
+    /// 消えた」のような行ごとの事情なので偽 —— 1 件で全部を諦めると、1 つの消えた
+    /// fork が一覧ぜんぶの集計を落とす。
+    pub fn repeats_for_every_target(&self) -> bool {
+        match self {
+            // 待てば直るが、いま叩き続けると二次制限を踏みに行く（05）。
+            GithubError::RateLimited { .. } => true,
+            // トークンの問題。残りを叩いても同じ答えを買うだけ。
+            GithubError::Unauthorized | GithubError::Forbidden { .. } => true,
+            // クライアントを組めない。どの対象でも組めない。
+            GithubError::InvalidHost { .. } => true,
+            // 対象ごとに違いうる。`Network` と `Decode` も**その 1 本だけ**の事故と
+            // して扱う —— 回線が落ちていれば残りも同じように落ちるが、それは通知に
+            // 出るだけで、諦めても叩いても払う往復は変わらない。
+            GithubError::NotFound
+            | GithubError::Network { .. }
+            | GithubError::Decode { .. }
+            | GithubError::Api { .. } => false,
+        }
+    }
 }

@@ -2,8 +2,6 @@
 
 use std::ops::ControlFlow;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -27,7 +25,6 @@ use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
 use ratatui::Terminal;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinSet;
 
 use crate::input::event_to_msg;
 use crate::ui;
@@ -409,8 +406,9 @@ impl Runtime {
             }
 
             // **扇形。`Cmd` 1 本のまま PR ごとに引く**（01 の「PR ペイン › 集計」）。
-            // 同時本数を抑えるのは `github` の中（05 の「`Semaphore`」）なので、
-            // ここは**対象のぶんだけタスクを起こすだけ**でよい。
+            // 同時本数と打ち切りは `github` の中（05 の「`Semaphore`」）—— ここは
+            // 答えを `Msg` に載せるだけで、**どの失敗で止めるかを判じない**
+            // （`GithubError::repeats_for_every_target`）。
             Cmd::FetchPrDetails { targets } => {
                 let Some((target, api)) = github_for(state) else {
                     return no_material(state, JobKind::FetchPrDetails, "PR の集計");
@@ -420,55 +418,25 @@ impl Runtime {
                     // 組み立てに失敗したら 1 件も引けない。**打ち切りとして返す** ——
                     // 黙って終わると、答えの無い行が「読み込み中」のまま残る。
                     let api = match api {
-                        Ok(api) => Arc::new(api),
+                        Ok(api) => api,
                         Err(err) => {
                             let _ = tx.send(Msg::PrDetailsFinished(Some(err)));
                             return;
                         }
                     };
-                    // **1 件でもレート制限で断られたら、残りは頼まない**（05）。
-                    // 同じ失敗を N 回買ううえ、二次制限を踏みに行く。
-                    let tripped = Arc::new(AtomicBool::new(false));
-                    let mut set = JoinSet::new();
-                    for (number, sha) in targets {
-                        let api = Arc::clone(&api);
-                        let tripped = Arc::clone(&tripped);
-                        let tx = tx.clone();
-                        let target = target.clone();
-                        set.spawn(async move {
-                            if tripped.load(Ordering::Relaxed) {
-                                // 頼まなかった行は**答えを送らない**。
-                                // `PrDetailsFinished` が理由ごと埋める。
-                                return None;
-                            }
-                            let result = api
-                                .pr_detail(&target.owner, &target.repo, number, &sha)
-                                .await;
-                            let limited = match &result {
-                                Err(err @ GithubError::RateLimited { .. }) => Some(err.clone()),
-                                _ => None,
-                            };
-                            if limited.is_some() {
-                                tripped.store(true, Ordering::Relaxed);
-                            }
-                            // **届いた行から出す。** 60 件を同時 4 本で引くと全部
-                            // 揃うまで数秒かかる（05 の予算）。
-                            let _ = tx.send(Msg::PrDetailLoaded {
-                                number,
-                                sha,
-                                result,
-                            });
-                            limited
+                    let send = |number, sha, result| {
+                        // **届いた行から出す。** 60 件を同時に引いても全部揃うまで
+                        // 数秒かかる（05 の予算）。
+                        let _ = tx.send(Msg::PrDetailLoaded {
+                            number,
+                            sha,
+                            result,
                         });
-                    }
-                    let mut aborted = None;
-                    while let Some(joined) = set.join_next().await {
-                        if let Ok(Some(err)) = joined {
-                            aborted = Some(err);
-                        }
-                    }
-                    // **全部の答えを送ったあとに送る。** ジョブを畳むのはこちらで、
-                    // 畳む前に届いた答えだけが一覧に当たる（`update::prs`）。
+                    };
+                    let aborted = api
+                        .pr_details(&target.owner, &target.repo, targets, send)
+                        .await;
+                    // **答えを全部送ったあとに送る。** ジョブを畳むのはこちら。
                     let _ = tx.send(Msg::PrDetailsFinished(aborted));
                 });
                 ControlFlow::Continue(())
@@ -524,13 +492,22 @@ fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, Gith
 
 /// 材料が揃わず走らせなかった `Cmd` を通知に積む。
 ///
-/// **`update` が出さない形なので、ここへは来ないはず。** `Cmd::FetchPrList` は
-/// [`AppState::wanted_pr_list`] が真のときしか出ず、その述語が `target` と `account` の
-/// 両方を見る（01 の「PR ペイン › 何を引くか」）。`OpenPr` も一覧が出ている画面からしか
-/// 押せない。
+/// **`update` が出さない形なので、ここへは来ないはず。** 呼び出し元ごとに理由が違う
+/// ので、**足したら数え直す**。
+///
+/// - `Cmd::FetchPrList` — [`AppState::wanted_pr_list`] が真のときしか出ず、その述語が
+///   `target` と `account` の両方を見る（01 の「PR ペイン › 何を引くか」）。
+/// - `Cmd::OpenPr` — 一覧が出ている画面からしか押せない。
+/// - `Cmd::FetchPrDetails` — 対象は一覧の行から出る。一覧はアカウントを失うと
+///   `PrState::forget` で空になるので、材料が消えれば対象も消える。
 ///
 /// **それでも黙らない。** 黙って捨てると、**到達不能と書いた腕が壊れても誰も
 /// 気付けない**（`CLAUDE.md`）。
+///
+/// **`FetchPrDetails` だけは、ここへ来ると行が「読み込み中」のまま残る** ——
+/// 通知は出るが、その行を頼み直す経路（`update::prs` の `fan_out`）へは次に一覧を
+/// 引き直すまで入らない。上の理由で到達しないと数えているが、**壊れたときの
+/// 見え方が他の 2 つと違う**（あちらは `PrLoad::Failed` が画面に出る）。
 /// **ジョブを畳むのが要る。** `update` の出口（[`AppState::issue`]）が登録したまま
 /// 誰も完了させないと、2 回目以降の同じ `Cmd` が通知も出さずに捨てられ、「1 回だけ
 /// 警告が出てあとは無反応」になる。`dispatch` が `notices` 以外に書いてよい唯一の
@@ -1009,6 +986,21 @@ mod tests {
         assert!(!state.jobs.is_running(JobKind::ListAccounts));
     }
 
+    /// 対象とアカウントを、**クライアントを組めない**形に置く。
+    ///
+    /// `valid_host` が弾くホスト（04）なので `GithubClient::new` が最後の関門になり、
+    /// 答えは `InvalidHost` に決まって実 API へ出ない。**2 つの見張りが同じ前提に
+    /// 乗っている**ので、`valid_host` が緩んだときに片方だけ意味を失うことがない。
+    fn aim_at_a_host_that_cannot_be_built(state: &mut AppState) {
+        state.repo.target = TargetState::Resolved(RepoTarget {
+            host: "-bad".to_string(),
+            port: None,
+            owner: "yshrsmz".to_string(),
+            repo: "mewgit".to_string(),
+        });
+        state.account = AccountState::Resolved(fake_account("taro"));
+    }
+
     /// `Cmd::FetchPrList` が `GithubClient` を通って `Msg::PrListLoaded` で返る
     /// （01 の「PR ペイン › 何を引くか」）。
     ///
@@ -1021,14 +1013,7 @@ mod tests {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
         let (mut runtime, mut msgs) = runtime_for(&repo, reader);
-        state.repo.target = TargetState::Resolved(RepoTarget {
-            // `valid_host` が弾く形（04）。`GithubClient::new` が最後の関門になる。
-            host: "-bad".to_string(),
-            port: None,
-            owner: "yshrsmz".to_string(),
-            repo: "mewgit".to_string(),
-        });
-        state.account = AccountState::Resolved(fake_account("taro"));
+        aim_at_a_host_that_cannot_be_built(&mut state);
 
         let cmd = state.issue(Cmd::FetchPrList);
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
@@ -1060,14 +1045,7 @@ mod tests {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
         let (mut runtime, mut msgs) = runtime_for(&repo, reader);
-        state.repo.target = TargetState::Resolved(RepoTarget {
-            // `valid_host` が弾く形（04）。`GithubClient::new` が最後の関門になる。
-            host: "-bad".to_string(),
-            port: None,
-            owner: "yshrsmz".to_string(),
-            repo: "mewgit".to_string(),
-        });
-        state.account = AccountState::Resolved(fake_account("taro"));
+        aim_at_a_host_that_cannot_be_built(&mut state);
 
         let cmd = state.issue(Cmd::FetchPrDetails {
             targets: vec![(82, "headsha".to_string())],

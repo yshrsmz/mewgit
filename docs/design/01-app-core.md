@@ -930,7 +930,7 @@ pub struct PrState {
     details: HashMap<u64, PrDetailEntry>,   // 下の「集計」
 }
 
-pub struct PrDetailEntry { sha: String, result: Result<PrDetail, GithubError> }
+// 集計は private な表に持ち、`PrState::detail(number) -> Option<&Result<PrDetail, GithubError>>` だけを貸す
 
 pub enum PrLoad { Pending, Loaded, Failed(GithubError) }
 ```
@@ -1004,14 +1004,23 @@ latch したせいで二度と直らなかった。**こちらは latch しな�
   `issue` に落とされた `Cmd` のぶんが「頼んだのに誰も返さない行」として残る ——
   落ちるのは扇形が走っているあいだに新しい一覧が届いたときで、**そのときは走って
   いるほうが終端で残りを数え直す**
+- **どの失敗で止めるかは `app` も `runtime` も判じない。** `GithubError` に答えられる
+  問いなので `github` が持つ（`GithubError::repeats_for_every_target`）。`app` は
+  終端が運んできた「打ち切った理由」を受け取るだけ
+- **タブを開いていなくても引く。** 既定のタブは Branches なので、PRs を一度も開かない
+  起動でも往復を払う。**いまはそれを選んでいる** —— タブで門にすると、切り替えた
+  ときに引き直す引き金を `focus` の巡回に足すことになり、巡回の出口（`reseat_focus`）で
+  導出する形に寄る（01 の「失敗の記憶」で採らないと決めた形）。払う量が問題になったら
+  別のタスクで決める（plan.md）
 - **鍵は `(番号, head sha)` で、世代は見ない。** チェックはコミットに紐づくので、
   push で head が進んだ PR の答えは前のコミットのもの。`PrState::detail_loaded` が
   **いまの一覧**と突き合わせて捨てる。**世代を足しても増える守りが無い** ——
   古いと判じたところで、集計を憶えている行は `wanted_details` が拾わないので
   頼み直しが出ない（`JobKind::region` にも書いてある）
-- **持っている行は引き直さない。** 1 件に 3 リクエストかかるので、毎回全件引くと
-  ref を動かす書き込み 1 回が `3N + 1` になる（05 の実測）。落とすのは head sha が
-  動いた行（`PrState::loaded`）と、アカウントが変わったとき（`PrState::forget`）だけ
+- **持っている行は引き直さない。** 1 件ぶんの往復が PR の数だけ積むので、毎回
+  全件引くと `core` の予算に対して重すぎる（数は 05 の「扇形は毎回引き直さない」に
+  実測で置いてある）。落とすのは head sha が動いた行（`PrState::loaded`）と、
+  アカウントが変わったとき（`PrState::forget`）だけ
 - **`reviews` は sha に紐づかないので、この鍵では古くなる。** sha が動かないまま
   レビューが付いても画面は変わらない。**受け入れた穴**で、塞ぐのは明示的な引き直し
   （plan.md）

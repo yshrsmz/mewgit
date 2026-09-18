@@ -1,5 +1,6 @@
 //! GitHub REST API クライアント。設計は `docs/design/05-github-api.md`。
 
+use futures::stream::{self, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use reqwest::{Response, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
@@ -49,6 +50,14 @@ const MAX_PAGES: usize = 10;
 /// **デッドロックする** —— [`GithubClient::checks`] は `try_join!` で 2 本張るので、
 /// 外側の permit を握ったまま内側が permit を待つ形になる（05）。
 static PERMITS: Semaphore = Semaphore::const_new(4);
+
+/// 同時に走らせる PR の本数（[`GithubClient::pr_details`]）。
+///
+/// **これは HTTP の上限ではない**（そちらは [`PERMITS`]）。1 件が複数のリクエストを
+/// 張るので、ここを大きくしても `PERMITS` の手前に並ぶだけ。**有界にするのは、
+/// 打ち切ったときに「まだ始めていない」ぶんを実際に頼まずに済ませるため** ——
+/// 全件を先に起こしてしまうと、止める合図はどれにも間に合わない。
+const FAN_OUT: usize = 4;
 
 /// API のベース URL を組む。
 ///
@@ -305,6 +314,58 @@ impl GithubClient {
             checks: summary,
             review,
         })
+    }
+
+    /// 一覧の各 PR の集計を引く。返るのは**打ち切った理由**（最後まで引けたら `None`）。
+    ///
+    /// **答えは届いた順に `on_each` へ渡す。** 60 件を引くと全部揃うまで数秒かかる
+    /// ので、揃うのを待たない（01 の「PR ペイン › 集計」）。
+    ///
+    /// **1 件が「どの対象でも同じように起きる」失敗を返したら、そこで止める**
+    /// （[`GithubError::repeats_for_every_target`]）。同じ失敗を N 回買ううえ、
+    /// レート制限では二次制限を踏みに行く（05）。
+    ///
+    /// **止めているのは「抜けること」で、同時本数ではない。** ここを抜けると
+    /// ストリームごと落ちるので、走っていない future は permit を取りに行かない。
+    /// **`tokio::spawn` / `JoinSet` に全件を渡してから旗で止める形は 1 本も
+    /// 止められない** —— 起こしたタスクは切り離されているので、旗を読み終えた
+    /// あと permit の列で待ち、順番が来れば素直に叩く（実測。見張りは
+    /// `a_fan_out_stops_asking_after_a_failure_that_repeats` で、**`return` を
+    /// 外すと落ちる**）。
+    ///
+    /// **[`FAN_OUT`] で有界にするのは別の理由** —— 対象が多いときに future を
+    /// 全部組み立てないためと、**permit の列を短く保つ**ため。tokio の
+    /// [`Semaphore`] は FIFO（`tokio-1.53.1/src/sync/semaphore.rs` の
+    /// 「permits are given out in the order they were requested」）なので、
+    /// 扇形が全件ぶんの `acquire` を並べると、そのあとに押した `f` の一覧取得が
+    /// 列の最後尾に付く。
+    ///
+    /// **`on_each` は同期。** 呼ぶ側がやるのは `Msg` を 1 本送ることだけで
+    /// （`mpsc::UnboundedSender::send`）、`github` に `Msg` を知らせないためでもある。
+    pub async fn pr_details(
+        &self,
+        owner: &str,
+        repo: &str,
+        targets: Vec<(u64, String)>,
+        mut on_each: impl FnMut(u64, String, Result<PrDetail, GithubError>),
+    ) -> Option<GithubError> {
+        let mut running = stream::iter(targets)
+            .map(|(number, sha)| async move {
+                let result = self.pr_detail(owner, repo, number, &sha).await;
+                (number, sha, result)
+            })
+            .buffer_unordered(FAN_OUT);
+        while let Some((number, sha, result)) = running.next().await {
+            let stop = match &result {
+                Err(err) if err.repeats_for_every_target() => Some(err.clone()),
+                _ => None,
+            };
+            on_each(number, sha, result);
+            if stop.is_some() {
+                return stop;
+            }
+        }
+        None
     }
 
     /// ベース URL にパスを足す。
@@ -1152,8 +1213,8 @@ mod tests {
 
     #[tokio::test]
     async fn pr_detail_counts_every_check_state_and_does_not_fold_them() {
-        // **5 値を 3 つに畳まない**（07）。`Skipped` と `Neutral` を成功か失敗の
-        // どちらかに足すと**どちらも嘘になる**。
+        // **[`CheckState`] の腕を畳まない**（07）。`Skipped` と `Neutral` を成功か
+        // 失敗のどちらかに足すと**どちらも嘘になる**。
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/repos/o/r/commits/abc/check-runs"))
@@ -1199,7 +1260,6 @@ mod tests {
                 neutral: 1,
             }
         );
-        assert_eq!(detail.checks.total(), 6);
         assert_eq!(detail.review.approved, 1);
         assert_eq!(detail.review.changes_requested, 1);
     }
@@ -1294,6 +1354,67 @@ mod tests {
         assert!(
             times[4].duration_since(times[0]) >= SLOW_DELAY / 2,
             "5 本目が 1 本目と同時に届いている（同時本数が抑えられていない）"
+        );
+    }
+
+    /// 叩かれたパスを記録して同じ応答を返す。
+    struct Recording {
+        seen: Arc<Mutex<Vec<String>>>,
+        status: u16,
+    }
+
+    impl Respond for Recording {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            self.seen
+                .lock()
+                .expect("毒されたロックはこのテストでは起きない")
+                .push(request.url.path().to_string());
+            ResponseTemplate::new(self.status)
+                .insert_header("x-ratelimit-remaining", "0")
+                .set_body_string("{}")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fan_out_stops_asking_after_a_failure_that_repeats() {
+        // **「どの対象でも同じように起きる」失敗を受けたら残りは頼まない**（05）。
+        // 全部を先に起こしてから旗で止める形では**1 本も止まらない** —— 起こした
+        // ぶんは最初の応答が返るより前に旗を読み終えているため。`buffer_unordered` は
+        // 次を必要になってから作るので、抜ければ残りは組み立てられもしない。
+        let server = MockServer::start().await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        Mock::given(method("GET"))
+            .respond_with(Recording {
+                seen: Arc::clone(&seen),
+                // 残量 0 の 403 = 一次レート制限（`is_rate_limited`）。
+                status: 403,
+            })
+            .mount(&server)
+            .await;
+
+        let targets: Vec<(u64, String)> = (1..=8).map(|n| (n, format!("sha{n}"))).collect();
+        let mut answers = Vec::new();
+        let aborted = client(&server)
+            .pr_details("o", "r", targets, |number, _sha, result| {
+                answers.push((number, result));
+            })
+            .await;
+
+        // **主張はこれ —— 後ろの対象を 1 度も叩かない。** 先に見る（下の 2 つは
+        // どちらもこの腕と同じ原因で落ちるので、順番を逆にするとこの腕が踏まれない）。
+        // 同時に走るのは `FAN_OUT` 件までなので、5 件目より後ろは組み立てられもしない。
+        let seen = seen.lock().expect("ロック").clone();
+        for n in (FAN_OUT + 1)..=8 {
+            assert!(
+                !seen.iter().any(|path| path.contains(&format!("sha{n}"))
+                    || path.contains(&format!("pulls/{n}/"))),
+                "{n} 件目を叩いている: {seen:?}"
+            );
+        }
+        assert_eq!(answers.len(), 1, "打ち切ったのに答えを配り続けた");
+        assert!(
+            matches!(aborted, Some(GithubError::RateLimited { .. })),
+            "{aborted:?}"
         );
     }
 

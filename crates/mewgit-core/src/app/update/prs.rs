@@ -189,8 +189,8 @@ mod tests {
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
-        fake_account, fake_oid, fake_pull_request, fake_target, pr_list_loaded as list_msg,
-        put_on_branch, reply,
+        deliver_pr_details, fake_account, fake_oid, fake_pull_request, fake_target,
+        pr_list_loaded as list_msg, put_on_branch, reply,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -230,31 +230,6 @@ mod tests {
             cmd @ Cmd::FetchPrDetails { .. } => cmd,
             _ => Cmd::None,
         }
-    }
-
-    /// 扇形を発行して答えを届け、終端まで運ぶ。
-    ///
-    /// **`AppState::issue` を通す**（`test_util::reply` と同じ理由）。通さずに
-    /// `Msg::PrDetail*` だけ届けると、ジョブの登録されていない**実物では起きない形**を
-    /// 作る（`CLAUDE.md`）。
-    fn deliver_details(
-        state: &mut AppState,
-        ask: Cmd,
-        answers: &[(u64, &str, Result<PrDetail, GithubError>)],
-        aborted: Option<GithubError>,
-    ) -> Cmd {
-        let _ = state.issue(ask);
-        for (number, sha, result) in answers {
-            let _ = update(
-                state,
-                Msg::PrDetailLoaded {
-                    number: *number,
-                    sha: (*sha).to_string(),
-                    result: result.clone(),
-                },
-            );
-        }
-        update(state, Msg::PrDetailsFinished(aborted))
     }
 
     #[test]
@@ -500,8 +475,8 @@ mod tests {
 
     #[test]
     fn the_fan_out_asks_only_for_the_rows_that_have_no_summary() {
-        // **1 件に 3 リクエスト**（check-runs / status / reviews）かかるので、毎回
-        // 全件引くと ref を動かす書き込み 1 回が `3N + 1` になる（05 の予算）。
+        // **1 件ぶんの往復が PR の数だけ積む**ので、毎回全件引くと `core` の予算に
+        // 対して重すぎる（数は 05 の「扇形は毎回引き直さない」）。
         let mut state = state_on_branch("feat/x");
         let list = vec![
             fake_pull_request(82, "feat/x", "sha82"),
@@ -517,13 +492,13 @@ mod tests {
             "初回は全件"
         );
 
-        let next = deliver_details(
+        let next = deliver_pr_details(
             &mut state,
             ask,
             &[(82, "sha82", Ok(detail(2))), (83, "sha83", Ok(detail(1)))],
             None,
         );
-        assert_eq!(state.prs.detail(82).unwrap().result, Ok(detail(2)));
+        assert_eq!(*state.prs.detail(82).unwrap(), Ok(detail(2)));
         // **終端で頼み直さないことをここで見る。** 下の `fan_out_after` だけでは
         // 足りない —— そちらが見るのは `update` の出口を通ったあとの `Cmd` で、
         // **終端が既に同じジョブを起こしていると `AppState::issue` が落とす**ので、
@@ -541,7 +516,7 @@ mod tests {
         // 結果を出したままにしない。
         let mut state = state_on_branch("feat/x");
         let ask = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "old")]);
-        let _ = deliver_details(&mut state, ask, &[(82, "old", Ok(detail(2)))], None);
+        let _ = deliver_pr_details(&mut state, ask, &[(82, "old", Ok(detail(2)))], None);
         assert!(state.prs.detail(82).is_some());
 
         // push して head が進んだ一覧が届く。
@@ -565,7 +540,7 @@ mod tests {
         let mut state = state_on_branch("feat/x");
         let ask = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "new")]);
         // 答えだけが古い sha で返ってくる。
-        let _ = deliver_details(&mut state, ask, &[(82, "old", Ok(detail(9)))], None);
+        let _ = deliver_pr_details(&mut state, ask, &[(82, "old", Ok(detail(9)))], None);
         assert!(
             state.prs.detail(82).is_none(),
             "前のコミットの結果を採っている"
@@ -573,7 +548,7 @@ mod tests {
 
         // 一覧から消えた PR の答えも採らない。
         let ask = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "new")]);
-        let _ = deliver_details(&mut state, ask, &[(99, "sha99", Ok(detail(1)))], None);
+        let _ = deliver_pr_details(&mut state, ask, &[(99, "sha99", Ok(detail(1)))], None);
         assert!(state.prs.detail(99).is_none(), "居ない行の集計が溜まった");
     }
 
@@ -590,16 +565,16 @@ mod tests {
         let limited = GithubError::RateLimited {
             reset_at: Some(1_789_703_295),
         };
-        let next = deliver_details(
+        let next = deliver_pr_details(
             &mut state,
             ask,
             &[(82, "sha82", Err(limited.clone()))],
             Some(limited.clone()),
         );
 
-        assert_eq!(state.prs.detail(82).unwrap().result, Err(limited.clone()));
+        assert_eq!(*state.prs.detail(82).unwrap(), Err(limited.clone()));
         assert_eq!(
-            state.prs.detail(83).unwrap().result,
+            *state.prs.detail(83).unwrap(),
             Err(limited.clone()),
             "頼まなかった行が埋まっていない"
         );
@@ -621,7 +596,7 @@ mod tests {
         // 前のトークンで見えた集計が番号だけで当たる。
         let mut state = state_on_branch("feat/x");
         let ask = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "sha82")]);
-        let _ = deliver_details(&mut state, ask, &[(82, "sha82", Ok(detail(2)))], None);
+        let _ = deliver_pr_details(&mut state, ask, &[(82, "sha82", Ok(detail(2)))], None);
         assert!(state.prs.detail(82).is_some());
 
         let _ = update(

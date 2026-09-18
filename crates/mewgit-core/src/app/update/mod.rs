@@ -84,7 +84,7 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 /// **ここに一覧も数も写さない** —— 導出できる値を離れた場所に置いたコピーになる
 /// （`CLAUDE.md`）。**印は索引であって導出ではない**ので、**忘れた印は見えない**。
 /// そこで**別の見方と突き合わせられる形にしてある** —— `update/` の production で
-/// [`load_more`] / `load_commit` / [`load_diff`] / `reload_log` /
+/// [`load_more`] / `load_commit` / [`load_diff`] / `reload_log` / `prs::fan_out` /
 /// `JobTracker::is_fresh` を呼ぶ場所は、**次の 1 つを除いて全部どれかの印の下にある**。
 ///
 /// - **除くのは [`diff::diff_loaded`] の `is_fresh` だけ。** あれは「届いた

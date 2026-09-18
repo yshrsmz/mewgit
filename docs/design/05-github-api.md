@@ -150,9 +150,23 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
   レビューが付いても画面は変わらない。**受け入れた穴**で、塞ぐなら明示的に引き直す
   キーを足す（plan.md）。`f` は ref を動かすが PR の head sha は変えないので、
   いまの引き金（01 の「何を引くか」）では拾えない。
-- **1 件でもレート制限で断られたら、残りは頼まない。** 同じ失敗を N 回買ううえ、
-  下の「二次制限」を踏みに行く。打ち切ったことは残りの行に理由として出す
-  （黙って `Pending` のまま残さない）。
+- **「どの対象でも同じように起きる」失敗を受けたら、残りは頼まない**（扇形は
+  `GithubClient::pr_details`）。同じ失敗を N 回買ううえ、レート制限では下の
+  「二次制限」を踏みに行く。打ち切ったことは残りの行に理由として出す（黙って
+  「まだ引いていない」のまま残さない）。
+  **どれがその失敗かを答えるのは `github`**（`GithubError::repeats_for_every_target`）
+  —— レート制限だけでなく 401 / 403 もそう。呼ぶ側で `matches!` を書くと、腕を
+  足したときに選び直す機会が無い。
+- **止めているのは「抜けること」で、同時本数ではない。** 対象を
+  `tokio::spawn` / `JoinSet` に全部渡してから旗で止める形は**1 本も止められない**
+  —— 切り離されたタスクは、旗を読み終えたあと permit の列で待ち、順番が来れば
+  素直に叩く（実測 2026-09-18。60 件で `issued=60 / skipped=0`）。有界な
+  `buffer_unordered` を抜ければ、走っていない future は permit を取りに行かない。
+- **同時に走らせる PR も有界にする**（`FAN_OUT`）。理由は 2 つで、対象が多いときに
+  future を全部組み立てないためと、**permit の列を短く保つ**ため —— tokio の
+  `Semaphore` は FIFO（`tokio-1.53.1/src/sync/semaphore.rs` の「permits are given
+  out in the order they were requested」）なので、扇形が全件ぶんの `acquire` を
+  並べると、そのあとに押した `f` の一覧取得が列の最後尾に付く。
 - **一覧は `Link` の `rel="next"` を辿る。** `per_page=100` で止めない。
   **切り捨てが答えを変えるものがある** —— `reviews` の配列は古い順なので、1 ページ目
   だけ見ると「変更要求のあと承認した人」を `changes_requested` と数える。check-runs も
@@ -250,7 +264,7 @@ pub enum PrStatus { Open, Closed, Merged }   // app::PrState（画面の状態�
 pub struct RefSpec { repo: Option<RepoRef>, branch: String, sha: String }
 pub struct RepoRef { owner: String, repo: String }
 pub enum CheckState { Success, Failure, Pending, Skipped, Neutral }
-pub struct CheckSummary { success, failure, pending, skipped, neutral }  // CheckState と同じ 5 値
+pub struct CheckSummary { success, failure, pending, skipped, neutral }  // CheckState の腕ごとに 1 つ
 pub struct Check { name, state: CheckState, url: Option<String> }
 ```
 

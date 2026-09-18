@@ -1216,22 +1216,26 @@ pub struct PrState {
 
 /// PR 1 行ぶんの集計と、どの head sha について引いたか。
 ///
-/// **「まだ引いていない」はこの型で表さない** —— 表に**居ないこと**がそれ
-/// （`CLAUDE.md` の「`None` の理由を 2 つ以上持たせない」）。居ない行には必ず
-/// 扇形が飛ぶか、飛んだ扇形の答えが入るので、`ui` は不在を「読み込み中」として描く。
-///
-/// **`sha` を持つのは、答えがどのコミットのものかが鍵だから。** 一覧は
-/// `sort=updated` で並びが変わり、PR の head も push で動く。番号だけを鍵にすると、
-/// push で sha が進んだ PR に**前のコミットのチェック結果**が出たままになる。
+/// **外へは出さない**（[`PrState::detail`] が `result` だけを貸す）。`sha` を持つのは
+/// 一覧と突き合わせるためで、読むのは [`in_list`] を呼ぶ 2 箇所だけ。一覧は
+/// `sort=updated` で並びが変わり、PR の head も push で動くので、番号だけを鍵に
+/// すると push で sha が進んだ PR に**前のコミットのチェック結果**が残る。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrDetailEntry {
-    /// 引いた（引いている）対象の head sha。
-    pub sha: String,
-    /// 集計か、その PR を引けなかった理由。
-    ///
+struct PrDetailEntry {
+    sha: String,
     /// **`Result` のまま持つ。** 失敗の理由は PR ごとに違う（404 は fork の削除、
     /// 403 はスコープ、レート制限は待てば直る）ので、畳むと `ui` が案内を選べない。
-    pub result: Result<PrDetail, GithubError>,
+    result: Result<PrDetail, GithubError>,
+}
+
+/// その `(番号, head sha)` がこの一覧に居るか。
+///
+/// **集計の鍵の定義はここ 1 つ。** 憶える側（[`PrState::detail_loaded`]）と捨てる側
+/// （[`PrState::loaded`]）が別々に書くと、片方に条件を足したときに**食い違ったまま
+/// 両方のテストが緑になる**（`CLAUDE.md` の「同じ判定を 2 箇所に書かない」）。
+fn in_list(list: &[PullRequest], number: u64, sha: &str) -> bool {
+    list.iter()
+        .any(|pr| pr.number == number && pr.head.sha == sha)
 }
 
 /// PR 一覧の読み込みがどこまで進んだか。
@@ -1299,10 +1303,8 @@ impl PrState {
         // **集計は `(番号, head sha)` が一致する行だけ残す。** push で head が
         // 進んだ行のチェックは前のコミットのもので、一覧から消えた行のものは
         // 誰も読まない（05 の「扇形は毎回引き直さない」）。
-        self.details.retain(|number, entry| {
-            list.iter()
-                .any(|pr| pr.number == *number && pr.head.sha == entry.sha)
-        });
+        self.details
+            .retain(|number, entry| in_list(&list, *number, &entry.sha));
         self.list = list;
         self.load = PrLoad::Loaded;
     }
@@ -1313,16 +1315,26 @@ impl PrState {
         self.load = PrLoad::Failed(err);
     }
 
-    /// この PR の集計。**居なければ「まだ引いていない」**（[`PrDetailEntry`]）。
-    pub fn detail(&self, number: u64) -> Option<&PrDetailEntry> {
-        self.details.get(&number)
+    /// この PR の集計。
+    ///
+    /// **`None` は「まだ引いていない」。** 表に**居ないこと**がそれで、`Err` は
+    /// 「引いたが読めなかった」。**同じ `None` に畳まない**（`CLAUDE.md` の
+    /// 「`None` の理由を 2 つ以上持たせない」）—— 畳むと `ui` が「CI の無い PR」と
+    /// 「CI を読めなかった PR」を区別できない。
+    ///
+    /// 居ない行には必ず扇形が飛ぶか、飛んだ扇形の答えが入る（`update::prs` の
+    /// `fan_out`）。**どの sha について引いたかは外へ出さない** —— 突き合わせるのは
+    /// [`detail_loaded`](Self::detail_loaded) と [`loaded`](Self::loaded) の中だけで、
+    /// 出すと「表示している行と違う sha の集計」を読む形が外から書ける。
+    pub fn detail(&self, number: u64) -> Option<&Result<PrDetail, GithubError>> {
+        self.details.get(&number).map(|entry| &entry.result)
     }
 
     /// まだ集計を持っていない行の `(番号, head sha)`。
     ///
-    /// **持っている行は引き直さない。** PR 1 件に 3 リクエスト（check-runs /
-    /// commit status / reviews）かかるので、ref を動かす書き込みのたびに全件引くと
-    /// `1 + 3N` になる（05 の実測）。憶えた集計を落とすのは
+    /// **持っている行は引き直さない。** 1 件ぶんの往復が PR の数だけ積むので、
+    /// ref を動かす書き込みのたびに全件引くと `core` の予算に対して重すぎる
+    /// （数は 05 の「扇形は毎回引き直さない」）。憶えた集計を落とすのは
     /// [`loaded`](Self::loaded)（head sha が動いた行）と [`forget`](Self::forget)
     /// （アカウントが変わった）だけ。
     pub(super) fn wanted_details(&self) -> Vec<(u64, String)> {
@@ -1346,11 +1358,7 @@ impl PrState {
         sha: String,
         result: Result<PrDetail, GithubError>,
     ) {
-        if !self
-            .list
-            .iter()
-            .any(|pr| pr.number == number && pr.head.sha == sha)
-        {
+        if !in_list(&self.list, number, &sha) {
             return;
         }
         self.details.insert(number, PrDetailEntry { sha, result });

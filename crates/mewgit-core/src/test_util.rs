@@ -73,7 +73,7 @@ use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
     LineOrigin, Oid, Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
 };
-use crate::github::{PrStatus, PullRequest, RefSpec, RepoRef};
+use crate::github::{GithubError, PrDetail, PrStatus, PullRequest, RefSpec, RepoRef};
 use secrecy::SecretString;
 use tempfile::TempDir;
 
@@ -846,6 +846,36 @@ pub fn fake_pull_request(number: u64, branch: &str, sha: &str) -> PullRequest {
 /// 直す場所を、クレートをまたいで散らさない。
 pub fn pr_list_loaded(list: Vec<PullRequest>) -> Msg {
     Msg::PrListLoaded(Ok(list))
+}
+
+/// 扇形を発行して、答えを届けて、終端まで運ぶ（01 の「PR ペイン › 集計」）。
+///
+/// **`ui` からも使う。** PRs ペインの描画を見張るのに同じ手順が要るので、`reply` と
+/// 同じくここに置く —— クレートごとに書くと、片方だけが**実物では起きない形**に
+/// 退化しても両方緑になる。
+///
+/// **`ask` は呼ぶ側が渡す。** 頼んだ対象と届ける答えが食い違う形も踏めるようにして
+/// おく（飛んでいるあいだに一覧が入れ替わる経路がそれ）。
+pub fn deliver_pr_details(
+    state: &mut AppState,
+    ask: Cmd,
+    answers: &[(u64, &str, Result<PrDetail, GithubError>)],
+    aborted: Option<GithubError>,
+) -> Cmd {
+    // **`AppState::issue` を通す**（[`reply`] と同じ理由）。通さずに `Msg` だけ
+    // 届けると、ジョブの登録されていない実物では起きない形になる。
+    let _ = state.issue(ask);
+    for (number, sha, result) in answers {
+        let _ = update(
+            state,
+            Msg::PrDetailLoaded {
+                number: *number,
+                sha: (*sha).to_string(),
+                result: result.clone(),
+            },
+        );
+    }
+    update(state, Msg::PrDetailsFinished(aborted))
 }
 
 /// アカウントと対象が決まり、HEAD が `branch` に居る状態にする。

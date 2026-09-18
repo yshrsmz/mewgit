@@ -64,11 +64,6 @@ pub fn terminal_with(state: &AppState, size: TermSize) -> Terminal<TestBackend> 
     terminal
 }
 
-/// `needle` を含む行が反転しているか（カーソル行の見張り）。
-///
-/// **描いて座標を突き合わせるところまでが 1 つ。** `terminal_with` と `row_of` を
-/// 各ペインで組み合わせると、反転の見方（どのセルを見るか）がペインの数だけ増える。
-/// 行の右側は余白でスタイルが付かないので、1 セルでも反転していれば真とする。
 /// 端末カーソルの位置。
 ///
 /// **編集中のモーダルは端末側のカーソルを出す**（反転の升目を自前で描かない。07）ので、
@@ -80,6 +75,11 @@ pub fn cursor(state: &AppState, size: TermSize) -> Position {
         .expect("カーソル位置を取れませんでした")
 }
 
+/// `needle` を含む行が反転しているか（カーソル行の見張り）。
+///
+/// **描いて座標を突き合わせるところまでが 1 つ。** `terminal_with` と `row_of` を
+/// 各ペインで組み合わせると、反転の見方（どのセルを見るか）がペインの数だけ増える。
+/// 行の右側は余白でスタイルが付かないので、1 セルでも反転していれば真とする。
 pub fn row_is_reversed(state: &AppState, size: TermSize, needle: &str) -> bool {
     let row = row_of(&draw(state, size), needle);
     let terminal = terminal_with(state, size);
@@ -105,6 +105,19 @@ pub fn pane_row_is_reversed(state: &AppState, size: TermSize, pane: Pane, needle
     let terminal = terminal_with(state, size);
     let buffer = terminal.backend().buffer();
     (area.x..area.right()).any(|x| buffer[(x, row)].modifier.contains(Modifier::REVERSED))
+}
+
+/// そのペインの中で `needle` を含む 1 行。無ければ panic する。
+///
+/// **[`row_of`] と対にする**（あちらは索引、こちらは本文）。行の本文を見る見張りは
+/// `pane_text(..).lines().find(..).expect(..)` を各テストが書き写すことになり、
+/// 見つからなかったときの文言がテストの数だけ散る。
+pub fn pane_row(state: &AppState, size: TermSize, pane: Pane, needle: &str) -> String {
+    let text = pane_text(state, size, pane);
+    text.lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("{pane:?} に {needle} を含む行がありません:\n{text}"))
+        .to_string()
 }
 
 /// そのペインの領域だけを取り出した描画結果。

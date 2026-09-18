@@ -1,11 +1,13 @@
 //! GitHub REST API クライアント。設計は `docs/design/05-github-api.md`。
 
+use futures::stream::{self, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use reqwest::{Response, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::Semaphore;
 
 use crate::auth::split_scopes;
 use crate::auth::url::valid_host;
@@ -14,7 +16,7 @@ use crate::auth::RepoTarget;
 use super::wire::{
     summarize_reviews, WireCheckRuns, WireCombinedStatus, WirePull, WireRepo, WireReview,
 };
-use super::{Check, GithubError, PullRequest, RepoMeta, ReviewSummary};
+use super::{Check, CheckSummary, GithubError, PrDetail, PullRequest, RepoMeta, ReviewSummary};
 
 /// `X-GitHub-Api-Version`。GitHub は「日付で固定せよ」と言っている。
 const API_VERSION: &str = "2022-11-28";
@@ -37,6 +39,26 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 辿るページ数の上限。`Link` が輪を作っても止まるようにする。
 /// 1 ページ 100 件なので 1000 件。
 const MAX_PAGES: usize = 10;
+
+/// 認証付きリクエストの同時本数（05）。
+///
+/// **プロセス全体で 1 つ。** [`GithubClient`] のフィールドにすると、`runtime` が
+/// dispatch のたびにクライアントを組み直すぶんだけ上限が増える（一覧の引き直しと
+/// PR ごとの扇形が並ぶと 2 倍になる）。
+///
+/// **permit を取るのは HTTP が実際に出るところ（[`GithubClient::get_page`]）だけ。**
+/// 上の段でも取ると
+/// **デッドロックする** —— [`GithubClient::checks`] は `try_join!` で 2 本張るので、
+/// 外側の permit を握ったまま内側が permit を待つ形になる（05）。
+static PERMITS: Semaphore = Semaphore::const_new(4);
+
+/// 同時に走らせる PR の本数（[`GithubClient::pr_details`]）。
+///
+/// **これは HTTP の上限ではない**（そちらは [`PERMITS`]）。1 件が複数のリクエストを
+/// 張るので、ここを大きくしても `PERMITS` の手前に並ぶだけ。**有界にするのは、
+/// 打ち切ったときに「まだ始めていない」ぶんを実際に頼まずに済ませるため** ——
+/// 全件を先に起こしてしまうと、止める合図はどれにも間に合わない。
+const FAN_OUT: usize = 4;
 
 /// API のベース URL を組む。
 ///
@@ -226,7 +248,8 @@ impl GithubClient {
         let runs_url = self.endpoint(&["repos", owner, repo, "commits", sha, "check-runs"]);
         let status_url = self.endpoint(&["repos", owner, repo, "commits", sha, "status"]);
         // **2 本は独立なので並べる。** 順に待つと RTT がそのまま倍になる。
-        // 同時 2 本は 05 の上限（4）の内側なので、`Semaphore` はまだ要らない。
+        // **permit はここでは取らない。** 取ると外側で握ったまま内側の `get_page` が
+        // 待つ形になり、扇形が上限まで並んだところで誰も返さなくなる（`PERMITS`）。
         let (runs, statuses) = tokio::try_join!(
             self.get_paged(runs_url, &[("per_page", PER_PAGE)], |p: WireCheckRuns| p
                 .check_runs),
@@ -262,6 +285,88 @@ impl GithubClient {
             .get_paged(url, &[("per_page", PER_PAGE)], |page: Vec<WireReview>| page)
             .await?;
         Ok(summarize_reviews(wire))
+    }
+
+    /// PR 1 件ぶんの集計（チェックとレビュー）。
+    ///
+    /// **2 本は独立なので並べる。** permit を取るのは `get_page` の中だけなので、
+    /// ここで `try_join!` しても入れ子で詰まらない（`PERMITS`）。
+    ///
+    /// **`sha` は PR の head。** チェックはコミットに紐づくので、呼ぶ側は
+    /// `(番号, head sha)` を鍵に憶えて、変わっていない行を引き直さない
+    /// （05 の「扇形は毎回引き直さない」）。**レビューは sha に紐づかない**ので、
+    /// その鍵では古くなる —— 受け入れた穴で、塞ぐのは明示的な引き直し（plan.md）。
+    pub async fn pr_detail(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        sha: &str,
+    ) -> Result<PrDetail, GithubError> {
+        let (checks, review) = tokio::try_join!(
+            self.checks(owner, repo, sha),
+            self.reviews(owner, repo, number),
+        )?;
+        let mut summary = CheckSummary::default();
+        for check in &checks {
+            summary.add(check.state);
+        }
+        Ok(PrDetail {
+            checks: summary,
+            review,
+        })
+    }
+
+    /// 一覧の各 PR の集計を引く。返るのは**打ち切った理由**（最後まで引けたら `None`）。
+    ///
+    /// **答えは届いた順に `on_each` へ渡す。** 60 件を引くと全部揃うまで数秒かかる
+    /// ので、揃うのを待たない（01 の「PR ペイン › 集計」）。
+    ///
+    /// **1 件が「どの対象でも同じように起きる」失敗を返したら、そこで止める**
+    /// （[`GithubError::repeats_for_every_target`]）。同じ失敗を N 回買ううえ、
+    /// レート制限では二次制限を踏みに行く（05）。
+    ///
+    /// **止めているのは「抜けること」で、同時本数ではない。** ここを抜けると
+    /// ストリームごと落ちるので、走っていない future は permit を取りに行かない。
+    /// **`tokio::spawn` / `JoinSet` に全件を渡してから旗で止める形は 1 本も
+    /// 止められない** —— 起こしたタスクは切り離されているので、旗を読み終えた
+    /// あと permit の列で待ち、順番が来れば素直に叩く（実測。見張りは
+    /// `a_fan_out_stops_asking_after_a_failure_that_repeats` で、**`return` を
+    /// 外すと落ちる**）。
+    ///
+    /// **`FAN_OUT` で有界にするのは別の理由** —— 対象が多いときに future を
+    /// 全部組み立てないためと、**permit の列を短く保つ**ため。tokio の
+    /// [`Semaphore`] は FIFO（`tokio-1.53.1/src/sync/semaphore.rs` の
+    /// 「permits are given out in the order they were requested」）なので、
+    /// 扇形が全件ぶんの `acquire` を並べると、そのあとに押した `f` の一覧取得が
+    /// 列の最後尾に付く。
+    ///
+    /// **`on_each` は同期。** 呼ぶ側がやるのは `Msg` を 1 本送ることだけで
+    /// （`mpsc::UnboundedSender::send`）、`github` に `Msg` を知らせないためでもある。
+    pub async fn pr_details(
+        &self,
+        owner: &str,
+        repo: &str,
+        targets: Vec<(u64, String)>,
+        mut on_each: impl FnMut(u64, String, Result<PrDetail, GithubError>),
+    ) -> Option<GithubError> {
+        let mut running = stream::iter(targets)
+            .map(|(number, sha)| async move {
+                let result = self.pr_detail(owner, repo, number, &sha).await;
+                (number, sha, result)
+            })
+            .buffer_unordered(FAN_OUT);
+        while let Some((number, sha, result)) = running.next().await {
+            let stop = match &result {
+                Err(err) if err.repeats_for_every_target() => Some(err.clone()),
+                _ => None,
+            };
+            on_each(number, sha, result);
+            if stop.is_some() {
+                return stop;
+            }
+        }
+        None
     }
 
     /// ベース URL にパスを足す。
@@ -322,11 +427,19 @@ impl GithubClient {
     }
 
     /// 1 リクエスト送って、本文と `Link` ヘッダを返す。
+    ///
+    /// **同時本数を抑えるのはここだけ**（`PERMITS`）。**permit は応答を読み切る
+    /// まで握る** —— 本文を読み終える前に返すと、次のリクエストが同時に飛ぶ。
     async fn get_page(
         &self,
         url: Url,
         query: &[(&str, &str)],
     ) -> Result<(String, Option<String>), GithubError> {
+        // `Semaphore` を閉じないので `acquire` は失敗しない。
+        let _permit = PERMITS
+            .acquire()
+            .await
+            .expect("PERMITS は閉じないので acquire は成功する");
         let response = self
             .http
             .get(url)
@@ -466,8 +579,12 @@ mod tests {
     // `CLAUDE.md` の「`cargo fix` は…」）。
     use crate::github::{CheckState, PrStatus, RepoRef};
     use serde_json::json;
-    use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    use wiremock::matchers::{
+        header, method, path, path_regex, query_param, query_param_is_missing,
+    };
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     fn client(server: &MockServer) -> GithubClient {
         let base = Url::parse(&format!("{}/", server.uri())).expect("mock server の URI");
@@ -1092,6 +1209,213 @@ mod tests {
         assert_eq!(
             seen,
             vec![("green", CheckState::Success), ("red", CheckState::Failure),]
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_detail_counts_every_check_state_and_does_not_fold_them() {
+        // **[`CheckState`] の腕を畳まない**（07）。`Skipped` と `Neutral` を成功か
+        // 失敗のどちらかに足すと**どちらも嘘になる**。
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits/abc/check-runs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "check_runs": [
+                    { "name": "a", "status": "completed", "conclusion": "success", "html_url": null },
+                    { "name": "b", "status": "completed", "conclusion": "failure", "html_url": null },
+                    { "name": "c", "status": "in_progress", "conclusion": null, "html_url": null },
+                    { "name": "d", "status": "completed", "conclusion": "skipped", "html_url": null },
+                    { "name": "e", "status": "completed", "conclusion": "neutral", "html_url": null },
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        // **commit status のぶんも同じ集計に入る**（片方だけ見ると、古い API しか
+        // 使っていないリポジトリで 0 件になる）。
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits/abc/status"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "statuses": [
+                    { "context": "legacy", "state": "success", "target_url": null },
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "user": { "login": "u1" }, "state": "APPROVED" },
+                { "user": { "login": "u2" }, "state": "CHANGES_REQUESTED" },
+            ])))
+            .mount(&server)
+            .await;
+
+        let detail = client(&server).pr_detail("o", "r", 7, "abc").await.unwrap();
+        assert_eq!(
+            detail.checks,
+            CheckSummary {
+                success: 2,
+                failure: 1,
+                pending: 1,
+                skipped: 1,
+                neutral: 1,
+            }
+        );
+        assert_eq!(detail.review.approved, 1);
+        assert_eq!(detail.review.changes_requested, 1);
+    }
+
+    /// 遅らせて返しつつ、**リクエストが届いた時刻**を記録する。
+    ///
+    /// **`respond` は遅延の前に呼ばれる** —— wiremock 0.6.5 の `mock_set.rs` は
+    /// `response_template()` を呼んでから `delay().map(sleep)` を組み、`hyper.rs` が
+    /// ハンドラの最後で `delay.await` する（ソースで確認、2026-09-18）。
+    struct Slow {
+        seen: Arc<Mutex<Vec<Instant>>>,
+        body: serde_json::Value,
+    }
+
+    impl Respond for Slow {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            self.seen
+                .lock()
+                .expect("毒されたロックはこのテストでは起きない")
+                .push(Instant::now());
+            ResponseTemplate::new(200)
+                .set_body_json(self.body.clone())
+                .set_delay(SLOW_DELAY)
+        }
+    }
+
+    const SLOW_DELAY: Duration = Duration::from_millis(200);
+
+    /// [`Slow`] を 1 本まとめる。**3 本とも同じ `seen` を共有する**ので、
+    /// 届いた順が 1 本の列になる。
+    async fn mount_slow(
+        server: &MockServer,
+        builder: wiremock::MockBuilder,
+        seen: &Arc<Mutex<Vec<Instant>>>,
+        body: serde_json::Value,
+    ) {
+        builder
+            .respond_with(Slow {
+                seen: Arc::clone(seen),
+                body,
+            })
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn the_fan_out_does_not_put_more_than_four_requests_in_flight() {
+        // **上限は `PERMITS`。** 6 件 × 3 リクエスト（check-runs / status / reviews）
+        // = 18 本を同時に頼み、**5 本目が 1 本目と同時には届かない**ことを見る。
+        // permit を外すと 18 本が一斉に届いてここが落ちる。
+        //
+        // **「ちょうど 4 本に届く」は見ない。** `PERMITS` はプロセスに 1 つで、
+        // **同じテストバイナリの他のテストも通る**ので、こちらが t0 に何本取れるかは
+        // 他のテストの混み具合で変わる。ここで見るのは**上限のほう**だけ。
+        //
+        // **`try_join!` の入れ子で詰まる形は timeout が拾う。** permit を PR ごとにも
+        // 取ると、外側が握ったまま内側が待って**誰も返さなくなる**（05）。
+        let server = MockServer::start().await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        mount_slow(
+            &server,
+            Mock::given(method("GET")).and(path("/repos/o/r/commits/abc/check-runs")),
+            &seen,
+            json!({ "check_runs": [] }),
+        )
+        .await;
+        mount_slow(
+            &server,
+            Mock::given(method("GET")).and(path("/repos/o/r/commits/abc/status")),
+            &seen,
+            json!({ "statuses": [] }),
+        )
+        .await;
+        mount_slow(
+            &server,
+            Mock::given(method("GET")).and(path_regex(r"^/repos/o/r/pulls/\d+/reviews$")),
+            &seen,
+            json!([]),
+        )
+        .await;
+
+        let api = client(&server);
+        let calls = (1..=6u64).map(|number| api.pr_detail("o", "r", number, "abc"));
+        let done =
+            tokio::time::timeout(Duration::from_secs(20), futures::future::join_all(calls)).await;
+        let results = done.expect("扇形が返らない（permit を握ったまま permit を待っている）");
+        assert!(results.iter().all(|r| r.is_ok()), "{results:?}");
+
+        let mut times = seen.lock().expect("ロック").clone();
+        assert_eq!(times.len(), 18, "叩いた本数");
+        times.sort();
+        assert!(
+            times[4].duration_since(times[0]) >= SLOW_DELAY / 2,
+            "5 本目が 1 本目と同時に届いている（同時本数が抑えられていない）"
+        );
+    }
+
+    /// 叩かれたパスを記録して同じ応答を返す。
+    struct Recording {
+        seen: Arc<Mutex<Vec<String>>>,
+        status: u16,
+    }
+
+    impl Respond for Recording {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            self.seen
+                .lock()
+                .expect("毒されたロックはこのテストでは起きない")
+                .push(request.url.path().to_string());
+            ResponseTemplate::new(self.status)
+                .insert_header("x-ratelimit-remaining", "0")
+                .set_body_string("{}")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fan_out_stops_asking_after_a_failure_that_repeats() {
+        // **「どの対象でも同じように起きる」失敗を受けたら残りは頼まない**（05）。
+        // 全部を先に起こしてから旗で止める形では**1 本も止まらない** —— 起こした
+        // ぶんは最初の応答が返るより前に旗を読み終えているため。`buffer_unordered` は
+        // 次を必要になってから作るので、抜ければ残りは組み立てられもしない。
+        let server = MockServer::start().await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        Mock::given(method("GET"))
+            .respond_with(Recording {
+                seen: Arc::clone(&seen),
+                // 残量 0 の 403 = 一次レート制限（`is_rate_limited`）。
+                status: 403,
+            })
+            .mount(&server)
+            .await;
+
+        let targets: Vec<(u64, String)> = (1..=8).map(|n| (n, format!("sha{n}"))).collect();
+        let mut answers = Vec::new();
+        let aborted = client(&server)
+            .pr_details("o", "r", targets, |number, _sha, result| {
+                answers.push((number, result));
+            })
+            .await;
+
+        // **主張はこれ —— 後ろの対象を 1 度も叩かない。** 先に見る（下の 2 つは
+        // どちらもこの腕と同じ原因で落ちるので、順番を逆にするとこの腕が踏まれない）。
+        // 同時に走るのは `FAN_OUT` 件までなので、5 件目より後ろは組み立てられもしない。
+        let seen = seen.lock().expect("ロック").clone();
+        for n in (FAN_OUT + 1)..=8 {
+            assert!(
+                !seen.iter().any(|path| path.contains(&format!("sha{n}"))
+                    || path.contains(&format!("pulls/{n}/"))),
+                "{n} 件目を叩いている: {seen:?}"
+            );
+        }
+        assert_eq!(answers.len(), 1, "打ち切ったのに答えを配り続けた");
+        assert!(
+            matches!(aborted, Some(GithubError::RateLimited { .. })),
+            "{aborted:?}"
         );
     }
 

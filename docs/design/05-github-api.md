@@ -117,15 +117,56 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
 8.6 日だった。**担保しているのは「直接依存かどうか」ではなく、lock を書き換える
 側の設定のほう。**
 
-- **認証付きリクエストは同時 4 本まで（`Semaphore`）。まだ入れていない。**
-  いま並ぶのは `checks`（check-runs と commit status）だけで、**上限 4 の
-  内側なので `Semaphore` が働く場面がまだ無い**。扇形に広がるのは
-  `ui::panes::prs`（2/2）の集計（PR ごとに checks / reviews を引く）なので、そこで入れる。
+- **認証付きリクエストは同時 4 本まで（`Semaphore`）。**
   **置くのはクライアントの中で、`Cmd` を N 本出す形にはできない** —— `JobTracker` は
   種別単位なので、同じ `JobKind` の 2 本目以降は `AppState::issue` が黙って落とす
   （01 の「実行中ジョブ」）。**扇形は 1 ジョブ**（対象の `Vec<(number, sha)>` を運ぶ
-  `Cmd` 1 本）にして、その中で `Semaphore` が同時本数を抑える。`checks` は
-  `try_join!` で 2 本取るが、上限 4 の内側なので入れ子で詰まることはない
+  `Cmd` 1 本）にして、その中で `Semaphore` が同時本数を抑える。
+- **permit を取るのは HTTP が実際に出る 1 箇所（`get_page`）だけ。** PR ごとにも
+  取ると**デッドロックする** —— `checks` は `try_join!` で check-runs と commit status
+  の 2 本を張るので、外側の permit を 4 本が握ったまま内側の 2 本が permit を待ち、
+  誰も返さない。**「上限 4 の内側だから入れ子で詰まらない」は成り立たない**
+  （詰まるのは本数ではなく、**permit を握ったまま permit を待つ**形のほう）。
+  取る場所が 1 箇所なら、`try_join!` の 2 本はどちらも**何も握らずに**待つ。
+  **実測（2026-09-18）** —— `pr_detail` の先頭にも `acquire()` を足すと、6 件 ×
+  3 リクエストの扇形が **20 秒のタイムアウトまで 1 件も返らなかった**
+  （`the_fan_out_does_not_put_more_than_four_requests_in_flight`）。
+  permit を外したほうの変異では 18 本が一斉に届いて同じ見張りが落ちる。
+  **どちらも「そうなるはず」ではなく、実際に踏んで確かめてある。**
+- **`Semaphore` はプロセス全体に 1 つ**（`shared_http()` の隣に `static`）。
+  `tokio` 1.53.1 の `Semaphore::const_new` は `#[cfg(not(all(loom, test)))]` だけが
+  付いた `pub const fn` なので `static` にそのまま置ける（`OnceLock` は要らない。
+  実測 2026-09-18、`tokio-1.53.1/src/sync/semaphore.rs`）。
+  **`GithubClient` のフィールドにしない** —— `runtime::github_for` が dispatch の
+  たびにクライアントを組み直すので、1 ジョブぶんしか抑えられない（一覧の引き直しと
+  扇形が並ぶと 4 + 4 本になる）
+- **扇形は毎回引き直さない。鍵は `(番号, head sha)`。** PR 1 件に 3 リクエスト
+  （check-runs / commit status / reviews）かかるので、ref を動かす書き込みのたびに
+  全件引くと **1 + 3N** になる。open PR が 60 件のリポジトリ（`cli/cli` は 62 件。
+  下の実測）では 1 回の commit が **181 リクエスト**で、`core` の 5000/時は
+  **27 回で尽きる**。`f` を 1 分おきに押すだけで超える。**checks は sha に紐づく**
+  ので、`(番号, head sha)` が変わっていない行は憶えた集計をそのまま使う。
+- **reviews は sha に紐づかないので、この記憶では古くなる。** sha が動かないまま
+  レビューが付いても画面は変わらない。**受け入れた穴**で、塞ぐなら明示的に引き直す
+  キーを足す（plan.md）。`f` は ref を動かすが PR の head sha は変えないので、
+  いまの引き金（01 の「何を引くか」）では拾えない。
+- **「どの対象でも同じように起きる」失敗を受けたら、残りは頼まない**（扇形は
+  `GithubClient::pr_details`）。同じ失敗を N 回買ううえ、レート制限では下の
+  「二次制限」を踏みに行く。打ち切ったことは残りの行に理由として出す（黙って
+  「まだ引いていない」のまま残さない）。
+  **どれがその失敗かを答えるのは `github`**（`GithubError::repeats_for_every_target`）
+  —— レート制限だけでなく 401 / 403 もそう。呼ぶ側で `matches!` を書くと、腕を
+  足したときに選び直す機会が無い。
+- **止めているのは「抜けること」で、同時本数ではない。** 対象を
+  `tokio::spawn` / `JoinSet` に全部渡してから旗で止める形は**1 本も止められない**
+  —— 切り離されたタスクは、旗を読み終えたあと permit の列で待ち、順番が来れば
+  素直に叩く（実測 2026-09-18。60 件で `issued=60 / skipped=0`）。有界な
+  `buffer_unordered` を抜ければ、走っていない future は permit を取りに行かない。
+- **同時に走らせる PR も有界にする**（`FAN_OUT`）。理由は 2 つで、対象が多いときに
+  future を全部組み立てないためと、**permit の列を短く保つ**ため —— tokio の
+  `Semaphore` は FIFO（`tokio-1.53.1/src/sync/semaphore.rs` の「permits are given
+  out in the order they were requested」）なので、扇形が全件ぶんの `acquire` を
+  並べると、そのあとに押した `f` の一覧取得が列の最後尾に付く。
 - **一覧は `Link` の `rel="next"` を辿る。** `per_page=100` で止めない。
   **切り捨てが答えを変えるものがある** —— `reviews` の配列は古い順なので、1 ページ目
   だけ見ると「変更要求のあと承認した人」を `changes_requested` と数える。check-runs も
@@ -175,9 +216,24 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
   常時出す残量の産出元にならず、`AppState` に「いつのものか判らない数」を 1 つ
   増やすだけになる。**送り先は `ui::panes::prs`（2/2）** —— PR / checks / reviews を
   引き始めると残量が実際に動き、読む側（ヘッダ）に出す意味が出る。
-  **タスクは 2 本に割れた**（plan.md）ので、送り先は **2/2（PR ごとの集計）**。
-  1 本目（一覧を出すだけ）で叩くのは `pulls` 1 本で、扇形に広がらず `Semaphore` も
-  働かない。**出す数は `core` の 1 つ**（上の「`/search/issues` は使わない」）
+  **タスクは 2 本に割れ、2 本目はさらに a / b に割れた**（plan.md）ので、送り先は
+  **2/2 の b**。1 本目（一覧を出すだけ）で叩くのは `pulls` 1 本で、扇形に広がらず
+  `Semaphore` も働かない。**出す数は `core` の 1 つ**（上の「`/search/issues` は
+  使わない」）
+- **残量は自分が出したリクエストのヘッダから採る。`/rate_limit` は別の数を返す。**
+  実測（2026-09-18、`gh api -i`、github.com の個人アカウント。**同じセッションで
+  連続して叩いた**）——
+
+  | 叩いたもの | `remaining` | `used` | `reset` |
+  |---|---|---|---|
+  | `/rate_limit` | 5000 | 0 | 1789703715 |
+  | `/repos/cli/cli/pulls?state=open&per_page=1` | 4984 | 16 | 1789703295 |
+
+  **どちらも `x-ratelimit-resource: core`** なのに数が合わず、`/rate_limit` のほうが
+  `reset` を**後ろ**に返した。**`/rate_limit` を残量の産出元にしない**（1 往復を
+  余分に払ったうえで嘘を出すことになる）。`x-ratelimit-used` は実在するので、
+  並行に飛んだ応答のどれが新しいかは `(reset, used)` の大きいほうで決められる。
+  **GHES で同じかは確かめていない**（手元に無い）
 
 ## エンドポイント対応
 
@@ -189,16 +245,26 @@ Renovate（`minimumReleaseAge: "2 weeks"`）に任せる。**人が
 | レビュー | `GET /repos/{o}/{r}/pulls/{n}/reviews` を最新レビュー/ユーザーで集約 |
 | PR 作成 | `POST /repos/{o}/{r}/pulls` |
 
+| PR ごとの集計 | 上の 2 つを `try_join!` で並べた `pr_detail`（`(番号, head sha)` で呼ぶ） |
+
 GraphQL は MVP では使わない（1 画面に必要な情報は REST 数本で足りる）。
+
+**集計を [`PullRequest`] に入れない。** 一覧（`pulls`）はこれを返さないので、
+`Option` で持たせると「まだ引いていない」と「引いたが失敗した」が同じ `None` に
+落ちる。段階を持つのは `app::PrState` の側で、失敗の理由（`GithubError`）もそちらが
+運ぶ（01 の「PR ペイン › 集計」）。**以前は `review` / `checks` を `Option` で
+持っていたが、誰も組まず誰も読まないまま置いてあった。**
 
 ## モデル
 
 ```rust
-pub struct PullRequest { number, title, state: PrStatus, draft, head: RefSpec, base: RefSpec, url, author, requested_reviewers: Vec<String>, review: Option<ReviewSummary>, checks: Option<CheckSummary> }
+pub struct PullRequest { number, title, state: PrStatus, draft, head: RefSpec, base: RefSpec, url, author, requested_reviewers: Vec<String> }
+pub struct PrDetail { checks: CheckSummary, review: ReviewSummary }  // pr_detail が返す。PullRequest には入れない
 pub enum PrStatus { Open, Closed, Merged }   // app::PrState（画面の状態）と紛らわしいので Status
 pub struct RefSpec { repo: Option<RepoRef>, branch: String, sha: String }
 pub struct RepoRef { owner: String, repo: String }
 pub enum CheckState { Success, Failure, Pending, Skipped, Neutral }
+pub struct CheckSummary { success, failure, pending, skipped, neutral }  // CheckState の腕ごとに 1 つ
 pub struct Check { name, state: CheckState, url: Option<String> }
 ```
 

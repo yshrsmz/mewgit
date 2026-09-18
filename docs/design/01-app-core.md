@@ -927,7 +927,10 @@ pub struct PrState {
     pub list: Vec<PullRequest>,
     pub cursor: usize,
     load: PrLoad,
+    details: HashMap<u64, PrDetailEntry>,   // 下の「集計」
 }
+
+// 集計は private な表に持ち、`PrState::detail(number) -> Option<&Result<PrDetail, GithubError>>` だけを貸す
 
 pub enum PrLoad { Pending, Loaded, Failed(GithubError) }
 ```
@@ -985,6 +988,74 @@ latch したせいで二度と直らなかった。**こちらは latch しな�
 
 **アカウントが決まっていないことを `Fetch` に持たせない。** `AccountState` から
 導ける。持たせると `Unasked` の理由が状態にも写り、どちらが正かが決まらなくなる。
+
+### 集計（チェックとレビュー）
+
+一覧の各行について `checks` と `reviews` を引き、行に出す（07 の「PRs ペイン」）。
+
+- **扇形でも `Cmd` は 1 本**（`Cmd::FetchPrDetails { targets: Vec<(番号, head sha)> }`）。
+  `JobTracker` は種別単位なので、PR ごとに `Cmd` を出すと 2 本目以降を
+  `AppState::issue` が黙って落とす。同時本数を抑えるのは `github` の中（05 の
+  「`Semaphore`」）
+- **答えは 1 件ずつ届く**（`Msg::PrDetailLoaded`）。60 件を同時 4 本で引くと全部
+  揃うまで数秒かかるので、揃うのを待たない。**ジョブを畳むのは終端**
+  （`Msg::PrDetailsFinished`）のほう
+- **「まだ引いていない」を状態に書かない。** 表に**居ないこと**がそれ。書くと、
+  `issue` に落とされた `Cmd` のぶんが「頼んだのに誰も返さない行」として残る ——
+  落ちるのは扇形が走っているあいだに新しい一覧が届いたときで、**そのときは走って
+  いるほうが終端で残りを数え直す**
+- **どの失敗で止めるかは `app` も `runtime` も判じない。** `GithubError` に答えられる
+  問いなので `github` が持つ（`GithubError::repeats_for_every_target`）。`app` は
+  終端が運んできた「打ち切った理由」を受け取るだけ
+- **タブを開いていなくても引く。** 既定のタブは Branches なので、PRs を一度も開かない
+  起動でも往復を払う。**いまはそれを選んでいる** —— タブで門にすると、切り替えた
+  ときに引き直す引き金を `focus` の巡回に足すことになり、巡回の出口（`reseat_focus`）で
+  導出する形に寄る（01 の「失敗の記憶」で採らないと決めた形）。払う量が問題になったら
+  別のタスクで決める（plan.md）
+- **鍵は `(番号, head sha)` で、世代は見ない。** チェックはコミットに紐づくので、
+  push で head が進んだ PR の答えは前のコミットのもの。`PrState::detail_loaded` が
+  **いまの一覧**と突き合わせて捨てる。**世代を足しても増える守りが無い** ——
+  古いと判じたところで、集計を憶えている行は `wanted_details` が拾わないので
+  頼み直しが出ない（`JobKind::region` にも書いてある）
+- **持っている行は引き直さない。** 1 件ぶんの往復が PR の数だけ積むので、毎回
+  全件引くと `core` の予算に対して重すぎる（数は 05 の「扇形は毎回引き直さない」に
+  実測で置いてある）。落とすのは head sha が動いた行（`PrState::loaded`）と、
+  アカウントが変わったとき（`PrState::forget`）だけ
+- **`reviews` は sha に紐づかないので、この鍵では古くなる。** sha が動かないまま
+  レビューが付いても画面は変わらない。**受け入れた穴**で、塞ぐのは明示的な引き直し
+  （plan.md）
+- **打ち切ったら、頼んだのに答えの返らなかった行を理由ごと埋める**
+  （`PrState::details_aborted`）。埋めないとその行は「まだ引いていない」のまま
+  `wanted_details` に拾われ、**同じ失敗を買い直す輪**になる（上の「`Err` から
+  再発行してよいのは対象が違うときだけ」）。
+  **埋める相手は頼んだ対象で、いまの一覧ではない** —— 一覧を舐めると、扇形が
+  走っているあいだに増えた行（`AppState::issue` に落とされて頼まれていない）まで
+  塞ぎ、次の `fan_out` も空になって**一度も叩いていない行が二度と引かれない**。
+  そのため `Msg::PrDetailsFinished` が理由と一緒に対象を運ぶ。
+- **引けなかった記憶は、次に一覧が届いたときに落とす**（`PrState::loaded` が `Err` の
+  行を捨てる）。落とさないと `wanted_details` が二度と拾わず、**回線が 1 回切れた
+  だけでセッション中ずっと `!` のまま**になる。**1 件ごとの失敗は通知に出ない**
+  （出るのは行の印だけ。07）ので、ここが唯一の出口。**輪にはならない** ——
+  1 回の扇形の中では答えが入って `wanted_details` が空になり、次に頼むのは
+  新しい一覧が届いたときだけ
+- **世代（`PrState::epoch`）も要る。鍵だけでは足りない。** アカウントを切り替えても
+  PR の番号も head も変わらないので、**前のトークンで飛んでいた扇形の答えが新しい
+  一覧にそのまま当たる**（`forget` が落とすと言っている守りを、走っている扇形が
+  外から破る）。`forget` が世代を進め、返信が持ち帰った世代と違えば**効果だけ**を
+  捨てる —— **ジョブは世代に関係なく畳む**（畳まないと以後の `Cmd::FetchPrDetails`
+  が `AppState::issue` に落とされ続ける）。
+  **`JobTracker` の世代とは別物** —— あちらは git の書き込みが何を古くするかを
+  数えるもので、アカウントの切り替えでは進まない
+- **打ち切ったときだけ通知を出す。** **1 件ごとの失敗では出さない** —— fork が
+  消えた PR の 404 は行ごとの事情で、一覧ぶん通知を積んでも次に何をするかが
+  変わらない。
+  **理由は要約行ではなく `Notice.detail` に載せる** —— `GithubError` の `Display` を
+  要約行に混ぜると 72 セル（上の「失敗の案内文」）を超えて `q:quit` が押し出される。
+  `InvalidHost` はホスト名をそのまま持ち、**ホスト名に上限が無い**（`-bad` の
+  4 文字でちょうど 72 セル。実測 2026-09-18）。`exec_finished` が argv と stderr を
+  `detail` に載せるのと同じ形で、**描くのは M6 のステータスバーのタスク**。
+  **行き止まりにはならない** —— 引けなかった記憶は次に一覧が届いたときに落ちるので、
+  `f` で引き直せる（上の項目）
 
 ### 現ブランチの PR
 
@@ -1828,6 +1899,8 @@ pub enum Msg {
     AccountResolved(Result<Account, DegradedReason>),
     AccountsListed(Result<Vec<GhLogin>, AuthError>),  // 選び直しの候補。上の「候補の取り直し」
     PrListLoaded(Result<Vec<PullRequest>, GithubError>),  // 開いている PR の一覧。上の「PR ペイン」
+    PrDetailLoaded { number: u64, sha: String, result: Result<PrDetail, GithubError> },  // 上の「集計」
+    PrDetailsFinished(Option<GithubError>),  // 扇形の終端。Some は打ち切り
     OpenPrFinished(Result<(), AuthError>),            // gh browse の結果。Err は通知に出す
 }
 ```
@@ -1921,6 +1994,7 @@ pub enum Cmd {
     ResolveAccount(RepoTarget),        // どのリポジトリのアカウントを決めるか（04 の手順 1〜4）
     ListAccounts(String),              // そのホストの login 一覧だけを取り直す（上の「候補の取り直し」）
     FetchPrList,                       // 開いている PR の一覧（上の「PR ペイン › 何を引くか」）
+    FetchPrDetails { targets: Vec<(u64, String)> },  // PR ごとの集計（上の「PR ペイン › 集計」）
     OpenPr { number: u64 },            // gh browse。上の「o（ブラウザで開く）」
     Quit,
 }

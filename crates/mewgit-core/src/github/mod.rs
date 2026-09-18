@@ -39,12 +39,18 @@ pub struct PullRequest {
     /// 入らない** —— チームの一員かどうかを答えるにはチームの数だけ membership を
     /// 叩くことになる（07 の「PRs ペイン」で受け入れた穴）。
     pub requested_reviewers: Vec<String>,
-    /// レビューは別リクエスト（`reviews`）なので、未取得なら `None`。
-    /// **`ReviewSummary::default()` を入れない** —— 「レビュー 0 件」と
-    /// 区別できなくなる。`checks` と対称にしてある。
-    pub review: Option<ReviewSummary>,
-    /// チェックは別リクエストなので、未取得なら `None`。
-    pub checks: Option<CheckSummary>,
+}
+
+/// PR 1 件ぶんの集計（チェックとレビュー）。[`GithubClient::pr_detail`] が返す。
+///
+/// **[`PullRequest`] には入れない。** 一覧（`pulls`）はこれを返さないので、
+/// `Option` で持たせると「まだ引いていない」と「引いたが失敗した」が同じ `None` に
+/// 落ちる（`CLAUDE.md` の「`None` の理由を 2 つ以上持たせない」）。
+/// 段階を持つのは `app::PrState` の側で、失敗の理由（[`GithubError`]）もそちらが運ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrDetail {
+    pub checks: CheckSummary,
+    pub review: ReviewSummary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,12 +98,35 @@ pub enum CheckState {
     Neutral,
 }
 
-/// チェックの集計。ヘッダとブランチ一覧に出す。
+/// チェックの集計。PRs ペインの各行に出す（07 の「PRs ペイン」）。
+///
+/// **[`CheckState`] の腕ごとに 1 つ数える。畳まない** —— `Skipped` と `Neutral` を
+/// 成功か失敗のどちらかに足すと**どちらも嘘になる**（07）。数える側で畳むと、
+/// 畳んだことが `ui` から見えないまま「全部緑」に見える。
+///
+/// 腕を足したときにここも足させるのは [`CheckSummary::add`] の網羅 `match` で、
+/// **enforcement はそこ 1 つ**。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CheckSummary {
     pub success: usize,
     pub failure: usize,
     pub pending: usize,
+    pub skipped: usize,
+    pub neutral: usize,
+}
+
+impl CheckSummary {
+    /// チェック 1 件を数える。
+    pub fn add(&mut self, state: CheckState) {
+        let slot = match state {
+            CheckState::Success => &mut self.success,
+            CheckState::Failure => &mut self.failure,
+            CheckState::Pending => &mut self.pending,
+            CheckState::Skipped => &mut self.skipped,
+            CheckState::Neutral => &mut self.neutral,
+        };
+        *slot += 1;
+    }
 }
 
 /// レビューの集計。ユーザーごとに最新のレビューだけを数える。
@@ -145,4 +174,100 @@ pub enum GithubError {
     Decode { message: String },
     #[error("GitHub API: {status}: {body_head}")]
     Api { status: u16, body_head: String },
+}
+
+impl GithubError {
+    /// **この失敗は、同じトークンで叩くどの対象でも同じように起きるか。**
+    ///
+    /// 扇形（[`GithubClient::pr_details`]）が 1 件目で受けたときに残りを頼むかを
+    /// これで決める。**答えられるのは `github` だけ**なので、呼ぶ側で
+    /// `matches!(err, GithubError::RateLimited { .. })` と書かない（`CLAUDE.md` の
+    /// 「層をまたぐ述語は、その名前が約束している問いに誰が答えられるかで置き場所を
+    /// 決める」）。**腕を足したときに選ばせる**ため網羅 `match` にしてある。
+    ///
+    /// 真にするのは**プロセス全体の条件**だけ。`NotFound` は「その PR の fork が
+    /// 消えた」のような行ごとの事情なので偽 —— 1 件で全部を諦めると、1 つの消えた
+    /// fork が一覧ぜんぶの集計を落とす。
+    pub fn repeats_for_every_target(&self) -> bool {
+        match self {
+            // 待てば直るが、いま叩き続けると二次制限を踏みに行く（05）。
+            GithubError::RateLimited { .. } => true,
+            // トークンの問題。残りを叩いても同じ答えを買うだけ。
+            GithubError::Unauthorized | GithubError::Forbidden { .. } => true,
+            // クライアントを組めない。どの対象でも組めない。
+            GithubError::InvalidHost { .. } => true,
+            // 対象ごとに違いうる。`Network` と `Decode` も**その 1 本だけ**の事故と
+            // して扱う —— 回線が落ちていれば残りも同じように落ちるが、諦めても
+            // 叩いても払う往復は変わらない。
+            //
+            // **1 件ごとの失敗は通知に出ない。** 出るのは行の印だけ（07 で受け入れた
+            // 穴）。行き止まりにならないのは、**引けなかった記憶が次に一覧を引いた
+            // ときに落ちる**から（`app::PrState::loaded`）—— `f` を押せば引き直す。
+            GithubError::NotFound
+            | GithubError::Network { .. }
+            | GithubError::Decode { .. }
+            | GithubError::Api { .. } => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_failures_that_are_the_whole_process_stop_the_fan_out() {
+        // **腕ごとに理由が違う。** `NotFound` は「その PR の fork が消えた」のような
+        // 行ごとの事情なので偽 —— 真にすると、**1 つの消えた fork が一覧ぜんぶの
+        // 集計を落とす**。`Unauthorized` / `Forbidden` はトークンの問題なので真で、
+        // 偽にすると同じ 401 を行の数だけ買う。
+        //
+        // **腕を 1 つずつ並べる。** 真偽をまとめて 2 本の `assert` にすると、腕を
+        // 足したときに**どちらにも入れないまま**通る。
+        let cases: [(GithubError, bool); 8] = [
+            (GithubError::RateLimited { reset_at: None }, true),
+            (GithubError::Unauthorized, true),
+            (
+                GithubError::Forbidden {
+                    needed_scopes: Vec::new(),
+                    saml: false,
+                    body_head: String::new(),
+                },
+                true,
+            ),
+            (
+                GithubError::InvalidHost {
+                    host: "-bad".to_string(),
+                },
+                true,
+            ),
+            (GithubError::NotFound, false),
+            (
+                GithubError::Network {
+                    message: "eof".to_string(),
+                },
+                false,
+            ),
+            (
+                GithubError::Decode {
+                    message: "eof".to_string(),
+                },
+                false,
+            ),
+            (
+                GithubError::Api {
+                    status: 500,
+                    body_head: String::new(),
+                },
+                false,
+            ),
+        ];
+        for (err, wanted) in cases {
+            assert_eq!(
+                err.repeats_for_every_target(),
+                wanted,
+                "{err:?} の判断が違う"
+            );
+        }
+    }
 }

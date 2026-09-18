@@ -405,6 +405,52 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
+            // **扇形。`Cmd` 1 本のまま PR ごとに引く**（01 の「PR ペイン › 集計」）。
+            // 同時本数と打ち切りは `github` の中（05 の「`Semaphore`」）—— ここは
+            // 答えを `Msg` に載せるだけで、**どの失敗で止めるかを判じない**
+            // （`GithubError::repeats_for_every_target`）。
+            Cmd::FetchPrDetails { epoch, targets } => {
+                let Some((target, api)) = github_for(state) else {
+                    return no_material(state, JobKind::FetchPrDetails, "PR の集計");
+                };
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    // **頼んだ対象を控える。** 打ち切ったときに埋めるのはこれで、
+                    // いまの一覧ではない（`PrState::details_aborted`）。
+                    let asked = targets.clone();
+                    // 組み立てに失敗したら 1 件も引けない。**打ち切りとして返す** ——
+                    // 黙って終わると、答えの無い行が「読み込み中」のまま残る。
+                    let api = match api {
+                        Ok(api) => api,
+                        Err(err) => {
+                            let _ = tx.send(Msg::PrDetailsFinished {
+                                epoch,
+                                aborted: Some((err, asked)),
+                            });
+                            return;
+                        }
+                    };
+                    let send = |number, sha, result| {
+                        // **届いた行から出す。** 全部揃うまで待たない（05 の予算）。
+                        let _ = tx.send(Msg::PrDetailLoaded {
+                            epoch,
+                            number,
+                            sha,
+                            result,
+                        });
+                    };
+                    let aborted = api
+                        .pr_details(&target.owner, &target.repo, targets, send)
+                        .await;
+                    // **答えを全部送ったあとに送る。** ジョブを畳むのはこちら。
+                    let _ = tx.send(Msg::PrDetailsFinished {
+                        epoch,
+                        aborted: aborted.map(|err| (err, asked)),
+                    });
+                });
+                ControlFlow::Continue(())
+            }
+
             // **`gh` は毎回 detect する**（上の `ResolveAccount` と同じ理由）。
             Cmd::OpenPr { number } => {
                 let Some(target) = state.repo.target.resolved().cloned() else {
@@ -455,13 +501,22 @@ fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, Gith
 
 /// 材料が揃わず走らせなかった `Cmd` を通知に積む。
 ///
-/// **`update` が出さない形なので、ここへは来ないはず。** `Cmd::FetchPrList` は
-/// [`AppState::wanted_pr_list`] が真のときしか出ず、その述語が `target` と `account` の
-/// 両方を見る（01 の「PR ペイン › 何を引くか」）。`OpenPr` も一覧が出ている画面からしか
-/// 押せない。
+/// **`update` が出さない形なので、ここへは来ないはず。** 呼び出し元ごとに理由が違う
+/// ので、**足したら数え直す**。
+///
+/// - `Cmd::FetchPrList` — [`AppState::wanted_pr_list`] が真のときしか出ず、その述語が
+///   `target` と `account` の両方を見る（01 の「PR ペイン › 何を引くか」）。
+/// - `Cmd::OpenPr` — 一覧が出ている画面からしか押せない。
+/// - `Cmd::FetchPrDetails` — 対象は一覧の行から出る。一覧はアカウントを失うと
+///   `PrState::forget` で空になるので、材料が消えれば対象も消える。
 ///
 /// **それでも黙らない。** 黙って捨てると、**到達不能と書いた腕が壊れても誰も
 /// 気付けない**（`CLAUDE.md`）。
+///
+/// **`FetchPrDetails` だけは、ここへ来ると行が「読み込み中」のまま残る** ——
+/// 通知は出るが、その行を頼み直す経路（`update::prs` の `fan_out`）へは次に一覧を
+/// 引き直すまで入らない。上の理由で到達しないと数えているが、**壊れたときの
+/// 見え方が他の 2 つと違う**（あちらは `PrLoad::Failed` が画面に出る）。
 /// **ジョブを畳むのが要る。** `update` の出口（[`AppState::issue`]）が登録したまま
 /// 誰も完了させないと、2 回目以降の同じ `Cmd` が通知も出さずに捨てられ、「1 回だけ
 /// 警告が出てあとは無反応」になる。`dispatch` が `notices` 以外に書いてよい唯一の
@@ -940,6 +995,21 @@ mod tests {
         assert!(!state.jobs.is_running(JobKind::ListAccounts));
     }
 
+    /// 対象とアカウントを、**クライアントを組めない**形に置く。
+    ///
+    /// `valid_host` が弾くホスト（04）なので `GithubClient::new` が最後の関門になり、
+    /// 答えは `InvalidHost` に決まって実 API へ出ない。**2 つの見張りが同じ前提に
+    /// 乗っている**ので、`valid_host` が緩んだときに片方だけ意味を失うことがない。
+    fn aim_at_a_host_that_cannot_be_built(state: &mut AppState) {
+        state.repo.target = TargetState::Resolved(RepoTarget {
+            host: "-bad".to_string(),
+            port: None,
+            owner: "yshrsmz".to_string(),
+            repo: "mewgit".to_string(),
+        });
+        state.account = AccountState::Resolved(fake_account("taro"));
+    }
+
     /// `Cmd::FetchPrList` が `GithubClient` を通って `Msg::PrListLoaded` で返る
     /// （01 の「PR ペイン › 何を引くか」）。
     ///
@@ -952,14 +1022,7 @@ mod tests {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
         let (mut runtime, mut msgs) = runtime_for(&repo, reader);
-        state.repo.target = TargetState::Resolved(RepoTarget {
-            // `valid_host` が弾く形（04）。`GithubClient::new` が最後の関門になる。
-            host: "-bad".to_string(),
-            port: None,
-            owner: "yshrsmz".to_string(),
-            repo: "mewgit".to_string(),
-        });
-        state.account = AccountState::Resolved(fake_account("taro"));
+        aim_at_a_host_that_cannot_be_built(&mut state);
 
         let cmd = state.issue(Cmd::FetchPrList);
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
@@ -978,6 +1041,48 @@ mod tests {
         // 通らない**ので、別の見張りが要る（`every_notice_that_a_missing_material…`）。
         let _ = update(&mut state, Msg::PrListLoaded(result));
         assert!(!state.jobs.is_running(JobKind::FetchPrList));
+    }
+
+    /// `Cmd::FetchPrDetails` の扇形が終端まで返る（01 の「PR ペイン › 集計」）。
+    ///
+    /// **クライアントを組めない形に向けてある**ので、1 件も叩かずに
+    /// `Msg::PrDetailsFinished(Some(..))` が返る。**見張るのはそこ** —— 黙って
+    /// 終わると、答えの無い行が**永久に「読み込み中」のまま**残る（`PrDetailEntry` は
+    /// 不在を「まだ引いていない」として描く）。
+    #[tokio::test]
+    async fn a_fan_out_that_cannot_build_a_client_comes_back_as_an_abort() {
+        let repo = TestRepo::init();
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+        aim_at_a_host_that_cannot_be_built(&mut state);
+
+        let cmd = state.issue(Cmd::FetchPrDetails {
+            epoch: 0,
+            targets: vec![(82, "headsha".to_string())],
+        });
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+
+        let Msg::PrDetailsFinished {
+            epoch: 0,
+            aborted: Some((err, asked)),
+        } = msg
+        else {
+            panic!("打ち切りとして返っていない: {msg:?}");
+        };
+        assert!(matches!(err, GithubError::InvalidHost { .. }), "{err:?}");
+        // **頼んだ対象を持ち帰る。** 埋める相手はいまの一覧ではない
+        // （`PrState::details_aborted`）。
+        assert_eq!(asked, vec![(82, "headsha".to_string())]);
+        // 畳むのは `update`（`prs::pr_details_finished`）の側。
+        let _ = update(
+            &mut state,
+            Msg::PrDetailsFinished {
+                epoch: 0,
+                aborted: Some((err, asked)),
+            },
+        );
+        assert!(!state.jobs.is_running(JobKind::FetchPrDetails));
     }
 
     /// `Cmd::OpenPr` が `GhCli::browse` を通って `Msg::OpenPrFinished` で返る（01 の
@@ -1017,6 +1122,7 @@ mod tests {
         let (mut state, _reader) = opened(&repo);
         let cases = [
             (JobKind::FetchPrList, "PR 一覧の取得"),
+            (JobKind::FetchPrDetails, "PR の集計"),
             (JobKind::OpenPr, "PR を開く操作"),
         ];
 

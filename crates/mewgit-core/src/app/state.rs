@@ -321,6 +321,28 @@ impl AppState {
         self.repo.target.resolved().is_some() && matches!(self.account, AccountState::Resolved(_))
     }
 
+    /// 集計をまだ引いていない行の `(番号, head sha)`。**PRs タブが見えていなければ
+    /// 空**（01 の「PR ペイン › 集計」）。
+    ///
+    /// **門は [`right_tab`](Self::right_tab) を直に読まない。** あれを書くのは
+    /// [`reseat_focus`](Self::reseat_focus) —— `update` の**出口** —— の 1 箇所なので、
+    /// `Tab` で PRs に入ったその回はまだ `Branches` のまま。直に読むと**切り替えた
+    /// その回だけ門が閉じ**、行が `…` のまま次に一覧が届くまで埋まらない。`focus` が
+    /// 右列の上に居るならそちらが正で、居ないときだけ憶えているタブを読む ——
+    /// `reseat_focus` が保つ不変条件（`focus` が右列なら `right_tab` はそれと同じ）を、
+    /// **いつ揃えたかに依らない形で書いたもの**。
+    ///
+    /// **latch（一度開いたら以後ずっと引く）にはしない。** タブを Branches に戻して
+    /// いるあいだも払い続けることになり、門で減らしたかった往復がそのまま残る。
+    /// **離れているあいだに増えた行は、戻ってきた `update::focus` が拾い直す**
+    /// （[`wanted_diff`](Self::wanted_diff) と同じ形）。
+    pub(super) fn wanted_details(&self) -> Vec<(u64, String)> {
+        if RightTab::of(self.focus).unwrap_or(self.right_tab) != RightTab::Prs {
+            return Vec::new();
+        }
+        self.prs.wanted_details()
+    }
+
     /// 一覧のうち、いま居るブランチの PR（01 の「現ブランチの PR」）。
     ///
     /// **状態に持たない。** `prs.list` と `repo` から毎回導く —— 写しを置くと、
@@ -1353,8 +1375,11 @@ impl PrState {
     /// 「`None` の理由を 2 つ以上持たせない」）—— 畳むと `ui` が「CI の無い PR」と
     /// 「CI を読めなかった PR」を区別できない。
     ///
-    /// 居ない行には必ず扇形が飛ぶか、飛んだ扇形の答えが入る（`update::prs` の
-    /// `fan_out`）。**どの sha について引いたかは外へ出さない** —— 突き合わせるのは
+    /// 居ない行に扇形が飛ぶのは**PRs タブが見えているあいだだけ**
+    /// （`AppState::wanted_details` の門。**リンクにしない** —— 門は `pub(super)` で、
+    /// 公開 doc からのリンクは解決しない。`CLAUDE.md` の #75）。タブを離れているあいだに増えた行は
+    /// `None` のまま残り、戻ってきたときに拾われる —— どちらも「まだ引いていない」
+    /// なので、`ui` が出すものは変わらない。**どの sha について引いたかは外へ出さない** —— 突き合わせるのは
     /// `detail_loaded` と `loaded` の中だけで、
     /// 出すと「表示している行と違う sha の集計」を読む形が外から書ける。
     pub fn detail(&self, number: u64) -> Option<&Result<PrDetail, GithubError>> {
@@ -1368,7 +1393,10 @@ impl PrState {
     /// （数は 05 の「扇形は毎回引き直さない」）。憶えた集計を落とすのは
     /// [`loaded`](Self::loaded)（head sha が動いた行）と [`forget`](Self::forget)
     /// （アカウントが変わった）だけ。
-    pub(super) fn wanted_details(&self) -> Vec<(u64, String)> {
+    ///
+    /// **`app` へは出さない。** タブの門を通さずに扇形を組む形が書けてしまうので、
+    /// 外から呼べるのは [`AppState::wanted_details`] だけにしてある。
+    fn wanted_details(&self) -> Vec<(u64, String)> {
         self.list
             .iter()
             .filter(|pr| !self.details.contains_key(&pr.number))

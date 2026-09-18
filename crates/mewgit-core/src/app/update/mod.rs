@@ -277,15 +277,20 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
     Cmd::None
 }
 
-/// フォーカスを移し、見えるようになった diff が要るなら頼む。
+/// フォーカスを移し、見えるようになったものが要るなら頼む。
 ///
 /// **フォーカスを動かすキーはすべてここを通す**（`Tab` / `Shift+Tab` の巡回、
 /// Worktree の `Enter`、Diff の `Esc`）。腕ごとに `Cmd::LoadDiff` を書くと、あとから
 /// ペインを足すたびに同じ特殊ケースが増える（01 の「diff の遅延取得」）。
+///
+/// **頼むものが 2 つになっても腕は増やさない。** PR の集計も「見えているペインの
+/// ぶんだけ引く」形なので、どちらも述語（[`AppState::wanted_diff`] /
+/// [`AppState::wanted_details`]）が中で門にする —— ここに `pane` を見る `if` を
+/// 置くと、ペインごとの特殊ケースが結局ここへ戻ってくる。
 fn focus(state: &mut AppState, pane: Pane) -> Cmd {
     state.focus = pane;
-    // 続きを頼む: 見えるようになったペインの diff。
-    load_diff(state)
+    // 続きを頼む: 見えるようになったペインの diff と、開いた PRs タブの集計。
+    Cmd::batch([load_diff(state), prs::fan_out(state)])
 }
 
 /// 破壊的な `GitOp` を確認モーダルに載せる（不変ルール 5）。

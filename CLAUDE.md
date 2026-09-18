@@ -487,6 +487,17 @@ env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/d
   設定ファイルを 1 枚書くだけのヘルパは `test_util::temp_file`
 - `graph` は固定のコミット列に対する `cells` の期待値テストを必ず追加する
 - GitHub API は `wiremock` でモック。実 API は叩かない
+- **wiremock のテストは出荷側の `reqwest::Client` を使い回さない。** `shared_http` は
+  プロセスで 1 つなので、**死んだ `MockServer` 宛ての idle 接続がプールに残り、OS が
+  同じポートを次のサーバに割り当てるとそこへ送って `error sending request` で落ちる**。
+  本文を 1 行も変えずにテストを 7 本足しただけで、既存の
+  `pr_detail_counts_every_check_state_and_does_not_fold_them` が **15 回中 2 回**落ちた
+  （main は 6 回中 0 回、`pool_max_idle_per_host(0)` で 12 回中 0 回。#90 で実測）。
+  ヘッダとタイムアウトは `http_builder` として出荷側と共有し、テストのクライアントだけ
+  プールを切ってある。**サーバが死なない出荷側では起きない**ので本番は切らない。
+  **揺れを持ち込むのが本文ではなくテストの本数**という形なので、**揺れが自分の差分由来かは
+  `git worktree` で main を切って同じループを回して比べる**（`cargo test -p <crate> --lib`
+  を 6〜12 回）
 - `git_exec::to_argv` は純粋関数なのでユニットテストで全 `GitOp` をカバーする
 - **`runtime::run` のループテストは、非同期の返信が届く順序に依存できない。**
   `stream::iter` で渡したキー入力は即座に ready なので、リーダースレッドの返信

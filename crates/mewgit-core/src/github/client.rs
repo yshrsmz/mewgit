@@ -138,6 +138,32 @@ pub struct GithubClient {
     rate: Mutex<Option<RateLimit>>,
 }
 
+/// 既定ヘッダとタイムアウトを載せた builder。
+///
+/// **プロセスで 1 つのクライアント（[`shared_http`]）と、テストが 1 件ずつ組む
+/// 使い捨てのクライアント（`tests::client`）が同じ設定を読む。** 分けると、
+/// テストが見ているヘッダと出荷されるヘッダが割れる
+/// （`repo_sends_the_auth_and_version_headers`）。
+fn http_builder() -> reqwest::ClientBuilder {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/vnd.github+json"),
+    );
+    headers.insert(
+        "X-GitHub-Api-Version",
+        HeaderValue::from_static(API_VERSION),
+    );
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static(concat!("mewgit/", env!("CARGO_PKG_VERSION"))),
+    );
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+}
+
 /// プロセスで 1 つの [`reqwest::Client`]。
 ///
 /// **クライアントごとに組まない。** トークンは `bearer_auth` でリクエスト単位に
@@ -151,28 +177,8 @@ pub struct GithubClient {
 /// 呼び直しても変わらない。
 fn shared_http() -> Result<reqwest::Client, GithubError> {
     static HTTP: OnceLock<Result<reqwest::Client, GithubError>> = OnceLock::new();
-    HTTP.get_or_init(|| {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/vnd.github+json"),
-        );
-        headers.insert(
-            "X-GitHub-Api-Version",
-            HeaderValue::from_static(API_VERSION),
-        );
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static(concat!("mewgit/", env!("CARGO_PKG_VERSION"))),
-        );
-        reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(REQUEST_TIMEOUT)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-            .map_err(network)
-    })
-    .clone()
+    HTTP.get_or_init(|| http_builder().build().map_err(network))
+        .clone()
 }
 
 impl GithubClient {
@@ -203,12 +209,17 @@ impl GithubClient {
 
     /// ベース URL を直に与える。テストがモックサーバを指すための seam。
     fn with_base_url(base: Url, token: SecretString) -> Result<Self, GithubError> {
-        Ok(GithubClient {
-            http: shared_http()?,
+        Ok(Self::with_http(shared_http()?, base, token))
+    }
+
+    /// HTTP クライアントごと与える。**テストが接続の使い回しを切るための seam。**
+    fn with_http(http: reqwest::Client, base: Url, token: SecretString) -> Self {
+        GithubClient {
+            http,
             base,
             token,
             rate: Mutex::new(None),
-        })
+        }
     }
 
     /// リポジトリのメタ情報。`auth::resolve` の probe 兼用。
@@ -646,9 +657,24 @@ mod tests {
     };
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+    /// モックサーバを指すクライアント。
+    ///
+    /// **接続を使い回さない**（`pool_max_idle_per_host(0)`）。出荷される
+    /// [`shared_http`] はプロセスで 1 つなので、**死んだ [`MockServer`] 宛ての
+    /// idle 接続がプールに残り、OS が同じポートを次のサーバに割り当てると
+    /// そこへ送って `error sending request` で落ちる**。実測（2026-09-18、macOS）
+    /// —— 本文の変更を入れずにテストを 7 本足しただけで
+    /// `pr_detail_counts_every_check_state_and_does_not_fold_them` が
+    /// **15 回中 2 回**落ち、`pool_max_idle_per_host(0)` で 12 回中 0 回になった
+    /// （main は 6 回中 0 回）。**サーバが死なない出荷側では起きない**ので、
+    /// 切るのはこちらだけ。
     fn client(server: &MockServer) -> GithubClient {
         let base = Url::parse(&format!("{}/", server.uri())).expect("mock server の URI");
-        GithubClient::with_base_url(base, SecretString::from("t0ken")).expect("クライアント")
+        let http = http_builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .expect("テスト用のクライアント");
+        GithubClient::with_http(http, base, SecretString::from("t0ken"))
     }
 
     /// `/repos/o/r` にこの応答を返させ、`repo` が返すエラーを取る。

@@ -341,8 +341,11 @@ fn header_line(state: &AppState, width: u16) -> Paragraph<'_> {
 /// **数えるのは余白まで。** **`contains` だけの見張りでは余白ゼロが通る**（#73）ので、
 /// 「入った」の基準を隣の語と地続きにならないところに置く。
 fn quota_fits(spans: &[Span<'_>], quota: &Span<'_>, spinner: usize, width: u16) -> bool {
+    // **区切りもセル幅で数える。** `SEP.len()` はバイト数なので、いまの `"  "` では
+    // 同じ値になるが、区切りを非 ASCII にした瞬間に組む側とずれる。
+    let sep = Span::raw(SEP).width();
     let left: usize = spans.iter().map(Span::width).sum();
-    left + SEP.len() + quota.width() + SEP.len() + spinner <= width as usize
+    left + sep + quota.width() + sep + spinner <= width as usize
 }
 
 /// ヘッダの要素の区切り。**1 セルだと隣の語と地続きに見える。**

@@ -18,6 +18,7 @@ use crate::{modals, panes};
 use mewgit_core::app::{AppState, GraphSelection, Pane, TermSize};
 use mewgit_core::auth::{gh, AccountState, DegradedReason};
 use mewgit_core::git_read::{FileEntry, FileStatus};
+use mewgit_core::github::RateLimit;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -29,10 +30,12 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let [header, body, status] = split(frame.area());
     let [left, right] = split_body(body);
 
-    frame.render_widget(header_line(state), header);
+    // **スピナーは先に組む。** ヘッダの残りを数えるのに幅が要る（`header_line`）。
+    let spinner = spinner_line(state);
+    frame.render_widget(header_line(state, header.width, spinner.as_ref()), header);
     // **スピナーは同じ領域に右寄せで重ねる。** `Paragraph` は既定のスタイルで
     // 領域を塗り直すだけなので、左に描いたリポジトリ名は消えない。
-    if let Some(spinner) = spinner_line(state) {
+    if let Some(spinner) = spinner {
         frame.render_widget(Paragraph::new(spinner).right_aligned(), header);
     }
     // **左は Graph と Diff の差し替え。** どちらを描くかは `focus` だけで決まる（07）。
@@ -299,7 +302,10 @@ pub fn graph_rows(term: TermSize) -> usize {
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
-fn header_line(state: &AppState) -> Paragraph<'_> {
+///
+/// **幅とスピナーを受けるのは残量のため**（下の `[api: …]`）。重ねて描く相手の
+/// 幅を知らないと、「余っているか」を数えられない。
+fn header_line<'a>(state: &'a AppState, width: u16, spinner: Option<&Line<'_>>) -> Paragraph<'a> {
     let mut spans = vec![Span::styled(
         repo_label(state),
         Style::default().add_modifier(Modifier::BOLD),
@@ -314,7 +320,64 @@ fn header_line(state: &AppState) -> Paragraph<'_> {
         spans.push(account);
     }
 
+    if let Some(limit) = state.prs.rate_limit() {
+        let quota = rate_limit_span(limit);
+        // **入らなければ出さない。** 右端のスピナーは同じ領域に重ねて描くので、
+        // はみ出した `[api: 4984]` は **`[api: 49` として残り、桁の減った数が
+        // そのまま読める**（実測。07 のヘッダに幅の表がある）。**切れた数は
+        // 「無い」より悪い。**
+        // **譲るのは新しく足したほう** —— `owner/repo` と `[gh: …]` が食われる形は
+        // 足す前からあり、落とす順序を全体で決めるのは M6（07）。
+        if quota_fits(&spans, &quota, spinner, width) {
+            spans.push(Span::raw("  "));
+            spans.push(quota);
+        }
+    }
+
     Paragraph::new(Line::from(spans))
+}
+
+/// 残量を足しても、右端のスピナーと隙間が残るか。
+///
+/// **隙間は 2 セル取る。** ヘッダの区切りが 2 セルなので、1 セルだと隣の語と
+/// 地続きに見える。**`contains` だけの見張りでは余白ゼロが通る**（#73）ので、
+/// ここで数えるのも余白まで。
+fn quota_fits(
+    spans: &[Span<'_>],
+    quota: &Span<'_>,
+    spinner: Option<&Line<'_>>,
+    width: u16,
+) -> bool {
+    let left: usize = spans.iter().map(Span::width).sum();
+    let spinner = spinner.map_or(0, Line::width);
+    left + GAP + quota.width() + GAP + spinner <= width as usize
+}
+
+/// ヘッダの要素のあいだに取る隙間。
+const GAP: usize = 2;
+
+/// ヘッダの `[api: …]`。GitHub API の残量（07 の「ヘッダ」）。
+///
+/// **1 度でも応答が届いたら出し続ける。** 閾値を割ったときだけ出す形は、**出ていない
+/// あいだ減り具合が見えない** —— 一覧 1 本と PR ごとの扇形で 1 回の引き直しに
+/// 100 往復を超えることがあり（05 の実測）、出たときにはもう遅い。
+///
+/// **乏しいときだけ色を付ける。** 割合で見るのは [`RateLimit::is_low`] で、上限は
+/// トークンの種類で変わる。
+///
+/// **上限は添えない。** `[api: 4984/5000]` は 18 セルで、80 桁では `owner/repo` が
+/// 現実的な長さでもスピナーに重なる（実測。07 のヘッダ）。
+///
+/// **`[gh: …]` と同時には出ない。** degraded なら [`PrState::forget`] が残量を
+/// 落としており、`Resolving` では一度も引いていない —— 出るのは
+/// `[gh: login @ host]` の隣だけ。
+fn rate_limit_span(limit: RateLimit) -> Span<'static> {
+    let text = format!("[api: {}]", limit.remaining);
+    if limit.is_low() {
+        Span::styled(text, theme::warn())
+    } else {
+        Span::raw(text)
+    }
 }
 
 /// ヘッダの `[gh: …]`。まだ決まっていなければ `None`（07）。
@@ -464,9 +527,12 @@ fn repo_label(state: &AppState) -> String {
 mod tests {
     use super::{degraded_label, file_row, pane_area, window, wrapped};
     use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
-    use mewgit_core::app::{AppState, Cmd, NoticeLevel, Pane, TargetState, TermSize};
+    use mewgit_core::app::{
+        update, AppState, Cmd, JobKind, Msg, NoticeLevel, Pane, TargetState, TermSize,
+    };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
+    use mewgit_core::github::RateLimit;
     use mewgit_core::test_util::{fake_account, fake_ambiguous, fake_snapshot};
     use ratatui::style::{Color, Modifier};
 
@@ -634,7 +700,11 @@ mod tests {
     /// **バッファを見る。** `draw` の文字列にはスタイルが残らないので、黄色で出して
     /// いるかは色を読まないと判らない（`row_is_reversed` と同じ理由でここに置く）。
     fn header_color_at(state: &AppState, needle: &str) -> Color {
-        let size = TermSize::default();
+        header_color_at_size(state, needle, TermSize::default())
+    }
+
+    /// 幅を指定して [`header_color_at`] と同じことをする。
+    fn header_color_at_size(state: &AppState, needle: &str, size: TermSize) -> Color {
         let line = header(state, size);
         let col = line
             .find(needle)
@@ -776,6 +846,127 @@ mod tests {
         });
         let _ = state.issue(Cmd::LoadBranches);
         state
+    }
+
+    /// 残量まで出ている出荷形の状態（アカウント解決済み + 扇形が走っている最中）。
+    ///
+    /// **`[api: …]` が出るのはこの形だけ。** degraded では [`PrState::forget`] が
+    /// 残量を落としており、`Resolving` では一度も引いていない。**スピナーも
+    /// 扇形のもの**（`pr checks`）—— 数が動くのはそのあいだだけなので、同時に
+    /// 出るのはこの組み合わせ（#73 の「出荷される形を測る」）。
+    fn state_with_quota(remaining: u32) -> AppState {
+        let mut state = state_fetching_details();
+        let epoch = state.prs.epoch();
+        let _ = update(
+            &mut state,
+            Msg::RateLimitSeen {
+                epoch,
+                seen: RateLimit {
+                    limit: 5000,
+                    remaining,
+                    reset: 1789703295,
+                },
+            },
+        );
+        state
+    }
+
+    /// 残量が届く前の同じ形。**足したことで他が変わっていないか**を比べる相手。
+    fn state_fetching_details() -> AppState {
+        let mut state = shipping_header_state();
+        state.jobs.finish(JobKind::LoadBranches);
+        state.account = resolved_account();
+        let _ = state.issue(Cmd::FetchPrDetails {
+            epoch: state.prs.epoch(),
+            targets: vec![(1, "sha".to_string())],
+        });
+        state
+    }
+
+    #[test]
+    fn the_header_shows_the_api_quota_next_to_the_account() {
+        // **出荷形で測る。** 左に `owner/repo` と `[gh: …]`、右端に扇形のスピナーが
+        // 重なる（07 のヘッダ）。**余白まで見る** —— スピナーと隙間なく並んだ状態で
+        // 通ると、`owner/repo` が 1 桁伸びた瞬間に残量が欠ける（#73）。
+        let size = TermSize {
+            width: 100,
+            height: 24,
+        };
+        let line = header(&state_with_quota(4984), size);
+
+        assert!(line.contains("[api: 4984]  "), "header: {line:?}");
+        assert!(line.contains("pr checks"), "スピナーが出ていない: {line:?}");
+    }
+
+    #[test]
+    fn the_quota_turns_warn_when_little_is_left() {
+        // **割合で見る**（`RateLimit::is_low`）。上限はトークンの種類で変わるので、
+        // 固定の本数だと上限 60 のトークンでは最初から点く。
+        let size = TermSize {
+            width: 100,
+            height: 24,
+        };
+
+        assert_eq!(
+            header_color_at_size(&state_with_quota(4984), "[api:", size),
+            Color::Reset
+        );
+        assert_eq!(
+            header_color_at_size(&state_with_quota(500), "[api:", size),
+            Color::Yellow,
+            "上限の 10% は乏しい"
+        );
+    }
+
+    #[test]
+    fn the_header_says_nothing_about_the_quota_before_the_first_response() {
+        // **応答が 1 度も届いていなければ出さない。** レートリミットを切った GHES は
+        // ヘッダごと返さないので、ここから動かない（05）。
+        let mut state = shipping_header_state();
+        state.account = resolved_account();
+
+        let line = header(&state, TermSize::default());
+
+        assert!(!line.contains("[api:"), "header: {line:?}");
+    }
+
+    #[test]
+    fn a_quota_that_does_not_fit_is_dropped_whole_not_cut() {
+        // **切れた数は「無い」より悪い。** 右端にはスピナーが重なるので、はみ出した
+        // `[api: 4984]` は `[api: 49` として残り、**桁の減った数がそのまま読める**
+        // 形になる（#89 の「桁を足した瞬間に予算が自分へ返る」の、返り先が
+        // 自分の数だった版）。
+        //
+        // **幅は実測で選ぶ**（2026-09-18、扇形のスピナー `pr checks` が走っている
+        // 最中）—— `anthropics/claude-code` + `user_shortcode` の左群は 70 セル、
+        // スピナーは 11 セル。**80 では測れない** —— 残量の始まる 72 桁目が
+        // スピナーの下（69 桁目から）に丸ごと隠れるので、**門を外しても画面が
+        // 変わらない**（この見張りは最初その幅で書いて、変異で素通りした）。
+        // 切れた数が見えるのは**幅 84〜93**で、出るのは**幅 96 以上**
+        // （隙間 2 セルを両側に取るため。`quota_fits`）。
+        let narrow = TermSize {
+            width: 90,
+            height: 24,
+        };
+        let line = header(&state_with_quota(4984), narrow);
+
+        assert!(!line.contains("[api:"), "切れた数を出した: {line:?}");
+        // **足したことで他の要素が 1 セルも動かない。** 幅が足りない回は、残量が
+        // 届く前とまったく同じヘッダになる。
+        assert_eq!(
+            line,
+            header(&state_fetching_details(), narrow),
+            "残量を落とすのに他がずれた"
+        );
+
+        let wide = TermSize {
+            width: 96,
+            height: 24,
+        };
+        assert!(
+            header(&state_with_quota(4984), wide).contains("[api: 4984]"),
+            "余地があるのに出さない"
+        );
     }
 
     #[test]

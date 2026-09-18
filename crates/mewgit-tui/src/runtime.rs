@@ -394,10 +394,19 @@ impl Runtime {
                 let Some((target, api)) = github_for(state) else {
                     return no_material(state, JobKind::FetchPrList, "PR 一覧の取得");
                 };
+                // **残量に添える世代もここで読む。** `Cmd::FetchPrList` は世代を
+                // 運ばないが（一覧そのものは世代で捨てない。01）、残量は**その
+                // トークンの予算**なので、返るころにアカウントが変わっていたら
+                // 捨てさせる（`Msg::RateLimitSeen`）。
+                let epoch = state.prs.epoch();
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
                     let result = match api {
-                        Ok(api) => api.pr_list(&target.owner, &target.repo).await,
+                        Ok(api) => {
+                            let result = api.pr_list(&target.owner, &target.repo).await;
+                            send_rate_limit(&tx, epoch, &api);
+                            result
+                        }
                         Err(err) => Err(err),
                     };
                     let _ = tx.send(Msg::PrListLoaded(result));
@@ -438,6 +447,10 @@ impl Runtime {
                             sha,
                             result,
                         });
+                        // **残量も 1 件ごとに運ぶ。** 60 件の扇形は数秒かかるので、
+                        // 終端まで待つと**いちばん減っているあいだ**ヘッダが古い数を
+                        // 出し続ける。`api` を借りるだけなので、扇形と同時に読める。
+                        send_rate_limit(&tx, epoch, &api);
                     };
                     let aborted = api
                         .pr_details(&target.owner, &target.repo, targets, send)
@@ -483,6 +496,17 @@ async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> 
         head: reader.head().await?,
         refs: reader.refs().await?,
     })
+}
+
+/// 応答が言ったレートリミット残量を `app` へ運ぶ（05 の「残量の受け渡し」）。
+///
+/// **運ぶのはランタイム。** `github` は `Msg` を知らない（`pr_details` の `on_each` が
+/// 同期なのと同じ理由）。**1 度も見ていなければ何も送らない** —— レートリミットを
+/// 切った GHES では応答にヘッダが無い。
+fn send_rate_limit(tx: &mpsc::UnboundedSender<Msg>, epoch: u64, api: &GithubClient) {
+    if let Some(seen) = api.rate_limit() {
+        let _ = tx.send(Msg::RateLimitSeen { epoch, seen });
+    }
 }
 
 /// `GithubClient` を組む材料。**`dispatch` は `AppState` を読んでよい**（01 のランタイム）。
@@ -1041,6 +1065,10 @@ mod tests {
         // 通らない**ので、別の見張りが要る（`every_notice_that_a_missing_material…`）。
         let _ = update(&mut state, Msg::PrListLoaded(result));
         assert!(!state.jobs.is_running(JobKind::FetchPrList));
+        // **残量は 1 度も見ていないので何も送らない**（`send_rate_limit`）。
+        // レートリミットを切った GHES も同じ形で、`Msg::RateLimitSeen` が
+        // 空の値で流れると `app` の「まだ判らない」が消える。
+        assert!(msgs.try_recv().is_err(), "余計な Msg が流れた");
     }
 
     /// `Cmd::FetchPrDetails` の扇形が終端まで返る（01 の「PR ペイン › 集計」）。

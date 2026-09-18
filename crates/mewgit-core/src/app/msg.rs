@@ -6,7 +6,7 @@ use crate::git_read::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp,
     LogPage, Oid, RefIndex, Remote, WorktreeSnapshot,
 };
-use crate::github::{GithubError, PrDetail, PullRequest};
+use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 
 use super::{Key, TermSize};
 
@@ -175,6 +175,22 @@ pub enum Msg {
     PrDetailsFinished {
         epoch: u64,
         aborted: Option<(GithubError, Vec<(u64, String)>)>,
+    },
+    /// 応答が言ったレートリミット残量（01 の「PR ペイン › 残量」）。
+    ///
+    /// **別の `Msg` にする。** 残量は答えそのものではなく、**同じ応答の副産物** ——
+    /// [`Msg::PrListLoaded`] や [`Msg::PrDetailLoaded`] に載せると、答えが無い回
+    /// （組み立てに失敗した扇形）から残量だけを出す形が作れない。
+    ///
+    /// **ジョブは持たない。** 走っているのは一覧か扇形のジョブで、これはその途中に
+    /// 何度でも流れる。畳むのはあちらの終端。
+    ///
+    /// **世代を運ぶ。** 残量は**そのトークンの予算**なので、アカウントを切り替えた
+    /// あとに前のトークンの扇形が返す数は嘘になる（`(reset, used)` は「どちらが
+    /// 新しいか」しか答えない。#89 の「鍵が答えられる問いを数える」）。
+    RateLimitSeen {
+        epoch: u64,
+        seen: RateLimit,
     },
     /// `gh browse` の結果。`Err` は通知に出す（01 の「`o`（ブラウザで開く）」）。
     ///

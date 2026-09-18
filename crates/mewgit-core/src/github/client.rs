@@ -5,7 +5,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use reqwest::{Response, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
@@ -16,7 +16,9 @@ use crate::auth::RepoTarget;
 use super::wire::{
     summarize_reviews, WireCheckRuns, WireCombinedStatus, WirePull, WireRepo, WireReview,
 };
-use super::{Check, CheckSummary, GithubError, PrDetail, PullRequest, RepoMeta, ReviewSummary};
+use super::{
+    Check, CheckSummary, GithubError, PrDetail, PullRequest, RateLimit, RepoMeta, ReviewSummary,
+};
 
 /// `X-GitHub-Api-Version`。GitHub は「日付で固定せよ」と言っている。
 const API_VERSION: &str = "2022-11-28";
@@ -124,6 +126,16 @@ pub struct GithubClient {
     http: reqwest::Client,
     base: Url,
     token: SecretString,
+    /// 直近の応答が言ったレートリミット残量（05 の「残量の受け渡し」）。
+    ///
+    /// **`&self` のまま書けるように `Mutex` を噛ませる。** 扇形は 1 つの
+    /// クライアントから同時 4 本まで飛び（`PERMITS`）、どれが新しいかは届く順では
+    /// 決まらないので、畳むのは [`RateLimit::newer`]。
+    ///
+    /// **持ち主はジョブ 1 本。** [`GithubClient`] は `Cmd` を捌くたびに組み直すので
+    /// （`runtime::github_for`）、ジョブをまたいで新しさを比べるのは受け取る側
+    /// （`app::PrState`）の仕事になる。
+    rate: Mutex<Option<RateLimit>>,
 }
 
 /// プロセスで 1 つの [`reqwest::Client`]。
@@ -195,6 +207,7 @@ impl GithubClient {
             http: shared_http()?,
             base,
             token,
+            rate: Mutex::new(None),
         })
     }
 
@@ -448,10 +461,41 @@ impl GithubClient {
             .send()
             .await
             .map_err(network)?;
+        // **状態を見る前に採る。** 残量が 0 の応答は 403 / 429 で返ってくるので、
+        // [`check_status`] の後ろに置くと**いちばん出したい数だけが採れない**。
+        self.note_rate_limit(&response);
         let response = check_status(response).await?;
         let link = header_str(&response, "link").map(str::to_string);
         let body = response.text().await.map_err(network)?;
         Ok((body, link))
+    }
+
+    /// 応答が言ったレートリミット残量を憶える。
+    ///
+    /// **新しいほうだけ残す**（[`RateLimit::newer`]）。同時に飛んだ 4 本は届く順が
+    /// 新しさの順ではない。
+    fn note_rate_limit(&self, response: &Response) {
+        let Some(seen) = RateLimit::from_parts(
+            header_str(response, "x-ratelimit-resource"),
+            header_i64(response, "x-ratelimit-limit"),
+            header_i64(response, "x-ratelimit-remaining"),
+            header_i64(response, "x-ratelimit-reset"),
+        ) else {
+            return;
+        };
+        let mut slot = self.rate.lock().expect("rate の Mutex は毒されない");
+        *slot = Some(match *slot {
+            Some(held) => held.newer(seen),
+            None => seen,
+        });
+    }
+
+    /// このクライアントが見たうちで新しいほうの残量。1 度も見ていなければ `None`。
+    ///
+    /// **読むのはランタイム。** `github` は `Msg` を知らないので、`app` へ運ぶのは
+    /// 呼ぶ側（05 の「残量の受け渡し」）。
+    pub fn rate_limit(&self) -> Option<RateLimit> {
+        *self.rate.lock().expect("rate の Mutex は毒されない")
     }
 }
 
@@ -1097,6 +1141,186 @@ mod tests {
         // 即座に叩き直す。
         let err = repo_err(ResponseTemplate::new(429)).await;
         assert_eq!(err, GithubError::RateLimited { reset_at: None });
+    }
+
+    // ---- レートリミット残量 ----
+
+    /// `/repos/o/r` にこのヘッダを載せて返させ、クライアントが憶えた残量を取る。
+    async fn rate_after_repo(headers: &[(&str, &str)]) -> Option<RateLimit> {
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(200).set_body_json(json!({
+            "owner": { "login": "o" },
+            "name": "r",
+            "default_branch": "main",
+        }));
+        for (name, value) in headers {
+            response = response.insert_header(*name, *value);
+        }
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let api = client(&server);
+        api.repo("o", "r").await.expect("repo");
+        api.rate_limit()
+    }
+
+    #[tokio::test]
+    async fn the_remaining_quota_comes_from_the_response_headers() {
+        // **`/rate_limit` は叩かない。** 同じセッションで連続して叩いても数が合わず、
+        // `reset` は後ろを返した（05 の実測表）。
+        let seen = rate_after_repo(&[
+            ("x-ratelimit-limit", "5000"),
+            ("x-ratelimit-remaining", "4984"),
+            ("x-ratelimit-reset", "1789703295"),
+        ])
+        .await;
+
+        assert_eq!(
+            seen,
+            Some(RateLimit {
+                limit: 5000,
+                remaining: 4984,
+                reset: 1789703295,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_without_the_headers_leaves_the_quota_unknown() {
+        // レートリミットを切った GHES がこの形。**エラーにはしない** ——
+        // 出さないだけ（07 のヘッダ）。
+        assert_eq!(rate_after_repo(&[]).await, None);
+        // 3 つのうち 1 つでも欠けたら組まない。
+        assert_eq!(
+            rate_after_repo(&[
+                ("x-ratelimit-limit", "5000"),
+                ("x-ratelimit-remaining", "4984"),
+            ])
+            .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quota_from_another_bucket_is_not_recorded() {
+        // `search` は上限が 2 桁小さい（05 の実測表）。混ぜると残量が突然 30 になる。
+        // **いま叩くエンドポイントは全部 `core`** なので、この腕を踏めるのはここだけ。
+        assert_eq!(
+            rate_after_repo(&[
+                ("x-ratelimit-resource", "search"),
+                ("x-ratelimit-limit", "30"),
+                ("x-ratelimit-remaining", "28"),
+                ("x-ratelimit-reset", "1789703295"),
+            ])
+            .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_response_still_records_the_quota() {
+        // **状態を見る前に採る。** 残量 0 は 403 / 429 で返ってくるので、
+        // `check_status` の後ろで採ると**いちばん出したい数だけが採れない**。
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("x-ratelimit-limit", "5000")
+                    .insert_header("x-ratelimit-remaining", "0")
+                    .insert_header("x-ratelimit-reset", "1789703295"),
+            )
+            .mount(&server)
+            .await;
+        let api = client(&server);
+
+        let err = api.repo("o", "r").await.unwrap_err();
+
+        assert!(matches!(err, GithubError::RateLimited { .. }), "{err:?}");
+        assert_eq!(api.rate_limit().map(|seen| seen.remaining), Some(0));
+    }
+
+    #[tokio::test]
+    async fn the_newer_of_two_responses_wins_even_when_it_comes_first() {
+        // **届く順は新しさの順ではない**（扇形は同時 4 本）。あとから届いた
+        // 「残量の多い」応答で上書きすると、ヘッダの数が増えたり減ったりする。
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "owner": { "login": "o" },
+                        "name": "r",
+                        "default_branch": "main",
+                    }))
+                    .insert_header("x-ratelimit-limit", "5000")
+                    .insert_header("x-ratelimit-remaining", "4900")
+                    .insert_header("x-ratelimit-reset", "1789703295"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([]))
+                    .insert_header("x-ratelimit-limit", "5000")
+                    .insert_header("x-ratelimit-remaining", "4950")
+                    .insert_header("x-ratelimit-reset", "1789703295"),
+            )
+            .mount(&server)
+            .await;
+        let api = client(&server);
+
+        api.repo("o", "r").await.expect("repo");
+        api.pr_list("o", "r").await.expect("pr_list");
+
+        assert_eq!(
+            api.rate_limit().map(|seen| seen.remaining),
+            Some(4900),
+            "あとから届いた古い応答で上書きした"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_from_the_next_window_wins_even_with_more_left() {
+        // 窓が変われば残量は戻る。**比べるのは `(reset, used)`** で、`reset` が先。
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "owner": { "login": "o" },
+                        "name": "r",
+                        "default_branch": "main",
+                    }))
+                    .insert_header("x-ratelimit-limit", "5000")
+                    .insert_header("x-ratelimit-remaining", "12")
+                    .insert_header("x-ratelimit-reset", "1789703295"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([]))
+                    .insert_header("x-ratelimit-limit", "5000")
+                    .insert_header("x-ratelimit-remaining", "5000")
+                    .insert_header("x-ratelimit-reset", "1789706895"),
+            )
+            .mount(&server)
+            .await;
+        let api = client(&server);
+
+        api.repo("o", "r").await.expect("repo");
+        api.pr_list("o", "r").await.expect("pr_list");
+
+        assert_eq!(api.rate_limit().map(|seen| seen.remaining), Some(5000));
     }
 
     #[tokio::test]

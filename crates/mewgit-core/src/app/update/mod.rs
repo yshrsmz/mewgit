@@ -25,7 +25,10 @@ use graph::{
     commit_detail_key, commit_detail_loaded, commit_files_loaded, graph_key, load_more, log_loaded,
 };
 use modal::modal_key;
-use prs::{open_pr_finished, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key};
+use prs::{
+    open_pr_finished, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key,
+    rate_limit_seen,
+};
 use remote::{fetch, push};
 use worktree::{head_message_loaded, status_loaded, worktree_key};
 
@@ -158,6 +161,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
             result,
         } => pr_detail_loaded(state, epoch, number, sha, result),
         Msg::PrDetailsFinished { epoch, aborted } => pr_details_finished(state, epoch, aborted),
+        Msg::RateLimitSeen { epoch, seen } => rate_limit_seen(state, epoch, seen),
         Msg::OpenPrFinished(result) => open_pr_finished(state, result),
     }
 }

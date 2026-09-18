@@ -256,12 +256,26 @@ mod tests {
 
     /// [`state_on_branch`] に加えて、**PRs タブを開いた**状態。
     ///
-    /// **`state.focus` に直に代入しない。** 門（[`AppState::wanted_details`]）が見るのは
-    /// 「タブが見えているか」なので、タブに入る経路（`Tab` → `update::focus`）を通さ
-    /// ないと、実物では起きない順序で開いた状態を見張ることになる。
+    /// **門を踏むテストでは `state.focus` に直に代入しない。** 門
+    /// （`AppState::wanted_details`）はタブに入る経路（`Tab` → `update::focus`）が
+    /// 扇形を頼むかまで見るので、代入だけだと**引き金を一度も踏まないまま**開いた
+    /// 状態になる。門に関わらないキー処理のテスト（`j` / `o` など）は直代入でよい。
+    ///
+    /// **開いた回の `Cmd` を捨てない。** 一覧がまだ無いので `Cmd::None` のはずで、
+    /// そうでなければ `AppState::issue` に `FetchPrDetails` が登録され、**以後の扇形が
+    /// 黙って落ちる**（#38 の形）。
     fn state_on_prs_tab(branch: &str) -> AppState {
         let mut state = state_on_branch(branch);
-        let _ = tab_to(&mut state, Pane::Prs);
+        let opened = tab_to(&mut state, Pane::Prs);
+        assert_eq!(opened, Cmd::None, "一覧がまだ無いのに扇形が出た");
+        state
+    }
+
+    /// [`state_on_prs_tab`] に加えて、**`#82` の集計まで憶えた**状態。
+    fn state_with_one_summary(branch: &str) -> AppState {
+        let mut state = state_on_prs_tab(branch);
+        let ask = fan_out_after(&mut state, vec![fake_pull_request(82, branch, "sha82")]);
+        let _ = deliver_pr_details(&mut state, ask, &[(82, "sha82", Ok(detail(2)))], None);
         state
     }
 
@@ -570,8 +584,7 @@ mod tests {
         assert_eq!(quiet, Cmd::None, "タブを開く前に引いた: {quiet:?}");
         assert!(state.prs.detail(82).is_none(), "集計が入っている");
 
-        // **タブに入った回に頼むのはこの経路だけ**（`update::focus`）。無いと、
-        // 開いた直後の行が `…` のまま次に一覧が届くまで埋まらない。
+        // タブに入った回の引き金（理由は `fan_out` の doc）。
         let opened = tab_to(&mut state, Pane::Prs);
         assert!(
             issued(
@@ -586,34 +599,21 @@ mod tests {
     }
 
     #[test]
-    fn either_order_of_the_tab_and_the_list_asks_for_the_summaries() {
+    fn a_list_arriving_after_the_tab_was_opened_asks_for_the_summaries() {
         // **キーと返信のどちらが先でも同じ答えにする**（`CLAUDE.md` の「非同期の返信が
-        // 2 本あるならテストは両方の順序を回す」の、片方がキーの版）。
-        let wanted = Cmd::FetchPrDetails {
-            epoch: 0,
-            targets: vec![(82, "sha82".to_string())],
-        };
-
-        // 一覧が先、タブが後。
-        let mut list_first = state_on_branch("feat/x");
-        let quiet = fan_out_after(
-            &mut list_first,
-            vec![fake_pull_request(82, "feat/x", "sha82")],
+        // 2 本あるならテストは両方の順序を回す」の、片方がキーの版）。**逆の順序
+        // （一覧が先、タブが後）は [`nothing_is_asked_for_until_the_prs_tab_is_opened`]
+        // が丸ごと踏む**ので、ここは残りの片方だけを見る。
+        let mut state = state_on_prs_tab("feat/x");
+        let after_list = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "sha82")]);
+        assert_eq!(
+            after_list,
+            Cmd::FetchPrDetails {
+                epoch: 0,
+                targets: vec![(82, "sha82".to_string())],
+            },
+            "タブが先だと引かない"
         );
-        assert_eq!(quiet, Cmd::None, "タブを開く前に引いた: {quiet:?}");
-        let after_open = tab_to(&mut list_first, Pane::Prs);
-        assert!(
-            issued(&after_open, &wanted),
-            "一覧が先だと引かない: {after_open:?}"
-        );
-
-        // タブが先、一覧が後。
-        let mut tab_first = state_on_prs_tab("feat/x");
-        let after_list = fan_out_after(
-            &mut tab_first,
-            vec![fake_pull_request(82, "feat/x", "sha82")],
-        );
-        assert_eq!(after_list, wanted, "タブが先だと引かない");
     }
 
     #[test]
@@ -622,9 +622,7 @@ mod tests {
         // `Esc` で Graph に戻ってもタブは残る（01 の「右上のタブ」）ので、画面に
         // 出ている行は引き続き埋まる —— `focus == Pane::Prs` で門にすると、
         // ペインを見ているのに `…` が埋まらない状態が出る。
-        let mut state = state_on_prs_tab("feat/x");
-        let ask = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "sha82")]);
-        let _ = deliver_pr_details(&mut state, ask, &[(82, "sha82", Ok(detail(2)))], None);
+        let mut state = state_with_one_summary("feat/x");
 
         let _ = press_code(&mut state, KeyCode::Esc);
         assert_eq!(state.focus, Pane::Graph);
@@ -649,13 +647,9 @@ mod tests {
 
     #[test]
     fn leaving_the_prs_tab_stops_the_fan_out_and_coming_back_picks_the_rows_up() {
-        // **latch（一度開いたら以後ずっと引く）にはしない。** Branches に戻している
-        // あいだも払い続けることになり、門で減らしたかった往復がそのまま残る。
-        // **行き止まりにもならない** —— 離れているあいだに増えた行は、戻ってきた
-        // `update::focus` が拾い直す（01 の「PR ペイン › 集計」）。
-        let mut state = state_on_prs_tab("feat/x");
-        let ask = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "sha82")]);
-        let _ = deliver_pr_details(&mut state, ask, &[(82, "sha82", Ok(detail(2)))], None);
+        // **latch にしない判断（01 の「PR ペイン › 集計」）を踏む腕。** 離れている
+        // あいだは引かず、戻ってきたら増えた行を拾う。
+        let mut state = state_with_one_summary("feat/x");
 
         let _ = tab_to(&mut state, Pane::Branches);
         let grown = vec![
@@ -923,9 +917,7 @@ mod tests {
     fn picking_another_account_forgets_the_summaries() {
         // **集計もアカウントに紐づく。** 残すと、次のトークンで引き直した一覧に
         // 前のトークンで見えた集計が番号だけで当たる。
-        let mut state = state_on_prs_tab("feat/x");
-        let ask = fan_out_after(&mut state, vec![fake_pull_request(82, "feat/x", "sha82")]);
-        let _ = deliver_pr_details(&mut state, ask, &[(82, "sha82", Ok(detail(2)))], None);
+        let mut state = state_with_one_summary("feat/x");
         assert!(state.prs.detail(82).is_some());
 
         let _ = update(

@@ -275,9 +275,19 @@ impl AppState {
         if !self.focus_candidates().contains(&self.focus) {
             self.focus = Pane::Graph;
         }
-        if let Some(tab) = RightTab::of(self.focus) {
-            self.right_tab = tab;
-        }
+        self.right_tab = self.visible_right_tab();
+    }
+
+    /// いま右列の上に出ているタブ。
+    ///
+    /// **`focus` が右列に居るならそちらが正で、居ないときだけ憶えている
+    /// [`right_tab`](Self::right_tab) を読む。** 同じ式を
+    /// [`reseat_focus`](Self::reseat_focus)（揃える側）と `wanted_details`（読む側）の
+    /// 両方が使うので、**「`reseat_focus` を通ったあとは `right_tab` がこれと等しい」が
+    /// 代入 1 本で読める** —— 読む側が `right_tab` を直に見る形だと、`reseat_focus` は
+    /// `update` の**出口**なので `Tab` で入ったその回だけ答えがずれる。
+    fn visible_right_tab(&self) -> RightTab {
+        RightTab::of(self.focus).unwrap_or(self.right_tab)
     }
 
     /// いま出すべき diff の対象。出すものが無ければ `None`（01 の「diff の遅延取得」）。
@@ -322,22 +332,10 @@ impl AppState {
     }
 
     /// 集計をまだ引いていない行の `(番号, head sha)`。**PRs タブが見えていなければ
-    /// 空**（01 の「PR ペイン › 集計」）。
-    ///
-    /// **門は [`right_tab`](Self::right_tab) を直に読まない。** あれを書くのは
-    /// [`reseat_focus`](Self::reseat_focus) —— `update` の**出口** —— の 1 箇所なので、
-    /// `Tab` で PRs に入ったその回はまだ `Branches` のまま。直に読むと**切り替えた
-    /// その回だけ門が閉じ**、行が `…` のまま次に一覧が届くまで埋まらない。`focus` が
-    /// 右列の上に居るならそちらが正で、居ないときだけ憶えているタブを読む ——
-    /// `reseat_focus` が保つ不変条件（`focus` が右列なら `right_tab` はそれと同じ）を、
-    /// **いつ揃えたかに依らない形で書いたもの**。
-    ///
-    /// **latch（一度開いたら以後ずっと引く）にはしない。** タブを Branches に戻して
-    /// いるあいだも払い続けることになり、門で減らしたかった往復がそのまま残る。
-    /// **離れているあいだに増えた行は、戻ってきた `update::focus` が拾い直す**
-    /// （[`wanted_diff`](Self::wanted_diff) と同じ形）。
+    /// 空**（[`wanted_diff`](Self::wanted_diff) と同じ「見えているぶんだけ引く」形。
+    /// latch にしない理由と引き金は 01 の「PR ペイン › 集計」）。
     pub(super) fn wanted_details(&self) -> Vec<(u64, String)> {
-        if RightTab::of(self.focus).unwrap_or(self.right_tab) != RightTab::Prs {
+        if self.visible_right_tab() != RightTab::Prs {
             return Vec::new();
         }
         self.prs.wanted_details()
@@ -1375,13 +1373,10 @@ impl PrState {
     /// 「`None` の理由を 2 つ以上持たせない」）—— 畳むと `ui` が「CI の無い PR」と
     /// 「CI を読めなかった PR」を区別できない。
     ///
-    /// 居ない行に扇形が飛ぶのは**PRs タブが見えているあいだだけ**
-    /// （`AppState::wanted_details` の門。**リンクにしない** —— 門は `pub(super)` で、
-    /// 公開 doc からのリンクは解決しない。`CLAUDE.md` の #75）。タブを離れているあいだに増えた行は
-    /// `None` のまま残り、戻ってきたときに拾われる —— どちらも「まだ引いていない」
-    /// なので、`ui` が出すものは変わらない。**どの sha について引いたかは外へ出さない** —— 突き合わせるのは
-    /// `detail_loaded` と `loaded` の中だけで、
-    /// 出すと「表示している行と違う sha の集計」を読む形が外から書ける。
+    /// 居ない行に扇形が飛ぶ条件は `AppState::wanted_details`（01 の
+    /// 「PR ペイン › 集計」）。**どの sha について引いたかは外へ出さない** ——
+    /// 突き合わせるのは `detail_loaded` と `loaded` の中だけで、出すと「表示している
+    /// 行と違う sha の集計」を読む形が外から書ける。
     pub fn detail(&self, number: u64) -> Option<&Result<PrDetail, GithubError>> {
         self.details.get(&number).map(|entry| &entry.result)
     }

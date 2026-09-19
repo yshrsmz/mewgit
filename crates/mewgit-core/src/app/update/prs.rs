@@ -90,7 +90,9 @@ fn refresh(state: &mut AppState) -> Cmd {
     if let Some(number) = state.prs.selected().map(|pr| pr.number) {
         state.prs.forget_detail(number);
     }
-    // 続きを頼む: 引き直した一覧と、その出口が拾う「記憶を落としたカーソル行」。
+    // **`// 続きを頼む:` の印は置かない。** あれは「届いた返信を見て続きを判じる」
+    // 場所の索引で（`update_inner` の doc）、ここは**キーが新しく頼む**場所。
+    // 落とした行を拾うのは `pr_list_loaded` の出口で、印はそちらにある。
     reload(state)
 }
 

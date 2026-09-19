@@ -73,9 +73,9 @@ const MOVE: KeyHint = hint(&[Key::char('j'), Key::char('k')], "移動");
 
 /// 左のグラフへ戻る（Diff だけは `Enter` で来た側 —— Working tree かコミット詳細）。
 ///
-/// **「1 つ前のペイン」ではない。** `Esc` の行き先は各ペインが決めていて、右列の 3 枚は
+/// **「1 つ前のペイン」ではない。** `Esc` の行き先は各ペインが決めていて、右列のペインは
 /// どれも無条件に `Pane::Graph` を指す（巡回でどこから来ても同じ）。ラベルを「戻る」に
-/// してあるのは、それでも嘘にならない語だから。
+/// してあるのは、どちらでも嘘にならない語だから。
 const BACK: KeyHint = hint(&[Key::new(KeyCode::Esc)], "戻る");
 
 const GRAPH: &[KeyHint] = &[

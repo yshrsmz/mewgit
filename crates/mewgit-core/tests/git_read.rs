@@ -270,41 +270,38 @@ fn head_reports_the_current_branch() {
 }
 
 #[test]
-fn head_reads_the_tracking_remote_of_the_current_branch() {
-    // **`app` はこれで fork から出した PR を当てる**（01 の「現ブランチの PR」）。
-    // リモートを登録しないのは、`head` が読むのが config だけだから
-    // （リモート名を URL に直すのは `app` の仕事）。
+fn head_reads_the_tracking_remote_only_once_the_merge_ref_is_there() {
+    // **`app` はこの値で fork から出した PR を当てる**（01 の「現ブランチの PR」）。
+    // リモートを登録しないのは、`head` が読むのが config だけだから（リモート名を
+    // URL に直すのは `app` の仕事）。
+    //
+    // **`None` の側だけを見ない。** あれは設定を 1 行も書かなくても自明に通るので、
+    // 入力を踏んだ証拠にならない（`merge` を足すと `Some` に変わるところまで見る）。
+    // `upstream_config` をそのまま呼ぶので、片方だけの設定は `None`（02 の「head」）。
     let repo = TestRepo::init();
     let first = repo.commit("first");
     repo.git(&["config", "branch.main.remote", "fork"]);
-    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
-    let reader = RepoReader::open(repo.path()).unwrap();
 
+    // **開き直す。** git2 の config は変更を stat で見るので、同じ `RepoReader` を
+    // 使い回すと 1 秒以内の書き換えを拾わないことがある。
     assert_eq!(
-        reader.head().unwrap(),
-        HeadInfo::Branch {
-            name: "main".to_string(),
-            oid: first,
-            upstream_remote: Some("fork".to_string()),
-        }
-    );
-}
-
-#[test]
-fn head_has_no_tracking_remote_when_the_merge_ref_is_missing() {
-    // **`upstream_config` をそのまま呼ぶ**ので、片方だけの設定は `None` に落ちる
-    // （02 の「head」）。同じ設定の読み方を 2 通り持たないため。
-    let repo = TestRepo::init();
-    let first = repo.commit("first");
-    repo.git(&["config", "branch.main.remote", "fork"]);
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    assert_eq!(
-        reader.head().unwrap(),
+        RepoReader::open(repo.path()).unwrap().head().unwrap(),
         HeadInfo::Branch {
             name: "main".to_string(),
             oid: first,
             upstream_remote: None,
+        },
+        "`merge` が無いのに追跡先を返している"
+    );
+
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+
+    assert_eq!(
+        RepoReader::open(repo.path()).unwrap().head().unwrap(),
+        HeadInfo::Branch {
+            name: "main".to_string(),
+            oid: first,
+            upstream_remote: Some("fork".to_string()),
         }
     );
 }

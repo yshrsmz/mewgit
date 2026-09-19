@@ -557,10 +557,10 @@ mod tests {
     }
 
     #[test]
-    fn tracking_a_fork_rules_out_the_row_from_the_target_repository() {
-        // **読めたら `target` は見ない。** fork へ push しているブランチと同じ名前の
-        // ブランチが upstream 側にもあるのはよくある形で、そこから出た PR は
-        // **他人の PR**（01 の「現ブランチの PR」）。
+    fn the_fork_row_wins_over_the_one_from_the_target_repository() {
+        // **候補は追跡先が先。** fork へ push しているブランチと同じ名前のブランチが
+        // upstream 側にもあるのはよくある形で、そこから出た PR は**他人の PR**
+        // （01 の「現ブランチの PR」）。
         let mut state = state_tracking(
             "feat/x",
             "fork",
@@ -572,15 +572,61 @@ mod tests {
         deliver(
             &mut state,
             vec![
+                // `fake_pull_request` の head は `target` のリポジトリ。**一覧では
+                // こちらが先**なので、順に当てるだけの実装ではこちらに座る。
+                fake_pull_request(90, "feat/x", "headsha"),
+                pr_from(82, "feat/x", "someone-else"),
+            ],
+        );
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(state.prs.cursor, 1);
+    }
+
+    #[test]
+    fn the_target_row_is_the_fallback_when_the_tracked_repository_has_none() {
+        // **追跡設定は「どこへ push したか」ではない。** `git checkout -b fix bob/fix`
+        // のあと origin へ push しても `branch.fix.remote` は `bob` のまま（実測。
+        // 表は 01）。**そこで打ち切ると、main では座っていた行に座らなくなる。**
+        let mut state = state_tracking(
+            "feat/x",
+            "bob",
+            &[
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+                ("bob", "git@github.com:bob/mewgit.git"),
+            ],
+        );
+        deliver(
+            &mut state,
+            vec![
                 fake_pull_request(90, "other", "othersha"),
-                // `fake_pull_request` の head は `target` のリポジトリ。
                 fake_pull_request(82, "feat/x", "headsha"),
             ],
         );
 
-        assert_eq!(state.current_pr(), None, "upstream 側の PR に座っている");
-        assert_eq!(state.prs.cursor, 0);
-        assert_eq!(state.prs.list.len(), 2, "消えている");
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(state.prs.cursor, 1);
+    }
+
+    #[test]
+    fn a_url_in_the_tracking_config_names_the_fork() {
+        // **`gh pr checkout` が書くのは URL**（実測 2026-09-20、gh 2.101.0）。
+        // リモートとして登録されていないので、名前では引けない。
+        let mut state = state_tracking(
+            "feat/x",
+            "https://github.com/someone-else/mewgit.git",
+            &[("origin", "git@github.com:yshrsmz/mewgit.git")],
+        );
+        deliver(
+            &mut state,
+            vec![
+                fake_pull_request(90, "other", "othersha"),
+                pr_from(82, "feat/x", "someone-else"),
+            ],
+        );
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(state.prs.cursor, 1);
     }
 
     #[test]

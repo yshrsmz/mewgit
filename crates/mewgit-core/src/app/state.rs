@@ -1301,57 +1301,65 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
         // コミットが 1 つも無いブランチから出した PR は無い。
         return None;
     };
-    let home = head_home(repo)?;
     // **リポジトリ名まで見る**（`RepoRef` 丸ごとの比較）。owner だけだと、同じ owner の
     // 下に作った fork（`acme/app` → `acme/app-fork`）から出た他人の PR が
     // 「現ブランチの PR」に当たる。
-    list.iter()
-        .find(|pr| pr.head.branch == *name && pr.head.repo.as_ref() == Some(&home))
+    head_homes(repo).into_iter().find_map(|home| {
+        list.iter()
+            .find(|pr| pr.head.branch == *name && pr.head.repo.as_ref() == Some(&home))
+    })
 }
 
-/// HEAD のブランチから出した PR の head が**在るはずの**リポジトリ
-/// （01 の「現ブランチの PR」）。
+/// HEAD のブランチから出した PR の head が在りうるリポジトリを、**確からしい順**に
+/// 返す（01 の「現ブランチの PR」）。
 ///
-/// **落とし先まで含めてここが答える。** 呼び出し側でタプルに畳むと、照合の規則
-/// （owner だけで比べない）を組み立てる場所と比べる場所に分かれ、どちらの側にも
-/// 退行を入れ直せる。
+/// **候補が 1 つに決まらないのは、git が「どこへ push したか」を憶えていないから。**
+/// `branch.<name>.remote` が答えるのは**何を基にしたか**で、実測（git 2.55、
+/// 一時リポジトリ。表は 01）では `git checkout -b fix bob/fix` のあと origin へ
+/// push しても `bob` のまま。だから**追跡先で当たらなければ `target` でも当てる** ——
+/// 追跡先を先に見るのは、fork 運用で upstream 側の同名ブランチから出た**他人の PR**
+/// より、自分の fork の PR を優先するため。
+///
+/// **`branch.<name>.remote` はリモート名でも URL でもよい**（git の仕様）。
+/// **`gh pr checkout` が書くのは URL のほう**（実測 2026-09-20、gh 2.101.0:
+/// `branch.<b>.remote=https://github.com/<fork>/<repo>.git`）なので、名前で引けない
+/// 値はそのまま URL として読む。ここを落とすと、**fork の PR をローカルに出す
+/// いちばんふつうの経路**が当たらない。
 ///
 /// **材料は引数に取らない。** `upstream_remote` は `repo.head` から導けるので、
 /// 別々に渡すと対応の取れない組（`Detached` な `head` に `Some("origin")`）が型で
 /// 組める（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
 ///
-/// **追跡設定が読めたら `target` は見ない。** それが答えで、両方を許すと fork 運用で
-/// **upstream 側の同名ブランチから出た他人の PR** に座る。読めないとき——設定が無い /
-/// `.`（ローカル追跡。その名前のリモートは無い）/ リモートが消えている / URL が
-/// GitHub の形でない——だけ `target` に落とす。**理由は分けない**：呼び出し側の扱いは
+/// **読めない追跡設定は候補にしない**（設定が無い / `.`（ローカル追跡）/ リモートが
+/// 消えている / URL が GitHub の形でない）。**理由は分けない**：呼び出し側の扱いは
 /// どれも同じで、**出す先も無い**（座る行が変わるだけで通知は出さない）。
 ///
 /// **host は見ない。** [`RepoTarget::host`] は `ssh -G` で正規化済みだが、こちらは
 /// URL に書かれたままなので、生のまま比べると **fork だけ別のエイリアスを使う
 /// 多アカウント運用**（04）で逆に落ちる。残る穴は、別ホストの同名 `owner/repo` に
 /// 同名のブランチがあり、その PR が一覧に居るとき（01）。
-fn head_home(repo: &RepoInfo) -> Option<RepoRef> {
-    let target = repo.target.resolved()?;
-    let HeadInfo::Branch {
-        upstream_remote, ..
-    } = repo.head.as_ref()?
-    else {
-        return None;
+fn head_homes(repo: &RepoInfo) -> Vec<RepoRef> {
+    let tracked = match repo.head.as_ref() {
+        Some(HeadInfo::Branch {
+            upstream_remote: Some(value),
+            ..
+        }) => {
+            // 名前で引ければその URL、引けなければ値そのものを URL として読む。
+            let url = repo
+                .remote(value)
+                .map_or(value.as_str(), |remote| remote.url.as_str());
+            RemoteUrl::parse(url).ok().map(|url| RepoRef {
+                owner: url.owner,
+                repo: url.repo,
+            })
+        }
+        _ => None,
     };
-    let tracked = upstream_remote
-        .as_deref()
-        .and_then(|name| repo.remote(name))
-        .and_then(|remote| RemoteUrl::parse(&remote.url).ok());
-    Some(match tracked {
-        Some(url) => RepoRef {
-            owner: url.owner,
-            repo: url.repo,
-        },
-        None => RepoRef {
-            owner: target.owner.clone(),
-            repo: target.repo.clone(),
-        },
-    })
+    let target = repo.target.resolved().map(|target| RepoRef {
+        owner: target.owner.clone(),
+        repo: target.repo.clone(),
+    });
+    tracked.into_iter().chain(target).collect()
 }
 
 /// PR ペインの状態（01 の「PR ペイン」）。

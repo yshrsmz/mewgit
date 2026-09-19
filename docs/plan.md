@@ -219,16 +219,18 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       フッターの Prs はキーが 1 つ増えても 80 桁で共通キーまで出る側に**残っている**
       （セル数は 07 の実測）
 - [x] fork のブランチで現ブランチの PR を当てる — `branch.<HEAD>.remote` を
-      `HeadInfo::Branch.upstream_remote` として読み、リモート名を `RepoInfo.remotes` で
-      URL に直して `RemoteUrl` に通し、その `owner` / `repo` と `head.repo` を比べる。
-      **材料は `Cmd::LoadRepoInfo` に載せた** —— `BranchState` の同じ設定を使うと、
-      **座り直しが 1 回きり**なので `Msg::BranchesLoaded` と一覧のどちらが先に届くかで
-      答えが変わり、二度と直らない（`RepoInfo.target` が `default_remote` を呼ばないのと
-      同じ形）。**読めたら `target` は見ない** —— 両方を許すと upstream 側の同名ブランチ
-      から出た他人の PR に座る。**host は比べない**（`target.host` は `ssh -G` で正規化
-      済み、こちらは生。生で比べると fork だけ別のエイリアスを使う多アカウント運用で
-      逆に落ちる）ので、**別ホストの同名 `owner/repo` に同名のブランチがある形は
-      受け入れた穴**（01 の「現ブランチの PR」）
+      `HeadInfo::Branch.upstream_remote` として読み、**リモート名なら `RepoInfo.remotes`
+      で URL に直し、引けなければ値そのものを** `RemoteUrl` に通して、その
+      `owner` / `repo` と `head.repo` を比べる（**`gh pr checkout` が書くのは URL**。
+      実測表は 01）。**材料は `Cmd::LoadRepoInfo` に載せた** —— `BranchState` の同じ
+      設定を使うと、**座り直しが 1 回きり**なので `Msg::BranchesLoaded` と一覧の
+      どちらが先に届くかで答えが変わり、二度と直らない（`RepoInfo.target` が
+      `default_remote` を呼ばないのと同じ形）。**当てる順は追跡先 → `target`** ——
+      git は「どこへ push したか」を憶えていないので、追跡先で打ち切ると main では
+      座っていた行に座らなくなる（01 の表の 1 行目）。**host は比べない**
+      （`target.host` は `ssh -G` で正規化済み、こちらは生。生で比べると fork だけ別の
+      エイリアスを使う多アカウント運用で逆に落ちる）ので、**別ホストの同名
+      `owner/repo` に同名のブランチがある形は受け入れた穴**（01 の「現ブランチの PR」）
 - [ ] 閉じた PR を見る経路 — 一覧は `state=open` だけを引くので、**マージされた
       瞬間にその行は消え、mewgit から辿る手段が無い**（01 の「現ブランチの PR」で
       受け入れた穴）。塞ぐなら「一覧に `state=all` を混ぜる」ではなく、**別の入口**

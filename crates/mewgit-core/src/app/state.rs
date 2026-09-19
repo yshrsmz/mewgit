@@ -438,7 +438,7 @@ impl RepoInfo {
     /// 名前で引いたリモート。無ければ `None`（`.`（ローカル追跡）もここに落ちる）。
     ///
     /// **引き方を 1 本にする。** `update::default_remote`（`branch.<HEAD>.remote` で
-    /// 引く）と [`head_home`] が同じ走査を書いていた。
+    /// 引く）と [`head_homes`] が同じ走査を書いていた。
     pub(super) fn remote(&self, name: &str) -> Option<&Remote> {
         self.remotes.iter().find(|remote| remote.name == name)
     }
@@ -1286,8 +1286,8 @@ impl BranchState {
 /// 先を決める側と描く側で照合の規則が割れると、カーソルが座っていない行を
 /// 「現ブランチの PR」として扱える。
 ///
-/// **fork のブランチも当てる。** 照合する相手は [`head_home`] が出す
-/// （`branch.<HEAD>.remote` の URL。無ければ `target`）。
+/// **fork のブランチも当てる。** 照合する相手は [`head_homes`] が確からしい順に
+/// 出す（`branch.<HEAD>.remote` の URL → `target`）。
 ///
 /// **到着順に依らない。** 材料の `head` と `remotes` はどちらも
 /// [`Msg::RepoInfoLoaded`](super::Msg::RepoInfoLoaded) に乗って**同時に**届き、

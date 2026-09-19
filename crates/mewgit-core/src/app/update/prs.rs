@@ -313,7 +313,8 @@ mod tests {
     /// 状態（`branch.<HEAD>.remote`）。`remotes` は `(名前, URL)` で登録する。
     ///
     /// **`put_on_branch` が置いた `head` に足す。** あちらは追跡設定を持たない形
-    /// （`upstream_remote: None`）なので、そのままでは `head_home` の入口に入らない。
+    /// （`upstream_remote: None`）なので、そのままでは `head_homes` の追跡先の腕に
+    /// 入らない。
     /// **組み直さない** —— `HeadInfo::Branch` のリテラルを写すと、フィールドが増える
     /// たびに直す構築サイトが 1 つ増える。
     fn state_tracking(branch: &str, tracked: &str, remotes: &[(&str, &str)]) -> AppState {
@@ -632,7 +633,8 @@ mod tests {
     #[test]
     fn a_fork_pr_does_not_match_without_the_tracking_config() {
         // 追跡設定が無ければ出どころを知る手段が無いので、`target` と比べるしかない
-        // （`head_home` の `None`）。**カーソルは先頭に座るだけ**で、PR は一覧に出ている。
+        // （`head_homes` の候補が `target` だけになる）。**カーソルは先頭に座るだけ**で、
+        // PR は一覧に出ている。
         let mut state = state_on_branch("feat/x");
         deliver(
             &mut state,

@@ -949,6 +949,7 @@ pub fn put_on_branch(state: &mut AppState, branch: &str) {
     state.repo.head = Some(HeadInfo::Branch {
         name: branch.to_string(),
         oid: fake_oid(0),
+        upstream_remote: None,
     });
 }
 

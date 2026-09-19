@@ -218,11 +218,17 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       値で答える** —— 述語を消去法で打ち消すと `Degraded` が潰れてペインと食い違う。
       フッターの Prs はキーが 1 つ増えても 80 桁で共通キーまで出る側に**残っている**
       （セル数は 07 の実測）
-- [ ] fork のブランチで現ブランチの PR を当てる — **一覧には fork からの PR も出る**
-      （`/repos/{o}/{r}/pulls` が返す）が、起動時にカーソルを座らせる照合が
-      `head.repo.owner == target.owner` なので、**fork のブランチでは合致せず先頭に
-      座る**（01 の「現ブランチの PR」）。塞ぐにはブランチの push 先リモート
-      （`branch.<name>.remote`）を `RemoteUrl` に通して owner を出す経路が要る
+- [x] fork のブランチで現ブランチの PR を当てる — `branch.<HEAD>.remote` を
+      `HeadInfo::Branch.upstream_remote` として読み、リモート名を `RepoInfo.remotes` で
+      URL に直して `RemoteUrl` に通し、その `owner` / `repo` と `head.repo` を比べる。
+      **材料は `Cmd::LoadRepoInfo` に載せた** —— `BranchState` の同じ設定を使うと、
+      **座り直しが 1 回きり**なので `Msg::BranchesLoaded` と一覧のどちらが先に届くかで
+      答えが変わり、二度と直らない（`RepoInfo.target` が `default_remote` を呼ばないのと
+      同じ形）。**読めたら `target` は見ない** —— 両方を許すと upstream 側の同名ブランチ
+      から出た他人の PR に座る。**host は比べない**（`target.host` は `ssh -G` で正規化
+      済み、こちらは生。生で比べると fork だけ別のエイリアスを使う多アカウント運用で
+      逆に落ちる）ので、**別ホストの同名 `owner/repo` に同名のブランチがある形は
+      受け入れた穴**（01 の「現ブランチの PR」）
 - [ ] 閉じた PR を見る経路 — 一覧は `state=open` だけを引くので、**マージされた
       瞬間にその行は消え、mewgit から辿る手段が無い**（01 の「現ブランチの PR」で
       受け入れた穴）。塞ぐなら「一覧に `state=all` を混ぜる」ではなく、**別の入口**

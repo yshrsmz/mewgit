@@ -1187,16 +1187,34 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
 ### 現ブランチの PR
 
 **一覧の 1 行として出す。** `RepoInfo.head` がブランチに居て、その名前と同じ
-`head.branch` を持ち、かつ `head.repo` の owner が `target.owner` と同じ PR が
-それ。**起動直後のカーソルはその行に座る。**
+`head.branch` を持ち、かつ `head.repo` が**そのブランチの行き先**と同じ PR がそれ。
+**起動直後のカーソルはその行に座る。**
 
 - **状態に持たない。** `list` と `RepoInfo.head` から毎回導ける。持つと、どちらかが
   更新されたときに片方だけ古くなる（**導出できる値を、元から離れた場所に置かない**）
-- **fork のブランチでは合致しない。** 一覧には fork からの PR も出る（05）が、
-  こちらが持っているのはローカルのブランチ名だけで、**その PR の head がどの fork に
-  あるかを知らない**。`branch.<name>.remote` のリモート URL から owner を出す経路が
-  要る（plan.md の「fork の PR」）。**合致しないとカーソルが先頭に座るだけ**で、
-  PR そのものは一覧に出ている
+- **行き先は `HeadInfo::Branch.upstream_remote`（`branch.<HEAD>.remote`）の URL から
+  出す。** 一覧には fork からの PR も出る（05）ので、`target` とだけ比べると
+  **fork のブランチでは合致しない**。リモート名を `RepoInfo.remotes` で引き、URL を
+  `RemoteUrl` に通して `owner` / `repo` を取る。**規則を持つのは `app`** ——
+  材料の `git_read::Remote` と `HeadInfo` がどちらも `auth` の上段の型だから（00・04）
+- **読めたらそちらだけを見る。** 追跡設定が答えなので、`target` との一致は
+  **読めなかったときの落とし先**（設定が無い / `.`（ローカル追跡）/ その名前の
+  リモートが無い / URL が GitHub の形でない）。両方を許すと、fork 運用で
+  **upstream 側の同名ブランチから出た他人の PR** に座る
+- **材料は `Cmd::LoadRepoInfo` に載せる**（02 の「head」）。`BranchState` にも同じ
+  設定があるが、**座り直しは 1 回きり**（一覧が 1 度届くと以後は選んでいる番号で
+  座るので、この導出は二度と走らない）なので、**別のジョブから届く値を混ぜると
+  到着順で答えが変わり、二度と直らない**。`RepoInfo.target` が `default_remote` を
+  呼ばないのと同じ数え方
+- **host は比べない。** `target.host` は `ssh -G` で正規化済み、こちらは URL に書かれた
+  ままなので、生のまま比べると **fork だけ別のエイリアス（`gh-me:owner/repo`）を使う
+  多アカウント運用**——04 が想定している形——で逆に落ちる。**正規化をもう 1 回頼むと、
+  カーソルの位置のために `ssh -G` が 1 本増える**ので採らない。**残る穴**は、
+  別ホストの同名 `owner/repo` に同名のブランチがあり、そこから出た PR が一覧に
+  居る場合で、そのとき**カーソルが他人の行に座る**
+- **`branch.<name>.pushRemote` と `remote.pushDefault` は読まない。** git の push 規則は
+  fetch と違う（下の「push の行き先」に送ってある）。`git push -u` が書くのは
+  `branch.<name>.remote` なので、fork へ push して PR を出した形はこれで当たる
 - **マージ済み / クローズ済みの PR は出ない。** 一覧は `state=open` だけを引くので、
   **PR がマージされた瞬間にその行は消える**。HEAD のブランチの PR を `MERGED` として
   出していた経路（`pr_for_branch` と `Cmd::FetchPr`）は、一覧に変えたときに消した。

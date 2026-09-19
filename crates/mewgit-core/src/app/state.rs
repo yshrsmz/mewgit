@@ -5,6 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
+use crate::auth::url::RemoteUrl;
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
@@ -1271,25 +1272,62 @@ impl BranchState {
 /// 先を決める側と描く側で照合の規則が割れると、カーソルが座っていない行を
 /// 「現ブランチの PR」として扱える。
 ///
-/// **fork のブランチでは合致しない。** 照合に使えるのはローカルのブランチ名だけで、
-/// その PR の head がどの fork にあるかを知らないため（plan.md の「fork のブランチで
-/// 現ブランチの PR を当てる」）。
+/// **fork のブランチも当てる。** 照合する相手は [`head_home`] が出す
+/// （`branch.<HEAD>.remote` の URL。無ければ `target`）。
+///
+/// **到着順に依らない。** 材料の `head` と `remotes` はどちらも
+/// [`Msg::RepoInfoLoaded`](super::Msg::RepoInfoLoaded) に乗って**同時に**届き、
+/// `target` はその返信から始まる鎖（`Cmd::ResolveTarget` → `Cmd::ResolveAccount` →
+/// 一覧）の途中なので、**一覧が届いた時点でどれも揃っている**。`BranchState` から
+/// 追跡設定を取るとこれが崩れる（01 の「現ブランチの PR」）ので、**順序を回す
+/// テストは要らない**。
 pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Option<&'a PullRequest> {
     let target = repo.target.resolved()?;
-    let HeadInfo::Branch { name, .. } = repo.head.as_ref()? else {
+    let HeadInfo::Branch {
+        name,
+        upstream_remote,
+        ..
+    } = repo.head.as_ref()?
+    else {
         // **`Detached` も `Unborn` も `None`。** 切り離された HEAD には名前が無く、
         // コミットが 1 つも無いブランチから出した PR は無い。
         return None;
     };
+    let home = head_home(repo, upstream_remote.as_deref());
+    let (owner, name_of_repo) = home
+        .as_ref()
+        .map_or((target.owner.as_str(), target.repo.as_str()), |url| {
+            (url.owner.as_str(), url.repo.as_str())
+        });
     list.iter().find(|pr| {
         pr.head.branch == *name
             && pr.head.repo.as_ref().is_some_and(|repo| {
                 // **リポジトリ名まで見る。** owner だけだと、同じ owner の下に作った
                 // fork（`acme/app` → `acme/app-fork`）から出た他人の PR が
                 // 「現ブランチの PR」に当たる。
-                repo.owner == target.owner && repo.repo == target.repo
+                repo.owner == owner && repo.repo == name_of_repo
             })
     })
+}
+
+/// HEAD のブランチが push した先の GitHub リポジトリ（01 の「現ブランチの PR」）。
+///
+/// **読めたら `target` は見ない。** 追跡設定があるならそれが答えで、両方を許すと
+/// fork 運用で**upstream 側の同名ブランチから出た他人の PR** に座る。
+///
+/// **`None` の理由は分けない。** 設定が無い / `.`（ローカル追跡。その名前のリモートは
+/// 無い）/ リモートが消えている / URL が GitHub の形でない —— 呼び出し側の扱いは
+/// どれも同じ（`target` に落とす）で、**出す先も無い**（座る行が変わるだけで通知は
+/// 出さない）。
+///
+/// **host は見ない。** [`RepoTarget::host`] は `ssh -G` で正規化済みだが、こちらは
+/// URL に書かれたままなので、生のまま比べると **fork だけ別のエイリアスを使う
+/// 多アカウント運用**（04）で逆に落ちる。残る穴は、別ホストの同名 `owner/repo` に
+/// 同名のブランチがあり、その PR が一覧に居るとき（01）。
+fn head_home(repo: &RepoInfo, upstream_remote: Option<&str>) -> Option<RemoteUrl> {
+    let wanted = upstream_remote?;
+    let remote = repo.remotes.iter().find(|remote| remote.name == wanted)?;
+    RemoteUrl::parse(&remote.url).ok()
 }
 
 /// PR ペインの状態（01 の「PR ペイン」）。

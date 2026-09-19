@@ -293,7 +293,7 @@ mod tests {
     };
     use crate::auth::{AccountState, DegradedReason};
     use crate::config::Config;
-    use crate::git_read::HeadInfo;
+    use crate::git_read::{HeadInfo, Remote};
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
@@ -307,6 +307,38 @@ mod tests {
         let mut state = state_with_commits(2);
         put_on_branch(&mut state, branch);
         state
+    }
+
+    /// [`state_on_branch`] に加えて、**HEAD のブランチが `tracked` を追跡している**
+    /// 状態（`branch.<HEAD>.remote`）。`remotes` は `(名前, URL)` で登録する。
+    ///
+    /// **`put_on_branch` の `head` を置き直す。** あちらは追跡設定を持たない形
+    /// （`upstream_remote: None`）なので、そのままでは `head_home` の入口に入らない。
+    fn state_tracking(branch: &str, tracked: &str, remotes: &[(&str, &str)]) -> AppState {
+        let mut state = state_on_branch(branch);
+        state.repo.head = Some(HeadInfo::Branch {
+            name: branch.to_string(),
+            oid: fake_oid(0),
+            upstream_remote: Some(tracked.to_string()),
+        });
+        state.repo.remotes = remotes
+            .iter()
+            .map(|(name, url)| Remote {
+                name: (*name).to_string(),
+                url: (*url).to_string(),
+            })
+            .collect();
+        state
+    }
+
+    /// `owner` の fork から出た、同じブランチ名の PR。
+    fn pr_from(number: u64, branch: &str, owner: &str) -> PullRequest {
+        let mut pr = fake_pull_request(number, branch, "headsha");
+        pr.head.repo = Some(RepoRef {
+            owner: owner.to_string(),
+            repo: fake_target().repo,
+        });
+        pr
     }
 
     /// [`state_on_branch`] に加えて、**PRs タブを開いた**状態。
@@ -427,6 +459,7 @@ mod tests {
                 head: HeadInfo::Branch {
                     name: "feat/x".to_string(),
                     oid: fake_oid(0),
+                    upstream_remote: None,
                 },
                 ..repo_snapshot()
             }))),
@@ -502,24 +535,108 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_branch_does_not_match_the_current_branch_row() {
-        // **受け入れた穴**（plan.md の「fork のブランチで現ブランチの PR を当てる」）。
-        // 一覧には fork の PR も出るが、照合が `head.repo.owner == target.owner` なので
-        // 合致せず、カーソルは先頭に座る。
-        let mut state = state_on_branch("feat/x");
-        let mut fork = fake_pull_request(82, "feat/x", "headsha");
-        fork.head.repo = Some(RepoRef {
-            owner: "someone-else".to_string(),
-            repo: fake_target().repo,
-        });
+    fn a_fork_branch_matches_the_current_branch_row() {
+        // 追跡先の URL が fork を指していれば、そこから出た PR に座る
+        // （01 の「現ブランチの PR」）。
+        let mut state = state_tracking(
+            "feat/x",
+            "fork",
+            &[
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+                ("fork", "git@github.com:someone-else/mewgit.git"),
+            ],
+        );
         deliver(
             &mut state,
-            vec![fake_pull_request(90, "other", "othersha"), fork],
+            vec![
+                fake_pull_request(90, "other", "othersha"),
+                pr_from(82, "feat/x", "someone-else"),
+            ],
+        );
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(state.prs.cursor, 1);
+    }
+
+    #[test]
+    fn tracking_a_fork_rules_out_the_row_from_the_target_repository() {
+        // **読めたら `target` は見ない。** fork へ push しているブランチと同じ名前の
+        // ブランチが upstream 側にもあるのはよくある形で、そこから出た PR は
+        // **他人の PR**（01 の「現ブランチの PR」）。
+        let mut state = state_tracking(
+            "feat/x",
+            "fork",
+            &[
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+                ("fork", "git@github.com:someone-else/mewgit.git"),
+            ],
+        );
+        deliver(
+            &mut state,
+            vec![
+                fake_pull_request(90, "other", "othersha"),
+                // `fake_pull_request` の head は `target` のリポジトリ。
+                fake_pull_request(82, "feat/x", "headsha"),
+            ],
+        );
+
+        assert_eq!(state.current_pr(), None, "upstream 側の PR に座っている");
+        assert_eq!(state.prs.cursor, 0);
+        assert_eq!(state.prs.list.len(), 2, "消えている");
+    }
+
+    #[test]
+    fn a_fork_pr_does_not_match_without_the_tracking_config() {
+        // 追跡設定が無ければ出どころを知る手段が無いので、`target` と比べるしかない
+        // （`head_home` の `None`）。**カーソルは先頭に座るだけ**で、PR は一覧に出ている。
+        let mut state = state_on_branch("feat/x");
+        deliver(
+            &mut state,
+            vec![
+                fake_pull_request(90, "other", "othersha"),
+                pr_from(82, "feat/x", "someone-else"),
+            ],
         );
 
         assert_eq!(state.current_pr(), None, "fork の PR に合致している");
         assert_eq!(state.prs.cursor, 0);
         assert_eq!(state.prs.list.len(), 2, "消えている");
+    }
+
+    #[test]
+    fn a_tracked_remote_that_is_not_registered_falls_back_to_the_target() {
+        // `branch.<HEAD>.remote` に書かれた名前がリモート一覧に無い（`.` の
+        // ローカル追跡もここに落ちる）。**`target` との照合は生きている。**
+        //
+        // **`target` でないリモートを先頭に置く。** 1 本目で済ませる実装（名前で
+        // 引かない）でも、`origin` しか無ければ答えが同じになって見張りが空振りする。
+        let mut state = state_tracking(
+            "feat/x",
+            ".",
+            &[
+                ("backup", "git@github.com:someone-else/mewgit.git"),
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+            ],
+        );
+        deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+    }
+
+    #[test]
+    fn a_tracked_url_that_is_not_github_falls_back_to_the_target() {
+        // GitHub の形として読めない URL（ローカルパス）。`RemoteUrl::parse` が拒む。
+        let mut state = state_tracking(
+            "feat/x",
+            "backup",
+            &[
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+                ("backup", "/srv/git/mewgit.git"),
+            ],
+        );
+        deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
     }
 
     #[test]

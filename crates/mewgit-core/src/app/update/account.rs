@@ -1228,6 +1228,7 @@ mod tests {
             head: HeadInfo::Branch {
                 name: "main".to_string(),
                 oid,
+                upstream_remote: None,
             },
             refs: RefIndex::from_iter([(
                 oid,

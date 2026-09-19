@@ -283,8 +283,8 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, issued, press, press_code, repo_snapshot, state, state_with_commits, tab_to,
-        NOTICE_CELLS,
+        cells, issued, press, press_code, remotes_of, repo_snapshot, state, state_with_commits,
+        tab_to, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -293,7 +293,7 @@ mod tests {
     };
     use crate::auth::{AccountState, DegradedReason};
     use crate::config::Config;
-    use crate::git_read::{HeadInfo, Remote};
+    use crate::git_read::HeadInfo;
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
@@ -312,22 +312,20 @@ mod tests {
     /// [`state_on_branch`] に加えて、**HEAD のブランチが `tracked` を追跡している**
     /// 状態（`branch.<HEAD>.remote`）。`remotes` は `(名前, URL)` で登録する。
     ///
-    /// **`put_on_branch` の `head` を置き直す。** あちらは追跡設定を持たない形
+    /// **`put_on_branch` が置いた `head` に足す。** あちらは追跡設定を持たない形
     /// （`upstream_remote: None`）なので、そのままでは `head_home` の入口に入らない。
+    /// **組み直さない** —— `HeadInfo::Branch` のリテラルを写すと、フィールドが増える
+    /// たびに直す構築サイトが 1 つ増える。
     fn state_tracking(branch: &str, tracked: &str, remotes: &[(&str, &str)]) -> AppState {
         let mut state = state_on_branch(branch);
-        state.repo.head = Some(HeadInfo::Branch {
-            name: branch.to_string(),
-            oid: fake_oid(0),
-            upstream_remote: Some(tracked.to_string()),
-        });
-        state.repo.remotes = remotes
-            .iter()
-            .map(|(name, url)| Remote {
-                name: (*name).to_string(),
-                url: (*url).to_string(),
-            })
-            .collect();
+        let Some(HeadInfo::Branch {
+            upstream_remote, ..
+        }) = &mut state.repo.head
+        else {
+            unreachable!("put_on_branch がブランチに置いている");
+        };
+        *upstream_remote = Some(tracked.to_string());
+        state.repo.remotes = remotes_of(remotes);
         state
     }
 

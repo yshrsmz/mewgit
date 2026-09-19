@@ -92,9 +92,11 @@ enum PushPlan {
 /// HEAD のブランチと登録済みのリモートから push の行き先を決める（01 の
 /// 「push の行き先」）。
 ///
-/// **HEAD のブランチは一覧から取る。** `RepoInfo.head` は起動時に読んだきりで、
-/// 外部で切り替えられると古くなる（#22 の「キャッシュした状態から破壊的操作を
-/// 選ばない」）。一覧は ref を動かす書き込みのたびに読み直される。
+/// **HEAD のブランチは一覧から取る。** 行き先の材料（`branch.<name>.merge`、追跡 ref の
+/// 位置、ahead / behind）を運ぶのは `Branch` の行だけで、`RepoInfo.head` が持つのは
+/// 名前と oid と `branch.<name>.remote` だけ（#22 の「キャッシュした状態から破壊的
+/// 操作を選ばない」）。**鮮度の差ではない** —— どちらも ref を動かす書き込みのたびに
+/// 読み直される（`Reload::Refs` が両方を同じバッチで出す）。
 ///
 /// **拒否の出口はここ 1 本。** 「一覧が届いていない」だけを呼び出し側の早期 return に
 /// すると、同じ「Warn を出して `Cmd::None`」が 2 箇所に割れる。
@@ -330,14 +332,9 @@ fn default_remote(state: &AppState) -> Result<&Remote, NoRemote> {
         }
         // **`origin` へ落とさない。** 落とすと、ユーザーが書いた行き先とは別の
         // リモートを黙って fetch することになる。
-        return state
-            .repo
-            .remotes
-            .iter()
-            .find(|remote| remote.name == config.remote)
-            .ok_or_else(|| {
-                NoRemote::Ask(format!("追跡先の {} がリモートにありません", config.remote))
-            });
+        return state.repo.remote(&config.remote).ok_or_else(|| {
+            NoRemote::Ask(format!("追跡先の {} がリモートにありません", config.remote))
+        });
     }
 
     conventional_remote(state)

@@ -1196,7 +1196,11 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
   出す。** 一覧には fork からの PR も出る（05）ので、`target` とだけ比べると
   **fork のブランチでは合致しない**。リモート名を `RepoInfo.remotes` で引き、URL を
   `RemoteUrl` に通して `owner` / `repo` を取る。**規則を持つのは `app`** ——
-  材料の `git_read::Remote` と `HeadInfo` がどちらも `auth` の上段の型だから（00・04）
+  `git_read` が返すのは git が持っている値（リモート**名**）までで、名前を URL に直し、
+  GitHub の形として読めるかを判断するのは `auth::url` を使う側の仕事。04 の「既定
+  リモート」が同じ理由で `app` に置いている。**00 が禁じているからではない** ——
+  `auth` は `git_read` の下段なので、`git_read` から `auth::url` を呼ぶこと自体は
+  下向きで許される（`github` が `auth::url::valid_host` を使っているのと同じ）
 - **読めたらそちらだけを見る。** 追跡設定が答えなので、`target` との一致は
   **読めなかったときの落とし先**（設定が無い / `.`（ローカル追跡）/ その名前の
   リモートが無い / URL が GitHub の形でない）。両方を許すと、fork 運用で
@@ -1659,9 +1663,12 @@ degraded なら `[r]`、`.git/config` 由来なら `[u]`、どちらも無けれ
 `src` / `dst` に割って持つ理由は 03 の「argv への変換」（refspec と lease で同じ名前を
 別の位置に置くので、1 本の文字列に畳むと lease が壊れる）。
 
-決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る**
-（`RepoInfo.head` は起動時に読んだきりで古くなる。#22 の「キャッシュした状態から
-破壊的操作を選ばない」）。
+決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る** ——
+行き先の材料（`branch.<name>.merge`、追跡 ref の位置、ahead / behind）を運ぶのは
+`Branch` の行だけで、`RepoInfo.head` が持つのは名前と oid と `branch.<name>.remote`
+だけ（#22 の「キャッシュした状態から破壊的操作を選ばない」）。**鮮度の差ではない**
+—— どちらも ref を動かす書き込みのたびに読み直される（`Reload::Refs` が両方を
+同じバッチで出す）。
 
 1. HEAD のブランチが無い（detached / unborn）→ 通知して何も出さない
 2. `Branch.upstream_config`（`branch.<name>.remote` / `.merge`）があるなら、それが

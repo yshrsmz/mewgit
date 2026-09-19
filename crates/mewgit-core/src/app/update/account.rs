@@ -366,8 +366,8 @@ pub(super) fn resolve_again(state: &mut AppState) -> Cmd {
 mod tests {
     use super::super::test_support::{
         cells, commit, exec_done_of, fake_output, fetched_remote, issued, press, press_code,
-        repo_snapshot, state, state_with_commits, tracking_branch, with_branches, HEADS_MAIN,
-        NOTICE_CELLS,
+        remotes_of, repo_snapshot, state, state_with_commits, tracking_branch, with_branches,
+        HEADS_MAIN, NOTICE_CELLS,
     };
     use super::super::{init, update};
     use super::*;
@@ -387,13 +387,7 @@ mod tests {
     /// （ヘルパが実物では起きない形を作らないため）。
     fn deliver_repo_info(state: &mut AppState, remotes: &[(&str, &str)]) -> Cmd {
         let info = RepoSnapshot {
-            remotes: remotes
-                .iter()
-                .map(|(name, url)| Remote {
-                    name: (*name).to_string(),
-                    url: (*url).to_string(),
-                })
-                .collect(),
+            remotes: remotes_of(remotes),
             ..repo_snapshot()
         };
         reply(

@@ -340,6 +340,18 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       **`Notice.detail`（argv と stderr）を出すのもここ。** いまは要約行しか描かないので、
       git が断った理由（`would be overwritten`、未マージのときの `-D` のヒント）が
       画面に出ない。不変ルール 4 が「UI まで届ける」と言っているのはこの詳細のこと
+- [ ] HEAD の追跡設定を 1 本にする。**いま `branch.<HEAD>.remote` は 2 箇所にある**
+      —— `RepoInfo.head`（`HeadInfo::Branch.upstream_remote`。PR の座り先が読む）と
+      `BranchState::head()` の `Branch.upstream_config`（`f` と push の行き先が読む）。
+      前者に寄せるには `HeadInfo` に `UpstreamConfig` を**対で**載せることが要る
+      （`push_plan` が `merge` を使うので `String` 1 本では肩代わりできない）。
+      **見返りは `update::default_remote` の 2 つのガード** ——「リモート一覧が空のあいだ
+      1 段目を飛ばす」「ブランチ一覧がまだなら飛ばす」——で、どちらも追跡設定を
+      `remotes` と別のジョブから取っていることだけが理由なので消えるはず
+      （`/simplify` の altitude が挙げた。**こちらでは数え直していない**）。
+      **`Branch.upstream_config` を消せるかは別の問い** —— あちらの読み手は ahead /
+      behind と追跡 ref も同じ行から取っており、出どころを混ぜると到着順の問いが
+      戻るかを数えていない
 - [ ] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

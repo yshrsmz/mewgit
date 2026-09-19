@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput};
 use crate::git_read::{
     Branch, Commit, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, HeadInfo, LogPage,
-    Oid, RefIndex, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
+    Oid, RefIndex, Remote, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
 };
 use crate::test_util::{
     fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid,
@@ -471,4 +471,20 @@ pub(super) fn repo_snapshot() -> RepoSnapshot {
 /// リモートを登録する。`RepoInfo` は `RepoInfoLoaded` で入る値なので直に置く。
 pub(super) fn with_remotes(state: &mut AppState, names: &[&str]) {
     state.repo.remotes = names.iter().copied().map(fake_remote).collect();
+}
+
+/// `(名前, URL)` からリモート一覧を組む。
+///
+/// **URL を見せたい側はこちら。** [`with_remotes`] が使う `test_util::fake_remote` の
+/// URL は `ssh://git@example.invalid/<名前>.git` でパスが 1 段しかなく、
+/// `RemoteUrl::parse` が拒む —— owner / repo を読む経路（`AppState::current_pr` の
+/// 座り先）では**黙って `target` に落ちる**ので、その腕を踏めない。
+pub(super) fn remotes_of(pairs: &[(&str, &str)]) -> Vec<Remote> {
+    pairs
+        .iter()
+        .map(|(name, url)| Remote {
+            name: (*name).to_string(),
+            url: (*url).to_string(),
+        })
+        .collect()
 }

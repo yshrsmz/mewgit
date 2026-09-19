@@ -106,7 +106,7 @@ impl Key {
     }
 
     /// `Ctrl` + 文字。
-    pub const fn ctrl(c: char) -> Self {
+    pub fn ctrl(c: char) -> Self {
         Self::with_mods(
             KeyCode::Char(c),
             Modifiers {
@@ -116,11 +116,11 @@ impl Key {
         )
     }
 
-    pub const fn code(&self) -> KeyCode {
+    pub fn code(&self) -> KeyCode {
         self.code
     }
 
-    pub const fn mods(&self) -> Modifiers {
+    pub fn mods(&self) -> Modifiers {
         self.mods
     }
 }

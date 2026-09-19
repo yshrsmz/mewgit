@@ -14,12 +14,12 @@ use crate::app::{ExecDone, InputIntent, Modal, RepoInfo, RepoSnapshot, TextBuffe
 use crate::config::Config;
 use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput};
 use crate::git_read::{
-    Branch, Commit, DiffTarget, FileDiff, GitReadError, HeadInfo, LogPage, Oid, RefIndex,
-    UpstreamConfig, WorktreeSection, WorktreeSnapshot,
+    Branch, Commit, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, HeadInfo, LogPage,
+    Oid, RefIndex, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
 };
 use crate::test_util::{
-    fake_branch, fake_commit, fake_detail, fake_file_diff, fake_hunk, fake_remote, fake_snapshot,
-    fake_upstream, reply,
+    fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid,
+    fake_remote, fake_snapshot, fake_upstream, reply,
 };
 
 /// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
@@ -53,6 +53,68 @@ pub(super) fn state_with_page(n: usize, done: bool) -> AppState {
     };
     let _ = reply(&mut state, first, page_loaded(Ok(page)));
     state
+}
+
+/// `n` 件を積み、1 件目のコミットにカーソルを乗せて詳細と一覧が届いた状態。
+///
+/// 起動直後のカーソルは WIP 行なので、`j` を 1 回打って乗せる。**一覧も届ける。**
+/// 届けないと `JobKind::LoadCommitFiles` が走ったままになり、以後の
+/// `Cmd::LoadCommitFiles` が `issue` に落とされて、テストが見ているのが
+/// 「出なかった」なのか「落とされた」なのか判らなくなる。
+pub(super) fn on_first_commit(n: usize) -> AppState {
+    on_first_commit_with_files(n, &["a.txt"])
+}
+
+/// [`on_first_commit`] で、ファイル一覧を `paths` にしたもの。
+///
+/// **一覧の行数を選べるようにしてある** —— カーソルを動かすキーの見張りは、端に置くと
+/// 片方が正しく無反応になるので 2 件以上要る。
+pub(super) fn on_first_commit_with_files(n: usize, paths: &[&str]) -> AppState {
+    let mut state = state_with_commits(n);
+    let _ = press(&mut state, 'j');
+    let _ = update(&mut state, detail_ok(0));
+    let _ = update(&mut state, files_of(0, paths));
+    state
+}
+
+/// 索引 `index` のコミットのファイル一覧が届いた [`Msg`]。中身は `a.txt` 1 件。
+pub(super) fn files_ok(index: u8) -> Msg {
+    files_of(index, &["a.txt"])
+}
+
+/// `paths` を `Modified` で並べたファイル一覧が届いた [`Msg`]。
+pub(super) fn files_of(index: u8, paths: &[&str]) -> Msg {
+    let entries = paths
+        .iter()
+        .map(|path| fake_entry(path, FileStatus::Modified))
+        .collect();
+    files_loaded(index, Ok(entries))
+}
+
+pub(super) fn files_loaded(index: u8, result: Result<Vec<FileEntry>, GitReadError>) -> Msg {
+    Msg::CommitFilesLoaded {
+        oid: fake_oid(index),
+        result: Box::new(result),
+    }
+}
+
+/// `pane` に届くまで `Tab` を押す。返すのは**最後の 1 回**が出した `Cmd`。
+///
+/// **回数を書かない。** 巡回の並びはグラフの選択と `config.github.enabled` で変わるので、
+/// 固定の回数は別の状態で黙って外れる（`CLAUDE.md`）。
+///
+/// **途中の回の `Cmd` は捨てる。** 通過するペインが何かを頼む状態で使うと、そのジョブが
+/// [`AppState::issue`] に登録されたまま残り、**後続の `assert_eq!(…, Cmd::None)` が門では
+/// なく「落とされた」で通る**（#38 の形）。集計の無い行を持ったまま通過させるテストを
+/// 書くときは、ここも受け取って見る。
+pub(super) fn tab_to(state: &mut AppState, pane: Pane) -> Cmd {
+    for _ in 0..state.focus_candidates().len() {
+        let cmd = press_code(state, KeyCode::Tab);
+        if state.focus == pane {
+            return cmd;
+        }
+    }
+    panic!("{pane:?} に届きませんでした: {:?}", state.focus);
 }
 
 /// staged に 1 ファイルだけある状態。worktree ペインの Staged を選んでいる。

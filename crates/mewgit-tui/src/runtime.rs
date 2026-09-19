@@ -1183,9 +1183,9 @@ mod tests {
             let _ = no_material(&mut state, kind, name);
             let message = state.notices[0].message.clone();
             // **収まることを直に見る。** `contains` は末尾が切れても通る（#80）。
-            // **見るのは 1 行目**（最下行はキーヒント。07 の「ステータスバー」）。
-            let lines = crate::test_util::draw(&state, TermSize::default());
-            let notice = lines[lines.len() - 2].clone();
+            // **見るのは 1 行目**（2 行目はキーヒント。07 の「ステータスバー」）。
+            // 取り出しは `test_util` の 1 本を通す（行番号を手で書かない）。
+            let notice = crate::test_util::notice_bar(&state, TermSize::default());
             assert!(notice.contains(&message), "{name}: {notice:?}");
         }
     }

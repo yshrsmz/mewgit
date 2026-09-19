@@ -9,9 +9,15 @@
 //!
 //! **`Tab` / `Shift+Tab` / `Ctrl-C` は入っていない。** いま読むのが 2 行目だけなので、
 //! そこに描かないものを入れても誰も読まない行になる。足すのは `Modal::Help` のタスク
-//! （`docs/plan.md` の M6）。
+//! （`docs/plan.md` の M6）。**モーダル自身のキーの案内も入っていない** —— あちらは
+//! 箱の中に自前の `HINT` を持っている（`modals::*`。07 の「ステータスバー」）。
+//!
+//! **まだ持っていないのはアクションの同一性。** キーと表示の文言しか無いので、この表は
+//! `update_key` の `match` の手書きの写しで、見張れるのは「表 → dispatch」の片側だけ
+//! （`every_hinted_key_does_something`）。`config.keymap`（08）はアクション名で書くので
+//! **`label` は鍵にならない** —— 足すのはそのタスク（`docs/plan.md` に何が要るか書いた）。
 
-use super::{Key, KeyCode, Pane};
+use super::{AppState, Key, KeyCode, Pane};
 
 /// 案内 1 つ —— 押すキーと、押すと何が起きるか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +31,11 @@ impl KeyHint {
     ///
     /// **別名は入れていない** —— `j` の代わりに効く `Down` は表に無い。ここは案内に
     /// 出すものの一覧で、出さないものを足しても案内は変わらない（01）。
-    pub fn keys(&self) -> &'static [Key] {
+    ///
+    /// **返すのは `&'static` ではなく借用。** `config.keymap` の上書き（08）で差し替えた
+    /// キーは `'static` では持てないので、いま `'static` を約束すると、そのタスクで
+    /// **呼び手ごと書き換えることになる**。
+    pub fn keys(&self) -> &[Key] {
         self.keys
     }
 
@@ -104,6 +114,20 @@ const DIFF: &[KeyHint] = &[
     hint(&[Key::char('x')], "破棄"),
     BACK,
 ];
+
+/// **いま**押せるペインのキー。`None` は「この表のどれも押せない」。
+///
+/// **モーダル表示中が `None`。** そのあいだキーは全部モーダルが受けるので
+/// （`update_key`）、ペインのキーも [`COMMON`] も [`QUIT`] も効かない。
+/// **`ui` に `modal.is_some()` を書かせない**ため、ここが答える —— あちらに書くと
+/// 振り分けの規則の写しが 2 本になる。**モーダル自身のキーの案内は各モーダルが
+/// 持っている**（`modals::*` の `HINT`。表に入れるのは `Modal::Help` のタスク）。
+pub fn live(state: &AppState) -> Option<&'static [KeyHint]> {
+    if state.modal.is_some() {
+        return None;
+    }
+    Some(pane(state.focus))
+}
 
 /// そのペインで押せるキー。
 ///

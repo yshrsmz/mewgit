@@ -304,8 +304,9 @@ pub(super) fn log_loaded(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        commit, commit_loads, cursor, detail_ok, diff_ok, fake_diff, more, page_loaded, press,
-        press_code, reload, state, state_with_commits, state_with_page, ROWS,
+        commit, commit_loads, cursor, detail_ok, diff_ok, fake_diff, files_loaded, files_of,
+        files_ok, more, on_first_commit, page_loaded, press, press_code, reload, state,
+        state_with_commits, state_with_page, ROWS,
     };
     use super::super::worktree::COMMIT_DIFF;
     use super::super::{init, update};
@@ -478,20 +479,6 @@ mod tests {
 
         assert_eq!(state.graph.cursor, 19);
         assert_eq!(state.graph.scroll, 1);
-    }
-
-    /// `n` 件を積み、1 件目のコミットにカーソルを乗せて詳細と一覧が届いた状態。
-    ///
-    /// 起動直後のカーソルは WIP 行なので、`j` を 1 回打って乗せる。**一覧も届ける。**
-    /// 届けないと `JobKind::LoadCommitFiles` が走ったままになり、以後の
-    /// `Cmd::LoadCommitFiles` が `issue` に落とされて、テストが見ているのが
-    /// 「出なかった」なのか「落とされた」なのか判らなくなる。
-    fn on_first_commit(n: usize) -> AppState {
-        let mut state = state_with_commits(n);
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
-        let _ = update(&mut state, detail_ok(0));
-        let _ = update(&mut state, files_ok(0));
-        state
     }
 
     /// 索引 `index` のコミットの詳細が失敗した [`Msg`]。
@@ -802,30 +789,9 @@ mod tests {
         assert!(state.graph.files_failed.is_none());
     }
 
-    /// 索引 `index` のコミットのファイル一覧が届いた [`Msg`]。中身は `a.txt` 1 件。
-    fn files_ok(index: u8) -> Msg {
-        files_of(index, &["a.txt"])
-    }
-
-    /// `paths` を `Modified` で並べたファイル一覧が届いた [`Msg`]。
-    fn files_of(index: u8, paths: &[&str]) -> Msg {
-        let entries = paths
-            .iter()
-            .map(|path| fake_entry(path, FileStatus::Modified))
-            .collect();
-        files_loaded(index, Ok(entries))
-    }
-
     /// 索引 `index` のコミットのファイル一覧が失敗した [`Msg`]。
     fn files_err(index: u8) -> Msg {
         files_loaded(index, Err(GitReadError::NonUtf8Head))
-    }
-
-    fn files_loaded(index: u8, result: Result<Vec<FileEntry>, GitReadError>) -> Msg {
-        Msg::CommitFilesLoaded {
-            oid: fake_oid(index),
-            result: Box::new(result),
-        }
     }
 
     #[test]

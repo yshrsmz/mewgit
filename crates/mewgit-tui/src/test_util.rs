@@ -46,6 +46,26 @@ fn unquote(line: &str) -> &str {
 /// `TestBackend` が隠れたセルを報告するときの区切り。閉じ `"` を含む。
 const HIDDEN_CELLS: &str = "\" Hidden by multi-width symbols:";
 
+/// 描いた通知の行（フッターの 1 行目）。
+///
+/// **取り出しはここ 1 本。** `height - 2` を各テストが持つと、フッターの高さや置き場所を
+/// 変えたときに一斉に嘘になる。**行番号は `ui::footer` から出す**（`ui::pane_area` と
+/// 同じ理由）。**`ui` の `mod tests` ではなくここに置く** —— `runtime` のテストも
+/// 通知の行を見る（テストの共有先は `test_util`。`CLAUDE.md`）。
+pub fn notice_bar(state: &AppState, size: TermSize) -> String {
+    footer_row(state, size, 0)
+}
+
+/// 描いたキーヒントの行（フッターの 2 行目）。
+pub fn hint_bar(state: &AppState, size: TermSize) -> String {
+    footer_row(state, size, 1)
+}
+
+fn footer_row(state: &AppState, size: TermSize, row: usize) -> String {
+    let y = ui::footer(size)[row].y as usize;
+    draw(state, size)[y].clone()
+}
+
 /// `needle` を含む行が何行目か。無ければ panic する。
 ///
 /// 桁や行を直に書かない。レイアウトを変えたときにテストだけ古い座標を持つのを避ける

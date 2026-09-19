@@ -1941,14 +1941,16 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 pub struct KeyHint { /* 非公開 */ }
 
 impl KeyHint {
-    pub fn keys(&self) -> &'static [Key];   // 案内に出すキー（`j` と `k` のように複数）
-    pub fn label(&self) -> &'static str;    // 何が起きるか
+    pub fn keys(&self) -> &[Key];        // 案内に出すキー（`j` と `k` のように複数）
+    pub fn label(&self) -> &'static str; // 何が起きるか
 }
 
 /// 終了。幅が足りなくても落とさない（07）。
 pub const QUIT: KeyHint;
 /// どのペインでも効くキー（`f` / `p` / `P` / `A`）。幅が余るペインでだけ出す。
 pub const COMMON: &[KeyHint];
+/// **いま**押せるペインのキー。`None` は「この表のどれも押せない」（モーダル表示中）。
+pub fn live(state: &AppState) -> Option<&'static [KeyHint]>;
 /// そのペインで押せるキー。網羅 `match` なので、`Pane` を足すと実装漏れが落ちる。
 pub fn pane(pane: Pane) -> &'static [KeyHint];
 ```
@@ -1966,6 +1968,16 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
 - **押して無反応なキーを表に入れない見張り**は `every_hinted_key_does_something`
   （`update` を通して 1 打鍵ずつ叩き、`Cmd` か `AppState` が動くことを見る）。
   `update_key` の `match` に対する 2 本目の一覧なので、**表だけが古くなる形を塞ぐ**
+- **「いま押せるか」に答えるのは [`live`] のほう。** モーダル表示中はキーを全部モーダルが
+  受けるので（上の「キー入力」）、ペインのキーも `COMMON` も `QUIT` も効かない。
+  **`ui` に `modal.is_some()` を書かせない** —— 書くと振り分けの規則の写しが 2 本になる
+- **表はまだ「どのキーか」と「何と書くか」しか持っていない。** dispatch と突き合わせる
+  **アクションの同一性が無い**ので、上の見張りが「表 → dispatch」の片側しか見られない。
+  `config.keymap`（08）はアクション名（`fetch = "f"`）で書くので、**`label` は鍵にならない**
+  （`移動` / `切替` / `破棄` はどのアクション名とも一致しない）。**上書きを入れるより先に
+  表へアクションを足す**（`docs/plan.md` の `config.keymap` の行）。足せば
+  `Key → Action` の引きと `match action` の網羅で両方向が見られるようになり、この節の
+  見張りと `hinted_state` は要らなくなる
 
 ## Msg
 

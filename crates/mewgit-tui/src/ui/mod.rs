@@ -11,6 +11,7 @@ pub mod theme;
 pub mod time;
 
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::Path;
 
@@ -27,7 +28,7 @@ use ratatui::Frame;
 
 /// 1 フレーム描く。
 pub fn render(frame: &mut Frame, state: &AppState) {
-    let [header, body, status] = split(frame.area());
+    let [header, body, notice, hints] = split(frame.area());
     let [left, right] = split_body(body);
 
     frame.render_widget(header_line(state, header.width), header);
@@ -57,7 +58,6 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         GraphSelection::Wip => panes::worktree::render(frame, right, state),
         GraphSelection::Commit(line) => panes::commit::render(frame, right, state, &line.commit),
     }
-    let [notice, hints] = split_footer(status);
     frame.render_widget(notice_line(state), notice);
     frame.render_widget(hint_line(state, hints.width), hints);
 
@@ -185,7 +185,7 @@ pub fn pick_charset(glyphs: (&'static str, &'static str), ascii: bool) -> &'stat
 /// 見て緑のまま無意味になることがない。
 #[cfg(test)]
 pub fn pane_area(pane: Pane, size: TermSize, state: &AppState) -> Rect {
-    let [_, body, _] = split(Rect::new(0, 0, size.width, size.height));
+    let [_, body, _, _] = split(Rect::new(0, 0, size.width, size.height));
     let [left, right] = split_body(body);
     // 右列は上のタブとその下に割れている。割る位置も実際の関数から出す。
     let [top, below] = split_right(state, &panes::TopPane::build(state), right);
@@ -276,24 +276,30 @@ fn mark(status: FileStatus) -> char {
     }
 }
 
-/// 画面をヘッダ / 本文 / ステータスバーに割る。
-fn split(area: Rect) -> [Rect; 3] {
+/// 画面をヘッダ / 本文 / フッター 2 行に割る。
+///
+/// **フッターは固定 2 行**（1 行目が通知、2 行目がキーヒント。07 の「ステータスバー」）。
+/// **中身で高さを変えない** —— 変えると [`graph_rows`] が動き、通知が 1 件出るだけで
+/// ログの読み直しが走る（01 の「グラフの行」）。**2 行を 1 本の `Layout` で割る**のは、
+/// 「フッターは何行か」を 2 箇所に書かないため。
+fn split(area: Rect) -> [Rect; 4] {
     Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(FOOTER_ROWS),
+        Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .areas(area)
 }
 
-/// フッターの行数。**中身で変えない**（07 の「ステータスバー」）—— 変えると
-/// `ui::graph_rows` が動き、通知が 1 件出るだけでログの読み直しが走る（01 の
-/// 「グラフの行」）。
-const FOOTER_ROWS: u16 = 2;
-
-/// フッターを通知の行とキーヒントの行に割る。
-fn split_footer(area: Rect) -> [Rect; 2] {
-    Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area)
+/// フッターの 2 行（1 行目が通知、2 行目がキーヒント）。テスト用。
+///
+/// **行番号を手で書かせない**（[`pane_area`] と同じ理由）。`height - 2` を各テストが
+/// 持つと、フッターの高さや置き場所を変えたときに一斉に嘘になる。
+#[cfg(test)]
+pub fn footer(term: TermSize) -> [Rect; 2] {
+    let [_, _, notice, hints] = split(Rect::new(0, 0, term.width, term.height));
+    [notice, hints]
 }
 
 /// グラフの行に使える行数。
@@ -306,7 +312,7 @@ fn split_footer(area: Rect) -> [Rect; 2] {
 /// 引数にあり、`Enter` を押すだけで行数が変わっていた。詳細を右ペインへ移して
 /// この依存は消えている（07 の「CommitDetail ペイン」）。
 pub fn graph_rows(term: TermSize) -> usize {
-    let [_, body, _] = split(Rect::new(0, 0, term.width, term.height));
+    let [_, body, _, _] = split(Rect::new(0, 0, term.width, term.height));
     let [left, _] = split_body(body);
     panes::graph::area(left).height as usize
 }
@@ -360,10 +366,14 @@ fn quota_fits(spans: &[Span<'_>], quota: &Span<'_>, spinner: usize, width: u16) 
     left + sep + quota.width() + sep + spinner <= width as usize
 }
 
-/// ヘッダの要素の区切り。**1 セルだと隣の語と地続きに見える。**
+/// 1 行に並べる要素の区切り。**1 セルだと隣の語と地続きに見える。**
 ///
 /// 組む側（`Span::raw(SEP)`）と数える側（[`quota_fits`]）が同じものを読む ——
 /// 幅だけを定数にすると、区切りを広げたときに数えるほうが 2 のまま残る。
+///
+/// **ヘッダとフッターで同じものを使う** —— ヘッダの `[api: …]` の手前と、キーヒントの
+/// 群（ペインのキー / 共通キー / `q:quit`）のあいだ。1 行の中で 2 通りの空きがあると、
+/// 幅を詰める判断がどちらの側の話か読めなくなる。
 const SEP: &str = "  ";
 
 /// ヘッダの `[api: …]`。GitHub API の残量（07 の「ヘッダ」）。
@@ -504,14 +514,12 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
 ///
 /// **幅いっぱい使ってよい**（キーヒントは 2 行目）。案内文がその予算に収まることは
 /// `app` 側が見張る（01 の「失敗の案内文」）。
+///
+/// 出すのは先頭行だけ。toml のパースエラーのように複数行のメッセージがあり、そのまま
+/// 流すと改行が消えて読めなくなる。全文は `Notice.message` に残っている（履歴表示は M6）。
 fn notice_line(state: &AppState) -> Paragraph<'_> {
-    let Some(notice) = state.notices.back() else {
-        return Paragraph::new("");
-    };
-    // 1 行しか無いので先頭行だけ。toml のパースエラーのように複数行のメッセージが
-    // あり、そのまま流すと改行が消えて読めなくなる。全文は notice.message に
-    // 残っている（履歴表示は M6）。
-    Paragraph::new(Line::raw(first_line(&notice.message)))
+    let message = state.notices.back().map_or("", |n| first_line(&n.message));
+    Paragraph::new(Line::raw(message))
 }
 
 /// 最初の行。改行が無ければ全体。
@@ -519,103 +527,119 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
 }
 
-/// フッターの 2 行目。フォーカス中のペインで押せるキー（07 の「ステータスバー」）。
+/// フッターの 2 行目。いま押せるキー（07 の「ステータスバー」）。
 ///
-/// **モーダル表示中は空。** キーはモーダルが受けるので、ここに出すものは 1 つも
-/// 効かない（モーダルは箱の中に自前の案内を持っている）。
+/// **「いま押せるか」を答えるのは core**（[`keys::live`]）。モーダル表示中に全部が
+/// 効かなくなるのは `update_key` の振り分けの話で、ここで `modal.is_some()` を見ると
+/// その知識の写しが `ui` にできる。
 fn hint_line(state: &AppState, width: u16) -> Paragraph<'static> {
-    if state.modal.is_some() {
+    let Some(pane) = keys::live(state) else {
         return Paragraph::new("");
-    }
-    Paragraph::new(Line::raw(hint_text(keys::pane(state.focus), width)))
+    };
+    // **`Line::raw(String)` に渡さない。** あちらは `Cow::Owned` を `Span` に割るときに
+    // 中身をもう 1 本作り直す（`ratatui-core` の `cow_to_spans` で確認）。
+    Paragraph::new(Line::from(Span::raw(hint_text(pane, width))))
 }
 
 /// `width` に収まるヒントの並び。
 ///
 /// 落とす順は**共通キー → ペインのキーの末尾**で、`q:quit` は落とさない（07）。
-/// **収まるかは `Line::width` で見る** —— ラベルに全角が混じるので、文字数では
-/// 数えられない。
+///
+/// **収まるかは組んだ字から数える。** 幅だけを別に算術で出すと、組む側と数える側で
+/// 規則が 2 本になる（`CLAUDE.md` の「出力を 1 本にしても入力が 2 本なら結果はずれる」）。
+/// そのぶん 1 フレームで数十の `String` を捨てるが、描画は 250ms ごとなので実測は
+/// µs の桁（幅が足りないときに落とす回数だけ組み直す）。
 fn hint_text(pane: &[KeyHint], width: u16) -> String {
-    let quit = shown(&keys::QUIT);
-    let common = joined(keys::COMMON);
-    let mut pane: Vec<String> = pane.iter().map(shown).collect();
-
-    let line = |pane: &[String], common: Option<&str>| {
-        let mut groups: Vec<&str> = Vec::new();
-        let pane = pane.join(KEY_GAP);
-        if !pane.is_empty() {
-            groups.push(&pane);
-        }
-        groups.extend(common);
-        groups.push(&quit);
-        groups.join(GROUP_GAP)
+    let line = |pane: &[KeyHint], common: &[KeyHint]| {
+        let groups = [joined(pane), joined(common), joined(&[keys::QUIT])];
+        groups
+            .iter()
+            .filter(|group| !group.is_empty())
+            .fold(String::new(), |mut out, group| {
+                if !out.is_empty() {
+                    out.push_str(SEP);
+                }
+                out.push_str(group);
+                out
+            })
     };
 
-    let with_common = line(&pane, Some(&common));
-    if fits(&with_common, width) {
-        return with_common;
+    // 共通キーまで出せるなら出す。
+    let full = line(pane, keys::COMMON);
+    if fits(&full, width) {
+        return full;
     }
+    // 入らなければ共通キーを落とし、それでも入らなければペインのキーを末尾から。
+    let mut keep = pane.len();
     loop {
-        let without = line(&pane, None);
-        if fits(&without, width) || pane.is_empty() {
-            return without;
+        let text = line(&pane[..keep], &[]);
+        if keep == 0 || fits(&text, width) {
+            return text;
         }
-        pane.pop();
+        keep -= 1;
     }
 }
 
-/// 1 つの案内を描いた字（`j/k:移動`）。
-///
-/// **表示の字を組むのはここだけ。** 表（`app::keys`）はキーしか持たない（01）。
-fn shown(hint: &KeyHint) -> String {
-    let keys: Vec<Cow<'static, str>> = hint.keys().iter().map(key_label).collect();
-    format!("{}:{}", keys.join("/"), hint.label())
+/// 案内をキーの空白で繋いだ字（`j/k:移動 Enter:差分`）。
+fn joined(hints: &[KeyHint]) -> String {
+    hints.iter().fold(String::new(), |mut out, hint| {
+        if !out.is_empty() {
+            out.push_str(KEY_GAP);
+        }
+        push_hint(&mut out, hint);
+        out
+    })
 }
 
-fn joined(hints: &[KeyHint]) -> String {
-    hints.iter().map(shown).collect::<Vec<_>>().join(KEY_GAP)
+/// 案内 1 つの字（`j/k:移動`）を `out` に足す。
+///
+/// **フッターの 2 行目を組むのはここだけ。** 表（`app::keys`）はキーしか持たない（01）。
+/// **モーダルは自前の `HINT` を持っている**（`modals::*`。あちらは箱の中で予算が違う）ので、
+/// 綴りが 2 通りある —— 揃えるのは `Modal::Help` のタスク（07 の「ステータスバー」）。
+fn push_hint(out: &mut String, hint: &KeyHint) {
+    for (i, key) in hint.keys().iter().enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        push_key(out, key);
+    }
+    out.push(':');
+    out.push_str(hint.label());
 }
 
 /// キー 1 つの字。
 ///
 /// **`Key` 全体を見る**（`KeyCode` だけでは `Ctrl-C` と `c` が同じ字になる）。
-fn key_label(key: &Key) -> Cow<'static, str> {
-    let code = match key.code() {
-        KeyCode::Char(c) => Cow::Owned(c.to_string()),
-        KeyCode::Enter => Cow::Borrowed("Enter"),
-        KeyCode::Esc => Cow::Borrowed("Esc"),
-        KeyCode::Tab => Cow::Borrowed("Tab"),
-        KeyCode::BackTab => Cow::Borrowed("Shift+Tab"),
-        KeyCode::Backspace => Cow::Borrowed("Backspace"),
-        KeyCode::Delete => Cow::Borrowed("Del"),
-        KeyCode::Insert => Cow::Borrowed("Ins"),
-        KeyCode::Left => Cow::Borrowed("←"),
-        KeyCode::Right => Cow::Borrowed("→"),
-        KeyCode::Up => Cow::Borrowed("↑"),
-        KeyCode::Down => Cow::Borrowed("↓"),
-        KeyCode::Home => Cow::Borrowed("Home"),
-        KeyCode::End => Cow::Borrowed("End"),
-        KeyCode::PageUp => Cow::Borrowed("PageUp"),
-        KeyCode::PageDown => Cow::Borrowed("PageDown"),
-        KeyCode::F(n) => Cow::Owned(format!("F{n}")),
-    };
+fn push_key(out: &mut String, key: &Key) {
     let mods = key.mods();
-    match (mods.ctrl, mods.alt) {
-        (false, false) => code,
-        (true, false) => Cow::Owned(format!("Ctrl-{code}")),
-        (false, true) => Cow::Owned(format!("Alt-{code}")),
-        (true, true) => Cow::Owned(format!("Ctrl-Alt-{code}")),
+    if mods.ctrl {
+        out.push_str("Ctrl-");
+    }
+    if mods.alt {
+        out.push_str("Alt-");
+    }
+    match key.code() {
+        KeyCode::Char(c) => out.push(c),
+        KeyCode::Enter => out.push_str("Enter"),
+        KeyCode::Esc => out.push_str("Esc"),
+        // **表に入っているのはこの 3 つだけ**（`app::keys`）。`Tab` / `Ctrl-C` を足すのは
+        // `Modal::Help` のタスクなので、**字を先に書かない** —— 書いても描かれないので
+        // 間違っていても見えない（`Debug` の字が出る形にしてある）。
+        other => {
+            let _ = write!(out, "{other:?}");
+        }
     }
 }
 
 /// 案内どうしの空白。
 const KEY_GAP: &str = " ";
 
-/// 群（ペインのキー / 共通キー / `q:quit`）のあいだの空白。
-const GROUP_GAP: &str = "  ";
-
+/// 幅 `width` に収まるか。
+///
+/// **`Line` を通さない。** あちらは幅を測るためだけに `Vec<Span>` を 1 本確保する
+/// （`modals::cursor_col` と同じ理由）。
 fn fits(text: &str, width: u16) -> bool {
-    Line::raw(text).width() <= width as usize
+    Span::raw(text).width() <= width as usize
 }
 
 /// リポジトリの表示名。パスの末尾を使い、取れなければパスそのもの。
@@ -628,8 +652,10 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{degraded_label, file_row, pane_area, window, wrapped, FOOTER_ROWS};
-    use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
+    use super::{degraded_label, file_row, pane_area, window, wrapped};
+    use crate::test_util::{
+        draw, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status, terminal_with,
+    };
     use mewgit_core::app::{
         update, AppState, Cmd, JobKind, Modal, Msg, NoticeLevel, Pane, TargetState, TermSize,
     };
@@ -1103,8 +1129,8 @@ mod tests {
 
     /// 描いたヘッダ（最上行）。
     ///
-    /// **取り出しはここ 1 本。** `status_bar` と同じ理由で、ヘッダの位置や高さが
-    /// 変わる（M6 の狭いレイアウト）と、各テストが持っている `[0]` が一斉に嘘になる。
+    /// **取り出しはここ 1 本。** `test_util::notice_bar` と同じ理由で、ヘッダの位置や
+    /// 高さが変わる（M6 の狭いレイアウト）と、各テストが持っている `[0]` が一斉に嘘になる。
     fn header(state: &AppState, size: TermSize) -> String {
         draw(state, size)[0].clone()
     }
@@ -1141,19 +1167,6 @@ mod tests {
         assert_ne!(header_while_fetching(0), header_while_fetching(1));
         // 一周して戻る。溢れても止まらない（`tick` は `wrapping_add`）。
         assert_eq!(header_while_fetching(0), header_while_fetching(8));
-    }
-
-    /// 描いた通知の行（フッターの 1 行目）。
-    ///
-    /// **取り出しはここ 1 本。** フッターの置き場所や高さが変わると、各テストが
-    /// 持っている `height - 2` が一斉に嘘になる。
-    fn notice_bar(state: &AppState, size: TermSize) -> String {
-        draw(state, size)[size.height as usize - FOOTER_ROWS as usize].clone()
-    }
-
-    /// 描いたキーヒントの行（フッターの 2 行目 = 最下行）。
-    fn hint_bar(state: &AppState, size: TermSize) -> String {
-        draw(state, size)[size.height as usize - 1].clone()
     }
 
     /// 通知を 1 件だけ積んで描いた通知の行。既定サイズ（80x24）で見る。
@@ -1213,12 +1226,10 @@ mod tests {
     }
 
     #[test]
-    fn the_common_keys_show_only_where_the_pane_keys_leave_room() {
-        // 幅 80 では Graph に共通キーぶんの余りがあり、Worktree には無い
-        // （**セル数の表は 07 の「ステータスバー」の 1 本**。ここに写すと腐る）。
-        let graph = hint_bar_of(Pane::Graph, 80);
-        assert!(graph.contains("f:fetch"), "hints: {graph:?}");
-
+    fn the_common_keys_drop_where_the_pane_keys_fill_the_line() {
+        // 幅 80 では Worktree のキーだけで 1 行が埋まる（**セル数の表は 07 の
+        // 「ステータスバー」の 1 本**。ここに写すと腐る）。**出る側は下の境目の
+        // テストが見る** —— 両方で見ると、同じことを 2 箇所で数えることになる。
         let worktree = hint_bar_of(Pane::Worktree, 80);
         assert!(!worktree.contains("f:fetch"), "hints: {worktree:?}");
         // 落とすのは共通キーのほうで、ペインのキーは残る（07）。

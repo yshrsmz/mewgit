@@ -687,6 +687,7 @@ mod tests {
         fake_account, fake_ambiguous, fake_rate_limit, fake_snapshot, fetch_pr_details,
     };
     use ratatui::style::{Color, Modifier};
+    use ratatui::text::Span;
 
     #[test]
     fn a_file_row_puts_the_status_letter_before_the_path() {
@@ -1276,6 +1277,29 @@ mod tests {
         assert!(!over.contains("f:fetch"), "hints: {over:?}");
         assert!(over.contains("n:ブランチ作成"), "hints: {over:?}");
         assert!(over.contains("q:quit"), "hints: {over:?}");
+    }
+
+    #[test]
+    fn the_prs_pane_keeps_the_common_keys_at_eighty_with_room_to_spare() {
+        // **キーを 1 つ足した回に、Prs が「共通キーの出る側」から落ちていないか。**
+        // 上の境目のテストは落とす仕組みを見ていて、**どのペインがどちら側に居るかは
+        // 見ていない**（07 のセル数の表がそれを言っている）。
+        let prs = hint_bar_of(Pane::Prs, 80);
+        assert!(prs.contains("r:更新"), "hints: {prs:?}");
+        assert!(prs.contains("f:fetch"), "hints: {prs:?}");
+
+        // **余白まで見る**（#80）。`contains` だけだと、80 桁をちょうど埋めた状態でも
+        // 通り、1 桁伸びた瞬間に共通キーが落ちることが見えない。
+        let width = Span::raw(prs.trim_end()).width() as u16;
+        assert!(width < 80, "80 桁で余白がありません: {prs:?}");
+
+        // **境目は組んだ字から数える**（07 の表をここに写すと腐る。上のテストと同じ
+        // 理由）。ちょうどの幅では出て、1 桁狭いと落ちる。
+        let fits = hint_bar_of(Pane::Prs, width);
+        assert!(fits.contains("f:fetch"), "hints: {fits:?}");
+        let over = hint_bar_of(Pane::Prs, width - 1);
+        assert!(!over.contains("f:fetch"), "hints: {over:?}");
+        assert!(over.contains("Esc:戻る"), "hints: {over:?}");
     }
 
     #[test]

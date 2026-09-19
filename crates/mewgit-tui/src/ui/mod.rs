@@ -673,7 +673,7 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{degraded_label, file_row, pane_area, window, wrapped};
+    use super::{degraded_label, file_row, fits, pane_area, window, wrapped};
     use crate::test_util::{
         draw, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status, terminal_with,
     };
@@ -687,7 +687,6 @@ mod tests {
         fake_account, fake_ambiguous, fake_rate_limit, fake_snapshot, fetch_pr_details,
     };
     use ratatui::style::{Color, Modifier};
-    use ratatui::text::Span;
 
     #[test]
     fn a_file_row_puts_the_status_letter_before_the_path() {
@@ -1289,17 +1288,10 @@ mod tests {
         assert!(prs.contains("f:fetch"), "hints: {prs:?}");
 
         // **余白まで見る**（#80）。`contains` だけだと、80 桁をちょうど埋めた状態でも
-        // 通り、1 桁伸びた瞬間に共通キーが落ちることが見えない。
-        let width = Span::raw(prs.trim_end()).width() as u16;
-        assert!(width < 80, "80 桁で余白がありません: {prs:?}");
-
-        // **境目は組んだ字から数える**（07 の表をここに写すと腐る。上のテストと同じ
-        // 理由）。ちょうどの幅では出て、1 桁狭いと落ちる。
-        let fits = hint_bar_of(Pane::Prs, width);
-        assert!(fits.contains("f:fetch"), "hints: {fits:?}");
-        let over = hint_bar_of(Pane::Prs, width - 1);
-        assert!(!over.contains("f:fetch"), "hints: {over:?}");
-        assert!(over.contains("Esc:戻る"), "hints: {over:?}");
+        // 通り、1 桁伸びた瞬間に共通キーが落ちることが見えない。**落とす仕組みの
+        // 境目は上のテストが見る** —— `hint_text` はどのペインかで分岐しないので、
+        // ここで跨ぎ直すと同じことを 2 箇所で数えることになる。
+        assert!(fits(prs.trim_end(), 79), "80 桁で余白がありません: {prs:?}");
     }
 
     #[test]

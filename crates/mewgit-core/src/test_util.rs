@@ -895,6 +895,29 @@ pub fn deliver_pr_details(
     answers: &[(u64, &str, Result<PrDetail, GithubError>)],
     aborted: Option<GithubError>,
 ) -> Cmd {
+    let (epoch, targets) = start_pr_details(state, ask, answers);
+    update(
+        state,
+        Msg::PrDetailsFinished {
+            epoch,
+            aborted: aborted.map(|err| (err, targets)),
+        },
+    )
+}
+
+/// 扇形を発行して答えを届けるところまで。**終端は送らない**ので、ジョブは走ったまま。
+///
+/// **[`deliver_pr_details`] から割った前半。** 「走っている最中に何かを押す」経路を
+/// 踏むテストが 2 人目の利用者になったので寄せた（`CLAUDE.md` の「2 つ目の利用者が
+/// 出た時点で共有先を作る」）。手で組み直すと、`AppState::issue` を通す理由
+/// （[`reply`] の doc）の写しがもう 1 本増える。
+///
+/// 返すのは `ask` が刻んだ世代と対象 —— 終端を送るのに要る。
+pub fn start_pr_details(
+    state: &mut AppState,
+    ask: Cmd,
+    answers: &[(u64, &str, Result<PrDetail, GithubError>)],
+) -> (u64, Vec<(u64, String)>) {
     let Cmd::FetchPrDetails { epoch, targets } = ask.clone() else {
         panic!("扇形の `Cmd` ではありません: {ask:?}");
     };
@@ -912,13 +935,7 @@ pub fn deliver_pr_details(
             },
         );
     }
-    update(
-        state,
-        Msg::PrDetailsFinished {
-            epoch,
-            aborted: aborted.map(|err| (err, targets)),
-        },
-    )
+    (epoch, targets)
 }
 
 /// アカウントと対象が決まり、HEAD が `branch` に居る状態にする。

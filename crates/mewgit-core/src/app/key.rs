@@ -44,11 +44,30 @@ pub enum KeyCode {
 ///
 /// `shift` は矢印や `Home` など、文字を持たず専用のキーコードも無いキーの修飾にだけ
 /// 残る。`Char` と `Tab` は [`Key::with_mods`] が正規化するので `shift` は立たない。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Modifiers {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+}
+
+impl Modifiers {
+    /// 修飾なし。
+    ///
+    /// **`Default` の const 版ではなく、`Default` がこちらを返す。** `const fn` から
+    /// `Default::default()` は呼べず（trait のメソッド）、両方に値を書くと「修飾なし」が
+    /// 2 箇所になる。
+    pub const NONE: Self = Self {
+        ctrl: false,
+        alt: false,
+        shift: false,
+    };
+}
+
+impl Default for Modifiers {
+    fn default() -> Self {
+        Self::NONE
+    }
 }
 
 impl Key {
@@ -60,7 +79,9 @@ impl Key {
     /// - Shift+Tab は端末が `BackTab` + SHIFT として送ってくる。`Tab` + shift と
     ///   `BackTab` + shift と `BackTab` の 3 通りができてしまうので、`BackTab`
     ///   （修飾なし）に寄せる
-    pub fn with_mods(code: KeyCode, mods: Modifiers) -> Self {
+    ///
+    /// **`const fn`。** 案内に出すキーの表（`app::keys`。01）を `const` で組むため。
+    pub const fn with_mods(code: KeyCode, mods: Modifiers) -> Self {
         let without_shift = Modifiers {
             shift: false,
             ..mods
@@ -75,31 +96,31 @@ impl Key {
     }
 
     /// 修飾なしのキー。
-    pub fn new(code: KeyCode) -> Self {
-        Self::with_mods(code, Modifiers::default())
+    pub const fn new(code: KeyCode) -> Self {
+        Self::with_mods(code, Modifiers::NONE)
     }
 
     /// 修飾なしの文字キー。
-    pub fn char(c: char) -> Self {
+    pub const fn char(c: char) -> Self {
         Self::new(KeyCode::Char(c))
     }
 
     /// `Ctrl` + 文字。
-    pub fn ctrl(c: char) -> Self {
+    pub const fn ctrl(c: char) -> Self {
         Self::with_mods(
             KeyCode::Char(c),
             Modifiers {
                 ctrl: true,
-                ..Modifiers::default()
+                ..Modifiers::NONE
             },
         )
     }
 
-    pub fn code(&self) -> KeyCode {
+    pub const fn code(&self) -> KeyCode {
         self.code
     }
 
-    pub fn mods(&self) -> Modifiers {
+    pub const fn mods(&self) -> Modifiers {
         self.mods
     }
 }

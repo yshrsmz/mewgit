@@ -161,8 +161,8 @@ pub(super) fn diff_loaded(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        diff_ok, exec_done, fake_diff, fake_output, only_staged, open_confirm, press, press_code,
-        worktree_state,
+        diff_ok, diff_pane, diff_state, exec_done, fake_diff, fake_output, only_staged,
+        open_confirm, press, press_code, worktree_state,
     };
     use super::super::update;
     use super::super::worktree::NOT_LATEST;
@@ -184,29 +184,6 @@ mod tests {
             target,
             result: Box::new(Err(GitReadError::NonUtf8Head)),
         }
-    }
-
-    /// Diff ペインを開き、`paths[0]` の diff が `hunks` 個のハンクで届いた状態。
-    fn diff_state(paths: &[&str], hunks: usize) -> AppState {
-        diff_pane(WorktreeSection::Unstaged, paths, fake_diff(paths[0], hunks))
-    }
-
-    /// Diff ペインを開き、`files` が届いた状態。
-    ///
-    /// **Diff ペインの立ち上げはここ 1 本。** 「worktree の状態を作る → `Enter` →
-    /// `diff_ok`」を 2 箇所に書くと、片方だけ直したときに差が出る。
-    fn diff_pane(section: WorktreeSection, paths: &[&str], files: Vec<FileDiff>) -> AppState {
-        let snapshot = match section {
-            WorktreeSection::Staged => fake_snapshot(paths, &[], &[]),
-            WorktreeSection::Unstaged => fake_snapshot(&[], paths, &[]),
-            WorktreeSection::Untracked => fake_snapshot(&[], &[], paths),
-            WorktreeSection::Conflicted => panic!("conflicted は diff を出さない"),
-        };
-        let mut state = worktree_state(snapshot, section);
-        let _ = press_code(&mut state, KeyCode::Enter);
-        let target = state.wanted_diff().expect("対象が決まっていません");
-        let _ = update(&mut state, diff_ok(target, files));
-        state
     }
 
     #[test]

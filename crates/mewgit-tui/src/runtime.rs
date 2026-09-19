@@ -1163,13 +1163,13 @@ mod tests {
         assert!(!state.jobs.is_running(JobKind::OpenPr));
     }
 
-    /// `no_material` が出す通知がステータスバーに収まる（01 の「失敗の案内文」の 72 セル）。
+    /// `no_material` が出す通知がフッターの 1 行目に収まる（01 の「失敗の案内文」）。
     ///
     /// **通知の新しい産出元なので、既存の見張りは自分では拾わない**（`CLAUDE.md` の
     /// 「共有した見張りは新しい産出元を自分では拾わない」）。**範囲は実装側の集合から
     /// 導かずに並べる**（#54 の裏返し）—— 腕を足したらここにも足す。
     #[test]
-    fn every_notice_that_a_missing_material_prints_fits_the_status_bar() {
+    fn every_notice_that_a_missing_material_prints_fits_the_notice_line() {
         let repo = TestRepo::init();
         let (mut state, _reader) = opened(&repo);
         let cases = [
@@ -1183,11 +1183,10 @@ mod tests {
             let _ = no_material(&mut state, kind, name);
             let message = state.notices[0].message.clone();
             // **収まることを直に見る。** `contains` は末尾が切れても通る（#80）。
-            let last = crate::test_util::draw(&state, TermSize::default())
-                .pop()
-                .expect("最下行がある");
-            assert!(last.contains(&message), "{name}: {last:?}");
-            assert!(last.contains("q:quit"), "{name}: {last:?}");
+            // **見るのは 1 行目**（最下行はキーヒント。07 の「ステータスバー」）。
+            let lines = crate::test_util::draw(&state, TermSize::default());
+            let notice = lines[lines.len() - 2].clone();
+            assert!(notice.contains(&message), "{name}: {notice:?}");
         }
     }
 

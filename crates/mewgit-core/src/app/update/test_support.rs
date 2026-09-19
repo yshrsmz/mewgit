@@ -121,6 +121,33 @@ pub(super) fn fake_diff(path: &str, hunks: usize) -> Vec<FileDiff> {
     vec![fake_file_diff(path, hunks)]
 }
 
+/// Diff ペインを開き、`paths[0]` の diff が `hunks` 個のハンクで届いた状態。
+pub(super) fn diff_state(paths: &[&str], hunks: usize) -> AppState {
+    diff_pane(WorktreeSection::Unstaged, paths, fake_diff(paths[0], hunks))
+}
+
+/// Diff ペインを開き、`files` が届いた状態。
+///
+/// **Diff ペインの立ち上げはここ 1 本。** 「worktree の状態を作る → `Enter` →
+/// `diff_ok`」を 2 箇所に書くと、片方だけ直したときに差が出る。
+pub(super) fn diff_pane(
+    section: WorktreeSection,
+    paths: &[&str],
+    files: Vec<FileDiff>,
+) -> AppState {
+    let snapshot = match section {
+        WorktreeSection::Staged => fake_snapshot(paths, &[], &[]),
+        WorktreeSection::Unstaged => fake_snapshot(&[], paths, &[]),
+        WorktreeSection::Untracked => fake_snapshot(&[], &[], paths),
+        WorktreeSection::Conflicted => panic!("conflicted は diff を出さない"),
+    };
+    let mut state = worktree_state(snapshot, section);
+    let _ = press_code(&mut state, KeyCode::Enter);
+    let target = state.wanted_diff().expect("対象が決まっていません");
+    let _ = update(&mut state, diff_ok(target, files));
+    state
+}
+
 pub(super) fn diff_ok(target: DiffTarget, files: Vec<FileDiff>) -> Msg {
     Msg::DiffLoaded {
         target,
@@ -310,6 +337,16 @@ pub(super) fn exec_done_of(op: GitOp, result: Result<ExecOutput, ExecError>) -> 
         progress: None,
     }))
 }
+
+/// 通知の要約行の予算（セル）。**端末の幅そのもの**で、80 桁を想定している
+/// （01 の「失敗の案内文」）。フッターの 2 行目がキーヒントなので、1 行目は幅いっぱい
+/// 使える。
+///
+/// **見張りは複数あって、新しい産出元を自分では拾わない**（`CLAUDE.md`）——
+/// `exec_advice` / `A` / `o` / PR の集計が別々に回している。通知を出す場所を足したら、
+/// そこでもこれを見る。**実際に描いて確かめるのは `mewgit-tui` 側**
+/// （`a_notice_of_the_full_width_fits_on_its_own_line`）。
+pub(super) const NOTICE_CELLS: usize = 80;
 
 /// 端末に描いたときの桁数。**案内文は ASCII と日本語だけ**なので、非 ASCII を
 /// 2 桁と数えれば実際の幅と一致する（合成文字や絵文字を入れたらここが嘘になる）。

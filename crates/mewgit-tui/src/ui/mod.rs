@@ -15,7 +15,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use crate::{modals, panes};
-use mewgit_core::app::{AppState, GraphSelection, Pane, TermSize};
+use mewgit_core::app::{keys, AppState, GraphSelection, Key, KeyCode, KeyHint, Pane, TermSize};
 use mewgit_core::auth::{gh, AccountState, DegradedReason};
 use mewgit_core::git_read::{FileEntry, FileStatus};
 use mewgit_core::github::RateLimit;
@@ -57,7 +57,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         GraphSelection::Wip => panes::worktree::render(frame, right, state),
         GraphSelection::Commit(line) => panes::commit::render(frame, right, state, &line.commit),
     }
-    frame.render_widget(status_line(state), status);
+    let [notice, hints] = split_footer(status);
+    frame.render_widget(notice_line(state), notice);
+    frame.render_widget(hint_line(state, hints.width), hints);
 
     // モーダルは最後。下のペインを覆って描く（07）。
     if let Some(modal) = &state.modal {
@@ -279,9 +281,19 @@ fn split(area: Rect) -> [Rect; 3] {
     Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(FOOTER_ROWS),
     ])
     .areas(area)
+}
+
+/// フッターの行数。**中身で変えない**（07 の「ステータスバー」）—— 変えると
+/// `ui::graph_rows` が動き、通知が 1 件出るだけでログの読み直しが走る（01 の
+/// 「グラフの行」）。
+const FOOTER_ROWS: u16 = 2;
+
+/// フッターを通知の行とキーヒントの行に割る。
+fn split_footer(area: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area)
 }
 
 /// グラフの行に使える行数。
@@ -488,21 +500,18 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
     Some(Line::from(spans))
 }
 
-/// ステータスバー。直近の通知とキーヒントの両方を出す。
+/// フッターの 1 行目。直近の通知だけを出す。
 ///
-/// 通知で置き換えないのは、起動時の設定警告が 1 件出るとヒントが二度と戻らなくなるため。
-fn status_line(state: &AppState) -> Paragraph<'_> {
-    let mut spans = Vec::new();
-    if let Some(notice) = state.notices.back() {
-        // 1 行しか無いので先頭行だけ。toml のパースエラーのように複数行の
-        // メッセージがあり、そのまま流すと改行が消えて読めなくなる。
-        // 全文は notice.message に残っている（履歴表示は M6）。
-        spans.push(Span::raw(first_line(&notice.message)));
-        spans.push(Span::raw("  "));
-    }
-    spans.push(Span::raw(HINT));
-
-    Paragraph::new(Line::from(spans))
+/// **幅いっぱい使ってよい**（キーヒントは 2 行目）。案内文がその予算に収まることは
+/// `app` 側が見張る（01 の「失敗の案内文」）。
+fn notice_line(state: &AppState) -> Paragraph<'_> {
+    let Some(notice) = state.notices.back() else {
+        return Paragraph::new("");
+    };
+    // 1 行しか無いので先頭行だけ。toml のパースエラーのように複数行のメッセージが
+    // あり、そのまま流すと改行が消えて読めなくなる。全文は notice.message に
+    // 残っている（履歴表示は M6）。
+    Paragraph::new(Line::raw(first_line(&notice.message)))
 }
 
 /// 最初の行。改行が無ければ全体。
@@ -510,8 +519,104 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
 }
 
-/// ステータスバー右側の固定ヒント。M6 の `Modal::Help` までの暫定。
-const HINT: &str = "q:quit";
+/// フッターの 2 行目。フォーカス中のペインで押せるキー（07 の「ステータスバー」）。
+///
+/// **モーダル表示中は空。** キーはモーダルが受けるので、ここに出すものは 1 つも
+/// 効かない（モーダルは箱の中に自前の案内を持っている）。
+fn hint_line(state: &AppState, width: u16) -> Paragraph<'static> {
+    if state.modal.is_some() {
+        return Paragraph::new("");
+    }
+    Paragraph::new(Line::raw(hint_text(keys::pane(state.focus), width)))
+}
+
+/// `width` に収まるヒントの並び。
+///
+/// 落とす順は**共通キー → ペインのキーの末尾**で、`q:quit` は落とさない（07）。
+/// **収まるかは `Line::width` で見る** —— ラベルに全角が混じるので、文字数では
+/// 数えられない。
+fn hint_text(pane: &[KeyHint], width: u16) -> String {
+    let quit = shown(&keys::QUIT);
+    let common = joined(keys::COMMON);
+    let mut pane: Vec<String> = pane.iter().map(shown).collect();
+
+    let line = |pane: &[String], common: Option<&str>| {
+        let mut groups: Vec<&str> = Vec::new();
+        let pane = pane.join(KEY_GAP);
+        if !pane.is_empty() {
+            groups.push(&pane);
+        }
+        groups.extend(common);
+        groups.push(&quit);
+        groups.join(GROUP_GAP)
+    };
+
+    let with_common = line(&pane, Some(&common));
+    if fits(&with_common, width) {
+        return with_common;
+    }
+    loop {
+        let without = line(&pane, None);
+        if fits(&without, width) || pane.is_empty() {
+            return without;
+        }
+        pane.pop();
+    }
+}
+
+/// 1 つの案内を描いた字（`j/k:移動`）。
+///
+/// **表示の字を組むのはここだけ。** 表（`app::keys`）はキーしか持たない（01）。
+fn shown(hint: &KeyHint) -> String {
+    let keys: Vec<Cow<'static, str>> = hint.keys().iter().map(key_label).collect();
+    format!("{}:{}", keys.join("/"), hint.label())
+}
+
+fn joined(hints: &[KeyHint]) -> String {
+    hints.iter().map(shown).collect::<Vec<_>>().join(KEY_GAP)
+}
+
+/// キー 1 つの字。
+///
+/// **`Key` 全体を見る**（`KeyCode` だけでは `Ctrl-C` と `c` が同じ字になる）。
+fn key_label(key: &Key) -> Cow<'static, str> {
+    let code = match key.code() {
+        KeyCode::Char(c) => Cow::Owned(c.to_string()),
+        KeyCode::Enter => Cow::Borrowed("Enter"),
+        KeyCode::Esc => Cow::Borrowed("Esc"),
+        KeyCode::Tab => Cow::Borrowed("Tab"),
+        KeyCode::BackTab => Cow::Borrowed("Shift+Tab"),
+        KeyCode::Backspace => Cow::Borrowed("Backspace"),
+        KeyCode::Delete => Cow::Borrowed("Del"),
+        KeyCode::Insert => Cow::Borrowed("Ins"),
+        KeyCode::Left => Cow::Borrowed("←"),
+        KeyCode::Right => Cow::Borrowed("→"),
+        KeyCode::Up => Cow::Borrowed("↑"),
+        KeyCode::Down => Cow::Borrowed("↓"),
+        KeyCode::Home => Cow::Borrowed("Home"),
+        KeyCode::End => Cow::Borrowed("End"),
+        KeyCode::PageUp => Cow::Borrowed("PageUp"),
+        KeyCode::PageDown => Cow::Borrowed("PageDown"),
+        KeyCode::F(n) => Cow::Owned(format!("F{n}")),
+    };
+    let mods = key.mods();
+    match (mods.ctrl, mods.alt) {
+        (false, false) => code,
+        (true, false) => Cow::Owned(format!("Ctrl-{code}")),
+        (false, true) => Cow::Owned(format!("Alt-{code}")),
+        (true, true) => Cow::Owned(format!("Ctrl-Alt-{code}")),
+    }
+}
+
+/// 案内どうしの空白。
+const KEY_GAP: &str = " ";
+
+/// 群（ペインのキー / 共通キー / `q:quit`）のあいだの空白。
+const GROUP_GAP: &str = "  ";
+
+fn fits(text: &str, width: u16) -> bool {
+    Line::raw(text).width() <= width as usize
+}
 
 /// リポジトリの表示名。パスの末尾を使い、取れなければパスそのもの。
 fn repo_label(state: &AppState) -> String {
@@ -523,10 +628,10 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{degraded_label, file_row, pane_area, window, wrapped};
+    use super::{degraded_label, file_row, pane_area, window, wrapped, FOOTER_ROWS};
     use crate::test_util::{draw, state_at, state_showing_diff, state_with_status, terminal_with};
     use mewgit_core::app::{
-        update, AppState, Cmd, JobKind, Msg, NoticeLevel, Pane, TargetState, TermSize,
+        update, AppState, Cmd, JobKind, Modal, Msg, NoticeLevel, Pane, TargetState, TermSize,
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
@@ -1038,39 +1143,130 @@ mod tests {
         assert_eq!(header_while_fetching(0), header_while_fetching(8));
     }
 
-    /// 描いたステータスバー（最下行）。
+    /// 描いた通知の行（フッターの 1 行目）。
     ///
-    /// **取り出しはここ 1 本。** ステータスバーの置き場所が変わる（M6）と、各テストが
-    /// 持っている `height - 1` が一斉に嘘になる。
-    fn status_bar(state: &AppState, size: TermSize) -> String {
+    /// **取り出しはここ 1 本。** フッターの置き場所や高さが変わると、各テストが
+    /// 持っている `height - 2` が一斉に嘘になる。
+    fn notice_bar(state: &AppState, size: TermSize) -> String {
+        draw(state, size)[size.height as usize - FOOTER_ROWS as usize].clone()
+    }
+
+    /// 描いたキーヒントの行（フッターの 2 行目 = 最下行）。
+    fn hint_bar(state: &AppState, size: TermSize) -> String {
         draw(state, size)[size.height as usize - 1].clone()
     }
 
-    /// 通知を 1 件だけ積んで描いたステータスバー。既定サイズ（80x24）で見る。
-    fn status_bar_with(message: &str) -> String {
+    /// 通知を 1 件だけ積んで描いた通知の行。既定サイズ（80x24）で見る。
+    fn notice_bar_with(message: &str) -> String {
         let mut state = state_at("/repo");
         state.push_notice(NoticeLevel::Error, message.to_string(), None);
-        status_bar(&state, TermSize::default())
+        notice_bar(&state, TermSize::default())
+    }
+
+    /// `pane` にフォーカスを置いて描いたヒントの行。
+    fn hint_bar_of(pane: Pane, width: u16) -> String {
+        let mut state = state_at("/repo");
+        state.focus = pane;
+        hint_bar(
+            &state,
+            TermSize {
+                width,
+                ..TermSize::default()
+            },
+        )
     }
 
     #[test]
-    fn status_bar_shows_the_quit_hint_when_there_is_no_notice() {
-        let last = status_bar(&state_at("/repo"), TermSize::default());
-        assert!(last.contains("q:quit"), "status: {last:?}");
+    fn the_hint_line_shows_the_quit_key_when_there_is_no_notice() {
+        let last = hint_bar(&state_at("/repo"), TermSize::default());
+        assert!(last.contains("q:quit"), "hints: {last:?}");
     }
 
     #[test]
-    fn status_bar_shows_the_latest_notice_alongside_the_hint() {
+    fn the_notice_line_shows_the_latest_notice_and_the_hints_stay_below() {
         let mut state = state_at("/repo");
         state.push_notice(NoticeLevel::Warn, "古い通知".to_string(), None);
         state.push_notice(NoticeLevel::Error, "新しい通知".to_string(), None);
 
-        let last = status_bar(&state, TermSize::default());
+        let notice = notice_bar(&state, TermSize::default());
+        let hints = hint_bar(&state, TermSize::default());
 
-        assert!(last.contains("新しい通知"), "status: {last:?}");
-        assert!(!last.contains("古い通知"), "status: {last:?}");
-        // 通知が出てもヒントは消えない。消すと二度と戻らない。
-        assert!(last.contains("q:quit"), "status: {last:?}");
+        assert!(notice.contains("新しい通知"), "notice: {notice:?}");
+        assert!(!notice.contains("古い通知"), "notice: {notice:?}");
+        // **通知とヒントは行が別。** 取り合わないことがフッターを 2 行にした理由
+        // （07 の「ステータスバー」）。
+        assert!(!notice.contains("q:quit"), "notice: {notice:?}");
+        assert!(hints.contains("q:quit"), "hints: {hints:?}");
+    }
+
+    #[test]
+    fn the_hint_line_shows_the_keys_of_the_focused_pane() {
+        // ペインごとに違うものが出ること。同じなら「フォーカス中のペインのキー」で
+        // あることを誰も見ていない。
+        let worktree = hint_bar_of(Pane::Worktree, 80);
+        assert!(worktree.contains("s:stage"), "hints: {worktree:?}");
+        assert!(worktree.contains("C:amend"), "hints: {worktree:?}");
+
+        let branches = hint_bar_of(Pane::Branches, 80);
+        assert!(branches.contains("D:強制削除"), "hints: {branches:?}");
+        assert!(!branches.contains("s:stage"), "hints: {branches:?}");
+    }
+
+    #[test]
+    fn the_common_keys_show_only_where_the_pane_keys_leave_room() {
+        // 幅 80 では Graph に共通キーぶんの余りがあり、Worktree には無い
+        // （**セル数の表は 07 の「ステータスバー」の 1 本**。ここに写すと腐る）。
+        let graph = hint_bar_of(Pane::Graph, 80);
+        assert!(graph.contains("f:fetch"), "hints: {graph:?}");
+
+        let worktree = hint_bar_of(Pane::Worktree, 80);
+        assert!(!worktree.contains("f:fetch"), "hints: {worktree:?}");
+        // 落とすのは共通キーのほうで、ペインのキーは残る（07）。
+        assert!(worktree.contains("Esc:戻る"), "hints: {worktree:?}");
+        assert!(worktree.contains("q:quit"), "hints: {worktree:?}");
+    }
+
+    #[test]
+    fn the_common_keys_drop_at_the_width_where_they_would_be_cut() {
+        // **境目を跨ぐ**（`CLAUDE.md`）。Graph + 共通キー + `q:quit` は 75 セルなので、
+        // 75 では出て 74 では落ちる。机上で選んだ幅では、どちらか片側しか踏めない。
+        let fits = hint_bar_of(Pane::Graph, 75);
+        assert!(fits.contains("f:fetch"), "hints: {fits:?}");
+        assert!(fits.contains("n:ブランチ作成"), "hints: {fits:?}");
+
+        let over = hint_bar_of(Pane::Graph, 74);
+        assert!(!over.contains("f:fetch"), "hints: {over:?}");
+        assert!(over.contains("n:ブランチ作成"), "hints: {over:?}");
+        assert!(over.contains("q:quit"), "hints: {over:?}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_keeps_quit_and_drops_pane_keys_from_the_end() {
+        // 幅が足りないときに落とすのはペインのキーで、末尾から（07）。終了の入口が
+        // 落ちると、そもそも抜けられない。
+        let narrow = hint_bar_of(Pane::Worktree, 30);
+        assert!(narrow.contains("q:quit"), "hints: {narrow:?}");
+        assert!(narrow.contains("j/k:移動"), "hints: {narrow:?}");
+        assert!(!narrow.contains("Esc:戻る"), "hints: {narrow:?}");
+    }
+
+    #[test]
+    fn a_modal_hides_the_hints_but_not_the_notice() {
+        // モーダル表示中は `q` もペインのキーも効かない（キーはモーダルが受ける）。
+        // 案内だけ残すと、押しても何も起きないキーを案内することになる（07）。
+        let mut state = state_at("/repo");
+        state.push_notice(NoticeLevel::Error, "失敗しました".to_string(), None);
+        state.modal = Some(Modal::Confirm {
+            title: "変更を破棄".to_string(),
+            body: "a.txt".to_string(),
+            on_yes: Cmd::None,
+        });
+
+        let notice = notice_bar(&state, TermSize::default());
+        let hints = hint_bar(&state, TermSize::default());
+
+        assert!(notice.contains("失敗しました"), "notice: {notice:?}");
+        assert!(!hints.contains("q:quit"), "hints: {hints:?}");
     }
 
     #[test]
@@ -1090,9 +1286,9 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_shows_only_the_first_line_of_a_notice() {
+    fn the_notice_line_shows_only_the_first_line_of_a_notice() {
         // toml のパースエラーは複数行。そのまま流すと改行が消えて読めなくなる。
-        let last = status_bar_with(
+        let last = notice_bar_with(
             "設定ファイルの構文エラー
   |
 2 | ascii = 
@@ -1101,38 +1297,30 @@ mod tests {
 
         assert!(
             last.contains("設定ファイルの構文エラー"),
-            "status: {last:?}"
+            "notice: {last:?}"
         );
-        assert!(!last.contains('|'), "status: {last:?}");
-        assert!(last.contains("q:quit"), "status: {last:?}");
+        assert!(!last.contains('|'), "notice: {last:?}");
     }
 
     #[test]
-    fn a_notice_of_72_cells_fits_beside_the_hint() {
-        // **案内文の 72 セルという予算はここから来る**（01 の「失敗の案内文」）。
-        // `q:quit` と空白 2 で 8 セル取るので、80 桁では通知に 72 セル残る。
+    fn a_notice_of_the_full_width_fits_on_its_own_line() {
+        // **案内文の予算（端末の幅）はここから来る**（01 の「失敗の案内文」）。
+        // ヒントが 2 行目へ移ったので、80 桁の端末では通知に 80 セルまるごと残る。
         // `contains` を見るテストは切れても通るので、**収まることを直に見る**。
         //
-        // **36 と 37 はリテラルのまま置く。** `HINT` から算出すると、M6 で `?:help` が
-        // 付いて予算が下がったときにこのテストが黙って追随し、`app` 側の「72 セルに
-        // 収める」だけが古くなる（`a_failure_puts_the_next_key_on_the_summary_line`）。
-        // **リテラルであること自体が、2 つの見張りを噛み合わせている** —— 予算が
-        // 変わればここが赤くなり、案内文の側も数え直すことになる。
+        // **40 と 41 はリテラルのまま置く。** 幅から算出すると、予算が変わったときに
+        // このテストが黙って追随し、`app` 側の「端末の幅に収める」だけが古くなる
+        // （`a_failure_puts_the_next_key_on_the_summary_line`）。**リテラルで
+        // あること自体が、2 つの見張りを噛み合わせている。**
 
-        let fits = "あ".repeat(36);
-        let last = status_bar_with(&fits);
-        assert!(last.contains(&fits), "status: {last:?}");
-        assert!(last.contains("q:quit"), "status: {last:?}");
+        let fits = "あ".repeat(40);
+        let last = notice_bar_with(&fits);
+        assert!(last.contains(&fits), "notice: {last:?}");
 
-        // 1 文字増やすと 74 セルになり、ヒントと合わせて 80 桁に入らない。**どちらが
-        // 切られるかは見ない** —— 07 は通知を切ると決めていて、いまの実装は末尾
-        // （ヒント）を落とす。直すのは M6 のステータスバーのタスク。
-        let over = "あ".repeat(37);
-        let last = status_bar_with(&over);
-        assert!(
-            !(last.contains(&over) && last.contains("q:quit")),
-            "status: {last:?}"
-        );
+        // 1 文字増やすと 82 セルになり、80 桁に入らない。
+        let over = "あ".repeat(41);
+        let last = notice_bar_with(&over);
+        assert!(!last.contains(&over), "notice: {last:?}");
     }
 
     #[test]
@@ -1155,8 +1343,8 @@ mod tests {
                 lines[0]
             );
 
-            let last = status_bar(&state_at("/repo"), size);
-            assert!(last.contains("q:quit"), "status: {last:?}");
+            let last = hint_bar(&state_at("/repo"), size);
+            assert!(last.contains("q:quit"), "hints: {last:?}");
         }
     }
 }

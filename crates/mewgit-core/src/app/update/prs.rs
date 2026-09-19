@@ -186,9 +186,10 @@ pub(super) fn pr_details_finished(
         if let Some((err, targets)) = aborted {
             state.prs.details_aborted(&targets, &err);
             // **理由は `detail` に載せる。** 要約行に `GithubError` の `Display` を
-            // 混ぜると **72 セルを超えて `q:quit` が押し出される** ——
-            // `InvalidHost` はホスト名をそのまま持ち、**ホスト名に上限が無い**
-            // （`-bad` の 4 文字でちょうど 72 セル。実測 2026-09-18）。
+            // 混ぜると **1 行目の予算を超えて末尾から切れる** ——
+            // `InvalidHost` はホスト名をそのまま持ち、**ホスト名に上限が無い**ので、
+            // 予算をいくつにしても変わらない（`-bad` の 4 文字でちょうど 72 セル。
+            // 実測 2026-09-18。当時の予算が 72 だったのは `q:quit` と同じ行だったため）。
             // `exec_finished` が argv と stderr を `detail` に載せるのと同じ形で、
             // **描くのは M6 のステータスバーのタスク**（01 の「通知」）。
             state.push_notice(
@@ -232,7 +233,7 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, issued, press, press_code, repo_snapshot, state, state_with_commits,
+        cells, issued, press, press_code, repo_snapshot, state, state_with_commits, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -784,7 +785,7 @@ mod tests {
         assert_eq!(notice.level, NoticeLevel::Warn);
         assert!(notice.message.contains("中断"), "{}", notice.message);
         // **理由は要約行ではなく `detail` に入る**（上限の無いホスト名を要約行に
-        // 混ぜると 72 セルを超える）。
+        // 混ぜると予算を超える）。
         assert!(
             notice
                 .detail
@@ -799,7 +800,7 @@ mod tests {
         // `o` も別々に見ているので、通知を出す場所を足したらここにも足す。
         // **本文に `GithubError` の `Display` が乗る**ので、腕を足したときに超えうる。
         assert!(
-            cells(&notice.message) <= 72,
+            cells(&notice.message) <= NOTICE_CELLS,
             "{} セル: {}",
             cells(&notice.message),
             notice.message
@@ -1094,7 +1095,11 @@ mod tests {
         let message = state.notices[0].message.clone();
         assert!(message.contains("ブラウザ"), "{message}");
         // ステータスバーの予算（01 の「失敗の案内文」）。
-        assert!(cells(&message) <= 72, "{} セル: {message}", cells(&message));
+        assert!(
+            cells(&message) <= NOTICE_CELLS,
+            "{} セル: {message}",
+            cells(&message)
+        );
     }
 
     #[test]

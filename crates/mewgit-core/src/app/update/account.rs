@@ -13,8 +13,8 @@ use super::prs;
 use super::remote::conventional_remote;
 use super::{exec_busy, submit_exec};
 use crate::app::{
-    AccountListing, AccountView, AppState, Cmd, JobKind, Modal, NoticeLevel, Repick, RepoSnapshot,
-    TargetState,
+    AccountListing, AccountView, AppState, Cmd, GithubBlock, JobKind, Modal, NoticeLevel, Repick,
+    RepoSnapshot, TargetState,
 };
 
 /// `A`。アカウント解決の結果を出す（01 の「アカウントの選び直し」）。
@@ -61,21 +61,20 @@ fn account_view(account: &AccountState, target: &TargetState) -> Result<AccountV
         })),
         // **`Unavailable` にだけ理由を出す。** 走っている最中は待てば変わるので、
         // 「次に何をするか」は無い（案内が求める操作を自分が持っているか、の逆側）。
+        //
+        // **文言は [`GithubBlock`] の 1 本から採る。** `r`（PRs ペインの引き直し）が
+        // 同じ状態に別の説明を出さないため —— あちらも通知 1 行で予算が同じ
+        // （01 の「引き直す（`r`）」）。**腕を自分で並べているのは、`A` の答えが
+        // 「引けるか」ではなく「モーダルを開けるか」だから** —— `Degraded` と
+        // `Resolved` はここでは `Ok` に落ちるので、`AppState::github_block` の
+        // `Option` とは境目が違う。
         AccountState::Resolving => Err(match target {
-            TargetState::Unavailable => {
-                "既定リモートから GitHub のリポジトリを特定できません".to_string()
-            }
+            TargetState::Unavailable => GithubBlock::TargetUnavailable.notice(),
             TargetState::Unasked | TargetState::Resolved(_) => {
-                "アカウントを解決しています".to_string()
+                GithubBlock::AccountResolving.notice()
             }
         }),
-        // **直す先は設定ファイルなので、外でやってくださいと書いてよい。** mewgit に
-        // 設定を書き換える操作は無い（#65 の「指示を足すのはその操作を持たない側」の
-        // 素直な側）。**再起動が要ることも書く** —— 実行中に設定は読み直さない（08）
-        // ので、書けば効くと読めると押しても変わらない直し方を案内することになる。
-        AccountState::Disabled => Err(
-            "GitHub 機能は config.toml の github.enabled で切ってあります（要再起動）".to_string(),
-        ),
+        AccountState::Disabled => Err(GithubBlock::AccountDisabled.notice()),
     }
 }
 
@@ -314,9 +313,10 @@ pub(super) fn account_resolved(
             AccountState::Degraded(reason)
         }
     };
-    // **アカウントが決まるまで `wanted_pr_list()` は偽**なので、ここが PR 一覧を頼む
-    // 2 本目の入口（もう 1 本は `repo_info_loaded`）。**どちらが先に届くかは
-    // 決まらない**（01 の「PR ペイン › 何を引くか」）。
+    // **アカウントが決まるまで `wanted_pr_list()` は偽**なので、ここも PR 一覧を頼む
+    // 入口（一覧は `prs::reload` の doc）。**非同期で届くもう 1 本
+    // （`repo_info_loaded`）とはどちらが先に届くかが決まらない**
+    // （01 の「PR ペイン › 何を引くか」）。
     //
     // **鍵が同じでも引き直す、ではなく鍵が無い。** 一覧は選択に紐づかないので、
     // `A` でアカウントを選び直したらそのまま引き直す（`prs::reload` の doc）。

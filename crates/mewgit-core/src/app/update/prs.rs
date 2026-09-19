@@ -22,6 +22,7 @@ pub(super) fn prs_key(state: &mut AppState, key: Key) -> Cmd {
             Cmd::None
         }
         KeyCode::Char('o') => open_pr(state),
+        KeyCode::Char('r') => refresh(state),
         // **`Tab` でしか入れないペインにも出口を用意する**（07）。Branches ペインと
         // 同じく、左の選択と無関係なので戻り先は `Graph`。
         KeyCode::Esc => focus(state, Pane::Graph),
@@ -47,22 +48,71 @@ fn open_pr(state: &mut AppState) -> Cmd {
     }
 }
 
+/// `r`。**カーソル行の集計を落として一覧を引き直す**（01 の「引き直す（`r`）」）。
+///
+/// **自動の引き金では拾えないものを人に押させる。** 集計の鍵は `(番号, head sha)` なので
+/// **sha が動かない変化**（レビューが付いた / チェックが回り直した）を拾えず、一覧の
+/// 引き金（[`reload`] の doc）には**タブを開く操作が入っていない**ので、他人が開いた
+/// PR は `f` を押すまで出ない。
+///
+/// **落とすのはカーソル行の集計だけ。** 全件落とすと、押すたびに一覧の行数ぶんの往復を
+/// 払う（open 60 件で 181 リクエスト。05）。**一覧のほうは丸ごと引き直す** ——
+/// あちらは 1 往復で済み、他人が開いた PR を知る経路がほかに無い。
+///
+/// **ここで扇形は頼まない。** [`fan_out`] を並べると、**これから引き直す一覧を待たずに
+/// 手元の sha で 3 本張る**ので、head が動いていた回はその答えが捨てられて新しい sha で
+/// もう 3 本払う。落とした行を頼むのは [`pr_list_loaded`] の出口で、あちらは**届いた
+/// 一覧の sha**を使う。
+///
+/// **ただし、扇形の終端が一覧より先に届くと [`pr_details_finished`] の数え直しが
+/// 手元の sha で頼む。** そこを塞ぐには「まだ引いていない」と「`r` が落とした」を状態で
+/// 割ることになり、01 の「『まだ引いていない』を状態に書かない」を破る ——
+/// **行き止まりにはならない**（どちらの順序でも最後は届いた一覧の sha で入る）ので、
+/// その順序のときだけ 3 本ぶん余計に払う（01 の「引き直す（`r`）」）。
+///
+/// **世代は進めない。** 進めるのは `PrState::forget`（アカウントが変わった）で、`r` は
+/// アカウントを変えない —— 飛んでいる扇形の答えは**いまのアカウントの答え**なので、
+/// 捨てる理由が無い。**そもそも扇形が走っている行に落とすものは無い** ——
+/// 対象は `PrState::wanted_details`（集計を持っていない行）なので、答えが飛んでいる
+/// 行は集計を持たない。
+///
+/// **引けないときは理由を通知に出す**（押しても何も起きない形にしない）。**理由を
+/// 消去法で組み立てない** —— [`AppState::github_block`] が腕で答える（潰すと
+/// `Degraded` が「アカウントが決まっていない」になり、30 セル隣のペインが同じ瞬間に
+/// 出している `GitHub: …（A）` と食い違う）。
+fn refresh(state: &mut AppState) -> Cmd {
+    if let Some(block) = state.github_block() {
+        state.push_notice(NoticeLevel::Info, block.notice(), None);
+        return Cmd::None;
+    }
+    // 一覧が空なら落とす記憶も無い（それでも一覧は引き直す —— 他人が開いた PR は
+    // そこで初めて出る）。
+    if let Some(number) = state.prs.selected().map(|pr| pr.number) {
+        state.prs.forget_detail(number);
+    }
+    // **`// 続きを頼む:` の印は置かない。** あれは「届いた返信を見て続きを判じる」
+    // 場所の索引で（`update_inner` の doc）、ここは**キーが新しく頼む**場所。
+    // 落とした行を拾うのは `pr_list_loaded` の出口で、印はそちらにある。
+    reload(state)
+}
+
 /// 材料が揃っていれば一覧を頼む。
 ///
-/// **入口は 2 つで、材料も 2 つ。** ref（`Msg::RepoInfoLoaded`。commit / push のあとは
-/// GitHub 側の PR と CI が動いており、マージされていれば open から消える）と、
-/// **どのアカウントで引いたか**（`Msg::AccountResolved`。`A` で選び直すと、前の
-/// トークンでは見えなかった PR が見える）。
+/// **材料は 2 つ**（`AppState::wanted_pr_list`）。**入口はそれを動かすものと、人の意思。**
+/// ref（`Msg::RepoInfoLoaded`。commit / push のあとは GitHub 側の PR と CI が動いており、
+/// マージされていれば open から消える）、**どのアカウントで引いたか**
+/// （`Msg::AccountResolved`。`A` で選び直すと、前のトークンでは見えなかった PR が
+/// 見える）、そして [`refresh`]（`r`）。
 ///
 /// **ここが失敗からの出口でもある。** 引けなかった答えは自分では落ちないので、
-/// `f` を押すか `A` で選び直せば引き直せる形にしておく（`CLAUDE.md` の「状態を消すのが
+/// `f` / `A` / `r` のどれかで引き直せる形にしておく（`CLAUDE.md` の「状態を消すのが
 /// 『その状態を根拠に断つキー』の先にあるなら、断つ前に消し方を数える」）。
 ///
 /// **出口は一覧だけでなく集計にも要る。** 集計を落とすのは `PrState::loaded`（届いた
-/// 一覧で `Err` の行を捨てる）と `PrState::forget`（アカウントが変わった）で、
-/// **どちらもこの経路の先にある** —— 一覧を引き直さないと集計の失敗も落ちない。
-/// 集計の失敗は通知に出ないので（07 で受け入れた穴）、ここが塞がると行の `!` が
-/// 消えない行き止まりになる。
+/// 一覧で `Err` の行を捨てる）、`PrState::forget`（アカウントが変わった）、
+/// `PrState::forget_detail`（`r` がカーソル行を名指し）。**前の 2 つはこの経路の先に
+/// ある** —— 一覧を引き直さないと集計の失敗も落ちない。集計の失敗は通知に出ない
+/// （07 で受け入れた穴）ので、そこが塞がると行の `!` は `r` でしか消せなくなる。
 pub(super) fn reload(state: &AppState) -> Cmd {
     if state.wanted_pr_list() {
         Cmd::FetchPrList
@@ -238,7 +288,9 @@ mod tests {
     };
     use super::super::update;
     use super::*;
-    use crate::app::{Msg, NoticeLevel, PrLoad, Region, RepoSnapshot, RightTab, TargetState};
+    use crate::app::{
+        GithubBlock, Msg, NoticeLevel, PrLoad, Region, RepoSnapshot, RightTab, TargetState,
+    };
     use crate::auth::{AccountState, DegradedReason};
     use crate::config::Config;
     use crate::git_read::HeadInfo;
@@ -247,6 +299,7 @@ mod tests {
     use crate::test_util::{
         deliver_pr_details, fake_account, fake_oid, fake_pull_request, fake_rate_limit,
         fake_target, fetch_pr_details, pr_list_loaded as list_msg, put_on_branch, reply,
+        start_pr_details,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -1155,5 +1208,237 @@ mod tests {
         assert!(matches!(state.account, AccountState::Disabled));
         // 旗が立っていれば候補に入る（この見張りが空振りしていないことの確認）。
         assert!(default_state.focus_candidates().contains(&Pane::Prs));
+    }
+    #[test]
+    fn r_drops_the_cursor_rows_summary_and_refetches_it_with_the_sha_the_list_brings() {
+        // **落とすのはカーソル行だけ**、**`Err` も落とす**、**扇形はその場で頼まない**
+        // の 3 つを 1 本で踏む（01 の「引き直す（`r`）」）。カーソル行を `Err` に
+        // しておくと、「`Ok` のときだけ落とす」形もここで落ちる。
+        let mut state = state_on_prs_tab("feat/x");
+        let ask = fan_out_after(
+            &mut state,
+            vec![
+                fake_pull_request(82, "feat/x", "sha82"),
+                fake_pull_request(90, "other", "sha90"),
+            ],
+        );
+        let _ = deliver_pr_details(
+            &mut state,
+            ask,
+            &[
+                (82, "sha82", Ok(detail(2))),
+                (90, "sha90", Err(GithubError::NotFound)),
+            ],
+            None,
+        );
+        let _ = press(&mut state, 'j');
+        assert_eq!(state.prs.selected().map(|pr| pr.number), Some(90));
+
+        let cmd = press(&mut state, 'r');
+
+        assert!(state.prs.detail(90).is_none(), "カーソル行が残っている");
+        assert!(state.prs.detail(82).is_some(), "隣の行まで落としている");
+        // **出るのは一覧の 1 本だけ。** ここで扇形も並べると、これから引き直す一覧を
+        // 待たずに**手元の sha**で 3 本張ることになる。
+        assert_eq!(cmd, Cmd::FetchPrList, "扇形まで出ている: {cmd:?}");
+
+        // 届いた一覧では 90 の head が動いている。**引き直すのはその sha。**
+        let again = update(
+            &mut state,
+            list_msg(vec![
+                fake_pull_request(82, "feat/x", "sha82"),
+                fake_pull_request(90, "other", "sha90b"),
+            ]),
+        );
+        assert_eq!(
+            again,
+            Cmd::FetchPrDetails {
+                // **世代は進めない**（進めるのは `PrState::forget` だけ）。進めると、
+                // 走っている扇形の答えがこのアカウントのものなのに捨てられる。
+                epoch: 0,
+                targets: vec![(90, "sha90b".to_string())],
+            },
+            "届いた一覧の sha で引き直していない"
+        );
+    }
+
+    #[test]
+    fn r_pressed_while_the_list_is_in_flight_is_covered_by_the_running_fetch() {
+        // **`r` が「押しても何も起きない」に見える 1 通り**（01 の「引き直す（`r`）」）。
+        // `AppState::issue` が同種を落とすので `Cmd::None` になるが、走っているほうが
+        // 返す一覧の出口が、落とした行を拾う。
+        let mut state = state_with_one_summary("feat/x");
+        // 1 本目が飛んでいる。**返信はまだ届けない。**
+        let _ = state.issue(reload(&state));
+        assert!(state.jobs.is_running(JobKind::FetchPrList));
+
+        let dropped = press(&mut state, 'r');
+        assert_eq!(dropped, Cmd::None, "落とされていない");
+        assert!(state.prs.detail(82).is_none(), "落ちていない");
+
+        // 1 本目の答えが届く。**その出口が記憶の無い行を拾う。**
+        let again = update(
+            &mut state,
+            list_msg(vec![fake_pull_request(82, "feat/x", "sha82")]),
+        );
+        assert_eq!(
+            again,
+            Cmd::FetchPrDetails {
+                epoch: 0,
+                targets: vec![(82, "sha82".to_string())],
+            },
+            "走っていたほうが拾っていない"
+        );
+    }
+
+    #[test]
+    fn r_during_a_fan_out_asks_with_the_local_sha_and_the_list_corrects_it() {
+        // **`refresh` の doc が約束する「届いた一覧の sha で引く」が破れる唯一の順序**
+        // （01 の「引き直す（`r`）」）—— 扇形の終端が一覧より先に届くと、
+        // `pr_details_finished` の数え直しが**手元の sha**で頼む。
+        // **行き止まりにならないことまで見る。**
+        let mut state = state_on_prs_tab("feat/x");
+        let ask = fan_out_after(
+            &mut state,
+            vec![
+                fake_pull_request(82, "feat/x", "sha82"),
+                fake_pull_request(90, "other", "sha90"),
+            ],
+        );
+        // 82 の答えだけ届いた時点で終端はまだ。**カーソルは集計を持っている 82**
+        // （答えの飛んでいる行には落とすものが無い —— 扇形の対象は集計を持っていない
+        // 行なので、そこで押しても `forget_detail` は空振りする）。
+        let (epoch, _) = start_pr_details(&mut state, ask, &[(82, "sha82", Ok(detail(2)))]);
+        assert_eq!(state.prs.selected().map(|pr| pr.number), Some(82));
+        assert!(state.prs.detail(82).is_some(), "落とす相手が居ない");
+
+        let cmd = press(&mut state, 'r');
+        assert_eq!(cmd, Cmd::FetchPrList, "一覧を頼んでいない: {cmd:?}");
+        assert!(state.prs.detail(82).is_none(), "落ちていない");
+
+        // 残りの答えと終端が、引き直した一覧より**先に**届く。
+        let _ = update(
+            &mut state,
+            Msg::PrDetailLoaded {
+                epoch,
+                number: 90,
+                sha: "sha90".to_string(),
+                result: Ok(detail(3)),
+            },
+        );
+        let recount = update(
+            &mut state,
+            Msg::PrDetailsFinished {
+                epoch,
+                aborted: None,
+            },
+        );
+        assert_eq!(
+            recount,
+            Cmd::FetchPrDetails {
+                epoch: 0,
+                targets: vec![(82, "sha82".to_string())],
+            },
+            "数え直しが手元の sha で頼んでいない"
+        );
+
+        // その 3 本が飛んでいるあいだに、引き直した一覧が届く。**82 の head が動いている。**
+        let (stale_epoch, _) = start_pr_details(&mut state, recount, &[]);
+        let after_list = update(
+            &mut state,
+            list_msg(vec![
+                fake_pull_request(82, "feat/x", "sha82b"),
+                fake_pull_request(90, "other", "sha90"),
+            ]),
+        );
+        assert_eq!(after_list, Cmd::None, "扇形が走っているのに落ちていない");
+
+        // 古い sha の答えは捨てられ、**次の終端が届いた一覧の sha で頼み直す。**
+        let _ = update(
+            &mut state,
+            Msg::PrDetailLoaded {
+                epoch: stale_epoch,
+                number: 82,
+                sha: "sha82".to_string(),
+                result: Ok(detail(9)),
+            },
+        );
+        assert!(
+            state.prs.detail(82).is_none(),
+            "古い sha の答えを採っている"
+        );
+        let again = update(
+            &mut state,
+            Msg::PrDetailsFinished {
+                epoch: stale_epoch,
+                aborted: None,
+            },
+        );
+        assert_eq!(
+            again,
+            Cmd::FetchPrDetails {
+                epoch: 0,
+                targets: vec![(82, "sha82b".to_string())],
+            },
+            "行き止まりになっている"
+        );
+    }
+
+    #[test]
+    fn r_says_why_it_cannot_refresh_instead_of_doing_nothing() {
+        // **押しても何も起きない形にしない**（#63）。**理由は消去法で組み立てない**
+        // —— `AppState::github_block` が腕で答える（01 の「引き直す（`r`）」）。
+        let mut state = state_with_commits(2);
+        state.focus = Pane::Prs;
+        state.reseat_focus();
+        assert_eq!(state.focus, Pane::Prs, "巡回候補に入っていません");
+
+        // **直近の通知は末尾**（ステータスバーが描くのもそこ）。
+        let said = |state: &mut AppState| {
+            let cmd = press(state, 'r');
+            assert_eq!(cmd, Cmd::None, "材料が無いのに頼んだ: {cmd:?}");
+            state.notices.back().expect("通知が無い").message.clone()
+        };
+
+        // まだ決まっていない / 見たが GitHub ではなかった / degraded。
+        // **待てば変わるものと変わらないものを潰さない。**
+        let resolving = said(&mut state);
+        state.repo.target = TargetState::Unavailable;
+        let unavailable = said(&mut state);
+        state.repo.target = TargetState::Resolved(fake_target());
+        assert_eq!(
+            said(&mut state),
+            resolving,
+            "同じ「待てば変わる」が割れている"
+        );
+        state.account = AccountState::Degraded(DegradedReason::GhMissing);
+        let degraded = said(&mut state);
+
+        let all = [&unavailable, &resolving, &degraded];
+        for (i, one) in all.iter().enumerate() {
+            for other in &all[i + 1..] {
+                assert_ne!(one, other, "同じ文言に潰れている: {one:?}");
+            }
+        }
+        // **`A` の通知と同じ字**（予算が同じ 1 行なので分けない。01）。
+        assert_eq!(unavailable, GithubBlock::TargetUnavailable.notice());
+        assert_eq!(resolving, GithubBlock::AccountResolving.notice());
+        // **`A` を案内してよいのは degraded だけ** —— そこにだけ内訳がある。
+        assert!(
+            degraded.contains('A'),
+            "内訳の在りかを出していない: {degraded:?}"
+        );
+        assert!(
+            !resolving.contains('A'),
+            "待つだけの状態に操作を案内している"
+        );
+
+        // **案内は端末の幅（80 セル）に収める**（01 の「失敗の案内文」）。
+        for message in all {
+            assert!(
+                cells(message) <= NOTICE_CELLS,
+                "通知が長すぎます: {message:?}"
+            );
+        }
     }
 }

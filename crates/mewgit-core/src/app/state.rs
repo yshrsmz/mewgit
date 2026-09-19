@@ -330,7 +330,33 @@ impl AppState {
     /// **HEAD は材料ではない。** 一覧はブランチに紐づかないので、detached でも
     /// unborn でも同じものが出る。
     pub fn wanted_pr_list(&self) -> bool {
-        self.repo.target.resolved().is_some() && matches!(self.account, AccountState::Resolved(_))
+        self.github_block().is_none()
+    }
+
+    /// GitHub を叩けない理由。叩けるなら `None`（01 の「PR ペイン › 引き直す（`r`）」）。
+    ///
+    /// **[`wanted_pr_list`](Self::wanted_pr_list) の裏返しではなく、あちらの出どころ。**
+    /// 述語だけを出すと、理由が要る側（`r` の通知）が**入力をもう一度読んで消去法で
+    /// 組み直す**ことになり、状態が既に持っている区別（`Degraded` / `Unasked` /
+    /// `Unavailable`）が潰れる。材料を 1 つ足したときに「残るのは◯◯だけ」の側が
+    /// 黙って嘘になる形でもある（`CLAUDE.md`）。
+    ///
+    /// **`account_view` と同じ文言を出す**（あちらの `Err` もここから採る）。**腕の順で
+    /// 答えが変わる組（`Degraded` かつ `Unavailable`）は到達しない** —— `target` を
+    /// 書くのは `update::account` の 3 箇所だけで、`Degraded` になる
+    /// `Msg::AccountResolved` は `target` が `Resolved` になってからしか出ない
+    /// （2026-09-19 に `/code-review` が腕を入れ替えて確かめ、workspace が緑のまま
+    /// だった）。**順は読みやすさのためで、守りではない。**
+    pub fn github_block(&self) -> Option<GithubBlock> {
+        match (&self.account, &self.repo.target) {
+            (AccountState::Disabled, _) => Some(GithubBlock::AccountDisabled),
+            (AccountState::Degraded(_), _) => Some(GithubBlock::AccountDegraded),
+            (_, TargetState::Unavailable) => Some(GithubBlock::TargetUnavailable),
+            (AccountState::Resolved(_), TargetState::Resolved(_)) => None,
+            (_, TargetState::Unasked) | (AccountState::Resolving, _) => {
+                Some(GithubBlock::AccountResolving)
+            }
+        }
     }
 
     /// 集計をまだ引いていない行の `(番号, head sha)`。**PRs タブが見えていなければ
@@ -445,6 +471,59 @@ impl TargetState {
         match self {
             TargetState::Resolved(target) => Some(target),
             TargetState::Unasked | TargetState::Unavailable => None,
+        }
+    }
+}
+
+/// GitHub を叩けない理由（[`AppState::github_block`]）。
+///
+/// **理由の字までは持たない。** [`notice`](Self::notice) が出すのは通知 1 行ぶんで、
+/// [`DegradedReason`] を字にする `ui::degraded` は `mewgit-tui` にしかない
+/// （不変ルール 6）。`AccountDegraded` が中身を運ばないのはそのため —— 運んでも
+/// core では展開できず、「`A` で見られる」までしか書けない。
+///
+/// **読み手は `r` の通知と `A` の通知（`update::account::account_view` の `Err`）。**
+/// どちらも 1 行で予算が同じなので文言を分けない（#73 の「置かれる場所の予算が違うなら
+/// 別の文言でよい」が当たらない側）。**枠の内側 30 セルの PRs ペイン**（07）は別で、
+/// あちらが読むのは M6 のタスク（`docs/plan.md`）。
+///
+/// [`DegradedReason`]: crate::auth::DegradedReason
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubBlock {
+    /// 既定リモートが決まらなかったか、GitHub のものではなかった。**待っても変わらない。**
+    TargetUnavailable,
+    /// まだ決まっていないだけ —— 既定リモートを見ている最中か、`gh auth status` の
+    /// 返事を待っている。**待てば変わる。**
+    ///
+    /// **「対象をまだ見ていない」を別の腕にしない。** [`TargetState::Unasked`] で
+    /// アカウントが `Resolved` になる経路は無い（`Cmd::ResolveAccount` が出るのは
+    /// 対象が決まってから）ので、割っても**テストで踏めない腕**が増えるだけ
+    /// （`CLAUDE.md`）。割れているのは「待てば変わる」と「変わらない」で、それは
+    /// [`TargetUnavailable`](Self::TargetUnavailable) との境目のほう。
+    AccountResolving,
+    /// `gh` が無い / 古い / どのアカウントも届かない。**`A` に内訳がある。**
+    AccountDegraded,
+    /// `config.github.enabled = false`。
+    AccountDisabled,
+}
+
+impl GithubBlock {
+    /// 通知 1 行ぶんの文言。
+    pub fn notice(self) -> String {
+        match self {
+            Self::TargetUnavailable => {
+                "既定リモートから GitHub のリポジトリを特定できません".to_string()
+            }
+            Self::AccountResolving => "アカウントを解決しています".to_string(),
+            // **直し方を書いてよい。** `A` は mewgit が持っている操作で、内訳もそこに
+            // 出る（#63 の「指示を足すのはその操作を持たない側」の素直な側）。
+            Self::AccountDegraded => "GitHub に接続できません（A で内訳を見られます）".to_string(),
+            // **直す先は設定ファイルなので、外でやってくださいと書いてよい。**
+            // **再起動が要ることも書く** —— 実行中に設定は読み直さない（08）。
+            Self::AccountDisabled => {
+                "GitHub 機能は config.toml の github.enabled で切ってあります（要再起動）"
+                    .to_string()
+            }
         }
     }
 }
@@ -1354,7 +1433,8 @@ impl PrState {
         // 二度と拾わず、**回線が 1 回切れただけでセッション中ずっと `!` のまま**に
         // なる。一覧を引き直すのは `f` と書き込みのあとなので、ここが
         // 「失敗からの出口」（01 の「何を引くか」が `reload` について言っているのと
-        // 同じ形）。**輪にはならない** —— 1 回の扇形の中では答えが入って
+        // 同じ形。**人が `r` を押しても落ちる** —— `forget_detail`）。
+        // **輪にはならない** —— 1 回の扇形の中では答えが入って
         // `wanted_details` が空になり、次に頼むのは新しい一覧が届いたときだけ。
         self.details
             .retain(|number, entry| entry.result.is_ok() && in_list(&list, *number, &entry.sha));
@@ -1388,8 +1468,9 @@ impl PrState {
     /// **持っている行は引き直さない。** 1 件ぶんの往復が PR の数だけ積むので、
     /// ref を動かす書き込みのたびに全件引くと `core` の予算に対して重すぎる
     /// （数は 05 の「扇形は毎回引き直さない」）。憶えた集計を落とすのは
-    /// [`loaded`](Self::loaded)（head sha が動いた行）と [`forget`](Self::forget)
-    /// （アカウントが変わった）だけ。
+    /// [`loaded`](Self::loaded)（head sha が動いた行）、[`forget`](Self::forget)
+    /// （アカウントが変わった）、[`forget_detail`](Self::forget_detail)（`r` で
+    /// 名指しされた行）。
     ///
     /// **`app` へは出さない。** タブの門を通さずに扇形を組む形が書けてしまうので、
     /// 外から呼べるのは [`AppState::wanted_details`] だけにしてある。
@@ -1472,6 +1553,14 @@ impl PrState {
     /// もっと減らしたあとの数を上書きしてしまう。
     pub(super) fn rate_limit_seen(&mut self, seen: RateLimit) {
         RateLimit::keep_newer(&mut self.rate_limit, seen);
+    }
+
+    /// この行の集計を落とす。`Err` も落とす。
+    ///
+    /// **1 行だけなこと・世代を進めないことの理由は、呼ぶ側の 1 本**
+    /// （`update::prs::refresh`。01 の「引き直す（`r`）」）。
+    pub(super) fn forget_detail(&mut self, number: u64) {
+        self.details.remove(&number);
     }
 
     /// アカウントが決まっていない状態に戻す。
@@ -1733,8 +1822,8 @@ impl JobKind {
             // **世代を足しても増える守りが無い** —— 世代で「古い」と判じたところで、
             // 集計を憶えている行は `PrState::wanted_details` が拾わないので頼み直しが
             // 出ない。**sha が変わらないまま中身が変わる**（レビューが付く / CI が
-            // 回り直す）のは世代でも鍵でも拾えず、そこは受け入れた穴として明示的な
-            // 引き直しへ送ってある（05、plan.md）。
+            // 回り直す）のは世代でも鍵でも拾えないので、そこは人が `r` を押して
+            // 記憶を落とす（01 の「引き直す（`r`）」）。
             JobKind::FetchPrDetails
             // 書き込みそのものと、Oid で追いつくもの、リポジトリの外から来るもの。
             | JobKind::Exec

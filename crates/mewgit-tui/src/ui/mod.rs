@@ -673,7 +673,7 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{degraded_label, file_row, pane_area, window, wrapped};
+    use super::{degraded_label, file_row, fits, pane_area, window, wrapped};
     use crate::test_util::{
         draw, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status, terminal_with,
     };
@@ -1276,6 +1276,22 @@ mod tests {
         assert!(!over.contains("f:fetch"), "hints: {over:?}");
         assert!(over.contains("n:ブランチ作成"), "hints: {over:?}");
         assert!(over.contains("q:quit"), "hints: {over:?}");
+    }
+
+    #[test]
+    fn the_prs_pane_keeps_the_common_keys_at_eighty_with_room_to_spare() {
+        // **キーを 1 つ足した回に、Prs が「共通キーの出る側」から落ちていないか。**
+        // 上の境目のテストは落とす仕組みを見ていて、**どのペインがどちら側に居るかは
+        // 見ていない**（07 のセル数の表がそれを言っている）。
+        let prs = hint_bar_of(Pane::Prs, 80);
+        assert!(prs.contains("r:更新"), "hints: {prs:?}");
+        assert!(prs.contains("f:fetch"), "hints: {prs:?}");
+
+        // **余白まで見る**（#80）。`contains` だけだと、80 桁をちょうど埋めた状態でも
+        // 通り、1 桁伸びた瞬間に共通キーが落ちることが見えない。**落とす仕組みの
+        // 境目は上のテストが見る** —— `hint_text` はどのペインかで分岐しないので、
+        // ここで跨ぎ直すと同じことを 2 箇所で数えることになる。
+        assert!(fits(prs.trim_end(), 79), "80 桁で余白がありません: {prs:?}");
     }
 
     #[test]

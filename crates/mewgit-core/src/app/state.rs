@@ -341,9 +341,12 @@ impl AppState {
     /// `Unavailable`）が潰れる。材料を 1 つ足したときに「残るのは◯◯だけ」の側が
     /// 黙って嘘になる形でもある（`CLAUDE.md`）。
     ///
-    /// **腕の順は `account_view` と同じ**（アカウントを先に見て、`Resolving` の中で
-    /// 対象を見る）—— あちらの `Err` もここから文言を採るので、順が割れると同じ状態に
-    /// 2 通りの説明が出る。
+    /// **`account_view` と同じ文言を出す**（あちらの `Err` もここから採る）。**腕の順で
+    /// 答えが変わる組（`Degraded` かつ `Unavailable`）は到達しない** —— `target` を
+    /// 書くのは `update::account` の 3 箇所だけで、`Degraded` になる
+    /// `Msg::AccountResolved` は `target` が `Resolved` になってからしか出ない
+    /// （2026-09-19 に `/code-review` が腕を入れ替えて確かめ、workspace が緑のまま
+    /// だった）。**順は読みやすさのためで、守りではない。**
     pub fn github_block(&self) -> Option<GithubBlock> {
         match (&self.account, &self.repo.target) {
             (AccountState::Disabled, _) => Some(GithubBlock::AccountDisabled),
@@ -445,6 +448,33 @@ pub struct RepoInfo {
 /// **リモートは起動中に変わらない前提。** mewgit に remote を足すキーが無いので、
 /// 外で `git remote add` したぶんは再起動まで効かない（`core.sshCommand` を起動時に
 /// 1 回だけ読むのと同じ判断。02）。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum TargetState {
+    /// まだ既定リモートを見ていない。
+    #[default]
+    Unasked,
+    Resolved(RepoTarget),
+    /// 既定リモートが決まらなかったか、その URL が GitHub のものではなかった。
+    /// **頼み直さない。**
+    ///
+    /// **理由は持たない。** 出す先がまだ無く（ヘッダの degraded 表示は M4 の別タスク）、
+    /// 持たせても読む腕が無い。表示を入れるときに [`DegradedReason`] へ畳むかを決める
+    /// （04）。
+    ///
+    /// [`DegradedReason`]: crate::auth::DegradedReason
+    Unavailable,
+}
+
+impl TargetState {
+    /// 決まっているなら中身。`github` を叩く経路はこれを通す。
+    pub fn resolved(&self) -> Option<&RepoTarget> {
+        match self {
+            TargetState::Resolved(target) => Some(target),
+            TargetState::Unasked | TargetState::Unavailable => None,
+        }
+    }
+}
+
 /// GitHub を叩けない理由（[`AppState::github_block`]）。
 ///
 /// **理由の字までは持たない。** [`notice`](Self::notice) が出すのは通知 1 行ぶんで、
@@ -494,33 +524,6 @@ impl GithubBlock {
                 "GitHub 機能は config.toml の github.enabled で切ってあります（要再起動）"
                     .to_string()
             }
-        }
-    }
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-pub enum TargetState {
-    /// まだ既定リモートを見ていない。
-    #[default]
-    Unasked,
-    Resolved(RepoTarget),
-    /// 既定リモートが決まらなかったか、その URL が GitHub のものではなかった。
-    /// **頼み直さない。**
-    ///
-    /// **理由は持たない。** 出す先がまだ無く（ヘッダの degraded 表示は M4 の別タスク）、
-    /// 持たせても読む腕が無い。表示を入れるときに [`DegradedReason`] へ畳むかを決める
-    /// （04）。
-    ///
-    /// [`DegradedReason`]: crate::auth::DegradedReason
-    Unavailable,
-}
-
-impl TargetState {
-    /// 決まっているなら中身。`github` を叩く経路はこれを通す。
-    pub fn resolved(&self) -> Option<&RepoTarget> {
-        match self {
-            TargetState::Resolved(target) => Some(target),
-            TargetState::Unasked | TargetState::Unavailable => None,
         }
     }
 }
@@ -1554,8 +1557,8 @@ impl PrState {
 
     /// この行の集計を落とす。`Err` も落とす。
     ///
-    /// **1 行だけなこと・世代を進めないこと・飛んでいた答えが入りうることの理由は、
-    /// 呼ぶ側の 1 本**（`update::prs::refresh`。01 の「引き直す（`r`）」）。
+    /// **1 行だけなこと・世代を進めないことの理由は、呼ぶ側の 1 本**
+    /// （`update::prs::refresh`。01 の「引き直す（`r`）」）。
     pub(super) fn forget_detail(&mut self, number: u64) {
         self.details.remove(&number);
     }

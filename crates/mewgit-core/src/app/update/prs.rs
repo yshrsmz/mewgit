@@ -64,11 +64,17 @@ fn open_pr(state: &mut AppState) -> Cmd {
 /// もう 3 本払う。落とした行を頼むのは [`pr_list_loaded`] の出口で、あちらは**届いた
 /// 一覧の sha**を使う。
 ///
+/// **ただし、扇形の終端が一覧より先に届くと [`pr_details_finished`] の数え直しが
+/// 手元の sha で頼む。** そこを塞ぐには「まだ引いていない」と「`r` が落とした」を状態で
+/// 割ることになり、01 の「『まだ引いていない』を状態に書かない」を破る ——
+/// **行き止まりにはならない**（どちらの順序でも最後は届いた一覧の sha で入る）ので、
+/// その順序のときだけ 3 本ぶん余計に払う（01 の「引き直す（`r`）」）。
+///
 /// **世代は進めない。** 進めるのは `PrState::forget`（アカウントが変わった）で、`r` は
 /// アカウントを変えない —— 飛んでいる扇形の答えは**いまのアカウントの答え**なので、
-/// 捨てる理由が無い。そのぶん、落とした行に飛んでいた答えがそのまま入ることがある
-/// （`PrState::detail_loaded`）。**それでよい** —— `r` を押す数秒前の GitHub の状態で、
-/// 押した人が求めているのはそれ。
+/// 捨てる理由が無い。**そもそも扇形が走っている行に落とすものは無い** ——
+/// 対象は `PrState::wanted_details`（集計を持っていない行）なので、答えが飛んでいる
+/// 行は集計を持たない。
 ///
 /// **引けないときは理由を通知に出す**（押しても何も起きない形にしない）。**理由を
 /// 消去法で組み立てない** —— [`AppState::github_block`] が腕で答える（潰すと
@@ -1284,10 +1290,11 @@ mod tests {
     }
 
     #[test]
-    fn r_takes_the_answer_that_was_already_in_flight_and_does_not_ask_again() {
-        // **落とした行に、飛んでいた答えがそのまま入る**（01 の「引き直す（`r`）」）。
-        // その答えは `r` を押す数秒前の GitHub の状態で、押した人が求めているのはそれ。
-        // **埋まった行を終端が頼み直さない**ことまで見る。
+    fn r_during_a_fan_out_asks_with_the_local_sha_and_the_list_corrects_it() {
+        // **`refresh` の doc が約束する「届いた一覧の sha で引く」が破れる唯一の順序**
+        // （01 の「引き直す（`r`）」）—— 扇形の終端が一覧より先に届くと、
+        // `pr_details_finished` の数え直しが**手元の sha**で頼む。
+        // **行き止まりにならないことまで見る。**
         let mut state = state_on_prs_tab("feat/x");
         let ask = fan_out_after(
             &mut state,
@@ -1296,13 +1303,18 @@ mod tests {
                 fake_pull_request(90, "other", "sha90"),
             ],
         );
-        // 82 の答えだけ届いた時点で終端はまだ。**カーソルは答えの返っていない 90 へ。**
+        // 82 の答えだけ届いた時点で終端はまだ。**カーソルは集計を持っている 82**
+        // （答えの飛んでいる行には落とすものが無い —— 扇形の対象は集計を持っていない
+        // 行なので、そこで押しても `forget_detail` は空振りする）。
         let (epoch, _) = start_pr_details(&mut state, ask, &[(82, "sha82", Ok(detail(2)))]);
-        let _ = press(&mut state, 'j');
-        assert_eq!(state.prs.selected().map(|pr| pr.number), Some(90));
-        let _ = press(&mut state, 'r');
+        assert_eq!(state.prs.selected().map(|pr| pr.number), Some(82));
+        assert!(state.prs.detail(82).is_some(), "落とす相手が居ない");
 
-        // 飛んでいた 90 の答えが届く。**落としたばかりの行に入る。**
+        let cmd = press(&mut state, 'r');
+        assert_eq!(cmd, Cmd::FetchPrList, "一覧を頼んでいない: {cmd:?}");
+        assert!(state.prs.detail(82).is_none(), "落ちていない");
+
+        // 残りの答えと終端が、引き直した一覧より**先に**届く。
         let _ = update(
             &mut state,
             Msg::PrDetailLoaded {
@@ -1312,9 +1324,7 @@ mod tests {
                 result: Ok(detail(3)),
             },
         );
-        assert!(state.prs.detail(90).is_some(), "飛んでいた答えを捨てている");
-
-        let finished = update(
+        let recount = update(
             &mut state,
             Msg::PrDetailsFinished {
                 epoch,
@@ -1322,9 +1332,53 @@ mod tests {
             },
         );
         assert_eq!(
-            finished,
-            Cmd::None,
-            "埋まっている行を頼み直した: {finished:?}"
+            recount,
+            Cmd::FetchPrDetails {
+                epoch: 0,
+                targets: vec![(82, "sha82".to_string())],
+            },
+            "数え直しが手元の sha で頼んでいない"
+        );
+
+        // その 3 本が飛んでいるあいだに、引き直した一覧が届く。**82 の head が動いている。**
+        let (stale_epoch, _) = start_pr_details(&mut state, recount, &[]);
+        let after_list = update(
+            &mut state,
+            list_msg(vec![
+                fake_pull_request(82, "feat/x", "sha82b"),
+                fake_pull_request(90, "other", "sha90"),
+            ]),
+        );
+        assert_eq!(after_list, Cmd::None, "扇形が走っているのに落ちていない");
+
+        // 古い sha の答えは捨てられ、**次の終端が届いた一覧の sha で頼み直す。**
+        let _ = update(
+            &mut state,
+            Msg::PrDetailLoaded {
+                epoch: stale_epoch,
+                number: 82,
+                sha: "sha82".to_string(),
+                result: Ok(detail(9)),
+            },
+        );
+        assert!(
+            state.prs.detail(82).is_none(),
+            "古い sha の答えを採っている"
+        );
+        let again = update(
+            &mut state,
+            Msg::PrDetailsFinished {
+                epoch: stale_epoch,
+                aborted: None,
+            },
+        );
+        assert_eq!(
+            again,
+            Cmd::FetchPrDetails {
+                epoch: 0,
+                targets: vec![(82, "sha82b".to_string())],
+            },
+            "行き止まりになっている"
         );
     }
 

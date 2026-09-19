@@ -313,9 +313,10 @@ pub(super) fn account_resolved(
             AccountState::Degraded(reason)
         }
     };
-    // **アカウントが決まるまで `wanted_pr_list()` は偽**なので、ここが PR 一覧を頼む
-    // 2 本目の入口（もう 1 本は `repo_info_loaded`）。**どちらが先に届くかは
-    // 決まらない**（01 の「PR ペイン › 何を引くか」）。
+    // **アカウントが決まるまで `wanted_pr_list()` は偽**なので、ここも PR 一覧を頼む
+    // 入口（一覧は `prs::reload` の doc）。**非同期で届くもう 1 本
+    // （`repo_info_loaded`）とはどちらが先に届くかが決まらない**
+    // （01 の「PR ペイン › 何を引くか」）。
     //
     // **鍵が同じでも引き直す、ではなく鍵が無い。** 一覧は選択に紐づかないので、
     // `A` でアカウントを選び直したらそのまま引き直す（`prs::reload` の doc）。

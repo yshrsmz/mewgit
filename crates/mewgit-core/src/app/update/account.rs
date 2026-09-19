@@ -367,6 +367,7 @@ mod tests {
     use super::super::test_support::{
         cells, commit, exec_done_of, fake_output, fetched_remote, issued, press, press_code,
         repo_snapshot, state, state_with_commits, tracking_branch, with_branches, HEADS_MAIN,
+        NOTICE_CELLS,
     };
     use super::super::{init, update};
     use super::*;
@@ -694,8 +695,8 @@ mod tests {
     }
 
     #[test]
-    fn every_notice_that_a_prints_fits_the_status_bar() {
-        // **72 セルはステータスバーの予算**（01 の「失敗の案内文」）。`A` は通知の
+    fn every_notice_that_a_prints_fits_the_notice_line() {
+        // **予算はフッター 1 行目の幅**（01 の「失敗の案内文」）。`A` は通知の
         // **新しい産出元**なので、`exec_advice` を回している見張りは自分では拾わない
         // （CLAUDE.md の「共有した見張りは新しい産出元を自分では拾わない」）。
         //
@@ -720,7 +721,11 @@ mod tests {
 
         for (account, target) in cases {
             let message = account_view(&account, &target).expect_err("モーダルを開いている");
-            assert!(cells(&message) <= 72, "{} セル: {message}", cells(&message));
+            assert!(
+                cells(&message) <= NOTICE_CELLS,
+                "{} セル: {message}",
+                cells(&message)
+            );
         }
     }
 

@@ -52,7 +52,7 @@
 ```
 crates/
   mewgit-core/src/
-    app/        state.rs  msg.rs  cmd.rs  key.rs
+    app/        state.rs  msg.rs  cmd.rs  key.rs  keys.rs
       update/   mod.rs  graph.rs  worktree.rs  diff.rs  branches.rs
                 remote.rs  account.rs  modal.rs  exec.rs
                 test_support.rs（`#[cfg(test)]`）

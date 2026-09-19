@@ -46,6 +46,33 @@ fn unquote(line: &str) -> &str {
 /// `TestBackend` が隠れたセルを報告するときの区切り。閉じ `"` を含む。
 const HIDDEN_CELLS: &str = "\" Hidden by multi-width symbols:";
 
+/// 描いた通知の行（フッターの 1 行目）。
+///
+/// **取り出しはここ 1 本。** `height - 2` を各テストが持つと、フッターの高さや置き場所を
+/// 変えたときに一斉に嘘になる。**行番号は `ui::footer` から出す**（`ui::pane_area` と
+/// 同じ理由）。**`ui` の `mod tests` ではなくここに置く** —— `runtime` のテストも
+/// 通知の行を見る（テストの共有先は `test_util`。`CLAUDE.md`）。
+pub fn notice_bar(state: &AppState, size: TermSize) -> String {
+    footer_row(state, size, 0)
+}
+
+/// 描いたキーヒントの行（フッターの 2 行目）。
+pub fn hint_bar(state: &AppState, size: TermSize) -> String {
+    footer_row(state, size, 1)
+}
+
+fn footer_row(state: &AppState, size: TermSize, row: usize) -> String {
+    // **その行が在ることまで見る。** 低い端末ではフッターに 2 行渡らず、通知の行が
+    // 0 行になる（`ui::split` が足りないぶんを通知から削る）。`y` だけを信じると
+    // **別の行を通知として読む**か、範囲外で理由の無い panic になる。
+    let area = ui::footer(size)[row];
+    assert!(
+        area.height > 0,
+        "{size:?} にはフッターの {row} 行目が無い（低すぎる端末）"
+    );
+    draw(state, size)[area.y as usize].clone()
+}
+
 /// `needle` を含む行が何行目か。無ければ panic する。
 ///
 /// 桁や行を直に書かない。レイアウトを変えたときにテストだけ古い座標を持つのを避ける

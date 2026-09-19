@@ -367,15 +367,130 @@ fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
 mod tests {
 
     use super::test_support::{
-        commit_loads, cursor, detail_ok, exec_done_of, more, press, state, state_with_commits,
-        state_with_page, ROWS,
+        commit_loads, cursor, detail_ok, diff_state, exec_done_of, more, on_first_commit,
+        on_first_commit_with_files, press, press_code, state, state_on_branches,
+        state_with_commits, state_with_page, tab_to, worktree_state, ROWS,
     };
     use super::*;
-    use crate::app::{Modal, RightTab, TermSize};
+    use crate::app::{keys, Modal, RightTab, TermSize};
+    use crate::git_read::WorktreeSection;
 
     use crate::git_exec::ExecError;
 
-    use crate::test_util::{fake_snapshot, fake_target};
+    use crate::test_util::{
+        fake_pull_request, fake_snapshot, fake_target, pr_list_loaded, put_on_branch, reply,
+    };
+
+    /// 案内に出すキーの表（`app::keys`）は、`update_key` の `match` に対する 2 本目の
+    /// 一覧（01 の「案内に出すキーの表」）。**表に載せたキーがそのペインで本当に
+    /// 何かすることを見る。**
+    ///
+    /// **向きは表 → dispatch だけ。** 逆（`match` の腕が全部表にあるか）は `match` から
+    /// 導けない。
+    ///
+    /// **`update` を通す。** ペインの `*_key` を直に呼ぶと [`AppState::issue`] を通らず、
+    /// 「出なかった」と「落とされた」が混ざる（#38）。
+    ///
+    /// **1 打鍵ごとに状態を組み直す。** 続けて押すと、先に開いたモーダルが後続のキーを
+    /// 全部受ける。
+    ///
+    /// **「何かする」は `Cmd` か状態の変化。** 断りの通知も状態を動かすので通る ——
+    /// ヒントはペイン単位なので、カーソル行によっては理由を出して断るのが正しい
+    /// （コミットの diff での `s` など。07）。
+    ///
+    /// **[`keys::COMMON`] と [`keys::QUIT`] は 1 つの状態でしか回さない。** あれは
+    /// `update_key` が `match state.focus` より手前で受けるので、ペインごとに押しても
+    /// 踏む経路は同じ（`CLAUDE.md` の「通る組み合わせを足しても見張りは増えない」）。
+    #[test]
+    fn every_hinted_key_does_something() {
+        for pane in [
+            Pane::Graph,
+            Pane::Branches,
+            Pane::Prs,
+            Pane::Worktree,
+            Pane::CommitDetail,
+            Pane::Diff,
+        ] {
+            for hint in keys::pane(pane) {
+                assert_reacts(pane, hint);
+            }
+        }
+        for hint in keys::COMMON.iter().chain(std::iter::once(&keys::QUIT)) {
+            assert_reacts(Pane::Graph, hint);
+        }
+    }
+
+    /// `pane` で `hint` のキーを 1 つずつ押し、無反応でないことを見る。
+    fn assert_reacts(pane: Pane, hint: &keys::KeyHint) {
+        for key in hint.keys() {
+            let mut state = hinted_state(pane);
+            assert_eq!(state.focus, pane, "{pane:?} に居ません");
+            let before = format!("{state:?}");
+
+            let cmd = update(&mut state, Msg::Key(*key));
+
+            assert!(
+                cmd != Cmd::None || format!("{state:?}") != before,
+                "{pane:?} の {key:?}（{}）が無反応です",
+                hint.label()
+            );
+        }
+    }
+
+    /// `pane` にフォーカスがあり、**表のどのキーも空振りしない**状態。
+    ///
+    /// **カーソルは一覧の真ん中に置く。** 端に置くと `j` か `k` の片方が正しく
+    /// 無反応になり、表が嘘でないのに落ちる。**置き方は `j` を 1 回押すので揃える**
+    /// —— フィールドに直に書くと、カーソルを動かす規則を通らない状態が作れる。
+    fn hinted_state(pane: Pane) -> AppState {
+        // 2 件以上ないと `j` と `k` の両方を踏めない。
+        let files = &["a.txt", "b.txt", "c.txt"];
+        match pane {
+            Pane::Graph => on_first_commit(3),
+            Pane::Branches => {
+                let mut state =
+                    state_on_branches(&[("main", true), ("topic", false), ("x", false)]);
+                let _ = press(&mut state, 'j');
+                state
+            }
+            Pane::Prs => {
+                let mut state = state_with_commits(3);
+                // 一覧を引く前に、アカウントと対象を決めておく（`prs::reload` が見る）。
+                put_on_branch(&mut state, "topic");
+                let list = (1..=3)
+                    .map(|n| fake_pull_request(n, "topic", "sha"))
+                    .collect();
+                let ask = prs::reload(&state);
+                let _ = reply(&mut state, ask, pr_list_loaded(list));
+                let _ = tab_to(&mut state, Pane::Prs);
+                let _ = press(&mut state, 'j');
+                state
+            }
+            Pane::Worktree => {
+                // staged が 1 つある（`c` が開ける）状態で、カーソルは unstaged に置く。
+                let mut state = worktree_state(
+                    fake_snapshot(&["a.txt"], &["b.txt", "c.txt", "d.txt"], &[]),
+                    WorktreeSection::Unstaged,
+                );
+                let _ = press(&mut state, 'j');
+                state
+            }
+            Pane::CommitDetail => {
+                let mut state = on_first_commit_with_files(3, files);
+                // `Enter` で右へ（コミットを選んでいるので CommitDetail）。
+                let _ = press_code(&mut state, KeyCode::Enter);
+                let _ = press(&mut state, 'j');
+                state
+            }
+            Pane::Diff => {
+                let mut state = diff_state(&["a.txt"], 3);
+                let _ = press(&mut state, 'j');
+                state
+            }
+            // 巡回候補に入っていないペイン。表も空なので回すものが無い。
+            Pane::Stash => panic!("Stash はまだ無い（M5）"),
+        }
+    }
 
     #[test]
     fn tab_moves_the_focus_and_the_worktree_keys_follow_it() {

@@ -260,9 +260,10 @@ fn exec_detail(err: &ExecError) -> String {
 /// 無い形、追跡設定に沿った push が断られた形で押すキーが違う。kind だけで文を選ぶと
 /// どれかに嘘を言う。
 ///
-/// **どの文も 72 セルに収める。** ステータスバーは 1 行で、右端の `q:quit` と空白 2 で
-/// 8 セル取る（07）。溢れると `Paragraph` が末尾から黙って切るので、「どうすればよいか」
-/// の側から消える。見張りは `mewgit-tui` 側に置く（80 桁で描いて確かめる）。
+/// **どの文も端末の幅に収める**（80 桁なら 80 セル。01 の「失敗の案内文」）。フッターの
+/// 1 行目は通知だけが使う（キーヒントは 2 行目。07）。溢れると `Paragraph` が末尾から
+/// 黙って切るので、「どうすればよいか」の側から消える。見張りは `mewgit-tui` 側にも
+/// 置く（80 桁で描いて確かめる）。
 fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
     // `NoResult` の `reason` は git の stderr ではなく mewgit の文言で、それ自体が
     // 案内になっている（03）。差し替えると説明が消える。`Canceled` も同じで、
@@ -334,7 +335,7 @@ mod tests {
         cells, commit, commit_op, exec_done, exec_done_of, failed_with, fake_output, finish_exec,
         forced_push_op, issued, page_loaded, press, push_op, reject_non_fast_forward, reload,
         repo_snapshot, state, state_for_push, state_with_commits, state_with_page, tracked_head,
-        with_branches, worktree_state, HEADS_MAIN,
+        with_branches, worktree_state, HEADS_MAIN, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -443,10 +444,10 @@ mod tests {
             let detail = notice.detail.as_deref().expect("detail がありません");
             assert!(detail.contains("git push origin main"), "detail: {detail}");
             // **1 行に収まる幅か。** 超えると末尾から黙って切れ、「どうすればよいか」
-            // の側が消える（01 の「失敗の案内文」）。72 が予算である理由は
-            // `mewgit-tui` の `a_notice_of_72_cells_fits_beside_the_hint` が見る。
+            // の側が消える（01 の「失敗の案内文」）。予算の根拠は `mewgit-tui` の
+            // `a_notice_of_the_full_width_fits_on_its_own_line` が見る。
             assert!(
-                cells(&notice.message) <= 72,
+                cells(&notice.message) <= NOTICE_CELLS,
                 "{} セル: {}",
                 cells(&notice.message),
                 notice.message

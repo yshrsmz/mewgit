@@ -8,12 +8,14 @@
 
 mod cmd;
 mod key;
+pub mod keys;
 mod msg;
 mod state;
 mod update;
 
 pub use cmd::Cmd;
 pub use key::{Key, KeyCode, Modifiers};
+pub use keys::KeyHint;
 pub use msg::{ExecDone, Msg, RepoSnapshot};
 pub use state::{
     AccountListing, AccountView, AppState, BranchLoad, BranchState, CommitFiles, DiffCursor,

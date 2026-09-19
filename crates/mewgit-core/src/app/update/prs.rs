@@ -186,9 +186,10 @@ pub(super) fn pr_details_finished(
         if let Some((err, targets)) = aborted {
             state.prs.details_aborted(&targets, &err);
             // **理由は `detail` に載せる。** 要約行に `GithubError` の `Display` を
-            // 混ぜると **72 セルを超えて `q:quit` が押し出される** ——
-            // `InvalidHost` はホスト名をそのまま持ち、**ホスト名に上限が無い**
-            // （`-bad` の 4 文字でちょうど 72 セル。実測 2026-09-18）。
+            // 混ぜると **1 行目の予算を超えて末尾から切れる** ——
+            // `InvalidHost` はホスト名をそのまま持ち、**ホスト名に上限が無い**ので、
+            // 予算をいくつにしても変わらない（`-bad` の 4 文字でちょうど 72 セル。
+            // 実測 2026-09-18。当時の予算が 72 だったのは `q:quit` と同じ行だったため）。
             // `exec_finished` が argv と stderr を `detail` に載せるのと同じ形で、
             // **描くのは M6 のステータスバーのタスク**（01 の「通知」）。
             state.push_notice(
@@ -232,7 +233,8 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, issued, press, press_code, repo_snapshot, state, state_with_commits,
+        cells, issued, press, press_code, repo_snapshot, state, state_with_commits, tab_to,
+        NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -277,25 +279,6 @@ mod tests {
         let ask = fan_out_after(&mut state, vec![fake_pull_request(82, branch, "sha82")]);
         let _ = deliver_pr_details(&mut state, ask, &[(82, "sha82", Ok(detail(2)))], None);
         state
-    }
-
-    /// `pane` に届くまで `Tab` を押す。返すのは**最後の 1 回**が出した `Cmd`。
-    ///
-    /// **回数を書かない。** 巡回の並びはグラフの選択と `config.github.enabled` で
-    /// 変わるので、固定の回数は別の状態で黙って外れる（`CLAUDE.md`）。
-    ///
-    /// **途中の回の `Cmd` は捨てる。** 通過するペインが何かを頼む状態で使うと、
-    /// そのジョブが `AppState::issue` に登録されたまま残り、**後続の
-    /// `assert_eq!(…, Cmd::None)` が門ではなく「落とされた」で通る**（#38 の形）。
-    /// 集計の無い行を持ったまま通過させるテストを書くときは、ここも受け取って見る。
-    fn tab_to(state: &mut AppState, pane: Pane) -> Cmd {
-        for _ in 0..state.focus_candidates().len() {
-            let cmd = press_code(state, KeyCode::Tab);
-            if state.focus == pane {
-                return cmd;
-            }
-        }
-        panic!("{pane:?} に届きませんでした: {:?}", state.focus);
     }
 
     /// 一覧を届けて、カーソルの座り先まで進める。
@@ -784,7 +767,7 @@ mod tests {
         assert_eq!(notice.level, NoticeLevel::Warn);
         assert!(notice.message.contains("中断"), "{}", notice.message);
         // **理由は要約行ではなく `detail` に入る**（上限の無いホスト名を要約行に
-        // 混ぜると 72 セルを超える）。
+        // 混ぜると予算を超える）。
         assert!(
             notice
                 .detail
@@ -799,7 +782,7 @@ mod tests {
         // `o` も別々に見ているので、通知を出す場所を足したらここにも足す。
         // **本文に `GithubError` の `Display` が乗る**ので、腕を足したときに超えうる。
         assert!(
-            cells(&notice.message) <= 72,
+            cells(&notice.message) <= NOTICE_CELLS,
             "{} セル: {}",
             cells(&notice.message),
             notice.message
@@ -1094,7 +1077,11 @@ mod tests {
         let message = state.notices[0].message.clone();
         assert!(message.contains("ブラウザ"), "{message}");
         // ステータスバーの予算（01 の「失敗の案内文」）。
-        assert!(cells(&message) <= 72, "{} セル: {message}", cells(&message));
+        assert!(
+            cells(&message) <= NOTICE_CELLS,
+            "{} セル: {message}",
+            cells(&message)
+        );
     }
 
     #[test]

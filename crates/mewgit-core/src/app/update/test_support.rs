@@ -14,15 +14,20 @@ use crate::app::{ExecDone, InputIntent, Modal, RepoInfo, RepoSnapshot, TextBuffe
 use crate::config::Config;
 use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput};
 use crate::git_read::{
-    Branch, Commit, DiffTarget, FileDiff, GitReadError, HeadInfo, LogPage, Oid, RefIndex,
-    UpstreamConfig, WorktreeSection, WorktreeSnapshot,
+    Branch, Commit, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, HeadInfo, LogPage,
+    Oid, RefIndex, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
 };
 use crate::test_util::{
-    fake_branch, fake_commit, fake_detail, fake_file_diff, fake_hunk, fake_remote, fake_snapshot,
-    fake_upstream, reply,
+    fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid,
+    fake_remote, fake_snapshot, fake_upstream, reply,
 };
 
-/// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
+/// グラフに使える行数。`ui` が決めた値が [`Msg::Layout`] で来る想定。
+///
+/// **実端末の値と一致していなくてよい。** テストはこれを viewport として使うだけで、
+/// 実際の `ui::graph_rows` は 80x24 で 19 行（フッターが 2 行になったぶん。20 に
+/// 当たるのは 80x25）。**一致させると、レイアウトを変えるたびに全テストの期待値が
+/// 動く。**
 pub(super) const ROWS: usize = 20;
 
 pub(super) fn state() -> AppState {
@@ -53,6 +58,63 @@ pub(super) fn state_with_page(n: usize, done: bool) -> AppState {
     };
     let _ = reply(&mut state, first, page_loaded(Ok(page)));
     state
+}
+
+/// `n` 件を積み、1 件目のコミットにカーソルを乗せて詳細と一覧が届いた状態。
+///
+/// 起動直後のカーソルは WIP 行なので、`j` を 1 回打って乗せる。**一覧も届ける。**
+/// 届けないと `JobKind::LoadCommitFiles` が走ったままになり、以後の
+/// `Cmd::LoadCommitFiles` が `issue` に落とされて、テストが見ているのが
+/// 「出なかった」なのか「落とされた」なのか判らなくなる。
+pub(super) fn on_first_commit(n: usize) -> AppState {
+    on_first_commit_with_files(n, &["a.txt"])
+}
+
+/// [`on_first_commit`] で、ファイル一覧を `paths` にしたもの。
+///
+/// **一覧の行数を選べるようにしてある** —— カーソルを動かすキーの見張りは、端に置くと
+/// 片方が正しく無反応になるので 2 件以上要る。
+pub(super) fn on_first_commit_with_files(n: usize, paths: &[&str]) -> AppState {
+    let mut state = state_with_commits(n);
+    let _ = press(&mut state, 'j');
+    let _ = update(&mut state, detail_ok(0));
+    let _ = update(&mut state, files_of(0, paths));
+    state
+}
+
+/// `paths` を `Modified` で並べたファイル一覧が届いた [`Msg`]。
+pub(super) fn files_of(index: u8, paths: &[&str]) -> Msg {
+    let entries = paths
+        .iter()
+        .map(|path| fake_entry(path, FileStatus::Modified))
+        .collect();
+    files_loaded(index, Ok(entries))
+}
+
+pub(super) fn files_loaded(index: u8, result: Result<Vec<FileEntry>, GitReadError>) -> Msg {
+    Msg::CommitFilesLoaded {
+        oid: fake_oid(index),
+        result: Box::new(result),
+    }
+}
+
+/// `pane` に届くまで `Tab` を押す。返すのは**最後の 1 回**が出した `Cmd`。
+///
+/// **回数を書かない。** 巡回の並びはグラフの選択と `config.github.enabled` で変わるので、
+/// 固定の回数は別の状態で黙って外れる（`CLAUDE.md`）。
+///
+/// **途中の回の `Cmd` は捨てる。** 通過するペインが何かを頼む状態で使うと、そのジョブが
+/// [`AppState::issue`] に登録されたまま残り、**後続の `assert_eq!(…, Cmd::None)` が門では
+/// なく「落とされた」で通る**（#38 の形）。集計の無い行を持ったまま通過させるテストを
+/// 書くときは、ここも受け取って見る。
+pub(super) fn tab_to(state: &mut AppState, pane: Pane) -> Cmd {
+    for _ in 0..state.focus_candidates().len() {
+        let cmd = press_code(state, KeyCode::Tab);
+        if state.focus == pane {
+            return cmd;
+        }
+    }
+    panic!("{pane:?} に届きませんでした: {:?}", state.focus);
 }
 
 /// staged に 1 ファイルだけある状態。worktree ペインの Staged を選んでいる。
@@ -119,6 +181,33 @@ pub(super) fn fake_diff(path: &str, hunks: usize) -> Vec<FileDiff> {
         .map(|n| fake_hunk(&format!("@@ -{n},1 +{n},1 @@"), &[]))
         .collect();
     vec![fake_file_diff(path, hunks)]
+}
+
+/// Diff ペインを開き、`paths[0]` の diff が `hunks` 個のハンクで届いた状態。
+pub(super) fn diff_state(paths: &[&str], hunks: usize) -> AppState {
+    diff_pane(WorktreeSection::Unstaged, paths, fake_diff(paths[0], hunks))
+}
+
+/// Diff ペインを開き、`files` が届いた状態。
+///
+/// **Diff ペインの立ち上げはここ 1 本。** 「worktree の状態を作る → `Enter` →
+/// `diff_ok`」を 2 箇所に書くと、片方だけ直したときに差が出る。
+pub(super) fn diff_pane(
+    section: WorktreeSection,
+    paths: &[&str],
+    files: Vec<FileDiff>,
+) -> AppState {
+    let snapshot = match section {
+        WorktreeSection::Staged => fake_snapshot(paths, &[], &[]),
+        WorktreeSection::Unstaged => fake_snapshot(&[], paths, &[]),
+        WorktreeSection::Untracked => fake_snapshot(&[], &[], paths),
+        WorktreeSection::Conflicted => panic!("conflicted は diff を出さない"),
+    };
+    let mut state = worktree_state(snapshot, section);
+    let _ = press_code(&mut state, KeyCode::Enter);
+    let target = state.wanted_diff().expect("対象が決まっていません");
+    let _ = update(&mut state, diff_ok(target, files));
+    state
 }
 
 pub(super) fn diff_ok(target: DiffTarget, files: Vec<FileDiff>) -> Msg {
@@ -310,6 +399,16 @@ pub(super) fn exec_done_of(op: GitOp, result: Result<ExecOutput, ExecError>) -> 
         progress: None,
     }))
 }
+
+/// 通知の要約行の予算（セル）。**端末の幅そのもの**で、80 桁を想定している
+/// （01 の「失敗の案内文」）。フッターの 2 行目がキーヒントなので、1 行目は幅いっぱい
+/// 使える。
+///
+/// **見張りは複数あって、新しい産出元を自分では拾わない**（`CLAUDE.md`）——
+/// `exec_advice` / `A` / `o` / PR の集計が別々に回している。通知を出す場所を足したら、
+/// そこでもこれを見る。**実際に描いて確かめるのは `mewgit-tui` 側**
+/// （`a_notice_of_the_full_width_fits_on_its_own_line`）。
+pub(super) const NOTICE_CELLS: usize = 80;
 
 /// 端末に描いたときの桁数。**案内文は ASCII と日本語だけ**なので、非 ASCII を
 /// 2 桁と数えれば実際の幅と一致する（合成文字や絵文字を入れたらここが嘘になる）。

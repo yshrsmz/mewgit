@@ -22,7 +22,12 @@ use crate::test_util::{
     fake_remote, fake_snapshot, fake_upstream, reply,
 };
 
-/// グラフに使える行数。`ui` が決めた値が [`Msg::Resize`] で来る想定。
+/// グラフに使える行数。`ui` が決めた値が [`Msg::Layout`] で来る想定。
+///
+/// **実端末の値と一致していなくてよい。** テストはこれを viewport として使うだけで、
+/// 実際の `ui::graph_rows` は 80x24 で 19 行（フッターが 2 行になったぶん。20 に
+/// 当たるのは 80x25）。**一致させると、レイアウトを変えるたびに全テストの期待値が
+/// 動く。**
 pub(super) const ROWS: usize = 20;
 
 pub(super) fn state() -> AppState {
@@ -75,11 +80,6 @@ pub(super) fn on_first_commit_with_files(n: usize, paths: &[&str]) -> AppState {
     let _ = update(&mut state, detail_ok(0));
     let _ = update(&mut state, files_of(0, paths));
     state
-}
-
-/// 索引 `index` のコミットのファイル一覧が届いた [`Msg`]。中身は `a.txt` 1 件。
-pub(super) fn files_ok(index: u8) -> Msg {
-    files_of(index, &["a.txt"])
 }
 
 /// `paths` を `Modified` で並べたファイル一覧が届いた [`Msg`]。

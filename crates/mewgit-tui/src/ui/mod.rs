@@ -276,21 +276,39 @@ fn mark(status: FileStatus) -> char {
     }
 }
 
-/// 画面をヘッダ / 本文 / フッター 2 行に割る。
+/// 画面をヘッダ / 本文 / フッター 2 行（通知・キーヒント）に割る。
 ///
-/// **フッターは固定 2 行**（1 行目が通知、2 行目がキーヒント。07 の「ステータスバー」）。
-/// **中身で高さを変えない** —— 変えると [`graph_rows`] が動き、通知が 1 件出るだけで
-/// ログの読み直しが走る（01 の「グラフの行」）。**2 行を 1 本の `Layout` で割る**のは、
-/// 「フッターは何行か」を 2 箇所に書かないため。
+/// **フッターは固定 2 行**（07 の「ステータスバー」）。**中身で高さを変えない** ——
+/// 変えると [`graph_rows`] が動き、通知が 1 件出るだけでログの読み直しが走る（01 の
+/// 「グラフの行」）。
+///
+/// **フッターの中は算術で割る。** `Layout` に 1 行ずつ割らせると、**高さが 2 に足りない
+/// 端末で後ろ（キーヒント）が 0 行になり、`q:quit` が画面から消える** —— 07 は
+/// 「幅が足りないときに落とすのはペインのキーのほう」と決めているのに、**高さでは
+/// その守りが効いていなかった**（リサイズ中の一瞬に踏む。80x3 で実測）。譲るのは
+/// 通知のほう。
 fn split(area: Rect) -> [Rect; 4] {
-    Layout::vertical([
+    let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(FOOTER_ROWS),
     ])
-    .areas(area)
+    .areas(area);
+    // 末尾の 1 行をキーヒントに、残りを通知に渡す（0 行なら描かれない）。
+    let hints = Rect {
+        y: footer.bottom().saturating_sub(1),
+        height: footer.height.min(1),
+        ..footer
+    };
+    let notice = Rect {
+        height: footer.height.saturating_sub(1),
+        ..footer
+    };
+    [header, body, notice, hints]
 }
+
+/// フッターの行数。**ここ 1 箇所だけが決める**（内訳は [`split`] が算術で割る）。
+const FOOTER_ROWS: u16 = 2;
 
 /// フッターの 2 行（1 行目が通知、2 行目がキーヒント）。テスト用。
 ///
@@ -490,8 +508,9 @@ const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// ヘッダ右端の「いま何が走っているか」。走っているものが無ければ `None`。
 ///
 /// **駒と一緒に説明も出す**（`⠋ fetch status`）。07 は当初これをステータスバーに
-/// 置いていたが、あちらは 1 行しかなく、`git` の失敗の案内文に 72 セルを取ってある
-/// （01 の「失敗の案内文」）。ジョブが 1 つ増えるたびに案内が末尾から削られるので、
+/// 置いていたが、フッターの 1 行目は通知が幅いっぱい使い（01 の「失敗の案内文」）、
+/// 2 行目はキーヒントが埋める（07 の「ステータスバー」）。**2 行になっても譲る席は
+/// 増えていない** —— ジョブが 1 つ増えるたびに案内かヒントが末尾から削られるので、
 /// 空いているヘッダへ移した。
 fn spinner_line(state: &AppState) -> Option<Line<'static>> {
     if state.jobs.is_empty() {
@@ -547,8 +566,10 @@ fn hint_line(state: &AppState, width: u16) -> Paragraph<'static> {
 ///
 /// **収まるかは組んだ字から数える。** 幅だけを別に算術で出すと、組む側と数える側で
 /// 規則が 2 本になる（`CLAUDE.md` の「出力を 1 本にしても入力が 2 本なら結果はずれる」）。
-/// そのぶん 1 フレームで数十の `String` を捨てるが、描画は 250ms ごとなので実測は
-/// µs の桁（幅が足りないときに落とす回数だけ組み直す）。
+/// そのぶん 1 フレームで数十の `String` を捨てる（幅が足りないときは落とす回数だけ
+/// 組み直す）が、描画は 250ms ごと（1 秒 4 回）。実測（release、10,000 回平均。
+/// レビューで測った値）—— Graph 幅 80 で 342ns、Worktree 幅 80 で 711ns、
+/// 落とす形の Worktree 幅 30 で 2.18µs。
 fn hint_text(pane: &[KeyHint], width: u16) -> String {
     let line = |pane: &[KeyHint], common: &[KeyHint]| {
         let groups = [joined(pane), joined(common), joined(&[keys::QUIT])];
@@ -887,7 +908,7 @@ mod tests {
     #[test]
     fn every_degraded_reason_fits_the_header() {
         // **7 つを 1 つずつ回す。** 理由を足したときに、文言の無い腕と、ヘッダから
-        // はみ出す長さの両方をここで落とす（通知の 72 セルと同じ形の見張り。01）。
+        // はみ出す長さの両方をここで落とす（通知の予算と同じ形の見張り。01）。
         //
         // **出荷される形のヘッダで測る**（`/code-review` が拾った）。`[gh: …]` が
         // 出るのは `Cmd::ResolveAccount` を出したリポジトリだけで、それを出すのは
@@ -1178,8 +1199,14 @@ mod tests {
 
     /// `pane` にフォーカスを置いて描いたヒントの行。
     fn hint_bar_of(pane: Pane, width: u16) -> String {
-        let mut state = state_at("/repo");
+        // **`focus` を置いたら `reseat_focus` を通す**（隣の
+        // `the_focused_pane_is_the_only_one_with_a_bold_border` と同じ理由）——
+        // 候補外の `focus` は実物では出ない画面。ワーキングツリーに 1 ファイル置くのは、
+        // Worktree と Diff を候補に入れるため。
+        let mut state = state_with_status(fake_snapshot(&[], &["a.txt"], &[]));
         state.focus = pane;
+        state.reseat_focus();
+        assert_eq!(state.focus, pane, "巡回候補に入っていません");
         hint_bar(
             &state,
             TermSize {
@@ -1288,12 +1315,48 @@ mod tests {
 
     #[test]
     fn tiny_terminal_does_not_panic() {
-        // ヘッダ 1 + 本文 1 + ステータス 1 の合計に満たない高さ。リサイズ中に
+        // ヘッダ 1 + 本文 1 + フッター 2 の合計（4）に満たない高さ。リサイズ中に
         // 一瞬こうなることがあるので、Layout が破綻しないことを固定しておく。
         for (width, height) in [(1, 1), (1, 3), (20, 2)] {
             let lines = draw(&state_at("/repo"), TermSize { width, height });
             assert_eq!(lines.len(), height as usize);
         }
+    }
+
+    #[test]
+    fn a_short_terminal_keeps_the_quit_key_and_drops_the_notice_instead() {
+        // **フッターが 2 行に足りないときに落とすのは通知のほう**（07）。`Layout` に
+        // 1 行ずつ割らせると後ろのキーヒントが 0 行になり、**`q:quit` が画面から消える**。
+        // **境目を跨ぐ**（高さ 3 でフッターは 1 行、4 で 2 行）。
+        let mut state = state_at("/repo");
+        state.push_notice(NoticeLevel::Error, "失敗しました".to_string(), None);
+
+        for height in [3, 4] {
+            let size = TermSize { width: 80, height };
+            let lines = draw(&state, size).join("\n");
+            assert!(lines.contains("q:quit"), "{height} 行: {lines:?}");
+        }
+
+        // 2 行あるときは通知も出る（落とすのは足りないときだけ）。
+        let both = draw(
+            &state,
+            TermSize {
+                width: 80,
+                height: 4,
+            },
+        )
+        .join("\n");
+        assert!(both.contains("失敗しました"), "{both:?}");
+        // 1 行しか無いときは通知が消える。
+        let only_hints = draw(
+            &state,
+            TermSize {
+                width: 80,
+                height: 3,
+            },
+        )
+        .join("\n");
+        assert!(!only_hints.contains("失敗しました"), "{only_hints:?}");
     }
 
     #[test]

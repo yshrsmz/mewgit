@@ -307,7 +307,10 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       **キーヒントの見張り（`every_hinted_key_does_something`）も
       `hinted_state` も要らなくなる**（表と dispatch が 1 本になるので、網羅 `match` が
       両方向を見る）。`KeyHint::keys` が `&'static` を返さないのはこのため ——
-      上書きしたキーは `'static` では持てない
+      上書きしたキーは `'static` では持てない。
+      **いまの見張りが拾えない形も同じここで消える** —— キーの動作が丸ごと通知に
+      退化した形（`x` が理由を出すだけになる）や誤配線（`x` が stage をする）は
+      「無反応でない」で通る（レビューが変異で確認した。受け入れた穴）
 - [ ] フォーカス中のペインとタブの選択中表示をわかりやすくする。**いまはペインが
       枠線の `Modifier::BOLD` だけ（`ui::pane_block`）、右上のタブは非選択側を
       `DIM` にするだけ（`panes::tab_style`）で、どちらも「選択中を強調する」形に
@@ -395,5 +398,9 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       網羅 `match`（`fn every_variant() -> Vec<GitOp>`）を 1 本置き、`cases()` が
       その集合を全部含むことを `BTreeSet` で比べること —— 変種を足すとそちらが
       コンパイルエラーになるので、数を書かずに漏れが出る
+- [ ] `scripts/screen.py` が全角文字のあとで 1 桁落とすのを直す。**桁を根拠にする
+      確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
+      地続きに見える（実測は `CLAUDE.md` の pty の節）。いまは生の
+      `ESC[<行>;<桁>H` を読んで回避している
 - [ ] `.git/HEAD` mtime 監視での外部変更検知
 - [ ] README、リリースワークフロー（`cargo dist` or release-please）

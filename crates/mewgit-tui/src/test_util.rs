@@ -62,8 +62,15 @@ pub fn hint_bar(state: &AppState, size: TermSize) -> String {
 }
 
 fn footer_row(state: &AppState, size: TermSize, row: usize) -> String {
-    let y = ui::footer(size)[row].y as usize;
-    draw(state, size)[y].clone()
+    // **その行が在ることまで見る。** 低い端末ではフッターに 2 行渡らず、通知の行が
+    // 0 行になる（`ui::split` が足りないぶんを通知から削る）。`y` だけを信じると
+    // **別の行を通知として読む**か、範囲外で理由の無い panic になる。
+    let area = ui::footer(size)[row];
+    assert!(
+        area.height > 0,
+        "{size:?} にはフッターの {row} 行目が無い（低すぎる端末）"
+    );
+    draw(state, size)[area.y as usize].clone()
 }
 
 /// `needle` を含む行が何行目か。無ければ panic する。

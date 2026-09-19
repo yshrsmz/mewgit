@@ -304,9 +304,9 @@ pub(super) fn log_loaded(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        commit, commit_loads, cursor, detail_ok, diff_ok, fake_diff, files_loaded, files_of,
-        files_ok, more, on_first_commit, page_loaded, press, press_code, reload, state,
-        state_with_commits, state_with_page, ROWS,
+        commit, commit_loads, cursor, detail_ok, diff_ok, fake_diff, files_loaded, files_of, more,
+        on_first_commit, page_loaded, press, press_code, reload, state, state_with_commits,
+        state_with_page, ROWS,
     };
     use super::super::worktree::COMMIT_DIFF;
     use super::super::{init, update};
@@ -479,6 +479,14 @@ mod tests {
 
         assert_eq!(state.graph.cursor, 19);
         assert_eq!(state.graph.scroll, 1);
+    }
+
+    /// 索引 `index` のコミットのファイル一覧が届いた [`Msg`]。中身は `a.txt` 1 件。
+    ///
+    /// **利用者はこのモジュールだけなので `test_support` に置かない**（00 の
+    /// 「ディレクトリ構成」）。`files_of` のほうは 2 者が呼ぶのであちら。
+    fn files_ok(index: u8) -> Msg {
+        files_of(index, &["a.txt"])
     }
 
     /// 索引 `index` のコミットの詳細が失敗した [`Msg`]。

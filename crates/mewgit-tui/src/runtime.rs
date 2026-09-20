@@ -641,7 +641,8 @@ mod tests {
             state.repo.head,
             Some(HeadInfo::Branch {
                 name: "main".to_string(),
-                oid
+                oid,
+                upstream_remote: None,
             })
         );
         let labels: Vec<&str> = state

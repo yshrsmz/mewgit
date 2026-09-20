@@ -1187,16 +1187,59 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
 ### 現ブランチの PR
 
 **一覧の 1 行として出す。** `RepoInfo.head` がブランチに居て、その名前と同じ
-`head.branch` を持ち、かつ `head.repo` の owner が `target.owner` と同じ PR が
-それ。**起動直後のカーソルはその行に座る。**
+`head.branch` を持ち、かつ `head.repo` が**そのブランチの head が在りうるリポジトリ**
+と一致する PR がそれ。**起動直後のカーソルはその行に座る。**
+
+**候補は 1 つに決まらない。git は「どこへ push したか」を憶えていない**（git 2.55、
+`env -i` の一時リポジトリで実測。2026-09-20）。
+
+| 手順 | `branch.<name>.remote` | 実際の push 先 |
+|---|---|---|
+| `checkout -b fix bob/fix` → `push origin fix` | `bob` | origin |
+| `remote.pushDefault=bob` で `push` | **未設定** | bob |
+| `push -u fork feat/x`（既存の `origin` を上書き） | `fork` | fork |
+| `gh pr checkout <n>`（fork からの PR） | **fork の URL**（リモート名ではない） | fork |
+
+だから**追跡先 → `target` の順に当てる**。追跡先が先なのは、fork 運用で upstream 側の
+同名ブランチから出た**他人の PR** より自分の fork の PR を採るため。`target` にも
+落とすのは、1 行目の形（他人の fork を基に作って origin へ push した）で
+**一覧に出ている自分の PR に座らなくなる**のを防ぐため。
 
 - **状態に持たない。** `list` と `RepoInfo.head` から毎回導ける。持つと、どちらかが
   更新されたときに片方だけ古くなる（**導出できる値を、元から離れた場所に置かない**）
-- **fork のブランチでは合致しない。** 一覧には fork からの PR も出る（05）が、
-  こちらが持っているのはローカルのブランチ名だけで、**その PR の head がどの fork に
-  あるかを知らない**。`branch.<name>.remote` のリモート URL から owner を出す経路が
-  要る（plan.md の「fork の PR」）。**合致しないとカーソルが先頭に座るだけ**で、
-  PR そのものは一覧に出ている
+- **追跡先は `HeadInfo::Branch.upstream_remote`（`branch.<HEAD>.remote`）の URL から
+  出す。** 一覧には fork からの PR も出る（05）ので、`target` とだけ比べると
+  **fork のブランチでは合致しない**。**値はリモート名でも URL でもよい**（git の仕様）
+  ので、`RepoInfo.remotes` で引けたらその URL を、引けなければ値そのものを
+  `RemoteUrl` に通して `owner` / `repo` を取る。**URL の腕を落とすと
+  `gh pr checkout` の形が当たらない**（上の表）。**規則を持つのは `app`** ——
+  `git_read` が返すのは git が持っている値（リモート**名**）までで、名前を URL に直し、
+  GitHub の形として読めるかを判断するのは `auth::url` を使う側の仕事。04 の「既定
+  リモート」が同じ理由で `app` に置いている。**00 が禁じているからではない** ——
+  `auth` は `git_read` の下段なので、`git_read` から `auth::url` を呼ぶこと自体は
+  下向きで許される（`github` が `auth::url::valid_host` を使っているのと同じ）
+- **追跡先で当たらなければ `target` でも当てる。** 読めない追跡設定（設定が無い /
+  `.`（ローカル追跡）/ その名前のリモートも URL でもない / GitHub の形でない）は
+  候補にしない。**理由は分けない** —— 扱いはどれも同じで、出す先も無い
+  （座る行が変わるだけで通知は出さない）。**残る穴**は、fork 運用で upstream 側にも
+  同名のブランチの PR があり、しかも**自分の fork の PR が無い**とき ——
+  そのとき他人の行に座る
+- **材料は `Cmd::LoadRepoInfo` に載せる**（02 の「head」）。`BranchState` にも同じ
+  設定があるが、**座り直しは 1 回きり**（一覧が 1 度届くと以後は選んでいる番号で
+  座るので、この導出は二度と走らない）なので、**別のジョブから届く値を混ぜると
+  到着順で答えが変わり、二度と直らない**。`RepoInfo.target` が `default_remote` を
+  呼ばないのと同じ数え方
+- **host は比べない。** `target.host` は `ssh -G` で正規化済み、こちらは URL に書かれた
+  ままなので、生のまま比べると **fork だけ別のエイリアス（`gh-me:owner/repo`）を使う
+  多アカウント運用**——04 が想定している形——で逆に落ちる。**正規化をもう 1 回頼むと、
+  カーソルの位置のために `ssh -G` が 1 本増える**ので採らない。**残る穴**は、
+  別ホストの同名 `owner/repo` に同名のブランチがあり、そこから出た PR が一覧に
+  居る場合で、そのとき**カーソルが他人の行に座る**
+- **`branch.<name>.pushRemote` と `remote.pushDefault` は読まない。** git の push 規則は
+  fetch と違う（下の「push の行き先」に送ってある）。**読んでも「どこへ push したか」は
+  出ない** —— 上の表のとおり config はそれを憶えていないので、精度が上がるのは
+  `pushRemote` を明示している形だけ。`gh pr checkout` はそれを書くが、
+  `branch.<name>.remote` にも同じ URL を書くので、いまの読み方で当たる
 - **マージ済み / クローズ済みの PR は出ない。** 一覧は `state=open` だけを引くので、
   **PR がマージされた瞬間にその行は消える**。HEAD のブランチの PR を `MERGED` として
   出していた経路（`pr_for_branch` と `Cmd::FetchPr`）は、一覧に変えたときに消した。
@@ -1641,9 +1684,12 @@ degraded なら `[r]`、`.git/config` 由来なら `[u]`、どちらも無けれ
 `src` / `dst` に割って持つ理由は 03 の「argv への変換」（refspec と lease で同じ名前を
 別の位置に置くので、1 本の文字列に畳むと lease が壊れる）。
 
-決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る**
-（`RepoInfo.head` は起動時に読んだきりで古くなる。#22 の「キャッシュした状態から
-破壊的操作を選ばない」）。
+決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る** ——
+行き先の材料（`branch.<name>.merge`、追跡 ref の位置、ahead / behind）を運ぶのは
+`Branch` の行だけで、`RepoInfo.head` が持つのは名前と oid と `branch.<name>.remote`
+だけ（#22 の「キャッシュした状態から破壊的操作を選ばない」）。**鮮度の差ではない**
+—— どちらも ref を動かす書き込みのたびに読み直される（`Reload::Refs` が両方を
+同じバッチで出す）。
 
 1. HEAD のブランチが無い（detached / unborn）→ 通知して何も出さない
 2. `Branch.upstream_config`（`branch.<name>.remote` / `.merge`）があるなら、それが

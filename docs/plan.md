@@ -218,11 +218,19 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       値で答える** —— 述語を消去法で打ち消すと `Degraded` が潰れてペインと食い違う。
       フッターの Prs はキーが 1 つ増えても 80 桁で共通キーまで出る側に**残っている**
       （セル数は 07 の実測）
-- [ ] fork のブランチで現ブランチの PR を当てる — **一覧には fork からの PR も出る**
-      （`/repos/{o}/{r}/pulls` が返す）が、起動時にカーソルを座らせる照合が
-      `head.repo.owner == target.owner` なので、**fork のブランチでは合致せず先頭に
-      座る**（01 の「現ブランチの PR」）。塞ぐにはブランチの push 先リモート
-      （`branch.<name>.remote`）を `RemoteUrl` に通して owner を出す経路が要る
+- [x] fork のブランチで現ブランチの PR を当てる — `branch.<HEAD>.remote` を
+      `HeadInfo::Branch.upstream_remote` として読み、**リモート名なら `RepoInfo.remotes`
+      で URL に直し、引けなければ値そのものを** `RemoteUrl` に通して、その
+      `owner` / `repo` と `head.repo` を比べる（**`gh pr checkout` が書くのは URL**。
+      実測表は 01）。**材料は `Cmd::LoadRepoInfo` に載せた** —— `BranchState` の同じ
+      設定を使うと、**座り直しが 1 回きり**なので `Msg::BranchesLoaded` と一覧の
+      どちらが先に届くかで答えが変わり、二度と直らない（`RepoInfo.target` が
+      `default_remote` を呼ばないのと同じ形）。**当てる順は追跡先 → `target`** ——
+      git は「どこへ push したか」を憶えていないので、追跡先で打ち切ると main では
+      座っていた行に座らなくなる（01 の表の 1 行目）。**host は比べない**
+      （`target.host` は `ssh -G` で正規化済み、こちらは生。生で比べると fork だけ別の
+      エイリアスを使う多アカウント運用で逆に落ちる）ので、**別ホストの同名
+      `owner/repo` に同名のブランチがある形は受け入れた穴**（01 の「現ブランチの PR」）
 - [ ] 閉じた PR を見る経路 — 一覧は `state=open` だけを引くので、**マージされた
       瞬間にその行は消え、mewgit から辿る手段が無い**（01 の「現ブランチの PR」で
       受け入れた穴）。塞ぐなら「一覧に `state=all` を混ぜる」ではなく、**別の入口**
@@ -334,6 +342,18 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       **`Notice.detail`（argv と stderr）を出すのもここ。** いまは要約行しか描かないので、
       git が断った理由（`would be overwritten`、未マージのときの `-D` のヒント）が
       画面に出ない。不変ルール 4 が「UI まで届ける」と言っているのはこの詳細のこと
+- [ ] HEAD の追跡設定を 1 本にする。**いま `branch.<HEAD>.remote` は 2 箇所にある**
+      —— `RepoInfo.head`（`HeadInfo::Branch.upstream_remote`。PR の座り先が読む）と
+      `BranchState::head()` の `Branch.upstream_config`（`f` と push の行き先が読む）。
+      前者に寄せるには `HeadInfo` に `UpstreamConfig` を**対で**載せることが要る
+      （`push_plan` が `merge` を使うので `String` 1 本では肩代わりできない）。
+      **見返りは `update::default_remote` の 2 つのガード** ——「リモート一覧が空のあいだ
+      1 段目を飛ばす」「ブランチ一覧がまだなら飛ばす」——で、どちらも追跡設定を
+      `remotes` と別のジョブから取っていることだけが理由なので消えるはず
+      （`/simplify` の altitude が挙げた。**こちらでは数え直していない**）。
+      **`Branch.upstream_config` を消せるかは別の問い** —— あちらの読み手は ahead /
+      behind と追跡 ref も同じ行から取っており、出どころを混ぜると到着順の問いが
+      戻るかを数えていない
 - [ ] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

@@ -289,6 +289,21 @@ pub enum HeadInfo {
     Branch {
         name: String,
         oid: Oid,
+        /// `branch.<name>.remote`（02 の「head」）。
+        ///
+        /// **[`Branch::upstream_config`] と同じ設定を、別のジョブがもう一度読む。**
+        /// 読み手は `app` の「現ブランチの PR」で、**fork から出した PR を当てる**のに
+        /// 要る（01）。あちらの `BranchState` から取ると、`Cmd::LoadBranches` の返信と
+        /// PR 一覧のどちらが先に届くかで**座り直しの答えが変わる** —— 一覧が 1 度
+        /// 届いたら以後は選んでいる番号で座るので、**間違えても二度と直らない**。
+        ///
+        /// **対のうち `remote` だけを載せる。** `RepoReader::upstream_config`（private
+        /// なのでリンクにできない）をそのまま呼んで射影するので、**`merge` が欠けて
+        /// いれば `None`**（同じ設定の読み方を 2 通り持たないため）。`merge` の読み手は
+        /// push の行き先（`update::push_plan`）で、そちらは [`Branch`] から対のまま
+        /// 取っている —— ここへ対で載せても**いまは誰も読まない値**になるので、
+        /// 載せ替えるのは読み手が来たとき（plan.md の「HEAD の追跡設定を 1 本にする」）。
+        upstream_remote: Option<String>,
     },
     Detached(Oid),
     /// コミットが 1 つも無いリポジトリ。

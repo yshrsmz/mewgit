@@ -5,13 +5,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
+use crate::auth::url::RemoteUrl;
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
     RefIndex, Remote, StashEntry, WorktreeSection, WorktreeSnapshot,
 };
-use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
+use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 use crate::graph::{GraphRow, LaneState};
 
 use crate::config::Config;
@@ -431,6 +432,16 @@ pub struct RepoInfo {
     pub head: Option<HeadInfo>,
     /// 既定リモートから解析・正規化した host / port / owner / repo。
     pub target: TargetState,
+}
+
+impl RepoInfo {
+    /// 名前で引いたリモート。無ければ `None`（`.`（ローカル追跡）もここに落ちる）。
+    ///
+    /// **引き方を 1 本にする。** `update::default_remote`（`branch.<HEAD>.remote` で
+    /// 引く）と [`head_homes`] が同じ走査を書いていた。
+    pub(super) fn remote(&self, name: &str) -> Option<&Remote> {
+        self.remotes.iter().find(|remote| remote.name == name)
+    }
 }
 
 /// [`RepoInfo::target`] の状態。
@@ -1251,8 +1262,12 @@ impl BranchState {
     /// HEAD が指しているブランチ。detached / unborn では `None`。
     ///
     /// **push の行き先も、断られたことの記憶も、HEAD はここからしか取らない。**
-    /// `RepoInfo.head` は起動時に読んだきりで古くなる（#22 の「キャッシュした状態から
-    /// 破壊的操作を選ばない」）。一覧は ref を動かす書き込みのたびに読み直される。
+    /// あちらの材料（`branch.<name>.merge`、追跡 ref の位置、ahead / behind）を運ぶのは
+    /// [`Branch`] の行だけで、`RepoInfo.head` が持つのは名前と oid と
+    /// `branch.<name>.remote` だけ（#22 の「キャッシュした状態から破壊的操作を
+    /// 選ばない」）。**鮮度の差ではない** —— `Reload::Refs` は `Cmd::LoadRepoInfo` と
+    /// `Cmd::LoadBranches` を同じバッチで出すので、どちらも ref を動かす書き込みの
+    /// たびに読み直される。
     pub fn head(&self) -> Option<&Branch> {
         self.branches.iter().find(|branch| branch.is_head)
     }
@@ -1271,25 +1286,80 @@ impl BranchState {
 /// 先を決める側と描く側で照合の規則が割れると、カーソルが座っていない行を
 /// 「現ブランチの PR」として扱える。
 ///
-/// **fork のブランチでは合致しない。** 照合に使えるのはローカルのブランチ名だけで、
-/// その PR の head がどの fork にあるかを知らないため（plan.md の「fork のブランチで
-/// 現ブランチの PR を当てる」）。
+/// **fork のブランチも当てる。** 照合する相手は [`head_homes`] が確からしい順に
+/// 出す（`branch.<HEAD>.remote` の URL → `target`）。
+///
+/// **到着順に依らない。** 材料の `head` と `remotes` はどちらも
+/// [`Msg::RepoInfoLoaded`](super::Msg::RepoInfoLoaded) に乗って**同時に**届き、
+/// `target` はその返信から始まる鎖（`Cmd::ResolveTarget` → `Cmd::ResolveAccount` →
+/// 一覧）の途中なので、**一覧が届いた時点でどれも揃っている**。`BranchState` から
+/// 追跡設定を取るとこれが崩れる（01 の「現ブランチの PR」）ので、**順序を回す
+/// テストは要らない**。
 pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Option<&'a PullRequest> {
-    let target = repo.target.resolved()?;
     let HeadInfo::Branch { name, .. } = repo.head.as_ref()? else {
         // **`Detached` も `Unborn` も `None`。** 切り離された HEAD には名前が無く、
         // コミットが 1 つも無いブランチから出した PR は無い。
         return None;
     };
-    list.iter().find(|pr| {
-        pr.head.branch == *name
-            && pr.head.repo.as_ref().is_some_and(|repo| {
-                // **リポジトリ名まで見る。** owner だけだと、同じ owner の下に作った
-                // fork（`acme/app` → `acme/app-fork`）から出た他人の PR が
-                // 「現ブランチの PR」に当たる。
-                repo.owner == target.owner && repo.repo == target.repo
-            })
+    // **リポジトリ名まで見る**（`RepoRef` 丸ごとの比較）。owner だけだと、同じ owner の
+    // 下に作った fork（`acme/app` → `acme/app-fork`）から出た他人の PR が
+    // 「現ブランチの PR」に当たる。
+    head_homes(repo).into_iter().find_map(|home| {
+        list.iter()
+            .find(|pr| pr.head.branch == *name && pr.head.repo.as_ref() == Some(&home))
     })
+}
+
+/// HEAD のブランチから出した PR の head が在りうるリポジトリを、**確からしい順**に
+/// 返す（01 の「現ブランチの PR」）。
+///
+/// **候補が 1 つに決まらないのは、git が「どこへ push したか」を憶えていないから。**
+/// `branch.<name>.remote` が答えるのは**何を基にしたか**で、実測（git 2.55、
+/// 一時リポジトリ。表は 01）では `git checkout -b fix bob/fix` のあと origin へ
+/// push しても `bob` のまま。だから**追跡先で当たらなければ `target` でも当てる** ——
+/// 追跡先を先に見るのは、fork 運用で upstream 側の同名ブランチから出た**他人の PR**
+/// より、自分の fork の PR を優先するため。
+///
+/// **`branch.<name>.remote` はリモート名でも URL でもよい**（git の仕様）。
+/// **`gh pr checkout` が書くのは URL のほう**（実測 2026-09-20、gh 2.101.0:
+/// `branch.<b>.remote=https://github.com/<fork>/<repo>.git`）なので、名前で引けない
+/// 値はそのまま URL として読む。ここを落とすと、**fork の PR をローカルに出す
+/// いちばんふつうの経路**が当たらない。
+///
+/// **材料は引数に取らない。** `upstream_remote` は `repo.head` から導けるので、
+/// 別々に渡すと対応の取れない組（`Detached` な `head` に `Some("origin")`）が型で
+/// 組める（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
+///
+/// **読めない追跡設定は候補にしない**（設定が無い / `.`（ローカル追跡）/ リモートが
+/// 消えている / URL が GitHub の形でない）。**理由は分けない**：呼び出し側の扱いは
+/// どれも同じで、**出す先も無い**（座る行が変わるだけで通知は出さない）。
+///
+/// **host は見ない。** [`RepoTarget::host`] は `ssh -G` で正規化済みだが、こちらは
+/// URL に書かれたままなので、生のまま比べると **fork だけ別のエイリアスを使う
+/// 多アカウント運用**（04）で逆に落ちる。残る穴は、別ホストの同名 `owner/repo` に
+/// 同名のブランチがあり、その PR が一覧に居るとき（01）。
+fn head_homes(repo: &RepoInfo) -> Vec<RepoRef> {
+    let tracked = match repo.head.as_ref() {
+        Some(HeadInfo::Branch {
+            upstream_remote: Some(value),
+            ..
+        }) => {
+            // 名前で引ければその URL、引けなければ値そのものを URL として読む。
+            let url = repo
+                .remote(value)
+                .map_or(value.as_str(), |remote| remote.url.as_str());
+            RemoteUrl::parse(url).ok().map(|url| RepoRef {
+                owner: url.owner,
+                repo: url.repo,
+            })
+        }
+        _ => None,
+    };
+    let target = repo.target.resolved().map(|target| RepoRef {
+        owner: target.owner.clone(),
+        repo: target.repo.clone(),
+    });
+    tracked.into_iter().chain(target).collect()
 }
 
 /// PR ペインの状態（01 の「PR ペイン」）。

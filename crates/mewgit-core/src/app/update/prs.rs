@@ -283,8 +283,8 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, issued, press, press_code, repo_snapshot, state, state_with_commits, tab_to,
-        NOTICE_CELLS,
+        cells, issued, press, press_code, remotes_of, repo_snapshot, state, state_with_commits,
+        tab_to, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -307,6 +307,37 @@ mod tests {
         let mut state = state_with_commits(2);
         put_on_branch(&mut state, branch);
         state
+    }
+
+    /// [`state_on_branch`] に加えて、**HEAD のブランチが `tracked` を追跡している**
+    /// 状態（`branch.<HEAD>.remote`）。`remotes` は `(名前, URL)` で登録する。
+    ///
+    /// **`put_on_branch` が置いた `head` に足す。** あちらは追跡設定を持たない形
+    /// （`upstream_remote: None`）なので、そのままでは `head_homes` の追跡先の腕に
+    /// 入らない。
+    /// **組み直さない** —— `HeadInfo::Branch` のリテラルを写すと、フィールドが増える
+    /// たびに直す構築サイトが 1 つ増える。
+    fn state_tracking(branch: &str, tracked: &str, remotes: &[(&str, &str)]) -> AppState {
+        let mut state = state_on_branch(branch);
+        let Some(HeadInfo::Branch {
+            upstream_remote, ..
+        }) = &mut state.repo.head
+        else {
+            unreachable!("put_on_branch がブランチに置いている");
+        };
+        *upstream_remote = Some(tracked.to_string());
+        state.repo.remotes = remotes_of(remotes);
+        state
+    }
+
+    /// `owner` の fork から出た、同じブランチ名の PR。
+    fn pr_from(number: u64, branch: &str, owner: &str) -> PullRequest {
+        let mut pr = fake_pull_request(number, branch, "headsha");
+        pr.head.repo = Some(RepoRef {
+            owner: owner.to_string(),
+            repo: fake_target().repo,
+        });
+        pr
     }
 
     /// [`state_on_branch`] に加えて、**PRs タブを開いた**状態。
@@ -427,6 +458,7 @@ mod tests {
                 head: HeadInfo::Branch {
                     name: "feat/x".to_string(),
                     oid: fake_oid(0),
+                    upstream_remote: None,
                 },
                 ..repo_snapshot()
             }))),
@@ -502,24 +534,155 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_branch_does_not_match_the_current_branch_row() {
-        // **受け入れた穴**（plan.md の「fork のブランチで現ブランチの PR を当てる」）。
-        // 一覧には fork の PR も出るが、照合が `head.repo.owner == target.owner` なので
-        // 合致せず、カーソルは先頭に座る。
-        let mut state = state_on_branch("feat/x");
-        let mut fork = fake_pull_request(82, "feat/x", "headsha");
-        fork.head.repo = Some(RepoRef {
-            owner: "someone-else".to_string(),
-            repo: fake_target().repo,
-        });
+    fn a_fork_branch_matches_the_current_branch_row() {
+        // 追跡先の URL が fork を指していれば、そこから出た PR に座る
+        // （01 の「現ブランチの PR」）。
+        let mut state = state_tracking(
+            "feat/x",
+            "fork",
+            &[
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+                ("fork", "git@github.com:someone-else/mewgit.git"),
+            ],
+        );
         deliver(
             &mut state,
-            vec![fake_pull_request(90, "other", "othersha"), fork],
+            vec![
+                fake_pull_request(90, "other", "othersha"),
+                pr_from(82, "feat/x", "someone-else"),
+            ],
+        );
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(state.prs.cursor, 1);
+    }
+
+    #[test]
+    fn the_fork_row_wins_over_the_one_from_the_target_repository() {
+        // **候補は追跡先が先。** fork へ push しているブランチと同じ名前のブランチが
+        // upstream 側にもあるのはよくある形で、そこから出た PR は**他人の PR**
+        // （01 の「現ブランチの PR」）。
+        let mut state = state_tracking(
+            "feat/x",
+            "fork",
+            &[
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+                ("fork", "git@github.com:someone-else/mewgit.git"),
+            ],
+        );
+        deliver(
+            &mut state,
+            vec![
+                // `fake_pull_request` の head は `target` のリポジトリ。**一覧では
+                // こちらが先**なので、順に当てるだけの実装ではこちらに座る。
+                fake_pull_request(90, "feat/x", "headsha"),
+                pr_from(82, "feat/x", "someone-else"),
+            ],
+        );
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(state.prs.cursor, 1);
+    }
+
+    #[test]
+    fn the_target_row_is_the_fallback_when_the_tracked_repository_has_none() {
+        // **追跡設定は「どこへ push したか」ではない。** `git checkout -b fix bob/fix`
+        // のあと origin へ push しても `branch.fix.remote` は `bob` のまま（実測。
+        // 表は 01）。**そこで打ち切ると、main では座っていた行に座らなくなる。**
+        let mut state = state_tracking(
+            "feat/x",
+            "bob",
+            &[
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+                ("bob", "git@github.com:bob/mewgit.git"),
+            ],
+        );
+        deliver(
+            &mut state,
+            vec![
+                fake_pull_request(90, "other", "othersha"),
+                fake_pull_request(82, "feat/x", "headsha"),
+            ],
+        );
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(state.prs.cursor, 1);
+    }
+
+    #[test]
+    fn a_url_in_the_tracking_config_names_the_fork() {
+        // **`gh pr checkout` が書くのは URL**（実測 2026-09-20、gh 2.101.0）。
+        // リモートとして登録されていないので、名前では引けない。
+        let mut state = state_tracking(
+            "feat/x",
+            "https://github.com/someone-else/mewgit.git",
+            &[("origin", "git@github.com:yshrsmz/mewgit.git")],
+        );
+        deliver(
+            &mut state,
+            vec![
+                fake_pull_request(90, "other", "othersha"),
+                pr_from(82, "feat/x", "someone-else"),
+            ],
+        );
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(state.prs.cursor, 1);
+    }
+
+    #[test]
+    fn a_fork_pr_does_not_match_without_the_tracking_config() {
+        // 追跡設定が無ければ出どころを知る手段が無いので、`target` と比べるしかない
+        // （`head_homes` の候補が `target` だけになる）。**カーソルは先頭に座るだけ**で、
+        // PR は一覧に出ている。
+        let mut state = state_on_branch("feat/x");
+        deliver(
+            &mut state,
+            vec![
+                fake_pull_request(90, "other", "othersha"),
+                pr_from(82, "feat/x", "someone-else"),
+            ],
         );
 
         assert_eq!(state.current_pr(), None, "fork の PR に合致している");
         assert_eq!(state.prs.cursor, 0);
         assert_eq!(state.prs.list.len(), 2, "消えている");
+    }
+
+    #[test]
+    fn a_tracked_remote_that_is_not_registered_falls_back_to_the_target() {
+        // `branch.<HEAD>.remote` に書かれた名前がリモート一覧に無い（`.` の
+        // ローカル追跡もここに落ちる）。**`target` との照合は生きている。**
+        //
+        // **`target` でないリモートを先頭に置く。** 1 本目で済ませる実装（名前で
+        // 引かない）でも、`origin` しか無ければ答えが同じになって見張りが空振りする。
+        let mut state = state_tracking(
+            "feat/x",
+            ".",
+            &[
+                ("backup", "git@github.com:someone-else/mewgit.git"),
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+            ],
+        );
+        deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+    }
+
+    #[test]
+    fn a_tracked_url_that_is_not_github_falls_back_to_the_target() {
+        // GitHub の形として読めない URL（ローカルパス）。`RemoteUrl::parse` が拒む。
+        let mut state = state_tracking(
+            "feat/x",
+            "backup",
+            &[
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+                ("backup", "/srv/git/mewgit.git"),
+            ],
+        );
+        deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
     }
 
     #[test]

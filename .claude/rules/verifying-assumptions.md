@@ -30,6 +30,7 @@
 | git がサブプロセスに何を渡すか | `core.sshCommand` にダンプ用のスクリプトを噛ませて argv を見る（`git -c core.sshCommand='sh dump.sh' ls-remote <url>`） |
 | ブラウザを開くコマンドが何を渡すか | `BROWSER`（`gh` は `GH_BROWSER` も見る）にダンプ用のスクリプトを置いて argv を見る。**窓は開かない**（`BROWSER="sh dump.sh" gh browse 1 -R <host>/<owner>/<repo>`） |
 | 手元のツールが内部で何をしているか | バイナリを `strings` に通して grep する（設定ファイルに何を書くか、どのシーケンスを送るかが読める） |
+| ツールが設定ファイルに**実際に何を書くか** | 一時リポジトリでそのツールを走らせ、`git config --list --local` を読む。`strings` は書きうる字は見せても、**どの値が入るかは見せない**（`gh pr checkout` は `branch.<name>.remote` にリモート名ではなく **URL** を書く。実測 2026-09-20、gh 2.101.0） |
 | 他の TUI がどう並べているか | `script` + `stty` で実機を撮る（`CLAUDE.md` の pty の節）。**`q` で終わると復元シーケンスまで録れる**ので `ESC[?1049l` の手前で切る。`scripts/screen.py` は部分再描画するアプリだとフレームが混ざるので、必要なら仮想画面を自前で起こす。スピナーの桁は生の `ESC[<行>;<桁>H` から読む |
 | 依存クレートの挙動 | `~/.cargo/registry/src/*/<crate>-<version>/` のソースを読む。ドキュメントより実装が正しい |
 | ある操作が GitHub API を何往復するか | pty で流し、**1 つのプロセスの中で**ヘッダの `[api: N]` が**落ち着いた値**だけを録画から拾う。罠が 2 つ（下） |

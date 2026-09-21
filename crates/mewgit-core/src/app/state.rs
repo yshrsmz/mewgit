@@ -1342,7 +1342,7 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 /// URL に書かれたままなので、生のまま比べると **fork だけ別のエイリアスを使う
 /// 多アカウント運用**（04）で逆に落ちる。残る穴は、別ホストの同名 `owner/repo` に
 /// 同名のブランチがあり、その PR が一覧に居るとき（01）。
-pub(super) fn head_homes(repo: &RepoInfo) -> Vec<RepoRef> {
+fn head_homes(repo: &RepoInfo) -> Vec<RepoRef> {
     let tracked = match repo.head.as_ref() {
         Some(HeadInfo::Branch {
             upstream_remote: Some(value),
@@ -2069,9 +2069,9 @@ impl Modal {
 
 /// [`Modal::PrCreate`] のどの欄を編集しているか（01 の「PR 作成（`N`）」）。
 ///
-/// **巡回の順は宣言順**（`Tab` が次へ、`Shift+Tab` が前へ）で、07 が描く縦の並びと
-/// 同じ。**画面の並びと巡回の順を割らない** —— 割ると `Tab` を押した先が画面の
-/// どこかを目で追えなくなる。
+/// **巡回の順は宣言順**（`Tab` が次へ = [`PrField::next`]、`Shift+Tab` が前へ）で、
+/// 07 が描く縦の並びと同じ。**画面の並びと巡回の順を割らない** —— 割ると `Tab` を
+/// 押した先が画面のどこかを目で追えなくなる。
 ///
 /// **`Draft` だけが文字を打つ欄ではない。** 端末カーソルを置ける場所が無いので、
 /// どの欄に居るかの印はラベルの反転が出す（07）。
@@ -2085,22 +2085,33 @@ pub enum PrField {
 }
 
 impl PrField {
-    /// 巡回の順に並べたもの。`Tab` の行き先と 07 の縦の並びがここから出る。
-    const ORDER: [PrField; 4] = [PrField::Title, PrField::Body, PrField::Base, PrField::Draft];
-
-    /// `delta` だけ巡回する。端では巻く。
+    /// `Tab` の行き先。端では巻く。
     ///
     /// **[`stepped_index`] を使わない。** あちらは一覧のカーソルで、**端で止まる**
-    /// （行が増減するものを行き過ぎないため）。欄は 4 つで増えないので、
-    /// `Tab` を押し続けて最後の欄で止まるほうが驚く。
-    pub(super) fn stepped(self, delta: isize) -> Self {
-        let at = Self::ORDER
-            .iter()
-            .position(|field| *field == self)
-            .expect("ORDER は全部の腕を持つ");
-        let len = Self::ORDER.len() as isize;
-        let next = (at as isize + delta).rem_euclid(len);
-        Self::ORDER[next as usize]
+    /// （行が増減するものを行き過ぎないため）。欄は増えないので、`Tab` を押し続けて
+    /// 最後の欄で止まるほうが驚く。
+    ///
+    /// **並びの配列を持たない。** 網羅 `match` で書くと、**変種を足したときに
+    /// コンパイルエラーになる** —— 配列にすると長さの辻褄が合ってしまい、足した欄が
+    /// 巡回から黙って漏れる（`CLAUDE.md` の「離れた場所に、コードの『いま N ある』を
+    /// 書かない」の、並びの版）。
+    pub(super) fn next(self) -> Self {
+        match self {
+            PrField::Title => PrField::Body,
+            PrField::Body => PrField::Base,
+            PrField::Base => PrField::Draft,
+            PrField::Draft => PrField::Title,
+        }
+    }
+
+    /// `Shift+Tab` の行き先。[`PrField::next`] の逆。
+    pub(super) fn prev(self) -> Self {
+        match self {
+            PrField::Title => PrField::Draft,
+            PrField::Body => PrField::Title,
+            PrField::Base => PrField::Body,
+            PrField::Draft => PrField::Base,
+        }
     }
 }
 

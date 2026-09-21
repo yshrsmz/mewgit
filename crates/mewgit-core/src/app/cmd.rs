@@ -146,8 +146,11 @@ pub enum Cmd {
     /// `state.repo.target` と `state.account` から読む（[`Cmd::FetchPrList`] と
     /// 同じ）。運ぶのはモーダルが打たせた字だけ。
     ///
-    /// **`Box` に入れる。** [`CreatePr`] は `String` を 4 本持つので、裸で載せると
-    /// `Cmd` の大きさが [`Cmd::Exec`]（`GitOp`）ではなくこちらで決まる。
+    /// **`Box` に入れる。** 実測（2026-09-21、64bit）—— `CreatePr` は 104 バイトで
+    /// [`Cmd::Exec`] が運ぶ `GitOp`（96）より大きく、裸で載せると `Cmd` が
+    /// **96 → 112 バイト**になる。箱なら 8 バイトで、`Cmd` は 96 のまま。
+    /// **`ResolveAccount` が `RepoTarget`（80）を裸で載せているのと逆の判断**で、
+    /// 分け目は「`GitOp` より大きいか」。
     CreatePr(Box<CreatePr>),
     /// `gh browse <番号>` でブラウザに渡す（01 の「`o`（ブラウザで開く）」）。
     ///
@@ -247,6 +250,10 @@ mod tests {
         // `RemoteUrl`（80 バイト）もそれより小さいから裸で載せている。`GitOp` が
         // 伸びればここが落ちて、その断定を数え直すことになる（実測値は 64bit で 96）。
         // `Msg` 側の `msg_stays_small` と同じ形。
+        //
+        // **`CreatePr`（104 バイト）はこの見張りに従って箱に入れた** —— 裸で載せると
+        // ここが 112 で落ちる（実測 2026-09-21）。つまりこの assert は
+        // 「`GitOp` より大きいものは箱へ」という規則の enforcement でもある。
         let size = std::mem::size_of::<Cmd>();
         assert!(size <= 96, "Cmd が大きすぎます: {size} バイト");
     }

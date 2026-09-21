@@ -2,13 +2,10 @@
 //! 設計は `docs/design/07-ui.md` の「CommitMessage モーダル」。
 
 use mewgit_core::app::TextBuffer;
-use ratatui::layout::{Position, Rect};
-use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
+use ratatui::layout::Rect;
 use ratatui::Frame;
 
 use crate::modals;
-use crate::ui;
 
 /// キーの案内。`update::commit_message_key` が受けるキーと揃える。
 ///
@@ -37,37 +34,18 @@ pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool) {
     let body_rows = u16::try_from(buf.lines.len()).unwrap_or(u16::MAX);
     let body_area = modals::place(frame, area, modals::block(title), WIDTH, body_rows, HINT);
 
-    let row = buf.cursor.0;
-    // 本文が枠より高ければ、カーソルの行が入るところまでずらす。
-    let shown = ui::window(buf.lines.len(), row..row + 1, body_area.height as usize);
-
     // **`ui::render_rows` は使わない。** あちらは横位置を持たず、diff と一覧は
     // それでよい（長い行は右で切れるだけ）。編集中はカーソルが右端を越えるので、
-    // 越えたぶんだけ横にずらす必要がある。
-    let (cursor_col, scroll_x) = modals::cursor_col(buf, body_area.width);
-
-    let lines: Vec<Line<'_>> = buf.lines[shown.clone()]
-        .iter()
-        .map(|line| Line::from(line.as_str()))
-        .collect();
-    // **折り返さない**（07）。折り返すと `ui` が出す桁とバッファの列が食い違い、
-    // カーソルの位置を出せなくなる。
-    frame.render_widget(Paragraph::new(lines).scroll((0, scroll_x)), body_area);
-
-    // **端末のカーソルを本文の位置に置く。** 反転の升目を自前で描かない。編集中は
-    // 端末側のカーソルが出ているのが自然で、行を選ぶ `Confirm` とは別物（07）。
-    // 窓が 0 行（潰れた端末）のときは置かない。
-    if shown.contains(&row) {
-        frame.set_cursor_position(Position {
-            x: body_area.x + cursor_col,
-            y: body_area.y + u16::try_from(row - shown.start).unwrap_or(u16::MAX),
-        });
+    // 越えたぶんだけ横にずらす必要がある。窓の切り出しと配線は
+    // `modals::edit_area`（`Input` と `PrCreate` が同じものを使う）。
+    if let Some(position) = modals::edit_area(frame, body_area, buf) {
+        frame.set_cursor_position(position);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{cursor, draw, row_of, state_with_modal};
+    use crate::test_util::{col_of, cursor, draw, row_of, state_with_modal};
     use mewgit_core::app::{AppState, Modal, TermSize, TextBuffer};
     use ratatui::text::Line;
 
@@ -164,11 +142,11 @@ mod tests {
         let x = cursor(&state, SIZE).x;
         let row = &lines[row_of(&lines, "あいう") as usize];
 
-        // 「あいう」の直後。**バイト位置ではなく桁で測る**（枠の `│` は 3 バイト）。
-        let head = &row[..row.find("あいう").unwrap()];
+        // 「あいう」の直後。**バイト位置ではなく桁で測る**（枠の `│` は 3 バイト。
+        // 測り方は `test_util::col_of` の 1 本）。
         assert_eq!(
-            x as usize,
-            Line::from(head).width() + Line::from("あいう").width()
+            x,
+            col_of(row, "あいう") + Line::from("あいう").width() as u16
         );
     }
 

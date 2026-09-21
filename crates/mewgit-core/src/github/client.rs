@@ -50,8 +50,8 @@ const MAX_PAGES: usize = 10;
 /// dispatch のたびにクライアントを組み直すぶんだけ上限が増える（一覧の引き直しと
 /// PR ごとの扇形が並ぶと 2 倍になる）。
 ///
-/// **permit を取るのは HTTP が実際に出るところ（[`GithubClient::get_page`]）だけ。**
-/// 上の段でも取ると
+/// **permit を取るのは HTTP が実際に出るところ（[`GithubClient::send`]）だけ。**
+/// GET も POST もそこを通る。上の段でも取ると
 /// **デッドロックする** —— [`GithubClient::checks`] は `try_join!` で 2 本張るので、
 /// 外側の permit を握ったまま内側が permit を待つ形になる（05）。
 static PERMITS: Semaphore = Semaphore::const_new(4);
@@ -297,7 +297,7 @@ impl GithubClient {
         let runs_url = self.endpoint(&["repos", owner, repo, "commits", sha, "check-runs"]);
         let status_url = self.endpoint(&["repos", owner, repo, "commits", sha, "status"]);
         // **2 本は独立なので並べる。** 順に待つと RTT がそのまま倍になる。
-        // **permit はここでは取らない。** 取ると外側で握ったまま内側の `get_page` が
+        // **permit はここでは取らない。** 取ると外側で握ったまま内側の `send` が
         // 待つ形になり、扇形が上限まで並んだところで誰も返さなくなる（`PERMITS`）。
         let (runs, statuses) = tokio::try_join!(
             self.get_paged(runs_url, &[("per_page", PER_PAGE)], |p: WireCheckRuns| p
@@ -338,7 +338,7 @@ impl GithubClient {
 
     /// PR 1 件ぶんの集計（チェックとレビュー）。
     ///
-    /// **2 本は独立なので並べる。** permit を取るのは `get_page` の中だけなので、
+    /// **2 本は独立なので並べる。** permit を取るのは `send` の中だけなので、
     /// ここで `try_join!` しても入れ子で詰まらない（`PERMITS`）。
     ///
     /// **`sha` は PR の head。** チェックはコミットに紐づくので、呼ぶ側は

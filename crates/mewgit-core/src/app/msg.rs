@@ -192,15 +192,16 @@ pub enum Msg {
         epoch: u64,
         seen: RateLimit,
     },
-    /// `N` で頼んだ PR 作成の結果（01 の「PR 作成（`N`）」）。
+    /// `N` で頼んだ PR 作成の結果 —— 作った PR の**番号**（01 の「PR 作成（`N`）」）。
     ///
-    /// **作った PR をそのまま運ぶ。** 読むのは番号だけ（作った行にカーソルを
-    /// 座らせる）だが、`()` に落とすと**作った PR が一覧に出るまで画面に何も
-    /// 出せない**（05）。
+    /// **`()` に落とさない。** 番号が要る —— 通知に `#<番号>` を出し、届いた一覧で
+    /// その行にカーソルを座らせる（`PrState::created`）。
     ///
-    /// **`Box` に入れる。** [`PullRequest`] は `String` を 5 本と `Vec` を持つので、
-    /// 裸で載せると `Msg` の上限（下の `msg_stays_small`）を押し上げる。
-    PrCreated(Box<Result<PullRequest, GithubError>>),
+    /// **[`PullRequest`] を丸ごと運ばない。** 残りのフィールドを読む場所が無く、
+    /// 載せると `String` 5 本と `Vec` のぶんで `Msg` の上限（下の `msg_stays_small`）に
+    /// 当たって `Box` が要る。**`GithubClient::create_pr` は `PullRequest` を返す
+    /// まま**（05）で、番号に落とすのはランタイムの腕。
+    PrCreated(Result<u64, GithubError>),
     /// `gh browse` の結果。`Err` は通知に出す（01 の「`o`（ブラウザで開く）」）。
     ///
     /// **`Ok` でも何も出さない。** ブラウザが前に出てくるので、画面に足す言葉が無い。

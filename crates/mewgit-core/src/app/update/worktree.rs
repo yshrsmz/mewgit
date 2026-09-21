@@ -13,10 +13,9 @@ use crate::git_read::{
 
 use super::diff::load_diff;
 use super::diff::open_diff;
-use super::{confirm, edit_key, exec_busy, focus, submit_exec};
+use super::{confirm, exec_busy, focus, multiline_edit_key, submit_exec};
 use crate::app::{
-    AppState, Cmd, GraphSelection, JobKind, Key, KeyCode, Modal, Motion, NoticeLevel, Pane,
-    TextBuffer,
+    AppState, Cmd, GraphSelection, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
 };
 
 /// ワーキングツリーペインのキー処理。
@@ -87,22 +86,9 @@ pub(super) fn commit_message_key(state: &mut AppState, key: Key) -> Cmd {
         return Cmd::None;
     };
 
-    // `Ctrl-J` はどの端末でも届く改行。raw mode では `\n` が `Ctrl+j` として来る。
-    if key == Key::ctrl('j') {
-        buf.insert_newline();
-        return Cmd::None;
-    }
-
-    match key.code() {
-        // ここに来る `Enter` は修飾付き（`Alt+Enter` = `ESC CR`、`Shift+Enter`）。
-        KeyCode::Enter => buf.insert_newline(),
-        // 行が複数あるモーダルにしか要らない。残りは `edit_key` が受ける。
-        KeyCode::Up => buf.move_cursor(Motion::Up),
-        KeyCode::Down => buf.move_cursor(Motion::Down),
-        _ => {
-            let _ = edit_key(buf, key);
-        }
-    }
+    // 改行と行移動と 1 行ぶんの編集は `Modal::PrCreate` の body 欄と同じ規則
+    // （`update::multiline_edit_key`）。
+    multiline_edit_key(buf, key);
     Cmd::None
 }
 
@@ -529,8 +515,8 @@ pub(super) fn status_loaded(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        commit_op, exec_done, exec_done_of, fake_output, only_staged, open_confirm, press,
-        press_code, state, type_text, worktree_state,
+        commit_op, enter_with, exec_done, exec_done_of, fake_output, only_staged, open_confirm,
+        press, press_code, state, type_text, worktree_state,
     };
     use super::super::update;
     use super::*;
@@ -760,11 +746,6 @@ mod tests {
 
         assert_eq!(cmd, Cmd::LoadHeadMessage);
         assert!(state.modal.is_none(), "古い本文で入力欄を開かない");
-    }
-
-    /// `Enter` に修飾を付けた打鍵。`Alt+Enter` は `ESC CR` として届く。
-    fn enter_with(mods: Modifiers) -> Msg {
-        Msg::Key(Key::with_mods(KeyCode::Enter, mods))
     }
 
     /// 編集中のバッファ。モーダルが出ていなければ `None`。

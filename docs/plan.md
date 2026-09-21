@@ -241,12 +241,20 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       （01 の「PR 作成（`N`）」）。**base の既定は `refs/remotes/<既定リモート>/HEAD`**
       —— `git_read::Remote.head_branch` として `Cmd::LoadRepoInfo` に載せた（02）ので
       **往復を増やさない**。symref が無い形（一度も fetch していないリモート）は
-      空欄で開く。**head の owner は `head_homes()` 1 本**（#98 のものをそのまま使う）。
+      空欄で開く。**head は plain な branch 名**（fork の `<owner>:<branch>` は
+      「PR チェックアウト」の行へ送った受け入れた穴。`branch.<name>.remote` から
+      owner を組むと fork 運用で外れる。01 に実測）。
       **push 済みかは手前で判定しない** —— 判定の材料（追跡設定）は #47 と #98 で
       二度不確かだと判っているので、422 の本文を通知の `detail` に出す。
       **`N` を足したぶん、Prs のキーヒントは 80 桁で共通キーを落とす側に移った**
       （07 の実測）
-- [ ] PR チェックアウト（同一リポジトリ / fork）
+- [ ] PR チェックアウト（同一リポジトリ / fork）。**`Modal::PrCreate` が受け入れた穴も
+      ここで塞ぐ** —— fork に在るブランチから PR を作るには `head` を
+      `<owner>:<branch>` にする必要があるが、**どのリモートに在るかを git は憶えて
+      いない**（01 の「head の組み立て」に実測）。塞ぐのに要るのは**そのブランチ名の
+      remote-tracking ref がどのリモートに在るかの読み取り**
+      （`refs/remotes/<名前>/<branch>`）で、fork の plumbing を入れるこのタスクと
+      同じ材料になる。いまは plain な branch 名を送り、GitHub の 422 を通知に出す
 - [ ] 403 の `needed_scopes` 案内
 - [ ] 既定リモートが GitHub でないときの PRs ペインの文言 — いまは
       `TargetState::Unavailable` でも `Cmd::ResolveAccount` が出ないため

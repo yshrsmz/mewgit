@@ -175,13 +175,13 @@ fn input_submit(state: &mut AppState) -> Cmd {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        branch_delete_confirm, open_confirm, open_input, press, press_code, push_op,
+        branch_delete_confirm, enter_with, open_confirm, open_input, press, press_code, push_op,
         reject_non_fast_forward, state, state_for_push, state_on_branches, tracked_head, type_text,
-        worktree_state, HEADS_MAIN,
+        worktree_state, ALT, HEADS_MAIN,
     };
     use super::super::update;
     use super::*;
-    use crate::app::{JobKind, Modal, Modifiers, Msg};
+    use crate::app::{JobKind, Modal, Msg};
 
     use crate::git_read::{FileStatus, WorktreeSection};
 
@@ -246,16 +246,7 @@ mod tests {
         let _ = press(&mut state, 'n');
         let _ = press(&mut state, 'x');
 
-        let cmd = update(
-            &mut state,
-            Msg::Key(Key::with_mods(
-                KeyCode::Enter,
-                Modifiers {
-                    alt: true,
-                    ..Modifiers::default()
-                },
-            )),
-        );
+        let cmd = update(&mut state, enter_with(ALT));
 
         // 見たいのは「修飾付きでも確定するか」だけ。組む `GitOp` の中身は
         // `enter_creates_the_branch_and_switches_to_it` が見張っている。

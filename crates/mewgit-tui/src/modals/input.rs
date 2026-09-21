@@ -1,9 +1,7 @@
 //! 1 行入力モーダルの描画。設計は `docs/design/07-ui.md` の「Input モーダル」。
 
 use mewgit_core::app::TextBuffer;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::Frame;
 
 use crate::modals;
@@ -43,23 +41,16 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, prompt: &str, buf: &Te
 
     // **折り返さない**（07）。折り返すと `ui` が出す桁とバッファの列が食い違い、
     // カーソルの位置を出せなくなる。長い名前はカーソルの見えるところまで横にずらす。
-    let (cursor_col, scroll_x) = modals::cursor_col(buf, input_area.width);
-    let line = Line::from(buf.lines[buf.cursor.0].as_str());
-    frame.render_widget(Paragraph::new(line).scroll((0, scroll_x)), input_area);
-
-    // **端末のカーソルを入力欄に置く**（`CommitMessage` と同じ）。潰れた端末では
-    // 入力欄の行が残らないので置かない。
-    if input_area.height > 0 {
-        frame.set_cursor_position(Position {
-            x: input_area.x + cursor_col,
-            y: input_area.y,
-        });
+    // 配線は `modals::edit_area`（`CommitMessage` と `PrCreate` が同じものを使う）。
+    // **行は 1 本しか無い**ので、あちらの窓の切り出しはここでは 1 行を返すだけ。
+    if let Some(position) = modals::edit_area(frame, input_area, buf) {
+        frame.set_cursor_position(position);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{cursor, draw, row_of, state_with_modal};
+    use crate::test_util::{col_of, cursor, draw, row_of, state_with_modal};
     use mewgit_core::app::{AppState, InputIntent, Modal, TermSize, TextBuffer};
     use ratatui::text::Line;
 
@@ -118,11 +109,11 @@ mod tests {
         let x = cursor(&state, SIZE).x;
         let row = &lines[row_of(&lines, "あいう") as usize];
 
-        // 「あいう」の直後。**バイト位置ではなく桁で測る**（枠の `│` は 3 バイト）。
-        let head = &row[..row.find("あいう").unwrap()];
+        // 「あいう」の直後。**バイト位置ではなく桁で測る**（枠の `│` は 3 バイト。
+        // 測り方は `test_util::col_of` の 1 本）。
         assert_eq!(
-            x as usize,
-            Line::from(head).width() + Line::from("あいう").width()
+            x,
+            col_of(row, "あいう") + Line::from("あいう").width() as u16
         );
     }
 

@@ -30,10 +30,10 @@ const TITLE: &str = "Create pull request";
 /// ラベルの桁（`Title  ` / `Body   ` / `Base   ` / `Draft  `）。
 const LABEL_WIDTH: u16 = 7;
 
-/// `Body` 以外の欄が取る行数（`Title` / `Base` / `Draft`）。
-const SINGLE_ROWS: u16 = 3;
-
 /// PR 作成モーダルを描く。
+///
+/// **縦は算術で割る**（`ui::split` と同じ形）。`Layout` の `Length` に絶対優先を
+/// 与えると、狭い端末で `Body` が 0 行に潰れる（#65 で一覧を潰した形）。
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -43,40 +43,39 @@ pub fn render(
     draft: bool,
     field: PrField,
 ) {
-    let want = SINGLE_ROWS.saturating_add(u16::try_from(body.lines.len()).unwrap_or(u16::MAX));
+    // 1 行の欄（`Title` / `Base` / `Draft`）と、残りを取る `Body`。
+    let singles: u16 = 3;
+    let want = singles.saturating_add(u16::try_from(body.lines.len()).unwrap_or(u16::MAX));
     let area = modals::place(frame, area, modals::block(TITLE), WIDTH, want, HINT);
+    let body_rows = area.height.saturating_sub(singles);
 
-    // **算術で割る**（`ui::split` と同じ形）。`Layout` の `Length` に絶対優先を
-    // 与えると、狭い端末で `Body` が 0 行に潰れる（#65 で一覧を潰した形）。
-    let body_rows = area.height.saturating_sub(SINGLE_ROWS);
-    let row = |index: u16, height: u16| -> Option<Rect> {
-        let height = height.min(area.height.checked_sub(index)?);
-        (height > 0).then(|| Rect::new(area.x, area.y + index, area.width, height))
+    // **上から順に積む。** 各欄の y を `1 + body_rows` のように手で組むと、欄を
+    // 足したときにその式が全部ずれる。
+    let mut y = area.y;
+    let mut take = |height: u16| -> Option<Rect> {
+        let left = area.height.checked_sub(y - area.y)?;
+        let height = height.min(left);
+        let at = (height > 0).then(|| Rect::new(area.x, y, area.width, height));
+        y += height;
+        at
     };
 
     let mut cursor = None;
-    if let Some(at) = row(0, 1) {
-        cursor = cursor.or(text_field(
-            frame,
-            at,
-            "Title",
-            title,
-            field == PrField::Title,
-        ));
+    if let Some(at) = take(1) {
+        cursor = cursor.or(text_field(frame, at, "Title", title, field));
     }
-    if let Some(at) = row(1, body_rows) {
-        cursor = cursor.or(body_field(frame, at, body, field == PrField::Body));
+    if let Some(at) = take(body_rows) {
+        cursor = cursor.or(text_field(frame, at, "Body", body, field));
     }
-    if let Some(at) = row(1 + body_rows, 1) {
-        cursor = cursor.or(text_field(frame, at, "Base", base, field == PrField::Base));
+    if let Some(at) = take(1) {
+        cursor = cursor.or(text_field(frame, at, "Base", base, field));
     }
-    if let Some(at) = row(2 + body_rows, 1) {
+    if let Some(at) = take(1) {
         // **`Draft` には端末カーソルを置かない。** 文字を打つ欄ではないので列が無い。
         // どの欄に居るかはラベルの反転が出す（07）。
-        let value = if draft { "[x]" } else { "[ ]" };
-        let (label, value_area) = split(at);
+        let (label, value) = split(at);
         label_at(frame, label, "Draft", field == PrField::Draft);
-        frame.render_widget(Paragraph::new(Line::from(value)), value_area);
+        frame.render_widget(Paragraph::new(Line::from(draft_box(draft))), value);
     }
 
     // **端末のカーソルは編集中の欄に置く**（`CommitMessage` と同じ）。潰れた端末で
@@ -86,60 +85,51 @@ pub fn render(
     }
 }
 
-/// 1 行の欄（`Title` / `Base`）。編集中ならカーソルの位置を返す。
+/// 文字を打つ欄（`Title` / `Body` / `Base`）。編集中ならカーソルの位置を返す。
+///
+/// **1 行の欄と複数行の欄を分けない。** 違うのは渡す `height` だけで、窓の切り出しも
+/// 横スクロールも `modals::edit_area` が受け持つ。
 fn text_field(
     frame: &mut Frame,
     at: Rect,
     label: &str,
     buf: &TextBuffer,
-    focused: bool,
+    field: PrField,
 ) -> Option<Position> {
+    let focused = label_field(label) == field;
     let (label_area, value_area) = split(at);
-    label_at(frame, label_area, label, focused);
-
-    // **折り返さない**（07）。折り返すと `ui` が出す桁とバッファの列が食い違い、
-    // カーソルの位置を出せなくなる。**ずらす幅はその欄の幅** —— 箱の幅で数えると、
-    // ラベルのぶんだけカーソルが右にずれる。
-    let (col, scroll_x) = modals::cursor_col(buf, value_area.width);
-    let line = Line::from(buf.lines[buf.cursor.0].as_str());
-    frame.render_widget(Paragraph::new(line).scroll((0, scroll_x)), value_area);
-
-    (focused && value_area.width > 0).then(|| Position {
-        x: value_area.x + col,
-        y: value_area.y,
-    })
-}
-
-/// 複数行の欄（`Body`）。ラベルは 1 行目だけに出す。
-fn body_field(frame: &mut Frame, at: Rect, buf: &TextBuffer, focused: bool) -> Option<Position> {
-    let (label_area, value_area) = split(at);
-    // ラベルは塊の先頭行にだけ置く。
+    // ラベルは塊の先頭行にだけ置く（`Body` は下へ伸びる）。
     label_at(
         frame,
         Rect::new(label_area.x, label_area.y, label_area.width, 1),
-        "Body",
+        label,
         focused,
     );
+    // **ずらす幅はその欄の幅**（ラベルのぶん狭い）で、箱の幅ではない。
+    let position = modals::edit_area(frame, value_area, buf);
+    focused.then_some(position).flatten()
+}
 
-    // 本文が欄より高ければ、カーソルの行が入るところまでずらす（`CommitMessage` と
-    // 同じ形）。
-    let cursor_row = buf.cursor.0;
-    let shown = ui::window(
-        buf.lines.len(),
-        cursor_row..cursor_row + 1,
-        value_area.height as usize,
-    );
-    let (col, scroll_x) = modals::cursor_col(buf, value_area.width);
-    let lines: Vec<Line<'_>> = buf.lines[shown.clone()]
-        .iter()
-        .map(|line| Line::from(line.as_str()))
-        .collect();
-    frame.render_widget(Paragraph::new(lines).scroll((0, scroll_x)), value_area);
+/// ラベルの字が指す欄。**この写像はここ 1 本**で、描く順（`render`）と
+/// フォーカスの判定が同じ字から出る。
+fn label_field(label: &str) -> PrField {
+    match label {
+        "Title" => PrField::Title,
+        "Body" => PrField::Body,
+        "Base" => PrField::Base,
+        // 打つ欄ではないので `text_field` からは来ない。
+        _ => PrField::Draft,
+    }
+}
 
-    (focused && value_area.width > 0 && shown.contains(&cursor_row)).then(|| Position {
-        x: value_area.x + col,
-        y: value_area.y + u16::try_from(cursor_row - shown.start).unwrap_or(u16::MAX),
-    })
+/// `Draft` の値。**`ui::pick_charset` を通さない** —— ASCII だけなので端末で
+/// 化けようがない（07）。
+fn draft_box(draft: bool) -> &'static str {
+    if draft {
+        "[x]"
+    } else {
+        "[ ]"
+    }
 }
 
 /// ラベルの桁と値の桁に割る。**幅が足りなければ値の桁が 0 になる。**
@@ -162,7 +152,7 @@ fn label_at(frame: &mut Frame, at: Rect, label: &str, focused: bool) {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{cursor, draw, row_of, state_with_modal, terminal_with};
+    use crate::test_util::{col_of, cursor, draw, row_of, state_with_modal, terminal_with};
     use mewgit_core::app::{AppState, Modal, PrField, TermSize, TextBuffer};
     use ratatui::style::Modifier;
     use ratatui::text::Line;
@@ -270,11 +260,9 @@ mod tests {
         let at = cursor(&state, SIZE);
 
         assert_eq!(at.y, row_of(&lines, "Base"), "Base の行にない");
-        let row = &lines[at.y as usize];
-        let head = &row[..row.find("main").expect("値の桁")];
         assert_eq!(
-            at.x as usize,
-            Line::from(head).width() + Line::from("main").width(),
+            at.x,
+            col_of(&lines[at.y as usize], "main") + Line::from("main").width() as u16,
             "打った字の直後にない"
         );
     }
@@ -293,21 +281,30 @@ mod tests {
     }
 
     #[test]
-    fn a_value_longer_than_its_field_scrolls_sideways_to_keep_the_cursor_visible() {
-        // **ずらす幅はその欄の幅**（ラベルのぶん狭い）。箱の幅で数えると、
-        // ラベルの桁ぶんだけカーソルが枠の外へ出る。
+    fn a_value_longer_than_its_field_scrolls_within_the_field_and_spares_the_label() {
+        // **渡す領域もずらす幅も「その欄」**（ラベルのぶん狭い）。箱の領域を渡すと
+        // **長い値がラベルの桁を上書きする** —— カーソルの桁は**どちらでも枠の内側の
+        // 右端**（`欄.x + 欄.width == 箱.x + 箱.width`）なので、位置だけを見る
+        // assert ではこの取り違えを踏めない。
         let long = format!("{}END", "x".repeat(120));
         let state = state_with_pr(&long, "b", "main", false, PrField::Title);
 
         let lines = draw(&state, SIZE);
         let at = cursor(&state, SIZE);
-
-        assert!(lines.join("\n").contains("END"), "{lines:?}");
-        assert_eq!(at.y, row_of(&lines, "END"));
-        // 枠の中に収まっている（枠の右辺より左）。
         let row = &lines[at.y as usize];
-        let right = row.rfind('│').expect("枠の右辺") as u16;
+
+        assert!(row.contains("END"), "{row:?}");
+        assert_eq!(at.y, row_of(&lines, "Title"), "Title の行にない");
+        assert!(row.contains("Title"), "ラベルが値に潰された: {row:?}");
+        // **枠の右辺より左に居る。桁で測る** —— `rfind` のバイト位置をそのまま桁に
+        // すると、行の左にある枠 1 本につき 2 大きくなって見張りが緩む。
+        let right = Line::from(&row[..row.rfind('│').expect("枠の右辺")]).width() as u16;
         assert!(at.x < right, "カーソルが枠の外: x={} right={right}", at.x);
+        // 値が始まるのはラベルの桁のあと（`split`）。
+        assert!(
+            at.x > col_of(row, "Title"),
+            "カーソルがラベルの桁に居る: {row:?}"
+        );
     }
 
     #[test]

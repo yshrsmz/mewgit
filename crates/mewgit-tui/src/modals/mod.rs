@@ -11,11 +11,13 @@ pub mod pr_create;
 pub mod remote_picker;
 
 use mewgit_core::app::{Modal, TextBuffer};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
+
+use crate::ui;
 
 /// 表示中のモーダルを描く。
 ///
@@ -168,6 +170,42 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 /// 増える（`CommitMessage` と `Input` の 2 人目が出た時点でここへ移した）。
 /// 編集中のモーダルはどちらも折り返さないので、カーソルが右端を越えたぶんだけ横に
 /// ずらすのが両方に共通の約束になる。
+/// 編集中のバッファを `area` に描き、端末カーソルを置く位置を返す。
+///
+/// **配線ごと共有する。** [`cursor_col`] は「どの桁か」を答える純粋関数で、その戻り値を
+/// [`Paragraph::scroll`] と `set_cursor_position` に**渡すところ**は各 `render` に
+/// 残っていた。#82 で「共有ヘルパが試されていることは、その戻り値を使う配線が
+/// 試されていることではない」と書いたのは**配線が 2 箇所だったとき**の結論で、
+/// `Modal::PrCreate` が 2 つの欄を足して 4 箇所になったので寄せた
+/// （`CLAUDE.md` の「2 つ目の利用者が出た時点で共有先を作る」）。
+///
+/// **折り返さない**（07）。折り返すと `ui` が出す桁とバッファの列が食い違い、
+/// カーソルの位置を出せなくなる。**ずらす幅は渡された `area` の幅** —— 欄にラベルが
+/// 付くモーダル（`PrCreate`）では箱の幅ではないので、測る側が決める。
+///
+/// **高さが足りなければカーソルを置かない**（`None`）。リサイズの途中では
+/// 本文の行が 1 行も残らない領域が来る。**カーソルの行が窓の外**のときも置かない ——
+/// 窓は [`ui::window`] がカーソルの行を入れるように切るが、高さ 0 では切れない。
+pub fn edit_area(frame: &mut Frame, area: Rect, buf: &TextBuffer) -> Option<Position> {
+    let row = buf.cursor.0;
+    // 本文が領域より高ければ、カーソルの行が入るところまでずらす。
+    let shown = ui::window(buf.lines.len(), row..row + 1, area.height as usize);
+    let (col, scroll_x) = cursor_col(buf, area.width);
+
+    let lines: Vec<Line<'_>> = buf.lines[shown.clone()]
+        .iter()
+        .map(|line| Line::from(line.as_str()))
+        .collect();
+    frame.render_widget(Paragraph::new(lines).scroll((0, scroll_x)), area);
+
+    // **端末のカーソルを本文の位置に置く。** 反転の升目を自前で描かない。編集中は
+    // 端末側のカーソルが出ているのが自然で、行を選ぶ `Confirm` とは別物（07）。
+    (area.width > 0 && shown.contains(&row)).then(|| Position {
+        x: area.x + col,
+        y: area.y + u16::try_from(row - shown.start).unwrap_or(u16::MAX),
+    })
+}
+
 pub fn cursor_col(buf: &TextBuffer, width: u16) -> (u16, u16) {
     // **`Line::from` を通さない。** あちらは幅を測るためだけに `Vec<Span>` を
     // 1 本確保する。`Span` は `&str` を借りるだけで、`width()` の中身は同じ。

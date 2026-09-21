@@ -482,7 +482,9 @@ impl Runtime {
                         }
                         Err(err) => Err(err),
                     };
-                    let _ = tx.send(Msg::PrCreated(Box::new(result)));
+                    // **番号に落とすのはここ**（`Msg::PrCreated` の doc）。`github` は
+                    // `PullRequest` を返すまま（05）で、`app` が読むのは番号だけ。
+                    let _ = tx.send(Msg::PrCreated(result.map(|pr| pr.number)));
                 });
                 ControlFlow::Continue(())
             }
@@ -555,8 +557,11 @@ fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, Gith
 ///   `target` と `account` の両方を見る（01 の「PR ペイン › 何を引くか」）。
 /// - `Cmd::OpenPr` — 一覧が出ている画面からしか押せない。
 /// - `Cmd::CreatePr` — `N` が `AppState::github_block` で断ってからしか開かない
-///   （01 の「PR 作成（`N`）」）。**開いているあいだに材料が消える形は残る** ——
-///   モーダルを出したまま `A` で degraded に落ちると、確定がここへ来る。
+///   （01 の「PR 作成（`N`）」）。**開いているあいだに材料は消えない** ——
+///   モーダル表示中のキーは全部モーダルが受けるので `A` を押せず、`account` を
+///   `Resolved` から動かせるのは `Msg::AccountResolved` だけで、それが飛ぶ経路
+///   （`update::account::resolve_again`）は**先に `Resolving` を書く**ので
+///   `N` のほうが断られる。`target` は 1 回きり latch する（01）。
 /// - `Cmd::FetchPrDetails` — 対象は一覧の行から出る。一覧はアカウントを失うと
 ///   `PrState::forget` で空になるので、材料が消えれば対象も消える。
 ///

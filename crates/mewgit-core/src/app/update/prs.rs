@@ -261,7 +261,9 @@ fn move_pr_field(state: &mut AppState, step: fn(PrField) -> PrField) -> Cmd {
 /// 「そのブランチがどのリモートに在るか」を読む必要がある（plan.md の PR
 /// チェックアウトの行）。
 ///
-/// **`Cmd` が落とされるなら閉じない**（`update::submit`）。
+/// **`Cmd` が落とされるなら閉じない**（`update::submit`）。**材料が消えていても
+/// 閉じない** —— 開いてから `A` の書き込みが終わると `account` が `Resolving` に
+/// 戻る（下のコメント）。
 fn pr_create_submit(state: &mut AppState) -> Cmd {
     let Some(Modal::PrCreate {
         title,
@@ -277,17 +279,30 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
         state.push_notice(NoticeLevel::Warn, "タイトルが空です".to_string(), None);
         return Cmd::None;
     }
+    // **打った字を先に写す。** 下の断りが `state` を可変で借りるので、モーダルを
+    // 借りたままでは通せない。
+    let typed = (title.text(), body.text(), base.text(), *draft);
+
+    // **開いてから材料が消えることはある。** `A` で選び直すと `GitOp::SetAccount` が
+    // 走り、**その書き込みが終わった時点で** `exec_finished` → `resolve_again` が
+    // `account` を `Resolving` に戻す —— あれが閉じるのは `Modal::AccountPicker` だけ
+    // なので、`N` で開いた箱はそのまま残る。**ここで断らないと**、材料の無い
+    // `Cmd::CreatePr` がランタイムへ出て `no_material` に落ち、**打った本文が消える**。
+    if github_blocked(state) {
+        return Cmd::None;
+    }
     let Some(head) = head_branch(&state.repo) else {
         // 開いたあとに HEAD が動いた形。**閉じない** —— 打った本文を返せない。
         state.push_notice(NoticeLevel::Warn, OFF_BRANCH.to_string(), None);
         return Cmd::None;
     };
+    let (title, body, base, draft) = typed;
     let input = CreatePr {
-        title: title.text(),
-        body: body.text(),
+        title,
+        body,
         head,
-        base: base.text(),
-        draft: *draft,
+        base,
+        draft,
     };
     submit(state, Cmd::CreatePr(Box::new(input)))
 }
@@ -546,8 +561,8 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, enter_with, issued, press, press_code, remotes_of, repo_snapshot, state,
-        state_with_commits, tab_to, type_text, ALT, NOTICE_CELLS,
+        cells, enter_with, exec_done_of, fake_output, issued, press, press_code, remotes_of,
+        repo_snapshot, state, state_with_commits, tab_to, type_text, ALT, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -556,6 +571,7 @@ mod tests {
     };
     use crate::auth::{AccountState, DegradedReason};
     use crate::config::Config;
+    use crate::git_exec::GitOp;
     use crate::git_read::HeadInfo;
     use crate::git_read::Remote;
     use crate::github::RepoRef;
@@ -929,6 +945,42 @@ mod tests {
             last_notice(&state).contains("PR を作っています"),
             "{state:?}"
         );
+    }
+
+    #[test]
+    fn the_box_stays_open_when_the_account_went_away_while_it_was_open() {
+        // **モーダルを開いているあいだに材料が消える経路はある。** `A` で選び直すと
+        // `GitOp::SetAccount` が走り、**その書き込みが終わった時点で**
+        // `exec_finished` → `resolve_again` が `account` を `Resolving` に戻す。
+        // モーダルは `AccountPicker` しか閉じないので、**`N` で開いた箱はそのまま
+        // 残る** —— そこで確定すると、材料の無い `Cmd::CreatePr` がランタイムへ出て
+        // 打った本文が消える。
+        let mut state = state_on_prs_tab("feat/x");
+        let _ = press(&mut state, 'N');
+        type_text(&mut state, "fix");
+
+        // 書き込みが終わって解決し直しが始まる（`Reload::Account`）。
+        let _ = update(
+            &mut state,
+            exec_done_of(
+                GitOp::SetAccount {
+                    login: "hanako".to_string(),
+                },
+                Ok(fake_output()),
+            ),
+        );
+        assert!(
+            state.github_block().is_some(),
+            "解決し直しが始まっていない: {:?}",
+            state.account
+        );
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::None, "材料が無いのに出した");
+        assert!(state.modal.is_some(), "閉じてしまった");
+        assert_eq!(modal_of(&state).0.text(), "fix", "打った本文が消えた");
+        assert_eq!(last_notice(&state), GithubBlock::AccountResolving.notice());
     }
 
     #[test]

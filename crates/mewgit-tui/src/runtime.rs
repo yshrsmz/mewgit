@@ -556,12 +556,12 @@ fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, Gith
 /// - `Cmd::FetchPrList` — [`AppState::wanted_pr_list`] が真のときしか出ず、その述語が
 ///   `target` と `account` の両方を見る（01 の「PR ペイン › 何を引くか」）。
 /// - `Cmd::OpenPr` — 一覧が出ている画面からしか押せない。
-/// - `Cmd::CreatePr` — `N` が `AppState::github_block` で断ってからしか開かない
-///   （01 の「PR 作成（`N`）」）。**開いているあいだに材料は消えない** ——
-///   モーダル表示中のキーは全部モーダルが受けるので `A` を押せず、`account` を
-///   `Resolved` から動かせるのは `Msg::AccountResolved` だけで、それが飛ぶ経路
-///   （`update::account::resolve_again`）は**先に `Resolving` を書く**ので
-///   `N` のほうが断られる。`target` は 1 回きり latch する（01）。
+/// - `Cmd::CreatePr` — `N` で開くときと**確定するときの両方**で
+///   `AppState::github_block` が断る（01 の「PR 作成（`N`）」）。**2 回見るのは、
+///   開いてから材料が消えるから** —— `A` で選び直した `GitOp::SetAccount` が
+///   終わると `exec_finished` → `resolve_again` が `account` を `Resolving` に戻し、
+///   あれが閉じるのは `Modal::AccountPicker` だけなので `N` の箱は残る
+///   （`the_box_stays_open_when_the_account_went_away_while_it_was_open`）。
 /// - `Cmd::FetchPrDetails` — 対象は一覧の行から出る。一覧はアカウントを失うと
 ///   `PrState::forget` で空になるので、材料が消えれば対象も消える。
 ///

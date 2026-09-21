@@ -167,9 +167,11 @@ mod tests {
     #[test]
     fn a_tiny_terminal_does_not_panic() {
         // リサイズの途中では枠より小さい端末が来る。**編集中のモーダルごとに
-        // 1 本ずつ見る。** 窓が 0 行になったときにカーソルを置かない分岐は
-        // モーダルごとに形が違い（こちらは窓が空か、`Input` は入力欄の高さが 0 か）、
-        // 下を覆うことと中央寄せだけが `modals::place` の担当（`confirm` が見ている）。
+        // 1 本ずつ見る。** カーソルを置かない分岐そのものは `modals::edit_area` の
+        // 1 本になったが、**そこへ渡す領域の作り方はモーダルごとに違う**
+        // （こちらは本文 1 枚、`Input` は prompt との縦割り、`PrCreate` は欄の
+        // 積み上げ）。下を覆うことと中央寄せだけが `modals::place` の担当
+        // （`confirm` が見ている）。
         for (width, height) in [(1, 1), (10, 3), (20, 5)] {
             let state = state_with_message("本文\n2 行目", false);
             let lines = draw(&state, TermSize { width, height });

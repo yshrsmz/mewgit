@@ -1421,9 +1421,25 @@ pub struct PrState {
     /// **材料は `Msg::PrCreated` だけ。** 別のジョブから届く値を混ぜると、到着順で
     /// 答えが変わる（#63 の `RepoInfo.target`）。
     ///
-    /// **latch ではない。** 一覧が 1 回届けば落ちるので、当たらなくても
-    /// （作った PR が即座に閉じられた、など）次の一覧で消える。
+    /// **当たったときだけ落とす**（[`PrState::loaded`]）。作成より前に頼まれた
+    /// 一覧が先に届くことがあり（[`PrState::list_behind`]）、そこで落とすと
+    /// **二度と座らない**。当たらないまま残るのは次の一覧までで、そこで
+    /// [`PrState::forget_created`] が落とす。
     created: Option<u64>,
+    /// **作った直後に頼んだ一覧が [`AppState::issue`] に落とされた。**
+    ///
+    /// `r` や書き込みで `FetchPrList` が飛んでいる最中に POST のほうが先に返ると、
+    /// `pr_created` が返す `Cmd::FetchPrList` は同種実行中なので落ちる。そこへ届く
+    /// 一覧は**作成より前に頼まれたもの**なので、作った PR は入っていない。
+    ///
+    /// **`JobTracker::is_fresh` では拾えない。** あれは領域の世代で「書き込みに
+    /// 追い越されたか」を見るが、**PR 作成はローカルの ref を動かさない**ので
+    /// 世代が進まない（`JobKind::CreatePr::region()` が `None`）。
+    ///
+    /// **1 回きり。** 当たらないたびに頼み直すと、作った PR が即座に閉じられた
+    /// ときに**同じ往復を回し続ける**（01 の「`Err` から再発行してよいのは対象が
+    /// 違うときだけ」と同じ形）。
+    list_behind: bool,
 }
 
 /// PR 1 行ぶんの集計と、どの head sha について引いたか。
@@ -1505,11 +1521,15 @@ impl PrState {
         fallback: impl FnOnce(&[PullRequest]) -> Option<u64>,
     ) {
         // **作ったばかりの PR がいちばん強い**（01 の「PR 作成（`N`）」）。人が
-        // いま出したものなので、直前に選んでいた行より先に見せる。**`take` で
-        // 落とす** —— 残すと、以後どの一覧が届いてもそこへ座り直す。
+        // いま出したものなので、直前に選んでいた行より先に見せる。
+        //
+        // **当たったときだけ落とす。** 作成より前に頼まれた一覧が先に届くことが
+        // あり（[`PrState::list_behind`]）、そこで無条件に落とすと**作った PR に
+        // 二度と座らない**。当たらないまま残るのは次の一覧までで、そこで
+        // [`PrState::forget_created`] が落とす。
         let wanted = self
             .created
-            .take()
+            .take_if(|number| list.iter().any(|pr| pr.number == *number))
             .or_else(|| self.selected().map(|pr| pr.number))
             .or_else(|| fallback(&list));
         self.cursor = wanted
@@ -1676,9 +1696,12 @@ impl PrState {
         // **残量も落とす。** あれは**そのトークンの予算**で、次のアカウントの残量では
         // ない。残すと、ヘッダの `[gh: …]` だけが変わって数が前のまま残る。
         self.rate_limit = None;
-        // **座らせる約束も落とす。** 一覧を捨てたので当てる先が無く、残すと
-        // **次のアカウントで引いた一覧**の同じ番号に座る。
+        // **座らせる約束も落とす。** 一覧を捨てたので当てる先が無い。
+        // **害が出るかは数えていない**（`target` は latch するので一覧は同じ
+        // リポジトリのもので、同じ番号は同じ PR）—— 一覧を捨てるなら、それを
+        // 指していた記憶も捨てる、という形を揃えているだけ。
         self.created = None;
+        self.list_behind = false;
     }
 
     /// 作った PR の番号を憶える。届いた一覧でその行に座る（01 の「PR 作成（`N`）」）。
@@ -1686,8 +1709,24 @@ impl PrState {
     /// **一覧に足さない。** 作った PR を手で差し込むと、並び（`sort=updated`）も
     /// 集計の鍵も `ui` の出し分けも、**一覧を引いたときとは別の経路**で作られる。
     /// 番号だけ憶えて引き直すほうが、産出元が 1 本で済む。
-    pub(super) fn seat_on_created(&mut self, number: u64) {
+    pub(super) fn seat_on_created(&mut self, number: u64, list_behind: bool) {
         self.created = Some(number);
+        self.list_behind = list_behind;
+    }
+
+    /// 作った直後の一覧が落とされていたか。**読んだら落とす**（1 回きり）。
+    pub(super) fn take_list_behind(&mut self) -> bool {
+        std::mem::take(&mut self.list_behind)
+    }
+
+    /// まだ座れていない作成の記憶があるか。
+    pub(super) fn has_unseated_creation(&self) -> bool {
+        self.created.is_some()
+    }
+
+    /// 座り先の記憶を落とす。**作成より後に頼んだ一覧に居なければ、もう出ない。**
+    pub(super) fn forget_created(&mut self) {
+        self.created = None;
     }
 }
 

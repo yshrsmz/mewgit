@@ -297,7 +297,7 @@ GraphQL は MVP では使わない（1 画面に必要な情報は REST 数本�
 
 ```rust
 pub struct PullRequest { number, title, state: PrStatus, draft, head: RefSpec, base: RefSpec, url, author, requested_reviewers: Vec<String> }
-pub struct CreatePr { title: String, body: String, head: String, base: String, draft: bool }  // create_pr の入力。head は fork なら "owner:branch"（01）
+pub struct CreatePr { title: String, body: String, head: String, base: String, draft: bool }  // create_pr の入力。head の組み立ては app（01）
 pub struct PrDetail { checks: CheckSummary, review: ReviewSummary }  // pr_detail が返す。PullRequest には入れない
 pub enum PrStatus { Open, Closed, Merged }   // app::PrState（画面の状態）と紛らわしいので Status
 pub struct RefSpec { repo: Option<RepoRef>, branch: String, sha: String }

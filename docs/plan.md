@@ -255,6 +255,9 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       remote-tracking ref がどのリモートに在るかの読み取り**
       （`refs/remotes/<名前>/<branch>`）で、fork の plumbing を入れるこのタスクと
       同じ材料になる。いまは plain な branch 名を送り、GitHub の 422 を通知に出す
+      （**422 は守りにならない** —— owner を付けない `head` は base リポジトリの
+      ブランチとして解決されるので、`target` 側に同名ブランチがあれば他人のブランチ
+      から PR が開く。実 API では確かめていない）
 - [ ] 403 の `needed_scopes` 案内
 - [ ] 既定リモートが GitHub でないときの PRs ペインの文言 — いまは
       `TargetState::Unavailable` でも `Cmd::ResolveAccount` が出ないため

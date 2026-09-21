@@ -41,6 +41,27 @@ pub struct PullRequest {
     pub requested_reviewers: Vec<String>,
 }
 
+/// [`GithubClient::create_pr`] に渡すもの（01 の「PR 作成（`N`）」）。
+///
+/// **`head` は fork から出すときだけ `<owner>:<branch>`。** 組むのは `app` 側
+/// （`head_homes()` の先頭が `RepoInfo.target` と違うときだけ owner を付ける）で、
+/// ここは受け取った字をそのまま載せる —— **どのリポジトリに head があるかを
+/// 答えられるのは `app`** で、`github` はリポジトリのローカルな設定を知らない
+/// （`CLAUDE.md` の「層をまたぐ述語は…」）。
+///
+/// **`title` が空でも組める。** 断るのは `app` 側（打った本文を消さずに
+/// 断れるのはモーダルを持っている側だけ。01）で、ここで検査すると同じ判定が
+/// 2 箇所になる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatePr {
+    pub title: String,
+    pub body: String,
+    /// `<branch>`、fork からなら `<owner>:<branch>`。
+    pub head: String,
+    pub base: String,
+    pub draft: bool,
+}
+
 /// PR 1 件ぶんの集計（チェックとレビュー）。[`GithubClient::pr_detail`] が返す。
 ///
 /// **[`PullRequest`] には入れない。** 一覧（`pulls`）はこれを返さないので、

@@ -28,7 +28,7 @@ use graph::{
 };
 use modal::modal_key;
 use prs::{
-    open_pr_finished, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key,
+    open_pr_finished, pr_created, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key,
     rate_limit_seen,
 };
 use remote::{fetch, push};
@@ -164,6 +164,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         } => pr_detail_loaded(state, epoch, number, sha, result),
         Msg::PrDetailsFinished { epoch, aborted } => pr_details_finished(state, epoch, aborted),
         Msg::RateLimitSeen { epoch, seen } => rate_limit_seen(state, epoch, seen),
+        Msg::PrCreated(result) => pr_created(state, *result),
         Msg::OpenPrFinished(result) => open_pr_finished(state, result),
     }
 }
@@ -329,18 +330,23 @@ fn edit_key(buf: &mut TextBuffer, key: Key) -> bool {
     true
 }
 
-/// 書き込みが走っているか。走っていれば理由を通知に出す。
+/// その種別のジョブが走っているか。走っていれば理由を通知に出す。
 ///
 /// **「押したのに何も起きない」に見せない**（`AppState::notify_dropped`）。
 /// **キューには積まないと決めた**（01 の「ランタイム」）。案内を `issue` と同じ
 /// 関数から出すのは、次に押すキーが状態で変わるため（中断を頼んだあとの `Ctrl-C` は
 /// 終了）。2 本に割ると、こちらだけが古い案内を出す。
-fn exec_busy(state: &mut AppState) -> bool {
-    if !state.jobs.is_running(JobKind::Exec) {
+fn busy(state: &mut AppState, kind: JobKind) -> bool {
+    if !state.jobs.is_running(kind) {
         return false;
     }
-    state.notify_dropped(JobKind::Exec);
+    state.notify_dropped(kind);
     true
+}
+
+/// 書き込み（`Cmd::Exec`）が走っているか。
+fn exec_busy(state: &mut AppState) -> bool {
+    busy(state, JobKind::Exec)
 }
 
 /// 編集中のモーダルを確定して `Cmd::Exec` を返す。
@@ -354,13 +360,22 @@ fn exec_busy(state: &mut AppState) -> bool {
 /// **2 人目（`Modal::Input`）が出た時点でここへ移した。** 写すと、片方だけ
 /// 「閉じてから返す」形に戻ったときに気付けない（01 の「1 行入力」）。
 fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
-    if exec_busy(state) {
+    submit(state, JobKind::Exec, Cmd::Exec(op))
+}
+
+/// 編集中のモーダルを確定して `cmd` を返す。走っていれば閉じずに断る。
+///
+/// **2 人目（`Modal::PrCreate`）が出た時点で `submit_exec` から割った。**
+/// `Cmd::Exec` かどうかではなく、**`AppState::issue` に落とされうる `Cmd` を
+/// 打った本文と引き換えに出すか**が問いなので、種別を引数に取る。
+fn submit(state: &mut AppState, kind: JobKind, cmd: Cmd) -> Cmd {
+    if busy(state, kind) {
         return Cmd::None;
     }
 
     // 閉じずに返すと、`Cmd` が落とされたときにモーダルだけが画面に残る。
     state.modal = None;
-    Cmd::Exec(op)
+    cmd
 }
 
 #[cfg(test)]

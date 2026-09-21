@@ -6,9 +6,15 @@
 use crate::auth::AuthError;
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 
-use super::focus;
-use crate::app::state::current_row;
-use crate::app::{AppState, Cmd, JobKind, Key, KeyCode, NoticeLevel, Pane};
+use super::remote::conventional_remote;
+use super::{edit_key, focus, submit};
+use crate::app::state::{current_row, head_homes};
+use crate::app::{
+    AppState, Cmd, JobKind, Key, KeyCode, Modal, Motion, NoticeLevel, Pane, PrField, RepoInfo,
+    TextBuffer,
+};
+use crate::git_read::HeadInfo;
+use crate::github::CreatePr;
 
 /// PRs ペインのキー処理。
 pub(super) fn prs_key(state: &mut AppState, key: Key) -> Cmd {
@@ -23,6 +29,7 @@ pub(super) fn prs_key(state: &mut AppState, key: Key) -> Cmd {
         }
         KeyCode::Char('o') => open_pr(state),
         KeyCode::Char('r') => refresh(state),
+        KeyCode::Char('N') => open_pr_create(state),
         // **`Tab` でしか入れないペインにも出口を用意する**（07）。Branches ペインと
         // 同じく、左の選択と無関係なので戻り先は `Graph`。
         KeyCode::Esc => focus(state, Pane::Graph),
@@ -32,20 +39,84 @@ pub(super) fn prs_key(state: &mut AppState, key: Key) -> Cmd {
 
 /// `o`。カーソル行の PR をブラウザで開く（01 の「`o`（ブラウザで開く）」）。
 ///
-/// **一覧が空のときに `N`（PR 作成）を案内しない。** `Modal::PrCreate` はまだ無いので、
-/// いま書くと存在しないキーを案内することになる（#63）。
+/// **一覧が空のときは `N`（PR 作成）を案内する。** 開ける PR が無いのは PR を作る
+/// 場面なので、「ありません」で止めると行き止まりになる（#63 の「案内が求める操作を、
+/// そもそも自分が持っているか」）。**`N` がこのペインで効くことは
+/// [`prs_key`] が答えている** —— 案内を出しているのと同じペインのキーなので、
+/// 画面ごとに数え直す必要が無い（`CLAUDE.md`）。
 fn open_pr(state: &mut AppState) -> Cmd {
     match state.prs.selected() {
         Some(pr) => Cmd::OpenPr { number: pr.number },
         None => {
             state.push_notice(
                 NoticeLevel::Info,
-                "開ける PR がありません".to_string(),
+                "開ける PR がありません（N で作成）".to_string(),
                 None,
             );
             Cmd::None
         }
     }
+}
+
+/// `N`。[`Modal::PrCreate`] を開く（01 の「PR 作成（`N`）」）。
+///
+/// **押した時点で断るのは 3 つ**で、どれも**リクエストを組めない**か**確実に 422 に
+/// なる**もの。GitHub が使えない（[`AppState::github_block`] が値で答える。`r` と
+/// 同じ）、HEAD がブランチでない（head に載せる名前が無い）、このブランチの PR が
+/// 既にある。
+///
+/// **3 つ目は [`AppState::current_pr`] の答えをそのまま使う。** 別の判定を書くと
+/// 座り直し（01 の「現ブランチの PR」）と食い違い、**カーソルが座っているその行の
+/// PR を「無い」と言って作りに行く**形が作れる。**行き止まりにはならない** ——
+/// 一覧を落とす経路（`f` / `A` / `r`）がそのままこの断りを落とす経路になっている
+/// （#53）。
+///
+/// **push 済みかは見ない。** リモートに無いブランチは GitHub が 422 で断るので、
+/// その本文を通知に出す（01）。手前で判定するには追跡設定を読むことになるが、
+/// **あの `None` には理由が 4 つあり**（#47）、**git は「どこへ push したか」を
+/// 憶えていない**（#98）。
+fn open_pr_create(state: &mut AppState) -> Cmd {
+    if let Some(block) = state.github_block() {
+        state.push_notice(NoticeLevel::Info, block.notice(), None);
+        return Cmd::None;
+    }
+    // **名前はここでは取らない。** 使うのは確定のとき（[`pr_create_submit`]）で、
+    // ここで写して持つと、モーダルを開いているあいだに HEAD が動いた回に
+    // **古いブランチ名で PR を作る**ことになる。
+    if !matches!(state.repo.head, Some(HeadInfo::Branch { .. })) {
+        state.push_notice(
+            NoticeLevel::Warn,
+            "ブランチに乗っていないので PR を作れません".to_string(),
+            None,
+        );
+        return Cmd::None;
+    }
+    if let Some(number) = state.current_pr().map(|pr| pr.number) {
+        state.push_notice(
+            NoticeLevel::Info,
+            format!("このブランチの PR は既にあります（#{number}）"),
+            None,
+        );
+        return Cmd::None;
+    }
+
+    // **既定リモートが言う既定ブランチ**（02 の `Remote::head_branch`）。一度も
+    // fetch していないリモートには symref が無いので、そのときは空欄で開く。
+    // **`conventional_remote` を使う** —— `RepoInfo.target` を決めたのもこれなので、
+    // base は**その target の既定ブランチ**になる（`default_remote` の追跡先の段は
+    // 通さない。あちらは fetch の行き先の話）。
+    let base = conventional_remote(state)
+        .ok()
+        .and_then(|remote| remote.head_branch.clone())
+        .unwrap_or_default();
+    state.modal = Some(Modal::PrCreate {
+        title: TextBuffer::default(),
+        body: TextBuffer::default(),
+        base: TextBuffer::from_text(&base),
+        draft: false,
+        field: PrField::default(),
+    });
+    Cmd::None
 }
 
 /// `r`。**カーソル行の集計を落として一覧を引き直す**（01 の「引き直す（`r`）」）。
@@ -94,6 +165,203 @@ fn refresh(state: &mut AppState) -> Cmd {
     // 場所の索引で（`update_inner` の doc）、ここは**キーが新しく頼む**場所。
     // 落とした行を拾うのは `pr_list_loaded` の出口で、印はそちらにある。
     reload(state)
+}
+
+/// [`Modal::PrCreate`] のキー処理（01 の「PR 作成（`N`）」）。
+///
+/// **`Modal::CommitMessage` に揃える。** 修飾なしの `Enter` はどの欄でも確定、
+/// 修飾付きの `Enter` と `Ctrl-J` は body 欄でだけ改行、`Esc` で破棄。
+/// **`Enter` の意味をモーダルごとに変えない** —— `CommitMessage` も `Input` も
+/// `Enter` で確定する。
+///
+/// **`Tab` / `Shift+Tab` は欄の巡回。** `update_key` はモーダル表示中に
+/// ペインの巡回へ渡さない（`modal.is_some()` が先に受ける）ので、ここで使える。
+///
+/// **`Space` は draft の欄でだけトグル。** ほかの欄では打った空白がそのまま入る
+/// （[`edit_key`](super::edit_key) が受ける）。
+pub(super) fn pr_create_key(state: &mut AppState, key: Key) -> Cmd {
+    // 取り消し。**確認は挟まない**（`CommitMessage` と同じ。01）。
+    if key == Key::new(KeyCode::Esc) {
+        state.modal = None;
+        return Cmd::None;
+    }
+    // **修飾なしの `Enter` だけが確定。** 修飾付きは下の改行に落ちる。
+    if key == Key::new(KeyCode::Enter) {
+        return pr_create_submit(state);
+    }
+    match key.code() {
+        KeyCode::Tab => return move_pr_field(state, 1),
+        KeyCode::BackTab => return move_pr_field(state, -1),
+        _ => {}
+    }
+
+    let Some(Modal::PrCreate {
+        title,
+        body,
+        base,
+        draft,
+        field,
+    }) = state.modal.as_mut()
+    else {
+        return Cmd::None;
+    };
+
+    // **文字を打つ欄ではないので、編集キーを一切渡さない。**
+    if *field == PrField::Draft {
+        if key == Key::char(' ') {
+            *draft = !*draft;
+        }
+        return Cmd::None;
+    }
+
+    let buf = match field {
+        PrField::Title => title,
+        PrField::Body => body,
+        PrField::Base => base,
+        // 上で返している。
+        PrField::Draft => return Cmd::None,
+    };
+
+    // **改行できるのは body だけ。** 1 行の欄に 2 行目ができると、`text()` の返す
+    // `\n` 入りの文字列がそのままタイトルやブランチ名になる（`Modal::Input` と同じ
+    // 理由。01 の「1 行入力」）。
+    if *field == PrField::Body {
+        // `Ctrl-J` はどの端末でも届く改行。raw mode では `\n` が `Ctrl+j` として来る。
+        if key == Key::ctrl('j') {
+            buf.insert_newline();
+            return Cmd::None;
+        }
+        match key.code() {
+            // ここに来る `Enter` は修飾付き（`Alt+Enter` = `ESC CR`、`Shift+Enter`）。
+            KeyCode::Enter => {
+                buf.insert_newline();
+                return Cmd::None;
+            }
+            KeyCode::Up => {
+                buf.move_cursor(Motion::Up);
+                return Cmd::None;
+            }
+            KeyCode::Down => {
+                buf.move_cursor(Motion::Down);
+                return Cmd::None;
+            }
+            _ => {}
+        }
+    }
+
+    let _ = edit_key(buf, key);
+    Cmd::None
+}
+
+/// 編集中の欄を巡回する。
+fn move_pr_field(state: &mut AppState, delta: isize) -> Cmd {
+    if let Some(Modal::PrCreate { field, .. }) = state.modal.as_mut() {
+        *field = field.stepped(delta);
+    }
+    Cmd::None
+}
+
+/// 打った字で `Cmd::CreatePr` を組む。
+///
+/// **title が空なら断る。** GitHub も 422 を返すが、**モーダルを閉じてからでは
+/// 打った本文が戻らない**（`commit_submit` と同じ理由。01）。**base は断らない**
+/// —— 空のまま送ると GitHub が「base が無い」と 422 で答えるが、**何が正しい値かを
+/// 知っているのは GitHub 側**で、こちらが持つのは symref だけ（無いことがふつうに
+/// ある。02）。
+///
+/// **head は HEAD のブランチ名。** fork から出すときだけ `<owner>:<branch>` で、
+/// owner の産出元は `head_homes()` 1 本（01）。
+///
+/// **`Cmd` が落とされるなら閉じない**（`update::submit`）。
+fn pr_create_submit(state: &mut AppState) -> Cmd {
+    let Some(Modal::PrCreate {
+        title,
+        body,
+        base,
+        draft,
+        ..
+    }) = &state.modal
+    else {
+        return Cmd::None;
+    };
+    if title.is_blank() {
+        state.push_notice(NoticeLevel::Warn, "タイトルが空です".to_string(), None);
+        return Cmd::None;
+    }
+    let Some(head) = head_ref(&state.repo) else {
+        // 開いたあとに HEAD が動いた形。**閉じない** —— 打った本文を返せない。
+        state.push_notice(
+            NoticeLevel::Warn,
+            "ブランチに乗っていないので PR を作れません".to_string(),
+            None,
+        );
+        return Cmd::None;
+    };
+    let input = CreatePr {
+        title: title.text(),
+        body: body.text(),
+        head,
+        base: base.text(),
+        draft: *draft,
+    };
+    submit(state, JobKind::CreatePr, Cmd::CreatePr(Box::new(input)))
+}
+
+/// `POST /pulls` の `head` —— HEAD のブランチ名、fork からなら `<owner>:<branch>`。
+///
+/// **owner を付けるかは `head_homes()` の先頭で決める**（01 の「現ブランチの PR」）。
+/// あれが「HEAD のブランチから出した PR の head が在りうるリポジトリ」を確からしい順に
+/// 答えるので、**owner の比較を 2 本目に書かない**（#98 で入れた判断をそのまま使う）。
+///
+/// **`target` と同じなら付けない。** 同一リポジトリのブランチに `owner:` を付けても
+/// GitHub は受けるが、**fork かどうかの判断が 2 通りの字で出る**ことになり、
+/// 422 の本文を読むときに「どちらの形で送ったか」を思い出す必要が出る。
+fn head_ref(repo: &RepoInfo) -> Option<String> {
+    let Some(HeadInfo::Branch { name, .. }) = repo.head.as_ref() else {
+        return None;
+    };
+    let target = repo.target.resolved();
+    let home = head_homes(repo).into_iter().next();
+    match (home, target) {
+        (Some(home), Some(target)) if home.owner != target.owner || home.repo != target.repo => {
+            Some(format!("{}:{name}", home.owner))
+        }
+        _ => Some(name.clone()),
+    }
+}
+
+/// PR を作った答えが届いた（01 の「PR 作成（`N`）」）。
+///
+/// **成功したら一覧を引き直す。** PR 作成は ref を動かさないので、既存の引き金
+/// （[`reload`] の doc）では拾えない —— 引かないと、いま作った PR が画面に出ない。
+///
+/// **カーソルは作った行へ。** `PrState::loaded` は「いま選んでいる PR の番号」を
+/// 優先するので、番号を憶えさせないと**新しい行が先頭に入ってもカーソルは残る**。
+///
+/// **失敗の本文は `detail` へ。** 422 の本文にも 403 のホスト名にも上限が無いので、
+/// 要約行に混ぜると端末の幅から末尾が切れる（01 の「失敗の案内文」）。
+pub(super) fn pr_created(state: &mut AppState, result: Result<PullRequest, GithubError>) -> Cmd {
+    state.jobs.finish(JobKind::CreatePr);
+    match result {
+        Ok(pr) => {
+            state.push_notice(
+                NoticeLevel::Info,
+                format!("PR #{} を作りました", pr.number),
+                None,
+            );
+            state.prs.seat_on_created(pr.number);
+            // 続きを頼む: 作った PR が入った一覧。
+            reload(state)
+        }
+        Err(err) => {
+            state.push_notice(
+                NoticeLevel::Error,
+                "PR を作れませんでした".to_string(),
+                Some(err.to_string()),
+            );
+            Cmd::None
+        }
+    }
 }
 
 /// 材料が揃っていれば一覧を頼む。
@@ -288,12 +556,14 @@ mod tests {
     };
     use super::super::update;
     use super::*;
+    use crate::app::Modifiers;
     use crate::app::{
         GithubBlock, Msg, NoticeLevel, PrLoad, Region, RepoSnapshot, RightTab, TargetState,
     };
     use crate::auth::{AccountState, DegradedReason};
     use crate::config::Config;
     use crate::git_read::HeadInfo;
+    use crate::git_read::Remote;
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
@@ -398,6 +668,337 @@ mod tests {
                 .unwrap_or(Cmd::None),
             other => panic!("一覧の返信がこれを出した: {other:?}"),
         }
+    }
+
+    /// `N` を押した状態の [`Modal::PrCreate`] を取り出す。
+    fn modal_of(state: &AppState) -> (&TextBuffer, &TextBuffer, &TextBuffer, bool, PrField) {
+        let Some(Modal::PrCreate {
+            title,
+            body,
+            base,
+            draft,
+            field,
+        }) = &state.modal
+        else {
+            panic!("PrCreate が開いていません: {:?}", state.modal);
+        };
+        (title, body, base, *draft, *field)
+    }
+
+    /// 直近の通知の要約行。
+    fn last_notice(state: &AppState) -> String {
+        state
+            .notices
+            .back()
+            .map(|notice| notice.message.clone())
+            .expect("通知が無い")
+    }
+
+    #[test]
+    fn n_fills_the_base_from_the_default_remotes_head_and_leaves_it_empty_without_one() {
+        // **base は `refs/remotes/<既定リモート>/HEAD`**（01 の「PR 作成（`N`）」）。
+        // **`Some` と `None` を 1 本で見る** —— 空欄のほうだけを見る assert は、
+        // `head_branch` を 1 行も置かなくても通る（`CLAUDE.md`）。
+        let mut state = state_on_prs_tab("feat/x");
+        state.repo.remotes = vec![Remote {
+            name: "origin".to_string(),
+            url: "https://github.com/owner/repo.git".to_string(),
+            head_branch: Some("trunk".to_string()),
+        }];
+
+        let cmd = press(&mut state, 'N');
+
+        assert_eq!(cmd, Cmd::None, "開くだけで往復しない");
+        let (title, body, base, draft, field) = modal_of(&state);
+        assert_eq!(base.text(), "trunk");
+        assert_eq!(title.text(), "", "title は空で開く");
+        assert_eq!(body.text(), "", "body は空で開く");
+        assert!(!draft, "draft は false で開く");
+        assert_eq!(field, PrField::Title, "最初の欄は title");
+
+        // 一度も fetch していないリモート（symref が無い）。
+        let mut state = state_on_prs_tab("feat/x");
+        state.repo.remotes = remotes_of(&[("origin", "https://github.com/owner/repo.git")]);
+        let _ = press(&mut state, 'N');
+        let (_, _, base, _, _) = modal_of(&state);
+        assert_eq!(base.text(), "", "symref が無ければ空欄で開く");
+    }
+
+    #[test]
+    fn n_refuses_when_the_branch_already_has_a_pull_request() {
+        // **`AppState::current_pr` の答えをそのまま使う**（01）。別の判定を書くと、
+        // **カーソルが座っているその行の PR を「無い」と言って作りに行く**形が作れる。
+        let mut state = state_on_prs_tab("feat/x");
+        deliver(&mut state, vec![fake_pull_request(7, "feat/x", "sha7")]);
+
+        let cmd = press(&mut state, 'N');
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.modal.is_none(), "開いてしまった");
+        let notice = last_notice(&state);
+        assert!(notice.contains("#7"), "番号を出していない: {notice}");
+
+        // **行き止まりにはならない。** 一覧を引き直してその PR が消えれば開く
+        // （#53 の「断つ前に消し方を数える」）。
+        deliver(&mut state, Vec::new());
+        let _ = press(&mut state, 'N');
+        assert!(state.modal.is_some(), "一覧から消えても断り続けている");
+    }
+
+    #[test]
+    fn n_refuses_off_a_branch_and_while_github_is_unavailable() {
+        // **どちらもリクエストを組めない形**（01 の表）。
+        let mut state = state_on_prs_tab("feat/x");
+        state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
+        let cmd = press(&mut state, 'N');
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.modal.is_none(), "detached で開いた");
+        assert!(last_notice(&state).contains("ブランチ"), "{state:?}");
+
+        // **理由は `github_block` が値で答える**（`r` と同じ。消去法で組まない）。
+        let mut state = state_on_prs_tab("feat/x");
+        state.account = AccountState::Degraded(DegradedReason::GhMissing);
+        let _ = press(&mut state, 'N');
+        assert!(state.modal.is_none(), "degraded で開いた");
+        assert_eq!(last_notice(&state), GithubBlock::AccountDegraded.notice());
+    }
+
+    #[test]
+    fn tab_walks_the_fields_and_space_only_toggles_draft() {
+        let mut state = state_on_prs_tab("feat/x");
+        let _ = press(&mut state, 'N');
+
+        // 宣言順に巡る（07 の縦の並びと同じ）。
+        for wanted in [PrField::Body, PrField::Base, PrField::Draft, PrField::Title] {
+            let _ = press_code(&mut state, KeyCode::Tab);
+            assert_eq!(modal_of(&state).4, wanted, "Tab の行き先");
+        }
+        // 端で巻く。
+        let _ = press_code(&mut state, KeyCode::BackTab);
+        assert_eq!(modal_of(&state).4, PrField::Draft);
+
+        // **draft の欄でだけトグル。** ここで 1 回押して真になる。
+        let _ = press(&mut state, ' ');
+        assert!(modal_of(&state).3, "Space が draft を立てていない");
+        let _ = press(&mut state, ' ');
+        assert!(!modal_of(&state).3, "2 回目で戻らない");
+
+        // title の欄では空白が入る文字（トグルではない）。
+        let _ = press_code(&mut state, KeyCode::Tab);
+        assert_eq!(modal_of(&state).4, PrField::Title);
+        let _ = press(&mut state, ' ');
+        assert!(!modal_of(&state).3, "title の欄で draft が変わった");
+        assert_eq!(modal_of(&state).0.text(), " ", "空白が入っていない");
+    }
+
+    #[test]
+    fn a_modified_enter_makes_a_newline_only_in_the_body() {
+        // **`CommitMessage` に揃える**（01）。修飾なしは確定、修飾付きは改行、
+        // **改行できるのは body だけ** —— 1 行の欄に 2 行目ができると `text()` の
+        // 返す字に `\n` が混ざる。
+        let mut state = state_on_prs_tab("feat/x");
+        let _ = press(&mut state, 'N');
+        let _ = press(&mut state, 'a');
+        let _ = update(&mut state, alt_enter());
+        assert_eq!(modal_of(&state).0.text(), "a", "title に改行が入った");
+
+        let _ = press_code(&mut state, KeyCode::Tab);
+        let _ = press(&mut state, 'b');
+        let _ = update(&mut state, alt_enter());
+        let _ = press(&mut state, 'c');
+        assert_eq!(modal_of(&state).1.text(), "b\nc");
+
+        // `Ctrl-J` も同じ（どの端末でも届く改行）。
+        let _ = update(&mut state, Msg::Key(Key::ctrl('j')));
+        let _ = press(&mut state, 'd');
+        assert_eq!(modal_of(&state).1.text(), "b\nc\nd");
+    }
+
+    #[test]
+    fn enter_sends_what_was_typed_and_an_empty_title_keeps_the_box_open() {
+        let mut state = state_on_prs_tab("feat/x");
+        state.repo.remotes = vec![Remote {
+            name: "origin".to_string(),
+            url: "https://github.com/owner/repo.git".to_string(),
+            head_branch: Some("main".to_string()),
+        }];
+        let _ = press(&mut state, 'N');
+
+        // **title が空なら断る。** GitHub も 422 を返すが、閉じてからでは打った
+        // 本文が戻らない（01）。
+        let cmd = press_code(&mut state, KeyCode::Enter);
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.modal.is_some(), "空の title で閉じた");
+        assert!(last_notice(&state).contains("タイトル"), "{state:?}");
+
+        for c in "fix".chars() {
+            let _ = press(&mut state, c);
+        }
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert!(state.modal.is_none(), "確定したのに閉じていない");
+        let Cmd::CreatePr(input) = cmd else {
+            panic!("CreatePr が出ていない: {cmd:?}");
+        };
+        assert_eq!(
+            *input,
+            CreatePr {
+                title: "fix".to_string(),
+                body: String::new(),
+                // **同一リポジトリなので owner を付けない**（01）。
+                head: "feat/x".to_string(),
+                base: "main".to_string(),
+                draft: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_branch_that_lives_on_a_fork_sends_an_owner_qualified_head() {
+        // **owner の産出元は `head_homes()` 1 本**（#98 で入れたもの。01）。
+        // 追跡先が fork を指していれば `<owner>:<branch>`。
+        let mut state = state_tracking(
+            "feat/x",
+            "fork",
+            &[("fork", "https://github.com/bob/repo.git")],
+        );
+        let opened = tab_to(&mut state, Pane::Prs);
+        assert_eq!(opened, Cmd::None, "一覧がまだ無いのに扇形が出た");
+        let _ = press(&mut state, 'N');
+        for c in "fix".chars() {
+            let _ = press(&mut state, c);
+        }
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        let Cmd::CreatePr(input) = cmd else {
+            panic!("CreatePr が出ていない: {cmd:?}");
+        };
+        assert_eq!(input.head, "bob:feat/x");
+    }
+
+    #[test]
+    fn the_box_stays_open_while_another_create_is_running() {
+        // **`Cmd` が落とされるなら閉じない**（`update::submit`）。閉じると
+        // 打った本文ごと消える。
+        let mut state = state_on_prs_tab("feat/x");
+        let _ = press(&mut state, 'N');
+        for c in "fix".chars() {
+            let _ = press(&mut state, c);
+        }
+        // 1 本目は `update` の出口で発行済み。走らせたままにする。
+        let first = press_code(&mut state, KeyCode::Enter);
+        assert!(matches!(first, Cmd::CreatePr(_)), "{first:?}");
+
+        let _ = press(&mut state, 'N');
+        for c in "two".chars() {
+            let _ = press(&mut state, c);
+        }
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.modal.is_some(), "落とされたのに閉じた");
+        assert_eq!(modal_of(&state).0.text(), "two", "打った本文が消えた");
+        assert!(
+            last_notice(&state).contains("PR を作っています"),
+            "{state:?}"
+        );
+    }
+
+    #[test]
+    fn a_created_pull_request_is_asked_for_again_and_takes_the_cursor() {
+        // **PR 作成は一覧の新しい引き金**（01 の「何を引くか」）—— ref が動かないので
+        // 既存の引き金では拾えない。**カーソルも作った行へ** —— `PrState::loaded` は
+        // 「いま選んでいる PR の番号」を優先するので、憶えさせないと座らない。
+        let mut state = state_on_prs_tab("feat/x");
+        deliver(&mut state, vec![fake_pull_request(3, "other", "sha3")]);
+        assert_eq!(state.prs.selected().map(|pr| pr.number), Some(3));
+
+        let _ = start_create(&mut state);
+        let cmd = update(&mut state, created_msg(9, "feat/x"));
+
+        assert!(issued(&cmd, &Cmd::FetchPrList), "引き直していない: {cmd:?}");
+        assert!(last_notice(&state).contains("#9"), "{state:?}");
+
+        // 届いた一覧では、いま選んでいた #3 ではなく作った #9 に座る。
+        let _ = reply(
+            &mut state,
+            Cmd::FetchPrList,
+            list_msg(vec![
+                fake_pull_request(9, "feat/x", "sha9"),
+                fake_pull_request(3, "other", "sha3"),
+            ]),
+        );
+        assert_eq!(state.prs.selected().map(|pr| pr.number), Some(9));
+
+        // **1 回きり。** 次の一覧では、いま選んでいる行がそのまま残る。
+        state.prs.move_cursor(1);
+        assert_eq!(state.prs.selected().map(|pr| pr.number), Some(3));
+        deliver(
+            &mut state,
+            vec![
+                fake_pull_request(3, "other", "sha3"),
+                fake_pull_request(9, "feat/x", "sha9"),
+            ],
+        );
+        assert_eq!(state.prs.selected().map(|pr| pr.number), Some(3));
+    }
+
+    #[test]
+    fn a_failed_create_keeps_the_reason_in_the_detail() {
+        // **要約行に混ぜない**（01 の「失敗の案内文」）。422 の本文にも 403 の
+        // ホスト名にも上限が無いので、端末の幅から末尾が切れる。
+        let mut state = state_on_prs_tab("feat/x");
+        let _ = start_create(&mut state);
+        let err = GithubError::Api {
+            status: 422,
+            body_head: "x".repeat(200),
+        };
+        let cmd = update(&mut state, Msg::PrCreated(Box::new(Err(err))));
+
+        assert_eq!(cmd, Cmd::None, "失敗では引き直さない");
+        let notice = state.notices.back().expect("通知");
+        assert!(cells(&notice.message) <= NOTICE_CELLS, "{}", notice.message);
+        assert!(
+            notice.detail.as_deref().is_some_and(|d| d.contains("422")),
+            "本文が detail に無い: {notice:?}"
+        );
+
+        // **ジョブは畳む。** 畳まないと以後の `N` が `AppState::issue` に落とされ続ける。
+        let again = start_create(&mut state);
+        assert!(matches!(again, Cmd::CreatePr(_)), "{again:?}");
+    }
+
+    /// `N` → タイトルを打つ → `Enter`。**返る `Cmd` は発行済み** ——
+    /// `update` の出口が `AppState::issue` を通すので、**ここで `issue` を呼ぶと
+    /// 2 度目になって落とされる**（`test_util::reply` に渡せないのも同じ理由。
+    /// あちらは未発行の `Cmd` を受ける）。返信は `update` に直に届ける。
+    fn start_create(state: &mut AppState) -> Cmd {
+        let _ = press(state, 'N');
+        let _ = press(state, 'x');
+        let cmd = press_code(state, KeyCode::Enter);
+        assert!(matches!(cmd, Cmd::CreatePr(_)), "{cmd:?}");
+        cmd
+    }
+
+    /// `Alt+Enter`（`ESC CR`）の打鍵。**修飾付きの `Enter` は改行**（01）。
+    fn alt_enter() -> Msg {
+        Msg::Key(Key::with_mods(
+            KeyCode::Enter,
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+        ))
+    }
+
+    /// 作った PR が返った `Msg`。
+    fn created_msg(number: u64, branch: &str) -> Msg {
+        Msg::PrCreated(Box::new(Ok(fake_pull_request(
+            number,
+            branch,
+            &format!("sha{number}"),
+        ))))
     }
 
     #[test]

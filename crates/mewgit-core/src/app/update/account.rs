@@ -1218,6 +1218,7 @@ mod tests {
             remotes: vec![Remote {
                 name: "origin".to_string(),
                 url: "git@github.com:owner/repo.git".to_string(),
+                head_branch: None,
             }],
             head: HeadInfo::Branch {
                 name: "main".to_string(),

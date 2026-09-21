@@ -99,6 +99,67 @@ fn remotes_returns_every_remote_sorted_by_name() {
 }
 
 #[test]
+fn remotes_read_the_default_branch_from_the_remote_head_symref() {
+    // `refs/remotes/<name>/HEAD` が指すブランチを `head_branch` に入れる（02）。
+    // **生の `refs/remotes/origin/main` のままでは PR の base に載せられない**ので、
+    // 接頭辞を剥がす。
+    //
+    // **symref は `git symbolic-ref` で書く。** clone と `git fetch` が書くのと
+    // 同じもので（実測 2026-09-21、git 2.55 の `env -i` 一時リポジトリ:
+    // clone 直後と `remote add` + `fetch` のあとはどちらも
+    // `refs/remotes/origin/HEAD -> refs/remotes/origin/main`）、ここでリモートを
+    // 立てずに済む。
+    let repo = TestRepo::init();
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/me/mewgit.git",
+    ]);
+    repo.git(&["remote", "add", "upstream", "git@github.com:up/mewgit.git"]);
+    repo.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/trunk",
+    ]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let remotes = reader.remotes().unwrap();
+
+    let heads: Vec<(&str, Option<&str>)> = remotes
+        .iter()
+        .map(|r| (r.name.as_str(), r.head_branch.as_deref()))
+        .collect();
+    // **`Some` と `None` を 1 本で見る。** `None` だけを見る assert は、symref を
+    // 1 行も書かなくても通る（`CLAUDE.md` の「否定を見る assert は…」）。
+    // `upstream` が `None` なのは、一度も fetch していないリモートの形（02）。
+    assert_eq!(heads, [("origin", Some("trunk")), ("upstream", None)]);
+}
+
+#[test]
+fn a_remote_head_pointing_outside_the_remote_is_not_a_branch_name() {
+    // 剥がせない値は `None`（02）。**`refs/heads/main` をそのまま返すと**、
+    // PR の base に `refs/heads/main` が載って GitHub が 422 を返す。
+    let repo = TestRepo::init();
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/me/mewgit.git",
+    ]);
+    repo.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/heads/main",
+    ]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let remotes = reader.remotes().unwrap();
+
+    assert_eq!(remotes[0].head_branch, None);
+}
+
+#[test]
 fn remotes_is_empty_without_any_remote() {
     let repo = TestRepo::init();
     let reader = RepoReader::open(repo.path()).unwrap();

@@ -659,10 +659,16 @@ pub fn fake_logins(logins: &[&str]) -> Vec<GhLogin> {
 }
 
 /// リモート 1 件。URL は使う側が見ないので、名前から作った偽物でよい。
+///
+/// **`head_branch` は `None`。** 既定ブランチを見る経路（`Modal::PrCreate` の base）を
+/// 踏むテストは、そこだけ `Remote` を自分で組む —— ここで `Some` を既定にすると、
+/// **空欄で開く腕**（一度も fetch していないリモート。02）がどのテストからも
+/// 踏めなくなる。
 pub fn fake_remote(name: &str) -> Remote {
     Remote {
         name: name.to_string(),
         url: format!("ssh://git@example.invalid/{name}.git"),
+        head_branch: None,
     }
 }
 

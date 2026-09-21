@@ -7,6 +7,7 @@ pub mod commit_message;
 pub mod confirm;
 pub mod input;
 pub mod picker;
+pub mod pr_create;
 pub mod remote_picker;
 
 use mewgit_core::app::{Modal, TextBuffer};
@@ -35,8 +36,15 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
         Modal::AccountPicker { view, cursor } => {
             account_picker::render(frame, area, view, *cursor);
         }
+        Modal::PrCreate {
+            title,
+            body,
+            base,
+            draft,
+            field,
+        } => pr_create::render(frame, area, title, body, base, *draft, *field),
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
-        Modal::RebaseEditor { .. } | Modal::PrCreate { .. } | Modal::Help => {}
+        Modal::RebaseEditor { .. } | Modal::Help => {}
     }
 }
 

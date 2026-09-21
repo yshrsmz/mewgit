@@ -120,7 +120,7 @@ pub enum Modal {
     Input { title: String, prompt: String, buf: TextBuffer, intent: InputIntent },
     CommitMessage { buf: TextBuffer, amend: bool },
     RebaseEditor { plan: RebasePlan, cursor: usize },
-    PrCreate { title: TextBuffer, body: TextBuffer, base: String, draft: bool },
+    PrCreate { title: TextBuffer, body: TextBuffer, base: TextBuffer, draft: bool, field: PrField },
     AccountPicker { view: AccountView, cursor: usize },
     Help,
 }
@@ -965,7 +965,9 @@ pub enum PrLoad { Pending, Loaded, Failed(GithubError) }
 unborn でも同じものが出る。
 
 **頼む場所は、ref（`Msg::RepoInfoLoaded`）と、どのアカウントで引いたか
-（`Msg::AccountResolved`）と、`r`（下の「引き直す（`r`）」）。** 前の 2 つは
+（`Msg::AccountResolved`）と、`r`（下の「引き直す（`r`）」）と、PR を作ったとき
+（下の「PR 作成（`N`）」）。** ref を動かさない PR 作成が引き金に要るのは、
+**GitHub 側の一覧だけが変わる**ため。前の 2 つは
 **どちらが先に届くかは決まらない**ので、両方の順序を回す
 テストを書く。#63 の `RepoInfo.target` はまさにこの 2 本の順序で答えが変わり、
 latch したせいで二度と直らなかった。**こちらは latch しない。**
@@ -1272,9 +1274,88 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
   **gh がそのホストにログインしていないと落ちる**（実測: `env -i` で
   `gh browse -n 123 -R github.com/cli/cli` が exit 4、
   `To get started with GitHub CLI, please run:  gh auth login`）
-- **一覧が空のときに `N` を案内しない。** `Modal::PrCreate` はまだ無いので、いま
-  書くと**存在しないキーを案内する**（#63 の「案内が求める操作を、そもそも自分が
-  持っているか」）
+- **一覧が空のときは `N` を案内する。** 開ける PR が無いのは PR を作る場面なので、
+  「開ける PR がありません」だけで止めると行き止まりになる（#63 の「案内が求める
+  操作を、そもそも自分が持っているか」）。**キーの案内を出せるのは `N` が入ってから**
+  で、それが下の節
+
+### PR 作成（`N`）
+
+PRs ペインの `N` で `Modal::PrCreate` を開き、確定で `POST /repos/{o}/{r}/pulls`（05）を
+1 本出す。`Cmd::CreatePr` / `Msg::PrCreated` / `JobKind::CreatePr`。
+
+**欄は 4 つ**（title / body / base / draft）。`Tab` / `Shift+Tab` で巡回し、
+どの欄を編集しているかは `Modal::PrCreate.field`（`PrField`）が持つ。
+**`base` も `TextBuffer`** —— ここにはずっと `base: String` と書いてあったが、
+要件（`docs/requirements.md`）がベースブランチの指定を求めており、編集できる欄は
+`TextBuffer` でないとカーソルを持てない。
+
+**キーは `Modal::CommitMessage` に揃える。** 修飾なしの `Enter` はどの欄でも確定、
+修飾付きの `Enter` と `Ctrl-J` は body 欄でだけ改行、`Esc` で破棄。
+**`draft` の欄では `Space` がトグル** —— `Enter` に載せると「決定」と「切替」が
+同じキーになる。**確定を `Alt+Enter` だけにしない** —— `CommitMessage` も `Input` も
+`Enter` で確定するので、モーダルごとに `Enter` の意味が変わる形になる。
+
+#### 初期値
+
+- **title と body は空。** HEAD のコミットの要約を入れる形も書けるが、それには
+  `Cmd::LoadHeadMessage` の答えが要り、**別のジョブから届く値を初期値に混ぜる**ことに
+  なる（#63 の `RepoInfo.target`）。押した瞬間に開くほうを採る
+- **base は `refs/remotes/<既定リモート>/HEAD` が指すブランチ。**
+  `git_read::Remote` が `head_branch` として運ぶ（02）ので、**往復を増やさない**。
+  `GET /repos/{o}/{r}` の `default_branch` でも出せるが、モーダルを開くのが非同期に
+  なり「引いている最中」「引けなかった」の腕が増える。**symref が無い形はある** ——
+  `git remote add` しただけで一度も fetch していないとき（clone 直後と `git fetch` の
+  あとには在る。実測 2026-09-21、git 2.55、`env -i` の一時リポジトリ）。そのときは
+  **空で開いて人に打たせる**
+- **draft は `false`**
+
+#### head の組み立て
+
+`head` は HEAD のブランチ名。**fork から出すときだけ `<owner>:<branch>`** で、owner は
+`head_homes()` の先頭（上の「現ブランチの PR」）が `RepoInfo.target` と違うときにそれを
+使う。**owner の比較を 2 本目に書かない** —— #98 で入れた `head_homes` が「HEAD の
+ブランチから出した PR の head が在りうるリポジトリ」を確からしい順に答えるので、
+そこが唯一の産出元。
+
+**push 済みかを手前で判定しない。** リモートに無いブランチから PR を作ると GitHub が
+422 を返すので、その本文を通知に出す。手前で判定するには追跡設定を読むことになるが、
+**あの `None` には理由が 4 つあり**（#47）、**git は「どこへ push したか」を憶えて
+いない**（上の表）—— **二度確かめて不確かだと判った材料の上に守りを組むことになる。**
+
+#### 押した時点で断る形
+
+どれも**リクエストを組めない**か**確実に 422 になる**もの。
+
+| 状態 | 出す案内 |
+|---|---|
+| GitHub が使えない（`AppState::github_block`） | `github_block` が値で答える文言（`r` と同じ。上の「引き直す（`r`）」） |
+| HEAD がブランチでない（detached / unborn） | head に載せる名前が無い |
+| このブランチの PR が既にある（`AppState::current_pr`） | その番号を出す |
+
+**3 つ目は `AppState::current_pr` の答えをそのまま使う。** 別の判定を書くと、座り直し
+（上の「現ブランチの PR」）と食い違う画面が作れる —— **カーソルが座っているその行の
+PR を「無い」と言って作りに行く**形になる。**行き止まりにはならない** ——
+一覧を落とす経路（`f` / `A` / `r`）がそのままこの断りを落とす経路になっている
+（#53 の「状態を消すのが『その状態を根拠に断つキー』の先にあるなら、断つ前に消し方を
+数える」）。
+
+#### 確定と、そのあと
+
+- **`Cmd` が落とされるなら閉じない**（`submit_exec` と同じ形）。打った本文がそのまま
+  消えるため。見るのは `JobKind::CreatePr` が走っているか
+- **title が空なら断る。** GitHub も 422 を返すが、モーダルを閉じてからでは打った
+  本文が戻らない（`commit_submit` と同じ理由）
+- 成功したら通知に `#<番号>` を出し、**一覧を引き直す**（上の「何を引くか」に足した
+  引き金）
+- **カーソルは作った PR に座る。** `PrState` が作った番号を 1 回だけ憶え、届いた一覧で
+  その行へ座る。**憶えないと座らない** —— `PrState::loaded` は「いま選んでいる PR の
+  番号」を優先するので、作る前に別の行を選んでいると、新しい行が一覧の先頭に入っても
+  カーソルはそのまま残る
+- 失敗は通知に出す。**要約行は端末の幅に収め、`GithubError` の `Display` と 422 の
+  本文は `Notice.detail` へ**（上の「失敗の案内文」）—— 422 の本文にも上限が無い
+- **`JobKind::CreatePr` の `region()` は `None`。** 返るのは**作った PR そのもの**で、
+  書き込みに追い越されて古くなるという問いが無い（`OpenPr` と同じ）
 
 ### 右上のタブ
 
@@ -2009,7 +2090,8 @@ impl JobKind {
 **`FetchPrList` は逆に、鍵が無くて世代だけ要る** —— 一覧は選択に紐づかないので
 「選択が動いた」を言う鍵がそもそも無く、**世代だけが「書き込みで中身が変わった」を
 言う**。**コミットの中身は書き込みで変わらないが、PR の中身は変わる**（上の
-「PR ペイン › 何を引くか」）。`OpenPr` は値を読まないので `None`。
+「PR ペイン › 何を引くか」）。`OpenPr` と `CreatePr` は `None` —— 前者は値を読まず、後者が返すのは**作った PR
+そのもの**なので、書き込みに追い越されて古くなるという問いが無い。
 
 **残るもの**: 落ちた要求の追いつき（(a)）は世代では解けない。`JobKind` の粒度を対象まで
 含めるかは、`LoadDiff` の要求が実際に落ちて困る形が出てから決める。
@@ -2126,6 +2208,7 @@ pub enum Msg {
     PrDetailLoaded { epoch: u64, number: u64, sha: String, result: Result<PrDetail, GithubError> },  // 上の「集計」
     PrDetailsFinished { epoch: u64, aborted: Option<(GithubError, Vec<(u64, String)>)> },  // 扇形の終端
     RateLimitSeen { epoch: u64, seen: RateLimit },    // API の残量。下の「残量」
+    PrCreated(Box<Result<PullRequest, GithubError>>),  // 作った PR。上の「PR 作成（N）」
     OpenPrFinished(Result<(), AuthError>),            // gh browse の結果。Err は通知に出す
 }
 ```
@@ -2219,7 +2302,8 @@ pub enum Cmd {
     ResolveAccount(RepoTarget),        // どのリポジトリのアカウントを決めるか（04 の手順 1〜4）
     ListAccounts(String),              // そのホストの login 一覧だけを取り直す（上の「候補の取り直し」）
     FetchPrList,                       // 開いている PR の一覧（上の「PR ペイン › 何を引くか」）
-    FetchPrDetails { targets: Vec<(u64, String)> },  // PR ごとの集計（上の「PR ペイン › 集計」）
+    FetchPrDetails { epoch: u64, targets: Vec<(u64, String)> },  // PR ごとの集計（上の「PR ペイン › 集計」）
+    CreatePr(Box<CreatePr>),           // POST /pulls。上の「PR 作成（N）」
     OpenPr { number: u64 },            // gh browse。上の「o（ブラウザで開く）」
     Quit,
 }

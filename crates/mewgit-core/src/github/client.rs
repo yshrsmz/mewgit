@@ -14,10 +14,12 @@ use crate::auth::url::valid_host;
 use crate::auth::RepoTarget;
 
 use super::wire::{
-    summarize_reviews, WireCheckRuns, WireCombinedStatus, WirePull, WireRepo, WireReview,
+    summarize_reviews, WireCheckRuns, WireCombinedStatus, WireCreatePr, WirePull, WireRepo,
+    WireReview,
 };
 use super::{
-    Check, CheckSummary, GithubError, PrDetail, PullRequest, RateLimit, RepoMeta, ReviewSummary,
+    Check, CheckSummary, CreatePr, GithubError, PrDetail, PullRequest, RateLimit, RepoMeta,
+    ReviewSummary,
 };
 
 /// `X-GitHub-Api-Version`。GitHub は「日付で固定せよ」と言っている。
@@ -258,6 +260,29 @@ impl GithubClient {
         Ok(wire.into_iter().map(Into::into).collect())
     }
 
+    /// PR を作る（01 の「PR 作成（`N`）」）。
+    ///
+    /// **返った `PullRequest` をそのまま返す。** `pulls` と同じ形が返るので
+    /// [`WirePull`] を使い回す。読む側が使うのは番号だけだが、**`()` に落とさない**
+    /// —— 落とすと、作った PR が一覧に出るまで画面に何も出せない（05）。
+    ///
+    /// **重複した PR も、リモートに無いブランチも 422。** どちらも
+    /// [`GithubError::Api`] に落ち、本文の先頭 200 文字が付く。**腕を足さない** ——
+    /// GitHub は同じ 422 に十数通りの `errors[].code` を載せるので、腕にすると
+    /// 載らなかった形が黙って `Api` へ落ちる（05）。
+    pub async fn create_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        input: &CreatePr,
+    ) -> Result<PullRequest, GithubError> {
+        let url = self.endpoint(&["repos", owner, repo, "pulls"]);
+        let body = WireCreatePr::from(input);
+        let (body, _) = self.send(self.http.post(url).json(&body)).await?;
+        let wire: WirePull = serde_json::from_str(&body).map_err(decode)?;
+        Ok(wire.into())
+    }
+
     /// コミットのチェック一覧。
     ///
     /// **2 本の API をマージする。** GitHub Actions などは check-run、外部 CI が
@@ -450,25 +475,35 @@ impl GithubClient {
         Ok(items)
     }
 
-    /// 1 リクエスト送って、本文と `Link` ヘッダを返す。
-    ///
-    /// **同時本数を抑えるのはここだけ**（`PERMITS`）。**permit は応答を読み切る
-    /// まで握る** —— 本文を読み終える前に返すと、次のリクエストが同時に飛ぶ。
+    /// GET を 1 本送る。
     async fn get_page(
         &self,
         url: Url,
         query: &[(&str, &str)],
+    ) -> Result<(String, Option<String>), GithubError> {
+        self.send(self.http.get(url).query(query)).await
+    }
+
+    /// 組んだリクエストを 1 本送って、本文と `Link` ヘッダを返す。
+    ///
+    /// **同時本数を抑えるのはここだけ**（`PERMITS`）。**permit は応答を読み切る
+    /// まで握る** —— 本文を読み終える前に返すと、次のリクエストが同時に飛ぶ。
+    ///
+    /// **メソッドで分けない。** GET と POST で違うのは `RequestBuilder` の組み方
+    /// だけで、permit・トークン・残量の記録・状態の写しはどれも同じ（05 の
+    /// 「`create_pr` だけが POST」）。**POST を別の経路で送ると**、扇形と同時に
+    /// 飛んだときに上限をすり抜け、残量も採れない。
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
     ) -> Result<(String, Option<String>), GithubError> {
         // `Semaphore` を閉じないので `acquire` は失敗しない。
         let _permit = PERMITS
             .acquire()
             .await
             .expect("PERMITS は閉じないので acquire は成功する");
-        let response = self
-            .http
-            .get(url)
+        let response = request
             .bearer_auth(self.token.expose_secret())
-            .query(query)
             .send()
             .await
             .map_err(network)?;
@@ -653,7 +688,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
     use wiremock::matchers::{
-        header, method, path, path_regex, query_param, query_param_is_missing,
+        body_json, header, method, path, path_regex, query_param, query_param_is_missing,
     };
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -897,6 +932,98 @@ mod tests {
             .await;
 
         assert!(client(&server).pr_list("o", "r").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_pr_posts_every_field_and_returns_the_new_pull_request() {
+        // **本文をまるごと突き合わせる。** 1 つでも欠けると GitHub は 422 を返すので、
+        // `contains` では「送っているつもりの欄」を見張れない。
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls"))
+            .and(body_json(json!({
+                "title": "feat: x",
+                "body": "本文",
+                "head": "fork-owner:feat/x",
+                "base": "main",
+                "draft": true,
+            })))
+            .respond_with(with_headers(
+                ResponseTemplate::new(201).set_body_json(pull(7, "open", None)),
+                &[
+                    ("x-ratelimit-limit", "5000"),
+                    ("x-ratelimit-remaining", "4321"),
+                    ("x-ratelimit-reset", "1700000000"),
+                ],
+            ))
+            .mount(&server)
+            .await;
+
+        let api = client(&server);
+        let created = api
+            .create_pr(
+                "o",
+                "r",
+                &CreatePr {
+                    title: "feat: x".to_string(),
+                    body: "本文".to_string(),
+                    head: "fork-owner:feat/x".to_string(),
+                    base: "main".to_string(),
+                    draft: true,
+                },
+            )
+            .await
+            .expect("create_pr");
+
+        assert_eq!(created.number, 7);
+        // **POST も GET と同じ経路（`send`）を通っている証拠。** 残量を採るのも
+        // permit を取るのもそこ 1 箇所なので、別経路で送ると**上限をすり抜け、
+        // 残量も採れない**（05）。ここが `None` なら経路が割れている。
+        assert_eq!(
+            api.rate_limit().map(|r| r.remaining),
+            Some(4321),
+            "POST が残量を採る経路を通っていません"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_pr_hands_the_422_body_to_the_caller() {
+        // 重複した PR も、リモートに無いブランチも 422（05）。**腕を足さずに
+        // `Api` へ落とし、本文をそのまま残す** —— 通知の `detail` に出るのがこれで、
+        // 握りつぶすと「何が悪いのか」を知る経路が無くなる（不変ルール 4 と同じ）。
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+                "message": "Validation Failed",
+                "errors": [{ "message": "A pull request already exists for me:feat/x." }],
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(&server)
+            .create_pr(
+                "o",
+                "r",
+                &CreatePr {
+                    title: "t".to_string(),
+                    body: String::new(),
+                    head: "feat/x".to_string(),
+                    base: "main".to_string(),
+                    draft: false,
+                },
+            )
+            .await
+            .expect_err("422 のはず");
+
+        let GithubError::Api { status, body_head } = err else {
+            panic!("Api に落ちていません: {err:?}");
+        };
+        assert_eq!(status, 422);
+        assert!(
+            body_head.contains("A pull request already exists"),
+            "{body_head}"
+        );
     }
 
     #[tokio::test]

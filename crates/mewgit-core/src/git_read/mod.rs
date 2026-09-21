@@ -211,6 +211,15 @@ pub struct Signature {
 pub struct Remote {
     pub name: String,
     pub url: String,
+    /// `refs/remotes/<name>/HEAD` が指すブランチの短縮名 —— **そのリモートが言う
+    /// 既定ブランチ**（02 の「remotes」）。読み手は `Modal::PrCreate` の base の
+    /// 初期値（01 の「PR 作成（`N`）」）。
+    ///
+    /// **`None` は「symref が無い」。** clone 直後と `git fetch` のあとには在るが、
+    /// `git remote add` しただけで一度も fetch していないリポジトリには無い
+    /// （実測 2026-09-21、git 2.55）。**読み手は空欄で開いて人に打たせる**ので、
+    /// 無いことを理由にしない。
+    pub head_branch: Option<String>,
 }
 
 /// Oid からその位置にある ref を引く索引。グラフ行の右にラベルを並べるのに使う（06）。

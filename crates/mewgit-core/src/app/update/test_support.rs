@@ -485,6 +485,7 @@ pub(super) fn remotes_of(pairs: &[(&str, &str)]) -> Vec<Remote> {
         .map(|(name, url)| Remote {
             name: (*name).to_string(),
             url: (*url).to_string(),
+            head_branch: None,
         })
         .collect()
 }

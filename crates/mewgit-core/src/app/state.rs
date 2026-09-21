@@ -169,6 +169,10 @@ impl AppState {
             | JobKind::ListAccounts
             | JobKind::FetchPrList
             | JobKind::FetchPrDetails => return,
+            // **黙って落とさない。** 落とすと `Modal::PrCreate` が閉じないまま
+            // 何も起きず（`update::submit` は `Cmd` が落ちるなら閉じない）、
+            // 打った本文を抱えた箱が無反応に見える。
+            JobKind::CreatePr => "PR を作っています",
             // **黙って落とさない。** `gh browse` は**起動したブラウザが終わるまで
             // 返らない**（gh 2.100.0 で実測。`BROWSER` に 5 秒眠るスクリプトを
             // 置くと 5.06 秒）。端末ブラウザや自分で抜けないラッパーを `BROWSER` に
@@ -1338,7 +1342,7 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 /// URL に書かれたままなので、生のまま比べると **fork だけ別のエイリアスを使う
 /// 多アカウント運用**（04）で逆に落ちる。残る穴は、別ホストの同名 `owner/repo` に
 /// 同名のブランチがあり、その PR が一覧に居るとき（01）。
-fn head_homes(repo: &RepoInfo) -> Vec<RepoRef> {
+pub(super) fn head_homes(repo: &RepoInfo) -> Vec<RepoRef> {
     let tracked = match repo.head.as_ref() {
         Some(HeadInfo::Branch {
             upstream_remote: Some(value),
@@ -1407,6 +1411,19 @@ pub struct PrState {
     /// クライアントは `auth` の中で使い捨てになる。**まだ誰のトークンか決まって
     /// いない候補の予算**を出さないため（05 の「残量の受け渡し」）。
     rate_limit: Option<RateLimit>,
+    /// **いま作ったばかりで、まだ一覧に出ていない PR の番号**（01 の
+    /// 「PR 作成（`N`）」）。届いた一覧でその行に座らせ、そこで落とす。
+    ///
+    /// **憶えないと座らない。** [`PrState::loaded`] は「いま選んでいる PR の番号」を
+    /// 優先するので、作る前に別の行を選んでいると、新しい行が一覧の先頭に入っても
+    /// カーソルはそのまま残る。
+    ///
+    /// **材料は `Msg::PrCreated` だけ。** 別のジョブから届く値を混ぜると、到着順で
+    /// 答えが変わる（#63 の `RepoInfo.target`）。
+    ///
+    /// **latch ではない。** 一覧が 1 回届けば落ちるので、当たらなくても
+    /// （作った PR が即座に閉じられた、など）次の一覧で消える。
+    created: Option<u64>,
 }
 
 /// PR 1 行ぶんの集計と、どの head sha について引いたか。
@@ -1476,19 +1493,24 @@ impl PrState {
     /// した瞬間にカーソルが別の PR を指す（`BranchState::loaded` が名前で座り直すのと
     /// 同じ理由）。
     ///
-    /// **座り直す先は 2 つ。** いま選んでいる PR の番号か、それが無ければ `fallback`
-    /// が新しい一覧から選ぶ番号（起動直後は「いま居るブランチの PR」。01 の
-    /// 「現ブランチの PR」）。どちらも見つからなければ先頭。**`fallback` が新しい
-    /// 一覧を受け取るのは、その答えが一覧の中身から決まるから** —— 呼ぶ側に
-    /// 座り直しの手順を出すと、添字のまま座る形が外から書けるようになる。
+    /// **座り直す先は 3 つで、強い順に**：いま作った PR（[`PrState::created`]）、
+    /// いま選んでいる PR の番号、`fallback` が新しい一覧から選ぶ番号（起動直後は
+    /// 「いま居るブランチの PR」。01 の「現ブランチの PR」）。どれも見つからなければ
+    /// 先頭。**`fallback` が新しい一覧を受け取るのは、その答えが一覧の中身から
+    /// 決まるから** —— 呼ぶ側に座り直しの手順を出すと、添字のまま座る形が外から
+    /// 書けるようになる。
     pub(super) fn loaded(
         &mut self,
         list: Vec<PullRequest>,
         fallback: impl FnOnce(&[PullRequest]) -> Option<u64>,
     ) {
+        // **作ったばかりの PR がいちばん強い**（01 の「PR 作成（`N`）」）。人が
+        // いま出したものなので、直前に選んでいた行より先に見せる。**`take` で
+        // 落とす** —— 残すと、以後どの一覧が届いてもそこへ座り直す。
         let wanted = self
-            .selected()
-            .map(|pr| pr.number)
+            .created
+            .take()
+            .or_else(|| self.selected().map(|pr| pr.number))
             .or_else(|| fallback(&list));
         self.cursor = wanted
             .and_then(|number| list.iter().position(|pr| pr.number == number))
@@ -1654,6 +1676,18 @@ impl PrState {
         // **残量も落とす。** あれは**そのトークンの予算**で、次のアカウントの残量では
         // ない。残すと、ヘッダの `[gh: …]` だけが変わって数が前のまま残る。
         self.rate_limit = None;
+        // **座らせる約束も落とす。** 一覧を捨てたので当てる先が無く、残すと
+        // **次のアカウントで引いた一覧**の同じ番号に座る。
+        self.created = None;
+    }
+
+    /// 作った PR の番号を憶える。届いた一覧でその行に座る（01 の「PR 作成（`N`）」）。
+    ///
+    /// **一覧に足さない。** 作った PR を手で差し込むと、並び（`sort=updated`）も
+    /// 集計の鍵も `ui` の出し分けも、**一覧を引いたときとは別の経路**で作られる。
+    /// 番号だけ憶えて引き直すほうが、産出元が 1 本で済む。
+    pub(super) fn seat_on_created(&mut self, number: u64) {
+        self.created = Some(number);
     }
 }
 
@@ -1856,6 +1890,7 @@ pub enum JobKind {
     ListAccounts,
     FetchPrList,
     FetchPrDetails,
+    CreatePr,
     OpenPr,
 }
 
@@ -1906,7 +1941,11 @@ impl JobKind {
             // `gh auth status` が読むのは gh 自身の設定で、git の書き込みで動かない。
             | JobKind::ListAccounts
             // **`OpenPr` は値を読まない**（ブラウザに渡すだけ）。
-            | JobKind::OpenPr => None,
+            | JobKind::OpenPr
+            // **`CreatePr` が返すのは作った PR そのもの。** 書き込みに追い越されて
+            // 古くなるという問いが無い（番号は変わらない）。一覧のほうは
+            // `FetchPrList` が世代で追いつく。
+            | JobKind::CreatePr => None,
         }
     }
 }
@@ -1955,11 +1994,20 @@ pub enum Modal {
         plan: RebasePlan,
         cursor: usize,
     },
+    /// PR を作る（01 の「PR 作成（`N`）」）。`N` で開く。
+    ///
+    /// **`base` も [`TextBuffer`]。** 要件がベースブランチの指定を求めており、
+    /// 編集できる欄はカーソルを持てないといけない（設計にはずっと `String` と
+    /// 書いてあった）。
+    ///
+    /// **どの欄を編集しているかは [`PrField`] が持つ。** 欄が 4 つあるので、
+    /// カーソルの位置だけでは決まらない。
     PrCreate {
         title: TextBuffer,
         body: TextBuffer,
-        base: String,
+        base: TextBuffer,
         draft: bool,
+        field: PrField,
     },
     /// アカウント解決の内訳を出し、選べるなら選ばせる（01 の
     /// 「アカウントの選び直し」）。`A` で開く。中身は [`AccountView`] が割る。
@@ -2016,6 +2064,43 @@ impl Modal {
             | Modal::PrCreate { .. }
             | Modal::Help => {}
         }
+    }
+}
+
+/// [`Modal::PrCreate`] のどの欄を編集しているか（01 の「PR 作成（`N`）」）。
+///
+/// **巡回の順は宣言順**（`Tab` が次へ、`Shift+Tab` が前へ）で、07 が描く縦の並びと
+/// 同じ。**画面の並びと巡回の順を割らない** —— 割ると `Tab` を押した先が画面の
+/// どこかを目で追えなくなる。
+///
+/// **`Draft` だけが文字を打つ欄ではない。** 端末カーソルを置ける場所が無いので、
+/// どの欄に居るかの印はラベルの反転が出す（07）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PrField {
+    #[default]
+    Title,
+    Body,
+    Base,
+    Draft,
+}
+
+impl PrField {
+    /// 巡回の順に並べたもの。`Tab` の行き先と 07 の縦の並びがここから出る。
+    const ORDER: [PrField; 4] = [PrField::Title, PrField::Body, PrField::Base, PrField::Draft];
+
+    /// `delta` だけ巡回する。端では巻く。
+    ///
+    /// **[`stepped_index`] を使わない。** あちらは一覧のカーソルで、**端で止まる**
+    /// （行が増減するものを行き過ぎないため）。欄は 4 つで増えないので、
+    /// `Tab` を押し続けて最後の欄で止まるほうが驚く。
+    pub(super) fn stepped(self, delta: isize) -> Self {
+        let at = Self::ORDER
+            .iter()
+            .position(|field| *field == self)
+            .expect("ORDER は全部の腕を持つ");
+        let len = Self::ORDER.len() as isize;
+        let next = (at as isize + delta).rem_euclid(len);
+        Self::ORDER[next as usize]
     }
 }
 

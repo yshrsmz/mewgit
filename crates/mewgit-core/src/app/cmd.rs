@@ -7,6 +7,7 @@ use crate::auth::url::RemoteUrl;
 use crate::auth::RepoTarget;
 use crate::git_exec::GitOp;
 use crate::git_read::{DiffTarget, Oid};
+use crate::github::CreatePr;
 
 use super::JobKind;
 
@@ -139,6 +140,15 @@ pub enum Cmd {
         epoch: u64,
         targets: Vec<(u64, String)>,
     },
+    /// PR を作る（01 の「PR 作成（`N`）」）。`POST /repos/{o}/{r}/pulls` 1 本。
+    ///
+    /// **`owner` / `repo` とトークンは運ばない。** `dispatch` が
+    /// `state.repo.target` と `state.account` から読む（[`Cmd::FetchPrList`] と
+    /// 同じ）。運ぶのはモーダルが打たせた字だけ。
+    ///
+    /// **`Box` に入れる。** [`CreatePr`] は `String` を 4 本持つので、裸で載せると
+    /// `Cmd` の大きさが [`Cmd::Exec`]（`GitOp`）ではなくこちらで決まる。
+    CreatePr(Box<CreatePr>),
     /// `gh browse <番号>` でブラウザに渡す（01 の「`o`（ブラウザで開く）」）。
     ///
     /// **[`Cmd::Exec`] に相乗りさせない。** git の実行中に押せなくなるうえ、
@@ -204,6 +214,7 @@ impl Cmd {
             Cmd::ListAccounts(_) => Some((JobKind::ListAccounts, "logins")),
             Cmd::FetchPrList => Some((JobKind::FetchPrList, "pr list")),
             Cmd::FetchPrDetails { .. } => Some((JobKind::FetchPrDetails, "pr checks")),
+            Cmd::CreatePr(_) => Some((JobKind::CreatePr, "pr create")),
             Cmd::OpenPr { .. } => Some((JobKind::OpenPr, "browse")),
         }
     }

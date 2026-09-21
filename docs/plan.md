@@ -236,7 +236,16 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       受け入れた穴）。塞ぐなら「一覧に `state=all` を混ぜる」ではなく、**別の入口**
       （番号を入れて開く / 閉じたものを出すトグル）にする —— 全件を引くと辿るページが
       2 桁増え、PR ごとの扇形が現実的な大きさに収まらない
-- [ ] `Modal::PrCreate` と `create_pr`
+- [x] `Modal::PrCreate` と `create_pr` — PRs ペインの `N` で 4 欄（title / body /
+      base / draft）のモーダルを開き、`POST /repos/{o}/{r}/pulls` を 1 本出す
+      （01 の「PR 作成（`N`）」）。**base の既定は `refs/remotes/<既定リモート>/HEAD`**
+      —— `git_read::Remote.head_branch` として `Cmd::LoadRepoInfo` に載せた（02）ので
+      **往復を増やさない**。symref が無い形（一度も fetch していないリモート）は
+      空欄で開く。**head の owner は `head_homes()` 1 本**（#98 のものをそのまま使う）。
+      **push 済みかは手前で判定しない** —— 判定の材料（追跡設定）は #47 と #98 で
+      二度不確かだと判っているので、422 の本文を通知の `detail` に出す。
+      **`N` を足したぶん、Prs のキーヒントは 80 桁で共通キーを落とす側に移った**
+      （07 の実測）
 - [ ] PR チェックアウト（同一リポジトリ / fork）
 - [ ] 403 の `needed_scopes` 案内
 - [ ] 既定リモートが GitHub でないときの PRs ペインの文言 — いまは

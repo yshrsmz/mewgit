@@ -19,7 +19,7 @@ impl GithubClient {
     pub async fn checks(&self, owner, repo, sha: &str) -> Result<Vec<Check>>;           // 実装済み
     pub async fn reviews(&self, owner, repo, number: u64) -> Result<ReviewSummary>;     // 実装済み
     pub async fn pr_list(&self, owner, repo) -> Result<Vec<PullRequest>>;               // 実装済み
-    pub async fn create_pr(&self, owner, repo, input: CreatePr) -> Result<PullRequest>;      // `Modal::PrCreate` のタスク
+    pub async fn create_pr(&self, owner, repo, input: &CreatePr) -> Result<PullRequest>;     // 実装済み
 }
 ```
 
@@ -35,6 +35,20 @@ impl GithubClient {
   `/repos/{o}/{r}/pulls` は fork からの PR も返し、`head.repo.owner` が fork 側の
   owner を運ぶ。`head` を `{owner}:{branch}` に組む場所ごと消えたので、
   `head_owner` を引数で運ぶ話も無くなった
+- **`create_pr` だけが POST。** リクエストを送る 1 箇所（`send`）はそのままで、
+  `RequestBuilder` を組むところだけが違う。**permit（`PERMITS`）も残量の記録も
+  そこに在る**ので、POST を別の経路で送ると扇形と同時に飛んだときに同時本数の
+  上限をすり抜け、残量も採れなくなる。
+- **`create_pr` は返った `PullRequest` をそのまま返す。** 一覧（`pulls`）と同じ形が
+  返るので `WirePull` を使い回す。**読む側は番号しか使わない**（01 の
+  「PR 作成（`N`）」がカーソルを座らせる）が、**`()` に落とさない** —— 落とすと、
+  作った PR が一覧に出るまで画面に何も出せない。
+- **重複した PR と、リモートに無いブランチは 422。** どちらも `GithubError::Api`
+  （`status: 422` と本文の先頭 200 文字）に落ちる。**腕を足さない** ——
+  GitHub は同じ 422 に十数通りの `errors[].code` を載せるので、腕にすると
+  「どれが来たか」を写した表を持つことになり、載らなかった形が黙って
+  `Api` へ落ちる。**本文は握りつぶさず通知の `detail` に出す**（不変ルール 4 と
+  同じ考え方）。
 - **`repo` は probe 兼用**なので、返り値を捨てて「届いたか」だけを見る呼び出しがある。
   probe 専用に `()` を返す関数は作らない。**`auth::resolve` が直に呼ぶのではない**
   —— `github` は `auth` の上段なので、`auth::Backend` を実装する側
@@ -283,6 +297,7 @@ GraphQL は MVP では使わない（1 画面に必要な情報は REST 数本�
 
 ```rust
 pub struct PullRequest { number, title, state: PrStatus, draft, head: RefSpec, base: RefSpec, url, author, requested_reviewers: Vec<String> }
+pub struct CreatePr { title: String, body: String, head: String, base: String, draft: bool }  // create_pr の入力。head は fork なら "owner:branch"（01）
 pub struct PrDetail { checks: CheckSummary, review: ReviewSummary }  // pr_detail が返す。PullRequest には入れない
 pub enum PrStatus { Open, Closed, Merged }   // app::PrState（画面の状態）と紛らわしいので Status
 pub struct RefSpec { repo: Option<RepoRef>, branch: String, sha: String }

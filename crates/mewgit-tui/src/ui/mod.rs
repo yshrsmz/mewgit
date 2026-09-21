@@ -1279,19 +1279,41 @@ mod tests {
     }
 
     #[test]
-    fn the_prs_pane_keeps_the_common_keys_at_eighty_with_room_to_spare() {
-        // **キーを 1 つ足した回に、Prs が「共通キーの出る側」から落ちていないか。**
-        // 上の境目のテストは落とす仕組みを見ていて、**どのペインがどちら側に居るかは
-        // 見ていない**（07 のセル数の表がそれを言っている）。
+    fn the_prs_pane_drops_the_common_keys_but_keeps_all_of_its_own() {
+        // **`N:PR 作成` を足して落ちる側へ移った**（07 の実測: ペインのキーだけで
+        // 43 → 53 セル。共通キーの 33 を足すと 86 で 80 に入らない）。ここが見張る
+        // のは**どちら側に居るか**で、落とす仕組みの境目は上のテストが見る。
         let prs = hint_bar_of(Pane::Prs, 80);
-        assert!(prs.contains("r:更新"), "hints: {prs:?}");
-        assert!(prs.contains("f:fetch"), "hints: {prs:?}");
+        assert!(!prs.contains("f:fetch"), "hints: {prs:?}");
 
-        // **余白まで見る**（#80）。`contains` だけだと、80 桁をちょうど埋めた状態でも
-        // 通り、1 桁伸びた瞬間に共通キーが落ちることが見えない。**落とす仕組みの
-        // 境目は上のテストが見る** —— `hint_text` はどのペインかで分岐しないので、
-        // ここで跨ぎ直すと同じことを 2 箇所で数えることになる。
+        // **落とすのは共通キーだけ。** ペインのキーが 1 つでも欠けると、
+        // 「いまここで何ができるか」の唯一の案内が減る（07）。
+        for key in [
+            "j/k:移動",
+            "o:ブラウザ",
+            "r:更新",
+            "N:PR 作成",
+            "Esc:戻る",
+            "q:quit",
+        ] {
+            assert!(prs.contains(key), "{key} が落ちた: {prs:?}");
+        }
+
+        // **余白まで見る**（#80）。ペインのキーだけで 53 セルなので、80 桁には
+        // まだ余る —— ここを埋め切ると次に落ちるのは `Esc:戻る` のほうになる。
         assert!(fits(prs.trim_end(), 79), "80 桁で余白がありません: {prs:?}");
+    }
+
+    #[test]
+    fn the_graph_pane_still_shows_the_common_keys_with_room_to_spare() {
+        // **`Prs` が落ちる側へ移った回に、出る側まで一緒に落ちていないか。**
+        // 上のテストと対になる —— あちらは落ちる側、こちらは出る側（07 の表）。
+        // **`CommitDetail` は `hint_bar_of` では座れない** —— あのヘルパは WIP 行を
+        // 選んだ状態なので候補に入らない（07 の「ペインとフォーカス」）。
+        let graph = hint_bar_of(Pane::Graph, 80);
+        assert!(graph.contains("f:fetch"), "hints: {graph:?}");
+        // `contains` だけだと、80 桁をちょうど埋めた状態でも通る（#80）。
+        assert!(fits(graph.trim_end(), 79), "余白がありません: {graph:?}");
     }
 
     #[test]

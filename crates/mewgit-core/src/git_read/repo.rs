@@ -88,6 +88,9 @@ impl RepoReader {
 
     /// リモート一覧。`url` は `.git/config` の生の値で、host / owner / repo の解析は
     /// `auth` の担当（00 の依存の向き）。
+    ///
+    /// **`head_branch` も一緒に読む**（02 の「remotes」）。同じ `Cmd::LoadRepoInfo` に
+    /// 乗るので、読み手（`Modal::PrCreate` の base）が別のジョブの到着を待たずに済む。
     pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError> {
         let names = self.repo.remotes()?;
         let mut remotes = Vec::with_capacity(names.len());
@@ -101,14 +104,37 @@ impl RepoReader {
             // URL は表示と `auth` の解析にしか使わないので、非 UTF-8 でもリモート自体は
             // 消さずに lossy で残す。
             let url = lossy(remote.url_bytes());
+            let head_branch = self.remote_head_branch(name);
             remotes.push(Remote {
                 name: name.to_string(),
                 url,
+                head_branch,
             });
         }
 
         remotes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(remotes)
+    }
+
+    /// `refs/remotes/<name>/HEAD` が指すブランチの短縮名。
+    ///
+    /// **`refs/remotes/<name>/` を剥がして返す。** 生の `refs/remotes/origin/main` は
+    /// ブランチ名ではないので、そのまま PR の base に載せると GitHub が 422 を返す
+    /// （02 の「remotes」）。**剥がせない値は `None`** —— symref が
+    /// `refs/heads/...` のような別の場所を指している形で、ブランチ名として使えない。
+    ///
+    /// **`Err` を返さない。** symref が無いのはふつうの状態（一度も fetch して
+    /// いないリモート）で、読み手は空欄で開くだけ。リポジトリを開けない理由には
+    /// ならない。
+    fn remote_head_branch(&self, name: &str) -> Option<String> {
+        let head = self
+            .repo
+            .find_reference(&format!("refs/remotes/{name}/HEAD"))
+            .ok()?;
+        let target = head.symbolic_target().ok().flatten()?;
+        target
+            .strip_prefix(&format!("refs/remotes/{name}/"))
+            .map(str::to_string)
     }
 
     /// Oid → ラベルの索引。グラフの各行の右に出す ref を引くのに使う（06）。

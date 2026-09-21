@@ -102,6 +102,7 @@ const PRS: &[KeyHint] = &[
     // **Branches の `r`（改名）とは別のキー。** キーマップはペインごとに割れて
     // いるので衝突しない（`CLAUDE.md` の「『押せる』は画面ごとに数える」）。
     hint(&[Key::char('r')], "更新"),
+    hint(&[Key::char('N')], "PR 作成"),
     BACK,
 ];
 

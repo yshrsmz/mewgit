@@ -52,16 +52,28 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
       - run: cargo fmt --all --check
 
+  # macOS runner は 1 分 $0.062 で ubuntu-latest（$0.006）の 10.33 倍かかる。
+  # 2026-09 の実績では、この 1 ジョブが 255 分 = $15.81（gross）で、個人アカウント
+  # の private リポ全体 $36.30 の 43% を占めていた。GitHub Pro の included は
+  # 月 $18.00 相当なので、この分を落とすと gross $20.49 となり、実請求は
+  # $18.28 から $2.49 に下がる計算になる。
+  #
+  # 開発機が macOS なので、日常の `cargo test` が常に macOS を通っている。
+  # ローカルで踏まないのは Linux 側であり、CI で再検証する価値が低い方を落とした。
+  #
+  # macOS 固有のバグを踏んだら matrix を戻す:
+  #     runs-on: ${{ matrix.os }}
+  #     strategy:
+  #       fail-fast: false
+  #       matrix:
+  #         os: [ubuntu-latest, macos-latest]
+  #   と name を `clippy + test (${{ matrix.os }})` に戻す。
   check:
-    name: clippy + test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: clippy + test
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

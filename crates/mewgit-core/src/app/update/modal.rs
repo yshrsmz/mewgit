@@ -7,6 +7,7 @@
 use crate::git_exec::GitOp;
 
 use super::account::{account_picked, account_reresolve, account_unset};
+use super::prs::pr_create_key;
 use super::remote::remote_picked;
 use super::worktree::commit_message_key;
 use super::{edit_key, submit_exec};
@@ -22,6 +23,9 @@ pub(super) fn modal_key(state: &mut AppState, key: Key) -> Cmd {
         // 違うのは `Enter` で出す `Cmd` だけなので、そこだけ各モーダルが持つ。
         Some(Modal::RemotePicker { .. }) => picker_key(state, key, remote_picked),
         Some(Modal::AccountPicker { .. }) => account_key(state, key),
+        // **骨格を共有しない。** 欄が 4 つあって `Enter` の意味も欄で変わるので、
+        // `picker_key` にも `edit_key` 1 本にも収まらない（01 の「PR 作成（`N`）」）。
+        Some(Modal::PrCreate { .. }) => pr_create_key(state, key),
         // 他のモーダルはそれぞれのタスクで実装する。閉じる道だけ開けておく。
         Some(_) => {
             if key == Key::new(KeyCode::Esc) {
@@ -171,13 +175,13 @@ fn input_submit(state: &mut AppState) -> Cmd {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        branch_delete_confirm, open_confirm, open_input, press, press_code, push_op,
+        branch_delete_confirm, enter_with, open_confirm, open_input, press, press_code, push_op,
         reject_non_fast_forward, state, state_for_push, state_on_branches, tracked_head, type_text,
-        worktree_state, HEADS_MAIN,
+        worktree_state, ALT, HEADS_MAIN,
     };
     use super::super::update;
     use super::*;
-    use crate::app::{JobKind, Modal, Modifiers, Msg};
+    use crate::app::{JobKind, Modal, Msg};
 
     use crate::git_read::{FileStatus, WorktreeSection};
 
@@ -242,16 +246,7 @@ mod tests {
         let _ = press(&mut state, 'n');
         let _ = press(&mut state, 'x');
 
-        let cmd = update(
-            &mut state,
-            Msg::Key(Key::with_mods(
-                KeyCode::Enter,
-                Modifiers {
-                    alt: true,
-                    ..Modifiers::default()
-                },
-            )),
-        );
+        let cmd = update(&mut state, enter_with(ALT));
 
         // 見たいのは「修飾付きでも確定するか」だけ。組む `GitOp` の中身は
         // `enter_creates_the_branch_and_switches_to_it` が見張っている。

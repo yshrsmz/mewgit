@@ -84,6 +84,21 @@ pub fn row_of(lines: &[String], needle: &str) -> u16 {
         .unwrap_or_else(|| panic!("{needle} を含む行がありません: {lines:?}")) as u16
 }
 
+/// 描いた行のなかで `needle` が始まる**桁**。
+///
+/// **バイト位置ではなく桁で測る。** 枠の `│` は 3 バイトなので、`str::find` の返す
+/// 添字をそのまま桁として使うと**枠 1 本につき 2 ずれる**。編集中のモーダルの
+/// カーソルを見張るテストがどれも同じ式を書いていたので、4 本目（`PrCreate` の
+/// 2 欄）が出た時点でここへ移した。
+///
+/// [`row_of`] と対で使う（あちらが行、こちらが桁）。
+pub fn col_of(line: &str, needle: &str) -> u16 {
+    let head = &line[..line
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle} がありません: {line:?}"))];
+    u16::try_from(Line::from(head).width()).unwrap_or(u16::MAX)
+}
+
 /// 1 フレーム描いた `TestBackend` を返す。バッファのスタイルを見るとき用。
 pub fn terminal_with(state: &AppState, size: TermSize) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(size.width, size.height)).unwrap();

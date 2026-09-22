@@ -7,10 +7,12 @@
 //! 未知のフィールドは無視する（`serde` の既定）。GitHub は互換のあるフィールド追加を
 //! 予告なく行うので、`deny_unknown_fields` にはしない。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::{Check, CheckState, PrStatus, PullRequest, RefSpec, RepoMeta, RepoRef, ReviewSummary};
+use super::{
+    Check, CheckState, CreatePr, PrStatus, PullRequest, RefSpec, RepoMeta, RepoRef, ReviewSummary,
+};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct WireRepo {
@@ -32,6 +34,35 @@ impl From<WireRepo> for RepoMeta {
 #[derive(Debug, Deserialize)]
 pub(super) struct WireUser {
     pub login: String,
+}
+
+/// `POST /repos/{o}/{r}/pulls` の本文。
+///
+/// **`CreatePr` をそのまま `Serialize` しない。** 値型に `serde` の属性が付くと、
+/// **API の名前の都合が値型に漏れる**（このモジュールの冒頭）。いまは名前が全部
+/// 同じなので写すだけだが、`Serialize` を値型に付けると次に名前が割れたときの
+/// 逃げ場が無い。
+///
+/// **借りる。** 本文を送るだけなので `String` を作り直す理由が無い。
+#[derive(Debug, Serialize)]
+pub(super) struct WireCreatePr<'a> {
+    pub title: &'a str,
+    pub body: &'a str,
+    pub head: &'a str,
+    pub base: &'a str,
+    pub draft: bool,
+}
+
+impl<'a> From<&'a CreatePr> for WireCreatePr<'a> {
+    fn from(input: &'a CreatePr) -> Self {
+        WireCreatePr {
+            title: &input.title,
+            body: &input.body,
+            head: &input.head,
+            base: &input.base,
+            draft: input.draft,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

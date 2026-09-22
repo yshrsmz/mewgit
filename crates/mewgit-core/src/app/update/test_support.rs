@@ -10,7 +10,7 @@
 //! 土台で、ここは `app::update` の中だけ。
 
 use super::*;
-use crate::app::{ExecDone, InputIntent, Modal, RepoInfo, RepoSnapshot, TextBuffer};
+use crate::app::{ExecDone, InputIntent, Modal, Modifiers, RepoInfo, RepoSnapshot, TextBuffer};
 use crate::config::Config;
 use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput};
 use crate::git_read::{
@@ -167,6 +167,21 @@ pub(super) fn press(state: &mut AppState, c: char) -> Cmd {
 pub(super) fn press_code(state: &mut AppState, code: KeyCode) -> Cmd {
     update(state, Msg::Key(Key::new(code)))
 }
+
+/// `Enter` に修飾を付けた打鍵。`Alt+Enter` は `ESC CR` として届く。
+///
+/// **3 人目（`Modal::PrCreate` の body 欄）が出た時点でここへ移した。**
+/// `Key::with_mods` の正規化（01 の「キー入力」）を変えたときに触る先が散らないように。
+pub(super) fn enter_with(mods: Modifiers) -> Msg {
+    Msg::Key(Key::with_mods(KeyCode::Enter, mods))
+}
+
+/// `Alt` だけを立てた修飾。`Alt+Enter` を打つのに使う。
+pub(super) const ALT: Modifiers = Modifiers {
+    alt: true,
+    ctrl: false,
+    shift: false,
+};
 
 /// 文字を 1 つずつ打つ。**貼り付け（`Msg::Paste`）ではない。**
 pub(super) fn type_text(state: &mut AppState, text: &str) {
@@ -485,6 +500,7 @@ pub(super) fn remotes_of(pairs: &[(&str, &str)]) -> Vec<Remote> {
         .map(|(name, url)| Remote {
             name: (*name).to_string(),
             url: (*url).to_string(),
+            head_branch: None,
         })
         .collect()
 }

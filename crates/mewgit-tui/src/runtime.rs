@@ -464,6 +464,31 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
+            // **PR 作成。材料の取り方は `FetchPrList` と同じ**（`Cmd` にトークンも
+            // owner / repo も載せない）。**残量も同じように運ぶ** —— POST も
+            // `x-ratelimit-*` を返すので、ここで捨てるとヘッダの数が 1 本ぶん古くなる。
+            Cmd::CreatePr(input) => {
+                let Some((target, api)) = github_for(state) else {
+                    return no_material(state, JobKind::CreatePr, "PR の作成");
+                };
+                let epoch = state.prs.epoch();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = match api {
+                        Ok(api) => {
+                            let result = api.create_pr(&target.owner, &target.repo, &input).await;
+                            send_rate_limit(&tx, epoch, &api);
+                            result
+                        }
+                        Err(err) => Err(err),
+                    };
+                    // **番号に落とすのはここ**（`Msg::PrCreated` の doc）。`github` は
+                    // `PullRequest` を返すまま（05）で、`app` が読むのは番号だけ。
+                    let _ = tx.send(Msg::PrCreated(result.map(|pr| pr.number)));
+                });
+                ControlFlow::Continue(())
+            }
+
             // **`gh` は毎回 detect する**（上の `ResolveAccount` と同じ理由）。
             Cmd::OpenPr { number } => {
                 let Some(target) = state.repo.target.resolved().cloned() else {
@@ -531,6 +556,12 @@ fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, Gith
 /// - `Cmd::FetchPrList` — [`AppState::wanted_pr_list`] が真のときしか出ず、その述語が
 ///   `target` と `account` の両方を見る（01 の「PR ペイン › 何を引くか」）。
 /// - `Cmd::OpenPr` — 一覧が出ている画面からしか押せない。
+/// - `Cmd::CreatePr` — `N` で開くときと**確定するときの両方**で
+///   `AppState::github_block` が断る（01 の「PR 作成（`N`）」）。**2 回見るのは、
+///   開いてから材料が消えるから** —— `A` で選び直した `GitOp::SetAccount` が
+///   終わると `exec_finished` → `resolve_again` が `account` を `Resolving` に戻し、
+///   あれが閉じるのは `Modal::AccountPicker` だけなので `N` の箱は残る
+///   （`the_box_stays_open_when_the_account_went_away_while_it_was_open`）。
 /// - `Cmd::FetchPrDetails` — 対象は一覧の行から出る。一覧はアカウントを失うと
 ///   `PrState::forget` で空になるので、材料が消えれば対象も消える。
 ///

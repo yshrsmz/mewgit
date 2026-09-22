@@ -17,7 +17,8 @@
 use crate::git_exec::{GitOp, PullMode};
 
 use super::{
-    AppState, Cmd, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, TextBuffer,
+    AppState, Cmd, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, PrField,
+    TextBuffer,
 };
 use account::{account_resolved, accounts_listed, open_account, repo_info_loaded, target_resolved};
 use branches::{branches_key, branches_loaded};
@@ -28,7 +29,7 @@ use graph::{
 };
 use modal::modal_key;
 use prs::{
-    open_pr_finished, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key,
+    open_pr_finished, pr_created, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key,
     rate_limit_seen,
 };
 use remote::{fetch, push};
@@ -164,6 +165,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         } => pr_detail_loaded(state, epoch, number, sha, result),
         Msg::PrDetailsFinished { epoch, aborted } => pr_details_finished(state, epoch, aborted),
         Msg::RateLimitSeen { epoch, seen } => rate_limit_seen(state, epoch, seen),
+        Msg::PrCreated(result) => pr_created(state, result),
         Msg::OpenPrFinished(result) => open_pr_finished(state, result),
     }
 }
@@ -274,7 +276,33 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
         // 押すまで git は走らない。**改行を落とすのは `insert_line` の担当**で、
         // ここで `replace` すると同じ判断が 2 箇所に割れる。
         Some(Modal::Input { buf, .. }) => buf.insert_line(text),
-        _ => {}
+        // **欄ごとに規則が変わる**（01 の「PR 作成（`N`）」）。body は複数行、
+        // title と base は 1 行なので `Modal::Input` と同じ扱い。
+        Some(Modal::PrCreate {
+            title,
+            body,
+            base,
+            field,
+            ..
+        }) => match field {
+            PrField::Title => title.insert_line(text),
+            PrField::Body => body.insert_text(text),
+            PrField::Base => base.insert_line(text),
+            // 文字を打つ欄ではない。
+            PrField::Draft => {}
+        },
+        // **`_` にしない。** ここを受け皿にしていたせいで、`Modal::PrCreate` を
+        // 足した回に**貼り付けだけが黙って無反応**になっていた（#63 の
+        // 「無反応よりまし」で止めない、の手前の形）。網羅にすると、次に編集できる
+        // モーダルを足す人が「貼り付けを受けるか」を選ばされる。
+        Some(
+            Modal::Confirm { .. }
+            | Modal::RemotePicker { .. }
+            | Modal::AccountPicker { .. }
+            | Modal::RebaseEditor { .. }
+            | Modal::Help,
+        )
+        | None => {}
     }
     Cmd::None
 }
@@ -329,18 +357,50 @@ fn edit_key(buf: &mut TextBuffer, key: Key) -> bool {
     true
 }
 
-/// 書き込みが走っているか。走っていれば理由を通知に出す。
+/// 複数行を編集できる欄のキー。改行と行移動を受け、残りは [`edit_key`] に落とす。
+///
+/// **2 人目（[`Modal::PrCreate`] の body 欄）が出た時点で `commit_message_key` から
+/// 割った。** 写すと、端末ごとの改行キー（`Shift+Enter` は区別して送れる端末だけ、
+/// `Ctrl-J` はどの端末でも届く。01 の「コミットメッセージの編集」）を直したときに
+/// 片方だけ古くなり、**どちらのテストも通る**（それぞれ自分の経路しか踏まない）。
+///
+/// **確定は受けない。** 修飾なしの `Enter` をどう扱うかはモーダルごとの判断で、
+/// ここに入れると「確定して何をするか」まで共有することになる。
+fn multiline_edit_key(buf: &mut TextBuffer, key: Key) {
+    // `Ctrl-J` はどの端末でも届く改行。raw mode では `\n` が `Ctrl+j` として来る。
+    if key == Key::ctrl('j') {
+        buf.insert_newline();
+        return;
+    }
+    match key.code() {
+        // ここに来る `Enter` は修飾付き（`Alt+Enter` = `ESC CR`、`Shift+Enter`）。
+        KeyCode::Enter => buf.insert_newline(),
+        // 行が複数ある欄にしか要らない。残りは `edit_key` が受ける。
+        KeyCode::Up => buf.move_cursor(Motion::Up),
+        KeyCode::Down => buf.move_cursor(Motion::Down),
+        _ => {
+            let _ = edit_key(buf, key);
+        }
+    }
+}
+
+/// その種別のジョブが走っているか。走っていれば理由を通知に出す。
 ///
 /// **「押したのに何も起きない」に見せない**（`AppState::notify_dropped`）。
 /// **キューには積まないと決めた**（01 の「ランタイム」）。案内を `issue` と同じ
 /// 関数から出すのは、次に押すキーが状態で変わるため（中断を頼んだあとの `Ctrl-C` は
 /// 終了）。2 本に割ると、こちらだけが古い案内を出す。
-fn exec_busy(state: &mut AppState) -> bool {
-    if !state.jobs.is_running(JobKind::Exec) {
+fn busy(state: &mut AppState, kind: JobKind) -> bool {
+    if !state.jobs.is_running(kind) {
         return false;
     }
-    state.notify_dropped(JobKind::Exec);
+    state.notify_dropped(kind);
     true
+}
+
+/// 書き込み（`Cmd::Exec`）が走っているか。
+fn exec_busy(state: &mut AppState) -> bool {
+    busy(state, JobKind::Exec)
 }
 
 /// 編集中のモーダルを確定して `Cmd::Exec` を返す。
@@ -354,13 +414,29 @@ fn exec_busy(state: &mut AppState) -> bool {
 /// **2 人目（`Modal::Input`）が出た時点でここへ移した。** 写すと、片方だけ
 /// 「閉じてから返す」形に戻ったときに気付けない（01 の「1 行入力」）。
 fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
-    if exec_busy(state) {
+    submit(state, Cmd::Exec(op))
+}
+
+/// 編集中のモーダルを確定して `cmd` を返す。走っていれば閉じずに断る。
+///
+/// **2 人目（`Modal::PrCreate`）が出た時点で `submit_exec` から割った。**
+/// `Cmd::Exec` かどうかではなく、**[`AppState::issue`] に落とされうる `Cmd` を
+/// 打った本文と引き換えに出すか**が問い。
+///
+/// **種別は引数に取らない。** [`Cmd::job`] が網羅 `match` で必ず答えるので、渡させると
+/// `submit(state, JobKind::Exec, Cmd::CreatePr(..))` という**食い違った対**が型で
+/// 組める —— 組むと**走っていない種別を見てモーダルを閉じ、そのあと `issue` が
+/// 本当の種別で落とす**ので、この関数が在る理由（打った本文を消さない）がそのまま
+/// 破れる（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
+fn submit(state: &mut AppState, cmd: Cmd) -> Cmd {
+    // 副作用を持たない `Cmd` は落とされようが無いので、そのまま閉じて返す。
+    if cmd.job_kind().is_some_and(|kind| busy(state, kind)) {
         return Cmd::None;
     }
 
     // 閉じずに返すと、`Cmd` が落とされたときにモーダルだけが画面に残る。
     state.modal = None;
-    Cmd::Exec(op)
+    cmd
 }
 
 #[cfg(test)]

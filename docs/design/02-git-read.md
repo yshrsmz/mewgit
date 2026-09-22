@@ -24,7 +24,7 @@ pub struct RepoReader {
 impl RepoReader {
     pub fn open(path: &Path) -> Result<Self, GitReadError>;
     pub fn workdir(&self) -> &Path;                                 // ワークツリーのルート
-    pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;     // name, url（生の値）
+    pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;     // name, url（生の値）, head_branch
     pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>
     pub fn head(&self) -> Result<HeadInfo, GitReadError>;           // branch name or detached Oid
     pub fn branches(&self) -> Result<Vec<Branch>, GitReadError>;    // ローカルブランチ + upstream の ahead/behind
@@ -51,9 +51,24 @@ git2 の呼び出しはどれも壊れたリポジトリや I/O エラーで失�
 
 ### remotes
 
-`Remote` は `{ name, url }` だけを持つ。URL の解析（host / owner / repo）は `auth`（04）の担当で、
+`Remote` は `{ name, url, head_branch }`。URL の解析（host / owner / repo）は `auth`（04）の担当で、
 `ssh -G` によるホスト別名の展開が要る。`git_read` から `auth` は参照できない（00 の依存の向き）ので、
 ここでは `.git/config` の生の文字列をそのまま返す。
+
+`head_branch` は `refs/remotes/<name>/HEAD` が指すブランチの短縮名で、**そのリモートが
+言う既定ブランチ**。読み手は `Modal::PrCreate` の base の初期値（01 の「PR 作成（`N`）」）。
+
+- **`Option`。** symref は clone 直後と `git fetch` のあとには在るが、`git remote add` を
+  しただけで一度も fetch していないリポジトリには無い（実測 2026-09-21、git 2.55、
+  `env -i` の一時リポジトリ）。**読み手はそのとき空欄で開いて人に打たせる**ので、
+  無いことを理由にしない
+- **`refs/remotes/<name>/` を剥がして返す。** 生の `refs/remotes/origin/main` は
+  ブランチ名ではないので、そのまま base に載せると GitHub が 422 を返す。剥がせない
+  値（symref が別の場所を指している）は `None`
+- **リモートごとに持つ。** どのリモートを既定とするかを答えられるのは `app`
+  （`update::conventional_remote`）で、`git_read` はリポジトリの状態しか知らない
+  （`CLAUDE.md` の「層をまたぐ述語は、その名前が約束している問いに誰が答えられるかで
+  置き場所を決める」）
 
 ### refs とラベル
 

@@ -1868,6 +1868,69 @@ mod tests {
     }
 
     #[test]
+    fn a_checked_out_fork_branch_matches_under_the_name_it_has_on_the_fork() {
+        // **取り出しはローカルを `bob/main` にし、`merge` に `refs/heads/main` を書く**
+        // （05 の「ブランチ名」）。ローカルの名前で比べると座らず、**`N` の「既に
+        // あります」もここを読む**ので、作り直しに行く。
+        let mut state = state_for_create("bob/main");
+        track(
+            &mut state,
+            "git@github.com:bob/mewgit.git",
+            "refs/heads/main",
+        );
+        deliver(
+            &mut state,
+            vec![
+                fake_pull_request(90, "other", "othersha"),
+                pr_from(82, "main", "bob"),
+            ],
+        );
+
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(state.prs.cursor, 1);
+
+        let cmd = press(&mut state, 'N');
+        assert_eq!(cmd, Cmd::None);
+        assert!(
+            state.modal.is_none(),
+            "取り出した PR をもう一度作りに行った"
+        );
+        assert_eq!(
+            last_notice(&state),
+            "このブランチの PR は既にあります（#82）"
+        );
+    }
+
+    #[test]
+    fn a_named_tracking_config_is_matched_under_the_local_name() {
+        // **名前の追跡先の `merge` は「何を基にしたか」**（01 の「現ブランチの PR」）。
+        // `git checkout -b feat upstream/main` は `merge` を `refs/heads/main` にする
+        // ので、そこで `merge` の名前を使うと upstream の `main` から出た PR に座り、
+        // `N` がそれを「既にある」として断る。
+        let mut state = state_tracking(
+            "feat",
+            "upstream",
+            &[
+                ("origin", "git@github.com:me/mewgit.git"),
+                ("upstream", "git@github.com:yshrsmz/mewgit.git"),
+            ],
+        );
+        track(&mut state, "upstream", "refs/heads/main");
+        deliver(&mut state, vec![fake_pull_request(90, "main", "othersha")]);
+        assert_eq!(state.current_pr(), None, "基にしたブランチの PR に座った");
+
+        // **肯定まで 1 本で見る** —— 否定だけだと、何も当てない実装で通る。
+        deliver(
+            &mut state,
+            vec![
+                fake_pull_request(90, "main", "othersha"),
+                fake_pull_request(82, "feat", "headsha"),
+            ],
+        );
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+    }
+
+    #[test]
     fn a_fork_pr_does_not_match_without_the_tracking_config() {
         // 追跡設定が無ければ出どころを知る手段が無いので、`target` と比べるしかない
         // （`head_homes` の候補が `target` だけになる）。**カーソルは先頭に座るだけ**で、

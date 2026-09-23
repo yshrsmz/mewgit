@@ -265,14 +265,14 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       URL（gh / mewgit が取り出した fork）。**候補が無ければ `N` で断る**（ブランチ名
       だけで送ると base リポジトリの同名ブランチとして解決される）。1/2 と材料が
       違った理由は 01 の「PR チェックアウト（`Enter`）」
-- [ ] 取り出した fork のブランチの名前がずれていても現ブランチの PR に座る —— 取り出しは
+- [x] 取り出した fork のブランチの名前がずれていても現ブランチの PR に座る —— 取り出しは
       衝突を避けてローカルを `bob/main` にする（05 の「ブランチ名」）が、座り直し
       （`state::current_row`）は**ローカルの名前**を PR の `head.branch`（`main`）と
-      比べるので座らない。**`N` の「既にあります」もここを読む**ので、その形では断らずに
-      開き、POST を GitHub に断らせることになる（断りの形は**実 API では確かめていない**。
-      比べる名前がローカルの名前であることは 2/2 の `/code-review` の裏取りでコードから読んだ）。
-      塞ぐには、追跡先の腕で比べる名前を `HeadInfo::Branch.upstream` の `merge` から
-      取る（PR 作成の `head` の候補と同じ材料。01 の「head の組み立て」）
+      比べていたので座らず、**`N` の「既にあります」も同じ関数を読むので素通りしていた**。
+      **追跡先が URL の腕だけ**、比べる名前を `HeadInfo::Branch.upstream` の `merge` から
+      取る。**名前の追跡先には広げない** —— そこでの `merge` は「何を基にしたか」で、
+      `checkout -b feat upstream/main` が upstream の `main` の PR に座る（01 の
+      「現ブランチの PR」）
 - [ ] 403 の `needed_scopes` 案内
 - [ ] 既定リモートが GitHub でないときの PRs ペインの文言 — いまは
       `TargetState::Unavailable` でも `Cmd::ResolveAccount` が出ないため

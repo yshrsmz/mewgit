@@ -68,7 +68,7 @@ use crate::auth::{
     Account, AccountSource, AccountState, AttemptFailure, AuthError, Backend, DegradedReason,
     GhLogin, LoginState, RepoTarget,
 };
-use crate::git_exec::{GitOp, Runner};
+use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Runner};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
     LineOrigin, Oid, Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
@@ -820,6 +820,33 @@ pub fn fake_oid(index: u8) -> Oid {
 ///
 /// **`ui` からも使う。** PRs ペインの描画を見張るのに同じ値が要るので、
 /// `#[cfg(test)] mod tests` ではなくここに置く（下の [`reply`] と同じ理由）。
+/// [`fake_fork_source`] の追跡先に書く fork の URL。
+pub const FAKE_FORK_URL: &str = "git@github.com:bob/app.git";
+
+/// `origin` から `feat` へ PR を取り出す書き込み（05 の「PR チェックアウト」）。
+///
+/// **3 つのテスト（argv の表・読み直しの分類・実物の git）が同じ値を組む**ので
+/// ここに置く。`PrCheckout` にフィールドが増えたときに直すのは 1 箇所。
+pub fn fake_pr_checkout(source: PrSource, local: LocalBranch) -> GitOp {
+    GitOp::CheckoutPr(Box::new(PrCheckout {
+        remote: "origin".into(),
+        branch: "feat".into(),
+        source,
+        local,
+    }))
+}
+
+/// bob の fork から出た #7。追跡先は [`FAKE_FORK_URL`] の `feat`。
+pub fn fake_fork_source() -> PrSource {
+    PrSource::Fork {
+        number: 7,
+        upstream: ForkUpstream {
+            remote: FAKE_FORK_URL.into(),
+            merge: "refs/heads/feat".into(),
+        },
+    }
+}
+
 pub fn fake_pull_request(number: u64, branch: &str, sha: &str) -> PullRequest {
     let repo = Some(RepoRef {
         owner: fake_target().owner,

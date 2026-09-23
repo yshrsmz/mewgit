@@ -23,6 +23,8 @@ pub enum GitOp {
     Revert { oids: Vec<Oid>, mainline: Option<u32> }, RevertContinue, RevertAbort,
     StashPush { message, include_untracked, paths: Option<Vec<PathBuf>> },
     StashApply(usize), StashPop(usize), StashDrop(usize),
+    SetAccount { login }, UnsetAccount,
+    CheckoutPr(Box<PrCheckout>),   // 複数の手順（下の「複数の手順を持つ書き込み」）
 }
 ```
 
@@ -48,21 +50,24 @@ pub enum GitOp {
 - **discard は tracked / untracked / 「HEAD に無い」の 3 変種に分ける。** untracked な
   ファイルは `git restore` では消せず `git clean` が要る。HEAD に無いファイル
   （`FileStatus::Added`）は、コミットが 1 つも無いと `restore --source=HEAD` 自体が
-  落ちるので `git rm` が要る。`to_command` は純粋関数で index もファイルシステムも
+  落ちるので `git rm` が要る。`to_commands` は純粋関数で index もファイルシステムも
   見られないので、どれを出すかは区画と変更種別を知っている呼び出し側
   （`WorktreeSnapshot` を持つ `app`）が決める
 
 ## argv への変換
 
-`GitOp` から argv と stdin を作るのは純粋関数 `to_command`。argv だけでなく stdin も
+`GitOp` から argv と stdin を作るのは純粋関数 `to_commands`。argv だけでなく stdin も
 一緒に返すのは、「どの引数で何を標準入力に流すか」が 1 つの判断だから（`git apply --cached -`）。
 2 つの関数に割ると、変種を足したときに片方だけ直る。
 
 ```rust
 pub struct GitCommand { pub argv: Vec<String>, pub stdin: Option<Vec<u8>> }
 
-pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError>;
+pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError>;
 ```
+
+**返すのは呼び出しの列。** 下の表の変種は `CheckoutPr` を除いてどれも 1 本で、
+`CheckoutPr` だけが複数を返す（下の「複数の手順を持つ書き込み」）。
 
 `argv` に `git` 自身は含めない（`Runner` が付ける）。`Result` なのは非 UTF-8 のパスを
 argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ごと落とすので実際には来ないが、
@@ -97,6 +102,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `StashApply(i)` / `Pop` / `Drop` | `stash apply` / `pop` / `drop` `stash@{i}` |
 | `SetAccount { login }` | `config --local -- mewgit.user <login>` |
 | `UnsetAccount` | `config --local --unset -- mewgit.user` |
+| `CheckoutPr(plan)` | 05 の「mewgit の手順」の表（場面ごとに複数） |
 
 決めたことと理由:
 
@@ -165,7 +171,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   切り替える」を 2 つの語彙で書くことになる。`BranchCreate { checkout: bool }` も
   `switch: bool` に揃えた。**`InputIntent`（01）は真偽値を持たない** — UI からの作成は
   常に切り替えるので、`switch: false` を組む経路が無い（`branch <name>` の側は
-  `to_command` のテストでだけ踏む）
+  `to_commands` のテストでだけ踏む）
 - **force push は `--force-with-lease`。`--force` は他人のコミットを消せるので使わない。**
   **値（`=<dst>:<lease>`）を必ず添える。** 省くと lease は remote-tracking ref
   （`origin/main`）と比べるだけになり、`git fetch` を挟むと他人が進めた位置がそこに入って
@@ -248,7 +254,7 @@ diff --git a/<path> b/<path>
   弾くのは、受け側の細かい規則を写し取らずに済ませるため。
   ファイル単位の stage / unstage / discard はパスを argv に載せるだけなので、
   こういう名前でも通る
-- 非 UTF-8 のパスは `to_command` と同じ `ArgvError::NonUtf8Path`。`git_read` が
+- 非 UTF-8 のパスは `to_commands` と同じ `ArgvError::NonUtf8Path`。`git_read` が
   一覧ごと落とすので実際には来ない
 
 ## Runner
@@ -279,7 +285,7 @@ pub enum ExecError {
 }
 ```
 
-- argv と stdin の組み立ては純粋関数 `to_command()`（「argv への変換」）
+- argv と stdin の組み立ては純粋関数 `to_commands()`（「argv への変換」）
 - `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
   引数にしているのは、設定を読んだのに渡し忘れる経路を作らないため
 - **`ExecError` を割るのは、失敗の種類で埋まるフィールドが違うため。** 1 つの
@@ -337,6 +343,30 @@ pub async fn run_cancelable(&self, op: &GitOp, cancel: oneshot::Receiver<()>)
 - `run` は送り手を作らずに `run_cancelable` へ渡す。受け側の `Ok(())` パターンが外れた枝は
   `select!` が無効にするので、その呼び方では中断の腕が二度と選ばれない
 
+### 複数の手順を持つ書き込み
+
+`GitOp::CheckoutPr` は git を続けて叩く（05 の「mewgit の手順」）。
+**`Runner` が順に叩き、1 本でも非 0 で終わればそこで止めて、その 1 本の
+`ExecError` を返す**（残りは叩かない）。成功なら**最後の 1 本の `ExecOutput`** を返す。
+
+- **1 つの `GitOp` にまとめる理由は 05 の「一連の手順を 1 つの書き込みにする」。**
+  `app` から見ると書き込みは 1 回で、`JobKind::Exec` も `Reload` も 1 回
+- **止まった手順が何だったかは `argv` で判る。** `ExecError` はどの変種も
+  `argv` を持っているので、通知の `detail` にはその 1 本の argv と stderr が出る
+  （不変ルール 4）。**どこまで済んだかは運ばない** —— 済んだ手順の結果は
+  リポジトリに残っており、読み直しがそれを拾う（`update::Reload` は
+  `CheckoutPr` を `RefsAndLog` に置く）
+- **中断は手順のあいだでも効く。** 合図は 1 本の `oneshot` で、叩く前に
+  「もう届いているか」を見る（届いていれば次を起こさずに `Canceled` を返す。
+  `argv` は起こさなかった 1 本のもの）。走っている最中に届けば 1 本だけの
+  書き込みと同じ（上の「キャンセル」）。**届いたことは憶えておく** —— 走っている
+  1 本が合図より先に成功していた回（`canceled_by` が偽）に受け側を「もう来ない」と
+  同じに畳むと、次の手順の前の確認が「届いていない」と答え、止めたはずの手順が
+  走る（`/code-review` が拾った。`CancelSignal` の 3 状態）
+- **`verb()` は最初の 1 本の `argv[0]`**（`CheckoutPr` は `fetch`）。スピナーに
+  出る語で、時間のほとんどは fetch が使う。見張りは `verb_matches_the_argv`
+  （最初の 1 本と比べる）
+
 ### BatchMode の重ね方
 
 素の `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` を置くと、ユーザーの
@@ -385,7 +415,7 @@ GIT_SSH_COMMAND = "<実効> -o BatchMode=yes"
 - **`RebaseInteractive` は `Runner` が実行せずに拒否する**（M5 まで）。todo を差し替えずに `git rebase -i` を走らせると、`GIT_EDITOR=true` により全 `pick` の rebase が実行され、`plan` を黙って捨てた破壊的操作になる。M5 で `--sequence-editor` を配線したら外す
 - **進行中操作（`InProgressOp`）の再検出は M5。** `git_read::in_progress` がまだ無いので、`ExecDone.progress` はランタイムが `None` を入れる
 
-終了状態を得られない経路は 4 つ（`to_command` の失敗、`RebaseInteractive` の拒否、
+終了状態を得られない経路は 4 つ（`to_commands` の失敗、`RebaseInteractive` の拒否、
 起動の失敗、終了待ちの失敗）。どれも `ExecError::NoResult` で返し、`reason` には git の
 stderr ではなく mewgit の説明文を入れる。**中断はここに入れない** —— 終了状態は
 得られており（signal で落ちた）、区別したいのは「失敗か、止めたか」だから

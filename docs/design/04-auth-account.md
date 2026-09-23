@@ -260,6 +260,7 @@ git 2.55 で実測した（`env -i` の一時リポジトリ）。
 |---|---|
 | 単一リモート `upstream`（`origin` 無し、`branch.*.remote` 無し） | **その 1 本を fetch する**（`refs/remotes/upstream/main` ができる） |
 | リモート 2 本、どちらも `origin` でない、`branch.*.remote` 無し | **何もせず exit 0**（ref が 1 つも増えない） |
+| `branch.<HEAD>.remote` が URL（`gh pr checkout` が書く形。2026-09-23） | **その URL から `merge` の 1 本だけを `FETCH_HEAD` へ取る**。remote-tracking ref は 1 つも動かない |
 
 「1 本ならそれ → 複数なら `origin`」と「`origin` があればそれ → 無ければ 1 本のとき
 だけ」は**同じ結果**になる（食い違うのは「単一かつ `origin` でない」場合だけで、
@@ -268,7 +269,9 @@ git 2.55 で実測した（`env -i` の一時リポジトリ）。
 
 **`branch.<HEAD>.remote` が `.`（ローカル追跡）や、存在しないリモートを指すときは
 決まらない**（`None`）。`.` は 01 の push が既に断っている形で、存在しない名前は
-git 自身も fetch でエラーにする。
+git 自身も fetch でエラーにする。**URL のときは `conventional_remote` へ落とす**
+（上の表の最後の行。git に合わせても `f` が何も動かさないため。理由は 01 の
+「既定リモート」）。
 
 送られていた 2 つのうち、片方だけを引き受ける。
 

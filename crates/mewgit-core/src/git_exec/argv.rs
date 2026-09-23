@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{GitOp, PullMode};
+use super::{GitOp, LocalBranch, PrCheckout, PrSource, PullMode};
 use crate::git_read::Oid;
 
 /// `git` に渡す 1 回分の呼び出し。
@@ -37,10 +37,14 @@ pub enum ArgvError {
     EmptyPathspec { argv: Vec<String> },
 }
 
-/// [`GitOp`] を `git` の呼び出しに変換する。
+/// [`GitOp`] を `git` の呼び出しの列に変換する。
+///
+/// **[`GitOp::CheckoutPr`] を除いて列の長さは 1。** あれだけが git を続けて叩く
+/// （03 の「複数の手順を持つ書き込み」）。`Runner` は列を先頭から順に叩き、非 0 で
+/// 止まる。
 ///
 /// 網羅 `match` なので、`GitOp` に変種を足すとここがコンパイルエラーになる。
-pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
+pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
     let mut argv: Vec<String> = Vec::new();
     let mut stdin: Option<Vec<u8>> = None;
 
@@ -255,9 +259,100 @@ pub fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
             "--".into(),
             crate::auth::MEWGIT_USER.into(),
         ]),
+        GitOp::CheckoutPr(plan) => return Ok(checkout_pr(plan)),
     }
 
-    Ok(GitCommand { argv, stdin })
+    Ok(vec![GitCommand { argv, stdin }])
+}
+
+/// [`GitOp::CheckoutPr`] の手順（05 の「mewgit の手順」の表）。
+///
+/// **どれも上書きしない。** `+` を付けるのは remote-tracking ref への refspec だけで、
+/// ローカルのブランチは `merge --ff-only` でしか動かさない。**新しく作るのは断る形の
+/// コマンドだけ**（`switch --create` と `branch`。在れば git が断る）。
+///
+/// **ローカルのブランチを fetch の refspec で動かさない。** `<src>:refs/heads/<b>` は
+/// **ローカルが先に進んでいるだけでも** non-fast-forward で断り（押し出していない
+/// コミットを持つ自分の PR が取り出せない）、しかも一覧が古いと在るブランチを
+/// 早送りする（05）。
+///
+/// **`--no-tags` は gh に揃えた。** PR を取り出すのにタグは要らず、fork から取る
+/// ときは他人のタグが混ざる。
+fn checkout_pr(plan: &PrCheckout) -> Vec<GitCommand> {
+    let PrCheckout {
+        remote,
+        branch,
+        source,
+        local,
+    } = plan;
+    let fetch = |refspec: &str| call(&["fetch", "--no-tags", remote, refspec]);
+    let switch = || call(&["switch", branch]);
+    let fast_forward = |to: &str| call(&["merge", "--ff-only", to]);
+
+    match source {
+        PrSource::SameRepo => {
+            let tracking = format!("refs/remotes/{remote}/{branch}");
+            let fetch = fetch(&format!("+refs/heads/{branch}:{tracking}"));
+            match local {
+                // **`--track` は明示する**（`branch.autoSetupMerge = false` の環境では
+                // 付けないと上流が入らない。05）。**`--create` の直後に名前を置く**
+                // （`BranchCreate` の注記と同じ理由で、`--create` は次の argv を名前と
+                // して食う）。
+                LocalBranch::Absent => vec![
+                    fetch,
+                    call(&[
+                        "switch",
+                        "--track",
+                        "--create",
+                        branch,
+                        &format!("{remote}/{branch}"),
+                    ]),
+                ],
+                // **いつも切り替えてから早送りする**（いま居ても `switch` は何もしない）。
+                // 一覧の「いま居る」を信じて `switch` を省くと、外で HEAD が動いていた
+                // とき**別のブランチを早送りする**（05）。
+                LocalBranch::Present => vec![fetch, switch(), fast_forward(&tracking)],
+            }
+        }
+        PrSource::Fork { number, upstream } => {
+            // `FETCH_HEAD` に取る。`switch` と `config` は `FETCH_HEAD` を動かさない。
+            let fetch = fetch(&format!("refs/pull/{number}/head"));
+            match local {
+                // **`branch` で作る**（在れば `already exists` で断る）。一覧が古くて
+                // 在るブランチを「無い」と読んでも、そのブランチも追跡設定も触らない。
+                // **追跡設定は `switch` より前に書く。** 切替が断られても（ワーク
+                // ツリーの変更がぶつかる）ブランチが完成しているように —— 後に書くと、
+                // 次の回は `Present` へ入って二度と書かれない（05）。
+                LocalBranch::Absent => {
+                    let mut steps = vec![fetch, call(&["branch", branch, "FETCH_HEAD"])];
+                    for (key, value) in [
+                        ("remote", &upstream.remote),
+                        ("pushRemote", &upstream.remote),
+                        ("merge", &upstream.merge),
+                    ] {
+                        steps.push(call(&[
+                            "config",
+                            "--local",
+                            "--",
+                            &format!("branch.{branch}.{key}"),
+                            value,
+                        ]));
+                    }
+                    steps.push(switch());
+                    steps
+                }
+                LocalBranch::Present => vec![fetch, switch(), fast_forward("FETCH_HEAD")],
+            }
+        }
+    }
+}
+
+/// stdin を持たない 1 回分の呼び出し。
+fn call(argv: &[&str]) -> GitCommand {
+    GitCommand {
+        argv: argv.iter().map(|arg| arg.to_string()).collect(),
+        stdin: None,
+    }
 }
 
 /// `GitOp::Push` が動かすリモート側の ref 名。
@@ -323,10 +418,10 @@ impl GitOp {
     /// この操作が走らせる `git` のサブコマンド。スピナーの説明に出す
     /// （01 の「実行中ジョブ」）。
     ///
-    /// **[`to_command`] の `argv[0]` と同じものを返す。** 別々に書いても
-    /// コンパイルは通るので、`verb_matches_the_argv` が全変種で突き合わせる。
-    /// `to_command` から取らないのは、語を 1 つ得るためにハンクのパッチまで
-    /// 組み直すことになるため（[`to_command`] は `Result` でもある）。
+    /// **[`to_commands`] の最初の 1 本の `argv[0]` と同じものを返す。** 別々に
+    /// 書いてもコンパイルは通るので、`verb_matches_the_argv` が全変種で突き合わせる。
+    /// `to_commands` から取らないのは、語を 1 つ得るためにハンクのパッチまで
+    /// 組み直すことになるため（[`to_commands`] は `Result` でもある）。
     ///
     /// 網羅 `match` にしているのは、変種を足したときに選ばせるため。
     pub fn verb(&self) -> &'static str {
@@ -361,6 +456,8 @@ impl GitOp {
             | GitOp::StashPop(_)
             | GitOp::StashDrop(_) => "stash",
             GitOp::SetAccount { .. } | GitOp::UnsetAccount => "config",
+            // **最初の 1 本。** 時間のほとんどは fetch が使う（03）。
+            GitOp::CheckoutPr(_) => "fetch",
         }
     }
 }
@@ -376,7 +473,7 @@ mod tests {
 
     use super::*;
     use crate::git_exec::{RebaseAction, RebaseEntry, RebasePlan};
-    use crate::test_util::fake_oid;
+    use crate::test_util::{fake_fork_source, fake_oid, fake_pr_checkout, FAKE_FORK_URL};
 
     /// 変種の名前。**網羅 `match` なので、`GitOp` に変種を足すとここが
     /// コンパイルエラーになる。** そのとき [`VARIANTS`] と [`cases`] にも足す
@@ -415,13 +512,14 @@ mod tests {
             GitOp::StashDrop(_) => "StashDrop",
             GitOp::SetAccount { .. } => "SetAccount",
             GitOp::UnsetAccount => "UnsetAccount",
+            GitOp::CheckoutPr(_) => "CheckoutPr",
         }
     }
 
     /// [`variant`] のアームの数。`GitOp` に変種を足すと `variant` の網羅 `match` が
     /// コンパイルエラーになり、ここに来る。アームと一緒にこの数と [`cases`] も足す
     /// （足し忘れは `covers_every_variant` が落とす）。
-    const VARIANT_COUNT: usize = 32;
+    const VARIANT_COUNT: usize = 33;
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
     fn cases() -> Vec<(GitOp, Vec<&'static str>)> {
@@ -673,27 +771,114 @@ mod tests {
         ]
     }
 
+    /// 1 本だけを返す変種の呼び出し。**2 本以上を返したら落とす** —— 表（[`cases`]）の
+    /// 1 行が 1 本の argv を写しているので、列を黙って先頭だけ見ると残りが見張られない。
+    fn to_command(op: &GitOp) -> Result<GitCommand, ArgvError> {
+        to_commands(op).map(|mut commands| {
+            assert_eq!(commands.len(), 1, "{op:?}");
+            commands.remove(0)
+        })
+    }
+
+    /// 設計書 05 の「mewgit の手順」の表をそのまま写したもの。
+    fn checkout_cases() -> Vec<(GitOp, Vec<Vec<&'static str>>)> {
+        let same_fetch = vec![
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/feat:refs/remotes/origin/feat",
+        ];
+        let fork_fetch = vec!["fetch", "--no-tags", "origin", "refs/pull/7/head"];
+        vec![
+            (
+                fake_pr_checkout(PrSource::SameRepo, LocalBranch::Absent),
+                vec![
+                    same_fetch.clone(),
+                    vec!["switch", "--track", "--create", "feat", "origin/feat"],
+                ],
+            ),
+            (
+                fake_pr_checkout(PrSource::SameRepo, LocalBranch::Present),
+                vec![
+                    same_fetch,
+                    vec!["switch", "feat"],
+                    vec!["merge", "--ff-only", "refs/remotes/origin/feat"],
+                ],
+            ),
+            (
+                fake_pr_checkout(fake_fork_source(), LocalBranch::Absent),
+                vec![
+                    fork_fetch.clone(),
+                    vec!["branch", "feat", "FETCH_HEAD"],
+                    vec![
+                        "config",
+                        "--local",
+                        "--",
+                        "branch.feat.remote",
+                        FAKE_FORK_URL,
+                    ],
+                    vec![
+                        "config",
+                        "--local",
+                        "--",
+                        "branch.feat.pushRemote",
+                        FAKE_FORK_URL,
+                    ],
+                    vec![
+                        "config",
+                        "--local",
+                        "--",
+                        "branch.feat.merge",
+                        "refs/heads/feat",
+                    ],
+                    vec!["switch", "feat"],
+                ],
+            ),
+            (
+                fake_pr_checkout(fake_fork_source(), LocalBranch::Present),
+                vec![
+                    fork_fetch,
+                    vec!["switch", "feat"],
+                    vec!["merge", "--ff-only", "FETCH_HEAD"],
+                ],
+            ),
+        ]
+    }
+
+    /// 全変種の表。1 本の変種は [`cases`] の 1 行を 1 本の列にしたもの。
+    fn all_cases() -> Vec<(GitOp, Vec<Vec<&'static str>>)> {
+        cases()
+            .into_iter()
+            .map(|(op, argv)| (op, vec![argv]))
+            .chain(checkout_cases())
+            .collect()
+    }
+
     #[test]
     fn argv_matches_the_design_table() {
-        for (op, expected) in cases() {
-            let command = to_command(&op).expect("argv を組めませんでした");
-            assert_eq!(command.argv, expected, "{op:?}");
+        for (op, expected) in all_cases() {
+            let commands = to_commands(&op).expect("argv を組めませんでした");
+            let argv: Vec<Vec<&str>> = commands
+                .iter()
+                .map(|command| command.argv.iter().map(String::as_str).collect())
+                .collect();
+            assert_eq!(argv, expected, "{op:?}");
         }
     }
 
     #[test]
     fn verb_matches_the_argv() {
-        // スピナーの説明と実際に走る git がずれないこと。`cases` は全変種を
+        // スピナーの説明と実際に走る git がずれないこと。`all_cases` は全変種を
         // 覆っている（`covers_every_variant`）ので、ここも全変種を回る。
-        for (op, _) in cases() {
-            let command = to_command(&op).expect("argv を組めませんでした");
-            assert_eq!(op.verb(), command.argv[0], "{op:?}");
+        for (op, _) in all_cases() {
+            let commands = to_commands(&op).expect("argv を組めませんでした");
+            assert_eq!(op.verb(), commands[0].argv[0], "{op:?}");
         }
     }
 
     #[test]
     fn covers_every_variant() {
-        let covered: BTreeSet<_> = cases().iter().map(|(op, _)| variant(op)).collect();
+        let covered: BTreeSet<_> = all_cases().iter().map(|(op, _)| variant(op)).collect();
         assert_eq!(
             covered.len(),
             VARIANT_COUNT,
@@ -703,13 +888,15 @@ mod tests {
 
     #[test]
     fn only_hunk_ops_use_stdin() {
-        for (op, _) in cases() {
-            let command = to_command(&op).expect("argv を組めませんでした");
+        for (op, _) in all_cases() {
+            let commands = to_commands(&op).expect("argv を組めませんでした");
             let expects_stdin = matches!(
                 op,
                 GitOp::StageHunk { .. } | GitOp::UnstageHunk { .. } | GitOp::DiscardHunk { .. }
             );
-            assert_eq!(command.stdin.is_some(), expects_stdin, "{op:?}");
+            for command in commands {
+                assert_eq!(command.stdin.is_some(), expects_stdin, "{op:?}");
+            }
         }
     }
 

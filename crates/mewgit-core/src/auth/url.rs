@@ -58,6 +58,12 @@ impl RemoteUrl {
 }
 
 fn parse_inner(url: &str) -> Option<RemoteUrl> {
+    split(url).map(|(parsed, _)| parsed)
+}
+
+/// [`parse_inner`] の本体。**パスが始まる位置**（`owner/repo` の手前の区切りの直後）も
+/// 返す —— [`sibling`] がそこで繋ぎ直すので、URL の割り方を 2 本書かない。
+fn split(url: &str) -> Option<(RemoteUrl, usize)> {
     let (authority, path, is_https) = if let Some(rest) = url
         .strip_prefix("ssh://")
         // `git+ssh://` は git が ssh 経路に流す（`core.sshCommand` で argv をダンプして
@@ -103,12 +109,46 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
 
     // 確保はここ 1 か所。読めない URL では 1 つも作らない。
     let (owner, repo) = split_owner_repo(path)?;
-    Some(RemoteUrl {
-        scheme,
-        host_raw: host.to_string(),
-        owner: owner.to_string(),
-        repo: repo.to_string(),
-    })
+    // `path` は `url` の末尾の部分文字列なので、長さの差がそのまま位置になる。
+    let path_start = url.len() - path.len();
+    Some((
+        RemoteUrl {
+            scheme,
+            host_raw: host.to_string(),
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+        },
+        path_start,
+    ))
+}
+
+/// `url` と同じ形で、`owner/repo` だけを差し替えた URL を組む（05 の「追跡先」）。
+///
+/// fork から取り出したブランチの `branch.<b>.remote` に書く。**`url` の形を写す**
+/// —— ssh なら ssh、エイリアスならエイリアスのまま。そのリポジトリへ実際に通して
+/// いる形なので、別の形（`https://<host>/…`）で組むより確かに繋がる。
+///
+/// - **https の userinfo は写さない。** `https://x-access-token:<PAT>@host/…` の
+///   資格情報を別のキーへ複製しない（`redacted` と同じ理由）。ssh の `git@` は
+///   ユーザー名なので残す
+/// - 末尾は `.git` に揃える（gh が書く形。05）
+/// - `url` が読めない形か、`owner` / `repo` が `valid_segment` を通らなければ
+///   `None`。**API から来た名前をそのまま設定に書かない**
+pub fn sibling(url: &str, owner: &str, repo: &str) -> Option<String> {
+    let url = url.trim();
+    let (parsed, path_start) = split(url)?;
+    if !valid_segment(owner) || !valid_segment(repo) {
+        return None;
+    }
+    let prefix = match parsed.scheme {
+        // userinfo を落とすので組み直す。
+        RemoteScheme::Https { port } => {
+            let port = port.map(|port| format!(":{port}")).unwrap_or_default();
+            format!("https://{}{port}/", parsed.host_raw)
+        }
+        RemoteScheme::Ssh => url[..path_start].to_string(),
+    };
+    Some(format!("{prefix}{owner}/{repo}.git"))
 }
 
 /// `[user@]host[:port]` を host と port に割る。
@@ -247,6 +287,63 @@ mod tests {
             Err(AuthError::InvalidRemoteUrl { .. }) => {}
             other => panic!("{url} を受けてしまった: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_sibling_keeps_the_shape_of_the_remote() {
+        // 形ごとに、owner / repo だけが差し替わる。
+        for (url, expected) in [
+            (
+                "git@github.com:acme/app.git",
+                "git@github.com:bob/app-fork.git",
+            ),
+            ("gh-work:acme/app", "gh-work:bob/app-fork.git"),
+            (
+                "ssh://git@ghe.example.com:2222/acme/app.git",
+                "ssh://git@ghe.example.com:2222/bob/app-fork.git",
+            ),
+            (
+                "https://github.com/acme/app",
+                "https://github.com/bob/app-fork.git",
+            ),
+            (
+                "https://ghe.example.com:8443/acme/app.git/",
+                "https://ghe.example.com:8443/bob/app-fork.git",
+            ),
+        ] {
+            assert_eq!(
+                sibling(url, "bob", "app-fork").as_deref(),
+                Some(expected),
+                "{url}"
+            );
+            // 組んだ URL は元と同じホストの bob/app-fork として読める。
+            let back = parsed(expected);
+            assert_eq!(
+                (back.owner.as_str(), back.repo.as_str()),
+                ("bob", "app-fork")
+            );
+            assert_eq!(back.host_raw, parsed(url).host_raw);
+        }
+    }
+
+    #[test]
+    fn a_sibling_drops_https_credentials() {
+        assert_eq!(
+            sibling(
+                "https://x-access-token:secret@github.com/acme/app.git",
+                "bob",
+                "app"
+            )
+            .as_deref(),
+            Some("https://github.com/bob/app.git")
+        );
+    }
+
+    #[test]
+    fn a_sibling_refuses_names_it_cannot_write() {
+        assert_eq!(sibling("git@github.com:acme/app.git", "..", "app"), None);
+        assert_eq!(sibling("git@github.com:acme/app.git", "bob", "a/b"), None);
+        assert_eq!(sibling("/srv/git/app.git", "bob", "app"), None);
     }
 
     #[test]

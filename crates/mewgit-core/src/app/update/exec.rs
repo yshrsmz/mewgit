@@ -200,7 +200,11 @@ impl Reload {
             | GitOp::CherryPickAbort
             | GitOp::Revert { .. }
             | GitOp::RevertContinue
-            | GitOp::RevertAbort => Reload::RefsAndLog,
+            | GitOp::RevertAbort
+            // PR の取り出しは fetch で新しいコミットを入れ、ブランチを作り、HEAD を
+            // 動かす。**手順の途中で止まっても前の手順の結果は残る**（03 の「複数の
+            // 手順を持つ書き込み」）ので、成否を見ない。
+            | GitOp::CheckoutPr(_) => Reload::RefsAndLog,
 
             // 同じく walk が変わるが、**1 回で決まるので失敗したなら ref は元のまま**。
             // そこで読み直すと `GraphState::restart` がカーソルとスクロールを先頭に
@@ -323,6 +327,12 @@ fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
         // `pull --ff-only` が履歴の分かれたブランチを断った形。merge / rebase は
         // M5 なので、mewgit の中に踏める手が無いことをそのまま言う。
         GitOp::Pull { .. } => Some("履歴が分かれています。merge / rebase はまだ実装していません"),
+        // PR の取り出しで、**ローカルに在った同名のブランチが PR と分かれていた**形。
+        // 切り替えたあとの `merge --ff-only` が断る（05）ので、**そのブランチには
+        // 居る** —— 「取り出せません」と書くと切り替わっていないように読める。
+        // **mewgit の中に踏める手は無い** —— 上書きを選ばせる経路は作っていない
+        // （ローカルにしか無いコミットを消す操作になる）。
+        GitOp::CheckoutPr(_) => Some("ローカルのブランチが PR と分かれているため早送りできません"),
         // fetch は remote-tracking ref を `+` 付きで更新するので非 FF で断らない
         // （git 2.55 で確認）。ほかの op も非 FF を出す経路が無い。
         _ => None,
@@ -341,8 +351,9 @@ mod tests {
     use super::*;
     use crate::app::Msg;
 
-    use crate::git_exec::{ExecErrorKind, PullMode};
+    use crate::git_exec::{ExecErrorKind, LocalBranch, PrSource, PullMode};
     use crate::git_read::{GitReadError, LogPage, WorktreeSection};
+    use crate::test_util::fake_pr_checkout;
 
     use crate::test_util::{fake_branch, fake_detail, fake_oid, fake_snapshot};
 
@@ -396,7 +407,7 @@ mod tests {
         // **ステータスバーが描くのは要約行の 1 行目だけ**（07）。ここが argv だと、
         // 「次に何を押すか」が画面に出ない（01 の「失敗の案内文」）。
         let tracked = push_op("origin", "main", false);
-        let cases: [(GitOp, ExecErrorKind, &str); 7] = [
+        let cases: [(GitOp, ExecErrorKind, &str); 8] = [
             (tracked.clone(), ExecErrorKind::SamlSsoRequired, "Authorize"),
             (tracked.clone(), ExecErrorKind::SshAuthFailed, "ssh-agent"),
             (
@@ -426,6 +437,13 @@ mod tests {
                 },
                 ExecErrorKind::NonFastForward,
                 "merge / rebase はまだ実装していません",
+            ),
+            // **受け皿の `_` に落ちていた腕。** 取り出しは分かれたブランチを上書きしない
+            // ので、何が起きたかを言う（05）。
+            (
+                fake_pr_checkout(PrSource::SameRepo, LocalBranch::Absent),
+                ExecErrorKind::NonFastForward,
+                "PR と分かれているため早送りできません",
             ),
         ];
 
@@ -748,6 +766,15 @@ mod tests {
         );
         assert_eq!(
             Reload::after(&GitOp::RebaseAbort, false),
+            Reload::RefsAndLog
+        );
+        // PR の取り出しは手順の途中で止まっても前の手順の結果が残る（fetch が
+        // ブランチを作ったあとで `switch` が断る。03 の「複数の手順を持つ書き込み」）。
+        assert_eq!(
+            Reload::after(
+                &fake_pr_checkout(PrSource::SameRepo, LocalBranch::Absent),
+                false
+            ),
             Reload::RefsAndLog
         );
     }

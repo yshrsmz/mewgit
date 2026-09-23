@@ -3,14 +3,17 @@
 //! 引くかどうかを決めるのは [`AppState::wanted_pr_list`] で、**頼む側と、文言を出すか
 //! 一覧を描くかを決める `ui` の両方がそれを読む**。
 
-use crate::auth::AuthError;
-use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
+use crate::auth::{url, AuthError, RepoTarget};
+use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource};
+use crate::git_read::{Branch, Remote};
+use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 
-use super::remote::conventional_remote;
+use super::remote::{conventional_remote, NoRemote};
 use super::{edit_key, focus, multiline_edit_key, submit};
 use crate::app::state::current_row;
 use crate::app::{
-    AppState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, RepoInfo, TextBuffer,
+    AppState, BranchLoad, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, RepoInfo,
+    TextBuffer,
 };
 use crate::git_read::HeadInfo;
 use crate::github::CreatePr;
@@ -26,6 +29,7 @@ pub(super) fn prs_key(state: &mut AppState, key: Key) -> Cmd {
             state.prs.move_cursor(-1);
             Cmd::None
         }
+        KeyCode::Enter => checkout(state),
         KeyCode::Char('o') => open_pr(state),
         KeyCode::Char('r') => refresh(state),
         KeyCode::Char('N') => open_pr_create(state),
@@ -54,6 +58,124 @@ fn open_pr(state: &mut AppState) -> Cmd {
             );
             Cmd::None
         }
+    }
+}
+
+/// `Enter`。カーソル行の PR をローカルのブランチに取り出す（01 の
+/// 「PR チェックアウト（`Enter`）」、手順は 05）。
+///
+/// **押した時点で断るのは 3 つ。** 一覧が空、fetch するリモートが決まらない、
+/// ブランチ一覧がまだ届いていない（「在るか」を決められない）。
+/// **GitHub の状態は見ない** —— 叩くのは git だけで、材料は一覧の行が持っている。
+///
+/// **確認モーダルは出さない。** どの手順も上書きしない（05）ので、不変ルール 5 の
+/// 破壊的操作に当たらない。
+fn checkout(state: &mut AppState) -> Cmd {
+    let Some(pr) = state.prs.selected() else {
+        state.push_notice(
+            NoticeLevel::Info,
+            "取り出せる PR がありません（N で作成）".to_string(),
+            None,
+        );
+        return Cmd::None;
+    };
+    let refusal = match (conventional_remote(state), state.repo.target.resolved()) {
+        // **`target` を決めたのと同じ規則でリモートを選ぶ**（PR 作成の base と同じ）。
+        // 一覧はそのリポジトリの PR なので、そこを指しているリモートから取る。
+        (Ok(remote), Some(target)) if state.branches.load() == BranchLoad::Loaded => {
+            let plan = checkout_plan(pr, remote, target, &state.branches.branches);
+            return Cmd::Exec(GitOp::CheckoutPr(Box::new(plan)));
+        }
+        // **診断だけを出す。** `NoRemote::into_notice` が足す「追跡先を設定して
+        // ください」は `f` / `P` の話で、取り出しはブランチの追跡設定を読まない。
+        (Err(NoRemote::Nobody(diagnosis) | NoRemote::Ask(diagnosis)), _) => diagnosis,
+        // 一覧が出ているなら `target` は決まっている（一覧を引く前提）。届く前に
+        // 一覧だけが残る経路は無いが、組めないものは断る。
+        (Ok(_), None) => "取り出す先のリポジトリが決まっていません".to_string(),
+        (Ok(_), Some(_)) => "ブランチ一覧をまだ読めていません".to_string(),
+    };
+    state.push_notice(NoticeLevel::Warn, refusal, None);
+    Cmd::None
+}
+
+/// PR をどう取り出すか（05 の「PR チェックアウト」）。**どの場面かを決めるだけ**で、
+/// 手順は `git_exec` が場面から導く。
+///
+/// - **同一リポジトリか**は `head.repo` と `target` の `owner` / `repo`
+///   （`RepoRef::same_as`。現ブランチの PR と同じ比べ方）。**消えた fork
+///   （`head.repo` が `None`）は fork**
+/// - **「在るか」は `branches`**（05）。古くても在るブランチを書き換えない ——
+///   作る手順が `already exists` で断る。**「いま居るか」は見ない**（05）
+fn checkout_plan(
+    pr: &PullRequest,
+    remote: &Remote,
+    target: &RepoTarget,
+    branches: &[Branch],
+) -> PrCheckout {
+    let head = &pr.head;
+    let target = RepoRef {
+        owner: target.owner.clone(),
+        repo: target.repo.clone(),
+    };
+    let same_repo = head.repo.as_ref().is_some_and(|repo| repo.same_as(&target));
+
+    let (branch, source) = if same_repo {
+        (head.branch.clone(), PrSource::SameRepo)
+    } else {
+        let branch = fork_branch_name(pr, remote);
+        // **URL を組めれば fork の URL と `refs/heads/<head>`、組めなければ fetch 元と
+        // `refs/pull/<n>/head`**（05 の「追跡先」。消えた fork は後者）。
+        let fork_url = head
+            .repo
+            .as_ref()
+            .and_then(|repo| url::sibling(&remote.url, &repo.owner, &repo.repo));
+        let upstream = match fork_url {
+            Some(url) => ForkUpstream {
+                remote: url,
+                merge: format!("refs/heads/{}", head.branch),
+            },
+            None => ForkUpstream {
+                remote: remote.name.clone(),
+                merge: format!("refs/pull/{}/head", pr.number),
+            },
+        };
+        (
+            branch,
+            PrSource::Fork {
+                number: pr.number,
+                upstream,
+            },
+        )
+    };
+
+    let local = if branches.iter().any(|local| local.name == branch) {
+        LocalBranch::Present
+    } else {
+        LocalBranch::Absent
+    };
+    PrCheckout {
+        remote: remote.name.clone(),
+        branch,
+        source,
+        local,
+    }
+}
+
+/// fork の PR を取り出すブランチの名前（05 の「ブランチ名」）。
+///
+/// **既定ブランチか PR の base と同名なら owner を前に付ける。** 付けないと、
+/// fork の `main` でローカルの `main` を早送りすることになる。既定ブランチは
+/// `refs/remotes/<r>/HEAD` でしか知らず、一度も fetch していなければ無いので、
+/// base とも比べる。**owner が分からない消えた fork は `pr-<n>/`。**
+fn fork_branch_name(pr: &PullRequest, remote: &Remote) -> String {
+    let name = &pr.head.branch;
+    let collides = remote.head_branch.as_deref() == Some(name.as_str()) || pr.base.branch == *name;
+    if !collides {
+        return name.clone();
+    }
+    match &pr.head.repo {
+        Some(repo) => format!("{}/{name}", repo.owner),
+        None => format!("pr-{}/{name}", pr.number),
     }
 }
 
@@ -330,8 +452,8 @@ const OFF_BRANCH: &str = "ブランチに乗っていないので PR を作れ�
 /// 数えない** —— owner を付けない `head` は**base リポジトリの中のブランチ**として
 /// 解決されるので、`target` 側に同名のブランチがあれば他人のブランチから PR が
 /// 開く（**実 API では確かめていない**。01）。塞ぐには「そのブランチがどのリモートに
-/// 在るか」を読むことになるので、fork の plumbing を入れる PR チェックアウトの
-/// タスクへ送った（plan.md）。
+/// 在るか」を読むことになる。取り出し（`Enter`）とは材料が違うと判ったので、
+/// PR チェックアウトの 2 本目へ送った（plan.md。割った理由は 01）。
 fn head_branch(repo: &RepoInfo) -> Option<String> {
     match repo.head.as_ref() {
         Some(HeadInfo::Branch { name, .. }) => Some(name.clone()),
@@ -582,8 +704,9 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, enter_with, exec_done_of, fake_output, issued, press, press_code, remotes_of,
-        repo_snapshot, state, state_with_commits, tab_to, type_text, ALT, NOTICE_CELLS,
+        cells, enter_with, exec_done_of, fake_output, issued, load_branches, press, press_code,
+        remotes_of, repo_snapshot, state, state_with_commits, tab_to, type_text, with_branches,
+        ALT, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -598,9 +721,9 @@ mod tests {
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
-        deliver_pr_details, fake_account, fake_oid, fake_pull_request, fake_rate_limit,
-        fake_target, fetch_pr_details, pr_list_loaded as list_msg, put_on_branch, reply,
-        start_pr_details,
+        deliver_pr_details, fake_account, fake_branch, fake_oid, fake_pull_request,
+        fake_rate_limit, fake_target, fetch_pr_details, pr_list_loaded as list_msg, put_on_branch,
+        reply, start_pr_details,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -2023,6 +2146,205 @@ mod tests {
             None,
             "前のトークンの残量が新しいアカウントに入った"
         );
+    }
+
+    /// PR の取り出しの前提（01 の「PR チェックアウト（`Enter`）」）。リモートは
+    /// `origin` 1 本（`target` と同じ `yshrsmz/mewgit`）、ローカルのブランチは
+    /// `branches`、PRs ペインにフォーカス。**一覧はまだ届けない**（届けるのは各テスト）。
+    fn state_for_checkout(branches: &[(&str, bool)]) -> AppState {
+        let mut state = state_on_branch("main");
+        state.repo.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
+        load_branches(&mut state, branches);
+        assert_eq!(state.branches.load(), BranchLoad::Loaded);
+        state.focus = Pane::Prs;
+        state
+    }
+
+    /// `Enter` が出した取り出しの中身。
+    fn checkout_of(cmd: Cmd) -> PrCheckout {
+        match cmd {
+            Cmd::Exec(GitOp::CheckoutPr(plan)) => *plan,
+            other => panic!("取り出しを出していません: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_checks_out_the_pr_under_the_cursor_by_where_its_branch_is() {
+        // 同一リポジトリの PR 3 件。いま居る / ローカルに無い / 在る。**いま居るのも
+        // 在るのと同じ扱い**（一覧の「いま居る」は外の `git switch` で古くなる。05）。
+        // **いま居る行を先頭に置く** —— 起動直後のカーソルは現ブランチの PR に座るので、
+        // そこから `j` で下る。
+        let mut state = state_for_checkout(&[("main", true), ("feat/b", false)]);
+        deliver(
+            &mut state,
+            vec![
+                fake_pull_request(3, "main", "m"),
+                fake_pull_request(1, "feat/a", "a"),
+                fake_pull_request(2, "feat/b", "b"),
+            ],
+        );
+        let mut plans = Vec::new();
+        for _ in 0..3 {
+            plans.push(checkout_of(press_code(&mut state, KeyCode::Enter)));
+            // 書き込みは同時に 1 つだけ。終わらせないと次の `Enter` は落とされる。
+            state.jobs.finish(JobKind::Exec);
+            let _ = press(&mut state, 'j');
+        }
+        // **カーソル行を取り出す** —— 先頭だけ見ると「先頭を取り出す」でも通る。
+        let seen: Vec<_> = plans
+            .iter()
+            .map(|plan| (plan.branch.as_str(), plan.local))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("main", LocalBranch::Present),
+                ("feat/a", LocalBranch::Absent),
+                ("feat/b", LocalBranch::Present),
+            ]
+        );
+        for plan in plans {
+            assert_eq!(plan.remote, "origin");
+            assert_eq!(plan.source, PrSource::SameRepo);
+        }
+    }
+
+    #[test]
+    fn a_fork_pr_is_tracked_at_the_fork_url_in_the_shape_of_the_remote() {
+        let mut state = state_for_checkout(&[("main", true)]);
+        deliver(&mut state, vec![pr_from(7, "fix", "bob")]);
+
+        let plan = checkout_of(press_code(&mut state, KeyCode::Enter));
+
+        assert_eq!(
+            plan,
+            PrCheckout {
+                remote: "origin".into(),
+                branch: "fix".into(),
+                source: PrSource::Fork {
+                    number: 7,
+                    upstream: ForkUpstream {
+                        // origin と同じ ssh の形で、owner / repo だけが fork のもの。
+                        remote: "git@github.com:bob/mewgit.git".into(),
+                        merge: "refs/heads/fix".into(),
+                    },
+                },
+                local: LocalBranch::Absent,
+            }
+        );
+    }
+
+    #[test]
+    fn the_same_repo_is_recognised_whatever_the_case_of_its_name() {
+        // GitHub の名前は大文字小文字を区別しない。URL の綴りが API と違っても
+        // fork 扱いにしない（fork 扱いだと `refs/pull` から取り、URL を追跡先に書く）。
+        let mut state = state_for_checkout(&[("main", true)]);
+        let mut pr = fake_pull_request(1, "feat", "a");
+        pr.head.repo = Some(RepoRef {
+            owner: "YSHRSMZ".into(),
+            repo: "MewGit".into(),
+        });
+        deliver(&mut state, vec![pr]);
+
+        let plan = checkout_of(press_code(&mut state, KeyCode::Enter));
+        assert_eq!(plan.source, PrSource::SameRepo);
+    }
+
+    #[test]
+    fn the_current_pr_is_found_whatever_the_case_of_the_repository_name() {
+        // 取り出し（`Enter`）と同じ比べ方（`RepoRef::same_as`）。片方だけが綴りの
+        // 違いを飲むと、取り出した行に座らない。
+        let mut state = state_on_branch("feat");
+        let mut pr = fake_pull_request(1, "feat", "a");
+        pr.head.repo = Some(RepoRef {
+            owner: "YSHRSMZ".into(),
+            repo: "MewGit".into(),
+        });
+        deliver(&mut state, vec![pr]);
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(1));
+    }
+
+    #[test]
+    fn a_fork_branch_named_like_the_default_or_the_base_gets_the_owner_in_front() {
+        // 付けないと fork の `main` でローカルの `main` を早送りする（05 の「ブランチ名」）。
+        // 既定ブランチ（`refs/remotes/origin/HEAD`）と base のどちらと重なっても付ける。
+        // 既定ブランチを知らない（一度も fetch していない）ときに base で拾えることも見る。
+        for (head_branch, pr_branch, base, expected) in [
+            (Some("develop"), "develop", "main", "bob/develop"),
+            (None, "main", "main", "bob/main"),
+            (Some("develop"), "fix", "main", "fix"),
+        ] {
+            let mut state = state_for_checkout(&[("main", true)]);
+            state.repo.remotes[0].head_branch = head_branch.map(str::to_string);
+            let mut pr = pr_from(7, pr_branch, "bob");
+            pr.base.branch = base.into();
+            deliver(&mut state, vec![pr]);
+
+            let plan = checkout_of(press_code(&mut state, KeyCode::Enter));
+            assert_eq!(
+                plan.branch, expected,
+                "{head_branch:?} / {pr_branch} / {base}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deleted_fork_is_tracked_at_the_pull_ref_of_the_remote() {
+        // URL を組む相手が無い（gh と同じ形。05 の「追跡先」）。名前が重なるときは
+        // owner も分からないので番号を付ける。
+        for (branch, expected) in [("fix", "fix"), ("main", "pr-7/main")] {
+            let mut state = state_for_checkout(&[("main", true)]);
+            let mut pr = pr_from(7, branch, "bob");
+            pr.head.repo = None;
+            deliver(&mut state, vec![pr]);
+
+            let plan = checkout_of(press_code(&mut state, KeyCode::Enter));
+            assert_eq!(plan.branch, expected);
+            assert_eq!(
+                plan.source,
+                PrSource::Fork {
+                    number: 7,
+                    upstream: ForkUpstream {
+                        remote: "origin".into(),
+                        merge: "refs/pull/7/head".into(),
+                    },
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn enter_refuses_what_it_cannot_decide_and_says_why() {
+        // 一覧が空。**`N` を案内する**（`o` と同じ）。
+        let mut state = state_for_checkout(&[("main", true)]);
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+        let message = &state.notices.back().expect("通知が無い").message;
+        assert!(message.contains("N で作成"), "{message}");
+
+        // ブランチ一覧がまだ無い。「在るか」を決められない。
+        let mut state = state_on_branch("main");
+        state.repo.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
+        state.focus = Pane::Prs;
+        deliver(&mut state, vec![fake_pull_request(1, "feat", "a")]);
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+        let message = &state.notices.back().expect("通知が無い").message;
+        assert_eq!(message, "ブランチ一覧をまだ読めていません");
+        // **届いたら取り出せる** —— 断ったのが一覧の有無だったことの裏返し。
+        let _ = with_branches(&mut state, Ok(vec![fake_branch("main", true)]));
+        let plan = checkout_of(press_code(&mut state, KeyCode::Enter));
+        assert_eq!(plan.branch, "feat");
+
+        // fetch するリモートが決まらない（2 本あって origin が無い）。**診断だけ** ——
+        // 「追跡先を設定してください」は取り出しには当たらない。
+        let mut state = state_for_checkout(&[("main", true)]);
+        state.repo.remotes = remotes_of(&[
+            ("a", "git@github.com:x/y.git"),
+            ("b", "git@github.com:z/w.git"),
+        ]);
+        deliver(&mut state, vec![fake_pull_request(1, "feat", "a")]);
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+        let message = &state.notices.back().expect("通知が無い").message;
+        assert_eq!(message, "origin がありません（a, b）");
     }
 
     #[test]

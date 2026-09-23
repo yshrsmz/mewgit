@@ -244,12 +244,17 @@ pub(super) fn with_branches(
 pub(super) fn state_on_branches(names: &[(&str, bool)]) -> AppState {
     let mut state = state_with_commits(2);
     state.focus = Pane::Branches;
+    load_branches(&mut state, names);
+    state
+}
+
+/// `(名前, HEAD か)` のブランチ一覧を届ける。
+pub(super) fn load_branches(state: &mut AppState, names: &[(&str, bool)]) {
     let branches = names
         .iter()
         .map(|(name, is_head)| fake_branch(name, *is_head))
         .collect();
-    let _ = with_branches(&mut state, Ok(branches));
-    state
+    let _ = with_branches(state, Ok(branches));
 }
 
 /// `d` / `D` を押したときの確認モーダルの本文と `on_yes`。

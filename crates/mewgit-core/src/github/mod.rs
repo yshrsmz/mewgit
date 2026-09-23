@@ -102,6 +102,17 @@ pub struct RepoRef {
     pub repo: String,
 }
 
+impl RepoRef {
+    /// 同じリポジトリか。**GitHub の名前は大文字小文字を区別しない**ので、そう比べる
+    /// —— URL に書かれた綴りと API が返す綴りは違うことがある。
+    ///
+    /// **`==` で比べない。** 現ブランチの PR（01）と PR の取り出し（05）が同じ組を
+    /// 比べるので、片方だけが綴りの違いを飲むと、取り出した行に座らない。
+    pub fn same_as(&self, other: &RepoRef) -> bool {
+        self.owner.eq_ignore_ascii_case(&other.owner) && self.repo.eq_ignore_ascii_case(&other.repo)
+    }
+}
+
 /// CI チェック 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {

@@ -3,11 +3,11 @@
 //! **どのペインからも押せる共通キー**なので、ペインのモジュールには置かない ——
 //! アカウントと同じくリポジトリ単位の話で、どのペインに居るかと関係が無い。
 
-use crate::auth::url::RemoteUrl;
 use crate::git_exec::{push_remote_ref, ExecError, ExecErrorKind, ExecOutput, GitOp};
 use crate::git_read::{short_oid, Remote};
 
 use super::confirm;
+use crate::app::state::Tracked;
 use crate::app::{AppState, BranchLoad, Cmd, JobKind, Modal, NoticeLevel, PushRejection};
 
 /// `P`。HEAD のブランチを push する（01 の「push の行き先」）。
@@ -326,25 +326,23 @@ fn default_remote(state: &AppState) -> Result<&Remote, NoRemote> {
         .head()
         .and_then(|head| head.upstream_config.as_ref())
     {
-        // **`.` はローカル追跡。** push が既に断っている形で、fetch に渡すと git が
-        // 「そんなリモートは無い」で落ちる。
-        if config.remote == "." {
-            return Err(NoRemote::Ask(LOCAL_TRACKING.to_string()));
-        }
-        if let Some(remote) = state.repo.remote(&config.remote) {
-            return Ok(remote);
-        }
-        // **URL なら 2 段目へ落とす**（01 の「既定リモート」）。`gh pr checkout` と
-        // PR チェックアウトが fork の URL を書く形で、git はそのとき `merge` の 1 本を
-        // `FETCH_HEAD` へ取るだけで remote-tracking ref を 1 つも動かさない（04 の表）
-        // —— `f` の役目を果たさないので、git に合わせる理由が無い。
-        if RemoteUrl::parse(&config.remote).is_err() {
+        match state.repo.tracked(&config.remote) {
+            // **`.` はローカル追跡。** push が既に断っている形で、fetch に渡すと git が
+            // 「そんなリモートは無い」で落ちる。
+            Tracked::Local => return Err(NoRemote::Ask(LOCAL_TRACKING.to_string())),
+            Tracked::Named(remote) => return Ok(remote),
+            // **URL なら 2 段目へ落とす**（01 の「既定リモート」）。`gh pr checkout` と
+            // PR チェックアウトが fork の URL を書く形で、git はそのとき `merge` の 1 本を
+            // `FETCH_HEAD` へ取るだけで remote-tracking ref を 1 つも動かさない（04 の表）
+            // —— `f` の役目を果たさないので、git に合わせる理由が無い。
+            Tracked::Url(_) => {}
             // **`origin` へ落とさない。** 落とすと、ユーザーが書いた行き先とは別の
             // リモートを黙って fetch することになる。
-            return Err(NoRemote::Ask(format!(
-                "追跡先の {} がリモートにありません",
-                config.remote
-            )));
+            Tracked::Missing(name) => {
+                return Err(NoRemote::Ask(format!(
+                    "追跡先の {name} がリモートにありません"
+                )))
+            }
         }
     }
 
@@ -575,13 +573,25 @@ mod tests {
         // URL）。git はそのとき何の remote-tracking ref も動かさない（04 の表）ので、
         // 2 段目の規則で選ぶ。**選ばせない** —— 選ばせると PR を取り出すたびに `f` が
         // モーダルを開く。
-        let mut state = state_for_push(
-            &["origin", "upstream"],
-            tracking_branch("feat", "https://github.com/bob/app.git", "refs/heads/feat"),
-        );
-        let cmd = press(&mut state, 'f');
-        assert_eq!(fetched_remote(&cmd).as_deref(), Some("origin"), "{cmd:?}");
-        assert!(state.modal.is_none());
+        // **GitHub の形でない URL も同じ**（URL かは git の値として決める。
+        // `RepoInfo::tracked`）。
+        for url in [
+            "https://github.com/bob/app.git",
+            "git@gitlab.example.com:group/sub/app.git",
+            "/srv/git/app.git",
+        ] {
+            let mut state = state_for_push(
+                &["origin", "upstream"],
+                tracking_branch("feat", url, "refs/heads/feat"),
+            );
+            let cmd = press(&mut state, 'f');
+            assert_eq!(
+                fetched_remote(&cmd).as_deref(),
+                Some("origin"),
+                "{url}: {cmd:?}"
+            );
+            assert!(state.modal.is_none(), "{url}");
+        }
     }
 
     #[test]

@@ -352,8 +352,9 @@ mod tests {
     use super::*;
     use crate::app::Msg;
 
-    use crate::git_exec::{ExecErrorKind, LocalBranch, PrCheckout, PrSource, PullMode};
+    use crate::git_exec::{ExecErrorKind, LocalBranch, PrSource, PullMode};
     use crate::git_read::{GitReadError, LogPage, WorktreeSection};
+    use crate::test_util::fake_pr_checkout;
 
     use crate::test_util::{fake_branch, fake_detail, fake_oid, fake_snapshot};
 
@@ -441,7 +442,7 @@ mod tests {
             // **受け皿の `_` に落ちていた腕。** 取り出しは分かれたブランチを上書きしない
             // ので、何が起きたかを言う（05）。
             (
-                checkout_pr_op(),
+                fake_pr_checkout(PrSource::SameRepo, LocalBranch::Absent),
                 ExecErrorKind::NonFastForward,
                 "PR と分かれているため取り出せません",
             ),
@@ -770,17 +771,13 @@ mod tests {
         );
         // PR の取り出しは手順の途中で止まっても前の手順の結果が残る（fetch が
         // ブランチを作ったあとで `switch` が断る。03 の「複数の手順を持つ書き込み」）。
-        assert_eq!(Reload::after(&checkout_pr_op(), false), Reload::RefsAndLog);
-    }
-
-    /// PR の取り出し（中身は分類に関わらない）。
-    fn checkout_pr_op() -> GitOp {
-        GitOp::CheckoutPr(Box::new(PrCheckout {
-            remote: "origin".into(),
-            branch: "feat".into(),
-            source: PrSource::SameRepo,
-            local: LocalBranch::Absent,
-        }))
+        assert_eq!(
+            Reload::after(
+                &fake_pr_checkout(PrSource::SameRepo, LocalBranch::Absent),
+                false
+            ),
+            Reload::RefsAndLog
+        );
     }
 
     #[test]

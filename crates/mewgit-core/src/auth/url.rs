@@ -58,6 +58,12 @@ impl RemoteUrl {
 }
 
 fn parse_inner(url: &str) -> Option<RemoteUrl> {
+    split(url).map(|(parsed, _)| parsed)
+}
+
+/// [`parse_inner`] の本体。**パスが始まる位置**（`owner/repo` の手前の区切りの直後）も
+/// 返す —— [`sibling`] がそこで繋ぎ直すので、URL の割り方を 2 本書かない。
+fn split(url: &str) -> Option<(RemoteUrl, usize)> {
     let (authority, path, is_https) = if let Some(rest) = url
         .strip_prefix("ssh://")
         // `git+ssh://` は git が ssh 経路に流す（`core.sshCommand` で argv をダンプして
@@ -103,12 +109,17 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
 
     // 確保はここ 1 か所。読めない URL では 1 つも作らない。
     let (owner, repo) = split_owner_repo(path)?;
-    Some(RemoteUrl {
-        scheme,
-        host_raw: host.to_string(),
-        owner: owner.to_string(),
-        repo: repo.to_string(),
-    })
+    // `path` は `url` の末尾の部分文字列なので、長さの差がそのまま位置になる。
+    let path_start = url.len() - path.len();
+    Some((
+        RemoteUrl {
+            scheme,
+            host_raw: host.to_string(),
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+        },
+        path_start,
+    ))
 }
 
 /// `url` と同じ形で、`owner/repo` だけを差し替えた URL を組む（05 の「追跡先」）。
@@ -125,24 +136,17 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
 ///   `None`。**API から来た名前をそのまま設定に書かない**
 pub fn sibling(url: &str, owner: &str, repo: &str) -> Option<String> {
     let url = url.trim();
-    let parsed = parse_inner(url)?;
+    let (parsed, path_start) = split(url)?;
     if !valid_segment(owner) || !valid_segment(repo) {
         return None;
     }
     let prefix = match parsed.scheme {
-        RemoteScheme::Https { port } => match port {
-            Some(port) => format!("https://{}:{port}/", parsed.host_raw),
-            None => format!("https://{}/", parsed.host_raw),
-        },
-        // `ssh://` / `git+ssh://` は authority の後ろの `/` まで、scp 形式は最初の
-        // `:` までがそのまま前置き（`parse_inner` が割った位置と同じ）。
-        RemoteScheme::Ssh => match url.find("://") {
-            Some(scheme_end) => {
-                let authority_end = url[scheme_end + 3..].find('/')? + scheme_end + 3;
-                url[..=authority_end].to_string()
-            }
-            None => url[..=url.find(':')?].to_string(),
-        },
+        // userinfo を落とすので組み直す。
+        RemoteScheme::Https { port } => {
+            let port = port.map(|port| format!(":{port}")).unwrap_or_default();
+            format!("https://{}{port}/", parsed.host_raw)
+        }
+        RemoteScheme::Ssh => url[..path_start].to_string(),
     };
     Some(format!("{prefix}{owner}/{repo}.git"))
 }

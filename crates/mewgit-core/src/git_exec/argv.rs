@@ -283,10 +283,10 @@ fn checkout_pr(plan: &PrCheckout) -> Vec<GitCommand> {
     let fetch = |refspecs: &[&str]| {
         let mut argv = vec!["fetch", "--no-tags", remote];
         argv.extend(refspecs);
-        call_vec(argv)
+        call(&argv)
     };
-    let switch = || call(["switch", branch]);
-    let fast_forward = |to: &str| call(["merge", "--ff-only", to]);
+    let switch = || call(&["switch", branch]);
+    let fast_forward = |to: &str| call(&["merge", "--ff-only", to]);
 
     match source {
         PrSource::SameRepo => {
@@ -299,7 +299,7 @@ fn checkout_pr(plan: &PrCheckout) -> Vec<GitCommand> {
                 // して食う）。
                 LocalBranch::Absent => vec![
                     fetch(&[&to_tracking]),
-                    call([
+                    call(&[
                         "switch",
                         "--track",
                         "--create",
@@ -334,7 +334,7 @@ fn checkout_pr(plan: &PrCheckout) -> Vec<GitCommand> {
                         ("pushRemote", &upstream.remote),
                         ("merge", &upstream.merge),
                     ] {
-                        steps.push(call([
+                        steps.push(call(&[
                             "config",
                             "--local",
                             "--",
@@ -353,14 +353,9 @@ fn checkout_pr(plan: &PrCheckout) -> Vec<GitCommand> {
 }
 
 /// stdin を持たない 1 回分の呼び出し。
-fn call<const N: usize>(argv: [&str; N]) -> GitCommand {
-    call_vec(argv.to_vec())
-}
-
-/// [`call`] の長さが決まっていない版。
-fn call_vec(argv: Vec<&str>) -> GitCommand {
+fn call(argv: &[&str]) -> GitCommand {
     GitCommand {
-        argv: argv.into_iter().map(str::to_string).collect(),
+        argv: argv.iter().map(|arg| arg.to_string()).collect(),
         stdin: None,
     }
 }
@@ -482,8 +477,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::git_exec::{ForkUpstream, RebaseAction, RebaseEntry, RebasePlan};
-    use crate::test_util::fake_oid;
+    use crate::git_exec::{RebaseAction, RebaseEntry, RebasePlan};
+    use crate::test_util::{fake_fork_source, fake_oid, fake_pr_checkout, FAKE_FORK_URL};
 
     /// 変種の名前。**網羅 `match` なので、`GitOp` に変種を足すとここが
     /// コンパイルエラーになる。** そのとき [`VARIANTS`] と [`cases`] にも足す
@@ -790,25 +785,6 @@ mod tests {
         })
     }
 
-    fn checkout(source: PrSource, local: LocalBranch) -> GitOp {
-        GitOp::CheckoutPr(Box::new(PrCheckout {
-            remote: "origin".into(),
-            branch: "feat".into(),
-            source,
-            local,
-        }))
-    }
-
-    fn fork() -> PrSource {
-        PrSource::Fork {
-            number: 7,
-            upstream: ForkUpstream {
-                remote: "git@github.com:bob/app.git".into(),
-                merge: "refs/heads/feat".into(),
-            },
-        }
-    }
-
     /// 設計書 05 の「mewgit の手順」の表をそのまま写したもの。
     fn checkout_cases() -> Vec<(GitOp, Vec<Vec<&'static str>>)> {
         let same_fetch = vec![
@@ -825,14 +801,14 @@ mod tests {
         ];
         vec![
             (
-                checkout(PrSource::SameRepo, LocalBranch::Absent),
+                fake_pr_checkout(PrSource::SameRepo, LocalBranch::Absent),
                 vec![
                     same_fetch.clone(),
                     vec!["switch", "--track", "--create", "feat", "origin/feat"],
                 ],
             ),
             (
-                checkout(PrSource::SameRepo, LocalBranch::Present),
+                fake_pr_checkout(PrSource::SameRepo, LocalBranch::Present),
                 vec![
                     vec![
                         "fetch",
@@ -845,14 +821,14 @@ mod tests {
                 ],
             ),
             (
-                checkout(PrSource::SameRepo, LocalBranch::Current),
+                fake_pr_checkout(PrSource::SameRepo, LocalBranch::Current),
                 vec![
                     same_fetch,
                     vec!["merge", "--ff-only", "refs/remotes/origin/feat"],
                 ],
             ),
             (
-                checkout(fork(), LocalBranch::Absent),
+                fake_pr_checkout(fake_fork_source(), LocalBranch::Absent),
                 vec![
                     fork_fetch.clone(),
                     vec![
@@ -860,14 +836,14 @@ mod tests {
                         "--local",
                         "--",
                         "branch.feat.remote",
-                        "git@github.com:bob/app.git",
+                        FAKE_FORK_URL,
                     ],
                     vec![
                         "config",
                         "--local",
                         "--",
                         "branch.feat.pushRemote",
-                        "git@github.com:bob/app.git",
+                        FAKE_FORK_URL,
                     ],
                     vec![
                         "config",
@@ -880,11 +856,11 @@ mod tests {
                 ],
             ),
             (
-                checkout(fork(), LocalBranch::Present),
+                fake_pr_checkout(fake_fork_source(), LocalBranch::Present),
                 vec![fork_fetch, vec!["switch", "feat"]],
             ),
             (
-                checkout(fork(), LocalBranch::Current),
+                fake_pr_checkout(fake_fork_source(), LocalBranch::Current),
                 vec![
                     vec!["fetch", "--no-tags", "origin", "refs/pull/7/head"],
                     vec!["merge", "--ff-only", "FETCH_HEAD"],

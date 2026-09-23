@@ -6,7 +6,7 @@
 use crate::auth::{url, AuthError, RepoTarget};
 use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource};
 use crate::git_read::{Branch, Remote};
-use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
+use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 
 use super::remote::{conventional_remote, NoRemote};
 use super::{edit_key, focus, multiline_edit_key, submit};
@@ -101,9 +101,9 @@ fn checkout(state: &mut AppState) -> Cmd {
 /// PR をどう取り出すか（05 の「PR チェックアウト」）。**どの場面かを決めるだけ**で、
 /// 手順は `git_exec` が場面から導く。
 ///
-/// - **同一リポジトリか**は `head.repo` と `target` の `owner` / `repo`。GitHub の名前は
-///   大文字小文字を区別しないので、そう比べる（URL の綴りと API の綴りが違うことがある）。
-///   **消えた fork（`head.repo` が `None`）は fork**
+/// - **同一リポジトリか**は `head.repo` と `target` の `owner` / `repo`
+///   （`RepoRef::same_as`。現ブランチの PR と同じ比べ方）。**消えた fork
+///   （`head.repo` が `None`）は fork**
 /// - **「在る / いま居る」は `branches`**（05）。古くても壊れない —— git が断る
 fn checkout_plan(
     pr: &PullRequest,
@@ -112,10 +112,11 @@ fn checkout_plan(
     branches: &[Branch],
 ) -> PrCheckout {
     let head = &pr.head;
-    let same_repo = head.repo.as_ref().is_some_and(|repo| {
-        repo.owner.eq_ignore_ascii_case(&target.owner)
-            && repo.repo.eq_ignore_ascii_case(&target.repo)
-    });
+    let target = RepoRef {
+        owner: target.owner.clone(),
+        repo: target.repo.clone(),
+    };
+    let same_repo = head.repo.as_ref().is_some_and(|repo| repo.same_as(&target));
 
     let (branch, source) = if same_repo {
         (head.branch.clone(), PrSource::SameRepo)
@@ -123,20 +124,20 @@ fn checkout_plan(
         let branch = fork_branch_name(pr, remote);
         // **URL を組めれば fork の URL と `refs/heads/<head>`、組めなければ fetch 元と
         // `refs/pull/<n>/head`**（05 の「追跡先」。消えた fork は後者）。
-        let upstream = head
+        let fork_url = head
             .repo
             .as_ref()
-            .and_then(|repo| url::sibling(&remote.url, &repo.owner, &repo.repo))
-            .map_or_else(
-                || ForkUpstream {
-                    remote: remote.name.clone(),
-                    merge: format!("refs/pull/{}/head", pr.number),
-                },
-                |url| ForkUpstream {
-                    remote: url,
-                    merge: format!("refs/heads/{}", head.branch),
-                },
-            );
+            .and_then(|repo| url::sibling(&remote.url, &repo.owner, &repo.repo));
+        let upstream = match fork_url {
+            Some(url) => ForkUpstream {
+                remote: url,
+                merge: format!("refs/heads/{}", head.branch),
+            },
+            None => ForkUpstream {
+                remote: remote.name.clone(),
+                merge: format!("refs/pull/{}/head", pr.number),
+            },
+        };
         (
             branch,
             PrSource::Fork {
@@ -702,9 +703,9 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, enter_with, exec_done_of, fake_output, issued, press, press_code, remotes_of,
-        repo_snapshot, state, state_with_commits, tab_to, type_text, with_branches, ALT,
-        NOTICE_CELLS,
+        cells, enter_with, exec_done_of, fake_output, issued, load_branches, press, press_code,
+        remotes_of, repo_snapshot, state, state_with_commits, tab_to, type_text, with_branches,
+        ALT, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -2152,24 +2153,10 @@ mod tests {
     fn state_for_checkout(branches: &[(&str, bool)]) -> AppState {
         let mut state = state_on_branch("main");
         state.repo.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
-        let loaded = branches
-            .iter()
-            .map(|(name, is_head)| fake_branch(name, *is_head))
-            .collect();
-        let _ = with_branches(&mut state, Ok(loaded));
+        load_branches(&mut state, branches);
         assert_eq!(state.branches.load(), BranchLoad::Loaded);
         state.focus = Pane::Prs;
         state
-    }
-
-    /// bob の fork から出た PR。
-    fn fork_pr(number: u64, branch: &str) -> PullRequest {
-        let mut pr = fake_pull_request(number, branch, "forksha");
-        pr.head.repo = Some(RepoRef {
-            owner: "bob".into(),
-            repo: "mewgit-fork".into(),
-        });
-        pr
     }
 
     /// `Enter` が出した取り出しの中身。
@@ -2223,7 +2210,7 @@ mod tests {
     #[test]
     fn a_fork_pr_is_tracked_at_the_fork_url_in_the_shape_of_the_remote() {
         let mut state = state_for_checkout(&[("main", true)]);
-        deliver(&mut state, vec![fork_pr(7, "fix")]);
+        deliver(&mut state, vec![pr_from(7, "fix", "bob")]);
 
         let plan = checkout_of(press_code(&mut state, KeyCode::Enter));
 
@@ -2236,7 +2223,7 @@ mod tests {
                     number: 7,
                     upstream: ForkUpstream {
                         // origin と同じ ssh の形で、owner / repo だけが fork のもの。
-                        remote: "git@github.com:bob/mewgit-fork.git".into(),
+                        remote: "git@github.com:bob/mewgit.git".into(),
                         merge: "refs/heads/fix".into(),
                     },
                 },
@@ -2262,6 +2249,20 @@ mod tests {
     }
 
     #[test]
+    fn the_current_pr_is_found_whatever_the_case_of_the_repository_name() {
+        // 取り出し（`Enter`）と同じ比べ方（`RepoRef::same_as`）。片方だけが綴りの
+        // 違いを飲むと、取り出した行に座らない。
+        let mut state = state_on_branch("feat");
+        let mut pr = fake_pull_request(1, "feat", "a");
+        pr.head.repo = Some(RepoRef {
+            owner: "YSHRSMZ".into(),
+            repo: "MewGit".into(),
+        });
+        deliver(&mut state, vec![pr]);
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(1));
+    }
+
+    #[test]
     fn a_fork_branch_named_like_the_default_or_the_base_gets_the_owner_in_front() {
         // 付けないと fork の `main` でローカルの `main` を早送りする（05 の「ブランチ名」）。
         // 既定ブランチ（`refs/remotes/origin/HEAD`）と base のどちらと重なっても付ける。
@@ -2273,7 +2274,7 @@ mod tests {
         ] {
             let mut state = state_for_checkout(&[("main", true)]);
             state.repo.remotes[0].head_branch = head_branch.map(str::to_string);
-            let mut pr = fork_pr(7, pr_branch);
+            let mut pr = pr_from(7, pr_branch, "bob");
             pr.base.branch = base.into();
             deliver(&mut state, vec![pr]);
 
@@ -2291,7 +2292,7 @@ mod tests {
         // owner も分からないので番号を付ける。
         for (branch, expected) in [("fix", "fix"), ("main", "pr-7/main")] {
             let mut state = state_for_checkout(&[("main", true)]);
-            let mut pr = fork_pr(7, branch);
+            let mut pr = pr_from(7, branch, "bob");
             pr.head.repo = None;
             deliver(&mut state, vec![pr]);
 

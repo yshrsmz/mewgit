@@ -10,12 +10,11 @@ use std::path::PathBuf;
 use mewgit_core::auth::ssh::SshCommand;
 use mewgit_core::auth::{resolve, DegradedReason};
 use mewgit_core::config::Config;
-use mewgit_core::git_exec::{
-    ExecError, ExecErrorKind, ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Runner,
-};
+use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, LocalBranch, PrSource, Runner};
 use mewgit_core::git_read::Oid;
 use mewgit_core::test_util::{
-    fake_target, wait_for_pid, wait_until_gone, BareRepo, Fake, TestRepo,
+    fake_fork_source, fake_pr_checkout, fake_target, wait_for_pid, wait_until_gone, BareRepo, Fake,
+    TestRepo, FAKE_FORK_URL,
 };
 
 /// `origin` に bare リポジトリを登録したワークツリー付きリポジトリ。
@@ -858,27 +857,6 @@ impl PrStage {
     }
 }
 
-const FORK_URL: &str = "git@github.com:bob/app.git";
-
-fn checkout_pr(source: PrSource, local: LocalBranch) -> GitOp {
-    GitOp::CheckoutPr(Box::new(PrCheckout {
-        remote: "origin".into(),
-        branch: "feat".into(),
-        source,
-        local,
-    }))
-}
-
-fn from_fork() -> PrSource {
-    PrSource::Fork {
-        number: 7,
-        upstream: ForkUpstream {
-            remote: FORK_URL.into(),
-            merge: "refs/heads/feat".into(),
-        },
-    }
-}
-
 fn current_branch(repo: &TestRepo) -> String {
     repo.git(&["symbolic-ref", "--short", "HEAD"])
 }
@@ -891,7 +869,7 @@ async fn a_same_repo_pr_is_checked_out_tracking_the_remote_branch() {
     repo.git(&["config", "branch.autoSetupMerge", "false"]);
 
     repo.runner()
-        .run(&checkout_pr(PrSource::SameRepo, LocalBranch::Absent))
+        .run(&fake_pr_checkout(PrSource::SameRepo, LocalBranch::Absent))
         .await
         .expect("取り出せませんでした");
 
@@ -919,7 +897,7 @@ async fn a_same_repo_pr_fast_forwards_the_local_branch_whether_or_not_it_is_chec
         };
 
         repo.runner()
-            .run(&checkout_pr(PrSource::SameRepo, local))
+            .run(&fake_pr_checkout(PrSource::SameRepo, local))
             .await
             .unwrap_or_else(|err| panic!("取り出せませんでした（current = {current}）: {err}"));
 
@@ -934,15 +912,18 @@ async fn a_fork_pr_is_checked_out_from_the_pull_ref_with_the_fork_as_upstream() 
     let repo = stage.clone();
 
     repo.runner()
-        .run(&checkout_pr(from_fork(), LocalBranch::Absent))
+        .run(&fake_pr_checkout(fake_fork_source(), LocalBranch::Absent))
         .await
         .expect("取り出せませんでした");
 
     assert_eq!(current_branch(&repo), "feat");
     assert_eq!(repo.head_oid(), stage.pull);
     // `gh pr checkout` が書くのと同じ 3 つ（05 の表）。
-    assert_eq!(repo.git(&["config", "branch.feat.remote"]), FORK_URL);
-    assert_eq!(repo.git(&["config", "branch.feat.pushRemote"]), FORK_URL);
+    assert_eq!(repo.git(&["config", "branch.feat.remote"]), FAKE_FORK_URL);
+    assert_eq!(
+        repo.git(&["config", "branch.feat.pushRemote"]),
+        FAKE_FORK_URL
+    );
     assert_eq!(
         repo.git(&["config", "branch.feat.merge"]),
         "refs/heads/feat"
@@ -964,7 +945,7 @@ async fn a_fork_pr_fast_forwards_an_existing_branch_whether_or_not_it_is_checked
         };
 
         repo.runner()
-            .run(&checkout_pr(from_fork(), local))
+            .run(&fake_pr_checkout(fake_fork_source(), local))
             .await
             .unwrap_or_else(|err| panic!("取り出せませんでした（current = {current}）: {err}"));
 
@@ -983,8 +964,8 @@ async fn a_diverged_local_branch_stops_the_checkout_without_overwriting_it() {
     for (source, current) in [
         (PrSource::SameRepo, false),
         (PrSource::SameRepo, true),
-        (from_fork(), false),
-        (from_fork(), true),
+        (fake_fork_source(), false),
+        (fake_fork_source(), true),
     ] {
         let label = format!("{source:?} current = {current}");
         let stage = PrStage::new();
@@ -1003,7 +984,7 @@ async fn a_diverged_local_branch_stops_the_checkout_without_overwriting_it() {
 
         let err = repo
             .runner()
-            .run(&checkout_pr(source, local))
+            .run(&fake_pr_checkout(source, local))
             .await
             .expect_err(&format!("止まるはずです（{label}）"));
 
@@ -1025,14 +1006,14 @@ async fn a_refused_switch_still_leaves_the_fork_upstream_written() {
 
     let err = repo
         .runner()
-        .run(&checkout_pr(from_fork(), LocalBranch::Absent))
+        .run(&fake_pr_checkout(fake_fork_source(), LocalBranch::Absent))
         .await
         .expect_err("switch が断るはずです");
 
     assert_eq!(err.argv(), ["switch", "feat"]);
     assert_eq!(current_branch(&repo), "main");
     assert_eq!(repo.rev_parse("refs/heads/feat"), stage.pull);
-    assert_eq!(repo.git(&["config", "branch.feat.remote"]), FORK_URL);
+    assert_eq!(repo.git(&["config", "branch.feat.remote"]), FAKE_FORK_URL);
     assert_eq!(
         repo.git(&["config", "branch.feat.merge"]),
         "refs/heads/feat"
@@ -1050,7 +1031,10 @@ async fn a_cancel_that_arrives_before_the_checkout_leaves_the_head_alone() {
 
     let err = repo
         .runner()
-        .run_cancelable(&checkout_pr(from_fork(), LocalBranch::Absent), canceled)
+        .run_cancelable(
+            &fake_pr_checkout(fake_fork_source(), LocalBranch::Absent),
+            canceled,
+        )
         .await
         .expect_err("中断されるはずです");
 

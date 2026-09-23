@@ -446,6 +446,41 @@ impl RepoInfo {
     pub(super) fn remote(&self, name: &str) -> Option<&Remote> {
         self.remotes.iter().find(|remote| remote.name == name)
     }
+
+    /// `branch.<name>.remote` の値をどう読むか。**git の仕様で値は名前でも URL でも
+    /// よい**（`gh pr checkout` と PR の取り出しは fork の URL を書く。05）。
+    ///
+    /// **読み方を 1 本にする。** [`head_homes`] と `update::default_remote` が別々に
+    /// 「名前で引けなければ URL」を書いていた。
+    ///
+    /// **URL かは GitHub の形かで決めない。** git の値として URL（`:` を含む /
+    /// `/` 始まり）かで決める —— `RemoteUrl::parse` で決めると、GitHub の形でない
+    /// URL（`/srv/git/x.git`）が「消えたリモート名」に化ける。リモート名は ref の
+    /// 部品として検査されるので `:` を含められない。
+    pub(super) fn tracked<'a>(&'a self, value: &'a str) -> Tracked<'a> {
+        if value == "." {
+            Tracked::Local
+        } else if let Some(remote) = self.remote(value) {
+            Tracked::Named(remote)
+        } else if value.contains(':') || value.starts_with('/') {
+            Tracked::Url(value)
+        } else {
+            Tracked::Missing(value)
+        }
+    }
+}
+
+/// [`RepoInfo::tracked`] の答え。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tracked<'a> {
+    /// `.`（ローカル追跡）。
+    Local,
+    /// 登録されているリモート。
+    Named(&'a Remote),
+    /// URL。
+    Url(&'a str),
+    /// 名前に見えるが、登録されていない（消えたリモート）。
+    Missing(&'a str),
 }
 
 /// [`RepoInfo::target`] の状態。
@@ -1309,8 +1344,14 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
     // 下に作った fork（`acme/app` → `acme/app-fork`）から出た他人の PR が
     // 「現ブランチの PR」に当たる。
     head_homes(repo).into_iter().find_map(|home| {
-        list.iter()
-            .find(|pr| pr.head.branch == *name && pr.head.repo.as_ref() == Some(&home))
+        list.iter().find(|pr| {
+            pr.head.branch == *name
+                && pr
+                    .head
+                    .repo
+                    .as_ref()
+                    .is_some_and(|repo| repo.same_as(&home))
+        })
     })
 }
 
@@ -1348,14 +1389,17 @@ fn head_homes(repo: &RepoInfo) -> Vec<RepoRef> {
             upstream_remote: Some(value),
             ..
         }) => {
-            // 名前で引ければその URL、引けなければ値そのものを URL として読む。
-            let url = repo
-                .remote(value)
-                .map_or(value.as_str(), |remote| remote.url.as_str());
-            RemoteUrl::parse(url).ok().map(|url| RepoRef {
-                owner: url.owner,
-                repo: url.repo,
-            })
+            // 名前で引ければその URL、URL ならそのもの。
+            let url = match repo.tracked(value) {
+                Tracked::Named(remote) => Some(remote.url.as_str()),
+                Tracked::Url(url) => Some(url),
+                Tracked::Local | Tracked::Missing(_) => None,
+            };
+            url.and_then(|url| RemoteUrl::parse(url).ok())
+                .map(|url| RepoRef {
+                    owner: url.owner,
+                    repo: url.repo,
+                })
         }
         _ => None,
     };

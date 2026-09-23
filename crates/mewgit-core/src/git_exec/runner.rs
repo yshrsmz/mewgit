@@ -85,8 +85,8 @@ impl Runner {
     /// `git` を実行して結果を返す。**キャンセルできない形。**
     ///
     /// 送り手を作らずに [`run_cancelable`](Self::run_cancelable) へ渡す。送り手が
-    /// 落ちた受け側は最初の 1 回で `Err` を返し、以後は見ない（`CancelSignal`）ので、
-    /// この呼び方ではキャンセルの腕が二度と選ばれない。
+    /// 落ちた受け側は二度と合図を返さない（`CancelSignal::wait`）ので、この呼び方
+    /// ではキャンセルの腕が選ばれない。
     pub async fn run(&self, op: &GitOp) -> Result<ExecOutput, ExecError> {
         let (_, cancel) = oneshot::channel();
         self.run_cancelable(op, cancel).await
@@ -123,7 +123,7 @@ impl Runner {
 
         // **列を先頭から順に叩き、非 0 で止まる**（03 の「複数の手順を持つ書き込み」）。
         // 1 本の変種では 1 周で抜けるので、ここまでの形と変わらない。
-        let mut cancel = CancelSignal::new(cancel);
+        let mut cancel = CancelSignal(Some(cancel));
         let mut last = None;
         for (index, command) in commands.into_iter().enumerate() {
             // **手順のあいだに届いた中断は、次を起こさずに返す。** 起こしてから
@@ -175,21 +175,10 @@ impl Runner {
         // **「中断した」を別の旗で持たない。** 持つと「殺したのに待ち直さない」という
         // 組み合わせが型で書ける。
         let mut finished = None;
-        loop {
-            tokio::select! {
-                waited = &mut run => {
-                    finished = Some(waited);
-                    break;
-                }
-                // 送り手が落ちた（キャンセルできない呼び方）なら、以後は見ない。
-                got = cancel.recv(), if cancel.live => match got {
-                    Ok(()) => {
-                        terminate(pid);
-                        break;
-                    }
-                    Err(_) => cancel.live = false,
-                },
-            }
+        tokio::select! {
+            waited = &mut run => finished = Some(waited),
+            // 送り手が落ちた（キャンセルできない呼び方）なら `wait` は返らない。
+            () = cancel.wait() => terminate(pid),
         }
         // **これは「合図を撃った」であって「中断で終わった」ではない**（下の分岐で
         // 終了状態まで確かめる）。
@@ -282,6 +271,45 @@ impl Runner {
     }
 }
 
+/// 中断の合図の受け側。**手順をまたいで 1 本を使い回す**（03 の「複数の手順を
+/// 持つ書き込み」）。
+///
+/// **`None` は「もう合図は来ない」**（届いた / 送り手が落ちた）。tokio の
+/// `oneshot::Receiver` は値（か送り手が落ちたこと）を返したあとに待ち直すと panic
+/// するので、終わった受け側は捨てる。**旗を別に持たない** —— `live: bool` と並べると
+/// 「来ないのに待つ」が型で組める（`CLAUDE.md` の「旗と値を割らない」）。
+struct CancelSignal(Option<oneshot::Receiver<()>>);
+
+impl CancelSignal {
+    /// 合図が既に届いているか。待たない。
+    fn arrived(&mut self) -> bool {
+        let Some(receiver) = self.0.as_mut() else {
+            return false;
+        };
+        match receiver.try_recv() {
+            Ok(()) => true,
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Closed) => {
+                self.0 = None;
+                false
+            }
+        }
+    }
+
+    /// 合図を待つ。**合図が来たときだけ返る** —— 送り手が落ちていれば永久に待つので、
+    /// `select!` の腕は git の終了のほうが必ず採られる。
+    async fn wait(&mut self) {
+        if let Some(receiver) = self.0.as_mut() {
+            let got = receiver.await;
+            self.0 = None;
+            if got.is_ok() {
+                return;
+            }
+        }
+        std::future::pending::<()>().await;
+    }
+}
+
 /// 中断で終わったか。`signaled` は「こちらが合図を撃ったか」。
 ///
 /// **撃っただけでは決めない。** `select!` は両方 ready なら無作為に腕を選ぶので、
@@ -291,47 +319,6 @@ impl Runner {
 ///
 /// **逆に、こちらが撃っていない SIGTERM は中断ではない**（外から `kill` された）。
 /// 押した本人が止めたものだけを `Canceled` にする。
-/// 中断の合図の受け側。**手順をまたいで 1 本を使い回す**（03 の「複数の手順を
-/// 持つ書き込み」）。
-///
-/// **`live` を別に持つのは、終わった受け側をもう一度待たないため。** tokio の
-/// `oneshot::Receiver` は値（か送り手が落ちたこと）を返したあとに待ち直すと panic
-/// する。1 本だけ叩いていたころは `select!` を 1 回しか回さなかったので要らなかった。
-struct CancelSignal {
-    receiver: oneshot::Receiver<()>,
-    /// まだ合図が来うるか。送り手が落ちたら偽。
-    live: bool,
-}
-
-impl CancelSignal {
-    fn new(receiver: oneshot::Receiver<()>) -> Self {
-        Self {
-            receiver,
-            live: true,
-        }
-    }
-
-    /// 合図が既に届いているか。待たない。
-    fn arrived(&mut self) -> bool {
-        if !self.live {
-            return false;
-        }
-        match self.receiver.try_recv() {
-            Ok(()) => true,
-            Err(TryRecvError::Empty) => false,
-            Err(TryRecvError::Closed) => {
-                self.live = false;
-                false
-            }
-        }
-    }
-
-    /// 合図を待つ。**`live` のときだけ呼ぶ**（`select!` の `if` で守る）。
-    async fn recv(&mut self) -> Result<(), oneshot::error::RecvError> {
-        (&mut self.receiver).await
-    }
-}
-
 fn canceled_by(signaled: bool, status: &ExitStatus) -> bool {
     signaled && status.signal() == Some(libc::SIGTERM)
 }

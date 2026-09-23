@@ -2083,12 +2083,18 @@ pub enum Modal {
     /// 編集できる欄はカーソルを持てないといけない（設計にはずっと `String` と
     /// 書いてあった）。
     ///
-    /// **どの欄を編集しているかは [`PrField`] が持つ。** 欄が 4 つあるので、
+    /// **どの欄を編集しているかは [`PrField`] が持つ。** 欄が複数あるので、
     /// カーソルの位置だけでは決まらない。
+    ///
+    /// **`head` は選ばせる**（01 の「head の組み立て」）。`heads` は `N` を押した時点の
+    /// 候補で、`head_cursor` がそのどれを選んでいるか。**確定のときに候補を組み直す**
+    /// ので、ここにあるのは画面に出すための写し。
     PrCreate {
         title: TextBuffer,
         body: TextBuffer,
         base: TextBuffer,
+        heads: Vec<PrHead>,
+        head_cursor: usize,
         draft: bool,
         field: PrField,
     },
@@ -2140,11 +2146,15 @@ impl Modal {
             Modal::AccountPicker { view, cursor } => {
                 *cursor = stepped_index(*cursor, view.candidates().len(), delta);
             }
+            // **`head` の候補から選ぶ**（`Head` 欄の `←` / `→`）。どの欄に居るかは
+            // 呼ぶ側（`update::prs::pr_create_key`）が見る。
+            Modal::PrCreate {
+                heads, head_cursor, ..
+            } => *head_cursor = stepped_index(*head_cursor, heads.len(), delta),
             Modal::Confirm { .. }
             | Modal::Input { .. }
             | Modal::CommitMessage { .. }
             | Modal::RebaseEditor { .. }
-            | Modal::PrCreate { .. }
             | Modal::Help => {}
         }
     }
@@ -2164,6 +2174,8 @@ pub enum PrField {
     Title,
     Body,
     Base,
+    /// **文字を打つ欄ではない**（`Draft` と同じ）。`←` / `→` で候補を選び直す。
+    Head,
     Draft,
 }
 
@@ -2182,7 +2194,8 @@ impl PrField {
         match self {
             PrField::Title => PrField::Body,
             PrField::Body => PrField::Base,
-            PrField::Base => PrField::Draft,
+            PrField::Base => PrField::Head,
+            PrField::Head => PrField::Draft,
             PrField::Draft => PrField::Title,
         }
     }
@@ -2193,7 +2206,39 @@ impl PrField {
             PrField::Title => PrField::Draft,
             PrField::Body => PrField::Title,
             PrField::Base => PrField::Body,
-            PrField::Draft => PrField::Base,
+            PrField::Head => PrField::Base,
+            PrField::Draft => PrField::Head,
+        }
+    }
+}
+
+/// PR 作成の `head` の候補 1 つ（01 の「head の組み立て」）。
+///
+/// **owner だけを持ち、リポジトリ名は持たない。** `POST /pulls` の `head` が運べるのは
+/// `<owner>:<branch>` までなので、同じ owner の 2 つのリポジトリは送る値の上で
+/// 区別できない —— 持つと、区別できない 2 つを別の候補として並べることになる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrHead {
+    pub owner: String,
+    pub branch: String,
+}
+
+impl PrHead {
+    /// 欄に出す字。**常に `<owner>:<branch>`** —— どのリポジトリから出すかを
+    /// 人に確かめさせる欄なので、送る値（[`PrHead::api_value`]）と違って owner を
+    /// 落とさない。
+    pub fn label(&self) -> String {
+        format!("{}:{}", self.owner, self.branch)
+    }
+
+    /// `POST /pulls` の `head`。**`target` と同じ owner ならブランチ名だけ**、違えば
+    /// `<owner>:<branch>`（gh の `QualifiedHeadRef` と同じ形）。GitHub の login は
+    /// 大文字小文字を区別しないので、比べるときもそうする。
+    pub(super) fn api_value(&self, target_owner: &str) -> String {
+        if self.owner.eq_ignore_ascii_case(target_owner) {
+            self.branch.clone()
+        } else {
+            self.label()
         }
     }
 }

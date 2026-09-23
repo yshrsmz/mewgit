@@ -3,7 +3,8 @@
 use std::fs;
 
 use mewgit_core::git_read::{
-    GitReadError, HeadInfo, LogPage, Oid, RefLabel, RepoReader, Upstream, UpstreamConfig,
+    GitReadError, HeadInfo, LogPage, Oid, RefLabel, RemoteCopy, RepoReader, Upstream,
+    UpstreamConfig,
 };
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
@@ -326,7 +327,51 @@ fn head_reports_the_current_branch() {
             name: "main".to_string(),
             oid: first,
             upstream_remote: None,
+            remote_copies: Vec::new(),
         }
+    );
+}
+
+#[test]
+fn head_lists_the_remotes_that_have_a_branch_of_the_same_name() {
+    // **PR 作成の `head` の候補はここから組む**（01 の「head の組み立て」）。
+    // 見るのは「登録されているリモートの、同名の ref」だけ。
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    let second = repo.commit("second");
+    repo.git(&["remote", "add", "origin", "git@github.com:me/mewgit.git"]);
+    // **`/` を含むリモート名**。ref 名から切り出す形だと `a` と `b/main` に割れる。
+    repo.git(&["remote", "add", "a/b", "git@github.com:ab/mewgit.git"]);
+    // 登録されているが同名のブランチが無いリモート。
+    repo.git(&["remote", "add", "upstream", "git@github.com:up/mewgit.git"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", &first.to_string()]);
+    repo.git(&["update-ref", "refs/remotes/a/b/main", &second.to_string()]);
+    repo.git(&[
+        "update-ref",
+        "refs/remotes/upstream/other",
+        &first.to_string(),
+    ]);
+    // **登録されていないリモート**の ref。リモートの一覧から組むので拾わない。
+    repo.git(&["update-ref", "refs/remotes/ghost/main", &first.to_string()]);
+
+    let Ok(HeadInfo::Branch { remote_copies, .. }) = RepoReader::open(repo.path()).unwrap().head()
+    else {
+        panic!("ブランチに乗っていない");
+    };
+
+    // 並びはリモート名の順（`remotes()` と同じ）。
+    assert_eq!(
+        remote_copies,
+        [
+            RemoteCopy {
+                remote: "a/b".to_string(),
+                oid: second,
+            },
+            RemoteCopy {
+                remote: "origin".to_string(),
+                oid: first,
+            },
+        ]
     );
 }
 
@@ -351,6 +396,7 @@ fn head_reads_the_tracking_remote_only_once_the_merge_ref_is_there() {
             name: "main".to_string(),
             oid: first,
             upstream_remote: None,
+            remote_copies: Vec::new(),
         },
         "`merge` が無いのに追跡先を返している"
     );
@@ -363,6 +409,7 @@ fn head_reads_the_tracking_remote_only_once_the_merge_ref_is_there() {
             name: "main".to_string(),
             oid: first,
             upstream_remote: Some("fork".to_string()),
+            remote_copies: Vec::new(),
         }
     );
 }

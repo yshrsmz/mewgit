@@ -218,7 +218,7 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 
 ### head
 
-- 通常は `Branch { name, oid, upstream_remote }`、detached HEAD は `Detached(oid)`
+- 通常は `Branch { name, oid, upstream_remote, remote_copies }`、detached HEAD は `Detached(oid)`
 - コミットが 1 つも無い（unborn）ときは `repo.head()` が `ErrorCode::UnbornBranch` を返すので、
   `HEAD` の symbolic target からブランチ名を取って `Unborn { name }` にする
 - **`upstream_remote` は `branch.<HEAD>.remote`。** 読み手は `app` の「現ブランチの PR」で、
@@ -231,6 +231,19 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
   （01 の「現ブランチの PR」。`RepoInfo.target` が `default_remote` を呼ばないのと
   同じ数え方）。`head` と `remotes` は同じ `Cmd::LoadRepoInfo` に乗るので、
   この 2 つのあいだには順序が無い
+- **`remote_copies` は、登録されている各リモート `<r>` について
+  `refs/remotes/<r>/<HEAD のブランチ名>` が在ればその名前と oid。** 読み手は PR 作成の
+  `head` の候補（01 の「head の組み立て」）で、**「どのリモートにそのブランチが在るか」
+  を git が残しているのはここだけ**（追跡設定は「何を基にしたか」しか答えない）。
+  - **`refs/remotes/*/<name>` を glob しない。** リモート名は `/` を含められるので
+    （`git remote add a/b …` が通る）、ref 名からリモート名を切り出せない。
+    **リモートの一覧を先に引き、名前ごとに組み立てて引く**
+  - **`remotes` と別に引かない。** 同じ `Cmd::LoadRepoInfo` の中で読むので、
+    候補と `RepoInfo.remotes`（URL を引く先）のあいだに順序が無い
+  - **読み直しは `Reload::Refs` に乗る**（`push` / `fetch` のあとに `Cmd::LoadRepoInfo`
+    が出る。`update/exec.rs` の `Reload`）。**外で `git push` したときは、次に ref を
+    動かす書き込みか `f` まで古い**（ファイルは監視していない）
+  - 非 UTF-8 のリモート名は飛ばす（ref 名を組めない）
 
 ## ログ列挙
 

@@ -1224,6 +1224,7 @@ mod tests {
                 name: "main".to_string(),
                 oid,
                 upstream_remote: None,
+                remote_copies: Vec::new(),
             },
             refs: RefIndex::from_iter([(
                 oid,

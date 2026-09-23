@@ -674,6 +674,7 @@ mod tests {
                 name: "main".to_string(),
                 oid,
                 upstream_remote: None,
+                remote_copies: Vec::new(),
             })
         );
         let labels: Vec<&str> = state

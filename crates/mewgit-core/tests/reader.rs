@@ -153,6 +153,7 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
             name: "main".to_string(),
             oid,
             upstream_remote: None,
+            remote_copies: Vec::new(),
         }
     );
     let labels: Vec<&str> = refs.labels(oid).iter().map(|l| l.name()).collect();

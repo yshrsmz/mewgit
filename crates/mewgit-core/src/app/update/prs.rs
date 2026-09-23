@@ -10,12 +10,12 @@ use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 
 use super::remote::{conventional_remote, NoRemote};
 use super::{edit_key, focus, multiline_edit_key, submit};
-use crate::app::state::current_row;
+use crate::app::state::{current_row, Tracked};
 use crate::app::{
-    AppState, BranchLoad, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, RepoInfo,
-    TextBuffer,
+    AppState, BranchLoad, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHead,
+    RepoInfo, TextBuffer,
 };
-use crate::git_read::HeadInfo;
+use crate::git_read::{HeadInfo, RemoteCopy};
 use crate::github::CreatePr;
 
 /// PRs ペインのキー処理。
@@ -181,10 +181,10 @@ fn fork_branch_name(pr: &PullRequest, remote: &Remote) -> String {
 
 /// `N`。[`Modal::PrCreate`] を開く（01 の「PR 作成（`N`）」）。
 ///
-/// **押した時点で断るのは 3 つ**で、どれも**リクエストを組めない**か**確実に 422 に
-/// なる**もの。GitHub が使えない（[`AppState::github_block`] が値で答える。`r` と
-/// 同じ）、HEAD がブランチでない（head に載せる名前が無い）、このブランチの PR が
-/// 既にある。
+/// **押した時点で断る**のは、**リクエストを組めない**か**確実に 422 になる**もの
+/// —— GitHub が使えない（[`AppState::github_block`] が値で答える。`r` と同じ）、
+/// HEAD がブランチでない（head に載せる名前が無い）、このブランチの PR が既にある、
+/// `head` の候補が無い（[`head_candidates`]）。
 ///
 /// **3 つ目は [`AppState::current_pr`] の答えをそのまま使う。** 別の判定を書くと
 /// 座り直し（01 の「現ブランチの PR」）と食い違い、**カーソルが座っているその行の
@@ -192,10 +192,9 @@ fn fork_branch_name(pr: &PullRequest, remote: &Remote) -> String {
 /// 一覧を落とす経路（`f` / `A` / `r`）がそのままこの断りを落とす経路になっている
 /// （#53）。
 ///
-/// **push 済みかは見ない。** リモートに無いブランチは GitHub が 422 で断るので、
-/// その本文を通知に出す（01）。手前で判定するには追跡設定を読むことになるが、
-/// **あの `None` には理由が 4 つあり**（#47）、**git は「どこへ push したか」を
-/// 憶えていない**（#98）。
+/// **候補が無いときに断るのは、ブランチ名だけの `head` を送らないため。** owner を
+/// 付けない `head` は base リポジトリの中のブランチとして解決されるので、`target` 側に
+/// 同名のブランチがあれば他人のブランチから PR が開く（01 の「head の組み立て」）。
 fn open_pr_create(state: &mut AppState) -> Cmd {
     if github_blocked(state) {
         return Cmd::None;
@@ -216,6 +215,11 @@ fn open_pr_create(state: &mut AppState) -> Cmd {
         );
         return Cmd::None;
     }
+    let heads = head_candidates(&state.repo);
+    if heads.is_empty() {
+        state.push_notice(NoticeLevel::Warn, NOT_PUSHED.to_string(), None);
+        return Cmd::None;
+    }
 
     // **既定リモートが言う既定ブランチ**（02 の `Remote::head_branch`）。一度も
     // fetch していないリモートには symref が無いので、そのときは空欄で開く。
@@ -230,6 +234,10 @@ fn open_pr_create(state: &mut AppState) -> Cmd {
         title: TextBuffer::default(),
         body: TextBuffer::default(),
         base: TextBuffer::from_text(&base),
+        heads,
+        // **既定は先頭**（01 の「head の組み立て」）。#101 の「候補の一覧の先頭を
+        // 断定値に使わない」を破らないのは、先頭が欄に出て人が確定するから。
+        head_cursor: 0,
         draft: false,
         field: PrField::default(),
     });
@@ -295,6 +303,8 @@ fn refresh(state: &mut AppState) -> Cmd {
 ///
 /// **`Space` は draft の欄でだけトグル。** ほかの欄では打った空白がそのまま入る
 /// （[`edit_key`](super::edit_key) が受ける）。
+///
+/// **`←` / `→` は head の欄でだけ候補を選び直す。** ほかの欄では文字カーソルの移動。
 pub(super) fn pr_create_key(state: &mut AppState, key: Key) -> Cmd {
     // 取り消し。**確認は挟まない**（`CommitMessage` と同じ。01）。
     if key == Key::new(KeyCode::Esc) {
@@ -311,35 +321,56 @@ pub(super) fn pr_create_key(state: &mut AppState, key: Key) -> Cmd {
         _ => {}
     }
 
-    let Some(Modal::PrCreate {
+    let Some(modal) = state.modal.as_mut() else {
+        return Cmd::None;
+    };
+    let Modal::PrCreate {
         title,
         body,
         base,
         draft,
         field,
-    }) = state.modal.as_mut()
+        ..
+    } = modal
     else {
         return Cmd::None;
     };
 
     // **欄の判断は 1 箇所。** どの欄かを何度も問い直すと、到達しない腕が混ざる。
-    match field {
-        // **文字を打つ欄ではないので、編集キーを一切渡さない。**
+    // 返すのは head の候補を動かす向き（`0` は動かさない）。
+    let step = match field {
+        // **文字を打つ欄ではないので、編集キーを一切渡さない。** 候補の選び直しは
+        // 分解を解いてから [`Modal::move_cursor`] に任せる（端の扱いを一覧の
+        // カーソルと揃える）。
+        PrField::Head => match key.code() {
+            KeyCode::Left => -1,
+            KeyCode::Right => 1,
+            _ => 0,
+        },
         PrField::Draft => {
             if key == Key::char(' ') {
                 *draft = !*draft;
             }
+            0
         }
         // **改行できるのは body だけ**（`CommitMessage` と同じ規則を共有する）。
         // 1 行の欄に 2 行目ができると、`text()` の返す `\n` 入りの文字列がそのまま
         // タイトルやブランチ名になる（`Modal::Input` と同じ理由。01 の「1 行入力」）。
-        PrField::Body => multiline_edit_key(body, key),
+        PrField::Body => {
+            multiline_edit_key(body, key);
+            0
+        }
         PrField::Title => {
             let _ = edit_key(title, key);
+            0
         }
         PrField::Base => {
             let _ = edit_key(base, key);
+            0
         }
+    };
+    if step != 0 {
+        modal.move_cursor(step);
     }
     Cmd::None
 }
@@ -378,10 +409,10 @@ fn move_pr_field(state: &mut AppState, step: fn(PrField) -> PrField) -> Cmd {
 /// 知っているのは GitHub 側**で、こちらが持つのは symref だけ（無いことがふつうに
 /// ある。02）。
 ///
-/// **head は HEAD のブランチ名だけ**（01 の「head の組み立て」）。fork に在る
-/// ブランチから出す `<owner>:<branch>` は**受け入れた穴**で、塞ぐには
-/// 「そのブランチがどのリモートに在るか」を読む必要がある（plan.md の PR
-/// チェックアウトの行）。
+/// **head は欄で選んだ候補**（01 の「head の組み立て」）。**写しを送らない** ——
+/// 開いているあいだに `RepoInfo` が読み直されると候補が変わるので、ここで
+/// [`head_candidates`] を引き直し、選んでいた候補が残っていなければ**閉じずに欄を
+/// 入れ替えて確かめ直させる**。
 ///
 /// **`Cmd` が落とされるなら閉じない**（`update::submit`）。**材料が消えていても
 /// 閉じない** —— 開いてから `A` の書き込みが終わると `account` が `Resolving` に
@@ -391,6 +422,8 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
         title,
         body,
         base,
+        heads,
+        head_cursor,
         draft,
         ..
     }) = &state.modal
@@ -404,6 +437,7 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
     // **打った字を先に写す。** 下の断りが `state` を可変で借りるので、モーダルを
     // 借りたままでは通せない。
     let typed = (title.text(), body.text(), base.text(), *draft);
+    let chosen = heads.get(*head_cursor).cloned();
 
     // **開いてから材料が消えることはある。** `A` で選び直すと `GitOp::SetAccount` が
     // 走り、**その書き込みが終わった時点で** `exec_finished` → `resolve_again` が
@@ -413,10 +447,39 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
     if github_blocked(state) {
         return Cmd::None;
     }
-    let Some(head) = head_branch(&state.repo) else {
+    if head_branch(&state.repo).is_none() {
         // 開いたあとに HEAD が動いた形。**閉じない** —— 打った本文を返せない。
         state.push_notice(NoticeLevel::Warn, OFF_BRANCH.to_string(), None);
         return Cmd::None;
+    }
+    let fresh = head_candidates(&state.repo);
+    let Some(chosen) = chosen.filter(|chosen| fresh.contains(chosen)) else {
+        // 開いたあとに候補が変わった形（`f` / 外の checkout で `RepoInfo` が読み直された）。
+        // **閉じずに欄を入れ替え、そこへ移す** —— 選び直すのは人。
+        let notice = if fresh.is_empty() {
+            NOT_PUSHED
+        } else {
+            HEADS_CHANGED
+        };
+        if let Some(Modal::PrCreate {
+            heads,
+            head_cursor,
+            field,
+            ..
+        }) = state.modal.as_mut()
+        {
+            *heads = fresh;
+            *head_cursor = 0;
+            *field = PrField::Head;
+        }
+        state.push_notice(NoticeLevel::Warn, notice.to_string(), None);
+        return Cmd::None;
+    };
+    // `github_blocked` を抜けたので `target` は決まっている（`github_block` の
+    // `(Resolved, Resolved)` の腕）。
+    let head = match state.repo.target.resolved() {
+        Some(target) => chosen.api_value(&target.owner),
+        None => chosen.label(),
     };
     let (title, body, base, draft) = typed;
     let input = CreatePr {
@@ -432,33 +495,86 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
 /// ブランチに乗っていないときの案内。**開く側と確定する側で同じ字を出す。**
 const OFF_BRANCH: &str = "ブランチに乗っていないので PR を作れません";
 
-/// `POST /pulls` の `head` —— HEAD のブランチ名。ブランチに乗っていなければ `None`。
+/// HEAD のブランチ名。ブランチに乗っていなければ `None`。
 ///
-/// **owner を付けない**（01 の「head の組み立て」）。fork に在るブランチは
-/// `<owner>:<branch>` で送る必要があるが、**どのリモートに在るかを git は憶えて
-/// いない** —— `branch.<name>.remote` が答えるのは**何を基にしたか**で、
-/// `git checkout -b feat upstream/main` はそれを `upstream` にする（実測
-/// 2026-09-21、git 2.55、`env -i` の一時リポジトリ）。**そこから owner を組むと、
-/// 自分の fork に push するつもりのブランチが upstream の owner で送られる。**
-///
-/// **`head_homes()` の先頭を使わない。** あれは「PR の head が**在りうる**
-/// リポジトリを確からしい順に」返す一覧で、**全部試す呼び手**（一覧のどの行に
-/// 座るか。#98）を前提にしている。先頭だけを断定値として採ると、**一覧が一覧で
-/// ある理由を捨てる**（`CLAUDE.md` の「共有先に寄せるときは、その基盤の暗黙の
-/// 前提が新しい利用者にも成り立つかを確かめる」）。
-///
-/// **残る穴** —— fork に在るブランチからは PR を作れない。ふつうは GitHub が
-/// 「head が無い」と 422 で断る（その本文は通知に出る）が、**422 を守りとしては
-/// 数えない** —— owner を付けない `head` は**base リポジトリの中のブランチ**として
-/// 解決されるので、`target` 側に同名のブランチがあれば他人のブランチから PR が
-/// 開く（**実 API では確かめていない**。01）。塞ぐには「そのブランチがどのリモートに
-/// 在るか」を読むことになる。取り出し（`Enter`）とは材料が違うと判ったので、
-/// PR チェックアウトの 2 本目へ送った（plan.md。割った理由は 01）。
+/// **`POST /pulls` の `head` にそのまま使わない**（01 の「head の組み立て」）。
+/// owner を付けない `head` は base リポジトリの中のブランチとして解決されるので、
+/// fork に在るブランチから出すと、`target` 側の同名ブランチから PR が開きうる。
+/// 送る値は [`head_candidates`] から人が選ぶ。
 fn head_branch(repo: &RepoInfo) -> Option<String> {
     match repo.head.as_ref() {
         Some(HeadInfo::Branch { name, .. }) => Some(name.clone()),
         _ => None,
     }
+}
+
+/// どのリモートにもこのブランチが無いときの案内。**開く側と確定する側で同じ字を出す。**
+///
+/// **`f` を案内する** —— 候補は remote-tracking ref から組むので、別の端末から
+/// push しただけのブランチは取得するまで候補に出ない（01 の「head の組み立て」の代償）。
+const NOT_PUSHED: &str = "どのリモートにもこのブランチがありません（push 済みなら f で取得）";
+
+/// 開いているあいだに候補が変わったときの案内。
+const HEADS_CHANGED: &str = "head の候補が変わりました。確かめてから確定してください";
+
+/// PR 作成の `head` の候補（01 の「head の組み立て」）。HEAD がブランチに
+/// 乗っていなければ空。
+///
+/// **候補は 2 つの材料から組む。**
+/// - 同名の remote-tracking ref が在るリモート（`HeadInfo::Branch.remote_copies`）。
+///   在ることが「そのリモートにそのブランチが在った」の証拠で、`branch.<name>.remote`
+///   （何を基にしたか）と違って push の結果そのものが残る
+/// - 追跡設定の URL（`branch.<name>.remote` が URL のとき）。`gh pr checkout` と
+///   mewgit の取り出しは fork の URL を書き、**remote-tracking ref を作らない**（05）
+///
+/// **`branch.<name>.pushRemote` は読まない。** 取り出しは `remote` にも同じ URL を
+/// 書くので上の 2 つ目で当たり、名前の `pushRemote` へ push したなら 1 つ目の ref が
+/// できる。
+///
+/// **並びは HEAD と同じ oid の ref が先**（gh が採るのと同じ「そこまで push 済み」の
+/// 証拠）、残りはリモート名の順、URL は最後。**owner で 1 つに畳む** —— 送る値が
+/// `<owner>:<branch>` までしか運べない（[`PrHead`]）。**GitHub の形として読めない
+/// リモートは入れない**。host は比べない（`state::head_homes` と同じ理由。01 の
+/// 「現ブランチの PR」）。
+fn head_candidates(repo: &RepoInfo) -> Vec<PrHead> {
+    let Some(HeadInfo::Branch {
+        name,
+        oid,
+        upstream_remote,
+        remote_copies,
+    }) = repo.head.as_ref()
+    else {
+        return Vec::new();
+    };
+    let owner_of = |value: &str| url::RemoteUrl::parse(value).ok().map(|url| url.owner);
+
+    // **安定ソート**なので、同じ側の中ではリモート名の順が残る。
+    let mut copies: Vec<&RemoteCopy> = remote_copies.iter().collect();
+    copies.sort_by_key(|copy| copy.oid != *oid);
+    let from_refs = copies
+        .into_iter()
+        .filter_map(|copy| repo.remote(&copy.remote))
+        .filter_map(|remote| owner_of(&remote.url));
+    let from_url = upstream_remote
+        .as_deref()
+        .and_then(|value| match repo.tracked(value) {
+            Tracked::Url(url) => owner_of(url),
+            Tracked::Named(_) | Tracked::Local | Tracked::Missing(_) => None,
+        });
+
+    let mut owners: Vec<String> = Vec::new();
+    for owner in from_refs.chain(from_url) {
+        if !owners.iter().any(|seen| seen.eq_ignore_ascii_case(&owner)) {
+            owners.push(owner);
+        }
+    }
+    owners
+        .into_iter()
+        .map(|owner| PrHead {
+            owner,
+            branch: name.clone(),
+        })
+        .collect()
 }
 
 /// PR を作った答えが届いた（01 の「PR 作成（`N`）」）。
@@ -781,6 +897,48 @@ mod tests {
         state
     }
 
+    /// [`state_on_prs_tab`] に加えて、**`head` の候補が 1 つある**状態 ——
+    /// `origin`（[`fake_target`] と同じリポジトリ）に同名のブランチが在る。
+    ///
+    /// **`N` を押すテストの土台。** 候補が無いと `N` は開かない（01 の
+    /// 「head の組み立て」）。
+    fn state_for_create(branch: &str) -> AppState {
+        let mut state = state_on_prs_tab(branch);
+        state.repo.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
+        set_copies(&mut state, &[("origin", true)]);
+        state
+    }
+
+    /// HEAD のブランチの `remote_copies` を差し替える。`(リモート名, HEAD と同じ位置か)`。
+    ///
+    /// **組み直さない**（[`state_tracking`] と同じ理由）。
+    fn set_copies(state: &mut AppState, copies: &[(&str, bool)]) {
+        let Some(HeadInfo::Branch {
+            oid, remote_copies, ..
+        }) = &mut state.repo.head
+        else {
+            unreachable!("put_on_branch がブランチに置いている");
+        };
+        *remote_copies = copies
+            .iter()
+            .map(|(remote, at_head)| RemoteCopy {
+                remote: (*remote).to_string(),
+                oid: if *at_head { *oid } else { fake_oid(9) },
+            })
+            .collect();
+    }
+
+    /// 開いている [`Modal::PrCreate`] の候補（欄に出る字）と、選んでいる位置。
+    fn heads_of(state: &AppState) -> (Vec<String>, usize) {
+        let Some(Modal::PrCreate {
+            heads, head_cursor, ..
+        }) = &state.modal
+        else {
+            panic!("PrCreate が開いていません: {:?}", state.modal);
+        };
+        (heads.iter().map(PrHead::label).collect(), *head_cursor)
+    }
+
     /// [`state_on_prs_tab`] に加えて、**`#82` の集計まで憶えた**状態。
     fn state_with_one_summary(branch: &str) -> AppState {
         let mut state = state_on_prs_tab(branch);
@@ -832,6 +990,7 @@ mod tests {
             base,
             draft,
             field,
+            ..
         }) = &state.modal
         else {
             panic!("PrCreate が開いていません: {:?}", state.modal);
@@ -853,10 +1012,10 @@ mod tests {
         // **base は `refs/remotes/<既定リモート>/HEAD`**（01 の「PR 作成（`N`）」）。
         // **`Some` と `None` を 1 本で見る** —— 空欄のほうだけを見る assert は、
         // `head_branch` を 1 行も置かなくても通る（`CLAUDE.md`）。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         state.repo.remotes = vec![Remote {
             name: "origin".to_string(),
-            url: "https://github.com/owner/repo.git".to_string(),
+            url: "https://github.com/yshrsmz/mewgit.git".to_string(),
             head_branch: Some("trunk".to_string()),
         }];
 
@@ -871,8 +1030,8 @@ mod tests {
         assert_eq!(field, PrField::Title, "最初の欄は title");
 
         // 一度も fetch していないリモート（symref が無い）。
-        let mut state = state_on_prs_tab("feat/x");
-        state.repo.remotes = remotes_of(&[("origin", "https://github.com/owner/repo.git")]);
+        let mut state = state_for_create("feat/x");
+        state.repo.remotes = remotes_of(&[("origin", "https://github.com/yshrsmz/mewgit.git")]);
         let _ = press(&mut state, 'N');
         let (_, _, base, _, _) = modal_of(&state);
         assert_eq!(base.text(), "", "symref が無ければ空欄で開く");
@@ -882,7 +1041,7 @@ mod tests {
     fn n_refuses_when_the_branch_already_has_a_pull_request() {
         // **`AppState::current_pr` の答えをそのまま使う**（01）。別の判定を書くと、
         // **カーソルが座っているその行の PR を「無い」と言って作りに行く**形が作れる。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         deliver(&mut state, vec![fake_pull_request(7, "feat/x", "sha7")]);
 
         let cmd = press(&mut state, 'N');
@@ -902,7 +1061,7 @@ mod tests {
     #[test]
     fn n_refuses_off_a_branch_and_while_github_is_unavailable() {
         // **どちらもリクエストを組めない形**（01 の表）。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
         let cmd = press(&mut state, 'N');
         assert_eq!(cmd, Cmd::None);
@@ -910,7 +1069,7 @@ mod tests {
         assert!(last_notice(&state).contains("ブランチ"), "{state:?}");
 
         // **理由は `github_block` が値で答える**（`r` と同じ。消去法で組まない）。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         state.account = AccountState::Degraded(DegradedReason::GhMissing);
         let _ = press(&mut state, 'N');
         assert!(state.modal.is_none(), "degraded で開いた");
@@ -919,11 +1078,17 @@ mod tests {
 
     #[test]
     fn tab_walks_the_fields_and_space_only_toggles_draft() {
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         let _ = press(&mut state, 'N');
 
         // 宣言順に巡る（07 の縦の並びと同じ）。
-        for wanted in [PrField::Body, PrField::Base, PrField::Draft, PrField::Title] {
+        for wanted in [
+            PrField::Body,
+            PrField::Base,
+            PrField::Head,
+            PrField::Draft,
+            PrField::Title,
+        ] {
             let _ = press_code(&mut state, KeyCode::Tab);
             assert_eq!(modal_of(&state).4, wanted, "Tab の行き先");
         }
@@ -950,7 +1115,7 @@ mod tests {
         // **貼り付けも欄ごとに規則が変わる**（`update::paste`）。body は複数行、
         // title と base は 1 行（`Modal::Input` と同じ。改行を落とすと「末尾に改行が
         // 付いただけ」の正当な貼り付けまで拒む）。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         let _ = press(&mut state, 'N');
 
         let _ = update(&mut state, Msg::Paste("fix: a\nb".to_string()));
@@ -968,15 +1133,29 @@ mod tests {
         let _ = update(&mut state, Msg::Paste("ma\nin".to_string()));
         assert_eq!(modal_of(&state).2.text(), "main", "base で改行が残った");
 
-        // **`Draft` は文字を打つ欄ではない。** 貼り付けても何も変わらない。
-        let _ = press_code(&mut state, KeyCode::Tab);
+        // **`Head` と `Draft` は文字を打つ欄ではない。** 貼り付けても何も変わらない
+        // （`Head` に入ると候補の外の値が作れる）。
         let snapshot = |state: &AppState| {
             let (title, body, base, draft, _) = modal_of(state);
-            (title.text(), body.text(), base.text(), draft)
+            (
+                title.text(),
+                body.text(),
+                base.text(),
+                draft,
+                heads_of(state),
+            )
         };
-        let before = snapshot(&state);
-        let _ = update(&mut state, Msg::Paste("x".to_string()));
-        assert_eq!(snapshot(&state), before, "draft の欄で貼り付けが入った");
+        for wanted in [PrField::Head, PrField::Draft] {
+            let _ = press_code(&mut state, KeyCode::Tab);
+            assert_eq!(modal_of(&state).4, wanted);
+            let before = snapshot(&state);
+            let _ = update(&mut state, Msg::Paste("x".to_string()));
+            assert_eq!(
+                snapshot(&state),
+                before,
+                "{wanted:?} の欄で貼り付けが入った"
+            );
+        }
     }
 
     #[test]
@@ -984,7 +1163,7 @@ mod tests {
         // **`CommitMessage` に揃える**（01）。修飾なしは確定、修飾付きは改行、
         // **改行できるのは body だけ** —— 1 行の欄に 2 行目ができると `text()` の
         // 返す字に `\n` が混ざる。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         let _ = press(&mut state, 'N');
         let _ = press(&mut state, 'a');
         let _ = update(&mut state, enter_with(ALT));
@@ -1004,10 +1183,10 @@ mod tests {
 
     #[test]
     fn enter_sends_what_was_typed_and_an_empty_title_keeps_the_box_open() {
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         state.repo.remotes = vec![Remote {
             name: "origin".to_string(),
-            url: "https://github.com/owner/repo.git".to_string(),
+            url: "https://github.com/yshrsmz/mewgit.git".to_string(),
             head_branch: Some("main".to_string()),
         }];
         let _ = press(&mut state, 'N');
@@ -1040,25 +1219,27 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_tracking_another_repository_still_sends_a_plain_head() {
-        // **追跡先から owner を組まない**（`head_branch` の doc）。
+    fn the_head_comes_from_where_the_branch_is_and_not_from_what_it_tracks() {
+        // **追跡先から owner を組まない**（01 の「head の組み立て」）。
         // `branch.<name>.remote` が答えるのは**何を基にしたか**で、
-        // `git checkout -b feat upstream/main` はそれを `upstream` にする
-        // （実測 2026-09-21、git 2.55）—— そこから `<owner>:<branch>` を組むと、
-        // **自分の fork に push するつもりのブランチが upstream の owner で送られる**。
-        //
-        // **fork に在るブランチから PR を作れないのは受け入れた穴**（plan.md）。
-        // GitHub が 422 で断り、その本文は通知に出る。
+        // `git checkout -b feat bob/feat` はそれを `bob` にする（実測 2026-09-21、
+        // git 2.55）—— そこから `<owner>:<branch>` を組むと、**自分の fork に
+        // push したブランチが bob の owner で送られる**。候補は同名の
+        // remote-tracking ref が在るリモート（ここでは自分の fork の `origin`）。
         //
         // **追跡先が死んでいないことを同じ 1 本で見る。** `head` が読まない以上、
         // 追跡設定を消しても `head` の assert は通る（#96 の「入力を 1 つ消しても
         // 緑」）ので、**座り直しがそれを読んでいること**を先に見る —— この 2 つが
-        // 同じ状態から出る（寛容な照合と、断定する head）のが分けた理由そのもの。
+        // 同じ状態から出る（寛容な照合と、人に選ばせる head）のが分けた理由そのもの。
         let mut state = state_tracking(
             "feat/x",
             "fork",
-            &[("fork", "git@github.com:someone-else/mewgit.git")],
+            &[
+                ("fork", "git@github.com:someone-else/mewgit.git"),
+                ("origin", "git@github.com:me/mewgit.git"),
+            ],
         );
+        set_copies(&mut state, &[("origin", true)]);
         let opened = tab_to(&mut state, Pane::Prs);
         assert_eq!(opened, Cmd::None, "一覧がまだ無いのに扇形が出た");
 
@@ -1073,6 +1254,7 @@ mod tests {
         // その PR が閉じられた（一覧から消えた）ところから作る。
         deliver(&mut state, Vec::new());
         let _ = press(&mut state, 'N');
+        assert_eq!(heads_of(&state), (vec!["me:feat/x".to_string()], 0));
         type_text(&mut state, "fix");
 
         let cmd = press_code(&mut state, KeyCode::Enter);
@@ -1080,15 +1262,178 @@ mod tests {
         let Cmd::CreatePr(input) = cmd else {
             panic!("CreatePr が出ていない: {cmd:?}");
         };
-        // **同じ追跡先から `bob:feat/x` は組まない。**
+        // **fork の owner を付ける**（`target` は yshrsmz/mewgit）。
+        assert_eq!(input.head, "me:feat/x");
+    }
+
+    #[test]
+    fn n_refuses_when_no_remote_has_the_branch() {
+        // **ブランチ名だけで送らない**（01 の「head の組み立て」）。owner を付けない
+        // `head` は base リポジトリの中のブランチとして解決される。
+        let mut state = state_for_create("feat/x");
+        set_copies(&mut state, &[]);
+
+        let cmd = press(&mut state, 'N');
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.modal.is_none(), "候補が無いのに開いた");
+        assert_eq!(last_notice(&state), NOT_PUSHED);
+        assert!(cells(NOT_PUSHED) <= NOTICE_CELLS, "{NOT_PUSHED}");
+
+        // **肯定まで 1 本で見る** —— 否定だけだと、何を置いても開かない実装で通る。
+        // `f` で ref が届けば開く（案内のとおり）。
+        set_copies(&mut state, &[("origin", false)]);
+        let _ = press(&mut state, 'N');
+        assert!(state.modal.is_some(), "ref が在るのに断った");
+    }
+
+    #[test]
+    fn the_candidates_put_what_is_pushed_up_to_head_first_and_fold_by_owner() {
+        // 並びは「HEAD と同じ位置の ref」→「遅れた ref」→「追跡設定の URL」
+        // （`head_candidates` の doc）。**GitHub の形でないリモートと、同じ owner の
+        // 2 つ目は候補にしない。**
+        let mut state = state_tracking(
+            "feat/x",
+            // `gh pr checkout` の形（追跡設定が URL）。
+            "https://github.com/bob/mewgit.git",
+            &[
+                ("local", "/srv/git/mewgit.git"),
+                ("origin", "git@github.com:me/mewgit.git"),
+                // **owner の大小文字は区別しない**（GitHub の login）。
+                ("origin2", "git@github.com:Me/mewgit-other.git"),
+                ("upstream", "git@github.com:yshrsmz/mewgit.git"),
+            ],
+        );
+        set_copies(
+            &mut state,
+            &[
+                ("local", true),
+                ("origin", true),
+                ("origin2", true),
+                ("upstream", false),
+            ],
+        );
+        state.focus = Pane::Prs;
+
+        let _ = press(&mut state, 'N');
+
+        assert_eq!(
+            heads_of(&state).0,
+            ["me:feat/x", "yshrsmz:feat/x", "bob:feat/x"]
+        );
+
+        // **遅れた ref が先に並んでいても、同じ位置のほうが前に来る。**
+        let mut state = state_for_create("feat/x");
+        state.repo.remotes = remotes_of(&[
+            ("a", "git@github.com:alice/mewgit.git"),
+            ("origin", "git@github.com:yshrsmz/mewgit.git"),
+        ]);
+        set_copies(&mut state, &[("a", false), ("origin", true)]);
+        let _ = press(&mut state, 'N');
+        assert_eq!(heads_of(&state).0, ["yshrsmz:feat/x", "alice:feat/x"]);
+    }
+
+    #[test]
+    fn left_and_right_pick_another_head_only_in_the_head_field() {
+        let mut state = state_for_create("feat/x");
+        state.repo.remotes = remotes_of(&[
+            ("fork", "git@github.com:me/mewgit.git"),
+            ("origin", "git@github.com:yshrsmz/mewgit.git"),
+        ]);
+        set_copies(&mut state, &[("fork", true), ("origin", true)]);
+        let _ = press(&mut state, 'N');
+        type_text(&mut state, "fix");
+
+        // **title の欄では文字カーソルの移動**で、候補は動かない。
+        let _ = press_code(&mut state, KeyCode::Right);
+        assert_eq!(heads_of(&state).1, 0, "title の欄で候補が動いた");
+
+        for _ in 0..3 {
+            let _ = press_code(&mut state, KeyCode::Tab);
+        }
+        assert_eq!(modal_of(&state).4, PrField::Head);
+        let _ = press_code(&mut state, KeyCode::Right);
+        assert_eq!(heads_of(&state).1, 1);
+        // **端で止まる**（一覧のカーソルと同じ `stepped_index`）。
+        let _ = press_code(&mut state, KeyCode::Right);
+        assert_eq!(heads_of(&state).1, 1, "端を越えた");
+        let _ = press_code(&mut state, KeyCode::Left);
+        assert_eq!(heads_of(&state).1, 0);
+        let _ = press_code(&mut state, KeyCode::Right);
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        let Cmd::CreatePr(input) = cmd else {
+            panic!("CreatePr が出ていない: {cmd:?}");
+        };
+        // **選んだ側を送る。** `target` と同じ owner なのでブランチ名だけ。
         assert_eq!(input.head, "feat/x");
+    }
+
+    #[test]
+    fn candidates_that_changed_while_the_box_was_open_are_shown_again_before_sending() {
+        // **写しを送らない**（`pr_create_submit`）。開いているあいだに `f` で
+        // `RepoInfo` が読み直されると候補が変わる。
+        let mut state = state_for_create("feat/x");
+        state.repo.remotes = remotes_of(&[
+            ("fork", "git@github.com:me/mewgit.git"),
+            ("origin", "git@github.com:yshrsmz/mewgit.git"),
+        ]);
+        set_copies(&mut state, &[("fork", true)]);
+        let _ = press(&mut state, 'N');
+        type_text(&mut state, "fix");
+        assert_eq!(heads_of(&state).0, ["me:feat/x"]);
+
+        // fork の ref が消え（`fetch --prune`）、origin に在った。
+        let deliver_copies = |state: &mut AppState, copies: Vec<RemoteCopy>| {
+            let mut snapshot = repo_snapshot();
+            snapshot.remotes = state.repo.remotes.clone();
+            snapshot.head = HeadInfo::Branch {
+                name: "feat/x".to_string(),
+                oid: fake_oid(0),
+                upstream_remote: None,
+                remote_copies: copies,
+            };
+            let _ = update(state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
+            assert!(state.github_block().is_none(), "GitHub 側で先に断られる");
+        };
+        deliver_copies(
+            &mut state,
+            vec![RemoteCopy {
+                remote: "origin".to_string(),
+                oid: fake_oid(0),
+            }],
+        );
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::None, "選んでいない head で送った");
+        assert_eq!(heads_of(&state), (vec!["yshrsmz:feat/x".to_string()], 0));
+        assert_eq!(modal_of(&state).4, PrField::Head, "欄へ移していない");
+        assert_eq!(modal_of(&state).0.text(), "fix", "打った本文が消えた");
+        assert_eq!(last_notice(&state), HEADS_CHANGED);
+        assert!(cells(HEADS_CHANGED) <= NOTICE_CELLS, "{HEADS_CHANGED}");
+
+        // 見せたあとの `Enter` は通る。
+        let cmd = press_code(&mut state, KeyCode::Enter);
+        assert!(matches!(cmd, Cmd::CreatePr(_)), "{cmd:?}");
+
+        // **候補が消えきった形**は開く側と同じ文言で、閉じない。
+        let mut state = state_for_create("feat/x");
+        let _ = press(&mut state, 'N');
+        type_text(&mut state, "fix");
+        deliver_copies(&mut state, Vec::new());
+        let cmd = press_code(&mut state, KeyCode::Enter);
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(heads_of(&state).0, Vec::<String>::new());
+        assert_eq!(last_notice(&state), NOT_PUSHED);
     }
 
     #[test]
     fn the_box_stays_open_while_another_create_is_running() {
         // **`Cmd` が落とされるなら閉じない**（`update::submit`）。閉じると
         // 打った本文ごと消える。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         let _ = press(&mut state, 'N');
         type_text(&mut state, "fix");
         // 1 本目は `update` の出口で発行済み。走らせたままにする。
@@ -1116,7 +1461,7 @@ mod tests {
         // モーダルは `AccountPicker` しか閉じないので、**`N` で開いた箱はそのまま
         // 残る** —— そこで確定すると、材料の無い `Cmd::CreatePr` がランタイムへ出て
         // 打った本文が消える。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         let _ = press(&mut state, 'N');
         type_text(&mut state, "fix");
 
@@ -1149,7 +1494,7 @@ mod tests {
         // **PR 作成は一覧の新しい引き金**（01 の「何を引くか」）—— ref が動かないので
         // 既存の引き金では拾えない。**カーソルも作った行へ** —— `PrState::loaded` は
         // 「いま選んでいる PR の番号」を優先するので、憶えさせないと座らない。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         deliver(&mut state, vec![fake_pull_request(3, "other", "sha3")]);
         assert_eq!(state.prs.selected().map(|pr| pr.number), Some(3));
 
@@ -1190,7 +1535,7 @@ mod tests {
         // `reload` は同種実行中なので落ちる。そこへ**作成より前に頼まれた一覧**が
         // 届く —— 落とされたことを憶えていないと、その古い一覧が座り先の記憶を
         // 食べて**作った PR が画面に出ないまま**になる。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         deliver(&mut state, vec![fake_pull_request(3, "other", "sha3")]);
 
         // 一覧を頼んで飛ばしたままにする（`r`）。
@@ -1227,7 +1572,7 @@ mod tests {
     fn a_creation_that_never_shows_up_does_not_keep_asking() {
         // **頼み直すのは 1 回だけ。** 作った PR が即座に閉じられると一覧に永久に
         // 出ないので、当たらないたびに頼み直すと**同じ往復を回し続ける**。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         deliver(&mut state, vec![fake_pull_request(3, "other", "sha3")]);
         let flying = press(&mut state, 'r');
         assert!(issued(&flying, &Cmd::FetchPrList), "{flying:?}");
@@ -1271,7 +1616,7 @@ mod tests {
         // **開いたあとに HEAD が detach する**経路は別 —— 外で `git checkout <sha>`
         // して書き込みが起きると `Msg::RepoInfoLoaded` が detached な HEAD を運ぶ。
         // ここで断らないと `head: ""` を POST してモーダルが閉じ、打った本文が消える。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         let _ = press(&mut state, 'N');
         type_text(&mut state, "fix");
 
@@ -1295,7 +1640,7 @@ mod tests {
     #[test]
     fn switching_the_account_drops_the_seat_it_was_holding() {
         // **一覧を捨てるなら、それを指していた記憶も捨てる**（`PrState::forget`）。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         let _ = start_create(&mut state);
         let _ = update(&mut state, Msg::PrCreated(Ok(9)));
         assert!(state.prs.has_unseated_creation(), "憶えていない");
@@ -1312,7 +1657,7 @@ mod tests {
     fn a_failed_create_keeps_the_reason_in_the_detail() {
         // **要約行に混ぜない**（01 の「失敗の案内文」）。422 の本文にも 403 の
         // ホスト名にも上限が無いので、端末の幅から末尾が切れる。
-        let mut state = state_on_prs_tab("feat/x");
+        let mut state = state_for_create("feat/x");
         let _ = start_create(&mut state);
         let err = GithubError::Api {
             status: 422,
@@ -1404,6 +1749,7 @@ mod tests {
                     name: "feat/x".to_string(),
                     oid: fake_oid(0),
                     upstream_remote: None,
+                    remote_copies: Vec::new(),
                 },
                 ..repo_snapshot()
             }))),

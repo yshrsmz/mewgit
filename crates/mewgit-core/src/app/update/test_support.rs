@@ -483,6 +483,7 @@ pub(super) fn repo_snapshot() -> RepoSnapshot {
             name: "main".to_string(),
             oid: commit(1).oid,
             upstream_remote: None,
+            remote_copies: Vec::new(),
         },
         refs: RefIndex::from_iter([]),
     }

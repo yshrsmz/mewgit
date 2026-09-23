@@ -1,6 +1,6 @@
 //! PR 作成モーダルの描画。設計は `docs/design/07-ui.md` の「PrCreate モーダル」。
 
-use mewgit_core::app::{PrField, TextBuffer};
+use mewgit_core::app::{PrField, PrHead, TextBuffer};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -27,24 +27,39 @@ const WIDTH: u16 = 76;
 /// 枠のタイトル。
 const TITLE: &str = "Create pull request";
 
-/// ラベルの桁（`Title  ` / `Body   ` / `Base   ` / `Draft  `）。
+/// ラベルの桁（`Title  ` / `Body   ` / `Base   ` / `Head   ` / `Draft  `）。
 const LABEL_WIDTH: u16 = 7;
+
+/// 描く欄の値。`Modal::PrCreate` を分解したもの。
+///
+/// **束ねるのは引数の数のため**（clippy の `too_many_arguments`）。`&Modal` を
+/// 受けて中で分解すると、`PrCreate` 以外が来たときの到達しない腕が要る。
+pub struct Fields<'a> {
+    pub title: &'a TextBuffer,
+    pub body: &'a TextBuffer,
+    pub base: &'a TextBuffer,
+    pub heads: &'a [PrHead],
+    pub head_cursor: usize,
+    pub draft: bool,
+    pub field: PrField,
+}
 
 /// PR 作成モーダルを描く。
 ///
 /// **縦は算術で割る**（`ui::split` と同じ形）。`Layout` の `Length` に絶対優先を
 /// 与えると、狭い端末で `Body` が 0 行に潰れる（#65 で一覧を潰した形）。
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    title: &TextBuffer,
-    body: &TextBuffer,
-    base: &TextBuffer,
-    draft: bool,
-    field: PrField,
-) {
-    // 1 行の欄（`Title` / `Base` / `Draft`）と、残りを取る `Body`。
-    let singles: u16 = 3;
+pub fn render(frame: &mut Frame, area: Rect, fields: &Fields) {
+    let Fields {
+        title,
+        body,
+        base,
+        heads,
+        head_cursor,
+        draft,
+        field,
+    } = *fields;
+    // 1 行の欄（`Title` / `Base` / `Head` / `Draft`）と、残りを取る `Body`。
+    let singles: u16 = 4;
     let want = singles.saturating_add(u16::try_from(body.lines.len()).unwrap_or(u16::MAX));
     let area = modals::place(frame, area, modals::block(TITLE), WIDTH, want, HINT);
     let body_rows = area.height.saturating_sub(singles);
@@ -69,6 +84,15 @@ pub fn render(
     }
     if let Some(at) = take(1) {
         cursor = cursor.or(text_field(frame, at, "Base", base, field));
+    }
+    if let Some(at) = take(1) {
+        // **`Head` にも端末カーソルを置かない**（`Draft` と同じく打つ欄ではない）。
+        let (label, value) = split(at);
+        label_at(frame, label, "Head", field == PrField::Head);
+        frame.render_widget(
+            Paragraph::new(Line::from(head_value(heads, head_cursor))),
+            value,
+        );
     }
     if let Some(at) = take(1) {
         // **`Draft` には端末カーソルを置かない。** 文字を打つ欄ではないので列が無い。
@@ -122,6 +146,20 @@ fn label_field(label: &str) -> PrField {
     }
 }
 
+/// `Head` の値（07 の「PrCreate モーダル」）。選んでいる候補の `<owner>:<branch>` と、
+/// **候補が 2 つ以上あるときだけ**選び直せることの印。
+///
+/// **印は ASCII**（`<- ->`）。`ui::pick_charset` を通さずに済み、端末で化けない。
+/// **空は「候補なし」** —— 開いているあいだに候補が消えた形（確定のときに
+/// `update::prs` が欄を入れ替える）。
+fn head_value(heads: &[PrHead], cursor: usize) -> String {
+    match heads.get(cursor) {
+        None => "(候補なし)".to_string(),
+        Some(head) if heads.len() == 1 => head.label(),
+        Some(head) => format!("{}  ({}/{} <- ->)", head.label(), cursor + 1, heads.len()),
+    }
+}
+
 /// `Draft` の値。**`ui::pick_charset` を通さない** —— ASCII だけなので端末で
 /// 化けようがない（07）。
 fn draft_box(draft: bool) -> &'static str {
@@ -153,7 +191,7 @@ fn label_at(frame: &mut Frame, at: Rect, label: &str, focused: bool) {
 #[cfg(test)]
 mod tests {
     use crate::test_util::{col_of, cursor, draw, row_of, state_with_modal, terminal_with};
-    use mewgit_core::app::{AppState, Modal, PrField, TermSize, TextBuffer};
+    use mewgit_core::app::{AppState, Modal, PrField, PrHead, TermSize, TextBuffer};
     use ratatui::style::Modifier;
     use ratatui::text::Line;
 
@@ -168,9 +206,31 @@ mod tests {
             title: TextBuffer::from_text(title),
             body: TextBuffer::from_text(body),
             base: TextBuffer::from_text(base),
+            heads: vec![head("taro")],
+            head_cursor: 0,
             draft,
             field,
         })
+    }
+
+    fn head(owner: &str) -> PrHead {
+        PrHead {
+            owner: owner.to_string(),
+            branch: "feat".to_string(),
+        }
+    }
+
+    /// `head` の候補と選んでいる位置だけを差し替える。
+    fn with_heads(mut state: AppState, owners: &[&str], cursor: usize) -> AppState {
+        let Some(Modal::PrCreate {
+            heads, head_cursor, ..
+        }) = &mut state.modal
+        else {
+            unreachable!()
+        };
+        *heads = owners.iter().map(|owner| head(owner)).collect();
+        *head_cursor = cursor;
+        state
     }
 
     /// その行が反転しているか（ラベルの桁だけを見る）。
@@ -209,6 +269,9 @@ mod tests {
         assert!(text.contains("本文"), "{text}");
         assert!(text.contains("Base"), "{text}");
         assert!(text.contains("main"), "{text}");
+        // **候補が 1 つなら選び直しの印を出さない**（07）。
+        assert!(text.contains("Head   taro:feat"), "{text}");
+        assert!(!text.contains("<- ->"), "{text}");
         // **`[ ]` / `[x]` で出す**（07）。`false` / `true` は画面の語ではない。
         assert!(text.contains("Draft  [ ]"), "{text}");
         assert!(text.contains("[Enter] 作成"), "{text}");
@@ -231,6 +294,20 @@ mod tests {
     }
 
     #[test]
+    fn the_head_shows_the_chosen_candidate_and_the_count_only_when_there_is_a_choice() {
+        let base = state_with_pr("t", "", "main", false, PrField::Head);
+
+        let two = draw(&with_heads(base, &["alice", "taro"], 1), SIZE).join("\n");
+        // **選んでいる側**を出す（先頭ではなく）。
+        assert!(two.contains("Head   taro:feat  (2/2 <- ->)"), "{two}");
+        assert!(!two.contains("alice"), "{two}");
+
+        let base = state_with_pr("t", "", "main", false, PrField::Head);
+        let none = draw(&with_heads(base, &[], 0), SIZE).join("\n");
+        assert!(none.contains("Head   (候補なし)"), "{none}");
+    }
+
+    #[test]
     fn the_label_of_the_field_being_edited_is_reversed() {
         // **どの欄に居るかはラベルの反転が出す**（07）。`Draft` には端末カーソルを
         // 置けないので、カーソルだけを手掛かりにすると**そこで印が消える**。
@@ -250,6 +327,10 @@ mod tests {
         let state = state_with_pr("t", "b", "main", false, PrField::Draft);
         assert!(label_is_reversed(&state, "Draft"), "Draft が反転していない");
         assert!(!label_is_reversed(&state, "Base"), "Base が残っている");
+        // `Head` もカーソルを置けない欄なので、印は反転だけ。
+        let state = state_with_pr("t", "b", "main", false, PrField::Head);
+        assert!(label_is_reversed(&state, "Head"), "Head が反転していない");
+        assert!(!label_is_reversed(&state, "Draft"), "Draft が残っている");
     }
 
     #[test]

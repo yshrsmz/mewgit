@@ -1,6 +1,6 @@
 //! PR 作成モーダルの描画。設計は `docs/design/07-ui.md` の「PrCreate モーダル」。
 
-use mewgit_core::app::{PrField, PrHead, TextBuffer};
+use mewgit_core::app::{PrField, PrHeads, TextBuffer};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -34,12 +34,12 @@ const LABEL_WIDTH: u16 = 7;
 ///
 /// **束ねるのは引数の数のため**（clippy の `too_many_arguments`）。`&Modal` を
 /// 受けて中で分解すると、`PrCreate` 以外が来たときの到達しない腕が要る。
+#[derive(Clone, Copy)]
 pub struct Fields<'a> {
     pub title: &'a TextBuffer,
     pub body: &'a TextBuffer,
     pub base: &'a TextBuffer,
-    pub heads: &'a [PrHead],
-    pub head_cursor: usize,
+    pub heads: &'a PrHeads,
     pub draft: bool,
     pub field: PrField,
 }
@@ -48,16 +48,15 @@ pub struct Fields<'a> {
 ///
 /// **縦は算術で割る**（`ui::split` と同じ形）。`Layout` の `Length` に絶対優先を
 /// 与えると、狭い端末で `Body` が 0 行に潰れる（#65 で一覧を潰した形）。
-pub fn render(frame: &mut Frame, area: Rect, fields: &Fields) {
+pub fn render(frame: &mut Frame, area: Rect, fields: Fields) {
     let Fields {
         title,
         body,
         base,
         heads,
-        head_cursor,
         draft,
         field,
-    } = *fields;
+    } = fields;
     // 1 行の欄（`Title` / `Base` / `Head` / `Draft`）と、残りを取る `Body`。
     let singles: u16 = 4;
     let want = singles.saturating_add(u16::try_from(body.lines.len()).unwrap_or(u16::MAX));
@@ -89,10 +88,7 @@ pub fn render(frame: &mut Frame, area: Rect, fields: &Fields) {
         // **`Head` にも端末カーソルを置かない**（`Draft` と同じく打つ欄ではない）。
         let (label, value) = split(at);
         label_at(frame, label, "Head", field == PrField::Head);
-        frame.render_widget(
-            Paragraph::new(Line::from(head_value(heads, head_cursor))),
-            value,
-        );
+        frame.render_widget(Paragraph::new(Line::from(head_value(heads))), value);
     }
     if let Some(at) = take(1) {
         // **`Draft` には端末カーソルを置かない。** 文字を打つ欄ではないので列が無い。
@@ -152,11 +148,16 @@ fn label_field(label: &str) -> PrField {
 /// **印は ASCII**（`<- ->`）。`ui::pick_charset` を通さずに済み、端末で化けない。
 /// **空は「候補なし」** —— 開いているあいだに候補が消えた形（確定のときに
 /// `update::prs` が欄を入れ替える）。
-fn head_value(heads: &[PrHead], cursor: usize) -> String {
-    match heads.get(cursor) {
+fn head_value(heads: &PrHeads) -> String {
+    match heads.selected() {
         None => "(候補なし)".to_string(),
-        Some(head) if heads.len() == 1 => head.label(),
-        Some(head) => format!("{}  ({}/{} <- ->)", head.label(), cursor + 1, heads.len()),
+        Some(head) if heads.list().len() == 1 => head.label(),
+        Some(head) => format!(
+            "{}  ({}/{} <- ->)",
+            head.label(),
+            heads.cursor() + 1,
+            heads.list().len()
+        ),
     }
 }
 
@@ -191,7 +192,7 @@ fn label_at(frame: &mut Frame, at: Rect, label: &str, focused: bool) {
 #[cfg(test)]
 mod tests {
     use crate::test_util::{col_of, cursor, draw, row_of, state_with_modal, terminal_with};
-    use mewgit_core::app::{AppState, Modal, PrField, PrHead, TermSize, TextBuffer};
+    use mewgit_core::app::{AppState, Modal, PrField, PrHead, PrHeads, TermSize, TextBuffer};
     use ratatui::style::Modifier;
     use ratatui::text::Line;
 
@@ -206,8 +207,7 @@ mod tests {
             title: TextBuffer::from_text(title),
             body: TextBuffer::from_text(body),
             base: TextBuffer::from_text(base),
-            heads: vec![head("taro")],
-            head_cursor: 0,
+            heads: PrHeads::new(vec![head("taro")]),
             draft,
             field,
         })
@@ -220,16 +220,15 @@ mod tests {
         }
     }
 
-    /// `head` の候補と選んでいる位置だけを差し替える。
-    fn with_heads(mut state: AppState, owners: &[&str], cursor: usize) -> AppState {
-        let Some(Modal::PrCreate {
-            heads, head_cursor, ..
-        }) = &mut state.modal
-        else {
+    /// `head` の候補を差し替え、`→` を `right` 回押した位置を選ぶ。
+    fn with_heads(mut state: AppState, owners: &[&str], right: usize) -> AppState {
+        let Some(Modal::PrCreate { heads, .. }) = &mut state.modal else {
             unreachable!()
         };
-        *heads = owners.iter().map(|owner| head(owner)).collect();
-        *head_cursor = cursor;
+        *heads = PrHeads::new(owners.iter().map(|owner| head(owner)).collect());
+        for _ in 0..right {
+            heads.move_cursor(1);
+        }
         state
     }
 

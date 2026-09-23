@@ -1323,7 +1323,7 @@ PRs ペインの `N` で `Modal::PrCreate` を開き、確定で `POST /repos/{o
 #### head の組み立て
 
 `head` は**モーダルの `Head` 欄で人が選んだ候補**。候補は `N` を押した時点で
-`RepoInfo` から組み（`update::prs::head_candidates`）、欄に `<owner>:<branch>` として
+`RepoInfo` と ref の索引から組み（`AppState::head_candidates`）、欄に `<owner>:<branch>` として
 見せる。**送るまで人の目を通す** —— 推定が外れても黙っては送られない。
 
 **なぜ推定だけで決めないか。git は「どこへ push したか」を憶えていない**（上の
@@ -1344,10 +1344,13 @@ git 2.55、`env -i` の一時リポジトリ。`push.default` は既定の `simp
 同名 ref を HEAD の SHA と照合し、それでも決まらなければ「どこへ push するか」を
 プロンプトで聞く。
 
-**候補**（`head_candidates`）:
+**候補**（`AppState::head_candidates`。座り直しの `head_homes` の隣に置く ——
+同じ材料の寛容な読み手と断定する読み手を並べ、#101 で割った理由を見失わないため）:
 
-- **同名の remote-tracking ref が在るリモート** —— `HeadInfo::Branch.remote_copies`
-  （各リモートの `refs/remotes/<r>/<branch>` と oid。02 の「head」）。**在ることは
+- **同名の remote-tracking ref が在るリモート** —— 各リモートの
+  `refs/remotes/<r>/<branch>` を `graph.refs`（`RefIndex::remote_oid`。02 の「refs と
+  ラベル」）から引く。**読み取りを足さない** —— 索引は `repo.head` と同じ
+  `Msg::RepoInfoLoaded` で届くので、2 つのあいだに順序は無い。**在ることは
   「そのリモートにそのブランチが在った」の証拠**で、`branch.<name>.remote`（何を
   基にしたか）と違って push の結果そのものが残る（上の表の 2 行目で `origin/feat` が
   在るのはこれ）
@@ -1383,9 +1386,10 @@ push しただけで一度も `f` していないと、remote-tracking ref が�
 **閉じずに欄を新しい候補で入れ替え、確かめ直させる**（本文は残る）。
 
 **push 済みかは見ない。** ref が HEAD より遅れていても候補にする（既定の並びが
-後ろになるだけ）—— PR の head として正しいかは「どのリポジトリか」で決まり、
-新しいコミットが載っていないのは push の問題で、GitHub は遅れた head からも
-PR を作る。**追跡設定（`Branch::upstream_config`）は読まない** —— あの `None` には
+後ろになるだけ）—— `head` が指すのは**リモートのブランチ**なので、正しいかは
+「どのリポジトリか」で決まる。ローカルにしか無いコミットは push の問題で、PR を
+作るかどうかとは別（遅れた head で GitHub が断るかは**実 API では確かめていない**）。
+**追跡設定（`Branch::upstream_config`）は読まない** —— あの `None` には
 理由が 4 つあり（#47）、ここで要るのは「どこに在るか」のほうなので ref を読む。
 
 #### 押した時点で断る形

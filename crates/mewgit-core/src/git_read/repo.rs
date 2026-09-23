@@ -7,7 +7,7 @@ use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
     lossy, signature, Branch, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex, RefLabel,
-    Remote, RemoteCopy, Timestamp, Upstream, UpstreamConfig,
+    Remote, Timestamp, Upstream, UpstreamConfig,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -341,41 +341,7 @@ impl RepoReader {
             name: name.to_string(),
             oid,
             upstream_remote,
-            remote_copies: self.remote_copies(name),
         })
-    }
-
-    /// 各リモートの `refs/remotes/<r>/<branch>`（02 の「head」）。
-    ///
-    /// **`refs/remotes/*/<branch>` を glob しない。** リモート名は `/` を含められる
-    /// （`git remote add a/b …` が通る）ので、ref 名からリモート名を切り出せない。
-    /// リモートの一覧を先に引き、名前ごとに組み立てて引く。
-    ///
-    /// **読めなければ空。** 読み手（PR 作成の `head` の候補）にとって空は「候補が無い
-    /// → `N` が断る」で、黙って誤った owner を送る側には倒れない。HEAD そのものは
-    /// 返せるので、ここで `head()` ごと落とさない。
-    fn remote_copies(&self, branch: &str) -> Vec<RemoteCopy> {
-        let Ok(names) = self.repo.remotes() else {
-            return Vec::new();
-        };
-        let mut copies: Vec<RemoteCopy> = names
-            .iter()
-            // 非 UTF-8 の名前は ref 名を組めない（`remotes()` と同じく落とす）。
-            .filter_map(|name| name.ok().flatten())
-            .filter_map(|remote| {
-                let reference = self
-                    .repo
-                    .find_reference(&format!("refs/remotes/{remote}/{branch}"))
-                    .ok()?;
-                Some(RemoteCopy {
-                    remote: remote.to_string(),
-                    oid: reference.peel_to_commit().ok()?.id(),
-                })
-            })
-            .collect();
-        // `remotes()` と同じ並び（あちらも名前で並べ直している）。
-        copies.sort_by(|a, b| a.remote.cmp(&b.remote));
-        copies
     }
 
     /// HEAD のコミットメッセージ全文。コミットが 1 つも無ければ `None`。

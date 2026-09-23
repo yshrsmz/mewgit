@@ -10,12 +10,12 @@ use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 
 use super::remote::{conventional_remote, NoRemote};
 use super::{edit_key, focus, multiline_edit_key, submit};
-use crate::app::state::{current_row, Tracked};
+use crate::app::state::current_row;
 use crate::app::{
-    AppState, BranchLoad, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHead,
+    AppState, BranchLoad, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHeads,
     RepoInfo, TextBuffer,
 };
-use crate::git_read::{HeadInfo, RemoteCopy};
+use crate::git_read::HeadInfo;
 use crate::github::CreatePr;
 
 /// PRs ペインのキー処理。
@@ -184,7 +184,7 @@ fn fork_branch_name(pr: &PullRequest, remote: &Remote) -> String {
 /// **押した時点で断る**のは、**リクエストを組めない**か**確実に 422 になる**もの
 /// —— GitHub が使えない（[`AppState::github_block`] が値で答える。`r` と同じ）、
 /// HEAD がブランチでない（head に載せる名前が無い）、このブランチの PR が既にある、
-/// `head` の候補が無い（[`head_candidates`]）。
+/// `head` の候補が無い（[`AppState::head_candidates`]）。
 ///
 /// **3 つ目は [`AppState::current_pr`] の答えをそのまま使う。** 別の判定を書くと
 /// 座り直し（01 の「現ブランチの PR」）と食い違い、**カーソルが座っているその行の
@@ -196,14 +196,13 @@ fn fork_branch_name(pr: &PullRequest, remote: &Remote) -> String {
 /// 付けない `head` は base リポジトリの中のブランチとして解決されるので、`target` 側に
 /// 同名のブランチがあれば他人のブランチから PR が開く（01 の「head の組み立て」）。
 fn open_pr_create(state: &mut AppState) -> Cmd {
-    if github_blocked(state) {
+    if github_ready(state).is_none() {
         return Cmd::None;
     }
-    // **名前はここでは取らない。** 使うのは確定のとき（[`pr_create_submit`]）で、
-    // ここで写して持つと、モーダルを開いているあいだに HEAD が動いた回に
-    // **古いブランチ名で PR を作る**ことになる。**問うのは同じ関数**で、
-    // 2 本の判定に割ると開く側だけが通して閉じられない確定へ人を運ぶ。
-    if head_branch(&state.repo).is_none() {
+    // **問うのは確定と同じ関数**で、2 本の判定に割ると開く側だけが通して閉じられない
+    // 確定へ人を運ぶ。欄に写す候補（ブランチ名を含む）は確定のときに組み直すので、
+    // 開いているあいだに HEAD が動いても古い名前では送らない（[`pr_create_submit`]）。
+    if !on_branch(&state.repo) {
         state.push_notice(NoticeLevel::Warn, OFF_BRANCH.to_string(), None);
         return Cmd::None;
     }
@@ -215,7 +214,7 @@ fn open_pr_create(state: &mut AppState) -> Cmd {
         );
         return Cmd::None;
     }
-    let heads = head_candidates(&state.repo);
+    let heads = state.head_candidates();
     if heads.is_empty() {
         state.push_notice(NoticeLevel::Warn, NOT_PUSHED.to_string(), None);
         return Cmd::None;
@@ -234,10 +233,7 @@ fn open_pr_create(state: &mut AppState) -> Cmd {
         title: TextBuffer::default(),
         body: TextBuffer::default(),
         base: TextBuffer::from_text(&base),
-        heads,
-        // **既定は先頭**（01 の「head の組み立て」）。#101 の「候補の一覧の先頭を
-        // 断定値に使わない」を破らないのは、先頭が欄に出て人が確定するから。
-        head_cursor: 0,
+        heads: PrHeads::new(heads),
         draft: false,
         field: PrField::default(),
     });
@@ -277,7 +273,7 @@ fn open_pr_create(state: &mut AppState) -> Cmd {
 /// `Degraded` が「アカウントが決まっていない」になり、30 セル隣のペインが同じ瞬間に
 /// 出している `GitHub: …（A）` と食い違う）。
 fn refresh(state: &mut AppState) -> Cmd {
-    if github_blocked(state) {
+    if github_ready(state).is_none() {
         return Cmd::None;
     }
     // 一覧が空なら落とす記憶も無い（それでも一覧は引き直す —— 他人が開いた PR は
@@ -321,72 +317,59 @@ pub(super) fn pr_create_key(state: &mut AppState, key: Key) -> Cmd {
         _ => {}
     }
 
-    let Some(modal) = state.modal.as_mut() else {
-        return Cmd::None;
-    };
-    let Modal::PrCreate {
+    let Some(Modal::PrCreate {
         title,
         body,
         base,
+        heads,
         draft,
         field,
-        ..
-    } = modal
+    }) = state.modal.as_mut()
     else {
         return Cmd::None;
     };
 
     // **欄の判断は 1 箇所。** どの欄かを何度も問い直すと、到達しない腕が混ざる。
-    // 返すのは head の候補を動かす向き（`0` は動かさない）。
-    let step = match field {
-        // **文字を打つ欄ではないので、編集キーを一切渡さない。** 候補の選び直しは
-        // 分解を解いてから [`Modal::move_cursor`] に任せる（端の扱いを一覧の
-        // カーソルと揃える）。
+    match field {
+        // **文字を打つ欄ではないので、編集キーを一切渡さない。**
         PrField::Head => match key.code() {
-            KeyCode::Left => -1,
-            KeyCode::Right => 1,
-            _ => 0,
+            KeyCode::Left => heads.move_cursor(-1),
+            KeyCode::Right => heads.move_cursor(1),
+            _ => {}
         },
         PrField::Draft => {
             if key == Key::char(' ') {
                 *draft = !*draft;
             }
-            0
         }
         // **改行できるのは body だけ**（`CommitMessage` と同じ規則を共有する）。
         // 1 行の欄に 2 行目ができると、`text()` の返す `\n` 入りの文字列がそのまま
         // タイトルやブランチ名になる（`Modal::Input` と同じ理由。01 の「1 行入力」）。
-        PrField::Body => {
-            multiline_edit_key(body, key);
-            0
-        }
+        PrField::Body => multiline_edit_key(body, key),
         PrField::Title => {
             let _ = edit_key(title, key);
-            0
         }
         PrField::Base => {
             let _ = edit_key(base, key);
-            0
         }
-    };
-    if step != 0 {
-        modal.move_cursor(step);
     }
     Cmd::None
 }
 
-/// GitHub を叩けないなら理由を通知に出す。
+/// GitHub を叩く先。叩けないなら理由を通知に出して `None`。
 ///
-/// **理由を消去法で組み立てない** —— [`AppState::github_block`] が腕で答える
+/// **理由を消去法で組み立てない** —— [`AppState::github_target`] が腕で答える
 /// （潰すと `Degraded` が「アカウントが決まっていない」になり、30 セル隣のペインが
-/// 同じ瞬間に出している `GitHub: …（A）` と食い違う）。
-fn github_blocked(state: &mut AppState) -> bool {
-    match state.github_block() {
-        Some(block) => {
+/// 同じ瞬間に出している `GitHub: …（A）` と食い違う）。**叩く先も同じ答えから
+/// 取る** —— 理由だけを見て `target` を読み直すと、「叩けるのに `target` が無い」
+/// という到達しない腕が要る。
+fn github_ready(state: &mut AppState) -> Option<RepoTarget> {
+    match state.github_target() {
+        Ok(target) => Some(target.clone()),
+        Err(block) => {
             state.push_notice(NoticeLevel::Info, block.notice(), None);
-            true
+            None
         }
-        None => false,
     }
 }
 
@@ -411,7 +394,7 @@ fn move_pr_field(state: &mut AppState, step: fn(PrField) -> PrField) -> Cmd {
 ///
 /// **head は欄で選んだ候補**（01 の「head の組み立て」）。**写しを送らない** ——
 /// 開いているあいだに `RepoInfo` が読み直されると候補が変わるので、ここで
-/// [`head_candidates`] を引き直し、選んでいた候補が残っていなければ**閉じずに欄を
+/// [`AppState::head_candidates`] を引き直し、選んでいた候補が残っていなければ**閉じずに欄を
 /// 入れ替えて確かめ直させる**。
 ///
 /// **`Cmd` が落とされるなら閉じない**（`update::submit`）。**材料が消えていても
@@ -423,7 +406,6 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
         body,
         base,
         heads,
-        head_cursor,
         draft,
         ..
     }) = &state.modal
@@ -437,22 +419,22 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
     // **打った字を先に写す。** 下の断りが `state` を可変で借りるので、モーダルを
     // 借りたままでは通せない。
     let typed = (title.text(), body.text(), base.text(), *draft);
-    let chosen = heads.get(*head_cursor).cloned();
+    let chosen = heads.selected().cloned();
 
     // **開いてから材料が消えることはある。** `A` で選び直すと `GitOp::SetAccount` が
     // 走り、**その書き込みが終わった時点で** `exec_finished` → `resolve_again` が
     // `account` を `Resolving` に戻す —— あれが閉じるのは `Modal::AccountPicker` だけ
     // なので、`N` で開いた箱はそのまま残る。**ここで断らないと**、材料の無い
     // `Cmd::CreatePr` がランタイムへ出て `no_material` に落ち、**打った本文が消える**。
-    if github_blocked(state) {
+    let Some(target) = github_ready(state) else {
         return Cmd::None;
-    }
-    if head_branch(&state.repo).is_none() {
+    };
+    if !on_branch(&state.repo) {
         // 開いたあとに HEAD が動いた形。**閉じない** —— 打った本文を返せない。
         state.push_notice(NoticeLevel::Warn, OFF_BRANCH.to_string(), None);
         return Cmd::None;
     }
-    let fresh = head_candidates(&state.repo);
+    let fresh = state.head_candidates();
     let Some(chosen) = chosen.filter(|chosen| fresh.contains(chosen)) else {
         // 開いたあとに候補が変わった形（`f` / 外の checkout で `RepoInfo` が読み直された）。
         // **閉じずに欄を入れ替え、そこへ移す** —— 選び直すのは人。
@@ -461,26 +443,14 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
         } else {
             HEADS_CHANGED
         };
-        if let Some(Modal::PrCreate {
-            heads,
-            head_cursor,
-            field,
-            ..
-        }) = state.modal.as_mut()
-        {
-            *heads = fresh;
-            *head_cursor = 0;
+        if let Some(Modal::PrCreate { heads, field, .. }) = state.modal.as_mut() {
+            *heads = PrHeads::new(fresh);
             *field = PrField::Head;
         }
         state.push_notice(NoticeLevel::Warn, notice.to_string(), None);
         return Cmd::None;
     };
-    // `github_blocked` を抜けたので `target` は決まっている（`github_block` の
-    // `(Resolved, Resolved)` の腕）。
-    let head = match state.repo.target.resolved() {
-        Some(target) => chosen.api_value(&target.owner),
-        None => chosen.label(),
-    };
+    let head = chosen.api_value(&target.owner);
     let (title, body, base, draft) = typed;
     let input = CreatePr {
         title,
@@ -495,17 +465,12 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
 /// ブランチに乗っていないときの案内。**開く側と確定する側で同じ字を出す。**
 const OFF_BRANCH: &str = "ブランチに乗っていないので PR を作れません";
 
-/// HEAD のブランチ名。ブランチに乗っていなければ `None`。
+/// HEAD がブランチに乗っているか。**開く側と確定する側で同じ判定を使う。**
 ///
-/// **`POST /pulls` の `head` にそのまま使わない**（01 の「head の組み立て」）。
-/// owner を付けない `head` は base リポジトリの中のブランチとして解決されるので、
-/// fork に在るブランチから出すと、`target` 側の同名ブランチから PR が開きうる。
-/// 送る値は [`head_candidates`] から人が選ぶ。
-fn head_branch(repo: &RepoInfo) -> Option<String> {
-    match repo.head.as_ref() {
-        Some(HeadInfo::Branch { name, .. }) => Some(name.clone()),
-        _ => None,
-    }
+/// `head` に載せる名前は [`AppState::head_candidates`] の候補が持つ（01 の
+/// 「head の組み立て」）。ここは「乗っていない」を候補が空と区別して案内するためだけ。
+fn on_branch(repo: &RepoInfo) -> bool {
+    matches!(repo.head, Some(HeadInfo::Branch { .. }))
 }
 
 /// どのリモートにもこのブランチが無いときの案内。**開く側と確定する側で同じ字を出す。**
@@ -516,66 +481,6 @@ const NOT_PUSHED: &str = "どのリモートにもこのブランチがありま
 
 /// 開いているあいだに候補が変わったときの案内。
 const HEADS_CHANGED: &str = "head の候補が変わりました。確かめてから確定してください";
-
-/// PR 作成の `head` の候補（01 の「head の組み立て」）。HEAD がブランチに
-/// 乗っていなければ空。
-///
-/// **候補は 2 つの材料から組む。**
-/// - 同名の remote-tracking ref が在るリモート（`HeadInfo::Branch.remote_copies`）。
-///   在ることが「そのリモートにそのブランチが在った」の証拠で、`branch.<name>.remote`
-///   （何を基にしたか）と違って push の結果そのものが残る
-/// - 追跡設定の URL（`branch.<name>.remote` が URL のとき）。`gh pr checkout` と
-///   mewgit の取り出しは fork の URL を書き、**remote-tracking ref を作らない**（05）
-///
-/// **`branch.<name>.pushRemote` は読まない。** 取り出しは `remote` にも同じ URL を
-/// 書くので上の 2 つ目で当たり、名前の `pushRemote` へ push したなら 1 つ目の ref が
-/// できる。
-///
-/// **並びは HEAD と同じ oid の ref が先**（gh が採るのと同じ「そこまで push 済み」の
-/// 証拠）、残りはリモート名の順、URL は最後。**owner で 1 つに畳む** —— 送る値が
-/// `<owner>:<branch>` までしか運べない（[`PrHead`]）。**GitHub の形として読めない
-/// リモートは入れない**。host は比べない（`state::head_homes` と同じ理由。01 の
-/// 「現ブランチの PR」）。
-fn head_candidates(repo: &RepoInfo) -> Vec<PrHead> {
-    let Some(HeadInfo::Branch {
-        name,
-        oid,
-        upstream_remote,
-        remote_copies,
-    }) = repo.head.as_ref()
-    else {
-        return Vec::new();
-    };
-    let owner_of = |value: &str| url::RemoteUrl::parse(value).ok().map(|url| url.owner);
-
-    // **安定ソート**なので、同じ側の中ではリモート名の順が残る。
-    let mut copies: Vec<&RemoteCopy> = remote_copies.iter().collect();
-    copies.sort_by_key(|copy| copy.oid != *oid);
-    let from_refs = copies
-        .into_iter()
-        .filter_map(|copy| repo.remote(&copy.remote))
-        .filter_map(|remote| owner_of(&remote.url));
-    let from_url = upstream_remote
-        .as_deref()
-        .and_then(|value| match repo.tracked(value) {
-            Tracked::Url(url) => owner_of(url),
-            Tracked::Named(_) | Tracked::Local | Tracked::Missing(_) => None,
-        });
-
-    let mut owners: Vec<String> = Vec::new();
-    for owner in from_refs.chain(from_url) {
-        if !owners.iter().any(|seen| seen.eq_ignore_ascii_case(&owner)) {
-            owners.push(owner);
-        }
-    }
-    owners
-        .into_iter()
-        .map(|owner| PrHead {
-            owner,
-            branch: name.clone(),
-        })
-        .collect()
-}
 
 /// PR を作った答えが届いた（01 の「PR 作成（`N`）」）。
 ///
@@ -826,14 +731,14 @@ mod tests {
     };
     use super::super::update;
     use super::*;
+    use crate::app::PrHead;
     use crate::app::{
         GithubBlock, Msg, NoticeLevel, PrLoad, Region, RepoSnapshot, RightTab, TargetState,
     };
     use crate::auth::{AccountState, DegradedReason};
     use crate::config::Config;
     use crate::git_exec::GitOp;
-    use crate::git_read::HeadInfo;
-    use crate::git_read::Remote;
+    use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote};
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
@@ -909,34 +814,40 @@ mod tests {
         state
     }
 
-    /// HEAD のブランチの `remote_copies` を差し替える。`(リモート名, HEAD と同じ位置か)`。
-    ///
-    /// **組み直さない**（[`state_tracking`] と同じ理由）。
+    /// HEAD のブランチと同名の remote-tracking ref を置き直す
+    /// （`graph.refs`。`(リモート名, HEAD と同じ位置か)`）。
     fn set_copies(state: &mut AppState, copies: &[(&str, bool)]) {
-        let Some(HeadInfo::Branch {
-            oid, remote_copies, ..
-        }) = &mut state.repo.head
-        else {
+        state.graph.refs = copies_of(&state.repo, copies);
+    }
+
+    /// [`set_copies`] の索引。`Msg::RepoInfoLoaded` で届ける形のテストも同じものを使う。
+    fn copies_of(repo: &RepoInfo, copies: &[(&str, bool)]) -> RefIndex {
+        let Some(HeadInfo::Branch { name, oid, .. }) = &repo.head else {
             unreachable!("put_on_branch がブランチに置いている");
         };
-        *remote_copies = copies
+        copies
             .iter()
-            .map(|(remote, at_head)| RemoteCopy {
-                remote: (*remote).to_string(),
-                oid: if *at_head { *oid } else { fake_oid(9) },
+            .map(|(remote, at_head)| {
+                let at = if *at_head { *oid } else { fake_oid(9) };
+                (
+                    at,
+                    RefLabel::Remote {
+                        name: format!("{remote}/{name}"),
+                    },
+                )
             })
-            .collect();
+            .collect()
     }
 
     /// 開いている [`Modal::PrCreate`] の候補（欄に出る字）と、選んでいる位置。
     fn heads_of(state: &AppState) -> (Vec<String>, usize) {
-        let Some(Modal::PrCreate {
-            heads, head_cursor, ..
-        }) = &state.modal
-        else {
+        let Some(Modal::PrCreate { heads, .. }) = &state.modal else {
             panic!("PrCreate が開いていません: {:?}", state.modal);
         };
-        (heads.iter().map(PrHead::label).collect(), *head_cursor)
+        (
+            heads.list().iter().map(PrHead::label).collect(),
+            heads.cursor(),
+        )
     }
 
     /// [`state_on_prs_tab`] に加えて、**`#82` の集計まで憶えた**状態。
@@ -1384,26 +1295,18 @@ mod tests {
         type_text(&mut state, "fix");
         assert_eq!(heads_of(&state).0, ["me:feat/x"]);
 
-        // fork の ref が消え（`fetch --prune`）、origin に在った。
-        let deliver_copies = |state: &mut AppState, copies: Vec<RemoteCopy>| {
+        // fork の ref が消え（`fetch --prune`）、origin に在った。**`Msg` で届ける**
+        // —— 画面の外で読み直された形そのもの。HEAD はいまの値を持ち越す
+        // （組み直すと `put_on_branch` の値に黙って依存する）。
+        let deliver_copies = |state: &mut AppState, copies: &[(&str, bool)]| {
             let mut snapshot = repo_snapshot();
             snapshot.remotes = state.repo.remotes.clone();
-            snapshot.head = HeadInfo::Branch {
-                name: "feat/x".to_string(),
-                oid: fake_oid(0),
-                upstream_remote: None,
-                remote_copies: copies,
-            };
+            snapshot.head = state.repo.head.clone().expect("ブランチに乗っている");
+            snapshot.refs = copies_of(&state.repo, copies);
             let _ = update(state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
             assert!(state.github_block().is_none(), "GitHub 側で先に断られる");
         };
-        deliver_copies(
-            &mut state,
-            vec![RemoteCopy {
-                remote: "origin".to_string(),
-                oid: fake_oid(0),
-            }],
-        );
+        deliver_copies(&mut state, &[("origin", true)]);
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
@@ -1422,7 +1325,7 @@ mod tests {
         let mut state = state_for_create("feat/x");
         let _ = press(&mut state, 'N');
         type_text(&mut state, "fix");
-        deliver_copies(&mut state, Vec::new());
+        deliver_copies(&mut state, &[]);
         let cmd = press_code(&mut state, KeyCode::Enter);
         assert_eq!(cmd, Cmd::None);
         assert_eq!(heads_of(&state).0, Vec::<String>::new());
@@ -1749,7 +1652,6 @@ mod tests {
                     name: "feat/x".to_string(),
                     oid: fake_oid(0),
                     upstream_remote: None,
-                    remote_copies: Vec::new(),
                 },
                 ..repo_snapshot()
             }))),

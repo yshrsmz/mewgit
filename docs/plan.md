@@ -261,7 +261,7 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       **どのリモートに在るかを git は憶えていない**（01 の「head の組み立て」に実測。
       `@{push}` も fork 運用のふつうの形で fatal になる）。**モーダルに `Head` 欄を
       足し、候補を人に選ばせる**（2026-09-23 にユーザーと決めた）—— 候補は各リモートの
-      `refs/remotes/<r>/<branch>`（`HeadInfo::Branch.remote_copies`。02）と追跡設定の
+      `refs/remotes/<r>/<branch>`（`RefIndex::remote_oid`。02）と追跡設定の
       URL（gh / mewgit が取り出した fork）。**候補が無ければ `N` で断る**（ブランチ名
       だけで送ると base リポジトリの同名ブランチとして解決される）。1/2 と材料が
       違った理由は 01 の「PR チェックアウト（`Enter`）」

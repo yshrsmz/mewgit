@@ -243,6 +243,20 @@ impl RefIndex {
     pub fn labels(&self, oid: Oid) -> &[RefLabel] {
         self.labels.get(&oid).map_or(&[], Vec::as_slice)
     }
+
+    /// リモート追跡ブランチ `name`（`origin/main` の短縮形）が指すコミット。無ければ `None`。
+    ///
+    /// 読み手は PR 作成の `head` の候補（01 の「head の組み立て」）。**索引は Oid で
+    /// 引く形なので、名前からは全件を舐める** —— 引くのは `N` を押したときと確定の
+    /// ときだけなので、名前の索引を別に持って 2 つを揃え続けるより安い。
+    pub fn remote_oid(&self, name: &str) -> Option<Oid> {
+        self.labels.iter().find_map(|(oid, labels)| {
+            labels
+                .iter()
+                .any(|label| matches!(label, RefLabel::Remote { name: n } if n == name))
+                .then_some(*oid)
+        })
+    }
 }
 
 /// `(Oid, RefLabel)` の並びから索引を組む。同じ Oid のラベルはまとめられる。
@@ -314,29 +328,12 @@ pub enum HeadInfo {
         /// 取っている —— ここへ対で載せても**いまは誰も読まない値**になるので、
         /// 載せ替えるのは読み手が来たとき（plan.md の「HEAD の追跡設定を 1 本にする」）。
         upstream_remote: Option<String>,
-        /// 登録されている各リモートに在る、同名の remote-tracking ref
-        /// （`refs/remotes/<r>/<name>`）。リモート名の順（[`Remote`] の並びと同じ）。
-        ///
-        /// 読み手は PR 作成の `head` の候補（01 の「head の組み立て」）。**「どの
-        /// リモートにこのブランチが在るか」を git が残しているのはここだけ** ——
-        /// `upstream_remote` が答えるのは**何を基にしたか**で、`checkout -b feat
-        /// upstream/main` のあと `push origin feat` しても `upstream` のまま（02 の「head」）。
-        remote_copies: Vec<RemoteCopy>,
     },
     Detached(Oid),
     /// コミットが 1 つも無いリポジトリ。
     Unborn {
         name: String,
     },
-}
-
-/// あるリモートに在る、HEAD のブランチと同名の remote-tracking ref（02 の「head」）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteCopy {
-    /// リモート名（[`Remote::name`]）。
-    pub remote: String,
-    /// `refs/remotes/<remote>/<branch>` が指すコミット。
-    pub oid: Oid,
 }
 
 /// ローカルブランチ 1 件。

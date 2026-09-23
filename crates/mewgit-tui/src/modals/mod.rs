@@ -43,18 +43,16 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
             body,
             base,
             heads,
-            head_cursor,
             draft,
             field,
         } => pr_create::render(
             frame,
             area,
-            &pr_create::Fields {
+            pr_create::Fields {
                 title,
                 body,
                 base,
                 heads,
-                head_cursor: *head_cursor,
                 draft: *draft,
                 field: *field,
             },

@@ -78,6 +78,7 @@ pub struct RefIndex { /* Oid → Vec<RefLabel> */ }
 
 impl RefIndex {
     pub fn labels(&self, oid: Oid) -> &[RefLabel];
+    pub fn remote_oid(&self, name: &str) -> Option<Oid>;   // "origin/main" → Oid
 }
 
 impl FromIterator<(Oid, RefLabel)> for RefIndex { /* 並べ替えは new を通る */ }
@@ -91,6 +92,13 @@ pub enum RefLabel {
 
 - `Remote` は remote 名とブランチ名を分けず `origin/main` の短縮形 1 つで持つ。06 は
   `{origin/main}` と一続りで描くだけなので、分けても描画側で連結し直すだけになる
+- **`remote_oid` は名前から位置を引く。** 読み手は PR 作成の `head` の候補（01 の
+  「head の組み立て」）で、**「どのリモートにそのブランチが在るか」を git が残して
+  いるのは remote-tracking ref だけ**（追跡設定は「何を基にしたか」しか答えない）。
+  **別の読み取りを足さない** —— 索引は `head` と同じ `Cmd::LoadRepoInfo` で届くので、
+  2 つのあいだに順序が無い。引く側は**リモートの一覧から `<remote>/<branch>` を組む**
+  （ref 名からリモート名を切り出すと、`/` を含むリモート名で割り方が決まらない）。
+  索引は Oid で引く形なので全件を舐めるが、引くのは `N` と確定のときだけ
 - annotated tag は `target()` が tag オブジェクトの Oid なので、commit まで peel してから引く。
   peel しないとラベルがどのグラフ行にも乗らない
 - 載せるのはローカルブランチ・リモート追跡ブランチ・タグだけ（ホワイトリスト）。
@@ -218,7 +226,7 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 
 ### head
 
-- 通常は `Branch { name, oid, upstream_remote, remote_copies }`、detached HEAD は `Detached(oid)`
+- 通常は `Branch { name, oid, upstream_remote }`、detached HEAD は `Detached(oid)`
 - コミットが 1 つも無い（unborn）ときは `repo.head()` が `ErrorCode::UnbornBranch` を返すので、
   `HEAD` の symbolic target からブランチ名を取って `Unborn { name }` にする
 - **`upstream_remote` は `branch.<HEAD>.remote`。** 読み手は `app` の「現ブランチの PR」で、
@@ -231,19 +239,6 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
   （01 の「現ブランチの PR」。`RepoInfo.target` が `default_remote` を呼ばないのと
   同じ数え方）。`head` と `remotes` は同じ `Cmd::LoadRepoInfo` に乗るので、
   この 2 つのあいだには順序が無い
-- **`remote_copies` は、登録されている各リモート `<r>` について
-  `refs/remotes/<r>/<HEAD のブランチ名>` が在ればその名前と oid。** 読み手は PR 作成の
-  `head` の候補（01 の「head の組み立て」）で、**「どのリモートにそのブランチが在るか」
-  を git が残しているのはここだけ**（追跡設定は「何を基にしたか」しか答えない）。
-  - **`refs/remotes/*/<name>` を glob しない。** リモート名は `/` を含められるので
-    （`git remote add a/b …` が通る）、ref 名からリモート名を切り出せない。
-    **リモートの一覧を先に引き、名前ごとに組み立てて引く**
-  - **`remotes` と別に引かない。** 同じ `Cmd::LoadRepoInfo` の中で読むので、
-    候補と `RepoInfo.remotes`（URL を引く先）のあいだに順序が無い
-  - **読み直しは `Reload::Refs` に乗る**（`push` / `fetch` のあとに `Cmd::LoadRepoInfo`
-    が出る。`update/exec.rs` の `Reload`）。**外で `git push` したときは、次に ref を
-    動かす書き込みか `f` まで古い**（ファイルは監視していない）
-  - 非 UTF-8 のリモート名は飛ばす（ref 名を組めない）
 
 ## ログ列挙
 

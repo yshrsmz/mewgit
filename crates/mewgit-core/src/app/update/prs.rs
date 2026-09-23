@@ -738,7 +738,7 @@ mod tests {
     use crate::auth::{AccountState, DegradedReason};
     use crate::config::Config;
     use crate::git_exec::GitOp;
-    use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote};
+    use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote, UpstreamConfig};
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
@@ -754,25 +754,30 @@ mod tests {
         state
     }
 
-    /// [`state_on_branch`] に加えて、**HEAD のブランチが `tracked` を追跡している**
-    /// 状態（`branch.<HEAD>.remote`）。`remotes` は `(名前, URL)` で登録する。
-    ///
-    /// **`put_on_branch` が置いた `head` に足す。** あちらは追跡設定を持たない形
-    /// （`upstream_remote: None`）なので、そのままでは `head_homes` の追跡先の腕に
-    /// 入らない。
-    /// **組み直さない** —— `HeadInfo::Branch` のリテラルを写すと、フィールドが増える
-    /// たびに直す構築サイトが 1 つ増える。
+    /// [`state_on_branch`] に加えて、**HEAD のブランチが `tracked` の同名ブランチを
+    /// 追跡している**状態（`branch.<HEAD>.remote` / `.merge`）。`remotes` は
+    /// `(名前, URL)` で登録する。
     fn state_tracking(branch: &str, tracked: &str, remotes: &[(&str, &str)]) -> AppState {
         let mut state = state_on_branch(branch);
-        let Some(HeadInfo::Branch {
-            upstream_remote, ..
-        }) = &mut state.repo.head
-        else {
-            unreachable!("put_on_branch がブランチに置いている");
-        };
-        *upstream_remote = Some(tracked.to_string());
+        track(&mut state, tracked, &format!("refs/heads/{branch}"));
         state.repo.remotes = remotes_of(remotes);
         state
+    }
+
+    /// HEAD のブランチの追跡設定を置き直す。
+    ///
+    /// **`put_on_branch` が置いた `head` に足す。** あちらは追跡設定を持たない形
+    /// （`upstream: None`）なので、そのままでは追跡先の腕に入らない。
+    /// **組み直さない** —— `HeadInfo::Branch` のリテラルを写すと、フィールドが増える
+    /// たびに直す構築サイトが 1 つ増える。
+    fn track(state: &mut AppState, remote: &str, merge: &str) {
+        let Some(HeadInfo::Branch { upstream, .. }) = &mut state.repo.head else {
+            unreachable!("put_on_branch がブランチに置いている");
+        };
+        *upstream = Some(UpstreamConfig {
+            remote: remote.to_string(),
+            merge: merge.to_string(),
+        });
     }
 
     /// `owner` の fork から出た、同じブランチ名の PR。
@@ -1245,6 +1250,45 @@ mod tests {
     }
 
     #[test]
+    fn a_checked_out_fork_branch_is_offered_under_the_name_it_has_on_the_fork() {
+        // **取り出しはローカルを `bob/main` にし、`merge` に `refs/heads/main` を書く**
+        // （05 の「ブランチ名」—— fork の `main` でローカルの `main` を早送りしない
+        // ため）。URL の候補をローカルの名前で組むと `bob:bob/main` —— fork に無い
+        // ブランチを指す（`/code-review` が拾った）。
+        let mut state = state_for_create("bob/main");
+        set_copies(&mut state, &[]);
+        track(
+            &mut state,
+            "git@github.com:bob/mewgit.git",
+            "refs/heads/main",
+        );
+
+        let _ = press(&mut state, 'N');
+        assert_eq!(heads_of(&state).0, ["bob:main"]);
+        type_text(&mut state, "fix");
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        let Cmd::CreatePr(input) = cmd else {
+            panic!("CreatePr が出ていない: {cmd:?}");
+        };
+        assert_eq!(input.head, "bob:main");
+
+        // **ブランチでない `merge`**（`refs/pull/<n>/head`）は候補にしない。
+        let mut state = state_for_create("bob/main");
+        set_copies(&mut state, &[]);
+        track(
+            &mut state,
+            "git@github.com:bob/mewgit.git",
+            "refs/pull/5/head",
+        );
+        let _ = press(&mut state, 'N');
+        assert!(
+            state.modal.is_none(),
+            "ブランチでない merge から候補を組んだ"
+        );
+    }
+
+    #[test]
     fn left_and_right_pick_another_head_only_in_the_head_field() {
         let mut state = state_for_create("feat/x");
         state.repo.remotes = remotes_of(&[
@@ -1651,7 +1695,7 @@ mod tests {
                 head: HeadInfo::Branch {
                     name: "feat/x".to_string(),
                     oid: fake_oid(0),
-                    upstream_remote: None,
+                    upstream: None,
                 },
                 ..repo_snapshot()
             }))),

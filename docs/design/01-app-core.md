@@ -1209,7 +1209,7 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
 
 - **状態に持たない。** `list` と `RepoInfo.head` から毎回導ける。持つと、どちらかが
   更新されたときに片方だけ古くなる（**導出できる値を、元から離れた場所に置かない**）
-- **追跡先は `HeadInfo::Branch.upstream_remote`（`branch.<HEAD>.remote`）の URL から
+- **追跡先は `HeadInfo::Branch.upstream` の `remote`（`branch.<HEAD>.remote`）の URL から
   出す。** 一覧には fork からの PR も出る（05）ので、`target` とだけ比べると
   **fork のブランチでは合致しない**。**値はリモート名でも URL でもよい**（git の仕様）
   ので、`RepoInfo.remotes` で引けたらその URL を、引けなければ値そのものを
@@ -1357,11 +1357,17 @@ git 2.55、`env -i` の一時リポジトリ。`push.default` は既定の `simp
 - **追跡設定の URL**（`branch.<name>.remote` が URL のとき）—— `gh pr checkout` と
   mewgit の取り出し（`Enter`）は fork の URL を書き、**remote-tracking ref を作らない**
   （05）。ref の腕だけにすると、**取り出した fork の PR に push し直して PR を作り直す**
-  いちばんふつうの形が候補から漏れる
+  いちばんふつうの形が候補から漏れる。**ブランチ名は `merge` から取る** —— 取り出しは
+  衝突を避けてローカルを `bob/main` にし、`merge` に `refs/heads/main` を書く（05 の
+  「ブランチ名」）ので、ローカルの名前で組むと fork に無い `bob:bob/main` を指す
+  （`/code-review` が拾った）。`refs/heads/` の下に無い `merge`（`refs/pull/<n>/head`）は
+  ブランチではないので候補にしない。材料は `HeadInfo::Branch.upstream`（remote と
+  merge の対。02 の「head」）
 - **GitHub の形として読めないリモートは候補にしない**（`RemoteUrl::parse`）。
   **host は比べない**（上の「現ブランチの PR」と同じ理由）
-- **owner で 1 つに畳む。** `POST /pulls` の `head` が運べるのは `<owner>:<branch>` まで
-  で、同じ owner の 2 つのリポジトリ（`acme/app` と `acme/app-fork`）は区別できない
+- **送る値（owner とブランチ名）で 1 つに畳む。** `POST /pulls` の `head` が運べるのは
+  `<owner>:<branch>` までで、同じ owner の 2 つのリポジトリ（`acme/app` と
+  `acme/app-fork`）は区別できない
   （`head_repo` を送る形は組まない —— 踏むリポジトリが出てから）
 
 **並びと既定。** HEAD と同じ oid の ref を持つ候補を先に置き（gh が採るのと同じ

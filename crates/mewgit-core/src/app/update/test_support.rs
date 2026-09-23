@@ -482,7 +482,7 @@ pub(super) fn repo_snapshot() -> RepoSnapshot {
         head: HeadInfo::Branch {
             name: "main".to_string(),
             oid: commit(1).oid,
-            upstream_remote: None,
+            upstream: None,
         },
         refs: RefIndex::from_iter([]),
     }

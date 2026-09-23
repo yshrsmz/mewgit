@@ -332,15 +332,11 @@ impl RepoReader {
         // `refs/heads/` の後ろ——`shorthand()` が既に見た側——だけ。**それでも
         // 握り潰す**：ここで落ちても「追跡設定を引く鍵が無い」だけで、HEAD そのものは
         // 返せる（`upstream_config` が `None` を返す場合と同じ扱いになる）。
-        let upstream_remote = head
-            .name()
-            .ok()
-            .and_then(|full| self.upstream_config(full))
-            .map(|config| config.remote);
+        let upstream = head.name().ok().and_then(|full| self.upstream_config(full));
         Ok(HeadInfo::Branch {
             name: name.to_string(),
             oid,
-            upstream_remote,
+            upstream,
         })
     }
 

@@ -409,21 +409,26 @@ impl AppState {
     ///   リモート名で割り方が決まらない。02）。索引は `repo.head` と同じ
     ///   `Msg::RepoInfoLoaded` で届くので、2 つのあいだに順序は無い
     /// - 追跡設定の URL（`branch.<name>.remote` が URL のとき）。`gh pr checkout` と
-    ///   mewgit の取り出しは fork の URL を書き、**remote-tracking ref を作らない**（05）
+    ///   mewgit の取り出しは fork の URL を書き、**remote-tracking ref を作らない**（05）。
+    ///   **ブランチ名は `merge` から取る** —— 取り出しは衝突を避けてローカルを
+    ///   `bob/main` にし、`merge` に `refs/heads/main` を書く（05 の「ブランチ名」）ので、
+    ///   ローカルの名前で組むと fork に無いブランチを指す。`refs/heads/` の下に無い
+    ///   `merge`（`refs/pull/<n>/head`）はブランチではないので候補にしない
     ///
     /// **`branch.<name>.pushRemote` は読まない。** 取り出しは `remote` にも同じ URL を
     /// 書くので上の 2 つ目で当たり、名前の `pushRemote` へ push したなら 1 つ目の ref が
     /// できる。
     ///
     /// **並びは HEAD と同じ oid の ref が先**（gh が採るのと同じ「そこまで push 済み」の
-    /// 証拠）、残りはリモート名の順、URL は最後。**owner で 1 つに畳む** —— 送る値が
-    /// `<owner>:<branch>` までしか運べない（[`PrHead`]）。**GitHub の形として読めない
+    /// 証拠）、残りはリモート名の順、URL は最後。**送る値（owner とブランチ名）で
+    /// 1 つに畳む** —— `<owner>:<branch>` までしか運べないので、同じ owner の 2 つの
+    /// リポジトリは区別できない（[`PrHead`]）。**GitHub の形として読めない
     /// リモートは入れない**。host は比べない（[`head_homes`] と同じ理由）。
     pub(super) fn head_candidates(&self) -> Vec<PrHead> {
         let Some(HeadInfo::Branch {
             name,
             oid,
-            upstream_remote,
+            upstream,
         }) = self.repo.head.as_ref()
         else {
             return Vec::new();
@@ -446,27 +451,25 @@ impl AppState {
         pushed.sort_by_key(|(_, at)| at != oid);
         let from_refs = pushed
             .into_iter()
-            .filter_map(|(remote, _)| owner_of(&remote.url));
-        let from_url =
-            upstream_remote
-                .as_deref()
-                .and_then(|value| match self.repo.tracked(value) {
-                    Tracked::Url(url) => owner_of(url),
-                    // 名前の追跡先は「何を基にしたか」で、在る証拠にならない。在るなら
-                    // 1 つ目の材料（ref）で拾えている。
-                    Tracked::Named(_) | Tracked::Local | Tracked::Missing(_) => None,
-                });
+            .filter_map(|(remote, _)| Some((owner_of(&remote.url)?, name.clone())));
+        let from_url = upstream.as_ref().and_then(|upstream| {
+            let url = match self.repo.tracked(&upstream.remote) {
+                Tracked::Url(url) => url,
+                // 名前の追跡先は「何を基にしたか」で、在る証拠にならない。在るなら
+                // 1 つ目の材料（ref）で拾えている。
+                Tracked::Named(_) | Tracked::Local | Tracked::Missing(_) => return None,
+            };
+            let branch = upstream.merge.strip_prefix("refs/heads/")?;
+            Some((owner_of(url)?, branch.to_string()))
+        });
 
         let mut heads: Vec<PrHead> = Vec::new();
-        for owner in from_refs.chain(from_url) {
-            if !heads
+        for (owner, branch) in from_refs.chain(from_url) {
+            let seen = heads
                 .iter()
-                .any(|head| head.owner.eq_ignore_ascii_case(&owner))
-            {
-                heads.push(PrHead {
-                    owner,
-                    branch: name.clone(),
-                });
+                .any(|head| head.owner.eq_ignore_ascii_case(&owner) && head.branch == branch);
+            if !seen {
+                heads.push(PrHead { owner, branch });
             }
         }
         heads
@@ -1461,7 +1464,7 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 /// 値はそのまま URL として読む。ここを落とすと、**fork の PR をローカルに出す
 /// いちばんふつうの経路**が当たらない。
 ///
-/// **材料は引数に取らない。** `upstream_remote` は `repo.head` から導けるので、
+/// **材料は引数に取らない。** 追跡設定は `repo.head` から導けるので、
 /// 別々に渡すと対応の取れない組（`Detached` な `head` に `Some("origin")`）が型で
 /// 組める（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
 ///
@@ -1476,11 +1479,11 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 fn head_homes(repo: &RepoInfo) -> Vec<RepoRef> {
     let tracked = match repo.head.as_ref() {
         Some(HeadInfo::Branch {
-            upstream_remote: Some(value),
+            upstream: Some(upstream),
             ..
         }) => {
             // 名前で引ければその URL、URL ならそのもの。
-            let url = match repo.tracked(value) {
+            let url = match repo.tracked(&upstream.remote) {
                 Tracked::Named(remote) => Some(remote.url.as_str()),
                 Tracked::Url(url) => Some(url),
                 Tracked::Local | Tracked::Missing(_) => None,

@@ -330,7 +330,7 @@ fn head_reports_the_current_branch() {
         HeadInfo::Branch {
             name: "main".to_string(),
             oid: first,
-            upstream_remote: None,
+            upstream: None,
         }
     );
 }
@@ -355,7 +355,7 @@ fn head_reads_the_tracking_remote_only_once_the_merge_ref_is_there() {
         HeadInfo::Branch {
             name: "main".to_string(),
             oid: first,
-            upstream_remote: None,
+            upstream: None,
         },
         "`merge` が無いのに追跡先を返している"
     );
@@ -367,7 +367,10 @@ fn head_reads_the_tracking_remote_only_once_the_merge_ref_is_there() {
         HeadInfo::Branch {
             name: "main".to_string(),
             oid: first,
-            upstream_remote: Some("fork".to_string()),
+            upstream: Some(UpstreamConfig {
+                remote: "fork".to_string(),
+                merge: "refs/heads/main".to_string(),
+            }),
         }
     );
 }

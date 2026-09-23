@@ -226,13 +226,14 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 
 ### head
 
-- 通常は `Branch { name, oid, upstream_remote }`、detached HEAD は `Detached(oid)`
+- 通常は `Branch { name, oid, upstream }`、detached HEAD は `Detached(oid)`
 - コミットが 1 つも無い（unborn）ときは `repo.head()` が `ErrorCode::UnbornBranch` を返すので、
   `HEAD` の symbolic target からブランチ名を取って `Unborn { name }` にする
-- **`upstream_remote` は `branch.<HEAD>.remote`。** 読み手は `app` の「現ブランチの PR」で、
-  **fork のブランチから出した PR を当てる**のに要る（01）。`upstream_config` をそのまま
-  呼んで `remote` だけ取るので、**`merge` が欠けていれば `None`** —— 同じ設定の読み方を
-  2 通り持たないため
+- **`upstream` は `branch.<HEAD>.remote` / `.merge` の対**（`UpstreamConfig`）。読み手は
+  `app` の「現ブランチの PR」（`remote`。**fork のブランチから出した PR を当てる**）と
+  PR 作成の `head` の候補（`merge`。追跡先が fork の URL のとき、そこに在るブランチの
+  名前はローカルの名前ではなく `merge` のほう）。01。`upstream_config` をそのまま
+  呼ぶので、**片方でも欠けていれば `None`** —— 同じ設定の読み方を 2 通り持たないため
 - **ブランチ一覧が読む `Branch::upstream_config` と同じ値を、別のジョブがもう一度読む。**
   重複を承知でこちらに載せるのは、**読み手が 1 回きりの座り直し**だから ——
   `Cmd::LoadBranches` の返信と PR 一覧のどちらが先に届くかで答えが変わる形になる

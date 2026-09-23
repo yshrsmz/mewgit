@@ -1931,26 +1931,6 @@ mod tests {
     }
 
     #[test]
-    fn a_url_tracking_config_without_a_branch_merge_falls_back_to_the_local_name() {
-        // `merge` が `refs/heads/` の下に無い（`refs/pull/<n>/head`）。**送る側
-        // （`head_candidates`）は候補から外すが、座り直しは寛容な照合なので
-        // ローカルの名前で当てる。**
-        let mut state = state_tracking(
-            "feat/x",
-            "https://github.com/bob/mewgit.git",
-            &[("origin", "git@github.com:yshrsmz/mewgit.git")],
-        );
-        track(
-            &mut state,
-            "https://github.com/bob/mewgit.git",
-            "refs/pull/5/head",
-        );
-        deliver(&mut state, vec![pr_from(82, "feat/x", "bob")]);
-
-        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
-    }
-
-    #[test]
     fn a_fork_pr_does_not_match_without_the_tracking_config() {
         // 追跡設定が無ければ出どころを知る手段が無いので、`target` と比べるしかない
         // （`head_homes` の候補が `target` だけになる）。**カーソルは先頭に座るだけ**で、

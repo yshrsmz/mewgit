@@ -410,10 +410,7 @@ impl AppState {
     ///   `Msg::RepoInfoLoaded` で届くので、2 つのあいだに順序は無い
     /// - 追跡設定の URL（`branch.<name>.remote` が URL のとき）。`gh pr checkout` と
     ///   mewgit の取り出しは fork の URL を書き、**remote-tracking ref を作らない**（05）。
-    ///   **ブランチ名は `merge` から取る** —— 取り出しは衝突を避けてローカルを
-    ///   `bob/main` にし、`merge` に `refs/heads/main` を書く（05 の「ブランチ名」）ので、
-    ///   ローカルの名前で組むと fork に無いブランチを指す。`refs/heads/` の下に無い
-    ///   `merge`（`refs/pull/<n>/head`）はブランチではないので候補にしない
+    ///   **ブランチ名はローカルの名前ではない**（[`RepoInfo::url_tracked`]）
     ///
     /// **`branch.<name>.pushRemote` は読まない。** 取り出しは `remote` にも同じ URL を
     /// 書くので上の 2 つ目で当たり、名前の `pushRemote` へ push したなら 1 つ目の ref が
@@ -425,12 +422,7 @@ impl AppState {
     /// リポジトリは区別できない（[`PrHead`]）。**GitHub の形として読めない
     /// リモートは入れない**。host は比べない（[`head_homes`] と同じ理由）。
     pub(super) fn head_candidates(&self) -> Vec<PrHead> {
-        let Some(HeadInfo::Branch {
-            name,
-            oid,
-            upstream,
-        }) = self.repo.head.as_ref()
-        else {
+        let Some(HeadInfo::Branch { name, oid, .. }) = self.repo.head.as_ref() else {
             return Vec::new();
         };
         let owner_of = |url: &str| RemoteUrl::parse(url).ok().map(|url| url.owner);
@@ -452,16 +444,12 @@ impl AppState {
         let from_refs = pushed
             .into_iter()
             .filter_map(|(remote, _)| Some((owner_of(&remote.url)?, name.clone())));
-        let from_url = upstream.as_ref().and_then(|upstream| {
-            let url = match self.repo.tracked(&upstream.remote) {
-                Tracked::Url(url) => url,
-                // 名前の追跡先は「何を基にしたか」で、在る証拠にならない。在るなら
-                // 1 つ目の材料（ref）で拾えている。
-                Tracked::Named(_) | Tracked::Local | Tracked::Missing(_) => return None,
-            };
-            let branch = upstream.merge.strip_prefix("refs/heads/")?;
-            Some((owner_of(url)?, branch.to_string()))
-        });
+        // 名前の追跡先は「何を基にしたか」で、在る証拠にならない。在るなら 1 つ目の
+        // 材料（ref）で拾えている。
+        let from_url = self
+            .repo
+            .url_tracked()
+            .and_then(|(url, branch)| Some((owner_of(url)?, branch.to_string())));
 
         let mut heads: Vec<PrHead> = Vec::new();
         for (owner, branch) in from_refs.chain(from_url) {
@@ -560,6 +548,30 @@ impl RepoInfo {
         } else {
             Tracked::Missing(value)
         }
+    }
+
+    /// HEAD のブランチの追跡先が URL のとき、その URL と **fork でのブランチ名**
+    /// （`merge` から `refs/heads/` を外したもの）。
+    ///
+    /// **名前は `merge` から取る。** URL を書くのは PR の取り出し（mewgit と
+    /// `gh pr checkout`）で、衝突を避けてローカルを `bob/main` にすることがある
+    /// （01 の「現ブランチの PR」の「比べる名前」）。**読み方を 1 本にする** ——
+    /// 座り直し（[`head_homes`]）と送る側（[`AppState::head_candidates`]）が別々に
+    /// 書くと、片方だけ直ったときに「取り出した PR に座らない」と「fork に無い
+    /// ブランチを送る」が片側だけで起きる。`refs/heads/` の下に無い `merge` は
+    /// ブランチではないので `None`（取り出しは URL と一緒には書かない。05）。
+    pub(super) fn url_tracked(&self) -> Option<(&str, &str)> {
+        let Some(HeadInfo::Branch {
+            upstream: Some(upstream),
+            ..
+        }) = self.head.as_ref()
+        else {
+            return None;
+        };
+        let Tracked::Url(url) = self.tracked(&upstream.remote) else {
+            return None;
+        };
+        Some((url, upstream.merge.strip_prefix("refs/heads/")?))
     }
 }
 
@@ -1420,8 +1432,6 @@ impl BranchState {
 ///
 /// **fork のブランチも当てる。** 照合する相手（リポジトリと、そこでのブランチ名）は
 /// [`head_homes`] が確からしい順に出す（`branch.<HEAD>.remote` の URL → `target`）。
-/// **名前は候補ごとに違う** —— 取り出した fork のブランチはローカルが `bob/main` でも
-/// fork では `main`。
 ///
 /// **到着順に依らない。** 材料の `head` と `remotes` はどちらも
 /// [`Msg::RepoInfoLoaded`](super::Msg::RepoInfoLoaded) に乗って**同時に**届き、
@@ -1449,16 +1459,8 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 /// **確からしい順**に返す（01 の「現ブランチの PR」）。HEAD がブランチに乗って
 /// いなければ空（`Detached` にも `Unborn` にも PR は無い）。
 ///
-/// **ブランチ名はリポジトリごとに違うことがある。** PR の取り出し（`Enter`）は fork の
-/// ブランチが既定ブランチや base と同名なら、衝突を避けてローカルを `bob/main` にし、
-/// 追跡設定の `merge` に `refs/heads/main` を書く（05 の「ブランチ名」）。だから
-/// **追跡先が URL の腕だけ `merge` の名前で比べる** —— URL を書くのは取り出し（mewgit と
-/// `gh pr checkout`）で、そこでの `merge` は「fork に在るブランチ」そのもの。
-/// **名前の追跡先ではローカルの名前のまま** —— そこでの `merge` は「何を基にしたか」で、
-/// `git checkout -b feat upstream/main` は `merge` を `refs/heads/main` にする。`main` と
-/// 比べると upstream の `main` から出た PR に座り、`N` がそれを「既にある」として断る。
-/// `refs/heads/` の下に無い `merge`（`refs/pull/<n>/head`）もローカルの名前に落とす
-/// （寛容な照合なので候補からは外さない。送る側の [`AppState::head_candidates`] は外す）。
+/// **名前は、追跡先が URL の腕だけ `merge` から取る**（[`RepoInfo::url_tracked`]）。
+/// 名前の追跡先と `target` の腕はローカルの名前のまま —— 理由は 01 の「比べる名前」。
 ///
 /// **候補が 1 つに決まらないのは、git が「どこへ push したか」を憶えていないから。**
 /// `branch.<name>.remote` が答えるのは**何を基にしたか**で、実測（git 2.55、
@@ -1478,7 +1480,8 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 /// 組める（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
 ///
 /// **読めない追跡設定は候補にしない**（設定が無い / `.`（ローカル追跡）/ リモートが
-/// 消えている / URL が GitHub の形でない）。**理由は分けない**：呼び出し側の扱いは
+/// 消えている / URL が GitHub の形でない / URL の `merge` がブランチでない）。
+/// **理由は分けない**：呼び出し側の扱いは
 /// どれも同じで、**出す先も無い**（座る行が変わるだけで通知は出さない）。
 ///
 /// **host は見ない。** [`RepoTarget::host`] は `ssh -G` で正規化済みだが、こちらは
@@ -1489,19 +1492,15 @@ fn head_homes(repo: &RepoInfo) -> Vec<(RepoRef, &str)> {
     let Some(HeadInfo::Branch { name, upstream, .. }) = repo.head.as_ref() else {
         return Vec::new();
     };
-    let tracked = upstream.as_ref().and_then(|upstream| {
-        // 名前で引ければその URL、URL ならそのもの。
-        let (url, branch) = match repo.tracked(&upstream.remote) {
-            Tracked::Named(remote) => (remote.url.as_str(), name.as_str()),
-            Tracked::Url(url) => (
-                url,
-                upstream
-                    .merge
-                    .strip_prefix("refs/heads/")
-                    .unwrap_or(name.as_str()),
-            ),
-            Tracked::Local | Tracked::Missing(_) => return None,
-        };
+    // 名前で引ければその URL、URL ならそのもの。
+    let tracked = match upstream
+        .as_ref()
+        .map(|upstream| repo.tracked(&upstream.remote))
+    {
+        Some(Tracked::Named(remote)) => Some((remote.url.as_str(), name.as_str())),
+        _ => repo.url_tracked(),
+    };
+    let tracked = tracked.and_then(|(url, branch)| {
         let url = RemoteUrl::parse(url).ok()?;
         Some((
             RepoRef {

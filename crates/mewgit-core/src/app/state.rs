@@ -1418,8 +1418,10 @@ impl BranchState {
 /// 先を決める側と描く側で照合の規則が割れると、カーソルが座っていない行を
 /// 「現ブランチの PR」として扱える。
 ///
-/// **fork のブランチも当てる。** 照合する相手は [`head_homes`] が確からしい順に
-/// 出す（`branch.<HEAD>.remote` の URL → `target`）。
+/// **fork のブランチも当てる。** 照合する相手（リポジトリと、そこでのブランチ名）は
+/// [`head_homes`] が確からしい順に出す（`branch.<HEAD>.remote` の URL → `target`）。
+/// **名前は候補ごとに違う** —— 取り出した fork のブランチはローカルが `bob/main` でも
+/// fork では `main`。
 ///
 /// **到着順に依らない。** 材料の `head` と `remotes` はどちらも
 /// [`Msg::RepoInfoLoaded`](super::Msg::RepoInfoLoaded) に乗って**同時に**届き、
@@ -1428,17 +1430,12 @@ impl BranchState {
 /// 追跡設定を取るとこれが崩れる（01 の「現ブランチの PR」）ので、**順序を回す
 /// テストは要らない**。
 pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Option<&'a PullRequest> {
-    let HeadInfo::Branch { name, .. } = repo.head.as_ref()? else {
-        // **`Detached` も `Unborn` も `None`。** 切り離された HEAD には名前が無く、
-        // コミットが 1 つも無いブランチから出した PR は無い。
-        return None;
-    };
     // **リポジトリ名まで見る**（`RepoRef` 丸ごとの比較）。owner だけだと、同じ owner の
     // 下に作った fork（`acme/app` → `acme/app-fork`）から出た他人の PR が
     // 「現ブランチの PR」に当たる。
-    head_homes(repo).into_iter().find_map(|home| {
+    head_homes(repo).into_iter().find_map(|(home, branch)| {
         list.iter().find(|pr| {
-            pr.head.branch == *name
+            pr.head.branch == branch
                 && pr
                     .head
                     .repo
@@ -1448,8 +1445,20 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
     })
 }
 
-/// HEAD のブランチから出した PR の head が在りうるリポジトリを、**確からしい順**に
-/// 返す（01 の「現ブランチの PR」）。
+/// HEAD のブランチから出した PR の head が在りうるリポジトリと、そこでのブランチ名を、
+/// **確からしい順**に返す（01 の「現ブランチの PR」）。HEAD がブランチに乗って
+/// いなければ空（`Detached` にも `Unborn` にも PR は無い）。
+///
+/// **ブランチ名はリポジトリごとに違うことがある。** PR の取り出し（`Enter`）は fork の
+/// ブランチが既定ブランチや base と同名なら、衝突を避けてローカルを `bob/main` にし、
+/// 追跡設定の `merge` に `refs/heads/main` を書く（05 の「ブランチ名」）。だから
+/// **追跡先が URL の腕だけ `merge` の名前で比べる** —— URL を書くのは取り出し（mewgit と
+/// `gh pr checkout`）で、そこでの `merge` は「fork に在るブランチ」そのもの。
+/// **名前の追跡先ではローカルの名前のまま** —— そこでの `merge` は「何を基にしたか」で、
+/// `git checkout -b feat upstream/main` は `merge` を `refs/heads/main` にする。`main` と
+/// 比べると upstream の `main` から出た PR に座り、`N` がそれを「既にある」として断る。
+/// `refs/heads/` の下に無い `merge`（`refs/pull/<n>/head`）もローカルの名前に落とす
+/// （寛容な照合なので候補からは外さない。送る側の [`AppState::head_candidates`] は外す）。
 ///
 /// **候補が 1 つに決まらないのは、git が「どこへ push したか」を憶えていないから。**
 /// `branch.<name>.remote` が答えるのは**何を基にしたか**で、実測（git 2.55、
@@ -1476,29 +1485,40 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 /// URL に書かれたままなので、生のまま比べると **fork だけ別のエイリアスを使う
 /// 多アカウント運用**（04）で逆に落ちる。残る穴は、別ホストの同名 `owner/repo` に
 /// 同名のブランチがあり、その PR が一覧に居るとき（01）。
-fn head_homes(repo: &RepoInfo) -> Vec<RepoRef> {
-    let tracked = match repo.head.as_ref() {
-        Some(HeadInfo::Branch {
-            upstream: Some(upstream),
-            ..
-        }) => {
-            // 名前で引ければその URL、URL ならそのもの。
-            let url = match repo.tracked(&upstream.remote) {
-                Tracked::Named(remote) => Some(remote.url.as_str()),
-                Tracked::Url(url) => Some(url),
-                Tracked::Local | Tracked::Missing(_) => None,
-            };
-            url.and_then(|url| RemoteUrl::parse(url).ok())
-                .map(|url| RepoRef {
-                    owner: url.owner,
-                    repo: url.repo,
-                })
-        }
-        _ => None,
+fn head_homes(repo: &RepoInfo) -> Vec<(RepoRef, &str)> {
+    let Some(HeadInfo::Branch { name, upstream, .. }) = repo.head.as_ref() else {
+        return Vec::new();
     };
-    let target = repo.target.resolved().map(|target| RepoRef {
-        owner: target.owner.clone(),
-        repo: target.repo.clone(),
+    let tracked = upstream.as_ref().and_then(|upstream| {
+        // 名前で引ければその URL、URL ならそのもの。
+        let (url, branch) = match repo.tracked(&upstream.remote) {
+            Tracked::Named(remote) => (remote.url.as_str(), name.as_str()),
+            Tracked::Url(url) => (
+                url,
+                upstream
+                    .merge
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(name.as_str()),
+            ),
+            Tracked::Local | Tracked::Missing(_) => return None,
+        };
+        let url = RemoteUrl::parse(url).ok()?;
+        Some((
+            RepoRef {
+                owner: url.owner,
+                repo: url.repo,
+            },
+            branch,
+        ))
+    });
+    let target = repo.target.resolved().map(|target| {
+        (
+            RepoRef {
+                owner: target.owner.clone(),
+                repo: target.repo.clone(),
+            },
+            name.as_str(),
+        )
     });
     tracked.into_iter().chain(target).collect()
 }

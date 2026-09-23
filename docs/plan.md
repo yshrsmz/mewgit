@@ -219,7 +219,7 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       フッターの Prs はキーが 1 つ増えても 80 桁で共通キーまで出る側に**残っている**
       （セル数は 07 の実測）
 - [x] fork のブランチで現ブランチの PR を当てる — `branch.<HEAD>.remote` を
-      `HeadInfo::Branch.upstream_remote` として読み、**リモート名なら `RepoInfo.remotes`
+      `HeadInfo::Branch.upstream`（当時は `upstream_remote`）として読み、**リモート名なら `RepoInfo.remotes`
       で URL に直し、引けなければ値そのものを** `RemoteUrl` に通して、その
       `owner` / `repo` と `head.repo` を比べる（**`gh pr checkout` が書くのは URL**。
       実測表は 01）。**材料は `Cmd::LoadRepoInfo` に載せた** —— `BranchState` の同じ
@@ -236,14 +236,14 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       受け入れた穴）。塞ぐなら「一覧に `state=all` を混ぜる」ではなく、**別の入口**
       （番号を入れて開く / 閉じたものを出すトグル）にする —— 全件を引くと辿るページが
       2 桁増え、PR ごとの扇形が現実的な大きさに収まらない
-- [x] `Modal::PrCreate` と `create_pr` — PRs ペインの `N` で 4 欄（title / body /
-      base / draft）のモーダルを開き、`POST /repos/{o}/{r}/pulls` を 1 本出す
+- [x] `Modal::PrCreate` と `create_pr` — PRs ペインの `N` で title / body /
+      base / draft の欄を持つモーダルを開き、`POST /repos/{o}/{r}/pulls` を 1 本出す
       （01 の「PR 作成（`N`）」）。**base の既定は `refs/remotes/<既定リモート>/HEAD`**
       —— `git_read::Remote.head_branch` として `Cmd::LoadRepoInfo` に載せた（02）ので
       **往復を増やさない**。symref が無い形（一度も fetch していないリモート）は
-      空欄で開く。**head は plain な branch 名**（fork の `<owner>:<branch>` は
-      「PR チェックアウト（2/2）」の行へ送った受け入れた穴。`branch.<name>.remote` から
-      owner を組むと fork 運用で外れる。01 に実測）。
+      空欄で開く。**head はこの時点では plain な branch 名**だった（fork の
+      `<owner>:<branch>` は「PR チェックアウト（2/2）」で塞いだ。`branch.<name>.remote`
+      から owner を組むと fork 運用で外れる。01 に実測）。
       **push 済みかは手前で判定しない** —— 判定の材料（追跡設定）は #47 と #98 で
       二度不確かだと判っているので、422 の本文を通知の `detail` に出す。
       **`N` を足したぶん、Prs のキーヒントは 80 桁で共通キーを落とす側に移った**
@@ -256,17 +256,23 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       書き込み」）。**`f` が URL の追跡先を扱えない穴も塞ぐ** —— gh で取り出した
       ブランチでも「追跡先の https://… がリモートにありません」でリモート選択が
       開いていた（01 / 04 の「既定リモート」）
-- [ ] PR チェックアウト（2/2）— `Modal::PrCreate` が受け入れた穴を塞ぐ。fork に在る
+- [x] PR チェックアウト（2/2）— `Modal::PrCreate` が受け入れた穴を塞ぐ。fork に在る
       ブランチから PR を作るには `head` を `<owner>:<branch>` にする必要があるが、
-      **どのリモートに在るかを git は憶えていない**（01 の「head の組み立て」に実測）。
-      **1/2 と同じ材料ではなかった**（01 の「PR チェックアウト（`Enter`）」に割った
-      理由）—— `refs/remotes/<名前>/<branch>` は gh / mewgit が取り出した fork の
-      ブランチ（remote-tracking ref が無い）を拾えず、`origin` と `upstream` の両方に
-      同名がある形では候補が 1 つに決まらない（#101）。**決め方から設計する。**
-      いまは plain な branch 名を送り、GitHub の 422 を通知に出す（**422 は守りに
-      ならない** —— owner を付けない `head` は base リポジトリのブランチとして
-      解決されるので、`target` 側に同名ブランチがあれば他人のブランチから PR が開く。
-      実 API では確かめていない）
+      **どのリモートに在るかを git は憶えていない**（01 の「head の組み立て」に実測。
+      `@{push}` も fork 運用のふつうの形で fatal になる）。**モーダルに `Head` 欄を
+      足し、候補を人に選ばせる**（2026-09-23 にユーザーと決めた）—— 候補は各リモートの
+      `refs/remotes/<r>/<branch>`（`RefIndex::remote_oid`。02）と追跡設定の
+      URL（gh / mewgit が取り出した fork）。**候補が無ければ `N` で断る**（ブランチ名
+      だけで送ると base リポジトリの同名ブランチとして解決される）。1/2 と材料が
+      違った理由は 01 の「PR チェックアウト（`Enter`）」
+- [ ] 取り出した fork のブランチの名前がずれていても現ブランチの PR に座る —— 取り出しは
+      衝突を避けてローカルを `bob/main` にする（05 の「ブランチ名」）が、座り直し
+      （`state::current_row`）は**ローカルの名前**を PR の `head.branch`（`main`）と
+      比べるので座らない。**`N` の「既にあります」もここを読む**ので、その形では断らずに
+      開き、POST を GitHub に断らせることになる（断りの形は**実 API では確かめていない**。
+      比べる名前がローカルの名前であることは 2/2 の `/code-review` の裏取りでコードから読んだ）。
+      塞ぐには、追跡先の腕で比べる名前を `HeadInfo::Branch.upstream` の `merge` から
+      取る（PR 作成の `head` の候補と同じ材料。01 の「head の組み立て」）
 - [ ] 403 の `needed_scopes` 案内
 - [ ] 既定リモートが GitHub でないときの PRs ペインの文言 — いまは
       `TargetState::Unavailable` でも `Cmd::ResolveAccount` が出ないため
@@ -372,10 +378,11 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       git が断った理由（`would be overwritten`、未マージのときの `-D` のヒント）が
       画面に出ない。不変ルール 4 が「UI まで届ける」と言っているのはこの詳細のこと
 - [ ] HEAD の追跡設定を 1 本にする。**いま `branch.<HEAD>.remote` は 2 箇所にある**
-      —— `RepoInfo.head`（`HeadInfo::Branch.upstream_remote`。PR の座り先が読む）と
-      `BranchState::head()` の `Branch.upstream_config`（`f` と push の行き先が読む）。
-      前者に寄せるには `HeadInfo` に `UpstreamConfig` を**対で**載せることが要る
-      （`push_plan` が `merge` を使うので `String` 1 本では肩代わりできない）。
+      —— `RepoInfo.head`（`HeadInfo::Branch.upstream`。PR の座り先と PR 作成の
+      `head` が読む）と `BranchState::head()` の `Branch.upstream_config`（`f` と push の
+      行き先が読む）。**`HeadInfo` に `UpstreamConfig` を対で載せるところまでは
+      PR チェックアウト（2/2）で済んだ**（`merge` の読み手が来たため）。残るのは
+      `f` / push の読み手を寄せること。
       **見返りは `update::default_remote` の 2 つのガード** ——「リモート一覧が空のあいだ
       1 段目を飛ばす」「ブランチ一覧がまだなら飛ばす」——で、どちらも追跡設定を
       `remotes` と別のジョブから取っていることだけが理由なので消えるはず

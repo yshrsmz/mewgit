@@ -78,6 +78,7 @@ pub struct RefIndex { /* Oid → Vec<RefLabel> */ }
 
 impl RefIndex {
     pub fn labels(&self, oid: Oid) -> &[RefLabel];
+    pub fn remote_oid(&self, name: &str) -> Option<Oid>;   // "origin/main" → Oid
 }
 
 impl FromIterator<(Oid, RefLabel)> for RefIndex { /* 並べ替えは new を通る */ }
@@ -91,6 +92,13 @@ pub enum RefLabel {
 
 - `Remote` は remote 名とブランチ名を分けず `origin/main` の短縮形 1 つで持つ。06 は
   `{origin/main}` と一続りで描くだけなので、分けても描画側で連結し直すだけになる
+- **`remote_oid` は名前から位置を引く。** 読み手は PR 作成の `head` の候補（01 の
+  「head の組み立て」）で、**「どのリモートにそのブランチが在るか」を git が残して
+  いるのは remote-tracking ref だけ**（追跡設定は「何を基にしたか」しか答えない）。
+  **別の読み取りを足さない** —— 索引は `head` と同じ `Cmd::LoadRepoInfo` で届くので、
+  2 つのあいだに順序が無い。引く側は**リモートの一覧から `<remote>/<branch>` を組む**
+  （ref 名からリモート名を切り出すと、`/` を含むリモート名で割り方が決まらない）。
+  索引は Oid で引く形なので全件を舐めるが、引くのは `N` と確定のときだけ
 - annotated tag は `target()` が tag オブジェクトの Oid なので、commit まで peel してから引く。
   peel しないとラベルがどのグラフ行にも乗らない
 - 載せるのはローカルブランチ・リモート追跡ブランチ・タグだけ（ホワイトリスト）。
@@ -218,13 +226,14 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 
 ### head
 
-- 通常は `Branch { name, oid, upstream_remote }`、detached HEAD は `Detached(oid)`
+- 通常は `Branch { name, oid, upstream }`、detached HEAD は `Detached(oid)`
 - コミットが 1 つも無い（unborn）ときは `repo.head()` が `ErrorCode::UnbornBranch` を返すので、
   `HEAD` の symbolic target からブランチ名を取って `Unborn { name }` にする
-- **`upstream_remote` は `branch.<HEAD>.remote`。** 読み手は `app` の「現ブランチの PR」で、
-  **fork のブランチから出した PR を当てる**のに要る（01）。`upstream_config` をそのまま
-  呼んで `remote` だけ取るので、**`merge` が欠けていれば `None`** —— 同じ設定の読み方を
-  2 通り持たないため
+- **`upstream` は `branch.<HEAD>.remote` / `.merge` の対**（`UpstreamConfig`）。読み手は
+  `app` の「現ブランチの PR」（`remote`。**fork のブランチから出した PR を当てる**）と
+  PR 作成の `head` の候補（`merge`。追跡先が fork の URL のとき、そこに在るブランチの
+  名前はローカルの名前ではなく `merge` のほう）。01。`upstream_config` をそのまま
+  呼ぶので、**片方でも欠けていれば `None`** —— 同じ設定の読み方を 2 通り持たないため
 - **ブランチ一覧が読む `Branch::upstream_config` と同じ値を、別のジョブがもう一度読む。**
   重複を承知でこちらに載せるのは、**読み手が 1 回きりの座り直し**だから ——
   `Cmd::LoadBranches` の返信と PR 一覧のどちらが先に届くかで答えが変わる形になる

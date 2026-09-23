@@ -1209,7 +1209,7 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
 
 - **状態に持たない。** `list` と `RepoInfo.head` から毎回導ける。持つと、どちらかが
   更新されたときに片方だけ古くなる（**導出できる値を、元から離れた場所に置かない**）
-- **追跡先は `HeadInfo::Branch.upstream_remote`（`branch.<HEAD>.remote`）の URL から
+- **追跡先は `HeadInfo::Branch.upstream` の `remote`（`branch.<HEAD>.remote`）の URL から
   出す。** 一覧には fork からの PR も出る（05）ので、`target` とだけ比べると
   **fork のブランチでは合致しない**。**値はリモート名でも URL でもよい**（git の仕様）
   ので、`RepoInfo.remotes` で引けたらその URL を、引けなければ値そのものを
@@ -1284,7 +1284,7 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
 PRs ペインの `N` で `Modal::PrCreate` を開き、確定で `POST /repos/{o}/{r}/pulls`（05）を
 1 本出す。`Cmd::CreatePr` / `Msg::PrCreated` / `JobKind::CreatePr`。
 
-**欄は 4 つ**（title / body / base / draft）。`Tab` / `Shift+Tab` で巡回し、
+**欄は title / body / base / head / draft**。`Tab` / `Shift+Tab` で巡回し、
 どの欄を編集しているかは `Modal::PrCreate.field`（`PrField`）が持つ。
 **`base` も `TextBuffer`** —— ここにはずっと `base: String` と書いてあったが、
 要件（`docs/requirements.md`）がベースブランチの指定を求めており、編集できる欄は
@@ -1300,6 +1300,8 @@ PRs ペインの `N` で `Modal::PrCreate` を開き、確定で `POST /repos/{o
 つなぐ（`Modal::Input` と同じ。上の「1 行入力」）。**`update::paste` の `match` は
 網羅にする** —— 受け皿の `_` にしていたせいで、このモーダルを足した回に**貼り付けだけが
 黙って無反応**になっていた。
+**`head` の欄では `←` / `→` が候補を選び直す**（下の「head の組み立て」）。文字は
+打てない —— 候補の外の値を打たせると、推定を人の目に通す意味が無くなる。
 **`draft` の欄では `Space` がトグル** —— `Enter` に載せると「決定」と「切替」が
 同じキーになる。**確定を `Alt+Enter` だけにしない** —— `CommitMessage` も `Input` も
 `Enter` で確定するので、モーダルごとに `Enter` の意味が変わる形になる。
@@ -1320,39 +1322,81 @@ PRs ペインの `N` で `Modal::PrCreate` を開き、確定で `POST /repos/{o
 
 #### head の組み立て
 
-`head` は **HEAD のブランチ名だけ**。`<owner>:<branch>` は組まない。
+`head` は**モーダルの `Head` 欄で人が選んだ候補**。候補は `N` を押した時点で
+`RepoInfo` と ref の索引から組み（`AppState::head_candidates`）、欄に `<owner>:<branch>` として
+見せる。**送るまで人の目を通す** —— 推定が外れても黙っては送られない。
 
-**`head_homes()` の先頭を owner に使わない。** あれは「PR の head が**在りうる**
-リポジトリ」を**確からしい順に**返す一覧で、**呼び手が全部試すこと**を前提にしている
-（上の「現ブランチの PR」）。先頭だけを断定値として採ると**一覧が一覧である理由を
-捨てる**ことになり、しかも**いちばんふつうの fork 運用で外れる** —— 実測（2026-09-21、
-git 2.55、`env -i` の一時リポジトリ）:
+**なぜ推定だけで決めないか。git は「どこへ push したか」を憶えていない**（上の
+「現ブランチの PR」の表）。`@{push}` も決め手にならない —— 実測（2026-09-23、
+git 2.55、`env -i` の一時リポジトリ。`push.default` は既定の `simple`）:
 
-```
-git clone <自分の fork>; git remote add upstream <本家>; git fetch upstream
-git checkout -b feat upstream/main
-→ branch.feat.remote = upstream   （push するのは自分の fork のほう）
-```
+| 手順 | `branch.<b>.remote` | `git rev-parse --abbrev-ref <b>@{push}` |
+|---|---|---|
+| `checkout -b feat upstream/main`（未 push） | upstream | `fatal: cannot resolve 'simple' push to a single destination` |
+| そのあと `push origin feat`（`-u` 無し） | upstream | **同じ fatal**（`refs/remotes/origin/feat` は在る） |
+| `remote.pushDefault=origin` にして `git push` | upstream | **同じ fatal**（push 自体は origin へ通る） |
+| `push -u origin feat3` | origin | `origin/feat3` |
 
-ここで先頭は upstream の owner なので、`<upstream-owner>:feat` を送ることになる。
-**`branch.<name>.remote` が答えるのは「何を基にしたか」**（上の表）で、
-「どこに在るか」ではない。**座り直し（寛容な照合）を良くする変更が PR 作成（断定）を
-悪くする**形なので、読み手を分けた。
+**gh も推定だけでは送らない**（gh 2.101.0 の `pkg/cmd/pr/create/create.go` と
+`pkg/cmd/pr/shared/find_refs_resolution.go` を読んだ）。push 先の設定
+（`@{push}` → `pushRemote` → `remote.pushDefault` → `branch.<b>.remote`）を当て、
+その `refs/remotes/<r>/<b>` が **HEAD と同じ SHA** なら採る。だめなら各リモートの
+同名 ref を HEAD の SHA と照合し、それでも決まらなければ「どこへ push するか」を
+プロンプトで聞く。
 
-**残る穴** —— **fork に在るブランチから PR を作れない。** ふつうは GitHub が
-「head が無い」と 422 で断り、その本文は通知の `detail` に出る。**ただし 422 は
-守りとして数えられない** —— owner を付けない `head` は**base リポジトリの中の
-ブランチ**として解決されるので、`target` 側に同名のブランチがあれば
-**他人のブランチから PR が開く**。**実 API では確かめていない**（確かめると PR が
-できてしまう）。塞ぐには「そのブランチがどのリモートに在るか」を読む必要があるので、
-**PR チェックアウトの 2 本目へ送った**（`docs/plan.md`。割った理由は下の
-「PR チェックアウト（`Enter`）」）。
+**候補**（`AppState::head_candidates`。座り直しの `head_homes` の隣に置く ——
+同じ材料の寛容な読み手と断定する読み手を並べ、#101 で割った理由を見失わないため）:
 
-**push 済みかを手前で判定しないのも同じ理由。** リモートに無いブランチから PR を作ると
-GitHub が 422 を返すので、その本文を通知に出す。手前で判定するには追跡設定を読むことに
-なるが、**あの `None` には理由が 4 つあり**（#47）、**git は「どこへ push したか」を
-憶えていない**（上の表）—— **二度確かめて不確かだと判った材料の上に守りを組むことに
-なる。**
+- **同名の remote-tracking ref が在るリモート** —— 各リモートの
+  `refs/remotes/<r>/<branch>` を `graph.refs`（`RefIndex::remote_oid`。02 の「refs と
+  ラベル」）から引く。**読み取りを足さない** —— 索引は `repo.head` と同じ
+  `Msg::RepoInfoLoaded` で届くので、2 つのあいだに順序は無い。**在ることは
+  「そのリモートにそのブランチが在った」の証拠**で、`branch.<name>.remote`（何を
+  基にしたか）と違って push の結果そのものが残る（上の表の 2 行目で `origin/feat` が
+  在るのはこれ）
+- **追跡設定の URL**（`branch.<name>.remote` が URL のとき）—— `gh pr checkout` と
+  mewgit の取り出し（`Enter`）は fork の URL を書き、**remote-tracking ref を作らない**
+  （05）。ref の腕だけにすると、**取り出した fork の PR に push し直して PR を作り直す**
+  いちばんふつうの形が候補から漏れる。**ブランチ名は `merge` から取る** —— 取り出しは
+  衝突を避けてローカルを `bob/main` にし、`merge` に `refs/heads/main` を書く（05 の
+  「ブランチ名」）ので、ローカルの名前で組むと fork に無い `bob:bob/main` を指す
+  （`/code-review` が拾った）。`refs/heads/` の下に無い `merge`（`refs/pull/<n>/head`）は
+  ブランチではないので候補にしない。材料は `HeadInfo::Branch.upstream`（remote と
+  merge の対。02 の「head」）
+- **GitHub の形として読めないリモートは候補にしない**（`RemoteUrl::parse`）。
+  **host は比べない**（上の「現ブランチの PR」と同じ理由）
+- **送る値（owner とブランチ名）で 1 つに畳む。** `POST /pulls` の `head` が運べるのは
+  `<owner>:<branch>` までで、同じ owner の 2 つのリポジトリ（`acme/app` と
+  `acme/app-fork`）は区別できない
+  （`head_repo` を送る形は組まない —— 踏むリポジトリが出てから）
+
+**並びと既定。** HEAD と同じ oid の ref を持つ候補を先に置き（gh が採るのと同じ
+「そこまで push 済み」の証拠）、残りはリモートの並び順、URL の候補は最後。**既定は
+先頭** —— #101 の「候補の一覧の先頭を断定値に使わない」を破らないのは、**先頭が
+画面に出て人が確定する**から。欄では `←` / `→` で選び直す。
+
+**送る値。** 選んだ候補の owner が `target` の owner と同じなら**ブランチ名だけ**、
+違えば `<owner>:<branch>`（gh の `QualifiedHeadRef` と同じ）。
+
+**候補が 1 つも無ければ `N` を押した時点で断る**（下の「押した時点で断る形」。
+2026-09-23 にユーザーと決めた）。**ブランチ名だけで送る経路は残さない** ——
+owner を付けない `head` は**base リポジトリの中のブランチ**として解決されるので、
+`target` 側に同名のブランチがあれば**他人のブランチから PR が開く**（**実 API では
+確かめていない** —— 確かめると PR ができてしまう）。**代償** —— 別の端末から
+push しただけで一度も `f` していないと、remote-tracking ref が無いので `f` するまで
+断られる。**断りの文言が `f` を案内する**のはそのため。
+
+**確定のときに組み直す。** モーダルを開いているあいだに `f` や外の checkout で
+`RepoInfo` が読み直されると候補が変わる。**写しを送らない** —— 確定の時点で
+`head_candidates` を引き直し、選んでいた候補（owner とブランチ名）が残っていなければ
+**閉じずに欄を新しい候補で入れ替え、確かめ直させる**（本文は残る）。
+
+**push 済みかは見ない。** ref が HEAD より遅れていても候補にする（既定の並びが
+後ろになるだけ）—— `head` が指すのは**リモートのブランチ**なので、正しいかは
+「どのリポジトリか」で決まる。ローカルにしか無いコミットは push の問題で、PR を
+作るかどうかとは別（遅れた head で GitHub が断るかは**実 API では確かめていない**）。
+**追跡設定（`Branch::upstream_config`）は読まない** —— あの `None` には
+理由が 4 つあり（#47）、ここで要るのは「どこに在るか」のほうなので ref を読む。
 
 #### 押した時点で断る形
 
@@ -1363,6 +1407,7 @@ GitHub が 422 を返すので、その本文を通知に出す。手前で判�
 | GitHub が使えない（`AppState::github_block`） | `github_block` が値で答える文言（`r` と同じ。上の「引き直す（`r`）」） |
 | HEAD がブランチでない（detached / unborn） | head に載せる名前が無い |
 | このブランチの PR が既にある（`AppState::current_pr`） | その番号を出す |
+| `head` の候補が 1 つも無い（上の「head の組み立て」） | どのリモートにも無い。push したなら `f` |
 
 **3 つ目は `AppState::current_pr` の答えをそのまま使う。** 別の判定を書くと、座り直し
 （上の「現ブランチの PR」）と食い違う画面が作れる —— **カーソルが座っているその行の
@@ -1372,7 +1417,8 @@ PR を「無い」と言って作りに行く**形になる。**行き止まり�
 数える」）。
 
 **断る側と送る側で読む材料が違う。** `current_pr` は `head_homes()` を通す**寛容な
-照合**で、`head` は**追跡先を読まない**（下の「head の組み立て」）。そのため
+照合**で、`head` は**remote-tracking ref と追跡設定の URL から組み、人が選ぶ**
+（上の「head の組み立て」）。そのため
 **追跡先が fork を指していて、その fork から同名ブランチの PR が出ている**とき、
 その PR が自分のものでなくても `N` は「既にあります（#n）」で断る。**受け入れた穴**
 ——「このブランチから出た PR」の定義は #98 の照合規則そのもので、断る側だけ別の規則を
@@ -1421,14 +1467,14 @@ PRs ペインの `Enter` でカーソル行の PR をローカルのブランチ
 - **カーソルは動かさない。** 押した行がそのまま「現ブランチの PR」になるが、
   座り直しは 1 回きりなので導出は走らない（上の「現ブランチの PR」）
 
-**PR 作成の `head`（上の「head の組み立て」の残る穴）は 2 本目に割った**
+**PR 作成の `head`（上の「head の組み立て」）は 2 本目に割った**
 （2026-09-23 にユーザーと決めた）。plan.md は「取り出しと同じ材料になる」と
 書いていたが、**同じ材料ではなかった** —— 取り出しは PR（owner が判っている）から
-ブランチを作る向きで、PR 作成はブランチから owner を探す逆向き。しかも plan.md が
-挙げた材料（`refs/remotes/<名前>/<branch>`）は、**`gh pr checkout` で取り出した
-fork のブランチ（remote-tracking ref が無い。05）を拾えず**、`origin` と
-`upstream` の両方に同名がある形では「候補の一覧の先頭を断定値に使わない」（#101）へ
-戻る。**別の設計問題なので別の PR にする。**
+ブランチを作る向きで、PR 作成はブランチから owner を探す逆向き。しかも
+remote-tracking ref だけでは、**`gh pr checkout` で取り出した fork のブランチ
+（remote-tracking ref が無い。05）を拾えず**、`origin` と `upstream` の両方に
+同名がある形では「候補の一覧の先頭を断定値に使わない」（#101）へ戻る。2 本目は
+**候補を人に選ばせる**ことでこれを解いた（上）。
 
 ### 右上のタブ
 

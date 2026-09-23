@@ -346,20 +346,32 @@ impl AppState {
     /// `Unavailable`）が潰れる。材料を 1 つ足したときに「残るのは◯◯だけ」の側が
     /// 黙って嘘になる形でもある（`CLAUDE.md`）。
     ///
-    /// **`account_view` と同じ文言を出す**（あちらの `Err` もここから採る）。**腕の順で
-    /// 答えが変わる組（`Degraded` かつ `Unavailable`）は到達しない** —— `target` を
-    /// 書くのは `update::account` の 3 箇所だけで、`Degraded` になる
+    /// **`account_view` と同じ文言を出す**（あちらの `Err` もここから採る）。
+    pub fn github_block(&self) -> Option<GithubBlock> {
+        self.github_target().err()
+    }
+
+    /// GitHub を叩く先。叩けないなら理由（[`github_block`](Self::github_block) の
+    /// 出どころ）。
+    ///
+    /// **叩けることと、叩く先を 1 つの答えで返す。** 理由だけを返すと、叩ける側
+    /// （PR 作成の `head` を組む `update::prs`）が `target` をもう一度読み直すことに
+    /// なり、**「叩けるのに `target` が無い」という到達しない腕**を書かされる
+    /// （`CLAUDE.md` の「旗と値を割らない」）。
+    ///
+    /// **腕の順で答えが変わる組（`Degraded` かつ `Unavailable`）は到達しない** ——
+    /// `target` を書くのは `update::account` の 3 箇所だけで、`Degraded` になる
     /// `Msg::AccountResolved` は `target` が `Resolved` になってからしか出ない
     /// （2026-09-19 に `/code-review` が腕を入れ替えて確かめ、workspace が緑のまま
     /// だった）。**順は読みやすさのためで、守りではない。**
-    pub fn github_block(&self) -> Option<GithubBlock> {
+    pub fn github_target(&self) -> Result<&RepoTarget, GithubBlock> {
         match (&self.account, &self.repo.target) {
-            (AccountState::Disabled, _) => Some(GithubBlock::AccountDisabled),
-            (AccountState::Degraded(_), _) => Some(GithubBlock::AccountDegraded),
-            (_, TargetState::Unavailable) => Some(GithubBlock::TargetUnavailable),
-            (AccountState::Resolved(_), TargetState::Resolved(_)) => None,
+            (AccountState::Disabled, _) => Err(GithubBlock::AccountDisabled),
+            (AccountState::Degraded(_), _) => Err(GithubBlock::AccountDegraded),
+            (_, TargetState::Unavailable) => Err(GithubBlock::TargetUnavailable),
+            (AccountState::Resolved(_), TargetState::Resolved(target)) => Ok(target),
             (_, TargetState::Unasked) | (AccountState::Resolving, _) => {
-                Some(GithubBlock::AccountResolving)
+                Err(GithubBlock::AccountResolving)
             }
         }
     }
@@ -380,6 +392,87 @@ impl AppState {
     /// どちらかが更新されたときに片方だけ古くなる。
     pub fn current_pr(&self) -> Option<&PullRequest> {
         current_row(&self.repo, &self.prs.list)
+    }
+
+    /// PR 作成の `head` の候補（01 の「head の組み立て」）。HEAD がブランチに
+    /// 乗っていなければ空。
+    ///
+    /// **[`head_homes`] とは読み手が違う。** あちらは「PR の head が**在りうる**
+    /// リポジトリ」を返す寛容な照合（座り直し）で、追跡先（何を基にしたか）も入れる。
+    /// こちらは**送る値の候補**なので、「そこに在る」と言える材料だけを使う（#101）。
+    ///
+    /// **候補は 2 つの材料から組む。**
+    /// - 同名の remote-tracking ref が在るリモート（`graph.refs` の
+    ///   [`RefIndex::remote_oid`]）。在ることが「そのリモートにそのブランチが在った」の
+    ///   証拠で、`branch.<name>.remote`（何を基にしたか）と違って push の結果そのものが
+    ///   残る。**名前はリモートの一覧から組む**（ref 名から切り出すと `/` を含む
+    ///   リモート名で割り方が決まらない。02）。索引は `repo.head` と同じ
+    ///   `Msg::RepoInfoLoaded` で届くので、2 つのあいだに順序は無い
+    /// - 追跡設定の URL（`branch.<name>.remote` が URL のとき）。`gh pr checkout` と
+    ///   mewgit の取り出しは fork の URL を書き、**remote-tracking ref を作らない**（05）。
+    ///   **ブランチ名は `merge` から取る** —— 取り出しは衝突を避けてローカルを
+    ///   `bob/main` にし、`merge` に `refs/heads/main` を書く（05 の「ブランチ名」）ので、
+    ///   ローカルの名前で組むと fork に無いブランチを指す。`refs/heads/` の下に無い
+    ///   `merge`（`refs/pull/<n>/head`）はブランチではないので候補にしない
+    ///
+    /// **`branch.<name>.pushRemote` は読まない。** 取り出しは `remote` にも同じ URL を
+    /// 書くので上の 2 つ目で当たり、名前の `pushRemote` へ push したなら 1 つ目の ref が
+    /// できる。
+    ///
+    /// **並びは HEAD と同じ oid の ref が先**（gh が採るのと同じ「そこまで push 済み」の
+    /// 証拠）、残りはリモート名の順、URL は最後。**送る値（owner とブランチ名）で
+    /// 1 つに畳む** —— `<owner>:<branch>` までしか運べないので、同じ owner の 2 つの
+    /// リポジトリは区別できない（[`PrHead`]）。**GitHub の形として読めない
+    /// リモートは入れない**。host は比べない（[`head_homes`] と同じ理由）。
+    pub(super) fn head_candidates(&self) -> Vec<PrHead> {
+        let Some(HeadInfo::Branch {
+            name,
+            oid,
+            upstream,
+        }) = self.repo.head.as_ref()
+        else {
+            return Vec::new();
+        };
+        let owner_of = |url: &str| RemoteUrl::parse(url).ok().map(|url| url.owner);
+
+        let mut pushed: Vec<(&Remote, Oid)> = self
+            .repo
+            .remotes
+            .iter()
+            .filter_map(|remote| {
+                let at = self
+                    .graph
+                    .refs
+                    .remote_oid(&format!("{}/{name}", remote.name))?;
+                Some((remote, at))
+            })
+            .collect();
+        // **安定ソート**なので、同じ側の中ではリモート名の順（`repo.remotes` の並び）が残る。
+        pushed.sort_by_key(|(_, at)| at != oid);
+        let from_refs = pushed
+            .into_iter()
+            .filter_map(|(remote, _)| Some((owner_of(&remote.url)?, name.clone())));
+        let from_url = upstream.as_ref().and_then(|upstream| {
+            let url = match self.repo.tracked(&upstream.remote) {
+                Tracked::Url(url) => url,
+                // 名前の追跡先は「何を基にしたか」で、在る証拠にならない。在るなら
+                // 1 つ目の材料（ref）で拾えている。
+                Tracked::Named(_) | Tracked::Local | Tracked::Missing(_) => return None,
+            };
+            let branch = upstream.merge.strip_prefix("refs/heads/")?;
+            Some((owner_of(url)?, branch.to_string()))
+        });
+
+        let mut heads: Vec<PrHead> = Vec::new();
+        for (owner, branch) in from_refs.chain(from_url) {
+            let seen = heads
+                .iter()
+                .any(|head| head.owner.eq_ignore_ascii_case(&owner) && head.branch == branch);
+            if !seen {
+                heads.push(PrHead { owner, branch });
+            }
+        }
+        heads
     }
 
     /// 出している diff を**直近の書き込みより後に**読めているか。
@@ -1371,7 +1464,7 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 /// 値はそのまま URL として読む。ここを落とすと、**fork の PR をローカルに出す
 /// いちばんふつうの経路**が当たらない。
 ///
-/// **材料は引数に取らない。** `upstream_remote` は `repo.head` から導けるので、
+/// **材料は引数に取らない。** 追跡設定は `repo.head` から導けるので、
 /// 別々に渡すと対応の取れない組（`Detached` な `head` に `Some("origin")`）が型で
 /// 組める（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
 ///
@@ -1386,11 +1479,11 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 fn head_homes(repo: &RepoInfo) -> Vec<RepoRef> {
     let tracked = match repo.head.as_ref() {
         Some(HeadInfo::Branch {
-            upstream_remote: Some(value),
+            upstream: Some(upstream),
             ..
         }) => {
             // 名前で引ければその URL、URL ならそのもの。
-            let url = match repo.tracked(value) {
+            let url = match repo.tracked(&upstream.remote) {
                 Tracked::Named(remote) => Some(remote.url.as_str()),
                 Tracked::Url(url) => Some(url),
                 Tracked::Local | Tracked::Missing(_) => None,
@@ -2083,12 +2176,17 @@ pub enum Modal {
     /// 編集できる欄はカーソルを持てないといけない（設計にはずっと `String` と
     /// 書いてあった）。
     ///
-    /// **どの欄を編集しているかは [`PrField`] が持つ。** 欄が 4 つあるので、
+    /// **どの欄を編集しているかは [`PrField`] が持つ。** 欄が複数あるので、
     /// カーソルの位置だけでは決まらない。
+    ///
+    /// **`head` は選ばせる**（01 の「head の組み立て」）。`heads` は `N` を押した時点の
+    /// 候補と、そのどれを選んでいるか。**確定のときに候補を組み直す**ので、ここに
+    /// あるのは画面に出すための写し。
     PrCreate {
         title: TextBuffer,
         body: TextBuffer,
         base: TextBuffer,
+        heads: PrHeads,
         draft: bool,
         field: PrField,
     },
@@ -2164,6 +2262,8 @@ pub enum PrField {
     Title,
     Body,
     Base,
+    /// **文字を打つ欄ではない**（`Draft` と同じ）。`←` / `→` で候補を選び直す。
+    Head,
     Draft,
 }
 
@@ -2182,7 +2282,8 @@ impl PrField {
         match self {
             PrField::Title => PrField::Body,
             PrField::Body => PrField::Base,
-            PrField::Base => PrField::Draft,
+            PrField::Base => PrField::Head,
+            PrField::Head => PrField::Draft,
             PrField::Draft => PrField::Title,
         }
     }
@@ -2193,8 +2294,78 @@ impl PrField {
             PrField::Title => PrField::Draft,
             PrField::Body => PrField::Title,
             PrField::Base => PrField::Body,
-            PrField::Draft => PrField::Base,
+            PrField::Head => PrField::Base,
+            PrField::Draft => PrField::Head,
         }
+    }
+}
+
+/// PR 作成の `head` の候補 1 つ（01 の「head の組み立て」）。
+///
+/// **owner だけを持ち、リポジトリ名は持たない。** `POST /pulls` の `head` が運べるのは
+/// `<owner>:<branch>` までなので、同じ owner の 2 つのリポジトリは送る値の上で
+/// 区別できない —— 持つと、区別できない 2 つを別の候補として並べることになる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrHead {
+    pub owner: String,
+    pub branch: String,
+}
+
+impl PrHead {
+    /// 欄に出す字。**常に `<owner>:<branch>`** —— どのリポジトリから出すかを
+    /// 人に確かめさせる欄なので、送る値（`PrHead::api_value`）と違って owner を
+    /// 落とさない。
+    pub fn label(&self) -> String {
+        format!("{}:{}", self.owner, self.branch)
+    }
+
+    /// `POST /pulls` の `head`。**`target` と同じ owner ならブランチ名だけ**、違えば
+    /// `<owner>:<branch>`（gh の `QualifiedHeadRef` と同じ形）。GitHub の login は
+    /// 大文字小文字を区別しないので、比べるときもそうする。
+    pub(super) fn api_value(&self, target_owner: &str) -> String {
+        if self.owner.eq_ignore_ascii_case(target_owner) {
+            self.branch.clone()
+        } else {
+            self.label()
+        }
+    }
+}
+
+/// [`Modal::PrCreate`] の `head` の候補と、選んでいる位置（01 の「head の組み立て」）。
+///
+/// **カーソルを持ち主の型に包む**（`BranchState::move_cursor` /
+/// `CommitFiles::move_cursor` と同じ）。一覧とカーソルを `Modal` のフィールドに
+/// 並べると、端の扱い（`stepped_index`）を `Modal` に置くことになり、
+/// **どの欄に居るときだけ動かすか**の判断と割れる。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrHeads {
+    list: Vec<PrHead>,
+    cursor: usize,
+}
+
+impl PrHeads {
+    /// 先頭を選んで開く。**既定が先頭でよいのは、欄に出て人が確定するから**
+    /// （#101 の「候補の一覧の先頭を断定値に使わない」を破らない理由。01）。
+    pub fn new(list: Vec<PrHead>) -> Self {
+        Self { list, cursor: 0 }
+    }
+
+    pub fn list(&self) -> &[PrHead] {
+        &self.list
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// 選んでいる候補。候補が空なら `None`（開いているあいだに消えた形）。
+    pub fn selected(&self) -> Option<&PrHead> {
+        self.list.get(self.cursor)
+    }
+
+    /// `←` / `→`。**端で止まる**（ペインのカーソルと同じ `stepped_index`）。
+    pub fn move_cursor(&mut self, delta: isize) {
+        self.cursor = stepped_index(self.cursor, self.list.len(), delta);
     }
 }
 

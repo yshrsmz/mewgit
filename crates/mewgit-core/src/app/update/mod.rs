@@ -288,8 +288,9 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
             PrField::Title => title.insert_line(text),
             PrField::Body => body.insert_text(text),
             PrField::Base => base.insert_line(text),
-            // 文字を打つ欄ではない。
-            PrField::Draft => {}
+            // 文字を打つ欄ではない。**`Head` に貼ると候補の外の値を作れてしまう**
+            // （01 の「PR 作成（`N`）」—— 推定を人の目に通す欄なので打たせない）。
+            PrField::Head | PrField::Draft => {}
         },
         // **`_` にしない。** ここを受け皿にしていたせいで、`Modal::PrCreate` を
         // 足した回に**貼り付けだけが黙って無反応**になっていた（#63 の

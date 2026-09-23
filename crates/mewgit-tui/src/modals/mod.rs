@@ -42,9 +42,21 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
             title,
             body,
             base,
+            heads,
             draft,
             field,
-        } => pr_create::render(frame, area, title, body, base, *draft, *field),
+        } => pr_create::render(
+            frame,
+            area,
+            pr_create::Fields {
+                title,
+                body,
+                base,
+                heads,
+                draft: *draft,
+                field: *field,
+            },
+        ),
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
         Modal::RebaseEditor { .. } | Modal::Help => {}
     }

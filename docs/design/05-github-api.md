@@ -398,36 +398,48 @@ gh が叩いた git を拾った。`maintenance` と partial clone の遅延取�
 - **いま居るブランチへは `<src>:<b>` で fetch できない**（`fatal: refusing to fetch
   into branch 'refs/heads/<b>' checked out at …`、exit 128。`--update-head-ok` を
   付けると通るが、ref だけ動いてワークツリーと index が置き去りになる）。
-  **だから「いま居る」だけ `FETCH_HEAD` を早送りする形**に割れている
+  **だから gh は「いま居る」だけ `FETCH_HEAD` を早送りする形**に割れている
 
 ### mewgit の手順
 
-gh の表から 3 つ変える。
+gh の表から 4 つ変える。
 
 - **`checkout` ではなく `switch`**（03 の「ブランチの切替は `checkout` ではなく
   `switch`」）。`checkout -b <b> --track <start>` は `switch --track --create <b>
   <start>` にする。**`--track` は明示する** —— `branch.autoSetupMerge` を `false`
   にしている環境では既定で入らず（git 2.55 で確認）、上流の無いブランチができると
   Branches ペインに ahead/behind が出ず、push でも `-u` が要る
+- **「いま居る」を場面にしない。** 在るならいつも `switch` してから `merge --ff-only`
+  する（いま居れば `switch` は何もしない）。場面を分けるには一覧の `is_head` を
+  信じることになり、**外で `git switch main` されていると `main` を PR の先端へ
+  早送りする**（`/code-review` が一時リポジトリで再現した）。いま居るブランチへは
+  `<src>:<b>` で fetch できない（上）ので、fork も `FETCH_HEAD` に取ってから早送りする
+- **fork の「無い」は `branch <b> FETCH_HEAD` で作る。** gh の
+  `fetch …:<b>` は在るブランチを黙って早送りし、そのあとの `config` が
+  **在るブランチの追跡設定を fork へ書き換える**（一覧が古くて「無い」と読んだ形。
+  `/code-review` が再現した）。`branch` は在れば `fatal: a branch named '<b>' already
+  exists`（exit 128）で断る
 - **fork の追跡設定は `switch` より前に書く。** gh は `checkout` のあとに書くので、
   **切替が断られると（ワークツリーの変更がぶつかる）追跡設定の無いブランチが残り**、
   次の回は「ローカルに在る」側へ入って二度と書かれない。先に書けば、切替が
   断られてもブランチは完成している
-- **同一リポジトリで「在る」ときは、fetch の refspec でローカルのブランチも
-  早送りする**（`+` を付けない 2 本目の refspec）。gh は切り替えてから
-  `merge --ff-only` するので、**分かれていると切り替えたあとで止まり**、失敗の
-  通知が出ているのに HEAD だけが動く（一時リポジトリで確かめた）。refspec なら
-  分かれていれば fetch が断り、切り替えまで進まない（remote-tracking ref のほうは
-  `+` 付きなので同じ fetch の中で更新される）。fork の「在る」と同じ形になる
+
+**ローカルのブランチを fetch の refspec（`<src>:refs/heads/<b>`）で動かさない。**
+一度はこの形にした（gh の `switch` → `merge` だと分かれているとき切り替えてから
+止まるので、その前に断りたかった）が、**`+` の無い refspec は早送りでない更新を
+全部断る** —— **ローカルが先に進んでいるだけ**（自分の PR のブランチに push して
+いないコミットがある）でも `! [rejected] (non-fast-forward)` になり、分かれても
+いないのに「分かれている」と言っていた（`/code-review` が拾った）。
+`merge --ff-only` は先に進んでいるだけなら `Already up to date` で通る。
+**分かれていれば切り替えたあとで止まる**が、押した本人が行きたかったブランチに
+居る状態なので採る（gh と同じ）。
 
 | 場面 | 手順 |
 |---|---|
 | 同一リポジトリ、無い | `fetch --no-tags <r> +refs/heads/<b>:refs/remotes/<r>/<b>` → `switch --track --create <b> <r>/<b>` |
-| 同一リポジトリ、在る | `fetch --no-tags <r> +refs/heads/<b>:refs/remotes/<r>/<b> refs/heads/<b>:refs/heads/<b>` → `switch <b>` |
-| 同一リポジトリ、いま居る | 同じ fetch → `merge --ff-only refs/remotes/<r>/<b>` |
-| fork、無い | `fetch --no-tags <r> refs/pull/<n>/head:refs/heads/<b>` → `config --local -- branch.<b>.remote <u>` → `… .pushRemote <u>` → `… .merge <m>` → `switch <b>` |
-| fork、在る | 同じ fetch → `switch <b>` |
-| fork、いま居る | `fetch --no-tags <r> refs/pull/<n>/head` → `merge --ff-only FETCH_HEAD` |
+| 同一リポジトリ、在る | 同じ fetch → `switch <b>` → `merge --ff-only refs/remotes/<r>/<b>` |
+| fork、無い | `fetch --no-tags <r> refs/pull/<n>/head` → `branch <b> FETCH_HEAD` → `config --local -- branch.<b>.remote <u>` → `… .pushRemote <u>` → `… .merge <m>` → `switch <b>` |
+| fork、在る | 同じ fetch → `switch <b>` → `merge --ff-only FETCH_HEAD` |
 
 `<r>` は **`RepoInfo.target` を決めたリモート**（`conventional_remote`。PR 作成の
 base と同じ）。gh は `origin` と書いてあるが、一覧は `target` のリポジトリの PR
@@ -438,10 +450,11 @@ base と同じ）。gh は `origin` と書いてあるが、一覧は `target` �
 URL の綴りと API の綴りが違うことがある）—— 現ブランチの PR（01）も同じ比べ方を
 通るので、取り出した行に座らない形は作らない。**消えた fork（`head.repo` が `null`）は fork**。
 
-**「在る / いま居る」は `BranchState` の一覧で決める。** 一覧がまだ届いていなければ
-押した時点で断る。一覧が古くても**壊れない** —— 「無い」と読んで在った形は
-`switch --create` が `already exists` で断り、fork の fetch は `+` が無いので
-早送りできなければ断る。
+**「在るか」は `BranchState` の一覧で決める。** 一覧がまだ届いていなければ
+押した時点で断る。一覧が古くても**在るブランチを書き換えない** —— 「無い」と
+読んで在った形は、作る手順（`switch --create` / `branch`）が `already exists` で
+断る。「在る」と読んで消えていた形は `switch` が断る。**どちらも一時リポジトリの
+統合テストで踏んでいる。**
 
 **同じ名前のブランチが在るとき、それが同じ PR のものかは確かめない**（gh も
 確かめない）。早送りできれば早送りして切り替える。

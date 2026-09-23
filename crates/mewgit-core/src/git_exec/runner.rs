@@ -123,7 +123,7 @@ impl Runner {
 
         // **列を先頭から順に叩き、非 0 で止まる**（03 の「複数の手順を持つ書き込み」）。
         // 1 本の変種では 1 周で抜けるので、ここまでの形と変わらない。
-        let mut cancel = CancelSignal(Some(cancel));
+        let mut cancel = CancelSignal::Waiting(cancel);
         let mut last = None;
         for (index, command) in commands.into_iter().enumerate() {
             // **手順のあいだに届いた中断は、次を起こさずに返す。** 起こしてから
@@ -274,39 +274,45 @@ impl Runner {
 /// 中断の合図の受け側。**手順をまたいで 1 本を使い回す**（03 の「複数の手順を
 /// 持つ書き込み」）。
 ///
-/// **`None` は「もう合図は来ない」**（届いた / 送り手が落ちた）。tokio の
-/// `oneshot::Receiver` は値（か送り手が落ちたこと）を返したあとに待ち直すと panic
-/// するので、終わった受け側は捨てる。**旗を別に持たない** —— `live: bool` と並べると
-/// 「来ないのに待つ」が型で組める（`CLAUDE.md` の「旗と値を割らない」）。
-struct CancelSignal(Option<oneshot::Receiver<()>>);
+/// **3 状態を持つ。** tokio の `oneshot::Receiver` は値（か送り手が落ちたこと）を
+/// 返したあとに待ち直すと panic するので、終わった受け側は捨てる。**捨てるときに
+/// 「届いた」と「もう来ない」を分ける** —— 1 つの `None` に畳むと、合図が届いた
+/// その回に git が先に成功していた（`canceled_by` が偽を返す）とき、**次の手順の
+/// 前の [`arrived`](Self::arrived) が「届いていない」と答え、止めたはずの手順が
+/// 走る**（`/code-review` が拾った）。
+enum CancelSignal {
+    Waiting(oneshot::Receiver<()>),
+    Arrived,
+    /// 送り手が落ちた（キャンセルできない呼び方）。
+    Closed,
+}
 
 impl CancelSignal {
     /// 合図が既に届いているか。待たない。
     fn arrived(&mut self) -> bool {
-        let Some(receiver) = self.0.as_mut() else {
-            return false;
-        };
-        match receiver.try_recv() {
-            Ok(()) => true,
-            Err(TryRecvError::Empty) => false,
-            Err(TryRecvError::Closed) => {
-                self.0 = None;
-                false
-            }
+        if let CancelSignal::Waiting(receiver) = self {
+            *self = match receiver.try_recv() {
+                Ok(()) => CancelSignal::Arrived,
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Closed) => CancelSignal::Closed,
+            };
         }
+        matches!(self, CancelSignal::Arrived)
     }
 
     /// 合図を待つ。**合図が来たときだけ返る** —— 送り手が落ちていれば永久に待つので、
-    /// `select!` の腕は git の終了のほうが必ず採られる。
+    /// `select!` の腕は git の終了のほうが必ず採られる。届いたあとは何度呼んでも
+    /// すぐ返る。
     async fn wait(&mut self) {
-        if let Some(receiver) = self.0.as_mut() {
-            let got = receiver.await;
-            self.0 = None;
-            if got.is_ok() {
-                return;
-            }
+        if let CancelSignal::Waiting(receiver) = self {
+            *self = match receiver.await {
+                Ok(()) => CancelSignal::Arrived,
+                Err(_) => CancelSignal::Closed,
+            };
         }
-        std::future::pending::<()>().await;
+        if matches!(self, CancelSignal::Closed) {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -512,6 +518,28 @@ mod tests {
     /// wait(2) の終了状態。下位 7 bit が signal、その上が exit code。
     fn status(raw: i32) -> ExitStatus {
         ExitStatus::from_raw(raw)
+    }
+
+    #[tokio::test]
+    async fn a_cancel_seen_while_waiting_is_still_seen_before_the_next_step() {
+        // 合図を `wait` で受けたが git が先に成功していた回（`canceled_by` が偽）。
+        // 次の手順の前の `arrived` がそれを憶えていないと、止めた手順が走る。
+        let (send, receive) = oneshot::channel();
+        let mut cancel = CancelSignal::Waiting(receive);
+        send.send(()).expect("送れませんでした");
+        // **時間を区切る。** 届いた合図を「もう来ない」に畳む形では `wait` が永久に
+        // 待つので、落ちる代わりに固まる。
+        tokio::time::timeout(std::time::Duration::from_secs(5), cancel.wait())
+            .await
+            .expect("届いた合図で返りませんでした");
+        assert!(cancel.arrived());
+        assert!(cancel.arrived(), "2 回目も届いたまま");
+
+        // 送り手が落ちたら届かない。
+        let (send, receive) = oneshot::channel::<()>();
+        let mut cancel = CancelSignal::Waiting(receive);
+        drop(send);
+        assert!(!cancel.arrived());
     }
 
     #[test]

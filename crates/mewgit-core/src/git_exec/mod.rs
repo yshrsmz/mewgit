@@ -181,7 +181,7 @@ pub enum GitOp {
     /// PR をローカルのブランチに取り出す（PRs ペインの `Enter`。05 の
     /// 「PR チェックアウト」）。
     ///
-    /// **git を 2〜5 本続けて叩く唯一の変種**（03 の「複数の手順を持つ書き込み」）。
+    /// **git を続けて叩く唯一の変種**（03 の「複数の手順を持つ書き込み」）。
     /// どの手順を組むかは [`PrCheckout`] の値で決まり、その値を決めるのは `app`
     /// （ブランチ一覧と `target` を知っている側）。
     ///
@@ -234,16 +234,17 @@ pub struct ForkUpstream {
     pub merge: String,
 }
 
-/// 取り出す先のブランチがローカルにどう在るか（05）。
+/// 取り出す先のブランチがローカルに在るか（05）。
+///
+/// **「いま居る」を持たない。** 一覧の `is_head` は外で `git switch` されると古く、
+/// それを信じて切替を省くと別のブランチを早送りする。在るなら**いつも切り替えてから**
+/// 早送りする（いま居れば `switch` は何もしない）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalBranch {
-    /// 無い。作る。
+    /// 無い。作る（在れば git が断る形で）。
     Absent,
-    /// 在るが、いま居ない。早送りして切り替える。
+    /// 在る。切り替えて `merge --ff-only` で早送りする。
     Present,
-    /// いま居る。**`<src>:<b>` で fetch できない**（git が exit 128 で断る。05）ので、
-    /// 取ってから `merge --ff-only` で早送りする。
-    Current,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

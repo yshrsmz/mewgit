@@ -65,7 +65,7 @@ fn open_pr(state: &mut AppState) -> Cmd {
 /// 「PR チェックアウト（`Enter`）」、手順は 05）。
 ///
 /// **押した時点で断るのは 3 つ。** 一覧が空、fetch するリモートが決まらない、
-/// ブランチ一覧がまだ届いていない（「在る / いま居る」を決められない）。
+/// ブランチ一覧がまだ届いていない（「在るか」を決められない）。
 /// **GitHub の状態は見ない** —— 叩くのは git だけで、材料は一覧の行が持っている。
 ///
 /// **確認モーダルは出さない。** どの手順も上書きしない（05）ので、不変ルール 5 の
@@ -104,7 +104,8 @@ fn checkout(state: &mut AppState) -> Cmd {
 /// - **同一リポジトリか**は `head.repo` と `target` の `owner` / `repo`
 ///   （`RepoRef::same_as`。現ブランチの PR と同じ比べ方）。**消えた fork
 ///   （`head.repo` が `None`）は fork**
-/// - **「在る / いま居る」は `branches`**（05）。古くても壊れない —— git が断る
+/// - **「在るか」は `branches`**（05）。古くても在るブランチを書き換えない ——
+///   作る手順が `already exists` で断る。**「いま居るか」は見ない**（05）
 fn checkout_plan(
     pr: &PullRequest,
     remote: &Remote,
@@ -147,10 +148,10 @@ fn checkout_plan(
         )
     };
 
-    let local = match branches.iter().find(|local| local.name == branch) {
-        None => LocalBranch::Absent,
-        Some(local) if local.is_head => LocalBranch::Current,
-        Some(_) => LocalBranch::Present,
+    let local = if branches.iter().any(|local| local.name == branch) {
+        LocalBranch::Present
+    } else {
+        LocalBranch::Absent
     };
     PrCheckout {
         remote: remote.name.clone(),
@@ -2169,9 +2170,10 @@ mod tests {
 
     #[test]
     fn enter_checks_out_the_pr_under_the_cursor_by_where_its_branch_is() {
-        // 同一リポジトリの PR 3 件。いま居る / ローカルに無い / 在る。**いま居る行を
-        // 先頭に置く** —— 起動直後のカーソルは現ブランチの PR に座るので、そこから
-        // `j` で下る。
+        // 同一リポジトリの PR 3 件。いま居る / ローカルに無い / 在る。**いま居るのも
+        // 在るのと同じ扱い**（一覧の「いま居る」は外の `git switch` で古くなる。05）。
+        // **いま居る行を先頭に置く** —— 起動直後のカーソルは現ブランチの PR に座るので、
+        // そこから `j` で下る。
         let mut state = state_for_checkout(&[("main", true), ("feat/b", false)]);
         deliver(
             &mut state,
@@ -2196,7 +2198,7 @@ mod tests {
         assert_eq!(
             seen,
             [
-                ("main", LocalBranch::Current),
+                ("main", LocalBranch::Present),
                 ("feat/a", LocalBranch::Absent),
                 ("feat/b", LocalBranch::Present),
             ]
@@ -2319,7 +2321,7 @@ mod tests {
         let message = &state.notices.back().expect("通知が無い").message;
         assert!(message.contains("N で作成"), "{message}");
 
-        // ブランチ一覧がまだ無い。「在る / いま居る」を決められない。
+        // ブランチ一覧がまだ無い。「在るか」を決められない。
         let mut state = state_on_branch("main");
         state.repo.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
         state.focus = Pane::Prs;

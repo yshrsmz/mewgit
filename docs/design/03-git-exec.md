@@ -102,7 +102,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `StashApply(i)` / `Pop` / `Drop` | `stash apply` / `pop` / `drop` `stash@{i}` |
 | `SetAccount { login }` | `config --local -- mewgit.user <login>` |
 | `UnsetAccount` | `config --local --unset -- mewgit.user` |
-| `CheckoutPr(plan)` | 05 の「mewgit の手順」の表（場面ごとに 2〜5 本） |
+| `CheckoutPr(plan)` | 05 の「mewgit の手順」の表（場面ごとに複数） |
 
 決めたことと理由:
 
@@ -345,7 +345,7 @@ pub async fn run_cancelable(&self, op: &GitOp, cancel: oneshot::Receiver<()>)
 
 ### 複数の手順を持つ書き込み
 
-`GitOp::CheckoutPr` は git を 2〜5 本続けて叩く（05 の「mewgit の手順」）。
+`GitOp::CheckoutPr` は git を続けて叩く（05 の「mewgit の手順」）。
 **`Runner` が順に叩き、1 本でも非 0 で終わればそこで止めて、その 1 本の
 `ExecError` を返す**（残りは叩かない）。成功なら**最後の 1 本の `ExecOutput`** を返す。
 
@@ -359,7 +359,10 @@ pub async fn run_cancelable(&self, op: &GitOp, cancel: oneshot::Receiver<()>)
 - **中断は手順のあいだでも効く。** 合図は 1 本の `oneshot` で、叩く前に
   「もう届いているか」を見る（届いていれば次を起こさずに `Canceled` を返す。
   `argv` は起こさなかった 1 本のもの）。走っている最中に届けば 1 本だけの
-  書き込みと同じ（上の「キャンセル」）
+  書き込みと同じ（上の「キャンセル」）。**届いたことは憶えておく** —— 走っている
+  1 本が合図より先に成功していた回（`canceled_by` が偽）に受け側を「もう来ない」と
+  同じに畳むと、次の手順の前の確認が「届いていない」と答え、止めたはずの手順が
+  走る（`/code-review` が拾った。`CancelSignal` の 3 状態）
 - **`verb()` は最初の 1 本の `argv[0]`**（`CheckoutPr` は `fetch`）。スピナーに
   出る語で、時間のほとんどは fetch が使う。見張りは `verb_matches_the_argv`
   （最初の 1 本と比べる）

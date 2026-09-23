@@ -883,30 +883,6 @@ async fn a_same_repo_pr_is_checked_out_tracking_the_remote_branch() {
 }
 
 #[tokio::test]
-async fn a_same_repo_pr_fast_forwards_the_local_branch_whether_or_not_it_is_checked_out() {
-    for current in [false, true] {
-        let stage = PrStage::new();
-        let repo = stage.clone();
-        // 1 つ手前で止まっているローカルの `feat`。
-        repo.git(&["branch", "feat", &format!("{}~1", stage.feat)]);
-        let local = if current {
-            repo.git(&["switch", "-q", "feat"]);
-            LocalBranch::Current
-        } else {
-            LocalBranch::Present
-        };
-
-        repo.runner()
-            .run(&fake_pr_checkout(PrSource::SameRepo, local))
-            .await
-            .unwrap_or_else(|err| panic!("取り出せませんでした（current = {current}）: {err}"));
-
-        assert_eq!(current_branch(&repo), "feat", "current = {current}");
-        assert_eq!(repo.head_oid(), stage.feat, "current = {current}");
-    }
-}
-
-#[tokio::test]
 async fn a_fork_pr_is_checked_out_from_the_pull_ref_with_the_fork_as_upstream() {
     let stage = PrStage::new();
     let repo = stage.clone();
@@ -930,69 +906,132 @@ async fn a_fork_pr_is_checked_out_from_the_pull_ref_with_the_fork_as_upstream() 
     );
 }
 
+/// `feat` が既に在るときの取り出し。`head` は PR の先端（同一リポジトリなら
+/// `origin/feat`、fork なら `refs/pull/7/head`）の何本手前にローカルの `feat` を
+/// 置くか、`mine` はその上に積む自分のコミットの有無、`on_feat` は `feat` に居るか。
+/// 返るのは取り出しの結果と、積んだ自分のコミット。
+async fn check_out_existing(
+    stage: &PrStage,
+    repo: &TestRepo,
+    source: PrSource,
+    behind: usize,
+    mine: bool,
+    on_feat: bool,
+) -> (Result<(), ExecError>, Option<Oid>) {
+    let tip = match source {
+        PrSource::SameRepo => stage.feat,
+        PrSource::Fork { .. } => stage.pull,
+    };
+    if matches!(source, PrSource::Fork { .. }) {
+        repo.git(&["fetch", "-q", "origin", "refs/pull/7/head"]);
+    }
+    repo.git(&["branch", "feat", &format!("{tip}~{behind}")]);
+    let mine = mine.then(|| {
+        repo.git(&["switch", "-q", "feat"]);
+        let oid = repo.commit_file("mine.txt", "mine");
+        repo.git(&["switch", "-q", "main"]);
+        oid
+    });
+    if on_feat {
+        repo.git(&["switch", "-q", "feat"]);
+    }
+    let result = repo
+        .runner()
+        .run(&fake_pr_checkout(source, LocalBranch::Present))
+        .await
+        .map(|_| ());
+    (result, mine)
+}
+
 #[tokio::test]
-async fn a_fork_pr_fast_forwards_an_existing_branch_whether_or_not_it_is_checked_out() {
-    for current in [false, true] {
+async fn an_existing_branch_is_switched_to_and_fast_forwarded_wherever_head_was() {
+    // **「いま居る」を一覧から決めない**（05）—— 居ても居なくても同じ手順で、
+    // 早送りするのは `feat` だけ。居なかったときに `main` が動いたら、外で HEAD が
+    // 動いていた回に別のブランチを早送りする形（`/code-review` が拾った）。
+    for source in [PrSource::SameRepo, fake_fork_source()] {
+        for on_feat in [false, true] {
+            let label = format!("{source:?} on_feat = {on_feat}");
+            let stage = PrStage::new();
+            let repo = stage.clone();
+            let main = repo.head_oid();
+            let tip = match source {
+                PrSource::SameRepo => stage.feat,
+                PrSource::Fork { .. } => stage.pull,
+            };
+
+            let (result, _) =
+                check_out_existing(&stage, &repo, source.clone(), 1, false, on_feat).await;
+
+            result.unwrap_or_else(|err| panic!("取り出せませんでした（{label}）: {err}"));
+            assert_eq!(current_branch(&repo), "feat", "{label}");
+            assert_eq!(repo.head_oid(), tip, "{label}");
+            assert_eq!(repo.rev_parse("refs/heads/main"), main, "{label}");
+            // **在るブランチの追跡設定には触らない**（gh と同じ。05）。
+            assert!(!repo.try_git(&["config", "branch.feat.remote"]), "{label}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_branch_ahead_of_the_pr_is_checked_out_as_it_is() {
+    // 自分の PR のブランチに、まだ push していないコミットがある形。**分かれては
+    // いない**ので断らない（fetch の `<src>:refs/heads/<b>` で動かしていたころは
+    // 非 FF で断っていた。`/code-review` が拾った）。
+    for source in [PrSource::SameRepo, fake_fork_source()] {
         let stage = PrStage::new();
         let repo = stage.clone();
-        repo.git(&["fetch", "-q", "origin", "refs/pull/7/head"]);
-        repo.git(&["branch", "feat", "FETCH_HEAD~1"]);
-        let local = if current {
-            repo.git(&["switch", "-q", "feat"]);
-            LocalBranch::Current
-        } else {
-            LocalBranch::Present
-        };
 
-        repo.runner()
-            .run(&fake_pr_checkout(fake_fork_source(), local))
-            .await
-            .unwrap_or_else(|err| panic!("取り出せませんでした（current = {current}）: {err}"));
+        let (result, mine) =
+            check_out_existing(&stage, &repo, source.clone(), 0, true, false).await;
 
-        assert_eq!(current_branch(&repo), "feat", "current = {current}");
-        assert_eq!(repo.head_oid(), stage.pull, "current = {current}");
-        // **在るブランチの追跡設定には触らない**（gh と同じ。05）。
-        assert!(
-            !repo.try_git(&["config", "branch.feat.remote"]),
-            "current = {current}"
-        );
+        result.unwrap_or_else(|err| panic!("取り出せませんでした（{source:?}）: {err}"));
+        assert_eq!(current_branch(&repo), "feat", "{source:?}");
+        assert_eq!(Some(repo.head_oid()), mine, "{source:?}");
     }
 }
 
 #[tokio::test]
 async fn a_diverged_local_branch_stops_the_checkout_without_overwriting_it() {
-    for (source, current) in [
-        (PrSource::SameRepo, false),
-        (PrSource::SameRepo, true),
-        (fake_fork_source(), false),
-        (fake_fork_source(), true),
-    ] {
-        let label = format!("{source:?} current = {current}");
-        let stage = PrStage::new();
-        let repo = stage.clone();
-        // PR の head にも無いコミットを 1 つ持った `feat`。
-        repo.git(&["switch", "-qc", "feat"]);
-        let mine = repo.commit_file("mine.txt", "mine");
-        if !current {
-            repo.git(&["switch", "-q", "main"]);
+    // PR の先端の 1 本手前から、自分のコミットを積んだ `feat`。**切り替えたあとの
+    // `merge --ff-only` で止まる**（gh と同じ。押した本人が行きたかったブランチに居る）。
+    for source in [PrSource::SameRepo, fake_fork_source()] {
+        for on_feat in [false, true] {
+            let label = format!("{source:?} on_feat = {on_feat}");
+            let stage = PrStage::new();
+            let repo = stage.clone();
+
+            let (result, mine) =
+                check_out_existing(&stage, &repo, source.clone(), 1, true, on_feat).await;
+
+            let err = result.expect_err(&format!("止まるはずです（{label}）"));
+            assert_eq!(failure_kind(&err), ExecErrorKind::NonFastForward, "{label}");
+            assert_eq!(Some(repo.rev_parse("refs/heads/feat")), mine, "{label}");
+            assert_eq!(current_branch(&repo), "feat", "{label}");
         }
-        let local = if current {
-            LocalBranch::Current
-        } else {
-            LocalBranch::Present
-        };
-
-        let err = repo
-            .runner()
-            .run(&fake_pr_checkout(source, local))
-            .await
-            .expect_err(&format!("止まるはずです（{label}）"));
-
-        assert_eq!(failure_kind(&err), ExecErrorKind::NonFastForward, "{label}");
-        assert_eq!(repo.rev_parse("refs/heads/feat"), mine, "{label}");
-        let expected_head = if current { "feat" } else { "main" };
-        assert_eq!(current_branch(&repo), expected_head, "{label}");
     }
+}
+
+#[tokio::test]
+async fn a_fork_pr_does_not_touch_a_branch_the_list_did_not_know_about() {
+    // 一覧が古く（外で `git branch` した）、在る `feat` を「無い」と読んだ形。
+    // **作る手順が断る**（`branch` は在れば `already exists`）ので、そのブランチも
+    // 追跡設定も動かない（`/code-review` が拾った。fetch の `<src>:refs/heads/<b>` で
+    // 作っていたころは早送りして追跡設定を fork へ書き換えていた）。
+    let stage = PrStage::new();
+    let repo = stage.clone();
+    repo.git(&["branch", "--track", "feat", "origin/feat"]);
+    let before = repo.rev_parse("refs/heads/feat");
+
+    let err = repo
+        .runner()
+        .run(&fake_pr_checkout(fake_fork_source(), LocalBranch::Absent))
+        .await
+        .expect_err("作る手順が断るはずです");
+
+    assert_eq!(err.argv(), ["branch", "feat", "FETCH_HEAD"]);
+    assert_eq!(repo.rev_parse("refs/heads/feat"), before);
+    assert_eq!(repo.git(&["config", "branch.feat.remote"]), "origin");
+    assert_eq!(current_branch(&repo), "main");
 }
 
 #[tokio::test]

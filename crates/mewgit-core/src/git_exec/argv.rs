@@ -267,9 +267,14 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
 
 /// [`GitOp::CheckoutPr`] の手順（05 の「mewgit の手順」の表）。
 ///
-/// **どれも上書きしない。** fetch の refspec のうち `+` を付けるのは
-/// remote-tracking ref への 1 本だけで、ローカルのブランチへは付けない（分かれて
-/// いれば git が `non-fast-forward` で断る）。`merge` は `--ff-only`。
+/// **どれも上書きしない。** `+` を付けるのは remote-tracking ref への refspec だけで、
+/// ローカルのブランチは `merge --ff-only` でしか動かさない。**新しく作るのは断る形の
+/// コマンドだけ**（`switch --create` と `branch`。在れば git が断る）。
+///
+/// **ローカルのブランチを fetch の refspec で動かさない。** `<src>:refs/heads/<b>` は
+/// **ローカルが先に進んでいるだけでも** non-fast-forward で断り（押し出していない
+/// コミットを持つ自分の PR が取り出せない）、しかも一覧が古いと在るブランチを
+/// 早送りする（05）。
 ///
 /// **`--no-tags` は gh に揃えた。** PR を取り出すのにタグは要らず、fork から取る
 /// ときは他人のタグが混ざる。
@@ -280,25 +285,21 @@ fn checkout_pr(plan: &PrCheckout) -> Vec<GitCommand> {
         source,
         local,
     } = plan;
-    let fetch = |refspecs: &[&str]| {
-        let mut argv = vec!["fetch", "--no-tags", remote];
-        argv.extend(refspecs);
-        call(&argv)
-    };
+    let fetch = |refspec: &str| call(&["fetch", "--no-tags", remote, refspec]);
     let switch = || call(&["switch", branch]);
     let fast_forward = |to: &str| call(&["merge", "--ff-only", to]);
 
     match source {
         PrSource::SameRepo => {
             let tracking = format!("refs/remotes/{remote}/{branch}");
-            let to_tracking = format!("+refs/heads/{branch}:{tracking}");
+            let fetch = fetch(&format!("+refs/heads/{branch}:{tracking}"));
             match local {
                 // **`--track` は明示する**（`branch.autoSetupMerge = false` の環境では
                 // 付けないと上流が入らない。05）。**`--create` の直後に名前を置く**
                 // （`BranchCreate` の注記と同じ理由で、`--create` は次の argv を名前と
                 // して食う）。
                 LocalBranch::Absent => vec![
-                    fetch(&[&to_tracking]),
+                    fetch,
                     call(&[
                         "switch",
                         "--track",
@@ -307,28 +308,23 @@ fn checkout_pr(plan: &PrCheckout) -> Vec<GitCommand> {
                         &format!("{remote}/{branch}"),
                     ]),
                 ],
-                // **ローカルのブランチも fetch の refspec で早送りする**（`+` 無し）。gh は
-                // 切り替えてから `merge --ff-only` するので、分かれていると**切り替えた
-                // あとで**止まり、失敗の通知が出ているのに HEAD だけ動く（05）。
-                LocalBranch::Present => vec![
-                    fetch(&[
-                        &to_tracking,
-                        &format!("refs/heads/{branch}:refs/heads/{branch}"),
-                    ]),
-                    switch(),
-                ],
-                LocalBranch::Current => vec![fetch(&[&to_tracking]), fast_forward(&tracking)],
+                // **いつも切り替えてから早送りする**（いま居ても `switch` は何もしない）。
+                // 一覧の「いま居る」を信じて `switch` を省くと、外で HEAD が動いていた
+                // とき**別のブランチを早送りする**（05）。
+                LocalBranch::Present => vec![fetch, switch(), fast_forward(&tracking)],
             }
         }
         PrSource::Fork { number, upstream } => {
-            let pull = format!("refs/pull/{number}/head");
-            let to_branch = format!("{pull}:refs/heads/{branch}");
+            // `FETCH_HEAD` に取る。`switch` と `config` は `FETCH_HEAD` を動かさない。
+            let fetch = fetch(&format!("refs/pull/{number}/head"));
             match local {
+                // **`branch` で作る**（在れば `already exists` で断る）。一覧が古くて
+                // 在るブランチを「無い」と読んでも、そのブランチも追跡設定も触らない。
                 // **追跡設定は `switch` より前に書く。** 切替が断られても（ワーク
                 // ツリーの変更がぶつかる）ブランチが完成しているように —— 後に書くと、
                 // 次の回は `Present` へ入って二度と書かれない（05）。
                 LocalBranch::Absent => {
-                    let mut steps = vec![fetch(&[&to_branch])];
+                    let mut steps = vec![fetch, call(&["branch", branch, "FETCH_HEAD"])];
                     for (key, value) in [
                         ("remote", &upstream.remote),
                         ("pushRemote", &upstream.remote),
@@ -345,8 +341,7 @@ fn checkout_pr(plan: &PrCheckout) -> Vec<GitCommand> {
                     steps.push(switch());
                     steps
                 }
-                LocalBranch::Present => vec![fetch(&[&to_branch]), switch()],
-                LocalBranch::Current => vec![fetch(&[&pull]), fast_forward("FETCH_HEAD")],
+                LocalBranch::Present => vec![fetch, switch(), fast_forward("FETCH_HEAD")],
             }
         }
     }
@@ -793,12 +788,7 @@ mod tests {
             "origin",
             "+refs/heads/feat:refs/remotes/origin/feat",
         ];
-        let fork_fetch = vec![
-            "fetch",
-            "--no-tags",
-            "origin",
-            "refs/pull/7/head:refs/heads/feat",
-        ];
+        let fork_fetch = vec!["fetch", "--no-tags", "origin", "refs/pull/7/head"];
         vec![
             (
                 fake_pr_checkout(PrSource::SameRepo, LocalBranch::Absent),
@@ -810,20 +800,8 @@ mod tests {
             (
                 fake_pr_checkout(PrSource::SameRepo, LocalBranch::Present),
                 vec![
-                    vec![
-                        "fetch",
-                        "--no-tags",
-                        "origin",
-                        "+refs/heads/feat:refs/remotes/origin/feat",
-                        "refs/heads/feat:refs/heads/feat",
-                    ],
-                    vec!["switch", "feat"],
-                ],
-            ),
-            (
-                fake_pr_checkout(PrSource::SameRepo, LocalBranch::Current),
-                vec![
                     same_fetch,
+                    vec!["switch", "feat"],
                     vec!["merge", "--ff-only", "refs/remotes/origin/feat"],
                 ],
             ),
@@ -831,6 +809,7 @@ mod tests {
                 fake_pr_checkout(fake_fork_source(), LocalBranch::Absent),
                 vec![
                     fork_fetch.clone(),
+                    vec!["branch", "feat", "FETCH_HEAD"],
                     vec![
                         "config",
                         "--local",
@@ -857,12 +836,9 @@ mod tests {
             ),
             (
                 fake_pr_checkout(fake_fork_source(), LocalBranch::Present),
-                vec![fork_fetch, vec!["switch", "feat"]],
-            ),
-            (
-                fake_pr_checkout(fake_fork_source(), LocalBranch::Current),
                 vec![
-                    vec!["fetch", "--no-tags", "origin", "refs/pull/7/head"],
+                    fork_fetch,
+                    vec!["switch", "feat"],
                     vec!["merge", "--ff-only", "FETCH_HEAD"],
                 ],
             ),

@@ -328,12 +328,11 @@ fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
         // M5 なので、mewgit の中に踏める手が無いことをそのまま言う。
         GitOp::Pull { .. } => Some("履歴が分かれています。merge / rebase はまだ実装していません"),
         // PR の取り出しで、**ローカルに在った同名のブランチが PR と分かれていた**形。
-        // fetch（`+` の無い `<src>:<b>`）も `merge --ff-only` も上書きしないので
-        // ここで止まる（05）。**mewgit の中に踏める手は無い** —— 上書きを選ばせる
-        // 経路は作っていない（ローカルにしか無いコミットを消す操作になる）。
-        GitOp::CheckoutPr(_) => {
-            Some("同名のローカルブランチが PR と分かれているため取り出せません")
-        }
+        // 切り替えたあとの `merge --ff-only` が断る（05）ので、**そのブランチには
+        // 居る** —— 「取り出せません」と書くと切り替わっていないように読める。
+        // **mewgit の中に踏める手は無い** —— 上書きを選ばせる経路は作っていない
+        // （ローカルにしか無いコミットを消す操作になる）。
+        GitOp::CheckoutPr(_) => Some("ローカルのブランチが PR と分かれているため早送りできません"),
         // fetch は remote-tracking ref を `+` 付きで更新するので非 FF で断らない
         // （git 2.55 で確認）。ほかの op も非 FF を出す経路が無い。
         _ => None,
@@ -444,7 +443,7 @@ mod tests {
             (
                 fake_pr_checkout(PrSource::SameRepo, LocalBranch::Absent),
                 ExecErrorKind::NonFastForward,
-                "PR と分かれているため取り出せません",
+                "PR と分かれているため早送りできません",
             ),
         ];
 

@@ -98,6 +98,9 @@ const BRANCHES: &[KeyHint] = &[
 
 const PRS: &[KeyHint] = &[
     MOVE,
+    // **Branches の `Enter` と同じ語。** どちらも「そのブランチに居る状態にする」で、
+    // PR のほうは無ければ作り、在れば早送りする（05 の「PR チェックアウト」）。
+    hint(&[Key::new(KeyCode::Enter)], "切替"),
     hint(&[Key::char('o')], "ブラウザ"),
     // **Branches の `r`（改名）とは別のキー。** キーマップはペインごとに割れて
     // いるので衝突しない（`CLAUDE.md` の「『押せる』は画面ごとに数える」）。

@@ -373,6 +373,124 @@ pub enum GithubError {
 
 ## PR チェックアウト
 
-1. `pr.head` が同一リポジトリなら `Fetch { remote: Some("origin") }` → `BranchCreate { name: <branch>, start: Some("origin/<branch>"), checkout: true }`（= `switch --create <branch> origin/<branch>`）。追跡設定は `branch.autoSetupMerge` が既定なら自動で入るが、**`false` にしている環境では入らない**（git 2.55 で確認。`--track` を付ければ入る）。上流の無いブランチができると Branches ペインに ahead/behind が出ず、push でも `-u` が要る。`GitOp::BranchCreate` に `track` を足すかは**このタスクで決める**
-2. fork なら `git fetch origin pull/<n>/head:<branch>` でローカルブランチを作り、`.git/config` に `branch.<b>.remote/merge` を書いて後の push 先を明示する
-3. いずれも `GitOp` として `git_exec` に渡す
+PRs ペインの `Enter` でカーソル行の PR をローカルのブランチに取り出す（01 の
+「PR チェックアウト（`Enter`）」）。**API は 1 本も叩かない** —— 材料は一覧が既に
+運んでいる `head`（branch / repo）と番号で足りる。
+
+**`gh pr checkout` と同じ形に揃える。** 同じリポジトリで両方を使ったときに、
+片方が作ったブランチをもう片方が別物として扱わないため。実測（2026-09-23、
+gh 2.101.0 / git 2.55、`sharkdp/hyperfine` の一時クローン。`GIT_TRACE=1` で
+gh が叩いた git を拾った。`maintenance` と partial clone の遅延取得は除く）:
+
+| 場面 | gh が叩く git | `.git/config` に書くもの |
+|---|---|---|
+| 同一リポジトリ、ローカルに無い | `fetch origin +refs/heads/<b>:refs/remotes/origin/<b> --no-tags` → `checkout -b <b> --track origin/<b>` | `--track` が書く `remote` / `merge` |
+| 同一リポジトリ、ローカルに在る（いま居るかは問わない） | 同じ fetch → `checkout <b>` → `merge --ff-only refs/remotes/origin/<b>` | なし |
+| fork、ローカルに無い | `fetch origin refs/pull/<n>/head:<b> --no-tags` → `checkout <b>` → `config` × 3 | `remote` と `pushRemote` に **fork の URL**、`merge = refs/heads/<b>` |
+| fork、ローカルに在る（いま居ない） | 同じ fetch → `checkout <b>` | なし |
+| fork、いま居る | `fetch origin refs/pull/<n>/head --no-tags` → `merge --ff-only FETCH_HEAD` | なし |
+| fork、head が base の既定ブランチと同名（`master`） | ブランチ名を **`<owner>/master`** にして上と同じ | 下の「追跡先」 |
+
+- **ローカルのブランチが PR と分かれていると止まる。** fetch の refspec に `+` が
+  無いので `! [rejected] … (non-fast-forward)` で exit 1、gh もそこで止まる
+  （以降の `checkout` は叩かない）。**上書きしない**のは、ローカルにしか無い
+  コミットを黙って消さないため
+- **いま居るブランチへは `<src>:<b>` で fetch できない**（`fatal: refusing to fetch
+  into branch 'refs/heads/<b>' checked out at …`、exit 128。`--update-head-ok` を
+  付けると通るが、ref だけ動いてワークツリーと index が置き去りになる）。
+  **だから「いま居る」だけ `FETCH_HEAD` を早送りする形**に割れている
+
+### mewgit の手順
+
+gh の表から 3 つ変える。
+
+- **`checkout` ではなく `switch`**（03 の「ブランチの切替は `checkout` ではなく
+  `switch`」）。`checkout -b <b> --track <start>` は `switch --track --create <b>
+  <start>` にする。**`--track` は明示する** —— `branch.autoSetupMerge` を `false`
+  にしている環境では既定で入らず（git 2.55 で確認）、上流の無いブランチができると
+  Branches ペインに ahead/behind が出ず、push でも `-u` が要る
+- **fork の追跡設定は `switch` より前に書く。** gh は `checkout` のあとに書くので、
+  **切替が断られると（ワークツリーの変更がぶつかる）追跡設定の無いブランチが残り**、
+  次の回は「ローカルに在る」側へ入って二度と書かれない。先に書けば、切替が
+  断られてもブランチは完成している
+- **同一リポジトリで「在る」ときは、fetch の refspec でローカルのブランチも
+  早送りする**（`+` を付けない 2 本目の refspec）。gh は切り替えてから
+  `merge --ff-only` するので、**分かれていると切り替えたあとで止まり**、失敗の
+  通知が出ているのに HEAD だけが動く（一時リポジトリで確かめた）。refspec なら
+  分かれていれば fetch が断り、切り替えまで進まない（remote-tracking ref のほうは
+  `+` 付きなので同じ fetch の中で更新される）。fork の「在る」と同じ形になる
+
+| 場面 | 手順 |
+|---|---|
+| 同一リポジトリ、無い | `fetch --no-tags <r> +refs/heads/<b>:refs/remotes/<r>/<b>` → `switch --track --create <b> <r>/<b>` |
+| 同一リポジトリ、在る | `fetch --no-tags <r> +refs/heads/<b>:refs/remotes/<r>/<b> refs/heads/<b>:refs/heads/<b>` → `switch <b>` |
+| 同一リポジトリ、いま居る | 同じ fetch → `merge --ff-only refs/remotes/<r>/<b>` |
+| fork、無い | `fetch --no-tags <r> refs/pull/<n>/head:refs/heads/<b>` → `config --local -- branch.<b>.remote <u>` → `… .pushRemote <u>` → `… .merge <m>` → `switch <b>` |
+| fork、在る | 同じ fetch → `switch <b>` |
+| fork、いま居る | `fetch --no-tags <r> refs/pull/<n>/head` → `merge --ff-only FETCH_HEAD` |
+
+`<r>` は **`RepoInfo.target` を決めたリモート**（`conventional_remote`。PR 作成の
+base と同じ）。gh は `origin` と書いてあるが、一覧は `target` のリポジトリの PR
+なので、そのリポジトリを指しているリモートから取る。
+
+**「同一リポジトリか」は `head.repo` と `target` の `owner` / `repo` の一致で決める**
+（上の「モデル」の `RefSpec.repo`）。**消えた fork（`head.repo` が `null`）は fork**。
+
+**「在る / いま居る」は `BranchState` の一覧で決める。** 一覧がまだ届いていなければ
+押した時点で断る。一覧が古くても**壊れない** —— 「無い」と読んで在った形は
+`switch --create` が `already exists` で断り、fork の fetch は `+` が無いので
+早送りできなければ断る。
+
+**同じ名前のブランチが在るとき、それが同じ PR のものかは確かめない**（gh も
+確かめない）。早送りできれば早送りして切り替える。
+
+#### ブランチ名
+
+**同一リポジトリは `head.branch` そのもの**（`--track` が `<r>/<b>` を追うので
+名前がずれると追跡先と食い違う）。**fork も `head.branch`** だが、**base の既定
+ブランチか PR の base ブランチと同名なら `<owner>/<branch>`**。gh が `<owner>/` を
+付けたのは既定ブランチと同名の #871 で見た（gh の規則の全体は確かめていない）。こちらは既定ブランチを `refs/remotes/<r>/HEAD`（02 の
+`Remote::head_branch`）でしか知らず、**一度も fetch していないリモートでは
+分からない** —— そのとき fork の `main` がローカルの `main` を早送りすることになるので、
+PR の base（ほぼ既定ブランチ）とも比べる。**owner が分からない消えた fork は
+`pr-<n>/<branch>`**。
+
+#### 追跡先
+
+**fork の URL を書く**（2026-09-23 にユーザーと決めた）。`<u>` は `<r>` の URL の
+`owner/repo` だけを `head.repo` のものに差し替えたもの、`<m>` は
+`refs/heads/<head.branch>`。
+
+- **URL は `<r>` の形を写す**（`auth::url::sibling`）。ssh なら ssh、エイリアスなら
+  エイリアスのまま —— gh は自分の `git_protocol` で組むが、こちらには
+  `target` のリモートを実際に通している形のほうが確か。**https の userinfo は写さない**
+  （`https://x-access-token:<PAT>@…` を別のキーへ複製しない。不変ルール 3 の趣旨）
+- **gh は fork の URL を書かないことがある。** 上の表の最後の行を取った #871 は
+  `maintainer_can_modify: false` で、`remote = origin`、`merge = refs/pull/871/head`
+  が書かれた（URL を書いた #865 は編集を許している PR）。**こちらはこの旗を見ない** —— 一覧
+  （`GET /repos/{o}/{r}/pulls`）は **`maintainer_can_modify` を `null` で返す**
+  （実測 2026-09-23。単体の `GET …/pulls/{n}` には入っている。gh は GraphQL で
+  取っている）ので、見るには PR ごとに 1 往復増える。**見ないことの代償**は、
+  push できない fork でも push 先が fork になること —— どちらを書いても push は
+  断られる（`refs/pull/…` は GitHub が受けない）ので、差は `p`（pull）の取り元だけ
+  で、**fork が読めない（private の fork）と `p` が認証で落ちる**
+- **消えた fork は `<r>` と `refs/pull/<n>/head`**（gh と同じ）。URL を組む相手が無い
+- **URL を組めない `<r>` も同じ形に落とす**（`RemoteUrl` として読めないリモート。
+  そもそも `target` を決められないので、一覧が出ている時点では起きない）
+- **mewgit の読み手は URL の追跡先を受ける。** 現ブランチの PR（01）は URL を
+  そのまま `RemoteUrl` に通し、`P` は URL へ push する。**`f` は受けていなかった**
+  （「追跡先の https://… がリモートにありません」でリモート選択を開いた。
+  gh で取り出したブランチでも同じ）ので、同じ PR で直した（01 / 04 の
+  「既定リモート」）
+- **ahead / behind は出ない。** URL の追跡先には remote-tracking ref が無い
+  （gh で取り出したブランチも同じ）
+
+#### 一連の手順を 1 つの書き込みにする
+
+手順は `GitOp::CheckoutPr` 1 つに載せ、`Runner` が順に叩く（03 の「複数の手順を
+持つ書き込み」）。**`app` が手順ごとに `Cmd::Exec` を出して `exec_finished` で
+次を出す形にしない。** その形だと (1) 「残りの手順」を `AppState` に持つことになり、
+失敗・中断のたびにそれを落とす経路が要る（#89 の「憶える形は落とす経路とセット」）、
+(2) 手順ごとに `Reload` が走り、ログの読み直しを手順の数だけ払う、(3) `Ctrl-C` が
+「いま走っている 1 本」しか止めず、次の手順が出てしまう。1 つの書き込みにすれば
+ジョブも読み直しも中断も 1 回で済む。

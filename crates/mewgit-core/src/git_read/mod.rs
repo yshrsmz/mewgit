@@ -213,12 +213,13 @@ pub struct Remote {
     pub url: String,
     /// `refs/remotes/<name>/HEAD` が指すブランチの短縮名 —— **そのリモートが言う
     /// 既定ブランチ**（02 の「remotes」）。読み手は `Modal::PrCreate` の base の
-    /// 初期値（01 の「PR 作成（`N`）」）。
+    /// 初期値（01 の「PR 作成（`N`）」）と、fork の PR を取り出すときのブランチ名
+    /// （05 の「ブランチ名」）。
     ///
     /// **`None` は「symref が無い」。** clone 直後と `git fetch` のあとには在るが、
     /// `git remote add` しただけで一度も fetch していないリポジトリには無い
-    /// （実測 2026-09-21、git 2.55）。**読み手は空欄で開いて人に打たせる**ので、
-    /// 無いことを理由にしない。
+    /// （実測 2026-09-21、git 2.55）。**どちらの読み手も無いことを理由にしない**
+    /// —— PR 作成は空欄で開いて人に打たせ、取り出しは PR の base とも比べる。
     pub head_branch: Option<String>,
 }
 

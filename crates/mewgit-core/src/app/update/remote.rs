@@ -3,6 +3,7 @@
 //! **どのペインからも押せる共通キー**なので、ペインのモジュールには置かない ——
 //! アカウントと同じくリポジトリ単位の話で、どのペインに居るかと関係が無い。
 
+use crate::auth::url::RemoteUrl;
 use crate::git_exec::{push_remote_ref, ExecError, ExecErrorKind, ExecOutput, GitOp};
 use crate::git_read::{short_oid, Remote};
 
@@ -290,7 +291,7 @@ const LOCAL_TRACKING: &str = "追跡先がローカルです";
 /// `git fetch`（引数なし）が選ぶリモート（01 と 04 の「既定リモート」）。
 ///
 /// ```text
-/// branch.<HEAD>.remote → conventional_remote()
+/// branch.<HEAD>.remote（名前）→ conventional_remote()
 /// ```
 ///
 /// **git 2.55 で実測した規則と同じ**（表は 04）。読み手は `f` だけ。
@@ -330,11 +331,21 @@ fn default_remote(state: &AppState) -> Result<&Remote, NoRemote> {
         if config.remote == "." {
             return Err(NoRemote::Ask(LOCAL_TRACKING.to_string()));
         }
-        // **`origin` へ落とさない。** 落とすと、ユーザーが書いた行き先とは別の
-        // リモートを黙って fetch することになる。
-        return state.repo.remote(&config.remote).ok_or_else(|| {
-            NoRemote::Ask(format!("追跡先の {} がリモートにありません", config.remote))
-        });
+        if let Some(remote) = state.repo.remote(&config.remote) {
+            return Ok(remote);
+        }
+        // **URL なら 2 段目へ落とす**（01 の「既定リモート」）。`gh pr checkout` と
+        // PR チェックアウトが fork の URL を書く形で、git はそのとき `merge` の 1 本を
+        // `FETCH_HEAD` へ取るだけで remote-tracking ref を 1 つも動かさない（04 の表）
+        // —— `f` の役目を果たさないので、git に合わせる理由が無い。
+        if RemoteUrl::parse(&config.remote).is_err() {
+            // **`origin` へ落とさない。** 落とすと、ユーザーが書いた行き先とは別の
+            // リモートを黙って fetch することになる。
+            return Err(NoRemote::Ask(format!(
+                "追跡先の {} がリモートにありません",
+                config.remote
+            )));
+        }
     }
 
     conventional_remote(state)
@@ -556,6 +567,21 @@ mod tests {
         assert_eq!(press(&mut state, 'f'), Cmd::None);
         let (_, remotes, _) = open_picker(&state);
         assert_eq!(remotes, ["origin"]);
+    }
+
+    #[test]
+    fn f_fetches_the_conventional_remote_when_the_tracked_remote_is_a_url() {
+        // `gh pr checkout` と PR の取り出しが書く形（`branch.<b>.remote` が fork の
+        // URL）。git はそのとき何の remote-tracking ref も動かさない（04 の表）ので、
+        // 2 段目の規則で選ぶ。**選ばせない** —— 選ばせると PR を取り出すたびに `f` が
+        // モーダルを開く。
+        let mut state = state_for_push(
+            &["origin", "upstream"],
+            tracking_branch("feat", "https://github.com/bob/app.git", "refs/heads/feat"),
+        );
+        let cmd = press(&mut state, 'f');
+        assert_eq!(fetched_remote(&cmd).as_deref(), Some("origin"), "{cmd:?}");
+        assert!(state.modal.is_none());
     }
 
     #[test]

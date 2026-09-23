@@ -242,22 +242,31 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       —— `git_read::Remote.head_branch` として `Cmd::LoadRepoInfo` に載せた（02）ので
       **往復を増やさない**。symref が無い形（一度も fetch していないリモート）は
       空欄で開く。**head は plain な branch 名**（fork の `<owner>:<branch>` は
-      「PR チェックアウト」の行へ送った受け入れた穴。`branch.<name>.remote` から
+      「PR チェックアウト（2/2）」の行へ送った受け入れた穴。`branch.<name>.remote` から
       owner を組むと fork 運用で外れる。01 に実測）。
       **push 済みかは手前で判定しない** —— 判定の材料（追跡設定）は #47 と #98 で
       二度不確かだと判っているので、422 の本文を通知の `detail` に出す。
       **`N` を足したぶん、Prs のキーヒントは 80 桁で共通キーを落とす側に移った**
       （07 の実測）
-- [ ] PR チェックアウト（同一リポジトリ / fork）。**`Modal::PrCreate` が受け入れた穴も
-      ここで塞ぐ** —— fork に在るブランチから PR を作るには `head` を
-      `<owner>:<branch>` にする必要があるが、**どのリモートに在るかを git は憶えて
-      いない**（01 の「head の組み立て」に実測）。塞ぐのに要るのは**そのブランチ名の
-      remote-tracking ref がどのリモートに在るかの読み取り**
-      （`refs/remotes/<名前>/<branch>`）で、fork の plumbing を入れるこのタスクと
-      同じ材料になる。いまは plain な branch 名を送り、GitHub の 422 を通知に出す
-      （**422 は守りにならない** —— owner を付けない `head` は base リポジトリの
-      ブランチとして解決されるので、`target` 側に同名ブランチがあれば他人のブランチ
-      から PR が開く。実 API では確かめていない）
+- [x] PR チェックアウト（1/2）— PRs ペインの `Enter` でカーソル行の PR を取り出す。
+      **`gh pr checkout` と同じ形**（fork は `refs/pull/<n>/head` から取り、
+      `branch.<b>.remote` / `pushRemote` に fork の URL を書く。2026-09-23 に
+      ユーザーと決めた。実測の表は 05 の「PR チェックアウト」）。手順は
+      `GitOp::CheckoutPr` 1 つに載せ、`Runner` が順に叩く（03 の「複数の手順を持つ
+      書き込み」）。**`f` が URL の追跡先を扱えない穴も塞ぐ** —— gh で取り出した
+      ブランチでも「追跡先の https://… がリモートにありません」でリモート選択が
+      開いていた（01 / 04 の「既定リモート」）
+- [ ] PR チェックアウト（2/2）— `Modal::PrCreate` が受け入れた穴を塞ぐ。fork に在る
+      ブランチから PR を作るには `head` を `<owner>:<branch>` にする必要があるが、
+      **どのリモートに在るかを git は憶えていない**（01 の「head の組み立て」に実測）。
+      **1/2 と同じ材料ではなかった**（01 の「PR チェックアウト（`Enter`）」に割った
+      理由）—— `refs/remotes/<名前>/<branch>` は gh / mewgit が取り出した fork の
+      ブランチ（remote-tracking ref が無い）を拾えず、`origin` と `upstream` の両方に
+      同名がある形では候補が 1 つに決まらない（#101）。**決め方から設計する。**
+      いまは plain な branch 名を送り、GitHub の 422 を通知に出す（**422 は守りに
+      ならない** —— owner を付けない `head` は base リポジトリのブランチとして
+      解決されるので、`target` 側に同名ブランチがあれば他人のブランチから PR が開く。
+      実 API では確かめていない）
 - [ ] 403 の `needed_scopes` 案内
 - [ ] 既定リモートが GitHub でないときの PRs ペインの文言 — いまは
       `TargetState::Unavailable` でも `Cmd::ResolveAccount` が出ないため

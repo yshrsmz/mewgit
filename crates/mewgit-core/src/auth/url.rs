@@ -111,6 +111,42 @@ fn parse_inner(url: &str) -> Option<RemoteUrl> {
     })
 }
 
+/// `url` と同じ形で、`owner/repo` だけを差し替えた URL を組む（05 の「追跡先」）。
+///
+/// fork から取り出したブランチの `branch.<b>.remote` に書く。**`url` の形を写す**
+/// —— ssh なら ssh、エイリアスならエイリアスのまま。そのリポジトリへ実際に通して
+/// いる形なので、別の形（`https://<host>/…`）で組むより確かに繋がる。
+///
+/// - **https の userinfo は写さない。** `https://x-access-token:<PAT>@host/…` の
+///   資格情報を別のキーへ複製しない（`redacted` と同じ理由）。ssh の `git@` は
+///   ユーザー名なので残す
+/// - 末尾は `.git` に揃える（gh が書く形。05）
+/// - `url` が読めない形か、`owner` / `repo` が `valid_segment` を通らなければ
+///   `None`。**API から来た名前をそのまま設定に書かない**
+pub fn sibling(url: &str, owner: &str, repo: &str) -> Option<String> {
+    let url = url.trim();
+    let parsed = parse_inner(url)?;
+    if !valid_segment(owner) || !valid_segment(repo) {
+        return None;
+    }
+    let prefix = match parsed.scheme {
+        RemoteScheme::Https { port } => match port {
+            Some(port) => format!("https://{}:{port}/", parsed.host_raw),
+            None => format!("https://{}/", parsed.host_raw),
+        },
+        // `ssh://` / `git+ssh://` は authority の後ろの `/` まで、scp 形式は最初の
+        // `:` までがそのまま前置き（`parse_inner` が割った位置と同じ）。
+        RemoteScheme::Ssh => match url.find("://") {
+            Some(scheme_end) => {
+                let authority_end = url[scheme_end + 3..].find('/')? + scheme_end + 3;
+                url[..=authority_end].to_string()
+            }
+            None => url[..=url.find(':')?].to_string(),
+        },
+    };
+    Some(format!("{prefix}{owner}/{repo}.git"))
+}
+
 /// `[user@]host[:port]` を host と port に割る。
 ///
 /// **port の構文はどちらの scheme でも確かめる。** 値を使うのは https だけだが
@@ -247,6 +283,63 @@ mod tests {
             Err(AuthError::InvalidRemoteUrl { .. }) => {}
             other => panic!("{url} を受けてしまった: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_sibling_keeps_the_shape_of_the_remote() {
+        // 形ごとに、owner / repo だけが差し替わる。
+        for (url, expected) in [
+            (
+                "git@github.com:acme/app.git",
+                "git@github.com:bob/app-fork.git",
+            ),
+            ("gh-work:acme/app", "gh-work:bob/app-fork.git"),
+            (
+                "ssh://git@ghe.example.com:2222/acme/app.git",
+                "ssh://git@ghe.example.com:2222/bob/app-fork.git",
+            ),
+            (
+                "https://github.com/acme/app",
+                "https://github.com/bob/app-fork.git",
+            ),
+            (
+                "https://ghe.example.com:8443/acme/app.git/",
+                "https://ghe.example.com:8443/bob/app-fork.git",
+            ),
+        ] {
+            assert_eq!(
+                sibling(url, "bob", "app-fork").as_deref(),
+                Some(expected),
+                "{url}"
+            );
+            // 組んだ URL は元と同じホストの bob/app-fork として読める。
+            let back = parsed(expected);
+            assert_eq!(
+                (back.owner.as_str(), back.repo.as_str()),
+                ("bob", "app-fork")
+            );
+            assert_eq!(back.host_raw, parsed(url).host_raw);
+        }
+    }
+
+    #[test]
+    fn a_sibling_drops_https_credentials() {
+        assert_eq!(
+            sibling(
+                "https://x-access-token:secret@github.com/acme/app.git",
+                "bob",
+                "app"
+            )
+            .as_deref(),
+            Some("https://github.com/bob/app.git")
+        );
+    }
+
+    #[test]
+    fn a_sibling_refuses_names_it_cannot_write() {
+        assert_eq!(sibling("git@github.com:acme/app.git", "..", "app"), None);
+        assert_eq!(sibling("git@github.com:acme/app.git", "bob", "a/b"), None);
+        assert_eq!(sibling("/srv/git/app.git", "bob", "app"), None);
     }
 
     #[test]

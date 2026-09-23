@@ -56,12 +56,13 @@ git2 の呼び出しはどれも壊れたリポジトリや I/O エラーで失�
 ここでは `.git/config` の生の文字列をそのまま返す。
 
 `head_branch` は `refs/remotes/<name>/HEAD` が指すブランチの短縮名で、**そのリモートが
-言う既定ブランチ**。読み手は `Modal::PrCreate` の base の初期値（01 の「PR 作成（`N`）」）。
+言う既定ブランチ**。読み手は `Modal::PrCreate` の base の初期値（01 の「PR 作成（`N`）」）と、
+fork の PR を取り出すときのブランチ名（05 の「ブランチ名」）。
 
 - **`Option`。** symref は clone 直後と `git fetch` のあとには在るが、`git remote add` を
   しただけで一度も fetch していないリポジトリには無い（実測 2026-09-21、git 2.55、
-  `env -i` の一時リポジトリ）。**読み手はそのとき空欄で開いて人に打たせる**ので、
-  無いことを理由にしない
+  `env -i` の一時リポジトリ）。**どちらの読み手も無いことを理由にしない** ——
+  PR 作成は空欄で開いて人に打たせ、取り出しは PR の base とも比べる
 - **`refs/remotes/<name>/` を剥がして返す。** 生の `refs/remotes/origin/main` は
   ブランチ名ではないので、そのまま base に載せると GitHub が 422 を返す。剥がせない
   値（symref が別の場所を指している）は `None`

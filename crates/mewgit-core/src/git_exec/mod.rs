@@ -11,11 +11,11 @@ use std::path::PathBuf;
 
 use crate::git_read::Oid;
 
-pub use argv::{push_remote_ref, to_command, ArgvError, GitCommand};
+pub use argv::{push_remote_ref, to_commands, ArgvError, GitCommand};
 pub use patch::{hunk_patch, supports_hunk_patch};
 pub use runner::Runner;
 
-/// 書き込み操作。[`to_command`] で `git` の argv と標準入力に変換する。
+/// 書き込み操作。[`to_commands`] で `git` の argv と標準入力に変換する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitOp {
     Stage(Vec<PathBuf>),
@@ -79,7 +79,7 @@ pub enum GitOp {
         ///
         /// **UI から出るのは常に `true`。** `false` を組む経路は無く（01 の
         /// `InputIntent` は真偽値を持たない）、`branch <name>` の側は
-        /// [`to_command`](argv::to_command) のテストでだけ踏む。
+        /// [`to_commands`] のテストでだけ踏む。
         switch: bool,
     },
     /// ブランチに切り替える（`switch <name>`）。
@@ -178,6 +178,72 @@ pub enum GitOp {
     /// [`auth::MEWGIT_USER`]: crate::auth::MEWGIT_USER
     /// [`AccountSource::is_unsettable`]: crate::auth::AccountSource::is_unsettable
     UnsetAccount,
+    /// PR をローカルのブランチに取り出す（PRs ペインの `Enter`。05 の
+    /// 「PR チェックアウト」）。
+    ///
+    /// **git を 2〜5 本続けて叩く唯一の変種**（03 の「複数の手順を持つ書き込み」）。
+    /// どの手順を組むかは [`PrCheckout`] の値で決まり、その値を決めるのは `app`
+    /// （ブランチ一覧と `target` を知っている側）。
+    ///
+    /// **`Box` に載せる。** 中身は文字列を 4 本持つので、裸で置くと `GitOp` が
+    /// 膨らみ、`Cmd` と `Msg` が 1 打鍵ごとにその大きさで作られる。
+    CheckoutPr(Box<PrCheckout>),
+}
+
+/// [`GitOp::CheckoutPr`] の中身。**場面（どこから取るか × ローカルにどう在るか）を
+/// 値で持ち、手順はそこから [`to_commands`] が導く**（05 の「mewgit の手順」の表）。
+///
+/// 手順の列そのもの（`Vec<GitOp>`）を持たないのは、**組み合わせてはいけない列が
+/// 型で組める**から —— たとえば「いま居るブランチへ `<src>:<b>` で fetch する」は
+/// git が exit 128 で断る形（05）で、列を渡す形だと呼び出し側がそれを避ける責任を持つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrCheckout {
+    /// fetch 元のリモート名（`RepoInfo.target` を決めたリモート。05）。
+    pub remote: String,
+    /// 取り出す先のローカルのブランチ名（05 の「ブランチ名」）。
+    pub branch: String,
+    pub source: PrSource,
+    pub local: LocalBranch,
+}
+
+/// PR の head がどこに在るか。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrSource {
+    /// base と同じリポジトリのブランチ。**名前は [`PrCheckout::branch`] と同じ**
+    /// （`--track` が `<remote>/<branch>` を追うので、違う名前にすると追跡先と
+    /// 食い違う。05）。
+    SameRepo,
+    /// fork（消えた fork を含む）。中身は base 側の `refs/pull/<number>/head` から取る。
+    Fork {
+        number: u64,
+        /// **新しく作るときだけ書く**追跡設定（[`LocalBranch::Absent`]）。
+        upstream: ForkUpstream,
+    },
+}
+
+/// fork から取り出したブランチに書く追跡設定（05 の「追跡先」）。
+///
+/// **`remote` と `merge` を 1 つにまとめる。** どちらか片方だけを書くと、git は
+/// 追跡設定として読まない（`branch.<b>.merge` が無ければ上流が無い）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkUpstream {
+    /// `branch.<b>.remote` と `branch.<b>.pushRemote` に書く値。fork の URL か、
+    /// 組めないときは fetch 元のリモート名。
+    pub remote: String,
+    /// `branch.<b>.merge` に書く値。`refs/heads/<head>` か `refs/pull/<n>/head`。
+    pub merge: String,
+}
+
+/// 取り出す先のブランチがローカルにどう在るか（05）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalBranch {
+    /// 無い。作る。
+    Absent,
+    /// 在るが、いま居ない。早送りして切り替える。
+    Present,
+    /// いま居る。**`<src>:<b>` で fetch できない**（git が exit 128 で断る。05）ので、
+    /// 取ってから `merge --ff-only` で早送りする。
+    Current,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

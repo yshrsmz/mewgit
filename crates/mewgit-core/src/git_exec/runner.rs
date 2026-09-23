@@ -7,9 +7,9 @@ use std::process::{ExitStatus, Stdio};
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
-use tokio::sync::oneshot;
+use tokio::sync::oneshot::{self, error::TryRecvError};
 
-use super::{to_command, ExecError, ExecErrorKind, ExecOutput, GitCommand, GitOp};
+use super::{to_commands, ExecError, ExecErrorKind, ExecOutput, GitCommand, GitOp};
 use crate::auth::ssh::SshCommand;
 
 /// `RebaseInteractive` を拒否する理由。
@@ -84,9 +84,9 @@ impl Runner {
 
     /// `git` を実行して結果を返す。**キャンセルできない形。**
     ///
-    /// 送り手を作らずに [`run_cancelable`](Self::run_cancelable) へ渡す。受け側の
-    /// `Ok(())` パターンが外れた枝は `select!` が無効にするので、この呼び方では
-    /// キャンセルの腕が二度と選ばれない。
+    /// 送り手を作らずに [`run_cancelable`](Self::run_cancelable) へ渡す。送り手が
+    /// 落ちた受け側は最初の 1 回で `Err` を返し、以後は見ない（`CancelSignal`）ので、
+    /// この呼び方ではキャンセルの腕が二度と選ばれない。
     pub async fn run(&self, op: &GitOp) -> Result<ExecOutput, ExecError> {
         let (_, cancel) = oneshot::channel();
         self.run_cancelable(op, cancel).await
@@ -105,18 +105,47 @@ impl Runner {
         op: &GitOp,
         cancel: oneshot::Receiver<()>,
     ) -> Result<ExecOutput, ExecError> {
-        let command = to_command(op).map_err(|err| ExecError::NoResult {
+        let commands = to_commands(op).map_err(|err| ExecError::NoResult {
             argv: Vec::new(),
             reason: err.to_string(),
         })?;
 
         if matches!(op, GitOp::RebaseInteractive { .. }) {
             return Err(ExecError::NoResult {
-                argv: command.argv,
+                argv: commands
+                    .into_iter()
+                    .next()
+                    .map(|c| c.argv)
+                    .unwrap_or_default(),
                 reason: REBASE_INTERACTIVE_UNSUPPORTED.to_string(),
             });
         }
 
+        // **列を先頭から順に叩き、非 0 で止まる**（03 の「複数の手順を持つ書き込み」）。
+        // 1 本の変種では 1 周で抜けるので、ここまでの形と変わらない。
+        let mut cancel = CancelSignal::new(cancel);
+        let mut last = None;
+        for (index, command) in commands.into_iter().enumerate() {
+            // **手順のあいだに届いた中断は、次を起こさずに返す。** 起こしてから
+            // `select!` で拾うと、1 本ぶん git を起こして殺すことになる。
+            if index > 0 && cancel.arrived() {
+                return Err(ExecError::Canceled { argv: command.argv });
+            }
+            last = Some(self.run_one(command, &mut cancel).await?);
+        }
+        // `to_commands` は空の列を返さない。
+        last.ok_or_else(|| ExecError::NoResult {
+            argv: Vec::new(),
+            reason: "git の呼び出しが 1 つもありません".to_string(),
+        })
+    }
+
+    /// 1 本の `git` を実行し、中断の合図が届いたらプロセスグループごと止める。
+    async fn run_one(
+        &self,
+        command: GitCommand,
+        cancel: &mut CancelSignal,
+    ) -> Result<ExecOutput, ExecError> {
         let mut child = self.spawn(&command)?;
 
         // **殺す相手はここで控える。** `wait_with_output` が `child` を取るので、
@@ -146,11 +175,21 @@ impl Runner {
         // **「中断した」を別の旗で持たない。** 持つと「殺したのに待ち直さない」という
         // 組み合わせが型で書ける。
         let mut finished = None;
-        tokio::select! {
-            waited = &mut run => finished = Some(waited),
-            // 送り手が落ちた（キャンセルできない呼び方）ときはパターンが外れ、
-            // `select!` がこの腕を無効にする。
-            Ok(()) = cancel => terminate(pid),
+        loop {
+            tokio::select! {
+                waited = &mut run => {
+                    finished = Some(waited);
+                    break;
+                }
+                // 送り手が落ちた（キャンセルできない呼び方）なら、以後は見ない。
+                got = cancel.recv(), if cancel.live => match got {
+                    Ok(()) => {
+                        terminate(pid);
+                        break;
+                    }
+                    Err(_) => cancel.live = false,
+                },
+            }
         }
         // **これは「合図を撃った」であって「中断で終わった」ではない**（下の分岐で
         // 終了状態まで確かめる）。
@@ -252,6 +291,47 @@ impl Runner {
 ///
 /// **逆に、こちらが撃っていない SIGTERM は中断ではない**（外から `kill` された）。
 /// 押した本人が止めたものだけを `Canceled` にする。
+/// 中断の合図の受け側。**手順をまたいで 1 本を使い回す**（03 の「複数の手順を
+/// 持つ書き込み」）。
+///
+/// **`live` を別に持つのは、終わった受け側をもう一度待たないため。** tokio の
+/// `oneshot::Receiver` は値（か送り手が落ちたこと）を返したあとに待ち直すと panic
+/// する。1 本だけ叩いていたころは `select!` を 1 回しか回さなかったので要らなかった。
+struct CancelSignal {
+    receiver: oneshot::Receiver<()>,
+    /// まだ合図が来うるか。送り手が落ちたら偽。
+    live: bool,
+}
+
+impl CancelSignal {
+    fn new(receiver: oneshot::Receiver<()>) -> Self {
+        Self {
+            receiver,
+            live: true,
+        }
+    }
+
+    /// 合図が既に届いているか。待たない。
+    fn arrived(&mut self) -> bool {
+        if !self.live {
+            return false;
+        }
+        match self.receiver.try_recv() {
+            Ok(()) => true,
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Closed) => {
+                self.live = false;
+                false
+            }
+        }
+    }
+
+    /// 合図を待つ。**`live` のときだけ呼ぶ**（`select!` の `if` で守る）。
+    async fn recv(&mut self) -> Result<(), oneshot::error::RecvError> {
+        (&mut self.receiver).await
+    }
+}
+
 fn canceled_by(signaled: bool, status: &ExitStatus) -> bool {
     signaled && status.signal() == Some(libc::SIGTERM)
 }

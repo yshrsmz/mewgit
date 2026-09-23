@@ -554,8 +554,9 @@ impl RepoInfo {
     /// （`merge` から `refs/heads/` を外したもの）。
     ///
     /// **名前は `merge` から取る。** URL を書くのは PR の取り出し（mewgit と
-    /// `gh pr checkout`）で、衝突を避けてローカルを `bob/main` にすることがある
-    /// （01 の「現ブランチの PR」の「比べる名前」）。**読み方を 1 本にする** ——
+    /// `gh pr checkout`）と `git push -u <URL> <local>:<remote>` で、どれもローカルと
+    /// 違う名前を `merge` に書きうる（取り出しは衝突を避けてローカルを `bob/main` に
+    /// する。01 の「現ブランチの PR」の「比べる名前」）。**読み方を 1 本にする** ——
     /// 座り直し（[`head_homes`]）と送る側（[`AppState::head_candidates`]）が別々に
     /// 書くと、片方だけ直ったときに「取り出した PR に座らない」と「fork に無い
     /// ブランチを送る」が片側だけで起きる。`refs/heads/` の下に無い `merge` は

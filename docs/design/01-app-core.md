@@ -1225,9 +1225,10 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
   もの）。PR の取り出し（`Enter`）は fork のブランチが既定ブランチや base と同名なら
   ローカルを `bob/main` にし、`merge` に `refs/heads/main` を書く（05 の「ブランチ名」）
   ので、ローカルの名前で比べると**取り出したその PR に座らず、`N` の「既にあります」も
-  素通りして作り直しに行く**。URL を書くのは取り出し（mewgit と `gh pr checkout`）で、
-  そこでの `merge` は「fork に在るブランチ」そのもの。**名前の追跡先と `target` の腕は
-  ローカルの名前のまま** —— 名前の追跡先の `merge` は「何を基にしたか」で、
+  素通りして作り直しに行く**。URL を書くのは取り出し（mewgit と `gh pr checkout`）と
+  `git push -u <URL> <local>:<remote>`（`merge` は `refs/heads/<remote>`。実測
+  2026-09-23、git 2.55）で、どれも `merge` は「その URL に在るブランチ」そのもの。
+  **名前の追跡先と `target` の腕はローカルの名前のまま** —— 名前の追跡先の `merge` は「何を基にしたか」で、
   `git checkout -b feat upstream/main` は `merge` を `refs/heads/main` にする。そこで
   `merge` を使うと upstream の `main` から出た PR に座り、`N` がそれを「既にある」として
   断る。`refs/heads/` の下に無い `merge`（`refs/pull/<n>/head`）の URL の腕は候補に

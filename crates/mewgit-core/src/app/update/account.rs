@@ -1090,9 +1090,14 @@ mod tests {
         // **`NoAccess` は並べるだけ**（04 の手順 4）—— どれも届かない状態で選んでも
         // 何も直らない。`j` も `Enter` も効かず、`Esc` で閉じる。
         let mut state = state_degraded(DegradedReason::NoAccess {
+            host: "github.com".to_string(),
             attempts: vec![ProbeAttempt {
                 login: "taro".to_string(),
-                failure: AttemptFailure::Denied { status: 404 },
+                active: true,
+                failure: AttemptFailure::Denied {
+                    status: 404,
+                    missing_scope: None,
+                },
             }],
         });
         let _ = press(&mut state, 'A');

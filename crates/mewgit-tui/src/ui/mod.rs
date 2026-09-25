@@ -494,7 +494,7 @@ pub(crate) fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
             format!("{login} のトークンがありません").into()
         }
         // **「権限が無い」と読ませない。** 回線が無いだけの回もここに来る（04）。
-        DegradedReason::NoAccess { attempts } => {
+        DegradedReason::NoAccess { attempts, .. } => {
             format!("どれも届きません（{} 件）", attempts.len()).into()
         }
         DegradedReason::Ambiguous { candidates } => {
@@ -940,6 +940,7 @@ mod tests {
                 message: "no oauth token found".to_string(),
             },
             DegradedReason::NoAccess {
+                host: "github.com".to_string(),
                 attempts: Vec::new(),
             },
             // **候補を空にしない。** 空だと `A` の案内が付かず、**出荷される
@@ -979,6 +980,7 @@ mod tests {
         assert!(pickable.contains("A で選ぶ"), "header: {pickable:?}");
 
         state.account = AccountState::Degraded(DegradedReason::NoAccess {
+            host: "github.com".to_string(),
             attempts: Vec::new(),
         });
         let shown = header(&state, size);

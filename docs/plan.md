@@ -273,7 +273,13 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       取る。**名前の追跡先には広げない** —— そこでの `merge` は「何を基にしたか」で、
       `checkout -b feat upstream/main` が upstream の `main` の PR に座る（01 の
       「現ブランチの PR」）
-- [ ] 403 の `needed_scopes` 案内
+- [x] 足りないスコープの案内 —— 行の名前は「403 の `needed_scopes` 案内」だったが、
+      **GitHub はスコープ不足を 404 で返す**（05 の実測）ので、ステータスで分ける前に
+      `X-Accepted-Oauth-Scopes` / `X-Oauth-Scopes` を見る（`GithubError::MissingScope`）。
+      ヘッダが付くのは mewgit の API では `repos/{o}/{r}` と commit status だけなので、
+      **出す先は `A` の `NoAccess` の内訳**（`gh auth refresh -h <host> -s <scope>`。
+      アクティブでない login には `gh auth switch` を先に書く。04 の「権限不足の案内」）。
+      SAML の 403 は `AttemptFailure::SsoRequired` に割って「SSO の承認が要ります」
 - [ ] 既定リモートが GitHub でないときの PRs ペインの文言 — いまは
       `TargetState::Unavailable` でも `Cmd::ResolveAccount` が出ないため
       `AccountState::Resolving` のままで、ペインが**永久に「読み込み中…」**になる

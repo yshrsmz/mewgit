@@ -258,6 +258,9 @@ pub enum DegradedReason {
     /// （起動時に回線が無い）の形もここに来る。**理由は `attempts` に 1 件ずつ
     /// 入っている**ので、案内はそちらから組む。
     NoAccess {
+        /// リポジトリのホスト。**案内の `gh auth refresh -h` に渡す**（04 の
+        /// 「権限不足の案内」）—— API のホスト（`api.github.com`）ではない。
+        host: String,
         attempts: Vec<ProbeAttempt>,
     },
     /// 候補を 1 つに絞れなかった。UI で選ばせる。
@@ -322,6 +325,12 @@ impl DegradedReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeAttempt {
     pub login: String,
+    /// gh の現在のアカウントか（[`GhLogin::active`]）。
+    ///
+    /// **案内のために運ぶ。** `gh auth refresh` はアクティブなアカウントにしか
+    /// 効かないので、そうでなければ `gh auth switch` を先に書く（04 の
+    /// 「権限不足の案内」）。書かないと**別のアカウントにスコープを足させる**。
+    pub active: bool,
     pub failure: AttemptFailure,
 }
 
@@ -333,7 +342,18 @@ pub struct ProbeAttempt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttemptFailure {
     /// HTTP のステータスで断られた（401 / 403 / 404）。**このアカウントでは無理**。
-    Denied { status: u16 },
+    Denied {
+        status: u16,
+        /// 応答のヘッダから判った、足りないスコープ（05 の `MissingScope`）。
+        /// 判らなければ `None`（ヘッダが無い / トークンが既に持っている）。
+        missing_scope: Option<String>,
+    },
+    /// SAML SSO の承認が要る 403。**トークンを org に承認すれば通る**ので、
+    /// 案内が `Denied` と違う。
+    ///
+    /// **`Denied` に `saml: bool` を足さない**（04）—— `Denied { 404, saml: true }`
+    /// が型で組める。SAML の拒否は常に 403 なので、ステータスを持たない腕にする。
+    SsoRequired,
     /// 断られてはいないが確かめられなかった（回線、TLS バックエンドの初期化、
     /// レート制限）。**もう一度なら通りうる**ので `Denied` と分ける ——
     /// レート制限を `Denied { status: 429 }` に畳むと、待てば直るものを
@@ -347,8 +367,8 @@ pub enum AttemptFailure {
 /// カンマ区切りの OAuth スコープを割る。
 ///
 /// **2 人の利用者がいる。** `gh auth status` の `scopes`（カンマ区切りの 1 本の
-/// 文字列）と、GitHub API が 403 に添える `x-accepted-oauth-scopes`
-/// （`github::client`）。00 の依存の向きで `github` は `auth` の上段なので、
+/// 文字列）と、GitHub API がエラーの応答に添える `x-accepted-oauth-scopes` /
+/// `x-oauth-scopes`（`github::client`）。00 の依存の向きで `github` は `auth` の上段なので、
 /// 下段のここに置いて上から呼ぶ。
 pub(crate) fn split_scopes(raw: &str) -> Vec<String> {
     raw.split(',')

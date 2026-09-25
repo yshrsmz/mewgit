@@ -628,9 +628,24 @@ mod tests {
             host: "ghe.example.com".to_string(),
             ..login("hanako")
         };
-        let backend = Fake::new(vec![active.clone(), inactive.clone()])
+        // **`Undetermined` の腕も通す。** `resolve` は断られた候補と確かめられな
+        // かった候補を別の腕で `attempts` に積むので、片方だけだともう片方の詰め替えを
+        // 見張れない。gh のアクティブは 1 ホストに 1 つだが、ここは運び方を見るので
+        // 2 つ目も立てる（立てないと `active` が落ちても区別できない）。
+        let unchecked = GhLogin {
+            host: "ghe.example.com".to_string(),
+            active: true,
+            ..login("jiro")
+        };
+        let backend = Fake::new(vec![active.clone(), inactive.clone(), unchecked.clone()])
             .probing("taro", denied(404))
-            .probing("hanako", denied(404));
+            .probing("hanako", denied(404))
+            .probing(
+                "jiro",
+                Err(AttemptFailure::Undetermined {
+                    message: "接続できません".to_string(),
+                }),
+            );
 
         let state = resolve_plain(&backend).await;
 
@@ -639,6 +654,7 @@ mod tests {
                 let logins: Vec<&GhLogin> = attempts.iter().map(|a| &a.login).collect();
                 assert!(logins.contains(&&active), "{logins:?}");
                 assert!(logins.contains(&&inactive), "{logins:?}");
+                assert!(logins.contains(&&unchecked), "{logins:?}");
             }
             other => panic!("{other:?}"),
         }

@@ -19,7 +19,7 @@ impl GhCli {
     pub async fn browse(&self, host: &str, owner: &str, repo: &str, number: u64) -> Result<(), AuthError>;
 }
 
-pub struct GhLogin { pub host, pub login, pub active: bool, pub scopes: Vec<String>, pub state: LoginState }
+pub struct GhLogin { pub host, pub login, pub active: bool, pub stored_active: bool, pub scopes: Vec<String>, pub state: LoginState }
 pub enum LoginState { Success, Timeout, Error }
 ```
 
@@ -643,10 +643,25 @@ jiro: SAML SSO の承認が要ります（HTTP 403）
 ```
 
 - **`gh auth refresh` はアクティブなアカウントにしか効かない**（`gh auth refresh --help`、
-  gh 2.101.0）。内訳に並ぶのは**複数アカウントの手順 4 だけ**（手順 3 は probe しない）
-  なので、アクティブでない login に当たる形がむしろ本命。案内をそのまま出すと
-  **別のアカウントにスコープを足させる**。アクティブでなければ `gh auth switch` を
-  先に書く
+  gh 2.101.0）。足りないスコープが内訳に並ぶのは**複数アカウントの手順 4 だけ**
+  （手順 3 は probe しない）なので、アクティブでない login に当たる形がむしろ本命。
+  案内をそのまま出すと**別のアカウントにスコープを足させる**。アクティブでなければ
+  `gh auth switch` を先に書く
+- **見るのは `GhLogin.stored_active`（設定上のアクティブ）で、`active` ではない。**
+  `GITHUB_TOKEN` / `GH_TOKEN` を export していると、`gh auth status --json` は
+  環境変数のエントリを `active: true` にし、**keyring のエントリを全部 `active: false`
+  にする**（実測 2026-09-26、gh 2.101.0。環境変数を外すと keyring 側が `true` に
+  戻る）。`merge_logins` は同じ login のエントリを畳むので、`active` は環境変数の
+  ほうを拾う。**probe のトークンは `gh auth token --user` で keyring から取る**ので、
+  足りないのは keyring のトークン —— refresh の相手と同じ。`stored_active` は
+  `tokenSource` が `keyring` / `oauth_token`（gh の `internal/config/config.go`）の
+  エントリだけから立てる。知らない出どころは立てない側（`switch` を足す側）
+- **環境変数があるあいだ `gh auth refresh` は断る**（exit 1。「The value of the
+  GITHUB_TOKEN environment variable is being used for authentication. To refresh
+  credentials stored in GitHub CLI, first clear the value from the environment.」）。
+  **その案内は gh 自身が出す**ので mewgit は足さない。外して打ち直したときには
+  上の `stored_active` が全員 `false` だったぶん `switch` が付いているので、
+  別のアカウントに足さない（`/code-review` が拾った）
 - **`ProbeAttempt` は `GhLogin` ごと運ぶ**（`Ambiguous` と同じ）。案内が読むのは
   `active` と `host` —— `-h` に渡すのはリポジトリのホスト（`github.com`。
   `gh auth status --hostname` に渡したもの）で、API のホスト（`api.github.com`）では
@@ -655,9 +670,10 @@ jiro: SAML SSO の承認が要ります（HTTP 403）
 - **スコープは `X-Accepted-Oauth-Scopes` と `X-Oauth-Scopes` から決める**（判定は 05）。
   **「無ければ操作ごとの既定値」は採らない** —— ヘッダが空の API で既定値を案内すると、
   **GitHub が言っていないスコープ名を発明する**ことになる。gh もヘッダが無ければ黙る
-- **1 行に 1 コマンド。** 並べた順が手順で、そのまま貼れる。理由の行に続けると、
-  本文は折り返す（`modals::picker` が `ui::wrapped` を通す）ものの、login と host に
-  上限が無いのでコマンドが語の途中から次の行へ割れる
+- **1 行に 1 コマンド。** 並べた順が手順。箱（80x24 で内側 58 セル）に収まる長さ
+  ならそのまま貼れる。**収まらない host と login では折り返す**（`modals::picker` が
+  `ui::wrapped` を通す）ので、語の切れ目で次の行へ割れる —— 切れはしないが、貼る
+  ときは繋ぎ直す。理由の行に続けると、短い login でも割れる
 - **`gh auth switch` で戻す手順は書かない。** mewgit はアクティブかどうかで
   アカウントを選ばない（手順 4 は全員を probe する）ので、切り替えたままでも
   mewgit の側は変わらない。gh の既定が変わったことを戻すかは本人の判断

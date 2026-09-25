@@ -619,6 +619,7 @@ pub fn fake_login(login: &str) -> GhLogin {
         host: fake_target().host,
         login: login.to_string(),
         active: false,
+        stored_active: false,
         scopes: vec!["repo".to_string()],
         state: LoginState::Success,
     }

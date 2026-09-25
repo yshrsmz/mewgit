@@ -110,7 +110,18 @@ impl RepoTarget {
 pub struct GhLogin {
     pub host: String,
     pub login: String,
+    /// gh の現在のアカウントか。**環境変数のトークンを含む** —— `GITHUB_TOKEN` を
+    /// export していると、gh はそのエントリを active と報告する（04）。
     pub active: bool,
+    /// **gh の設定上**（keyring / hosts.yml）で現在のアカウントか。
+    ///
+    /// **`gh auth refresh` / `gh auth switch` が相手にするのはこちら。**
+    /// [`active`](Self::active) と分けるのは、環境変数のトークンがあると gh が
+    /// そちらを active と報告し、設定上のエントリを**全部**非 active にするため
+    /// （実測 2026-09-26、gh 2.101.0）。`active` で案内を組むと `gh auth switch` を
+    /// 省き、環境変数を外して打ち直した refresh が**別のアカウントにスコープを
+    /// 足す**（`/code-review` が拾った）。
+    pub stored_active: bool,
     pub scopes: Vec<String>,
     /// gh がそのトークンを検証した結果。
     ///

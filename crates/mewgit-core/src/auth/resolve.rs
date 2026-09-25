@@ -291,6 +291,7 @@ mod tests {
             host: "github.com".to_string(),
             login: name.to_string(),
             active: false,
+            stored_active: false,
             scopes: Vec::new(),
             state: LoginState::Success,
         }
@@ -622,6 +623,7 @@ mod tests {
         let active = GhLogin {
             host: "ghe.example.com".to_string(),
             active: true,
+            stored_active: true,
             ..login("taro")
         };
         let inactive = GhLogin {
@@ -635,6 +637,7 @@ mod tests {
         let unchecked = GhLogin {
             host: "ghe.example.com".to_string(),
             active: true,
+            stored_active: true,
             ..login("jiro")
         };
         let backend = Fake::new(vec![active.clone(), inactive.clone(), unchecked.clone()])

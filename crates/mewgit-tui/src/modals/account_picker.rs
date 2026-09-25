@@ -307,16 +307,18 @@ fn attempt_lines(attempt: &ProbeAttempt) -> Vec<String> {
     let GhLogin {
         host,
         login,
-        active,
+        stored_active,
         ..
     } = login;
     let mut lines = vec![format!(
         "{login}: {scope} スコープが要ります（HTTP {status}）"
     )];
     // **`gh auth refresh` はアクティブなアカウントにしか効かない**（`--help`）。
-    // 書かないと、別のアカウントにスコープを足させる。**1 行に 1 コマンド** ——
+    // 書かないと、別のアカウントにスコープを足させる。**見るのは設定上の
+    // アクティブ**（`GhLogin::stored_active`）—— 環境変数のトークンがあると
+    // `active` はそちらを指し、refresh の相手とずれる。**1 行に 1 コマンド** ——
     // 並べた順が手順で、そのまま貼れる。
-    if !active {
+    if !stored_active {
         lines.push(format!("  gh auth switch -h {host} -u {login}"));
     }
     lines.push(format!("  gh auth refresh -h {host} -s {scope}"));
@@ -749,7 +751,7 @@ mod tests {
     fn missing_repo(login: &str, active: bool) -> ProbeAttempt {
         ProbeAttempt {
             login: GhLogin {
-                active,
+                stored_active: active,
                 ..fake_login(login)
             },
             failure: AttemptFailure::Denied {
@@ -801,25 +803,38 @@ mod tests {
     #[test]
     fn the_whole_command_is_on_screen_even_when_it_wraps() {
         // **末尾（`-s <scope>`）から切れない。** 箱より長い行は折り返す
-        // （`modals::picker`）。アクティブでない login はコマンドが 2 行になるので
-        // 本文がいちばん長い形。
-        let state = state_with_reason(fake_no_access(vec![
-            missing_repo("taro_acme", true),
-            missing_repo("hanako", false),
-        ]));
+        // （`modals::picker`）。**長い host と login で箱の幅を超えさせる** ——
+        // 80x24 の箱（内側 58 セル）には `github.com` と短い login のコマンドが
+        // 収まってしまい、折り返しを外しても通る（`/code-review` が拾った）。
+        let host = "ghe.example-enterprise.co.jp";
+        let login = "taro_acme_enterprise_user";
+        let attempt = ProbeAttempt {
+            login: GhLogin {
+                host: host.to_string(),
+                ..missing_repo(login, false).login
+            },
+            ..missing_repo(login, false)
+        };
+        let switch = format!("gh auth switch -h {host} -u {login}");
+        assert!(switch.len() > 60, "箱の幅を超えていない: {switch}");
+        let state = state_with_reason(fake_no_access(vec![attempt]));
 
-        let text = draw(&state, SIZE).join("\n");
+        // モーダルの行だけを取り出し、折り返しを繋ぎ直して読む。モーダルが
+        // 重なった行は `│ 余白 │本文│ 余白 │` の 5 片に割れる。
+        let body: Vec<String> = draw(&state, SIZE)
+            .iter()
+            .filter_map(|row| {
+                let parts: Vec<&str> = row.split('│').collect();
+                (parts.len() == 5).then(|| parts[2].trim_end().to_string())
+            })
+            .collect();
+        let joined = body.join(" ");
+        let joined = joined.split_whitespace().collect::<Vec<_>>().join(" ");
 
+        assert!(joined.contains(&switch), "{body:#?}");
         assert!(
-            text.contains("gh auth switch -h github.com -u hanako"),
-            "{text}"
-        );
-        // 2 本とも `-s repo` まで出る。折り返しで最後の語が消えていない。
-        assert_eq!(
-            text.matches("gh auth refresh -h github.com -s repo")
-                .count(),
-            2,
-            "{text}"
+            joined.contains(&format!("gh auth refresh -h {host} -s repo")),
+            "{body:#?}"
         );
     }
 

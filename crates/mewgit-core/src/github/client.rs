@@ -1335,6 +1335,13 @@ mod tests {
         // ただの `NotFound` に戻ることで、上の入力が効いていることを見る。
         let without_held = with_headers(ResponseTemplate::new(404), &[accepted]);
         assert_eq!(repo_err(without_held).await, GithubError::NotFound);
+        // **ヘッダはあるが値が空**の形も同じ。GitHub は空のスコープヘッダを値の無い
+        // まま送ってくる（05 の実測で `X-Accepted-Oauth-Scopes` がそうだった）。
+        let empty_held = with_headers(
+            ResponseTemplate::new(404),
+            &[accepted, ("x-oauth-scopes", "")],
+        );
+        assert_eq!(repo_err(empty_held).await, GithubError::NotFound);
     }
 
     #[tokio::test]

@@ -230,6 +230,10 @@ struct WireEntry {
     state: String,
     active: bool,
     login: String,
+    /// トークンの出どころ。設定に保存したものは `keyring` / `oauth_token`
+    /// （hosts.yml）で、ほかは環境変数の名前（gh の `internal/config/config.go`）。
+    #[serde(rename = "tokenSource")]
+    token_source: Option<String>,
     /// カンマ区切りの 1 本の文字列。**fine-grained PAT では丸ごと欠ける**ので
     /// `Option`（`omitempty`）。
     scopes: Option<String>,
@@ -243,6 +247,16 @@ impl WireEntry {
             // `error` と、gh が今後足す状態。**未知を成功にしない。**
             _ => LoginState::Error,
         }
+    }
+
+    /// 設定に保存したトークンか。**知らない出どころは保存していない側に数える** ——
+    /// そうすると案内が `gh auth switch` を足す側に倒れ、別のアカウントに
+    /// スコープを足させない。
+    fn is_stored(&self) -> bool {
+        matches!(
+            self.token_source.as_deref(),
+            Some("keyring" | "oauth_token")
+        )
     }
 }
 
@@ -275,6 +289,8 @@ fn merge_logins(status: WireStatus) -> Vec<GhLogin> {
                 continue;
             }
             let state = entry.state();
+            // `entry.login` を下の閉包が持っていくので、先に読む。
+            let stored = entry.is_stored();
             let slot = merged
                 .entry((host.clone(), entry.login.clone()))
                 .or_insert_with(|| Slot {
@@ -282,6 +298,7 @@ fn merge_logins(status: WireStatus) -> Vec<GhLogin> {
                         host: host.clone(),
                         login: entry.login,
                         active: false,
+                        stored_active: false,
                         scopes: Vec::new(),
                         // 最初の 1 件で上書きされるか、この値のまま残る。
                         state: LoginState::Error,
@@ -289,6 +306,7 @@ fn merge_logins(status: WireStatus) -> Vec<GhLogin> {
                     scopes_taken: false,
                 });
             slot.login.active |= entry.active;
+            slot.login.stored_active |= entry.active && stored;
             if better(state, slot.login.state) {
                 slot.login.state = state;
             }
@@ -544,7 +562,41 @@ mod tests {
             ));
             assert_eq!(merged.len(), 1, "同じ login は 1 件に畳む: {merged:?}");
             assert!(merged[0].active, "どちらかが active なら active");
+            // **設定上は非 active。** 環境変数のエントリが active でも、`gh auth
+            // refresh` が相手にするのは keyring のほう（`GhLogin::stored_active`）。
+            assert!(
+                !merged[0].stored_active,
+                "環境変数の active を設定上の active にしない"
+            );
             assert_eq!(merged[0].scopes, vec!["gist", "repo"]);
+        }
+    }
+
+    #[test]
+    fn only_a_stored_token_makes_the_login_active_in_gh_config() {
+        // `gh auth refresh` / `switch` が相手にするのは設定上のアカウント。
+        // **知らない出どころは保存していない側**（案内が `switch` を足す側に倒れる）。
+        let merged = logins(
+            r#"{"hosts":{"github.com":[
+                {"state":"success","active":true,"login":"kr","tokenSource":"keyring"},
+                {"state":"success","active":true,"login":"yml","tokenSource":"oauth_token"},
+                {"state":"success","active":true,"login":"env","tokenSource":"GH_ENTERPRISE_TOKEN"},
+                {"state":"success","active":true,"login":"none"},
+                {"state":"success","active":false,"login":"off","tokenSource":"keyring"}
+            ]}}"#,
+        );
+        let stored: Vec<(&str, bool)> = merged
+            .iter()
+            .map(|l| (l.login.as_str(), l.stored_active))
+            .collect();
+        for want in [
+            ("kr", true),
+            ("yml", true),
+            ("env", false),
+            ("none", false),
+            ("off", false),
+        ] {
+            assert!(stored.contains(&want), "{want:?}: {stored:?}");
         }
     }
 

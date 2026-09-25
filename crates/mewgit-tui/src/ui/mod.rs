@@ -494,7 +494,7 @@ pub(crate) fn degraded(reason: &DegradedReason) -> Cow<'static, str> {
             format!("{login} のトークンがありません").into()
         }
         // **「権限が無い」と読ませない。** 回線が無いだけの回もここに来る（04）。
-        DegradedReason::NoAccess { attempts } => {
+        DegradedReason::NoAccess { attempts, .. } => {
             format!("どれも届きません（{} 件）", attempts.len()).into()
         }
         DegradedReason::Ambiguous { candidates } => {
@@ -685,7 +685,8 @@ mod tests {
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::github::GithubError;
     use mewgit_core::test_util::{
-        fake_account, fake_ambiguous, fake_rate_limit, fake_snapshot, fetch_pr_details,
+        fake_account, fake_ambiguous, fake_no_access, fake_rate_limit, fake_snapshot,
+        fetch_pr_details,
     };
     use ratatui::style::{Color, Modifier};
 
@@ -939,9 +940,7 @@ mod tests {
                 source: AccountSource::GitConfig,
                 message: "no oauth token found".to_string(),
             },
-            DegradedReason::NoAccess {
-                attempts: Vec::new(),
-            },
+            fake_no_access(Vec::new()),
             // **候補を空にしない。** 空だと `A` の案内が付かず、**出荷される
             // `Ambiguous` の形（いちばん長い）を測らないまま緑になる**。
             fake_ambiguous(&["user_shortcode", "taro"]),
@@ -978,9 +977,7 @@ mod tests {
         let pickable = header(&state, size);
         assert!(pickable.contains("A で選ぶ"), "header: {pickable:?}");
 
-        state.account = AccountState::Degraded(DegradedReason::NoAccess {
-            attempts: Vec::new(),
-        });
+        state.account = AccountState::Degraded(fake_no_access(Vec::new()));
         let shown = header(&state, size);
         assert!(shown.contains("A で詳細"), "header: {shown:?}");
     }

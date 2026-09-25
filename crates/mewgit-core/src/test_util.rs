@@ -66,7 +66,7 @@ use crate::app::{update, AppState, Cmd, Msg, TargetState};
 use crate::auth::ssh::SshCommand;
 use crate::auth::{
     Account, AccountSource, AccountState, AttemptFailure, AuthError, Backend, DegradedReason,
-    GhLogin, LoginState, RepoTarget,
+    GhLogin, LoginState, ProbeAttempt, RepoTarget,
 };
 use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Runner};
 use crate::git_read::{
@@ -619,6 +619,7 @@ pub fn fake_login(login: &str) -> GhLogin {
         host: fake_target().host,
         login: login.to_string(),
         active: false,
+        stored_active: false,
         scopes: vec!["repo".to_string()],
         state: LoginState::Success,
     }
@@ -648,6 +649,30 @@ pub fn fake_configured_unavailable() -> DegradedReason {
         source: AccountSource::GitConfig,
         message: "no oauth token found".to_string(),
     }
+}
+
+/// 足りないスコープが判らなかった拒否。
+///
+/// **`Denied` にフィールドが増えたとき、直すのをここ 1 箇所にする**（#108 の
+/// 次で `missing_scope` を足したとき、2 クレートの 7 箇所に同じ `None` が入った）。
+pub fn fake_denied(status: u16) -> AttemptFailure {
+    AttemptFailure::Denied {
+        status,
+        missing_scope: None,
+    }
+}
+
+/// `NoAccess` の 1 件。login は [`fake_login`]（アクティブでない）。
+pub fn fake_attempt(login: &str, failure: AttemptFailure) -> ProbeAttempt {
+    ProbeAttempt {
+        login: fake_login(login),
+        failure,
+    }
+}
+
+/// どの候補もリポジトリに届かなかった `NoAccess`。
+pub fn fake_no_access(attempts: Vec<ProbeAttempt>) -> DegradedReason {
+    DegradedReason::NoAccess { attempts }
 }
 
 /// ログイン一覧。`gh auth status` が返したぶんの代わり。

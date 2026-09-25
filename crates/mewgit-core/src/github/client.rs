@@ -568,8 +568,8 @@ fn network(err: reqwest::Error) -> GithubError {
 /// ステータスコードを [`GithubError`] に写す。
 ///
 /// **レート制限を先に見る。** GitHub は使い切った要求に **403** を返す
-/// （429 のこともある）ので、`Forbidden` として扱うと「スコープが足りない」の
-/// 案内が出て、待てば直るものを直らないものとして見せる。
+/// （429 のこともある）ので、`Forbidden` / `MissingScope` として扱うと、待てば
+/// 直るものを直らないものとして見せる。
 async fn check_status(response: Response) -> Result<Response, GithubError> {
     let status = response.status();
     if status.is_success() {
@@ -614,10 +614,10 @@ async fn check_status(response: Response) -> Result<Response, GithubError> {
 ///
 /// - **一次制限**（時間あたりの総量）は `x-ratelimit-remaining` が 0 になる。
 /// - **二次制限**（短時間に叩きすぎ）は**残量を減らさずに** `retry-after` を付ける。
-///   これを見落とすと `Forbidden` に落ち、05 が「出してはいけない」と書いている
-///   「スコープが足りない」の案内が、**待てば直るものに対して**出る。
+///   これを見落とすと `Forbidden` / `MissingScope` に落ち、**待てば直るものを
+///   直らないものとして**見せる。
 ///
-/// どちらの印も無い 403 はスコープ不足なので `Forbidden` のまま。
+/// どちらの印も無い 403 は `MissingScope` か `Forbidden` のまま（05）。
 fn is_rate_limited(response: &Response) -> bool {
     if response.status() == StatusCode::TOO_MANY_REQUESTS {
         return true;
@@ -646,14 +646,9 @@ fn rate_limit_reset(response: &Response) -> Option<i64> {
 
 /// 応答のヘッダから判る「足りないスコープ」。判らなければ `None`。
 ///
-/// **判定は gh に合わせる**（`api/client.go` の `generateScopesSuggestion`。05）——
-/// 4xx（422 を除く）で、`x-oauth-scopes`（トークンが持っているもの）が空でなく、
-/// `x-accepted-oauth-scopes`（この API が受け付けるもの）が空でないこと。
-///
-/// **gh と 1 つだけ変える。** 受け付けるスコープは**どれか 1 つで足りる**ので、
-/// 1 つでも持っていれば断られた理由は別にある。gh はそこでも「持っていない最初の
-/// 1 つ」を案内する（`read:gpg_key` を持っていても `admin:gpg_key` を足せと言う）が、
-/// こちらは**1 つも持っていないときだけ**先頭を返す。
+/// **条件と gh との違いは 05 の「足りないスコープ」**（`api/client.go` の
+/// `generateScopesSuggestion` に合わせ、受け付けるスコープを 1 つでも持っていれば
+/// 案内しない点だけ変えた）。
 fn missing_scope(response: &Response) -> Option<String> {
     let status = response.status();
     if !status.is_client_error() || status == StatusCode::UNPROCESSABLE_ENTITY {
@@ -670,35 +665,39 @@ fn missing_scope(response: &Response) -> Option<String> {
     accepted.into_iter().next()
 }
 
-/// `held` のどれかが `scope` を含むか。**含み方は gh と同じ**（`repo` は
-/// `public_repo` などを、`admin:x` は `read:x` / `write:x` を、`write:x` は
-/// `read:x` を含む）。
+/// `held` のどれかが `scope` を含むか。
 fn holds(held: &[String], scope: &str) -> bool {
-    held.iter().any(|h| {
-        h == scope
-            || match h.as_str() {
-                "repo" => matches!(
-                    scope,
-                    "repo:status"
-                        | "repo_deployment"
-                        | "public_repo"
-                        | "repo:invite"
-                        | "security_events"
-                ),
-                "user" => matches!(scope, "read:user" | "user:email" | "user:follow"),
-                "codespace" => scope == "codespace:secrets",
-                _ => {
-                    if let Some(rest) = h.strip_prefix("admin:") {
-                        scope.strip_prefix("read:") == Some(rest)
-                            || scope.strip_prefix("write:") == Some(rest)
-                    } else if let Some(rest) = h.strip_prefix("write:") {
-                        scope.strip_prefix("read:") == Some(rest)
-                    } else {
-                        false
-                    }
-                }
-            }
-    })
+    held.iter().any(|h| implies(h, scope))
+}
+
+/// スコープ `held` を持っていれば `scope` も持っているか。**含み方は gh と同じ**
+/// （`repo` は `public_repo` などを、`admin:x` は `read:x` / `write:x` を、`write:x` は
+/// `read:x` を含む）。
+fn implies(held: &str, scope: &str) -> bool {
+    if held == scope {
+        return true;
+    }
+    match held {
+        "repo" => {
+            return matches!(
+                scope,
+                "repo:status"
+                    | "repo_deployment"
+                    | "public_repo"
+                    | "repo:invite"
+                    | "security_events"
+            )
+        }
+        "user" => return matches!(scope, "read:user" | "user:email" | "user:follow"),
+        "codespace" => return scope == "codespace:secrets",
+        _ => {}
+    }
+    if let Some(rest) = held.strip_prefix("admin:") {
+        return scope.strip_prefix("read:") == Some(rest)
+            || scope.strip_prefix("write:") == Some(rest);
+    }
+    held.strip_prefix("write:")
+        .is_some_and(|rest| scope.strip_prefix("read:") == Some(rest))
 }
 
 /// 応答の `x-ratelimit-*` から残量を組む。**どれか 1 つでも欠けたら `None`**。
@@ -1451,7 +1450,7 @@ mod tests {
     #[tokio::test]
     async fn a_secondary_rate_limit_403_is_rate_limited_even_with_quota_left() {
         // 二次制限は残量を減らさずに `retry-after` を付ける。見落とすと
-        // 「スコープが足りない」の案内が、待てば直るものに対して出る。
+        // `Forbidden` に落ち、待てば直るものを直らないものとして見せる。
         let response = ResponseTemplate::new(403)
             .insert_header("x-ratelimit-remaining", "4999")
             .insert_header("retry-after", "60");

@@ -372,13 +372,14 @@ mod tests {
     use super::super::{init, update};
     use super::*;
     use crate::app::{KeyCode, Modal, Msg};
-    use crate::auth::{AccountSource, AttemptFailure, GhLogin, ProbeAttempt};
+    use crate::auth::{AccountSource, GhLogin};
 
     use crate::git_exec::ExecError;
     use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote};
 
     use crate::test_util::{
-        fake_account, fake_ambiguous, fake_configured_unavailable, fake_logins, fake_target, reply,
+        fake_account, fake_ambiguous, fake_attempt, fake_configured_unavailable, fake_denied,
+        fake_logins, fake_no_access, fake_target, reply,
     };
 
     /// リモートを載せた `RepoInfoLoaded` を 1 通届ける。
@@ -1089,17 +1090,8 @@ mod tests {
     fn the_picker_never_lets_you_choose_when_nothing_reached_the_repository() {
         // **`NoAccess` は並べるだけ**（04 の手順 4）—— どれも届かない状態で選んでも
         // 何も直らない。`j` も `Enter` も効かず、`Esc` で閉じる。
-        let mut state = state_degraded(DegradedReason::NoAccess {
-            host: "github.com".to_string(),
-            attempts: vec![ProbeAttempt {
-                login: "taro".to_string(),
-                active: true,
-                failure: AttemptFailure::Denied {
-                    status: 404,
-                    missing_scope: None,
-                },
-            }],
-        });
+        let mut state =
+            state_degraded(fake_no_access(vec![fake_attempt("taro", fake_denied(404))]));
         let _ = press(&mut state, 'A');
         let _ = press(&mut state, 'j');
 

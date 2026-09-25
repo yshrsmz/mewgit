@@ -258,9 +258,6 @@ pub enum DegradedReason {
     /// （起動時に回線が無い）の形もここに来る。**理由は `attempts` に 1 件ずつ
     /// 入っている**ので、案内はそちらから組む。
     NoAccess {
-        /// リポジトリのホスト。**案内の `gh auth refresh -h` に渡す**（04 の
-        /// 「権限不足の案内」）—— API のホスト（`api.github.com`）ではない。
-        host: String,
         attempts: Vec<ProbeAttempt>,
     },
     /// 候補を 1 つに絞れなかった。UI で選ばせる。
@@ -324,13 +321,12 @@ impl DegradedReason {
 /// `NoAccess` のとき、どのログインがなぜ落ちたか。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeAttempt {
-    pub login: String,
-    /// gh の現在のアカウントか（[`GhLogin::active`]）。
-    ///
-    /// **案内のために運ぶ。** `gh auth refresh` はアクティブなアカウントにしか
-    /// 効かないので、そうでなければ `gh auth switch` を先に書く（04 の
-    /// 「権限不足の案内」）。書かないと**別のアカウントにスコープを足させる**。
-    pub active: bool,
+    /// **[`GhLogin`] ごと運ぶ**（`Ambiguous` と同じ）。案内が読むのは
+    /// `host`（`gh auth refresh -h` に渡すリポジトリのホスト）と `active`
+    /// （`gh auth refresh` はアクティブなアカウントにしか効かないので、そうで
+    /// なければ `gh auth switch` を先に書く）。04 の「権限不足の案内」。
+    /// 1 フィールドずつ抜くと、案内の材料が増えるたびに型と詰め替えが増える。
+    pub login: GhLogin,
     pub failure: AttemptFailure,
 }
 

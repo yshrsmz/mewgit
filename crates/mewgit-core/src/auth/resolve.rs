@@ -84,14 +84,12 @@ pub async fn resolve<B: Backend + Sync>(
     // 手順 3。**probe しない**（04）。1 件しかないなら選びようが無く、起動のたびに
     // 1 往復払う理由が無い。
     if logins.len() == 1 {
-        let GhLogin { login, active, .. } = logins.remove(0);
-        return match backend.token(&target.host, &login).await {
-            Ok(token) => resolved(target, login, token, AccountSource::Single),
+        let login = logins.remove(0);
+        return match backend.token(&target.host, &login.login).await {
+            Ok(token) => resolved(target, login.login, token, AccountSource::Single),
             Err(err) => Err(DegradedReason::NoAccess {
-                host: target.host.clone(),
                 attempts: vec![ProbeAttempt {
                     login,
-                    active,
                     failure: AttemptFailure::NoToken {
                         message: err.to_string(),
                     },
@@ -129,17 +127,12 @@ pub async fn resolve<B: Backend + Sync>(
             // 出口も 3 つで数える。`CLAUDE.md`）。
             Err(failure @ AttemptFailure::Undetermined { .. }) => {
                 attempts.push(ProbeAttempt {
-                    login: login.login.clone(),
-                    active: login.active,
+                    login: login.clone(),
                     failure,
                 });
                 unchecked.push(login);
             }
-            Err(failure) => attempts.push(ProbeAttempt {
-                login: login.login,
-                active: login.active,
-                failure,
-            }),
+            Err(failure) => attempts.push(ProbeAttempt { login, failure }),
         }
     }
 
@@ -157,10 +150,7 @@ pub async fn resolve<B: Backend + Sync>(
         // 全部が `Undetermined`（起動時に回線が無い）の形もここに来るので、
         // 読む側は変種の名前を「権限が無い」と読まない。**選ばせない**のは、
         // どれも動かない状態でアカウントを選んでも何も直らないため。
-        (0, _) => Err(DegradedReason::NoAccess {
-            host: target.host.clone(),
-            attempts,
-        }),
+        (0, _) => Err(DegradedReason::NoAccess { attempts }),
         // **除外できなかった候補を並べる。** 断られたもの（401 / 404）は落とす ——
         // UI が「選べるアカウント」として届かないログインを出すことになる。
         // **`auth_status` を呼び直さないで済むよう `GhLogin` ごと運ぶ**
@@ -291,7 +281,7 @@ fn resolved(
 mod tests {
     use super::*;
     use crate::auth::LoginState;
-    use crate::test_util::{fake_target, Fake, TestRepo};
+    use crate::test_util::{fake_denied, fake_target, Fake, TestRepo};
     use std::time::Duration;
 
     /// `state` は既定で `Success`。**絞り込みに使わないので**（04）、値が効くのは
@@ -315,10 +305,7 @@ mod tests {
     }
 
     fn denied(status: u16) -> Result<(), AttemptFailure> {
-        Err(AttemptFailure::Denied {
-            status,
-            missing_scope: None,
-        })
+        Err(fake_denied(status))
     }
 
     /// 明示指定の無いリポジトリで手順 2 以降を踏む。**リポジトリを引数に取らない**
@@ -509,7 +496,7 @@ mod tests {
             // **`Denied { status: 0 }` にしない。** HTTP まで行っていない。
             DegradedReason::NoAccess { attempts, .. } => match attempts.as_slice() {
                 [attempt] => {
-                    assert_eq!(attempt.login, "taro");
+                    assert_eq!(attempt.login.login, "taro");
                     assert!(
                         matches!(&attempt.failure, AttemptFailure::NoToken { .. }),
                         "{:?}",
@@ -613,16 +600,10 @@ mod tests {
             DegradedReason::NoAccess { attempts, .. } => {
                 let seen: Vec<(&str, &AttemptFailure)> = attempts
                     .iter()
-                    .map(|a| (a.login.as_str(), &a.failure))
+                    .map(|a| (a.login.login.as_str(), &a.failure))
                     .collect();
                 assert_eq!(seen.len(), 3);
-                assert!(seen.contains(&(
-                    "taro",
-                    &AttemptFailure::Denied {
-                        status: 401,
-                        missing_scope: None
-                    }
-                )));
+                assert!(seen.contains(&("taro", &fake_denied(401))));
                 assert!(seen.iter().any(|(login, failure)| *login == "hanako"
                     && matches!(failure, AttemptFailure::Undetermined { .. })));
                 assert!(seen.iter().any(|(login, failure)| *login == "jiro"
@@ -633,35 +614,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_access_carries_the_host_and_which_login_is_active() {
+    async fn no_access_carries_each_login_as_gh_reported_it() {
         // **案内の材料**（04 の「権限不足の案内」）。`gh auth refresh` はアクティブな
-        // アカウントにしか効かないので、1 件ずつ `active` が要る。`-h` に渡すのは
-        // リポジトリのホスト。**`fake_target` と違う host にする** —— 同じだと、
-        // 決め打ちの `github.com` でも通る。
-        let repo = TestRepo::init();
-        let target = RepoTarget {
-            host: "ghe.example.com".to_string(),
-            ..fake_target()
-        };
+        // アカウントにしか効かないので `active` が、`-h` にはリポジトリのホストが要る。
+        // どちらも `GhLogin` ごと運んで読む。**既定の `login()` と違う値にする** ——
+        // 同じだと、詰め替えのどこかで既定値に戻っても通る。
         let active = GhLogin {
+            host: "ghe.example.com".to_string(),
             active: true,
             ..login("taro")
         };
-        let backend = Fake::new(vec![active, login("hanako")])
+        let inactive = GhLogin {
+            host: "ghe.example.com".to_string(),
+            ..login("hanako")
+        };
+        let backend = Fake::new(vec![active.clone(), inactive.clone()])
             .probing("taro", denied(404))
             .probing("hanako", denied(404));
 
-        let state = resolve(&target, repo.path(), &backend, &Config::default()).await;
+        let state = resolve_plain(&backend).await;
 
         match reason(&state) {
-            DegradedReason::NoAccess { host, attempts } => {
-                assert_eq!(host, "ghe.example.com");
-                let seen: Vec<(&str, bool)> = attempts
-                    .iter()
-                    .map(|a| (a.login.as_str(), a.active))
-                    .collect();
-                assert!(seen.contains(&("taro", true)), "{seen:?}");
-                assert!(seen.contains(&("hanako", false)), "{seen:?}");
+            DegradedReason::NoAccess { attempts } => {
+                let logins: Vec<&GhLogin> = attempts.iter().map(|a| &a.login).collect();
+                assert!(logins.contains(&&active), "{logins:?}");
+                assert!(logins.contains(&&inactive), "{logins:?}");
             }
             other => panic!("{other:?}"),
         }

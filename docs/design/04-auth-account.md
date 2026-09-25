@@ -318,11 +318,11 @@ pub enum DegradedReason {
     Unusable { message: String },                  // gh は居るのに答えが返らない
     NotLoggedIn { host: String },
     ConfiguredUnavailable { login, message },      // 明示指定の login のトークンが取れない
-    NoAccess { host: String, attempts: Vec<ProbeAttempt> },  // host は案内の `-h`
+    NoAccess { attempts: Vec<ProbeAttempt> },
     Ambiguous { candidates: Vec<GhLogin> },        // probe を通った候補だけ
 }
 
-pub struct ProbeAttempt { pub login: String, pub active: bool, pub failure: AttemptFailure }  // active は案内の `gh auth switch`
+pub struct ProbeAttempt { pub login: GhLogin, pub failure: AttemptFailure }  // GhLogin ごと。案内が host と active を読む
 
 pub enum AttemptFailure {
     Denied { status: u16, missing_scope: Option<String> },  // HTTP で断られた。このアカウントでは無理
@@ -645,11 +645,13 @@ jiro: SAML SSO の承認が要ります（HTTP 403）
 - **`gh auth refresh` はアクティブなアカウントにしか効かない**（`gh auth refresh --help`、
   gh 2.101.0）。内訳に並ぶのは**複数アカウントの手順 4 だけ**（手順 3 は probe しない）
   なので、アクティブでない login に当たる形がむしろ本命。案内をそのまま出すと
-  **別のアカウントにスコープを足させる**。だから `ProbeAttempt` に `GhLogin.active` を
-  運び、アクティブでなければ `gh auth switch` を先に書く
-- **`host` は `NoAccess` に持たせる。** `-h` に渡すのはリポジトリのホスト
-  （`github.com`）で、API のホスト（`api.github.com`）ではない。`resolve` は
-  `target.host` を持っている
+  **別のアカウントにスコープを足させる**。アクティブでなければ `gh auth switch` を
+  先に書く
+- **`ProbeAttempt` は `GhLogin` ごと運ぶ**（`Ambiguous` と同じ）。案内が読むのは
+  `active` と `host` —— `-h` に渡すのはリポジトリのホスト（`github.com`。
+  `gh auth status --hostname` に渡したもの）で、API のホスト（`api.github.com`）では
+  ない。1 フィールドずつ抜くと、案内の材料が増えるたびに型と詰め替えが増える
+  （`/simplify` が拾った）
 - **スコープは `X-Accepted-Oauth-Scopes` と `X-Oauth-Scopes` から決める**（判定は 05）。
   **「無ければ操作ごとの既定値」は採らない** —— ヘッダが空の API で既定値を案内すると、
   **GitHub が言っていないスコープ名を発明する**ことになる。gh もヘッダが無ければ黙る

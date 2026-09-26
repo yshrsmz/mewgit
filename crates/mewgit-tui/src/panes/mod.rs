@@ -36,7 +36,7 @@ pub struct TopPane {
 /// **`cursor` が `Option` なのは、選べる行が無い状態があるから。** 一覧が空のときに
 /// 出すのは文言 1 行で、そこは選択肢ではない —— `0` で表すと「先頭の行を選んでいる」と
 /// 同じ値になり、反転させる側が「文言を反転してよいか」を答えられなくなる
-/// （`CLAUDE.md` の「`None` の理由を 2 つ以上持たせない」）。
+/// （`.claude/rules/rust-coding.md` の「`None` の理由を 2 つ以上持たせない」）。
 pub struct Rows {
     pub lines: Vec<Line<'static>>,
     pub cursor: Option<usize>,

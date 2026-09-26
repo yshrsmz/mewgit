@@ -66,7 +66,7 @@ pub struct CreatePr {
 ///
 /// **[`PullRequest`] には入れない。** 一覧（`pulls`）はこれを返さないので、
 /// `Option` で持たせると「まだ引いていない」と「引いたが失敗した」が同じ `None` に
-/// 落ちる（`CLAUDE.md` の「`None` の理由を 2 つ以上持たせない」）。
+/// 落ちる（`.claude/rules/rust-coding.md` の「`None` の理由を 2 つ以上持たせない」）。
 /// 段階を持つのは `app::PrState` の側で、失敗の理由（[`GithubError`]）もそちらが運ぶ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrDetail {
@@ -201,7 +201,7 @@ impl RateLimit {
     ///
     /// **判定はここ 1 本。** 同時に飛んだ応答を畳む [`GithubClient`] と、ジョブを
     /// またいで届く返信を畳む `app::PrState` の両方が、[`RateLimit::keep_newer`] を
-    /// 通してこれを呼ぶ（`CLAUDE.md` の「同じ判定を 2 箇所に書かない」）。
+    /// 通してこれを呼ぶ（`.claude/rules/rust-coding.md` の「同じ判定を 2 箇所に書かない」）。
     pub fn newer(self, other: Self) -> Self {
         let key = |limit: &Self| (limit.reset, limit.limit.saturating_sub(limit.remaining));
         if key(&other) > key(&self) {

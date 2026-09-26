@@ -6,11 +6,12 @@ pub mod account_picker;
 pub mod commit_message;
 pub mod confirm;
 pub mod input;
+pub mod notice_log;
 pub mod picker;
 pub mod pr_create;
 pub mod remote_picker;
 
-use mewgit_core::app::{Modal, TextBuffer};
+use mewgit_core::app::{AppState, Modal, TextBuffer};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -21,9 +22,13 @@ use crate::ui;
 
 /// 表示中のモーダルを描く。
 ///
+/// **`AppState` を受ける。** `NoticeLog` は一覧を写しで持たず `AppState.notices` を
+/// 読む（01 の「通知」）。欄を 1 つずつ引数に足すと、`AppState` の別の値を読む
+/// モーダルが来るたびに署名が伸びる。
+///
 /// `match` で `_` を使わないのは、`Modal` に変種を足したときに描画漏れを
 /// コンパイルエラーにするため（`update` や `Cmd::job_kind` と同じ）。
-pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
+pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
     match modal {
         Modal::Confirm { title, body, .. } => confirm::render(frame, area, title, body),
         Modal::CommitMessage { buf, amend } => commit_message::render(frame, area, buf, *amend),
@@ -57,6 +62,7 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
                 field: *field,
             },
         ),
+        Modal::NoticeLog { selected } => notice_log::render(frame, area, state, *selected),
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
         Modal::RebaseEditor { .. } | Modal::Help => {}
     }

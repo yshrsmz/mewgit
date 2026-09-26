@@ -27,7 +27,7 @@ use exec::exec_finished;
 use graph::{
     commit_detail_key, commit_detail_loaded, commit_files_loaded, graph_key, load_more, log_loaded,
 };
-use modal::modal_key;
+use modal::{modal_key, open_notice_log};
 use prs::{
     open_pr_finished, pr_created, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key,
     rate_limit_seen,
@@ -248,6 +248,10 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
     if key == Key::char('A') {
         return open_account(state);
     }
+    // **通知の履歴も共通キー。** 失敗はどのペインに居ても積まれる（01 の「通知」）。
+    if key == Key::char('L') {
+        return open_notice_log(state);
+    }
 
     // フォーカスの巡回もペインより先に見る。ペインごとに書くと、あとから足した
     // ペインが `Tab` を受けずに閉じ込められる。`Shift+Tab` は `BackTab`（修飾なし）に
@@ -309,6 +313,7 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
             Modal::Confirm { .. }
             | Modal::RemotePicker { .. }
             | Modal::AccountPicker { .. }
+            | Modal::NoticeLog { .. }
             | Modal::RebaseEditor { .. }
             | Modal::Help,
         )

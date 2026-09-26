@@ -280,6 +280,11 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       **出す先は `A` の `NoAccess` の内訳**（`gh auth refresh -h <host> -s <scope>`。
       アクティブでない login には `gh auth switch` を先に書く。04 の「権限不足の案内」）。
       SAML の 403 は `AttemptFailure::SsoRequired` に割って「SSO の承認が要ります」
+- [ ] SAML の承認 URL を案内に載せる — `X-GitHub-SSO` ヘッダが何を返すかを確かめて
+      いない（SAML を強制する org が手元に無い）。**踏む org が出てから**、ヘッダの値を
+      実測して `AttemptFailure::SsoRequired` に URL を持たせ、`A` の内訳に出す
+      （04 の「権限不足の案内」）。送り先だった「通知の履歴」は、承認 URL を運ぶ値が
+      無いまま済んだので、ここへ移した
 - [ ] 既定リモートが GitHub でないときの PRs ペインの文言 — いまは
       `TargetState::Unavailable` でも `Cmd::ResolveAccount` が出ないため
       `AccountState::Resolving` のままで、ペインが**永久に「読み込み中…」**になる
@@ -383,13 +388,21 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       なので。**時間で消す形・未読バッジ・常駐の履歴エリアは採らなかった**（理由は
       01 の「通知」）。時刻は `HH:MM:SS` を前に添えるので、**案内文の予算は 80 → 71 セル**
       （溢れたら `…`。07 の「ステータスバー」）
-- [ ] ステータスバー（2/2）— 通知の履歴を見るモーダル。**時刻は日付まで**
+- [x] ステータスバー（2/2）— 通知の履歴を見るモーダル。**時刻は日付まで**
       （`ui::time::format`）出し、**`Notice.detail`（argv と stderr）もここで出す。**
       いまは要約行しか描かないので、git が断った理由（`would be overwritten`、
       未マージのときの `-D` のヒント）が画面に出ない。不変ルール 4 が「UI まで届ける」と
       言っているのはこの詳細のこと。**`Modal` に変種を足したら `_` の腕を持つ `match` を
       grep する**（`update::paste` が受け皿を持っていた。`.claude/rules/rust-coding.md`）。開くキーは
       フッターの表（`app::keys`）に載せ、`every_hinted_key_does_something` を通す
+      - **`L` を共通キーの末尾に足した**（2026-09-26 にユーザーと決めた）。あわせて
+        **共通キーを丸ごとではなく末尾から 1 つずつ落とす**形にした —— 丸ごとだと 80 桁の
+        Graph から `f` / `p` / `P` / `A` まで消えた（`/simplify` の altitude が拾った）。
+        80 桁の Graph で落ちるのは `L` だけで、`L` の案内が 80 桁で見えるのは
+        CommitDetail だけ（実測は 07 の「ステータスバー」）
+      - **stderr のタブは空白に展開する**（ratatui が描かないので字下げが消える。実物を
+        描いて判った。07 の「NoticeLog モーダル」）
+      - **中身のスクロールは入れていない**（入りきらなければ最下行を `…`）。受け入れた穴
 - [ ] HEAD の追跡設定を 1 本にする。**いま `branch.<HEAD>.remote` は 2 箇所にある**
       —— `RepoInfo.head`（`HeadInfo::Branch.upstream`。PR の座り先と PR 作成の
       `head` が読む）と `BranchState::head()` の `Branch.upstream_config`（`f` と push の
@@ -414,6 +427,10 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 - [ ] 端末幅 < 100 のレイアウト。**枠付きペインの折り返しが 1 セルはみ出す件もここ** ——
       `ui::pane_block` に `Padding::right(1)` を足す（`modals::block` は
       `Modal::AccountPicker` のタスクで入れた。07 の「モーダル」）。
+      **`render_rows` を見える行だけ組む形にするのもここ**（07 の「見えない行の
+      組み立て」）。`NoticeLog` は一覧に加えて**中身（上限の無い stderr）の全文**も
+      毎フレーム組むので、中身も「見える行 + 1 行」で打ち切る（detail 5000 行で
+      1 フレーム 7.1ms。実測は 07）
       **モーダルのキーの案内が切れる境目もここで見る** —— `AccountPicker` の
       いちばん長い案内（`[u] 指定を解除` 付きと `[r] 解決し直す` 付き。どちらも
       14 セルなので並ぶ）は 57 セルで、箱の内側
@@ -463,7 +480,10 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       （00 の「ディレクトリ構成」）。**引き金は行数ではなく、`Modal` / `GraphState` /
       `WorktreeState` / `JobTracker` が独立して育ったかどうか。** M6 は `Modal::Help` と
       `RebaseEditor`、ステータスバーの通知履歴で `Modal` と `Notice` に手が入るので、
-      そこで数え直す
+      そこで数え直す。**通知履歴では数え直して割らなかった** —— 増えたのは
+      `Modal::NoticeLog` の変種 1 つと、`Modal::move_cursor` を `AppState::move_modal_cursor`
+      へ移したことだけで（一覧の長さを `AppState.notices` が持つため）、`Modal` が
+      独立して育ったとは言えない
 - [ ] `git_exec::argv` の `VARIANT_COUNT` を消す。**`variant()` の網羅 `match` から
       離れた場所に変種の本数のコピーが置いてある**（`.claude/rules/rust-coding.md` の「離れた場所に、
       コードの『いま N ある』を書かない」）。**ただの削除では済まない** ——

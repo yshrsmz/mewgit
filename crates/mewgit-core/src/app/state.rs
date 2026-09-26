@@ -84,7 +84,7 @@ pub struct PushRejection {
 }
 
 /// 保持する通知の上限。超えた分は古いものから捨てる。
-const MAX_NOTICES: usize = 100;
+pub(super) const MAX_NOTICES: usize = 100;
 
 impl AppState {
     /// 開いたリポジトリと設定から初期状態を作る。
@@ -199,7 +199,10 @@ impl AppState {
     /// 組み立てをここに寄せているのは、上限を 1 箇所で効かせるため。生産者は
     /// `update` とランタイムの両方にいる。
     pub fn push_notice(&mut self, level: NoticeLevel, message: String, detail: Option<String>) {
+        // 上限で捨てても最新は残るので、最新の次の番号で重ならない。
+        let seq = self.notices.back().map_or(0, |last| last.seq + 1);
         self.notices.push_back(Notice {
+            seq,
             level,
             message,
             detail,
@@ -209,6 +212,21 @@ impl AppState {
         while self.notices.len() > MAX_NOTICES {
             self.notices.pop_front();
         }
+    }
+
+    /// 履歴で `selected`（[`Notice::seq`]）が描かれる行。新しい順で 0 が最新。
+    ///
+    /// **捨てられた通知を選んでいたら最古の行に寄せる**（01 の「通知」）。`None` は
+    /// 通知が 1 件も無いときだけ。**描く側（`ui`）と `j` / `k` がこの 1 本を読む** ——
+    /// 寄せ方を 2 箇所に書くと、描いている行と動かす起点が食い違う。
+    pub fn notice_log_row(&self, selected: u64) -> Option<usize> {
+        let last = self.notices.len().checked_sub(1)?;
+        let row = self
+            .notices
+            .iter()
+            .rev()
+            .position(|notice| notice.seq == selected);
+        Some(row.unwrap_or(last))
     }
 
     /// ステータスバーに出ている通知。
@@ -2179,6 +2197,9 @@ impl JobKind {
 /// トースト通知 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
+    /// 積まれた順の番号（[`AppState::push_notice`] が振る）。[`Modal::NoticeLog`] が
+    /// 選んでいる通知を指すのに使う。
+    pub seq: u64,
     pub level: NoticeLevel,
     pub message: String,
     /// 実行した argv や stderr など、展開して見せる詳細（不変ルール 4）。
@@ -2269,10 +2290,22 @@ pub enum Modal {
         remotes: Vec<String>,
         cursor: usize,
     },
+    /// 通知の履歴（01 の「通知」）。`L` で開く。**ステータスバーでは読めない
+    /// `detail`（argv と stderr）と日付を出すのはここだけ。**
+    ///
+    /// **一覧は持たない。** 読むのは [`AppState::notices`] で、写しを持つと開いている
+    /// あいだに積まれた通知が出ない。
+    NoticeLog {
+        /// 選んでいる通知の [`Notice::seq`]。**添字で持たない** —— 添字だと、開いて
+        /// いるあいだに積まれた 1 件でカーソルの下の通知が入れ替わり、`push_notice` が
+        /// モーダルを知って補正することになる（01 の「通知」）。描く行は
+        /// [`AppState::notice_log_row`]。
+        selected: u64,
+    },
     Help,
 }
 
-impl Modal {
+impl AppState {
     /// 一覧から 1 つ選ぶモーダルのカーソルを動かす。カーソルを持たないモーダルでは
     /// 何もしない。
     ///
@@ -2281,23 +2314,45 @@ impl Modal {
     /// （[`BranchState::move_cursor`] / [`CommitFiles::move_cursor`]）。`update` から
     /// [`stepped_index`] を直に呼ぶと、そのために可視性を広げることになる。
     ///
+    /// **`Modal` ではなく `AppState` に置く。** [`Modal::NoticeLog`] の一覧は
+    /// [`AppState::notices`] で、モーダル自身は中身を知らない。
+    ///
     /// [`Modal::RebaseEditor`] が入るときは、ここに腕を足す。
-    pub(super) fn move_cursor(&mut self, delta: isize) {
-        match self {
-            Modal::RemotePicker {
+    pub(super) fn move_modal_cursor(&mut self, delta: isize) {
+        // 一覧を読むので、`modal` を可変で借りる前に行き先を決めておく。
+        let notice_to = |selected: u64| {
+            let row = self.notice_log_row(selected)?;
+            let row = stepped_index(row, self.notices.len(), delta);
+            Some(self.notices[self.notices.len() - 1 - row].seq)
+        };
+        let notice = match self.modal {
+            Some(Modal::NoticeLog { selected }) => notice_to(selected),
+            _ => None,
+        };
+        match self.modal.as_mut() {
+            Some(Modal::RemotePicker {
                 remotes, cursor, ..
-            } => *cursor = stepped_index(*cursor, remotes.len(), delta),
+            }) => *cursor = stepped_index(*cursor, remotes.len(), delta),
             // **選べない degraded では候補が空**なので、`stepped_index` が 0 を返して
             // 動かない（`NoAccess` の内訳は本文に出る。07）。
-            Modal::AccountPicker { view, cursor } => {
+            Some(Modal::AccountPicker { view, cursor }) => {
                 *cursor = stepped_index(*cursor, view.candidates().len(), delta);
             }
-            Modal::Confirm { .. }
-            | Modal::Input { .. }
-            | Modal::CommitMessage { .. }
-            | Modal::RebaseEditor { .. }
-            | Modal::PrCreate { .. }
-            | Modal::Help => {}
+            // **通知が無ければ動かない**（`notice_log_row` が `None`）。
+            Some(Modal::NoticeLog { selected }) => {
+                if let Some(seq) = notice {
+                    *selected = seq;
+                }
+            }
+            Some(
+                Modal::Confirm { .. }
+                | Modal::Input { .. }
+                | Modal::CommitMessage { .. }
+                | Modal::RebaseEditor { .. }
+                | Modal::PrCreate { .. }
+                | Modal::Help,
+            )
+            | None => {}
         }
     }
 }
@@ -2487,7 +2542,7 @@ impl AccountView {
     /// `Enter` で選べる候補。
     ///
     /// **読み手が散っているので 1 本にする** —— `ui`（一覧の行・タイトル・キーの
-    /// 案内）、`Modal::move_cursor`、`Enter` の確定。別々に `matches!` を書くと、
+    /// 案内）、`AppState::move_modal_cursor`、`Enter` の確定。別々に `matches!` を書くと、
     /// 選ばせないはずの画面で `Enter` だけが効く。
     ///
     /// **`Waiting` と `Failed` が空なのは意図。** 候補が届いていない画面で `Enter` を
@@ -3283,6 +3338,10 @@ mod tests {
             state.notices.front().map(|n| n.message.as_str()),
             Some("notice 5")
         );
+        // **捨てたあとも番号は重ならない**（`Modal::NoticeLog` が番号で選ぶ）。上限を
+        // 2 件以上越えて積まないと、件数で振る形でも重ならずに通る。
+        let seqs: Vec<u64> = state.notices.iter().map(|n| n.seq).collect();
+        assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
     }
 
     #[test]

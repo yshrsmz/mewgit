@@ -160,6 +160,7 @@ impl AppState {
     pub(crate) fn refusal(&mut self, cmd: &Cmd) -> Option<Cmd> {
         if let Cmd::Exec(op) = cmd {
             if self.refuse_in_progress(op) {
+                // 続きを頼む: 進行中操作で断った書き込みの代わりの status の読み直し。
                 return Some(Cmd::LoadStatus);
             }
         }

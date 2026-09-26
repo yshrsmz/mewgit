@@ -85,7 +85,7 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 /// 印があり、**一覧はそこから出る**。
 ///
 /// ```text
-/// grep -rnE "^ *// 続きを頼む" crates/mewgit-core/src/app/update/
+/// grep -rnE "^ *// 続きを頼む" crates/mewgit-core/src/app/
 /// ```
 ///
 /// **ここに一覧も数も写さない** —— 導出できる値を離れた場所に置いたコピーになる

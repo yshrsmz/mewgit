@@ -2140,7 +2140,10 @@ git が自分で断る —— 03 の表で断らないのは stash だけで、s
 ならない。**いまの mewgit には進行中操作を始めるキーが無く、必ず外で始まる**ので普通に踏む。
 断ると git を起動しないぶん読み直しも起きず、断り続ける（`/code-review` が拾い、pty で
 再現した）。**断ったら代わりに `Cmd::LoadStatus` を出す** —— 1 回目は断られるが、外で
-終わっていれば 2 回目は通る。1 回目も消すには外部の変更の検知（M6 の `.git/HEAD` 監視）が要る
+終わっていれば 2 回目は通る。1 回目も消すには外部の変更の検知（M6 の `.git/HEAD` 監視）が要る。
+**git の実行中に断ったとき**は、この読み直しが書き込みより前の世代で刻まれ、書き込みの
+あとに `exec_finished` が出す `LoadStatus` のほうが同種実行中で落とされる。古い返りは
+`status_loaded` の追いつき（届いた刻印が古ければ頼み直す）が拾う
 
 **断るのは `AppState::issue`**（`update` の出口）。同種のジョブが走っているときに落とすのと
 同じ `AppState::refusal` の中で、**進行中操作を先に診る**（git の実行が終わっても断られる
@@ -2174,8 +2177,11 @@ impl Cmd {
 }
 
 impl AppState {
-    /// `update` が返す `Cmd` を発行してよい形にする。同種が走っていれば `Cmd::None`。
+    /// `update` が返す `Cmd` を発行してよい形にする。同種が走っていれば `Cmd::None`、
+    /// 進行中操作で断る書き込みなら `Cmd::LoadStatus`（下の「進行中操作があるときの書き込み」）。
     pub fn issue(&mut self, cmd: Cmd) -> Cmd;
+    /// `issue` が断るなら、理由を通知に積んで代わりに出す `Cmd` を返す。`submit` も同じ関数で問う。
+    pub(crate) fn refusal(&mut self, cmd: &Cmd) -> Option<Cmd>;
 }
 ```
 
@@ -2583,7 +2589,8 @@ pub fn init(state: &mut AppState) -> Cmd;
 ## update の原則
 
 - `update` は `AppState` を直接変更し、`Cmd` を返す。I/O を呼ばない。返す `Cmd` は
-  出口で `AppState::issue` を通し、同種のジョブが走っていれば発行しない
+  出口で `AppState::issue` を通し、同種のジョブが走っていれば発行しない（進行中操作で断る
+  書き込みは `Cmd::LoadStatus` に差し替える）
 - キー入力は `focus` と `modal` を見て、対応する pane / modal の handler に委譲する。
   ペインが `Cmd` を組み立てるのは `update` の中だけで、`ui` からは呼ばない
 - `ExecFinished` は成功・失敗・中断を問わず `LoadStatus` を発行する。**例外は

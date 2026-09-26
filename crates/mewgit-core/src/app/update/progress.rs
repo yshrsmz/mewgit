@@ -107,8 +107,8 @@ fn advice(progress: &InProgressOp) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, fake_output, finish_exec, open_input, press, press_code, state_on_branches,
-        type_text, worktree_state, NOTICE_CELLS,
+        cells, exec_done_of, fake_output, finish_exec, open_input, press, press_code,
+        state_on_branches, type_text, worktree_state, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -265,6 +265,33 @@ mod tests {
         let cmd = press_code(&mut state, KeyCode::Enter);
 
         assert_eq!(cmd, Cmd::Exec(GitOp::Switch("another".to_string())));
+    }
+
+    #[test]
+    fn refusing_while_git_runs_still_catches_up_with_the_write() {
+        // 走っている git のあいだに断ると、読み直しは書き込みより前の世代で刻まれ、
+        // 書き込みのあとの `LoadStatus` は同種実行中で落ちる。届いた古い返りから
+        // `status_loaded` が頼み直す（01 の「進行中操作があるときの書き込み」）。
+        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        arrive(&mut state, Some(rebase()));
+        let fetch = GitOp::Fetch {
+            remote: None,
+            prune: false,
+        };
+        let _ = state.issue(Cmd::Exec(fetch.clone()));
+        let _ = press(&mut state, 'k');
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::LoadStatus);
+
+        let after = update(&mut state, exec_done_of(fetch, Ok(fake_output())));
+        assert!(
+            !format!("{after:?}").contains("LoadStatus"),
+            "書き込みのあとの読み直しは落ちるはず: {after:?}"
+        );
+        let stale = fake_snapshot(&["a.txt"], &[], &[]);
+        let again = update(&mut state, Msg::StatusLoaded(Box::new(Ok(stale))));
+
+        assert!(format!("{again:?}").contains("LoadStatus"), "{again:?}");
+        assert!(!state.worktree_is_current());
     }
 
     #[test]

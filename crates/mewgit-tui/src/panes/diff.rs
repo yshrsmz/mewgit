@@ -395,9 +395,10 @@ mod tests {
         let lines = draw(&state, SIZE);
         let row = |needle: &str| lines[row_of(&lines, needle) as usize].clone();
 
-        // 枠(1) + 記号(1) + タブ 8 桁。
-        assert!(row("one").starts_with("│         one"), "{:?}", row("one"));
-        assert!(row("two").starts_with("│+        two"), "{:?}", row("two"));
+        // 枠(1) + 記号(1) + タブ 8 桁。Diff は出ているあいだ必ずフォーカスがあるので、
+        // 枠は太線（07 の「ペインとフォーカス」）。
+        assert!(row("one").starts_with("┃         one"), "{:?}", row("one"));
+        assert!(row("two").starts_with("┃+        two"), "{:?}", row("two"));
     }
 
     #[test]

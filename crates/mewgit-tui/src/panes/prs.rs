@@ -319,7 +319,10 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{draw, pane_row, pane_row_is_reversed, pane_text, state_at};
+    use crate::test_util::{
+        draw, pane_row, pane_row_is_reversed, pane_text, state_at, terminal_with,
+    };
+    use crate::ui;
     use mewgit_core::app::{Cmd, Msg, Pane, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::github::{CheckSummary, ReviewSummary};
@@ -327,6 +330,7 @@ mod tests {
         deliver_pr_details, fake_pull_request, fetch_pr_details, pr_list_loaded, put_on_branch,
         reply,
     };
+    use ratatui::style::Modifier;
 
     const SIZE: TermSize = TermSize {
         width: 80,
@@ -801,6 +805,59 @@ mod tests {
         let text = draw(&off, SIZE).join("\n");
         assert!(text.contains("Branches"), "{text}");
         assert!(!text.contains("PRs"), "{text}");
+    }
+
+    /// 右上の見出しで `title` を描いた升目の修飾。**前後の空白 1 つずつを含める**
+    /// （空白ごと反転する。07 の「右上のタブ」）。
+    fn tab_modifiers(state: &AppState, title: &str) -> Vec<Modifier> {
+        let area = ui::pane_area(Pane::Prs, SIZE, state);
+        let text = pane_text(state, SIZE, Pane::Prs);
+        let header = text.lines().next().unwrap_or_default();
+        let x = area.x + u16::try_from(column_of(header, title)).unwrap();
+        let terminal = terminal_with(state, SIZE);
+        let buffer = terminal.backend().buffer();
+        let width = u16::try_from(title.len()).unwrap();
+        (x - 1..x + width + 1)
+            .map(|x| buffer[(x, area.y)].modifier)
+            .collect()
+    }
+
+    #[test]
+    fn the_tab_on_display_is_reversed_and_the_other_is_dimmed() {
+        // `DIM` だけだと、`DIM` を無視する端末で 2 枚が同じに見える（07）。
+        let reversed = |m: &Modifier| m.contains(Modifier::REVERSED);
+        let dimmed = |m: &Modifier| m.contains(Modifier::DIM) && !reversed(m);
+
+        let on_prs = on_prs_tab();
+        assert!(tab_modifiers(&on_prs, "PRs").iter().all(reversed));
+        assert!(tab_modifiers(&on_prs, "Branches").iter().all(dimmed));
+
+        // **強調は `focus` ではなく `right_tab` に付く。** フォーカスが Graph に
+        // 移っても、右上に出しているのは PRs のまま（07）。
+        let mut on_graph = on_prs_tab();
+        on_graph.focus = Pane::Graph;
+        on_graph.reseat_focus();
+        assert!(tab_modifiers(&on_graph, "PRs").iter().all(reversed));
+
+        let mut on_branches = on_prs_tab();
+        on_branches.focus = Pane::Branches;
+        on_branches.reseat_focus();
+        assert!(tab_modifiers(&on_branches, "Branches").iter().all(reversed));
+        assert!(tab_modifiers(&on_branches, "PRs").iter().all(dimmed));
+    }
+
+    #[test]
+    fn a_lone_tab_is_not_emphasised() {
+        // GitHub を切るとタブは 1 枚で、選ぶ相手が無い（07）。
+        let mut off = state_at("/repo");
+        off.account = AccountState::Disabled;
+        let modifiers = tab_modifiers(&off, "Branches");
+        assert!(
+            modifiers
+                .iter()
+                .all(|m| !m.intersects(Modifier::REVERSED | Modifier::DIM)),
+            "{modifiers:?}"
+        );
     }
 
     #[test]

@@ -30,6 +30,25 @@ pub fn selected() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
 }
 
+/// フォーカスのあるペインの枠と見出し（07 の「ペインとフォーカス」）。
+///
+/// **色は ANSI の名前付き色に限る。** 実際の RGB は端末のカラースキームが決めるので、
+/// light / dark を切り替えれば追随する。色が出ない端末のために、枠の線の形も変える
+/// （`ui::pane_block`）。
+pub fn focused() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// 右上のタブで、いま出ているほう（07 の「右上のタブ」）。
+///
+/// `selected` と同じ反転だが、**あちらは一覧のカーソル行で、こちらはタブ**。
+/// `[theme]` にキーを足すときに別々に変えられるよう分けておく。
+pub fn current_tab() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
+}
+
 /// 見出しなど、本文より弱く出すもの。
 pub fn muted() -> Style {
     Style::default().add_modifier(Modifier::DIM)

@@ -23,7 +23,7 @@ use mewgit_core::github::RateLimit;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 /// 1 フレーム描く。
@@ -88,8 +88,9 @@ fn split_right(state: &AppState, top: &panes::TopPane, right: Rect) -> [Rect; 2]
 /// ペインの枠。
 ///
 /// **フォーカスのあるペインは枠を強調する**（07）。どちらがキーを受けるか判らないと、
-/// `s` や `x` が別のペインに飛んだように見える。枠の内側の大きさは強調の有無で
-/// 変わらないので、レイアウトの計算は `focused` を偽で呼んでよい。
+/// `s` や `x` が別のペインに飛んだように見える。**線の形（太線）と色の両方を変える**
+/// —— 修飾だけだと、太字を描かない端末で差が出ない。枠の内側の大きさは強調の有無で
+/// 変わらない（太線も 1 セル）ので、レイアウトの計算は `focused` を偽で呼んでよい。
 pub fn pane_block(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
     // **`&'static str` も受ける。** グラフの枠は行数を測るのに `runtime::layout` から
     // ループのたびに組まれるので、そこで毎回 `String` を確保しない。
@@ -97,7 +98,9 @@ pub fn pane_block(title: impl Into<Line<'static>>, focused: bool) -> Block<'stat
     // （`panes::right_tabs`。07 の「右上のタブ」）。
     let block = Block::default().borders(Borders::ALL).title(title.into());
     if focused {
-        block.border_style(Style::default().add_modifier(Modifier::BOLD))
+        block
+            .border_type(BorderType::Thick)
+            .border_style(theme::focused())
     } else {
         block
     }
@@ -762,8 +765,8 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        degraded_label, ellipsize, file_row, fits, hint_text, pane_area, push_expanded, window,
-        wrapped, SPACES, TAB_WIDTH,
+        degraded_label, ellipsize, file_row, fits, hint_text, pane_area, push_expanded, theme,
+        window, wrapped, SPACES, TAB_WIDTH,
     };
     use crate::test_util::{
         draw, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status, terminal_with,
@@ -778,7 +781,7 @@ mod tests {
         fake_account, fake_ambiguous, fake_no_access, fake_rate_limit, fake_snapshot,
         fetch_pr_details,
     };
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Color;
 
     #[test]
     fn a_file_row_puts_the_status_letter_before_the_path() {
@@ -864,8 +867,10 @@ mod tests {
     }
 
     #[test]
-    fn the_focused_pane_is_the_only_one_with_a_bold_border() {
+    fn the_focused_pane_is_the_only_one_with_a_thick_border() {
         // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
+        // **線の形と色の両方を見る**（07）。形は色も修飾も出ない端末のための強調で、
+        // 色だけを見ると `BorderType` を落としても通る。
         let size = TermSize::default();
         // 巡回の候補はグラフの選択で変わる（01）。WIP 側で回す。
         //
@@ -889,12 +894,19 @@ mod tests {
 
             for &pane in candidates {
                 let at = corner(pane, size, &state);
-                let bold = buffer[at].modifier.contains(Modifier::BOLD);
+                let cell = &buffer[at];
                 // **`pane == focus` では見られない。** Graph と Diff は同じ領域なので、
                 // Diff にフォーカスがあるとき「Graph の枠」の座標には Diff の枠が
                 // 描かれている。太いかどうかはその領域にフォーカスがあるかで決まる。
-                let expected = at == corner(focus, size, &state);
-                assert_eq!(bold, expected, "focus={focus:?} pane={pane:?}");
+                let focused = at == corner(focus, size, &state);
+                let (symbol, fg) = if focused {
+                    ("┏", theme::focused().fg)
+                } else {
+                    ("┌", None)
+                };
+                let why = format!("focus={focus:?} pane={pane:?}");
+                assert_eq!(cell.symbol(), symbol, "{why}");
+                assert_eq!(Some(cell.fg).filter(|fg| *fg != Color::Reset), fg, "{why}");
             }
         }
     }
@@ -1344,7 +1356,7 @@ mod tests {
     /// `pane` にフォーカスを置いて描いたヒントの行。
     fn hint_bar_of(pane: Pane, width: u16) -> String {
         // **`focus` を置いたら `reseat_focus` を通す**（隣の
-        // `the_focused_pane_is_the_only_one_with_a_bold_border` と同じ理由）——
+        // `the_focused_pane_is_the_only_one_with_a_thick_border` と同じ理由）——
         // 候補外の `focus` は実物では出ない画面。ワーキングツリーに 1 ファイル置くのは、
         // Worktree と Diff を候補に入れるため。
         let mut state = state_with_status(fake_snapshot(&[], &["a.txt"], &[]));

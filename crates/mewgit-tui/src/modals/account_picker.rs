@@ -820,11 +820,12 @@ mod tests {
         let state = state_with_reason(fake_no_access(vec![attempt]));
 
         // モーダルの行だけを取り出し、折り返しを繋ぎ直して読む。モーダルが
-        // 重なった行は `│ 余白 │本文│ 余白 │` の 5 片に割れる。
+        // 重なった行は `│ 余白 │本文│ 余白 │` の 5 片に割れる。**フォーカスのある
+        // ペインの縦線は `┃`**（07 の「ペインとフォーカス」）なので両方で割る。
         let body: Vec<String> = draw(&state, SIZE)
             .iter()
             .filter_map(|row| {
-                let parts: Vec<&str> = row.split('│').collect();
+                let parts: Vec<&str> = row.split(['│', '┃']).collect();
                 (parts.len() == 5).then(|| parts[2].trim_end().to_string())
             })
             .collect();

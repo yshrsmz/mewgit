@@ -461,7 +461,7 @@ mod tests {
             // に残り、履歴表示（M6）から読める。
             let detail = notice.detail.as_deref().expect("detail がありません");
             assert!(detail.contains("git push origin main"), "detail: {detail}");
-            // **1 行に収まる幅か。** 超えると末尾から黙って切れ、「どうすればよいか」
+            // **1 行に収まる幅か。** 超えると末尾が `…` に切れ、「どうすればよいか」
             // の側が消える（01 の「失敗の案内文」）。予算の根拠は `mewgit-tui` の
             // `a_notice_of_the_full_width_fits_on_its_own_line` が見る。
             assert!(

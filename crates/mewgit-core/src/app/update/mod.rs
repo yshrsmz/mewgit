@@ -522,6 +522,14 @@ mod tests {
                 term: TermSize::default(),
             },
         );
+        // **非同期の完了も回す。** 通知を積まない成功の返信で、失敗のあとに必ず届く
+        // 形（書き込みのあとの読み直し）。
+        let _ = reply(
+            &mut state,
+            Cmd::LoadStatus,
+            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+        );
+        assert_eq!(state.notices.len(), 1, "返信が通知を積んでいる");
 
         assert_eq!(shown(&state), Some("push に失敗しました"));
     }

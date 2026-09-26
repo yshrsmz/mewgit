@@ -562,16 +562,19 @@ fn ellipsize(text: &str, cells: u16) -> Cow<'_, str> {
     }
     // `…` の 1 セルを先に取っておく。
     let mut left = usize::from(cells - 1);
-    let mut end = 0;
-    for (i, c) in text.char_indices() {
-        let w = Span::raw(&text[i..i + c.len_utf8()]).width();
+    let mut kept = String::new();
+    // **書記素ごとに測る。** 描くときの単位がそれで、文字ごとに足すと異体字セレクタ付きの
+    // 絵文字（`❤️` は 2 文字で 2 セル、文字ごとだと 1）を少なく数えて `…` が溢れる。
+    for grapheme in Span::raw(text).styled_graphemes(Style::default()) {
+        let w = Span::raw(grapheme.symbol).width();
         if w > left {
             break;
         }
         left -= w;
-        end = i + c.len_utf8();
+        kept.push_str(grapheme.symbol);
     }
-    Cow::Owned(format!("{}…", &text[..end]))
+    kept.push('…');
+    Cow::Owned(kept)
 }
 
 /// 最初の行。改行が無ければ全体。
@@ -1260,6 +1263,11 @@ mod tests {
         assert_eq!(ellipsize("あいう", 5), "あい…");
         assert_eq!(ellipsize("あいう", 4), "あ…");
         assert_eq!(ellipsize("abc", 0), "");
+        // 異体字セレクタ付きの絵文字は 1 書記素で 2 セル（文字ごとに足すと 1）。
+        let heart = "a❤️bcd";
+        assert_eq!(ratatui::text::Span::raw(heart).width(), 6);
+        assert_eq!(ellipsize(heart, 4), "a❤️…");
+        assert_eq!(ellipsize(heart, 3), "a…");
     }
 
     /// `pane` にフォーカスを置いて描いたヒントの行。

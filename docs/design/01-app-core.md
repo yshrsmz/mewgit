@@ -57,7 +57,7 @@ host / port / owner / repo は `RepoInfo.target: TargetState` に入れる（`Op
 `host` / `owner` / `repo` の 3 つを受ける）。
 
 `AppState` に `Default` は付けない。リポジトリの無い `AppState` を表現可能にしないため。
-入口は `AppState::new(repo: RepoInfo, config: Config)` の 1 つ。サブ状態の `Default` は残す。
+入口は `AppState::new(repo: RepoInfo, config: Config, now: Timestamp)` の 1 つ（`now` を取る理由は下の「通知」）。サブ状態の `Default` は残す。
 
 `Config` は `AppState` が持つ。`ui` は `theme` を、`update` は `keymap` と
 `graph.page_size` を、ランタイムは `general.git_bin` を読む。`ui` が触れるのは
@@ -1103,11 +1103,11 @@ latch したせいで二度と直らなかった。**こちらは latch しな�
   消えた PR の 404 は行ごとの事情で、一覧ぶん通知を積んでも次に何をするかが
   変わらない。
   **理由は要約行ではなく `Notice.detail` に載せる** —— `GithubError` の `Display` を
-  要約行に混ぜると 1 行目の予算（上の「失敗の案内文」）を超え、末尾から黙って切れる。
+  要約行に混ぜると 1 行目の予算（上の「失敗の案内文」）を超え、末尾が `…` に切れる。
   `InvalidHost` はホスト名をそのまま持ち、**ホスト名に上限が無い**ので、予算をいくつに
   してもこれは変わらない（`-bad` の 4 文字でちょうど 72 セル。実測 2026-09-18。
   当時の予算が 72 だったのは `q:quit` と同じ行だったため）。`exec_finished` が argv と stderr を
-  `detail` に載せるのと同じ形で、**描くのは M6 のステータスバーのタスク**。
+  `detail` に載せるのと同じ形で、**描くのは M6 の通知の履歴のタスク**（ステータスバー 2/2）。
   **行き止まりにはならない** —— 引けなかった記憶は次に一覧が届いたときに落ちるので、
   `f` で引き直せる（上の項目）
 
@@ -2095,7 +2095,7 @@ pub struct PushRejection {
 - **argv は画面から退く。** これまでステータスバーに出ていた `git <argv>` は
   `detail` の 1 行目に移り、履歴表示（M6）まで見えない。**1 行目を 2 つで分けない**
   —— 案内文は端末の幅いっぱいまで使う前提で書いてある（上）ので、argv を前に置くと
-  「どうすればよいか」の側が末尾から削られる
+  「どうすればよいか」の側が末尾から `…` に削られる
 
 ## 実行中ジョブ
 

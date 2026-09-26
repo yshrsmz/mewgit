@@ -683,7 +683,7 @@ pub(super) fn pr_details_finished(
             // 予算をいくつにしても変わらない（`-bad` の 4 文字でちょうど 72 セル。
             // 実測 2026-09-18。当時の予算が 72 だったのは `q:quit` と同じ行だったため）。
             // `exec_finished` が argv と stderr を `detail` に載せるのと同じ形で、
-            // **描くのは M6 のステータスバーのタスク**（01 の「通知」）。
+            // **描くのは M6 の通知の履歴のタスク**（01 の「通知」）。
             state.push_notice(
                 NoticeLevel::Warn,
                 "PR の集計を中断しました".to_string(),

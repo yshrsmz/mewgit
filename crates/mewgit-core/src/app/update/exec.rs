@@ -264,10 +264,10 @@ fn exec_detail(err: &ExecError) -> String {
 /// 無い形、追跡設定に沿った push が断られた形で押すキーが違う。kind だけで文を選ぶと
 /// どれかに嘘を言う。
 ///
-/// **どの文も端末の幅に収める**（80 桁なら 80 セル。01 の「失敗の案内文」）。フッターの
-/// 1 行目は通知だけが使う（キーヒントは 2 行目。07）。溢れると `Paragraph` が末尾から
-/// 黙って切るので、「どうすればよいか」の側から消える。見張りは `mewgit-tui` 側にも
-/// 置く（80 桁で描いて確かめる）。
+/// **どの文も通知の予算に収める**（80 桁の端末で、時刻の 9 セルを引いた 71 セル。01 の
+/// 「失敗の案内文」）。フッターの 1 行目は通知とその時刻だけが使う（キーヒントは 2 行目。
+/// 07）。溢れると末尾が `…` に置き換わるので、「どうすればよいか」の側から消える。
+/// 見張りは `mewgit-tui` 側にも置く（80 桁で描いて確かめる）。
 fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
     // `NoResult` の `reason` は git の stderr ではなく mewgit の文言で、それ自体が
     // 案内になっている（03）。差し替えると説明が消える。`Canceled` も同じで、
@@ -461,7 +461,7 @@ mod tests {
             // に残り、履歴表示（M6）から読める。
             let detail = notice.detail.as_deref().expect("detail がありません");
             assert!(detail.contains("git push origin main"), "detail: {detail}");
-            // **1 行に収まる幅か。** 超えると末尾から黙って切れ、「どうすればよいか」
+            // **1 行に収まる幅か。** 超えると末尾が `…` に切れ、「どうすればよいか」
             // の側が消える（01 の「失敗の案内文」）。予算の根拠は `mewgit-tui` の
             // `a_notice_of_the_full_width_fits_on_its_own_line` が見る。
             assert!(

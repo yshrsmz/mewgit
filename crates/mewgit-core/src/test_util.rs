@@ -62,6 +62,13 @@ const CLOCK_START: i64 = 1_700_000_000;
 /// `git` 1 回あたりに進める秒数。
 const TICK: i64 = 60;
 
+/// テストの「いま」。2026-09-26 10:03:26 +0900。`AppState::new` に渡し、
+/// `Msg::Tick` に載せる（01 の「通知」）。
+pub const FAKE_NOW: Timestamp = Timestamp {
+    seconds: 1_790_384_606,
+    offset_minutes: 540,
+};
+
 use crate::app::{update, AppState, Cmd, Msg, TargetState};
 use crate::auth::ssh::SshCommand;
 use crate::auth::{

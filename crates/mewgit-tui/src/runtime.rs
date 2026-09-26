@@ -19,7 +19,7 @@ use mewgit_core::auth::AccountState;
 use mewgit_core::auth::Backend as _;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
-use mewgit_core::git_read::{GitReadError, ReaderHandle};
+use mewgit_core::git_read::{GitReadError, ReaderHandle, Timestamp};
 use mewgit_core::github::{AccountBackend, GithubClient, GithubError};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
@@ -72,7 +72,7 @@ pub fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle), Git
         ..RepoInfo::default()
     };
 
-    Ok((AppState::new(repo, config), reader))
+    Ok((AppState::new(repo, config, Timestamp::now()), reader))
 }
 
 /// 描画 → 入力待ち → `update` → `dispatch` を回す。
@@ -153,7 +153,8 @@ where
             },
             // 送り手は `runtime` が持っているので、この分岐が閉じることはない。
             Some(msg) = msgs.recv() => msg,
-            _ = tick.tick() => Msg::Tick,
+            // 時計を読むのはここだけ（01 の「通知」）。
+            _ = tick.tick() => Msg::Tick(Timestamp::now()),
         };
 
         let cmd = update(state, msg);

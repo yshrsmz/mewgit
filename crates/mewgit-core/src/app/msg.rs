@@ -4,7 +4,7 @@ use crate::auth::{Account, AuthError, DegradedReason, GhLogin, ResolvedTarget};
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp,
-    LogPage, Oid, RefIndex, Remote, WorktreeSnapshot,
+    LogPage, Oid, RefIndex, Remote, Timestamp, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 
@@ -43,7 +43,10 @@ pub enum Msg {
     /// 端末に bracketed paste を要求するのは `main.rs`。
     Paste(String),
     /// 250ms 周期。スピナー更新と外部変更検知に使う。
-    Tick,
+    ///
+    /// **時計を読むのはランタイムで、ここで運ぶ**（01 の「通知」）。`update` の中で
+    /// 時計を読むと、同じ入力から違う状態ができて遷移をテストできなくなる。
+    Tick(Timestamp),
 
     // git_read
     /// ログの 1 ページ。`Result` にしているのは、失敗しても必ずここに来るようにするため。

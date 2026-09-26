@@ -4,7 +4,7 @@
 use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Modal, Msg, Pane, RepoInfo, TermSize};
 use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, FileEntry, GitReadError, LogPage, WorktreeSnapshot};
-use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents, reply};
+use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents, reply, FAKE_NOW};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Position;
 use ratatui::style::Modifier;
@@ -209,6 +209,7 @@ pub fn state_at(path: &str) -> AppState {
             ..RepoInfo::default()
         },
         Config::default(),
+        FAKE_NOW,
     )
 }
 

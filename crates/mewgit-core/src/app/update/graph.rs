@@ -306,7 +306,7 @@ mod tests {
     use super::super::test_support::{
         commit, commit_loads, cursor, detail_ok, diff_ok, fake_diff, files_loaded, files_of, more,
         on_first_commit, page_loaded, press, press_code, reload, state, state_with_commits,
-        state_with_page, ROWS,
+        state_with_page, tick, ROWS,
     };
     use super::super::worktree::COMMIT_DIFF;
     use super::super::{init, update};
@@ -1069,7 +1069,7 @@ mod tests {
             update(&mut state, Msg::Layout { graph_rows: 10 }),
             Cmd::None
         );
-        assert_eq!(update(&mut state, Msg::Tick), Cmd::None);
+        assert_eq!(update(&mut state, tick()), Cmd::None);
     }
 
     #[test]

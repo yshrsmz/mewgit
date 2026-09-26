@@ -1,32 +1,48 @@
-//! コミットの日時を文字列にする。設計は `docs/design/07-ui.md` の「詳細の展開」。
+//! 日時を文字列にする。設計は `docs/design/07-ui.md` の「詳細の展開」と「ステータスバー」。
 //!
-//! **コミットに刻まれたタイムゾーンで出す。** `git show` と同じで、見る人の環境の
-//! タイムゾーンには寄せない。だから必要なのは「秒数 + オフセット」から暦の日付を
-//! 起こすことだけで、tz データベースは要らない。
+//! **`Timestamp` が持っているオフセットで出す。** コミットの日時はコミットに刻まれた
+//! タイムゾーン（`git show` と同じで、見る人の環境には寄せない）、通知の時刻は
+//! 刻んだときのローカルのタイムゾーン（`Timestamp::now`）で、どちらも
+//! 「秒数 + オフセット」から暦の日付を起こすことだけで足り、tz データベースは要らない。
 //!
-//! そのためだけに日時のクレートを足していない。ここでやることは 1 つの純粋関数に
-//! 収まり、テストで固定できる。
+//! そのためだけに日時のクレートを足していない。ここでやることは純粋関数に収まり、
+//! テストで固定できる。
 
 use mewgit_core::git_read::Timestamp;
 
 /// `2026-09-06 15:35:55 +0900` の形にする。
 pub fn format(time: Timestamp) -> String {
-    // オフセットを足した「そのタイムゾーンでの壁時計」に直してから暦に落とす。
-    let local = time.seconds + i64::from(time.offset_minutes) * 60;
-    let days = local.div_euclid(SECONDS_PER_DAY);
+    let local = local_seconds(time);
+    let (year, month, day) = civil_from_days(local.div_euclid(SECONDS_PER_DAY));
     let secs = local.rem_euclid(SECONDS_PER_DAY);
-    let (year, month, day) = civil_from_days(days);
 
     let sign = if time.offset_minutes < 0 { '-' } else { '+' };
     let offset = time.offset_minutes.unsigned_abs();
 
     format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} {sign}{:02}{:02}",
-        secs / 3600,
-        (secs / 60) % 60,
-        secs % 60,
+        "{year:04}-{month:02}-{day:02} {} {sign}{:02}{:02}",
+        hms(secs),
         offset / 60,
         offset % 60,
+    )
+}
+
+/// `15:35:55` の形にする。ステータスバーの通知に添える（07 の「ステータスバー」）。
+pub fn clock(time: Timestamp) -> String {
+    hms(local_seconds(time).rem_euclid(SECONDS_PER_DAY))
+}
+
+/// オフセットを足した「そのタイムゾーンでの壁時計」の、epoch からの秒数。
+fn local_seconds(time: Timestamp) -> i64 {
+    time.seconds + i64::from(time.offset_minutes) * 60
+}
+
+fn hms(secs: i64) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs / 60) % 60,
+        secs % 60
     )
 }
 
@@ -63,6 +79,17 @@ mod tests {
             seconds,
             offset_minutes,
         })
+    }
+
+    #[test]
+    fn the_clock_is_the_wall_clock_of_the_offset() {
+        // 日付をまたぐ側で見る。UTC の 22 時は東京では翌朝 7 時。
+        let time = |offset_minutes| Timestamp {
+            seconds: 1_700_000_000,
+            offset_minutes,
+        };
+        assert_eq!(clock(time(0)), "22:13:20");
+        assert_eq!(clock(time(540)), "07:13:20");
     }
 
     #[test]

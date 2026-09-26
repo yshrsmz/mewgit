@@ -2,9 +2,10 @@
 //!
 //! 各ペインは `AppState` を読むだけで、`Cmd` を作らない（不変ルール 2）。
 
+use std::borrow::Cow;
+
 use mewgit_core::app::{AppState, Pane, RightTab};
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 use ratatui::Frame;
@@ -108,23 +109,34 @@ impl TopPane {
 /// 「出ている見出し」と「行ける先」が食い違っても何も落ちない。
 ///
 /// **`Stash` は入らない。** M5 のペインで、まだ候補に入っていない。
+///
+/// **タブが 1 枚なら強調しない**（選ぶ相手が無い。07）。ほかのペインと同じ素の見出し。
 fn right_tabs(state: &AppState) -> Line<'static> {
-    let branches = Span::styled(branches::title(state), tab_style(state, RightTab::Branches));
     if !state.focus_candidates().contains(&Pane::Prs) {
-        return Line::from(branches);
+        return Line::from(branches::title(state));
     }
-    Line::from(vec![
-        branches,
-        Span::styled(" | ", theme::muted()),
-        Span::styled(prs::title(), tab_style(state, RightTab::Prs)),
-    ])
+    let mut spans = Vec::with_capacity(7);
+    spans.extend(tab(state, RightTab::Branches, branches::title(state)));
+    spans.push(Span::styled("|", theme::muted()));
+    spans.extend(tab(state, RightTab::Prs, prs::title()));
+    Line::from(spans)
 }
 
-/// いま出ていないタブは弱く出す。
-fn tab_style(state: &AppState, tab: RightTab) -> Style {
-    if state.right_tab == tab {
-        Style::default()
+/// タブ 1 枚の見出し。いま出ているほうは前後 1 空白ごと反転し、出ていないほうは
+/// 弱く出す（07 の「右上のタブ」）。
+///
+/// **空白は両方に付ける。** 出ているほうにだけ付けると、切り替えるたびに見出しの
+/// 位置がずれる。空白を別の `Span` にするのは、見出しを `format!` で組み直さないため
+/// （枠は毎フレーム組む）。
+fn tab(state: &AppState, tab: RightTab, title: impl Into<Cow<'static, str>>) -> [Span<'static>; 3] {
+    let style = if state.right_tab == tab {
+        theme::current_tab()
     } else {
         theme::muted()
-    }
+    };
+    [
+        Span::styled(" ", style),
+        Span::styled(title, style),
+        Span::styled(" ", style),
+    ]
 }

@@ -626,7 +626,8 @@ pub struct StashEntry {
     pub oid: Oid,
 }
 
-/// 進行中の操作。continue / skip / abort 以外の書き込みを拒否する判断に使う。
+/// 進行中の操作。HEAD か作業ツリー全体を動かす書き込みを断る判断に使う（03 の
+/// 「進行中に通す書き込み」）。
 ///
 /// 見分け方と、持たない値（`-i` の有無、止まった理由）は 02 の「進行中操作の検出」。
 #[derive(Debug, Clone, PartialEq, Eq)]

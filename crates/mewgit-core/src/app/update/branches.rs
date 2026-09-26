@@ -3,6 +3,7 @@
 use crate::git_exec::GitOp;
 use crate::git_read::{short_oid, Branch, GitReadError, Oid};
 
+use super::progress::refuses;
 use super::{confirm, focus};
 use crate::app::{
     AppState, Cmd, InputIntent, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
@@ -105,6 +106,18 @@ fn input(
 /// 1 本も無い）はまさに作りたい状態。`switch --create` は unborn HEAD でも通り、
 /// `HEAD` を新しい名前に向け替える（git 2.55 で確認）。
 pub(super) fn open_branch_create(state: &mut AppState, start: Option<Oid>) -> Cmd {
+    // **開く前に断る。** 確定のときに断ると、打ち終えた名前を捨てさせることになる
+    // （01 の「進行中操作があるときの書き込み」）。判定は確定で出す `GitOp` の形で
+    // 問う —— 名前はまだ無いが、断るかどうかは変種と `switch` だけで決まる。
+    let op = GitOp::BranchCreate {
+        name: String::new(),
+        start: None,
+        switch: true,
+    };
+    if refuses(state, &op) {
+        return Cmd::None;
+    }
+
     // **タイトルに起点を出す。** どのコミットから生やすかは押す前に読めないといけない
     // （`Confirm` の本文に対象をそのまま出すのと同じ理由。07 の「Input モーダル」）。
     let title = match &start {

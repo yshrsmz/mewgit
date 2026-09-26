@@ -41,6 +41,7 @@ mod diff;
 mod exec;
 mod graph;
 mod modal;
+mod progress;
 mod prs;
 mod remote;
 #[cfg(test)]
@@ -77,6 +78,9 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
     // 候補から外れる。経路ごとに書くと足し忘れが静かに通るので、`issue` と同じく
     // 出口 1 箇所で診る。
     state.reseat_focus();
+    // **進行中操作で断る書き込みも出口 1 箇所で診る**（01 の「進行中操作があるときの
+    // 書き込み」）。`Cmd::Exec` を返す経路はキー・確認モーダル・入力の確定と多い。
+    let cmd = progress::refuse_writes(state, cmd);
     state.issue(cmd)
 }
 
@@ -446,6 +450,13 @@ fn submit(state: &mut AppState, cmd: Cmd) -> Cmd {
     // 副作用を持たない `Cmd` は落とされようが無いので、そのまま閉じて返す。
     if cmd.job_kind().is_some_and(|kind| busy(state, kind)) {
         return Cmd::None;
+    }
+    // 進行中操作で断るときも閉じない。出口（`update`）で断るとモーダルはもう閉じていて、
+    // 打った本文が消える（01 の「進行中操作があるときの書き込み」）。
+    if let Cmd::Exec(op) = &cmd {
+        if progress::refuses(state, op) {
+            return Cmd::None;
+        }
     }
 
     // 閉じずに返すと、`Cmd` が落とされたときにモーダルだけが画面に残る。

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::auth::url::RemoteUrl;
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
-use crate::git_exec::RebasePlan;
+use crate::git_exec::{GitOp, RebasePlan};
 use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, Oid, RefIndex, Remote,
     StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
@@ -120,9 +120,10 @@ impl AppState {
 
     /// `update` が返す [`Cmd`] を発行してよい形にする。
     ///
-    /// 非同期ジョブを生む `Cmd` は [`JobTracker`] に登録し、同種が既に走っていれば
-    /// [`Cmd::None`] に落とす。判定をここ（`update` の出口）に置くのは、ランタイムの
-    /// `dispatch` が `AppState` に書いてよいのが `notices` だけだから（01 のランタイム）。
+    /// 非同期ジョブを生む `Cmd` は [`JobTracker`] に登録し、[`refuses`](Self::refuses) が
+    /// 断るものは [`Cmd::None`] に落とす。判定をここ（`update` の出口）に置くのは、
+    /// ランタイムの `dispatch` が `AppState` に書いてよいのが `notices` だけだから
+    /// （01 のランタイム）。
     pub fn issue(&mut self, cmd: Cmd) -> Cmd {
         match cmd {
             // `Batch` の中身は 1 つずつ判定する。まとめて弾くと、同種が走っている
@@ -131,18 +132,35 @@ impl AppState {
                 let issued: Vec<Cmd> = cmds.into_iter().map(|cmd| self.issue(cmd)).collect();
                 Cmd::batch(issued)
             }
-            cmd => match cmd.job() {
-                None => cmd,
-                Some((kind, label)) => {
-                    let job = Job::new(kind, label);
-                    if self.jobs.start(job) {
-                        cmd
-                    } else {
-                        self.notify_dropped(kind);
-                        Cmd::None
-                    }
+            cmd if self.refuses(&cmd) => Cmd::None,
+            cmd => {
+                if let Some((kind, label)) = cmd.job() {
+                    // 走っていないことは `refuses` が確かめた。
+                    let _ = self.jobs.start(Job::new(kind, label));
                 }
-            },
+                cmd
+            }
+        }
+    }
+
+    /// `cmd` を [`issue`](Self::issue) が落とすなら、理由を通知に積んで真を返す。
+    ///
+    /// **打った本文を持つモーダルの確定（`update::submit`）も同じ関数で問う** ——
+    /// 落とされると分かっていれば閉じずに断れる。判定を写すと、片方にだけ足した
+    /// 断りで本文が消える。**進行中操作を先に診る** —— git の実行が終わっても
+    /// 断られるので、待てと言うより出口を言うほうが先に要る。
+    pub(crate) fn refuses(&mut self, cmd: &Cmd) -> bool {
+        if let Cmd::Exec(op) = cmd {
+            if self.refuse_in_progress(op) {
+                return true;
+            }
+        }
+        match cmd.job_kind() {
+            Some(kind) if self.jobs.is_running(kind) => {
+                self.notify_dropped(kind);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -2612,6 +2630,27 @@ pub enum InputIntent {
     },
     /// ブランチの名前を変える（`branch --move`）。`from` は元の名前。
     BranchRename { from: String },
+}
+
+impl InputIntent {
+    /// 打った `name` で確定したときに出す書き込み。
+    ///
+    /// **開く前の判定もこれで問う**（名前は空のまま）。進行中操作で断るかは変種と
+    /// `switch` だけで決まるので、確定と同じ `GitOp` を組めば判定が割れない（01 の
+    /// 「進行中操作があるときの書き込み」）。
+    pub fn op(&self, name: String) -> GitOp {
+        match self {
+            InputIntent::BranchCreate { start } => GitOp::BranchCreate {
+                name,
+                start: start.clone(),
+                switch: true,
+            },
+            InputIntent::BranchRename { from } => GitOp::BranchRename {
+                from: from.clone(),
+                to: name,
+            },
+        }
+    }
 }
 
 /// 複数行の編集バッファ。

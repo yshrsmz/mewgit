@@ -78,9 +78,6 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
     // 候補から外れる。経路ごとに書くと足し忘れが静かに通るので、`issue` と同じく
     // 出口 1 箇所で診る。
     state.reseat_focus();
-    // **進行中操作で断る書き込みも出口 1 箇所で診る**（01 の「進行中操作があるときの
-    // 書き込み」）。`Cmd::Exec` を返す経路はキー・確認モーダル・入力の確定と多い。
-    let cmd = progress::refuse_writes(state, cmd);
     state.issue(cmd)
 }
 
@@ -427,7 +424,7 @@ fn exec_busy(state: &mut AppState) -> bool {
 /// あちらのモーダルはユーザーが打ったものを持っていない。ここで同じことをすると、
 /// 前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
 /// 「ほかの git 実行が終わるまで待ってください」と出て**打った文字ごと消える**。
-/// 判定は [`AppState::issue`] と同じ `jobs.is_running`。
+/// 判定は [`AppState::issue`] と同じ `AppState::refuses`。
 ///
 /// **2 人目（`Modal::Input`）が出た時点でここへ移した。** 写すと、片方だけ
 /// 「閉じてから返す」形に戻ったときに気付けない（01 の「1 行入力」）。
@@ -435,7 +432,8 @@ fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
     submit(state, Cmd::Exec(op))
 }
 
-/// 編集中のモーダルを確定して `cmd` を返す。走っていれば閉じずに断る。
+/// 編集中のモーダルを確定して `cmd` を返す。`issue` が落とすなら閉じずに断る
+/// （同種が走っている、進行中操作がある）。
 ///
 /// **2 人目（`Modal::PrCreate`）が出た時点で `submit_exec` から割った。**
 /// `Cmd::Exec` かどうかではなく、**[`AppState::issue`] に落とされうる `Cmd` を
@@ -447,16 +445,8 @@ fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
 /// 本当の種別で落とす**ので、この関数が在る理由（打った本文を消さない）がそのまま
 /// 破れる（`.claude/rules/rust-coding.md` の「導出できる値を引数に取らせない」）。
 fn submit(state: &mut AppState, cmd: Cmd) -> Cmd {
-    // 副作用を持たない `Cmd` は落とされようが無いので、そのまま閉じて返す。
-    if cmd.job_kind().is_some_and(|kind| busy(state, kind)) {
+    if state.refuses(&cmd) {
         return Cmd::None;
-    }
-    // 進行中操作で断るときも閉じない。出口（`update`）で断るとモーダルはもう閉じていて、
-    // 打った本文が消える（01 の「進行中操作があるときの書き込み」）。
-    if let Cmd::Exec(op) = &cmd {
-        if progress::refuses(state, op) {
-            return Cmd::None;
-        }
     }
 
     // 閉じずに返すと、`Cmd` が落とされたときにモーダルだけが画面に残る。

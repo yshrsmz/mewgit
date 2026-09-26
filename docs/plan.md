@@ -323,11 +323,9 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       `sequencer/` だけが残る形を拾う。バッジに止まった理由（`(edit)`）は出さない（07）
 - [ ] `--sequence-editor` / `--commit-editor` 隠しサブコマンド
 - [ ] `RebasePlan::to_todo` + テスト、`Modal::RebaseEditor`
-- [ ] 進行中操作があるときの書き込み `GitOp` 拒否。**continue / abort より先に入れる**
+- [x] 進行中操作があるときの書き込み `GitOp` 拒否。**continue / abort より先に入れる**
       （2026-09-27 に順序を入れ替えた）。**断るのは HEAD か作業ツリー全体を動かすもの
-      だけ** —— 03 に「continue / skip / abort 以外を拒否」と書いていたが、そのとおりだと
-      解消の stage も merge を結ぶ commit も断ってコンフリクトから抜けられない（03 の
-      「進行中に通す書き込み」に実測の表）
+      だけ**（03 の「進行中に通す書き込み」）
 - [ ] rebase の continue / skip / abort。**`m` で開くメニュー**（lazygit と同じ）に
       進行中操作の種類で絞った項目を出し、abort は `Modal::Confirm` を通す。**merge の
       abort（`GitOp::MergeAbort`）もここで足す** —— 書き込みの拒否が switch / pull を断るので、

@@ -6,45 +6,29 @@
 use crate::git_exec::GitOp;
 use crate::git_read::InProgressOp;
 
-use crate::app::{AppState, Cmd, NoticeLevel};
+use crate::app::{AppState, NoticeLevel};
 
-/// `cmd` に含まれる書き込みのうち、進行中操作があって断るものを落とす。
-///
-/// **`update` の出口で呼ぶ**（`issue` の手前）。`Cmd::Exec` を返す経路はキー・確認
-/// モーダルの `on_yes`・入力の確定と多く、経路ごとに書くと足し忘れが静かに通る。
-pub(super) fn refuse_writes(state: &mut AppState, cmd: Cmd) -> Cmd {
-    match cmd {
-        // `issue` と同じく中身を 1 つずつ診る。まとめて落とすと、断る書き込み 1 つの
-        // ために読み取りまで落ちる。
-        Cmd::Batch(cmds) => {
-            let kept: Vec<Cmd> = cmds
-                .into_iter()
-                .map(|cmd| refuse_writes(state, cmd))
-                .collect();
-            Cmd::batch(kept)
+impl AppState {
+    /// 進行中操作があって `op` を断るなら、理由を通知に積んで真を返す。
+    ///
+    /// **信じるのは鮮度のある snapshot だけ**。古いときは git に任せる（01 の
+    /// 「進行中操作があるときの書き込み」）。
+    pub(crate) fn refuse_in_progress(&mut self, op: &GitOp) -> bool {
+        if !self.worktree_is_current() {
+            return false;
         }
-        Cmd::Exec(op) if refuses(state, &op) => Cmd::None,
-        cmd => cmd,
+        let Some(message) = self
+            .worktree
+            .snapshot
+            .progress
+            .as_ref()
+            .and_then(|progress| refusal(progress, op))
+        else {
+            return false;
+        };
+        self.push_notice(NoticeLevel::Warn, message, None);
+        true
     }
-}
-
-/// 進行中操作があって `op` を断るなら、理由を通知に積んで真を返す。
-///
-/// **信じるのは鮮度のある snapshot だけ**（`c` の「stage された変更がありません」と同じ
-/// 門）。書き込みの直後は status が届くまで古く、そこで持っている進行中操作を信じると
-/// abort した直後の操作を断る。古いときは git に任せる（01）。
-pub(super) fn refuses(state: &mut AppState, op: &GitOp) -> bool {
-    if !state.worktree_is_current() {
-        return false;
-    }
-    let Some(progress) = &state.worktree.snapshot.progress else {
-        return false;
-    };
-    let Some(message) = refusal(progress, op) else {
-        return false;
-    };
-    state.push_notice(NoticeLevel::Warn, message.to_string(), None);
-    true
 }
 
 /// `progress` の途中で `op` を断るなら、その案内文。通すなら `None`。
@@ -54,7 +38,7 @@ pub(super) fn refuses(state: &mut AppState, op: &GitOp) -> bool {
 /// ブランチの改名・削除）は通す（03 の表）。
 ///
 /// 網羅 `match` にしているのは、`GitOp` に変種を足したときに断るか通すかを選ばせるため。
-fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<&'static str> {
+fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<String> {
     let passes = match op {
         GitOp::Stage(_)
         | GitOp::Unstage(_)
@@ -102,31 +86,32 @@ fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<&'static str> {
 }
 
 /// 何の途中かと、そこから出る手。**71 セルに収める**（01 の「失敗の案内文」）。
-fn advice(progress: &InProgressOp) -> &'static str {
-    match progress {
-        InProgressOp::Rebase { .. } => "rebase の途中です。先に continue か abort で終えてください",
-        InProgressOp::CherryPick { .. } => {
-            "cherry-pick の途中です。先に continue か abort で終えてください"
-        }
-        InProgressOp::Revert { .. } => "revert の途中です。先に continue か abort で終えてください",
+fn advice(progress: &InProgressOp) -> String {
+    let verb = match progress {
+        InProgressOp::Rebase { .. } => "rebase",
+        InProgressOp::CherryPick { .. } => "cherry-pick",
+        InProgressOp::Revert { .. } => "revert",
         // merge の continue に当たる `GitOp` は無い。結ぶのは `c`（03 の表）。
-        InProgressOp::Merge { .. } => "merge の途中です。先に commit で結んでください",
+        InProgressOp::Merge { .. } => {
+            return "merge の途中です。先に commit で結んでください".to_string();
+        }
         // mewgit から am は始めず、`GitOp` にも無い（02 の「進行中操作の検出」）。
         InProgressOp::Am { .. } => {
-            "am の途中です。端末で git am --continue か --abort を打ってください"
+            return "am の途中です。端末で git am --continue か --abort を打ってください"
+                .to_string();
         }
-    }
+    };
+    format!("{verb} の途中です。先に continue か abort で終えてください")
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, exec_done_of, fake_output, open_input, press, press_code, state_on_branches,
+        cells, fake_output, finish_exec, open_input, press, press_code, state_on_branches,
         type_text, worktree_state, NOTICE_CELLS,
     };
-    use super::super::update;
     use super::*;
-    use crate::app::{KeyCode, Modal, Msg, Pane};
+    use crate::app::{Cmd, KeyCode, Modal, Msg};
     use crate::git_exec::{LocalBranch, PrSource, PullMode};
     use crate::git_read::{Step, WorktreeSection};
     use crate::test_util::{fake_oid, fake_pr_checkout, fake_snapshot, reply};
@@ -140,14 +125,19 @@ mod tests {
         }
     }
 
+    fn cherry_pick() -> InProgressOp {
+        InProgressOp::CherryPick {
+            oid: Some(fake_oid(1)),
+        }
+    }
+
     fn every_progress() -> [InProgressOp; 5] {
-        let oid = fake_oid(1);
         [
             rebase(),
             InProgressOp::Am { step: None },
-            InProgressOp::CherryPick { oid: Some(oid) },
+            cherry_pick(),
             InProgressOp::Revert { oid: None },
-            InProgressOp::Merge { oid },
+            InProgressOp::Merge { oid: fake_oid(1) },
         ]
     }
 
@@ -162,8 +152,9 @@ mod tests {
         );
     }
 
-    fn last_notice(state: &AppState) -> &str {
-        &state.notices.back().expect("通知がありません").message
+    /// ステータスバーに出ている通知の文言。
+    fn shown(state: &AppState) -> &str {
+        &state.shown_notice().expect("通知が出ていません").message
     }
 
     #[test]
@@ -224,14 +215,11 @@ mod tests {
 
     #[test]
     fn continue_and_abort_pass_only_for_the_operation_in_progress() {
-        let oid = fake_oid(1);
-        let cherry_pick = InProgressOp::CherryPick { oid: Some(oid) };
-
         assert_eq!(refusal(&rebase(), &GitOp::RebaseContinue), None);
         assert_eq!(refusal(&rebase(), &GitOp::RebaseSkip), None);
-        assert_eq!(refusal(&cherry_pick, &GitOp::CherryPickAbort), None);
+        assert_eq!(refusal(&cherry_pick(), &GitOp::CherryPickAbort), None);
         // cherry-pick の途中の `rebase --continue` は git が別の操作として扱う。
-        assert!(refusal(&cherry_pick, &GitOp::RebaseContinue).is_some());
+        assert!(refusal(&cherry_pick(), &GitOp::RebaseContinue).is_some());
         assert!(refusal(&rebase(), &GitOp::RevertAbort).is_some());
         // am には mewgit から打てる出口が無い。
         assert!(refusal(&InProgressOp::Am { step: None }, &GitOp::RebaseContinue).is_some());
@@ -241,7 +229,7 @@ mod tests {
     fn every_advice_fits_the_notice_line() {
         for progress in every_progress() {
             let message = advice(&progress);
-            assert!(cells(message) <= NOTICE_CELLS, "{message}");
+            assert!(cells(&message) <= NOTICE_CELLS, "{message}");
         }
     }
 
@@ -254,20 +242,16 @@ mod tests {
         let cmd = press_code(&mut state, KeyCode::Enter);
 
         assert_eq!(cmd, Cmd::None);
-        assert!(last_notice(&state).starts_with("rebase の途中です"));
+        assert!(shown(&state).starts_with("rebase の途中です"));
     }
 
     #[test]
     fn staging_in_the_middle_of_a_rebase_still_runs() {
-        let mut state = worktree_state(
-            fake_snapshot(&[], &["a.txt"], &[]),
-            WorktreeSection::Unstaged,
-        );
-        arrive(&mut state, Some(rebase()));
-        state.focus = Pane::Worktree;
-        state.worktree.section = WorktreeSection::Staged;
+        let mut snapshot = fake_snapshot(&["a.txt"], &[], &[]);
+        snapshot.progress = Some(rebase());
+        let mut state = worktree_state(snapshot, WorktreeSection::Staged);
         // 同じ状態で切り替えは断られる —— 通ったのが進行中操作を見落としたからではない。
-        assert!(refuses(&mut state, &GitOp::Switch("main".to_string())));
+        assert!(state.refuse_in_progress(&GitOp::Switch("main".to_string())));
 
         let cmd = press(&mut state, 'u');
 
@@ -280,12 +264,8 @@ mod tests {
         // 終わった rebase を理由に断る（01）。
         let mut state = state_on_branches(&[("another", false), ("main", true)]);
         arrive(&mut state, Some(rebase()));
-        assert!(refuses(&mut state, &GitOp::Switch("another".to_string())));
-        let _ = state.issue(Cmd::Exec(GitOp::RebaseAbort));
-        let _ = update(
-            &mut state,
-            exec_done_of(GitOp::RebaseAbort, Ok(fake_output())),
-        );
+        assert!(state.refuse_in_progress(&GitOp::Switch("another".to_string())));
+        finish_exec(&mut state, GitOp::RebaseAbort, Ok(fake_output()));
         assert!(!state.worktree_is_current());
         let _ = press(&mut state, 'k');
 
@@ -317,7 +297,17 @@ mod tests {
 
         assert_eq!(cmd, Cmd::None);
         assert_eq!(state.modal, None);
-        assert!(last_notice(&state).starts_with("rebase の途中です"));
+        assert!(shown(&state).starts_with("rebase の途中です"));
+    }
+
+    #[test]
+    fn r_still_opens_because_renaming_passes() {
+        let mut state = state_on_branches(&[("main", true)]);
+        arrive(&mut state, Some(rebase()));
+
+        let _ = press(&mut state, 'r');
+
+        assert!(matches!(state.modal, Some(Modal::Input { .. })));
     }
 
     #[test]
@@ -334,7 +324,6 @@ mod tests {
         assert_eq!(cmd, Cmd::None);
         let (_, _, buf, _) = open_input(&state);
         assert_eq!(buf.text(), "topic");
-        assert!(matches!(state.modal, Some(Modal::Input { .. })));
-        assert!(last_notice(&state).starts_with("rebase の途中です"));
+        assert!(shown(&state).starts_with("rebase の途中です"));
     }
 }

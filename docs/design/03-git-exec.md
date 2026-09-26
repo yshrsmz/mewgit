@@ -538,14 +538,15 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 
 ここから決めたこと ——
 
-- **断るのは HEAD か作業ツリー全体を動かす書き込み**：`Switch`、`BranchCreate { switch: true }`、
-  `Pull`、`CheckoutPr`、`RebaseInteractive`、`CherryPick`、`Revert`、`StashPush` /
-  `StashApply` / `StashPop`。**git が自分で断るものも断る** —— 押すたびに赤い通知と
-  argv を出すより、何の途中かと出口を先に言うほうが読める。**`stash` だけは git が受けて
-  進行中操作を壊す**ので、これは案内の都合ではなく守り
-- **通すのは解消に要るものと、実測で無害なもの**：stage / unstage / ハンク / discard、
-  `Commit`（amend も。cherry-pick / merge の途中の amend は git が断る）、`Fetch`、`Push`、
-  `BranchDelete` / `BranchRename`、`StashDrop`、`SetAccount` / `UnsetAccount`
+- **断るのは HEAD か作業ツリー全体を動かす書き込み**（switch、pull、PR の取り出し、
+  cherry-pick / revert / rebase の開始、stash の push / apply / pop など）。**git が自分で
+  断るものも断る** —— 押すたびに赤い通知と argv を出すより、何の途中かと出口を先に言う
+  ほうが読める。**`stash` だけは git が受けて進行中操作を壊す**ので、これは案内の都合では
+  なく守り
+- **通すのは解消に要るもの**（stage / unstage / ハンク / discard、`Commit`。amend も ——
+  cherry-pick / merge の途中の amend は git が断る）**と、実測で無害なもの**（fetch、push、
+  ブランチの改名・削除）。**変種ごとの振り分けは `app::update::progress::refusal` の
+  網羅 `match` が正**で、ここには写さない
 - **continue / skip / abort は、進行中の操作と種類が合うときだけ通す**（cherry-pick の途中の
   `RebaseContinue` は断る）。**am には通すものが無い** —— mewgit から am は始めず、
   `GitOp` にも無い。端末で `git am --continue` / `--abort` を打つよう案内する

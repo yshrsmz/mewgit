@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput};
 use crate::git_read::{
     Branch, Commit, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, HeadInfo, LogPage,
-    Oid, RefIndex, Remote, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
+    Oid, RefIndex, Remote, Timestamp, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
 };
 use crate::test_util::{
     fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid,
@@ -420,15 +420,26 @@ pub(super) fn exec_done_of(op: GitOp, result: Result<ExecOutput, ExecError>) -> 
     }))
 }
 
-/// 通知の要約行の予算（セル）。**端末の幅そのもの**で、80 桁を想定している
-/// （01 の「失敗の案内文」）。フッターの 2 行目がキーヒントなので、1 行目は幅いっぱい
-/// 使える。
+/// テストで `Tick` に載せる時刻。2026-09-26 10:03:26 +0900。
+pub(super) const NOW: Timestamp = Timestamp {
+    seconds: 1_790_384_606,
+    offset_minutes: 540,
+};
+
+/// ランタイムが 250ms ごとに送る `Tick`（時刻は [`NOW`]）。
+pub(super) fn tick() -> Msg {
+    Msg::Tick(NOW)
+}
+
+/// 通知の要約行の予算（セル）。**80 桁の端末から、前に添える時刻の 9 セル
+/// （`HH:MM:SS` と空白）を引いた残り**（01 の「失敗の案内文」）。フッターの 2 行目が
+/// キーヒントなので、1 行目は時刻のほかは幅いっぱい使える。
 ///
 /// **見張りは複数あって、新しい産出元を自分では拾わない**（`CLAUDE.md`）——
 /// `exec_advice` / `A` / `o` / PR の集計が別々に回している。通知を出す場所を足したら、
 /// そこでもこれを見る。**実際に描いて確かめるのは `mewgit-tui` 側**
 /// （`a_notice_of_the_full_width_fits_on_its_own_line`）。
-pub(super) const NOTICE_CELLS: usize = 80;
+pub(super) const NOTICE_CELLS: usize = 71;
 
 /// 端末に描いたときの桁数。**案内文は ASCII と日本語だけ**なので、非 ASCII を
 /// 2 桁と数えれば実際の幅と一致する（合成文字や絵文字を入れたらここが嘘になる）。

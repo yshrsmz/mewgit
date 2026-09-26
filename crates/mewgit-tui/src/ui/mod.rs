@@ -58,7 +58,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         GraphSelection::Wip => panes::worktree::render(frame, right, state),
         GraphSelection::Commit(line) => panes::commit::render(frame, right, state, &line.commit),
     }
-    frame.render_widget(notice_line(state), notice);
+    frame.render_widget(notice_line(state, notice.width), notice);
     frame.render_widget(hint_line(state, hints.width), hints);
 
     // モーダルは最後。下のペインを覆って描く（07）。
@@ -530,16 +530,56 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
     Some(Line::from(spans))
 }
 
-/// フッターの 1 行目。直近の通知だけを出す。
+/// フッターの 1 行目。直近の通知だけを、積まれた時刻を添えて出す。
 ///
-/// **幅いっぱい使ってよい**（キーヒントは 2 行目）。案内文がその予算に収まることは
-/// `app` 側が見張る（01 の「失敗の案内文」）。
+/// **幅いっぱい使ってよい**（キーヒントは 2 行目）。時刻の 9 セルを引いた残りに
+/// 案内文が収まることは `app` 側が見張る（01 の「失敗の案内文」）。**キー入力で
+/// 下ろした通知は出さない**（[`AppState::shown_notice`]）。
+///
+/// **溢れたら末尾を `…` にする**（07 の「ステータスバー」）。予算を見張れるのは
+/// 固定の文言だけで、パスやホスト名を埋めた文言には上限が無い。黙って切ると、
+/// 切れたことが画面から判らない。
 ///
 /// 出すのは先頭行だけ。toml のパースエラーのように複数行のメッセージがあり、そのまま
 /// 流すと改行が消えて読めなくなる。全文は `Notice.message` に残っている（履歴表示は M6）。
-fn notice_line(state: &AppState) -> Paragraph<'_> {
-    let message = state.notices.back().map_or("", |n| first_line(&n.message));
-    Paragraph::new(Line::raw(message))
+fn notice_line(state: &AppState, width: u16) -> Paragraph<'_> {
+    let Some(notice) = state.shown_notice() else {
+        return Paragraph::new("");
+    };
+    let mut spans = Vec::with_capacity(2);
+    // 最初の `Tick` より前に積まれた通知は時刻を持たない。ランタイムは起動時に
+    // 時計を入れるので、実物では出ない形（テストの状態で出る）。
+    if let Some(at) = notice.at {
+        spans.push(Span::styled(
+            format!("{} ", time::clock(at)),
+            theme::muted(),
+        ));
+    }
+    let room = usize::from(width).saturating_sub(spans.iter().map(Span::width).sum());
+    spans.push(Span::raw(ellipsize(first_line(&notice.message), room)));
+    Paragraph::new(Line::from(spans))
+}
+
+/// `text` を `cells` セルに収める。溢れるときは末尾を `…` に置き換える。
+fn ellipsize(text: &str, cells: usize) -> Cow<'_, str> {
+    if Span::raw(text).width() <= cells {
+        return Cow::Borrowed(text);
+    }
+    if cells == 0 {
+        return Cow::Borrowed("");
+    }
+    // `…` の 1 セルを先に取っておく。
+    let mut left = cells - 1;
+    let mut end = 0;
+    for (i, c) in text.char_indices() {
+        let w = Span::raw(&text[i..i + c.len_utf8()]).width();
+        if w > left {
+            break;
+        }
+        left -= w;
+        end = i + c.len_utf8();
+    }
+    Cow::Owned(format!("{}…", &text[..end]))
 }
 
 /// 最初の行。改行が無ければ全体。
@@ -674,7 +714,7 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{degraded_label, file_row, fits, pane_area, window, wrapped};
+    use super::{degraded_label, ellipsize, file_row, fits, pane_area, window, wrapped};
     use crate::test_util::{
         draw, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status, terminal_with,
     };
@@ -683,6 +723,7 @@ mod tests {
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
+    use mewgit_core::git_read::Timestamp;
     use mewgit_core::github::GithubError;
     use mewgit_core::test_util::{
         fake_account, fake_ambiguous, fake_no_access, fake_rate_limit, fake_snapshot,
@@ -1189,10 +1230,55 @@ mod tests {
     }
 
     /// 通知を 1 件だけ積んで描いた通知の行。既定サイズ（80x24）で見る。
+    ///
+    /// **時計を入れてから積む。** ランタイムは起動時に時計を入れるので、時刻の無い
+    /// 通知は実物では出ない（`runtime::open`）。入れないと時刻の 9 セルぶん予算が
+    /// 広く見える。
     fn notice_bar_with(message: &str) -> String {
         let mut state = state_at("/repo");
+        state.now = Some(TEN_O_THREE);
         state.push_notice(NoticeLevel::Error, message.to_string(), None);
         notice_bar(&state, TermSize::default())
+    }
+
+    /// 2026-09-26 10:03:26 +0900。
+    const TEN_O_THREE: Timestamp = Timestamp {
+        seconds: 1_790_384_606,
+        offset_minutes: 540,
+    };
+
+    #[test]
+    fn a_notice_leads_with_the_time_it_was_raised() {
+        let bar = notice_bar_with("push に失敗しました");
+        assert!(
+            bar.trim_start_matches(['│', ' '])
+                .starts_with("10:03:26 push に失敗しました"),
+            "notice: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn a_notice_taken_down_by_a_key_is_not_drawn() {
+        let mut state = state_at("/repo");
+        state.push_notice(NoticeLevel::Warn, "古い通知".to_string(), None);
+        assert!(notice_bar(&state, TermSize::default()).contains("古い通知"));
+
+        let _ = update(&mut state, Msg::Key(mewgit_core::app::Key::char('j')));
+
+        assert!(
+            !notice_bar(&state, TermSize::default()).contains("古い通知"),
+            "下ろした通知が出ています"
+        );
+    }
+
+    #[test]
+    fn ellipsize_cuts_at_the_cell_budget_and_marks_the_cut() {
+        assert_eq!(ellipsize("abc", 3), "abc");
+        assert_eq!(ellipsize("abcd", 3), "ab…");
+        // 全角は 2 セル。半端な 1 セルは空けて、`…` を跨がせない。
+        assert_eq!(ellipsize("あいう", 5), "あい…");
+        assert_eq!(ellipsize("あいう", 4), "あ…");
+        assert_eq!(ellipsize("abc", 0), "");
     }
 
     /// `pane` にフォーカスを置いて描いたヒントの行。
@@ -1415,23 +1501,26 @@ mod tests {
 
     #[test]
     fn a_notice_of_the_full_width_fits_on_its_own_line() {
-        // **案内文の予算（端末の幅）はここから来る**（01 の「失敗の案内文」）。
-        // ヒントが 2 行目へ移ったので、80 桁の端末では通知に 80 セルまるごと残る。
+        // **案内文の予算（端末の幅 − 時刻の 9 セル）はここから来る**（01 の「失敗の
+        // 案内文」）。ヒントは 2 行目なので、80 桁の端末では時刻の後ろに 71 セル残る。
         // `contains` を見るテストは切れても通るので、**収まることを直に見る**。
         //
-        // **40 と 41 はリテラルのまま置く。** 幅から算出すると、予算が変わったときに
-        // このテストが黙って追随し、`app` 側の「端末の幅に収める」だけが古くなる
+        // **35 と 36 はリテラルのまま置く。** 幅から算出すると、予算が変わったときに
+        // このテストが黙って追随し、`app` 側の「予算に収める」だけが古くなる
         // （`a_failure_puts_the_next_key_on_the_summary_line`）。**リテラルで
         // あること自体が、2 つの見張りを噛み合わせている。**
 
-        let fits = "あ".repeat(40);
+        let fits = "あ".repeat(35);
         let last = notice_bar_with(&fits);
         assert!(last.contains(&fits), "notice: {last:?}");
+        assert!(!last.contains('…'), "notice: {last:?}");
 
-        // 1 文字増やすと 82 セルになり、80 桁に入らない。
-        let over = "あ".repeat(41);
+        // 1 文字増やすと 72 セルになり、時刻の後ろに入らない。**切れたことを `…` で
+        // 見せる**（07 の「ステータスバー」）。
+        let over = "あ".repeat(36);
         let last = notice_bar_with(&over);
         assert!(!last.contains(&over), "notice: {last:?}");
+        assert!(last.contains(&format!("{fits}…")), "notice: {last:?}");
     }
 
     #[test]

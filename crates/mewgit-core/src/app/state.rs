@@ -10,7 +10,7 @@ use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarg
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
-    RefIndex, Remote, StashEntry, WorktreeSection, WorktreeSnapshot,
+    RefIndex, Remote, StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 use crate::graph::{GraphRow, LaneState};
@@ -59,6 +59,14 @@ pub struct AppState {
     ///
     /// [`Msg::Tick`]: crate::app::Msg::Tick
     pub tick: u64,
+    /// 最後に届いた [`Msg::Tick`] の時刻。通知に刻む（01 の「通知」）。
+    ///
+    /// **`update` は時計を読まない。** 読むのはランタイムで、`Tick` に載せて運ぶ。
+    /// そのぶん刻まれる時刻は最大 1 周期（250ms）古い。`None` は一度も届いて
+    /// いないことで、そのあいだの通知は時刻を持たない。
+    ///
+    /// [`Msg::Tick`]: crate::app::Msg::Tick
+    pub now: Option<Timestamp>,
     /// 起動時に確定した設定。実行中は再読込しない（08）。
     pub config: Config,
 }
@@ -105,6 +113,7 @@ impl AppState {
             notices: VecDeque::new(),
             term: TermSize::default(),
             tick: 0,
+            now: None,
             config,
         }
     }
@@ -192,9 +201,29 @@ impl AppState {
             level,
             message,
             detail,
+            at: self.now,
+            dismissed: false,
         });
         while self.notices.len() > MAX_NOTICES {
             self.notices.pop_front();
+        }
+    }
+
+    /// ステータスバーに出ている通知。
+    ///
+    /// 出すのは最新の 1 件で、**キー入力で下ろしたら出さない**（01 の「通知」）。
+    /// 下ろした旗は通知ごとに持つので、新しい通知が積まれればまた出る。
+    pub fn shown_notice(&self) -> Option<&Notice> {
+        self.notices.back().filter(|notice| !notice.dismissed)
+    }
+
+    /// 出ている通知を下ろす。キー入力と貼り付けの入口で呼ぶ（01 の「通知」）。
+    ///
+    /// **そのキーが出す通知より先に呼ぶ。** 後に呼ぶと、押した結果の警告
+    /// （「変更のないファイルは stage できません」）がその場で消えて読めない。
+    pub fn dismiss_notice(&mut self) {
+        if let Some(notice) = self.notices.back_mut() {
+            notice.dismissed = true;
         }
     }
 
@@ -677,8 +706,7 @@ impl GithubBlock {
             // **直す先は設定ファイルなので、外でやってくださいと書いてよい。**
             // **再起動が要ることも書く** —— 実行中に設定は読み直さない（08）。
             Self::AccountDisabled => {
-                "GitHub 機能は config.toml の github.enabled で切ってあります（要再起動）"
-                    .to_string()
+                "GitHub 機能は config.toml の github.enabled で無効です（要再起動）".to_string()
             }
         }
     }
@@ -2153,6 +2181,10 @@ pub struct Notice {
     pub message: String,
     /// 実行した argv や stderr など、展開して見せる詳細（不変ルール 4）。
     pub detail: Option<String>,
+    /// 積まれた時刻（[`AppState::now`] の写し）。最初の `Tick` より前は `None`。
+    pub at: Option<Timestamp>,
+    /// ステータスバーから下ろしたか（[`AppState::dismiss_notice`]）。
+    pub dismissed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

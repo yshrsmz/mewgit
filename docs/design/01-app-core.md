@@ -44,6 +44,7 @@ pub struct AppState {
     pub notices: VecDeque<Notice>,    // エラー・情報のトースト
     pub term: TermSize,               // 端末サイズ。レイアウト分岐に使う
     pub tick: u64,                    // Msg::Tick が来た回数。スピナーの駒を選ぶ
+    pub now: Option<Timestamp>,       // 最後の Msg::Tick の時刻。通知に刻む（下の「通知」）
     pub config: Config,               // 起動時に確定。実行中は再読込しない（08）
 }
 ```
@@ -105,7 +106,24 @@ impl AppState {
 - **`message` は「次に何をすればよいか」、`detail` は証拠**（argv と stderr）。
   ステータスバーが描くのは `message` の 1 行目だけなので、そこを証拠で埋めると
   案内が画面から消える（下の「失敗の案内文」）
-- 明示的な dismiss と期限切れは M6 のステータスバーのタスクで決める
+- **ステータスバーの通知は次の入力で下ろす**（M6。2026-09-26 に決めた）。下ろすのは
+  `Msg::Key` と `Msg::Paste` の入口で、**そのキーが何かする前**（`AppState::dismiss_notice`）
+  —— 後にすると、押した結果の警告がその場で消える。`Tick`・`Resize`・`Layout` と
+  非同期の完了では下ろさない。**離れているあいだに出た失敗を、読まれないまま消さない
+  ため**で、時間で消す形（Tick で期限切れ）を採らなかった理由もこれ。時間に依存しないので、
+  遷移のテストに時計も要らない
+- **下ろした旗は通知ごとに持つ**（`Notice.dismissed`）。`AppState` に 1 つの旗で持つと、
+  「出ている」と「通知が 1 件も無い」が同時に立つ形が組める（`CLAUDE.md` の「旗と値を
+  割らない」）。ステータスバーが読むのは `AppState::shown_notice`（最新の 1 件で、
+  下ろしていないもの）。**下ろしても履歴からは消えない**
+- **通知には積まれた時刻を刻む**（`Notice.at`）。**時計を読むのはランタイムだけ** ——
+  `Msg::Tick(Timestamp)` で運び、`update` は `AppState.now` に写して `push_notice` が
+  刻む。`update` の中で時計を読むと、同じ入力から違う状態ができて遷移をテストできない。
+  そのぶん刻まれる時刻は最大 1 周期（250ms）古い。**起動時の設定の警告は最初の
+  `Tick` より前に積まれる**ので、`runtime::open` が `now` を入れてから返す。
+  時刻は見る人のローカルのタイムゾーンで持つ（`Timestamp::now`。オフセットは
+  libgit2 の `git_signature_now` に数えさせ、日時のクレートは足さない）
+- **履歴の表示と `detail` の表示は M6 の次のタスク**（plan.md）
 
 ## Pane と Modal
 
@@ -1457,7 +1475,7 @@ PR を「無い」と言って作りに行く**形になる。**行き止まり�
   その行へ座る。**憶えないと座らない** —— `PrState::loaded` は「いま選んでいる PR の
   番号」を優先するので、作る前に別の行を選んでいると、新しい行が一覧の先頭に入っても
   カーソルはそのまま残る
-- 失敗は通知に出す。**要約行は端末の幅に収め、`GithubError` の `Display` と 422 の
+- 失敗は通知に出す。**要約行は通知の予算に収め、`GithubError` の `Display` と 422 の
   本文は `Notice.detail` へ**（上の「失敗の案内文」）—— 422 の本文にも上限が無い
 - **`JobKind::CreatePr` の `region()` は `None`。** 返るのは**作った PR そのもの**で、
   書き込みに追い越されて古くなるという問いが無い（`OpenPr` と同じ）
@@ -2064,12 +2082,14 @@ pub struct PushRejection {
   二度と出さなくなり、記憶を落とす経路（`exec_finished`）へ入れなくなる。リモート側の
   同名ブランチが外で消えても断り続けることになるので、**代わりに憶えないほうを直した**
   （上の「force push」）
-- **端末の幅に収める（80 桁なら 80 セル）。** フッターは 2 行あり、**1 行目は通知だけが
-  使う**（キーヒントは 2 行目。07 の「ステータスバー」）。溢れると `Paragraph` が黙って
-  切るのは**行の末尾**、つまり案内の「どうすればよいか」の側から消える。**見張りは
-  80 桁で描いて、案内の末尾が見えることを見る**（`contains` だけでは切れても通る）。
-  **以前の予算は 72 セルだった** —— 同じ行の右端に `q:quit` が居たので、空白 2 と
-  合わせて 8 セル譲っていた。ヒントを 2 行目へ移した時点で譲る相手が消えている
+- **端末の幅から時刻の 9 セル（`HH:MM:SS` と空白）を引いた 71 セルに収める**（80 桁の
+  端末で）。フッターは 2 行あり、**1 行目は通知だけが使う**（キーヒントは 2 行目。07 の
+  「ステータスバー」）。溢れると末尾が `…` に置き換わるので、**消えるのは案内の
+  「どうすればよいか」の側**。`…` は上限の無い値（パス・ホスト名）を埋めた文言が
+  溢れたときに切れたことを見せる受け皿で、**固定の文言を予算に収める理由は消えていない**。
+  **見張りは 80 桁で描いて、案内の末尾が見えることを見る**（`contains` だけでは切れても
+  通る）。**予算の経緯** —— 72（同じ行の右端に `q:quit` が居た）→ 80（ヒントを 2 行目へ
+  移した）→ 71（時刻を前に添えた。2026-09-26）
 - **argv は画面から退く。** これまでステータスバーに出ていた `git <argv>` は
   `detail` の 1 行目に移り、履歴表示（M6）まで見えない。**1 行目を 2 つで分けない**
   —— 案内文は端末の幅いっぱいまで使う前提で書いてある（上）ので、argv を前に置くと
@@ -2102,7 +2122,8 @@ impl AppState {
 ### スピナー
 
 **走っているものがあるあいだ、ヘッダの右端に駒と説明を出す**（`⠋ fetch`。07 の
-ヘッダ）。駒を進めるのは `Msg::Tick`（250ms）で、`AppState.tick` を 1 つ増やすだけ。
+ヘッダ）。駒を進めるのは `Msg::Tick`（250ms）で、`AppState.tick` を 1 つ増やす（`Tick` が運ぶ
+時刻は `AppState.now` に写すだけで、駒の選択には使わない。07 のヘッダ）。
 `ui` はその剰余で駒を選ぶ。
 
 - **時刻ではなく回数を持つ。** `ui` は `AppState` を描くだけ（不変ルール 2）なので、
@@ -2332,7 +2353,7 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
 
 ```rust
 pub enum Msg {
-    Key(Key), Resize { term: TermSize }, Layout { graph_rows: usize }, Tick,
+    Key(Key), Resize { term: TermSize }, Layout { graph_rows: usize }, Tick(Timestamp),
     // git_read
     Paste(String),                     // bracketed paste。編集中のモーダルだけが受ける
     LogLoaded { restart: bool, result: Result<LogPage, GitReadError> },
@@ -2517,7 +2538,7 @@ loop {
     let msg = tokio::select! {
         Some(ev) = events.next() => match event_to_msg(ev?) { Some(m) => m, None => continue },
         Some(msg) = msgs.recv() => msg,
-        _ = tick.tick() => Msg::Tick,
+        _ = tick.tick() => Msg::Tick(Timestamp::now()),
     };
     let cmd = app::update(&mut state, msg);
     if runtime.dispatch(&mut state, cmd).is_break() {
@@ -2576,7 +2597,8 @@ loop {
   通した破壊的操作を待たせると、**流れる時点の状態は押したときの状態ではない**
   （`x` で確認したファイルの区画が、先に走っている `pull` で変わっている）。
   中断が入ったので「終わるまで待つ」から抜ける手もある
-- `Tick` は 250ms。`AppState.tick` を進めてスピナーを回すのと、外部変更検知
+- `Tick` は 250ms。**ランタイムが読んだ時刻を載せる**（`update` は時計を読まない。
+  上の「通知」）。`AppState.tick` を進めてスピナーを回すのと、外部変更検知
   （`.git/HEAD` の mtime 監視）に使う。**`Tick` から `Cmd` は出さない** —— 1 秒に 4 回
   git を叩くことになる
 - `Cmd::Exec` のタスクには中断の受け口（`oneshot`）を渡し、送り手はランタイムが持つ。

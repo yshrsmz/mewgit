@@ -3095,7 +3095,7 @@ mod tests {
             "待つだけの状態に操作を案内している"
         );
 
-        // **案内は端末の幅（80 セル）に収める**（01 の「失敗の案内文」）。
+        // **案内は通知の予算に収める**（01 の「失敗の案内文」）。
         for message in all {
             assert!(
                 cells(message) <= NOTICE_CELLS,

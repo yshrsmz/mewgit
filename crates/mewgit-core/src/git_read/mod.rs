@@ -190,6 +190,30 @@ pub struct Timestamp {
     pub offset_minutes: i32,
 }
 
+impl Timestamp {
+    /// いまの時刻を、**見る人の環境のタイムゾーン**で。
+    ///
+    /// 通知に刻む時刻に使う（01 の「通知」）。コミットの日時と違って、刻む相手は
+    /// この端末の前にいる人なので、ローカルのオフセットで持つ。
+    ///
+    /// **オフセットは libgit2 に数えさせる。** `git_signature_now` は UTC の `tm` を
+    /// `mktime` に渡して差を取るので、夏時間も含めたローカルのオフセットが返る
+    /// （libgit2 1.9 の `signature.c` の `current_time`）。そのためだけに日時の
+    /// クレートを足さない（07 の「詳細の展開」と同じ判断）。呼ぶたびに数え直すので、
+    /// 実行中に夏時間をまたいでも追随する。**名前とメールは意味を持たない** ——
+    /// `Signature` を作らないと時刻を取り出せないので置いているだけ。
+    pub fn now() -> Self {
+        // 名前もメールも空でなく `<` `>` を含まない定数なので、`Err` は来ない。
+        let when = git2::Signature::now("mewgit", "mewgit")
+            .expect("定数の名前とメールは常に通る")
+            .when();
+        Self {
+            seconds: when.seconds(),
+            offset_minutes: when.offset_minutes(),
+        }
+    }
+}
+
 /// [`LogSession::next_page`] が返す 1 ページ分。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LogPage {
@@ -626,5 +650,18 @@ mod tests {
             let oid = Oid::from_str(hex).expect("40 桁の 16 進");
             assert_eq!(short_oid(&oid), hex[..SHORT_OID], "{hex}");
         }
+    }
+
+    #[test]
+    fn now_is_the_current_second_with_a_real_world_offset() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch より後")
+            .as_secs() as i64;
+        let now = super::Timestamp::now();
+        // 秒の境目をまたぐぶんだけ許す。
+        assert!((before..=before + 1).contains(&now.seconds), "{now:?}");
+        // 実在するオフセットは UTC-12:00 から UTC+14:00 まで。
+        assert!((-12 * 60..=14 * 60).contains(&now.offset_minutes), "{now:?}");
     }
 }

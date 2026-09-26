@@ -118,7 +118,12 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 ///   入力欄を開いてしまうと、あとから届く返信では取り消せない。
 fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
     match msg {
-        Msg::Key(key) => update_key(state, key),
+        // **下ろすのは入力だけ**（01 の「通知」）。`Tick` や非同期の完了で下ろすと、
+        // 離れているあいだに出た失敗が誰にも読まれずに消える。
+        Msg::Key(key) => {
+            state.dismiss_notice();
+            update_key(state, key)
+        }
         // 端末サイズはレイアウトの分岐にしか使わない。グラフの行数はこのあと
         // ランタイムが `Msg::Layout` で入れる（01 の「ランタイム」）。
         Msg::Resize { term } => {
@@ -132,11 +137,15 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
             // 続きを頼む: 窓が広がって残りが 1 画面を切ったぶんのログの追加ページ。
             load_more(state)
         }
-        Msg::Paste(text) => paste(state, &text),
+        Msg::Paste(text) => {
+            state.dismiss_notice();
+            paste(state, &text)
+        }
         // スピナーの駒を進めるだけ。読み直しは引かない（`Tick` は 250ms ごとに
         // 来るので、ここから `Cmd` を出すと git を 1 秒に 4 回叩くことになる）。
-        Msg::Tick => {
+        Msg::Tick(now) => {
             state.tick = state.tick.wrapping_add(1);
+            state.now = Some(now);
             Cmd::None
         }
 
@@ -446,7 +455,7 @@ mod tests {
     use super::test_support::{
         commit_loads, cursor, detail_ok, diff_state, exec_done_of, more, on_first_commit,
         on_first_commit_with_files, press, press_code, state, state_on_branches,
-        state_with_commits, state_with_page, tab_to, worktree_state, ROWS,
+        state_with_commits, state_with_page, tab_to, tick, worktree_state, NOW, ROWS,
     };
     use super::*;
     use crate::app::{keys, Modal, RightTab, TermSize};
@@ -457,6 +466,74 @@ mod tests {
     use crate::test_util::{
         fake_pull_request, fake_snapshot, fake_target, pr_list_loaded, put_on_branch, reply,
     };
+
+    /// 最新の通知の文言。下ろしていれば `None`。
+    fn shown(state: &AppState) -> Option<&str> {
+        state.shown_notice().map(|notice| notice.message.as_str())
+    }
+
+    #[test]
+    fn a_key_takes_the_notice_down_but_keeps_the_one_it_raised() {
+        // **下ろすのは押したキーが何かする前**（01 の「通知」）。後にすると、`A` が
+        // 出した「確かめている最中」の案内がその場で消える。
+        let mut state = state();
+        state.push_notice(NoticeLevel::Warn, "古い通知".to_string(), None);
+        assert_eq!(shown(&state), Some("古い通知"));
+
+        let _ = press(&mut state, 'j');
+        assert_eq!(shown(&state), None, "キーで下ろしていない");
+        // 履歴には残る。下ろしたのは表示だけ。
+        assert_eq!(state.notices.len(), 1);
+
+        // `Resolving` の `A` は通知に落ちる（01 の「アカウント選択」）。
+        let _ = press(&mut state, 'A');
+        let raised = shown(&state)
+            .expect("A が出した通知まで下ろしている")
+            .to_string();
+        assert_ne!(raised, "古い通知");
+
+        let _ = press(&mut state, 'j');
+        assert_eq!(shown(&state), None);
+    }
+
+    #[test]
+    fn a_paste_takes_the_notice_down_too() {
+        let mut state = state();
+        state.push_notice(NoticeLevel::Warn, "古い通知".to_string(), None);
+
+        let _ = update(&mut state, Msg::Paste("x".to_string()));
+
+        assert_eq!(shown(&state), None);
+    }
+
+    #[test]
+    fn only_input_takes_the_notice_down() {
+        // 離れているあいだに出た失敗を、`Tick` や非同期の完了で消さない。
+        let mut state = state();
+        state.push_notice(NoticeLevel::Error, "push に失敗しました".to_string(), None);
+
+        let _ = update(&mut state, tick());
+        let _ = update(&mut state, Msg::Layout { graph_rows: ROWS });
+        let _ = update(
+            &mut state,
+            Msg::Resize {
+                term: TermSize::default(),
+            },
+        );
+
+        assert_eq!(shown(&state), Some("push に失敗しました"));
+    }
+
+    #[test]
+    fn a_notice_carries_the_time_of_the_last_tick() {
+        let mut state = state();
+        state.push_notice(NoticeLevel::Info, "前".to_string(), None);
+        let _ = update(&mut state, tick());
+        state.push_notice(NoticeLevel::Info, "後".to_string(), None);
+
+        let at: Vec<_> = state.notices.iter().map(|notice| notice.at).collect();
+        assert_eq!(at, [None, Some(NOW)]);
+    }
 
     /// 案内に出すキーの表（`app::keys`）は、`update_key` の `match` に対する 2 本目の
     /// 一覧（01 の「案内に出すキーの表」）。**表に載せたキーがそのペインで本当に
@@ -502,6 +579,9 @@ mod tests {
         for key in hint.keys() {
             let mut state = hinted_state(pane);
             assert_eq!(state.focus, pane, "{pane:?} に居ません");
+            // **出ている通知があると、どのキーも「下ろした」ことで反応したように
+            // 見える**（01 の「通知」）。この見張りが空になるので、無い状態から押す。
+            assert_eq!(state.shown_notice(), None, "{pane:?} に通知が出ています");
             let before = format!("{state:?}");
 
             let cmd = update(&mut state, Msg::Key(*key));
@@ -809,7 +889,7 @@ mod tests {
         let mut state = state();
         assert_eq!(state.tick, 0);
 
-        assert_eq!(update(&mut state, Msg::Tick), Cmd::None);
+        assert_eq!(update(&mut state, tick()), Cmd::None);
 
         assert_eq!(state.tick, 1);
     }

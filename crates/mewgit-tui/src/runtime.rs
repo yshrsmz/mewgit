@@ -296,12 +296,7 @@ impl Runtime {
                 self.cancel = Some(cancel);
                 tokio::spawn(async move {
                     let result = runner.run_cancelable(&op, canceled).await;
-                    // 進行中操作の再検出は M5（03）。それまではここで `None` を入れる。
-                    let done = ExecDone {
-                        op,
-                        result,
-                        progress: None,
-                    };
+                    let done = ExecDone { op, result };
                     let _ = tx.send(Msg::ExecFinished(Box::new(done)));
                 });
                 ControlFlow::Continue(())
@@ -596,7 +591,7 @@ mod tests {
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::git_read::HeadInfo;
+    use mewgit_core::git_read::{HeadInfo, InProgressOp};
     use mewgit_core::test_util::{fake_account, fake_target, wait_for_pid, BareRepo, TestRepo};
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -844,6 +839,97 @@ mod tests {
         assert_eq!(state.worktree.snapshot.staged.len(), 1);
         assert!(state.worktree.snapshot.untracked.is_empty());
         assert!(state.notices.is_empty(), "{:?}", state.notices);
+    }
+
+    /// `cmd`（書き込み）を流し、返ってきた `Msg` を `update` に渡す。**`update` が
+    /// 返した読み直しもそのまま流し、status が届くまで受け続ける**（書き込みのあとの
+    /// 読み直しまでを 1 回で踏む）。ref を動かす書き込みは `LoadStatus` を他の読み直しと
+    /// 束ねて返すので、`Cmd` を 1 つに決め打ちしない。
+    async fn dispatch_through_status(
+        runtime: &mut Runtime,
+        msgs: &mut mpsc::UnboundedReceiver<Msg>,
+        state: &mut AppState,
+        cmd: Cmd,
+    ) {
+        let cmd = state.issue(cmd);
+        assert!(runtime.dispatch(state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        // `update` は出口で `issue` を通してある。**もう一度通さない** —— 二重に通すと
+        // 登録済みのジョブとして落とされ、ジョブだけが残って下のループが返らない。
+        let next = update(state, msg);
+        assert!(runtime.dispatch(state, next).is_continue());
+        assert!(
+            state.jobs.is_running(JobKind::LoadStatus),
+            "書き込みのあとに status を読み直していません"
+        );
+        while state.jobs.is_running(JobKind::LoadStatus) {
+            let msg = msgs.recv().await.expect("Msg が返りませんでした");
+            let _ = update(state, msg);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_write_shows_the_operation_it_stopped_in() {
+        // **検出の関数ではなく、書き込みのあとの status の読み直しに載ってくることを
+        // 見る**（03 の「進行中操作との整合」）。
+        let (repo, side, _) = TestRepo::diverged();
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+
+        dispatch_through_status(
+            &mut runtime,
+            &mut msgs,
+            &mut state,
+            Cmd::Exec(GitOp::CherryPick(vec![side])),
+        )
+        .await;
+
+        assert_eq!(
+            state.worktree.snapshot.progress,
+            Some(InProgressOp::CherryPick { oid: Some(side) })
+        );
+    }
+
+    #[tokio::test]
+    async fn an_operation_left_in_progress_is_seen_at_startup_and_cleared_by_abort() {
+        // 起動時は `init` の `LoadStatus` が読む（01 の「起動時の読み込み」）。
+        // **abort で消えることだけでなく、関係の無い書き込みでは消えない**ことも見る。
+        let (repo, side, _) = TestRepo::diverged();
+        assert!(!repo.try_git(&["cherry-pick", &side.to_string()]));
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+        assert_eq!(state.worktree.snapshot.progress, None);
+        let cmd = state.issue(Cmd::LoadStatus);
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+        assert_eq!(
+            state.worktree.snapshot.progress,
+            Some(InProgressOp::CherryPick { oid: Some(side) })
+        );
+
+        // 進行中操作と関係の無い書き込み（コンフリクトしていないファイルの stage）。
+        repo.write_worktree_file("other.txt", b"x");
+        dispatch_through_status(
+            &mut runtime,
+            &mut msgs,
+            &mut state,
+            Cmd::Exec(GitOp::Stage(vec!["other.txt".into()])),
+        )
+        .await;
+        assert!(
+            state.worktree.snapshot.progress.is_some(),
+            "stage で消えました"
+        );
+
+        dispatch_through_status(
+            &mut runtime,
+            &mut msgs,
+            &mut state,
+            Cmd::Exec(GitOp::CherryPickAbort),
+        )
+        .await;
+        assert_eq!(state.worktree.snapshot.progress, None);
     }
 
     #[tokio::test]

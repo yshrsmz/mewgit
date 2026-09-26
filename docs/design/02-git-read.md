@@ -34,12 +34,11 @@ impl RepoReader {
     pub fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
     pub fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
     pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;
-    pub fn in_progress(&self) -> Option<InProgressOp>;
 }
 ```
 
 git2 の呼び出しはどれも壊れたリポジトリや I/O エラーで失敗しうるので、参照系も含めてすべて `Result` を返す。
-例外は `in_progress` だけで、これは `.git/` のファイルの有無を見るだけだから「進行中の操作は無い」と区別できない。
+進行中操作の検出（`in_progress`）は自由関数で、`Result` を返さない。`.git/` のファイルの有無を見るだけで、読めないことと「進行中の操作は無い」を区別しても出し分けが無いため（下の「進行中操作の検出」）。`status()` の中で呼ばれる。
 
 ### open
 
@@ -375,6 +374,7 @@ pub struct WorktreeSnapshot {
     pub unstaged: Vec<FileEntry>,
     pub untracked: Vec<FileEntry>,
     pub conflicted: Vec<FileEntry>,
+    pub progress: Option<InProgressOp>,   // 区画ではない。下の「進行中操作の検出」
 }
 
 pub struct FileEntry {
@@ -506,15 +506,88 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
 
 ## 進行中操作の検出
 
-| 判定 | InProgressOp |
-|---|---|
-| `.git/rebase-merge/` 存在 | `Rebase { interactive, current, total, onto }` |
-| `.git/rebase-apply/` 存在 | `Rebase { interactive: false, .. }` |
-| `.git/CHERRY_PICK_HEAD` | `CherryPick { oid }` |
-| `.git/REVERT_HEAD` | `Revert { oid }` |
-| `.git/MERGE_HEAD` | `Merge { oid }` |
+```rust
+pub fn in_progress(git_dir: &Path) -> Option<InProgressOp>;   // git2 を使わない自由関数
 
-`git2::Repository::state()` も参考にするが、rebase の進捗（`msgnum` / `end`）はファイルから直接読む。
+pub enum InProgressOp {
+    Rebase { step: Option<Step> },   // Step { current, total }
+    Am { step: Option<Step> },
+    CherryPick { oid: Option<Oid> },
+    Revert { oid: Option<Oid> },
+    Merge { oid: Oid },
+}
+```
+
+**`status()` が同じ読み取りの中で呼び、`WorktreeSnapshot.progress` に載せる。** 別の
+読み取り（起動時の同期読みや、書き込みの直後に `ExecFinished` へ添える形）にすると、
+入口ごとに到着順の議論が要る —— `LoadStatus` に載せれば、古い返りを捨てるのは既存の
+世代（01 の「実行中ジョブ › 世代」）の 1 本で、`conflicted` と進行中操作が同じ時点の
+値になる。`git status` 自身も両方を 1 回で出す。**関数を gitdir を受ける自由関数に
+しておくのは**、ファイルしか見ないのでテストで gitdir に見立てたディレクトリを渡せる
+ようにするため。
+
+**読む先はワークツリーごとの gitdir**（`RepoReader::git_dir()` = `git2::Repository::path()`）。
+linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<name>/` に置かれる
+（下の実測）ので、`workdir/.git` を決め打ちすると別のワークツリーの状態を読む。
+
+**判定は上から順で、最初に当たった 1 つを採る。** `git status` とは違う —— あちらは複数を同時に出す（`rebase -r` の merge の行がコンフリクトすると `rebase-merge/` と `MERGE_HEAD` が両方在り、両方を出す。下の実測）。**rebase を先に見る**のは、そのとき打つのが `git rebase --continue` / `--abort` だから（merge を採ると M5 の continue / abort が merge 側の argv を組む）。
+
+| 判定 | InProgressOp | 進捗 |
+|---|---|---|
+| `rebase-merge/` 存在 | `Rebase` | `msgnum` / `end` |
+| `rebase-apply/applying` 存在 | `Am` | `next` / `last` |
+| `rebase-apply/` 存在（`applying` 無し） | `Rebase` | `next` / `last` |
+| `MERGE_HEAD` | `Merge { oid }`（先頭行） | — |
+| `CHERRY_PICK_HEAD` | `CherryPick { oid: Some }` | — |
+| `REVERT_HEAD` | `Revert { oid: Some }` | — |
+| `sequencer/todo` の先頭行が `pick` / `p` | `CherryPick { oid: None }` | — |
+| `sequencer/todo` の先頭行が `revert` | `Revert { oid: None }` | — |
+
+**実測（git 2.55.0、2026-09-26。一時リポジトリで各状態を作って `.git/` を読んだ）。**
+表の形はここから決めた。
+
+| 作った状態 | `.git/` に在ったもの | `git status` の見出し |
+|---|---|---|
+| `git rebase main`（`-i` 無し）でコンフリクト | `rebase-merge/`（`interactive` **も在る**）、`msgnum` 1 / `end` 2 | interactive rebase in progress |
+| `git rebase -i main` で `edit` に止まる | `rebase-merge/`（`amend` が増える）、`done` の最終行 `edit …` | interactive rebase in progress |
+| `git rebase -x false <base>`（2 コミット、コンフリクト無し） | `msgnum` 2 / **`end` 4**、`done` の最終行 `exec false` | — |
+| `git rebase -i main` で `edit` にした pick がコンフリクト | `done` の最終行 `edit …`（止まった理由はコンフリクト） | interactive rebase in progress |
+| `git rebase -r main` で merge の行がコンフリクト | `rebase-merge/` **と** `MERGE_HEAD` の両方 | interactive rebase と unmerged paths の両方を出す |
+| `git rebase --apply main` でコンフリクト | `rebase-apply/`（`rebasing` が在る）、`next` / `last` | rebase in progress |
+| `git am` でコンフリクト | `rebase-apply/`（**`applying` が在る**） | You are in the middle of an am session |
+| `git cherry-pick A` でコンフリクト | `CHERRY_PICK_HEAD` | — |
+| `git cherry-pick A B` でコンフリクト | `CHERRY_PICK_HEAD` + `sequencer/`（`todo` は `pick …` の 2 行） | — |
+| ↑ を解いて `git commit` した直後 | **`sequencer/` だけ**（`CHERRY_PICK_HEAD` は消える） | Cherry-pick currently in progress |
+| `git revert` でコンフリクト | `REVERT_HEAD` | — |
+| `git merge` でコンフリクト / `--no-commit` | `MERGE_HEAD`（1 行） | — |
+| linked worktree で `git merge` でコンフリクト | `MERGE_HEAD` は `.git/worktrees/<name>/` に在る | — |
+
+ここから決めたこと ——
+
+- **`Rebase` に `interactive` を持たせない。** `-i` の有無で `rebase-merge/` の中身は
+  変わらず（2.26 以降の既定は merge backend）、`git status` 自身も両方を
+  「interactive rebase」と呼ぶ。区別できない値を持つと、読み手が嘘の分岐を書く
+- **`Am` を `Rebase` と分ける。** 同じ `rebase-apply/` だが、am の途中で
+  `git rebase --continue` を打つと git が `It looks like 'git am' is in progress.
+  Cannot rebase.` で断る（実測）。continue / abort の argv が違うので、同じ変種に
+  すると M5 の continue で壊れる。**mewgit から am は始めない**が、外で始めた am の途中で
+  開いたときに「進行中は無い」と読むと、書き込みの拒否（M5）が効かない
+- **`CherryPick` / `Revert` の `oid` は `Option`。** 複数の pick の途中で 1 つを
+  commit で解くと `sequencer/` だけが残る。`git status` はそれも進行中と呼ぶ
+- **`git2::Repository::state()` は使わない。** libgit2 1.9 の実装（`repository.c`）は
+  `rebase-merge/interactive` の有無で `REBASE_INTERACTIVE` を返すので上の区別が
+  できず、`sequencer/todo` は `CHERRY_PICK_HEAD` が在るときしか見ない（`sequencer/`
+  だけの形は `NONE`）。**ファイルが SoT**
+- **進捗（`Step`）は todo の行数で、コミット数ではない。** `-x` は exec の行を足すので、
+  2 コミットの rebase が `end` 4 になる。画面には git の数えたとおり出す
+- **`Step` が読めないときは `None`**（ディレクトリは在るのに `msgnum` がまだ無い ——
+  外で `git rebase -i` の todo を編集している最中など）。**進行中であることは落とさない**
+- **止まった理由（`edit` / コンフリクト / exec の失敗）は持たない。** `done` の最終行は
+  理由を表さない —— `edit` にした pick がコンフリクトすると、最終行は `edit` なのに
+  止まったのはコンフリクトのため（実測）。07 のモックにあった `(edit)` はこの理由で出さない
+- `MERGE_HEAD` は octopus では複数行になる。`Merge` が持つのは先頭行だけ
+- ファイルが読めない・中身が壊れているときは、その行を「無い」と読んで次の判定へ進む。
+  **戻り値が `Option` で `Result` でないのはこのため**（上の「API」）
 
 ## エラー
 

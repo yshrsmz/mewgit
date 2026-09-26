@@ -18,7 +18,7 @@ use std::path::Path;
 use crate::{modals, panes};
 use mewgit_core::app::{keys, AppState, GraphSelection, Key, KeyCode, KeyHint, Pane, TermSize};
 use mewgit_core::auth::{gh, AccountState, DegradedReason};
-use mewgit_core::git_read::{FileEntry, FileStatus};
+use mewgit_core::git_read::{short_oid, FileEntry, FileStatus, InProgressOp, Step};
 use mewgit_core::github::RateLimit;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -58,7 +58,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         GraphSelection::Wip => panes::worktree::render(frame, right, state),
         GraphSelection::Commit(line) => panes::commit::render(frame, right, state, &line.commit),
     }
-    frame.render_widget(notice_line(state, notice.width), notice);
+    frame.render_widget(status_line(state, notice.width), notice);
     frame.render_widget(hint_line(state, hints.width), hints);
 
     // モーダルは最後。下のペインを覆って描く（07）。
@@ -533,24 +533,55 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
     Some(Line::from(spans))
 }
 
-/// フッターの 1 行目。直近の通知だけを、積まれた時刻を添えて出す。
+/// フッターの 1 行目。進行中操作のバッジと、直近の通知を積まれた時刻を添えて出す。
 ///
 /// **幅いっぱい使ってよい**（キーヒントは 2 行目）。時刻の 9 セルを引いた残りに
 /// 案内文が収まることは `app` 側が見張る（01 の「失敗の案内文」）。**キー入力で
-/// 下ろした通知は出さない**（[`AppState::shown_notice`]）。
+/// 下ろした通知は出さない**（[`AppState::shown_notice`]）が、**バッジは下ろさない**
+/// —— 進行中操作は continue / abort するまで終わらない（07 の「ステータスバー」）。
 ///
 /// **溢れたら末尾を `…` にする**（07 の「ステータスバー」）。予算を見張れるのは
 /// 固定の文言だけで、パスやホスト名を埋めた文言には上限が無い。黙って切ると、
-/// 切れたことが画面から判らない。
+/// 切れたことが画面から判らない。**バッジが出ているあいだは、そのぶん短く切れる**
+/// （予算は縮めない。07）。
 ///
 /// 出すのは先頭行だけ。toml のパースエラーのように複数行のメッセージがあり、そのまま
 /// 流すと改行が消えて読めなくなる。全文は `L` の履歴で読む（`modals::notice_log`）。
-fn notice_line(state: &AppState, width: u16) -> Paragraph<'_> {
+fn status_line(state: &AppState, width: u16) -> Paragraph<'_> {
+    let mut lead = Vec::new();
+    if let Some(op) = &state.worktree.snapshot.progress {
+        lead.push(Span::styled(
+            format!(" {} ", progress_label(op)),
+            theme::in_progress(),
+        ));
+        lead.push(Span::raw(" "));
+    }
     let Some(notice) = state.shown_notice() else {
-        return Paragraph::new("");
+        return Paragraph::new(Line::from(lead));
     };
-    let at = Span::styled(format!("{} ", time::clock(notice.at)), theme::muted());
-    Paragraph::new(lead_line(vec![at], &notice.message, width))
+    lead.push(Span::styled(
+        format!("{} ", time::clock(notice.at)),
+        theme::muted(),
+    ));
+    Paragraph::new(lead_line(lead, &notice.message, width))
+}
+
+/// 進行中操作のバッジの文言。git の語を大文字で（07 の「ステータスバー」）。
+///
+/// **止まった理由（`edit` など）は出さない** —— 検出側が持っていない（02）。
+fn progress_label(op: &InProgressOp) -> String {
+    let step = |step: &Option<Step>| step.map(|step| format!("{}/{}", step.current, step.total));
+    let (name, detail) = match op {
+        InProgressOp::Rebase { step: s } => ("REBASE", step(s)),
+        InProgressOp::Am { step: s } => ("AM", step(s)),
+        InProgressOp::CherryPick { oid } => ("CHERRY-PICK", oid.as_ref().map(short_oid)),
+        InProgressOp::Revert { oid } => ("REVERT", oid.as_ref().map(short_oid)),
+        InProgressOp::Merge { oid } => ("MERGE", Some(short_oid(oid))),
+    };
+    match detail {
+        Some(detail) => format!("{name} {detail}"),
+        None => name.to_string(),
+    }
 }
 
 /// `lead`（時刻など）の後ろに `message` の 1 行目を置き、`width` に収まるように
@@ -765,20 +796,22 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        degraded_label, ellipsize, file_row, fits, hint_text, pane_area, push_expanded, window,
-        wrapped, SPACES, TAB_WIDTH,
+        degraded_label, ellipsize, file_row, fits, hint_text, pane_area, progress_label,
+        push_expanded, window, wrapped, SPACES, TAB_WIDTH,
     };
     use crate::test_util::{
-        draw, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status, terminal_with,
+        draw, footer_area, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status,
+        terminal_with,
     };
     use mewgit_core::app::{
         keys, update, AppState, Cmd, JobKind, Modal, Msg, NoticeLevel, Pane, TargetState, TermSize,
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
+    use mewgit_core::git_read::{short_oid, InProgressOp, Step};
     use mewgit_core::github::GithubError;
     use mewgit_core::test_util::{
-        fake_account, fake_ambiguous, fake_no_access, fake_rate_limit, fake_snapshot,
+        fake_account, fake_ambiguous, fake_no_access, fake_oid, fake_rate_limit, fake_snapshot,
         fetch_pr_details,
     };
     use ratatui::style::{Color, Modifier};
@@ -1601,6 +1634,105 @@ mod tests {
         let last = notice_bar_with(&over);
         assert!(!last.contains(&over), "notice: {last:?}");
         assert!(last.contains(&format!("{fits}…")), "notice: {last:?}");
+    }
+
+    #[test]
+    fn the_progress_badge_leads_the_line_and_outlives_the_notice() {
+        // 通知は次の入力で下ろすが、進行中操作は continue / abort するまで終わらない
+        // （07 の「ステータスバー」）。**通知が無い行にも出る**ことまで見る。
+        let mut state = state_at("/repo");
+        state.worktree.snapshot.progress = Some(InProgressOp::Rebase {
+            step: Some(Step {
+                current: 3,
+                total: 7,
+            }),
+        });
+        state.push_notice(NoticeLevel::Error, "push に失敗しました".to_string(), None);
+        let bar = notice_bar(&state, TermSize::default());
+        assert!(
+            bar.starts_with(" REBASE 3/7  10:03:26 push に失敗しました"),
+            "notice: {bar:?}"
+        );
+
+        state.dismiss_notice();
+        let bar = notice_bar(&state, TermSize::default());
+        assert_eq!(bar.trim_end(), " REBASE 3/7", "notice: {bar:?}");
+    }
+
+    #[test]
+    fn the_progress_badge_is_set_apart_from_the_notice() {
+        // 反転だけだとタブやカーソル行と同じ見た目になる（`theme::in_progress`）。
+        let mut state = state_at("/repo");
+        state.worktree.snapshot.progress = Some(InProgressOp::Merge { oid: fake_oid(1) });
+        let terminal = terminal_with(&state, TermSize::default());
+        let y = footer_area(TermSize::default(), 0).y;
+        let buffer = terminal.backend().buffer();
+
+        let badge = &buffer[(1, y)];
+        assert_eq!(badge.symbol(), "M");
+        assert_eq!(badge.fg, Color::Yellow);
+        assert!(badge.modifier.contains(Modifier::REVERSED));
+        // 前後の空白 1 つずつまでがバッジ。区切りの空白は素のまま。
+        let label = format!(" MERGE {} ", short_oid(&fake_oid(1)));
+        let width = u16::try_from(label.len()).unwrap();
+        assert!(buffer[(0, y)].modifier.contains(Modifier::REVERSED));
+        assert!(buffer[(width - 1, y)].modifier.contains(Modifier::REVERSED));
+        assert!(!buffer[(width, y)].modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn each_operation_has_its_git_name_on_the_badge() {
+        let oid = fake_oid(1);
+        let short = short_oid(&oid);
+        let step = Some(Step {
+            current: 1,
+            total: 2,
+        });
+        for (op, label) in [
+            (InProgressOp::Rebase { step }, "REBASE 1/2".to_string()),
+            (InProgressOp::Rebase { step: None }, "REBASE".to_string()),
+            (InProgressOp::Am { step }, "AM 1/2".to_string()),
+            (
+                InProgressOp::CherryPick { oid: Some(oid) },
+                format!("CHERRY-PICK {short}"),
+            ),
+            (
+                InProgressOp::CherryPick { oid: None },
+                "CHERRY-PICK".to_string(),
+            ),
+            (
+                InProgressOp::Revert { oid: Some(oid) },
+                format!("REVERT {short}"),
+            ),
+            (InProgressOp::Revert { oid: None }, "REVERT".to_string()),
+            (InProgressOp::Merge { oid }, format!("MERGE {short}")),
+        ] {
+            assert_eq!(progress_label(&op), label, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn a_notice_beside_the_longest_badge_is_cut_short_not_pushed_off() {
+        // **予算（71 セル）は縮めない**ので、いちばん長いバッジ（`CHERRY-PICK
+        // abc1234`、前後の空白と区切りで 22 セル）の隣では 80 − 22 − 9 = 49 セルで
+        // 切れる（07 の「ステータスバー」）。**24 と 25 はリテラルのまま置く** ——
+        // 上の `a_notice_of_the_full_width_fits_on_its_own_line` と同じ理由。
+        let mut state = state_at("/repo");
+        state.worktree.snapshot.progress = Some(InProgressOp::CherryPick {
+            oid: Some(fake_oid(1)),
+        });
+
+        let fits = "あ".repeat(24);
+        state.push_notice(NoticeLevel::Error, fits.clone(), None);
+        let bar = notice_bar(&state, TermSize::default());
+        assert!(bar.contains(&fits), "notice: {bar:?}");
+        assert!(!bar.contains('…'), "notice: {bar:?}");
+
+        let over = "あ".repeat(25);
+        state.push_notice(NoticeLevel::Error, over.clone(), None);
+        let bar = notice_bar(&state, TermSize::default());
+        assert!(!bar.contains(&over), "notice: {bar:?}");
+        assert!(bar.contains(&format!("{fits}…")), "notice: {bar:?}");
     }
 
     #[test]

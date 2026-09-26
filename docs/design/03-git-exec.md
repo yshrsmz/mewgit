@@ -413,7 +413,6 @@ GIT_SSH_COMMAND = "<実効> -o BatchMode=yes"
 - タイムアウトは設けない（fetch の長さは予測不能）。代わりに UI から中断できるようにする
   （下の「キャンセル」）
 - **`RebaseInteractive` は `Runner` が実行せずに拒否する**（M5 まで）。todo を差し替えずに `git rebase -i` を走らせると、`GIT_EDITOR=true` により全 `pick` の rebase が実行され、`plan` を黙って捨てた破壊的操作になる。M5 で `--sequence-editor` を配線したら外す
-- **進行中操作（`InProgressOp`）の再検出は M5。** `git_read::in_progress` がまだ無いので、`ExecDone.progress` はランタイムが `None` を入れる
 
 終了状態を得られない経路は 4 つ（`to_commands` の失敗、`RebaseInteractive` の拒否、
 起動の失敗、終了待ちの失敗）。どれも `ExecError::NoResult` で返し、`reason` には git の
@@ -491,14 +490,23 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 3. `GIT_SEQUENCE_EDITOR="cp T"` 相当のスクリプトを渡して `git rebase -i <onto>` を実行
    - 実際には `sh -c 'cat "$1" > "$2"'` 形式のヘルパーではなく、自バイナリを `--sequence-editor <T>` サブコマンド付きで指定する（外部依存ゼロ）
 4. `reword` は `GIT_EDITOR` にも自バイナリを指定し、あらかじめ集めたメッセージを書き込む
-5. 停止したら `ExecFinished` に添えた `progress` で `Rebase` モードに入り、continue / skip / abort を提供
+5. 停止したら、書き込みのあとの `LoadStatus` が運ぶ進行中操作（`WorktreeSnapshot.progress`）で `Rebase` モードに入り、continue / skip / abort を提供
 
 自バイナリをエディタとして使う場合、`mewgit --sequence-editor <path>` / `mewgit --commit-editor <path>` の隠しサブコマンドを用意する。
 
 ## 進行中操作との整合
 
-- `Runner` は `GitOp` 実行後に必ず `InProgressOp`（`git_read::in_progress`）を再検出し、
-  `ExecFinished` の `progress` として一緒に返す。実行結果と進行中操作を別々の `Msg` に
-  割ると `update` が受け取る順序に依存してしまうため、1 通にまとめる
-  （M5。`git_read::in_progress` ができるまではランタイムが `None` を入れる）
-- 進行中操作があるときは、continue / skip / abort 以外の書き込み `GitOp` を拒否する（UI 側でも無効化）
+- **`ExecFinished` は進行中操作を運ばない。** `exec_finished` が成功・失敗・中断を
+  問わず出す `LoadStatus` の返り（`WorktreeSnapshot.progress`。02）で入れ替わる
+  （`GitOp::SetAccount` / `UnsetAccount`（`.git/config` の 1 行だけを書く）は出さない —— 進行中操作は動かない）。
+  **以前は「実行結果と 1 通に束ねる」と決めていた**（別々の `Msg` に割ると受け取る順序に
+  依存するため）が、束ねると起動時・書き込みのあと・M6 の外部変更の検知で入口が 3 本に
+  なり、それぞれに到着順の議論が要った。status に載せれば、古い返りを捨てるのは既存の
+  世代の 1 本で済む（01 の「起動時の読み込み」）。**代わりにバッジは status が届くまで
+  1 往復遅れる**が、そのあいだは `conflicted` の一覧も同じだけ遅れており、世代の門が
+  その窓を「まだ信じない」と読むので食い違いにはならない（2026-09-26、`/simplify` の
+  指摘を受けてユーザーと決めた）
+- `Runner` は gitdir を知らない。中断した git の後始末（`CHERRY_PICK_HEAD` の削除など）は
+  `run_cancelable` が終了を待ってから返るので、`LoadStatus` はそのあとを読む
+- 進行中操作があるときは、continue / skip / abort 以外の書き込み `GitOp` を拒否する（UI 側でも無効化）。
+  **これは M5 の別タスク**（`docs/plan.md`）で、検出と表示だけが先に入っている

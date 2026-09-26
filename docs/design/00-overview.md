@@ -23,7 +23,8 @@
 （`Oid`、`InProgressOp`、`Hunk` など）だけは他の 3 つから参照してよい**。git の概念を
 表す語彙を 4 回定義し直さないため。逆向き（`git_read` が他の 3 つを使う）と、
 `graph` / `git_exec` / `github` の相互参照はしない。進行中操作の**検出**は `git_read`
-の責務で、`git_exec` は実行後にそれを呼んで結果に添える（02・03 参照）。
+の責務で、`status()` が同じ読み取りの中で検出して `WorktreeSnapshot` に載せる
+（02・03 参照）。
 
 ## クレート分割（Cargo workspace）
 
@@ -57,7 +58,7 @@ crates/
                 remote.rs  account.rs  modal.rs  exec.rs
                 test_support.rs（`#[cfg(test)]`）
     graph/      lane.rs
-    git_read/   repo.rs   log.rs  diff.rs  status.rs  thread.rs
+    git_read/   repo.rs   log.rs  diff.rs  status.rs  thread.rs  progress.rs
     git_exec/   argv.rs   runner.rs patch.rs  〔rebase.rs〕
     github/     client.rs wire.rs  account.rs
     auth/       gh.rs     resolve.rs probe.rs  ssh.rs  url.rs

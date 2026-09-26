@@ -73,6 +73,12 @@ impl RepoReader {
         &self.workdir
     }
 
+    /// ワークツリーごとの gitdir。linked worktree では `.git/worktrees/<name>/` で、
+    /// 進行中操作のファイルはこちらに置かれる（[`in_progress`](super::in_progress)）。
+    pub fn git_dir(&self) -> &Path {
+        self.repo.path()
+    }
+
     /// `core.sshCommand` の値。設定されていなければ `None`。
     ///
     /// **読むのは起動時の 1 回だけ。** `Runner` がここから受けた値に

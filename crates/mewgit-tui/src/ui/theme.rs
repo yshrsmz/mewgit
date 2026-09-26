@@ -49,6 +49,15 @@ pub fn current_tab() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
 }
 
+/// フッターの 1 行目の、進行中操作のバッジ（07 の「ステータスバー」）。
+///
+/// **反転に色を足す。** 反転だけだとタブやカーソル行と同じ見た目になり、通知の
+/// 並びの中で「いまの状態」だと読めない。色は [`warn`] から取る ——
+/// 「止まっているが壊れてはいない」は同じ意味なので、片方だけ色を変えない。
+pub fn in_progress() -> Style {
+    warn().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+}
+
 /// 見出しなど、本文より弱く出すもの。
 pub fn muted() -> Style {
     Style::default().add_modifier(Modifier::DIM)

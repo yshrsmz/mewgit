@@ -36,7 +36,6 @@ pub struct AppState {
     pub branches: BranchState,     // ローカルブランチの一覧と選択（下の「ブランチ一覧」）
     pub stashes: Vec<StashEntry>,
     pub prs: PrState,                 // 開いている PR の一覧・カーソル・API の残量（下の「PR ペイン」）
-    pub progress: Option<InProgressOp>, // Rebase | CherryPick | Revert | Merge
     pub focus: Pane,
     pub right_tab: RightTab,          // 右列の上に出すタブ（下の「右上のタブ」）
     pub modal: Option<Modal>,
@@ -2384,8 +2383,7 @@ pub enum Msg {
     BranchesLoaded(Box<Result<Vec<Branch>, GitReadError>>),   // ローカルブランチの一覧
     DiffLoaded { target: DiffTarget, result: Box<Result<Vec<FileDiff>, GitReadError>> },
     // git_exec
-    ExecFinished(Box<ExecDone>),       // { op, result, progress }
-    ProgressDetected(Option<InProgressOp>),
+    ExecFinished(Box<ExecDone>),       // { op, result }
     // auth / github
     TargetResolved(Box<ResolvedTarget>),  // { target, unnormalized }。上の「RepoInfo.target を埋める」
     AccountResolved(Result<Account, DegradedReason>),
@@ -2527,15 +2525,23 @@ pub fn init(state: &mut AppState) -> Cmd;
 `Msg::TargetResolved` を待ってから出す（上の「`RepoInfo.target` を埋める」）。起動時はまだ何も読んでいないので
 `restart` は偽でよい（`LogSession` が無ければ `restart` の有無に関わらず先頭から開く）。
 
+**進行中操作は `LoadStatus` の返りに載ってくる**（`WorktreeSnapshot.progress`。02 の
+「進行中操作の検出」）。起動時の専用の読み取りは持たない —— 起動時・書き込みのあと・
+（M6 の）外部変更の検知が同じ `LoadStatus` を通るので、**古い返りを捨てるのは
+`Region::Worktree` の世代の 1 本**で済む（上の「実行中ジョブ › 世代」）。`conflicted` の
+一覧と進行中操作が同じ時点の値になり、M5 の「進行中は書き込みを断る」も `c` と同じ
+「鮮度のある snapshot だけを信じる」（`WorktreeState::snapshot_epoch`）で判じられる。
+
 ## update の原則
 
 - `update` は `AppState` を直接変更し、`Cmd` を返す。I/O を呼ばない。返す `Cmd` は
   出口で `AppState::issue` を通し、同種のジョブが走っていれば発行しない
 - キー入力は `focus` と `modal` を見て、対応する pane / modal の handler に委譲する。
   ペインが `Cmd` を組み立てるのは `update` の中だけで、`ui` からは呼ばない
-- `ExecFinished` は進行中操作を一緒に運ぶ。`Runner` が実行直後に再検出するため（03）、
-  `update` から検出を頼み直さない。受けたら成功・失敗を問わず `progress` を反映し
-  `LoadStatus` を発行する。`ProgressDetected` は `.git/HEAD` 監視による外部変更検知用（M6）
+- `ExecFinished` は成功・失敗・中断を問わず `LoadStatus` を発行する。**例外は
+  `GitOp::SetAccount` / `UnsetAccount`（`.git/config` の 1 行だけを書く）は出さない —— 進行中操作は動かない**（`update::exec` の `Reload::Account`）。進行中操作は
+  その返りで入れ替わる（03 の「進行中操作との整合」）。M6 の `.git/HEAD` 監視も、
+  専用の `Msg` を足さずに `LoadStatus` を出す
 - 同種の `Cmd` が実行中なら重複発行しない（`JobTracker` で管理）
 
 ## ランタイム

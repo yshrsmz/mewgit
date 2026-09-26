@@ -239,9 +239,15 @@ pub enum GithubError {
     InvalidHost { host: String },
     #[error("GitHub API: 401 Unauthorized")]
     Unauthorized,
-    #[error("GitHub API: 403 Forbidden")]
+    /// 4xx のうち、**足りないスコープが応答のヘッダから判ったもの**（05）。
+    ///
+    /// **ステータスで分ける前に見る。** GitHub はスコープが足りない要求を
+    /// **403 ではなく 404** で返す（05 の実測）ので、`Forbidden` の中に持たせると
+    /// いちばん起きる形を取りこぼす。
+    #[error("GitHub API: {status}: {scope} スコープが要ります")]
+    MissingScope { status: u16, scope: String },
+    #[error("GitHub API: 403 {}", if *saml { "SAML SSO の承認が要ります" } else { "Forbidden" })]
     Forbidden {
-        needed_scopes: Vec<String>,
         /// 本文に SAML enforcement が含まれていた。案内を SSO 承認に切り替える。
         saml: bool,
         body_head: String,
@@ -286,7 +292,9 @@ impl GithubError {
             // 待てば直るが、いま叩き続けると二次制限を踏みに行く（05）。
             GithubError::RateLimited { .. } => true,
             // トークンの問題。残りを叩いても同じ答えを買うだけ。
-            GithubError::Unauthorized | GithubError::Forbidden { .. } => true,
+            GithubError::Unauthorized
+            | GithubError::Forbidden { .. }
+            | GithubError::MissingScope { .. } => true,
             // クライアントを組めない。どの対象でも組めない。
             GithubError::InvalidHost { .. } => true,
             // 対象ごとに違いうる。`Network` と `Decode` も**その 1 本だけ**の事故と
@@ -317,14 +325,20 @@ mod tests {
         //
         // **腕を 1 つずつ並べる。** 真偽をまとめて 2 本の `assert` にすると、腕を
         // 足したときに**どちらにも入れないまま**通る。
-        let cases: [(GithubError, bool); 8] = [
+        let cases: [(GithubError, bool); 9] = [
             (GithubError::RateLimited { reset_at: None }, true),
             (GithubError::Unauthorized, true),
             (
                 GithubError::Forbidden {
-                    needed_scopes: Vec::new(),
                     saml: false,
                     body_head: String::new(),
+                },
+                true,
+            ),
+            (
+                GithubError::MissingScope {
+                    status: 404,
+                    scope: "repo".to_string(),
                 },
                 true,
             ),

@@ -19,7 +19,7 @@ impl GhCli {
     pub async fn browse(&self, host: &str, owner: &str, repo: &str, number: u64) -> Result<(), AuthError>;
 }
 
-pub struct GhLogin { pub host, pub login, pub active: bool, pub scopes: Vec<String>, pub state: LoginState }
+pub struct GhLogin { pub host, pub login, pub active: bool, pub stored_active: bool, pub scopes: Vec<String>, pub state: LoginState }
 pub enum LoginState { Success, Timeout, Error }
 ```
 
@@ -322,10 +322,11 @@ pub enum DegradedReason {
     Ambiguous { candidates: Vec<GhLogin> },        // probe を通った候補だけ
 }
 
-pub struct ProbeAttempt { pub login: String, pub failure: AttemptFailure }
+pub struct ProbeAttempt { pub login: GhLogin, pub failure: AttemptFailure }  // GhLogin ごと。案内が host と active を読む
 
 pub enum AttemptFailure {
-    Denied { status: u16 },        // HTTP で断られた。このアカウントでは無理
+    Denied { status: u16, missing_scope: Option<String> },  // HTTP で断られた。このアカウントでは無理
+    SsoRequired,                   // SAML の 403。トークンを org に承認すれば通る
     Undetermined { message: String },  // 回線 / TLS / レート制限。もう一度なら通りうる
     NoToken { message: String },   // gh からトークンを取れず、probe まで行っていない
 }
@@ -415,10 +416,12 @@ pub async fn resolve<B: Backend + Sync>(
 |---|---|---|
 | `Ok(RepoMeta)` | `Ok(())` | |
 | `Err(Decode)` | **`Ok(())`** | `check_status` を通ったあとにしか出ない = **2xx が返っている**。GHES の版差で本文の形が違うだけで、アクセス権はある。`Failed` に落とすと動いている環境が `NoAccess` になる |
-| `Err(Unauthorized)` | `Err(Denied { 401 })` | |
-| `Err(Forbidden)` | `Err(Denied { 403 })` | **SAML の 403 もここ。** 「SSO 承認が要る」は直せる状態だが、サーバは**答えを返している**（このトークンでは通らない）ので `Undetermined`（確かめられなかった）ではない。**`saml` の印はここで落ちる。載せないと決めた**（ピッカーのタスクで数え直した結果）—— 403 の候補は `Ambiguous` に並ばず落ちるので、印が出るのは `NoAccess` の内訳だけ。そこで直し方まで書くには bool ではなく**どの org を承認するか**（`body_head`）と `needed_scopes` が要り、それは M4 の「403 の `needed_scopes` 案内」が要る材料と同じ。**そちらで 1 回作る。** `Denied` に `saml: bool` を足すと `Denied { 404, saml: true }` が型で組める（「旗と値を割らない」） |
-| `Err(NotFound)` | `Err(Denied { 404 })` | 権限が無ければ GitHub は 404 を返す |
-| `Err(Api { status: 4xx, .. })` | `Err(Denied { status })` | |
+| `Err(Unauthorized)` | `Err(Denied { 401, None })` | |
+| `Err(MissingScope)` | `Err(Denied { status, missing_scope: Some(scope) })` | **足りないスコープが判った 4xx**（05。実際には 404 で返る）。直し方は下の「権限不足の案内」 |
+| `Err(Forbidden { saml: true })` | **`Err(SsoRequired)`** | 「SSO 承認が要る」は直せる状態だが、サーバは**答えを返している**（このトークンでは通らない）ので `Undetermined`（確かめられなかった）ではない。**`Denied` に `saml: bool` を足さない** —— `Denied { 404, saml: true }` が型で組める（「旗と値を割らない」）。SAML の 403 は常に 403 なので、ステータスを持たない腕にする。`resolve` の手順 4 では `Denied` と同じく「除外できた」側 |
+| `Err(Forbidden { saml: false })` | `Err(Denied { 403, None })` | fine-grained PAT の権限や IP allowlist。案内できることが無い |
+| `Err(NotFound)` | `Err(Denied { 404, None })` | 権限が無ければ GitHub は 404 を返す。**足りないスコープが判る 404 は上の `MissingScope`** |
+| `Err(Api { status: 4xx, .. })` | `Err(Denied { status, None })` | |
 | `Err(Api { status: 5xx, .. })` | **`Err(Undetermined)`** | **サーバが一時的に答えられないだけ**で、断られてはいない。`Denied` に畳むと手順 4 が「除外できた」と数え、GHES のメンテナンスや 502 が 1 回混じった回に**別のアカウントを黙って選んで latch する**（`/code-review` が拾った。`unchecked` の見張りが塞いだはずの形） |
 | `Err(RateLimited)` | `Err(Undetermined)` | **ステータスを載せない。** 05 の `RateLimited` は 429 だけでなく**印の付いた 403** からも来る |
 | `Err(Network)` | `Err(Undetermined)` | |
@@ -621,17 +624,58 @@ mewgit は提供していないので、#65 で決めた「**指示を足すの�
 ## EMU 特有の考慮
 
 - EMU の login は `user_shortcode` 形式。表示上の見分けを付けるため、`gh auth status` の login をそのまま使う
-- 企業ポリシーで OAuth App が制限されている環境では PAT ログインが前提になる。トークンの種類は判定せず、`scopes` が空（fine-grained PAT）でも動作させる。スコープ不足は API の 403 で検出する
+- 企業ポリシーで OAuth App が制限されている環境では PAT ログインが前提になる。トークンの種類は判定せず、`scopes` が空（fine-grained PAT）でも動作させる。スコープ不足は API の応答ヘッダで検出する（**403 ではなく 404 で返る**。05 の実測）
 - データレジデンシー（`*.ghe.com`）は `host` が違うだけで同じ流れ。API ベース URL は `https://api.{host}`（github.com は `https://api.github.com`）
 
 ## 権限不足の案内
 
-`GithubError::Forbidden { needed_scopes }` を受けたら、通知に以下を出す:
+**出すのは `A` の `NoAccess` の内訳。** 足りないスコープが判る API は mewgit では
+アカウント確認だけ（05 の実測）なので、通知や PR ペインには `GithubError` の表示
+（`… repo スコープが要ります`）が出るだけで、コマンドは添えない。
 
 ```
-GitHub API: 403 Forbidden（PR 作成）
-必要スコープ: repo
-対処: gh auth refresh -h github.com -s repo
+taro: repo スコープが要ります（HTTP 404）
+  gh auth refresh -h github.com -s repo
+hanako: repo スコープが要ります（HTTP 404）
+  gh auth switch -h github.com -u hanako
+  gh auth refresh -h github.com -s repo
+jiro: SAML SSO の承認が要ります（HTTP 403）
 ```
 
-`needed_scopes` はレスポンスヘッダ `X-Accepted-OAuth-Scopes` から取り、無ければ操作ごとの既定値を使う。
+- **`gh auth refresh` はアクティブなアカウントにしか効かない**（`gh auth refresh --help`、
+  gh 2.101.0）。足りないスコープが内訳に並ぶのは**複数アカウントの手順 4 だけ**
+  （手順 3 は probe しない）なので、アクティブでない login に当たる形がむしろ本命。
+  案内をそのまま出すと**別のアカウントにスコープを足させる**。アクティブでなければ
+  `gh auth switch` を先に書く
+- **見るのは `GhLogin.stored_active`（設定上のアクティブ）で、`active` ではない。**
+  `GITHUB_TOKEN` / `GH_TOKEN` を export していると、`gh auth status --json` は
+  環境変数のエントリを `active: true` にし、**keyring のエントリを全部 `active: false`
+  にする**（実測 2026-09-26、gh 2.101.0。環境変数を外すと keyring 側が `true` に
+  戻る）。`merge_logins` は同じ login のエントリを畳むので、`active` は環境変数の
+  ほうを拾う。**probe のトークンは `gh auth token --user` で keyring から取る**ので、
+  足りないのは keyring のトークン —— refresh の相手と同じ。`stored_active` は
+  `tokenSource` が `keyring` / `oauth_token`（gh の `internal/config/config.go`）の
+  エントリだけから立てる。知らない出どころは立てない側（`switch` を足す側）
+- **環境変数があるあいだ `gh auth refresh` は断る**（exit 1。「The value of the
+  GITHUB_TOKEN environment variable is being used for authentication. To refresh
+  credentials stored in GitHub CLI, first clear the value from the environment.」）。
+  **その案内は gh 自身が出す**ので mewgit は足さない。外して打ち直したときには
+  上の `stored_active` が全員 `false` だったぶん `switch` が付いているので、
+  別のアカウントに足さない（`/code-review` が拾った）
+- **`ProbeAttempt` は `GhLogin` ごと運ぶ**（`Ambiguous` と同じ）。案内が読むのは
+  `active` と `host` —— `-h` に渡すのはリポジトリのホスト（`github.com`。
+  `gh auth status --hostname` に渡したもの）で、API のホスト（`api.github.com`）では
+  ない。1 フィールドずつ抜くと、案内の材料が増えるたびに型と詰め替えが増える
+  （`/simplify` が拾った）
+- **スコープは `X-Accepted-Oauth-Scopes` と `X-Oauth-Scopes` から決める**（判定は 05）。
+  **「無ければ操作ごとの既定値」は採らない** —— ヘッダが空の API で既定値を案内すると、
+  **GitHub が言っていないスコープ名を発明する**ことになる。gh もヘッダが無ければ黙る
+- **1 行に 1 コマンド。** 並べた順が手順。箱（80x24 で内側 58 セル）に収まる長さ
+  ならそのまま貼れる。**収まらない host と login では折り返す**（`modals::picker` が
+  `ui::wrapped` を通す）ので、語の切れ目で次の行へ割れる —— 切れはしないが、貼る
+  ときは繋ぎ直す。理由の行に続けると、短い login でも割れる
+- **`gh auth switch` で戻す手順は書かない。** mewgit はアクティブかどうかで
+  アカウントを選ばない（手順 4 は全員を probe する）ので、切り替えたままでも
+  mewgit の側は変わらない。gh の既定が変わったことを戻すかは本人の判断
+- **SAML の承認 URL は載せない。** 載せる先は M6 の `detail`（`X-GitHub-SSO` が何を
+  返すかは確かめていない）

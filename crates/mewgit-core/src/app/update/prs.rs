@@ -683,7 +683,7 @@ pub(super) fn pr_details_finished(
             // 予算をいくつにしても変わらない（`-bad` の 4 文字でちょうど 72 セル。
             // 実測 2026-09-18。当時の予算が 72 だったのは `q:quit` と同じ行だったため）。
             // `exec_finished` が argv と stderr を `detail` に載せるのと同じ形で、
-            // **描くのは M6 のステータスバーのタスク**（01 の「通知」）。
+            // **描くのは M6 の通知の履歴のタスク**（01 の「通知」）。
             state.push_notice(
                 NoticeLevel::Warn,
                 "PR の集計を中断しました".to_string(),
@@ -744,7 +744,7 @@ mod tests {
     use crate::test_util::{
         deliver_pr_details, fake_account, fake_branch, fake_oid, fake_pull_request,
         fake_rate_limit, fake_target, fetch_pr_details, pr_list_loaded as list_msg, put_on_branch,
-        reply, start_pr_details,
+        reply, start_pr_details, FAKE_NOW,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -2854,7 +2854,7 @@ mod tests {
         let default_state = state();
         let mut config = Config::default();
         config.github.enabled = false;
-        let mut state = AppState::new(crate::app::RepoInfo::default(), config);
+        let mut state = AppState::new(crate::app::RepoInfo::default(), config, FAKE_NOW);
         assert!(matches!(state.account, AccountState::Disabled));
         assert!(!state.focus_candidates().contains(&Pane::Prs));
 
@@ -3095,7 +3095,7 @@ mod tests {
             "待つだけの状態に操作を案内している"
         );
 
-        // **案内は端末の幅（80 セル）に収める**（01 の「失敗の案内文」）。
+        // **案内は通知の予算に収める**（01 の「失敗の案内文」）。
         for message in all {
             assert!(
                 cells(message) <= NOTICE_CELLS,

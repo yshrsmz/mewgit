@@ -82,7 +82,14 @@ fn attempt(result: Result<RepoMeta, GithubError>) -> Result<(), AttemptFailure> 
         // いる環境が `NoAccess` になる（04）。
         Ok(_) | Err(GithubError::Decode { .. }) => Ok(()),
         Err(GithubError::Unauthorized) => Err(denied(401)),
-        Err(GithubError::Forbidden { .. }) => Err(denied(403)),
+        // **足りないスコープは運ぶ。** `A` の内訳が直し方（`gh auth refresh`）を
+        // 組む材料になる（04 の「権限不足の案内」）。
+        Err(GithubError::MissingScope { status, scope }) => Err(AttemptFailure::Denied {
+            status,
+            missing_scope: Some(scope),
+        }),
+        Err(GithubError::Forbidden { saml: true, .. }) => Err(AttemptFailure::SsoRequired),
+        Err(GithubError::Forbidden { saml: false, .. }) => Err(denied(403)),
         // 権限が無ければ GitHub は 404 を返す。
         Err(GithubError::NotFound) => Err(denied(404)),
         // **5xx は「断られた」ではない。** サーバが一時的に答えられないだけで、
@@ -108,8 +115,12 @@ fn attempt(result: Result<RepoMeta, GithubError>) -> Result<(), AttemptFailure> 
     }
 }
 
+/// 足りないスコープが判らなかった拒否。
 fn denied(status: u16) -> AttemptFailure {
-    AttemptFailure::Denied { status }
+    AttemptFailure::Denied {
+        status,
+        missing_scope: None,
+    }
 }
 
 /// 断られてはいないが確かめられなかった。**理由は `Display` をそのまま運ぶ** ——
@@ -147,8 +158,24 @@ mod tests {
             ),
             (Err(GithubError::Unauthorized), Err(denied(401))),
             (
+                Err(GithubError::MissingScope {
+                    status: 404,
+                    scope: "repo".to_string(),
+                }),
+                Err(AttemptFailure::Denied {
+                    status: 404,
+                    missing_scope: Some("repo".to_string()),
+                }),
+            ),
+            (
                 Err(GithubError::Forbidden {
-                    needed_scopes: vec!["repo".to_string()],
+                    saml: true,
+                    body_head: String::new(),
+                }),
+                Err(AttemptFailure::SsoRequired),
+            ),
+            (
+                Err(GithubError::Forbidden {
                     saml: false,
                     body_head: String::new(),
                 }),

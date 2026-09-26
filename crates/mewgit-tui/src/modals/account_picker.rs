@@ -278,7 +278,7 @@ fn degraded_body(reason: &DegradedReason) -> Vec<String> {
                 "届いたアカウントがありません（{} 件）",
                 attempts.len()
             )];
-            lines.extend(attempts.iter().map(attempt_line));
+            lines.extend(attempts.iter().flat_map(attempt_lines));
             lines
         }
         // **外での直し方を書かない。** 選ばせるのはこのモーダル自身で、書くと
@@ -290,11 +290,46 @@ fn degraded_body(reason: &DegradedReason) -> Vec<String> {
     }
 }
 
-/// `NoAccess` の 1 件。
-fn attempt_line(attempt: &ProbeAttempt) -> String {
+/// `NoAccess` の 1 件。足りないスコープが判っていれば、直し方を次の行から足す。
+///
+/// **コマンドを理由の行に続けない。** 本文は折り返す（`modals::picker`）が、
+/// login と host に上限が無いので、続けると長い login でコマンドが語の途中から
+/// 次の行へ割れる（04 の「権限不足の案内」）。
+fn attempt_lines(attempt: &ProbeAttempt) -> Vec<String> {
     let ProbeAttempt { login, failure } = attempt;
+    let AttemptFailure::Denied {
+        status,
+        missing_scope: Some(scope),
+    } = failure
+    else {
+        return vec![attempt_line(&login.login, failure)];
+    };
+    let GhLogin {
+        host,
+        login,
+        stored_active,
+        ..
+    } = login;
+    let mut lines = vec![format!(
+        "{login}: {scope} スコープが要ります（HTTP {status}）"
+    )];
+    // **`gh auth refresh` はアクティブなアカウントにしか効かない**（`--help`）。
+    // 書かないと、別のアカウントにスコープを足させる。**見るのは設定上の
+    // アクティブ**（`GhLogin::stored_active`）—— 環境変数のトークンがあると
+    // `active` はそちらを指し、refresh の相手とずれる。**1 行に 1 コマンド** ——
+    // 並べた順が手順で、そのまま貼れる。
+    if !stored_active {
+        lines.push(format!("  gh auth switch -h {host} -u {login}"));
+    }
+    lines.push(format!("  gh auth refresh -h {host} -s {scope}"));
+    lines
+}
+
+/// 直し方を添えない 1 行。
+fn attempt_line(login: &str, failure: &AttemptFailure) -> String {
     match failure {
-        AttemptFailure::Denied { status } => format!("{login}: HTTP {status} で断られました"),
+        AttemptFailure::Denied { status, .. } => format!("{login}: HTTP {status} で断られました"),
+        AttemptFailure::SsoRequired => format!("{login}: SAML SSO の承認が要ります（HTTP 403）"),
         // **「断られた」と混ぜない。** もう一度なら通りうる（04）。
         AttemptFailure::Undetermined { message } => {
             format!("{login}: 確かめられませんでした（{message}）")
@@ -330,13 +365,15 @@ fn candidate_line(login: &GhLogin) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hint, HINT_RERESOLVE};
+    use super::{attempt_lines, hint, HINT_RERESOLVE};
     use crate::test_util::{draw, row_is_reversed, row_of, state_with_modal};
     use mewgit_core::app::{AccountListing, AccountView, AppState, Modal, Repick, TermSize};
     use mewgit_core::auth::{
-        AccountSource, AttemptFailure, DegradedReason, LoginState, ProbeAttempt,
+        AccountSource, AttemptFailure, DegradedReason, GhLogin, LoginState, ProbeAttempt,
     };
-    use mewgit_core::test_util::{fake_configured_unavailable, fake_login};
+    use mewgit_core::test_util::{
+        fake_attempt, fake_configured_unavailable, fake_denied, fake_login, fake_no_access,
+    };
 
     const SIZE: TermSize = TermSize {
         width: 80,
@@ -644,20 +681,15 @@ mod tests {
     #[test]
     fn nothing_reached_the_repository_lists_the_reasons_and_offers_no_choice() {
         // **ヘッダは件数しか出せない**（1 行なので。07）。1 件ずつ並べるのがここ（04）。
-        let state = state_with_reason(DegradedReason::NoAccess {
-            attempts: vec![
-                ProbeAttempt {
-                    login: "taro_acme".to_string(),
-                    failure: AttemptFailure::Denied { status: 404 },
+        let state = state_with_reason(fake_no_access(vec![
+            fake_attempt("taro_acme", fake_denied(404)),
+            fake_attempt(
+                "taro",
+                AttemptFailure::Undetermined {
+                    message: "接続できませんでした".to_string(),
                 },
-                ProbeAttempt {
-                    login: "taro".to_string(),
-                    failure: AttemptFailure::Undetermined {
-                        message: "接続できませんでした".to_string(),
-                    },
-                },
-            ],
-        });
+            ),
+        ]));
 
         let text = draw(&state, SIZE).join("\n");
 
@@ -715,6 +747,97 @@ mod tests {
         assert!(text.contains("login29"), "{text}");
     }
 
+    /// `repo` が足りずに 404 で断られた 1 件。
+    fn missing_repo(login: &str, active: bool) -> ProbeAttempt {
+        ProbeAttempt {
+            login: GhLogin {
+                stored_active: active,
+                ..fake_login(login)
+            },
+            failure: AttemptFailure::Denied {
+                status: 404,
+                missing_scope: Some("repo".to_string()),
+            },
+        }
+    }
+
+    #[test]
+    fn a_missing_scope_names_the_command_and_switches_first_for_an_inactive_login() {
+        // **`gh auth refresh` はアクティブなアカウントにしか効かない**（04）。
+        // アクティブでない login にそのまま案内すると、別のアカウントに足させる。
+        assert_eq!(
+            attempt_lines(&missing_repo("taro", true)),
+            vec![
+                "taro: repo スコープが要ります（HTTP 404）".to_string(),
+                "  gh auth refresh -h github.com -s repo".to_string(),
+            ]
+        );
+        // **host は `GhLogin` のものを使う**（`gh auth status --hostname` に渡した
+        // リポジトリのホスト）。`fake_login` と違う値にして、決め打ちでは通らない形に。
+        let ghe = ProbeAttempt {
+            login: GhLogin {
+                host: "ghe.example.com".to_string(),
+                ..missing_repo("hanako", false).login
+            },
+            ..missing_repo("hanako", false)
+        };
+        assert_eq!(
+            attempt_lines(&ghe),
+            vec![
+                "hanako: repo スコープが要ります（HTTP 404）".to_string(),
+                "  gh auth switch -h ghe.example.com -u hanako".to_string(),
+                "  gh auth refresh -h ghe.example.com -s repo".to_string(),
+            ]
+        );
+        // 判らなければ直し方を足さない。
+        assert_eq!(
+            attempt_lines(&fake_attempt("jiro", fake_denied(404))),
+            vec!["jiro: HTTP 404 で断られました".to_string()]
+        );
+        assert_eq!(
+            attempt_lines(&fake_attempt("saburo", AttemptFailure::SsoRequired)),
+            vec!["saburo: SAML SSO の承認が要ります（HTTP 403）".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_whole_command_is_on_screen_even_when_it_wraps() {
+        // **末尾（`-s <scope>`）から切れない。** 箱より長い行は折り返す
+        // （`modals::picker`）。**長い host と login で箱の幅を超えさせる** ——
+        // 80x24 の箱（内側 58 セル）には `github.com` と短い login のコマンドが
+        // 収まってしまい、折り返しを外しても通る（`/code-review` が拾った）。
+        let host = "ghe.example-enterprise.co.jp";
+        let login = "taro_acme_enterprise_user";
+        let attempt = ProbeAttempt {
+            login: GhLogin {
+                host: host.to_string(),
+                ..missing_repo(login, false).login
+            },
+            ..missing_repo(login, false)
+        };
+        let switch = format!("gh auth switch -h {host} -u {login}");
+        assert!(switch.len() > 60, "箱の幅を超えていない: {switch}");
+        let state = state_with_reason(fake_no_access(vec![attempt]));
+
+        // モーダルの行だけを取り出し、折り返しを繋ぎ直して読む。モーダルが
+        // 重なった行は `│ 余白 │本文│ 余白 │` の 5 片に割れる。
+        let body: Vec<String> = draw(&state, SIZE)
+            .iter()
+            .filter_map(|row| {
+                let parts: Vec<&str> = row.split('│').collect();
+                (parts.len() == 5).then(|| parts[2].trim_end().to_string())
+            })
+            .collect();
+        let joined = body.join(" ");
+        let joined = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(joined.contains(&switch), "{body:#?}");
+        assert!(
+            joined.contains(&format!("gh auth refresh -h {host} -s repo")),
+            "{body:#?}"
+        );
+    }
+
     #[test]
     fn a_body_that_fills_the_box_is_not_cut_by_the_empty_list() {
         // **一覧が空のときは縦に割らない**（`picker`）。割ると `Min(1)` が 1 行取り、
@@ -723,12 +846,9 @@ mod tests {
         // **境目は実測で 80x9（内訳 5 件）。** それより高いと `place` が空ける余白から
         // 1 行を取るだけなので**同じ内訳でも踏めない**（80x10 では直す前も通る）。
         let attempts: Vec<_> = (0..5)
-            .map(|i| ProbeAttempt {
-                login: format!("login{i:02}"),
-                failure: AttemptFailure::Denied { status: 404 },
-            })
+            .map(|i| fake_attempt(&format!("login{i:02}"), fake_denied(404)))
             .collect();
-        let state = state_with_reason(DegradedReason::NoAccess { attempts });
+        let state = state_with_reason(fake_no_access(attempts));
 
         let text = draw(
             &state,

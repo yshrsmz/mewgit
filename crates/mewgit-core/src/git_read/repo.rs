@@ -7,7 +7,7 @@ use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
     lossy, signature, Branch, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex, RefLabel,
-    Remote, Timestamp, Upstream, UpstreamConfig,
+    Remote, Upstream, UpstreamConfig,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -296,9 +296,9 @@ impl RepoReader {
             parents: commit.parent_ids().collect(),
             message,
             author: signature(&author),
-            author_time: timestamp(author.when()),
+            author_time: author.when().into(),
             committer: signature(&committer),
-            committer_time: timestamp(committer.when()),
+            committer_time: committer.when().into(),
         })
     }
 
@@ -371,14 +371,6 @@ impl RepoReader {
             .map_err(|_| GitReadError::NonUtf8Head)?
             .ok_or(GitReadError::NonUtf8Head)?;
         Ok(target.strip_prefix("refs/heads/").unwrap_or(target).into())
-    }
-}
-
-/// git2 の日時を層の値型にする。オフセットはコミットに刻まれたもの（02）。
-fn timestamp(time: git2::Time) -> Timestamp {
-    Timestamp {
-        seconds: time.seconds(),
-        offset_minutes: time.offset_minutes(),
     }
 }
 

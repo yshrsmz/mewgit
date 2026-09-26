@@ -568,8 +568,8 @@ fn network(err: reqwest::Error) -> GithubError {
 /// ステータスコードを [`GithubError`] に写す。
 ///
 /// **レート制限を先に見る。** GitHub は使い切った要求に **403** を返す
-/// （429 のこともある）ので、`Forbidden` として扱うと「スコープが足りない」の
-/// 案内が出て、待てば直るものを直らないものとして見せる。
+/// （429 のこともある）ので、`Forbidden` / `MissingScope` として扱うと、待てば
+/// 直るものを直らないものとして見せる。
 async fn check_status(response: Response) -> Result<Response, GithubError> {
     let status = response.status();
     if status.is_success() {
@@ -581,15 +581,22 @@ async fn check_status(response: Response) -> Result<Response, GithubError> {
         });
     }
     // **本文を読む前にヘッダを取る。** `text()` が `response` を消費する。
-    let scopes = needed_scopes(&response);
+    let missing = missing_scope(&response);
     // 401 / 404 でも本文は読み切る。読まずに落とすと hyper がその接続を
     // プールへ戻せない（GitHub のエラー本文は数十バイト）。
     let body = response.text().await.unwrap_or_default();
     let body_head: String = body.chars().take(BODY_HEAD_CHARS).collect();
+    // **ステータスで分ける前に見る**（05）。足りないスコープは 403 ではなく 404 で
+    // 返るので、`FORBIDDEN` の腕の中で見ると取りこぼす。
+    if let Some(scope) = missing {
+        return Err(GithubError::MissingScope {
+            status: status.as_u16(),
+            scope,
+        });
+    }
     Err(match status {
         StatusCode::UNAUTHORIZED => GithubError::Unauthorized,
         StatusCode::FORBIDDEN => GithubError::Forbidden {
-            needed_scopes: scopes,
             saml: body.contains("SAML"),
             body_head,
         },
@@ -607,10 +614,10 @@ async fn check_status(response: Response) -> Result<Response, GithubError> {
 ///
 /// - **一次制限**（時間あたりの総量）は `x-ratelimit-remaining` が 0 になる。
 /// - **二次制限**（短時間に叩きすぎ）は**残量を減らさずに** `retry-after` を付ける。
-///   これを見落とすと `Forbidden` に落ち、05 が「出してはいけない」と書いている
-///   「スコープが足りない」の案内が、**待てば直るものに対して**出る。
+///   これを見落とすと `Forbidden` / `MissingScope` に落ち、**待てば直るものを
+///   直らないものとして**見せる。
 ///
-/// どちらの印も無い 403 はスコープ不足なので `Forbidden` のまま。
+/// どちらの印も無い 403 は `MissingScope` か `Forbidden` のまま（05）。
 fn is_rate_limited(response: &Response) -> bool {
     if response.status() == StatusCode::TOO_MANY_REQUESTS {
         return true;
@@ -637,13 +644,60 @@ fn rate_limit_reset(response: &Response) -> Option<i64> {
     header_i64(response, "x-ratelimit-reset")
 }
 
-/// 403 に添える「足りないスコープ」。GitHub は要求されるスコープを
-/// `x-accepted-oauth-scopes` で返す。
-fn needed_scopes(response: &Response) -> Vec<String> {
-    // 割り方は `auth` と共有する（`gh auth status` の `scopes` が 2 人目の利用者）。
-    header_str(response, "x-accepted-oauth-scopes")
-        .map(split_scopes)
-        .unwrap_or_default()
+/// 応答のヘッダから判る「足りないスコープ」。判らなければ `None`。
+///
+/// **条件と gh との違いは 05 の「足りないスコープ」**（`api/client.go` の
+/// `generateScopesSuggestion` に合わせ、受け付けるスコープを 1 つでも持っていれば
+/// 案内しない点だけ変えた）。
+fn missing_scope(response: &Response) -> Option<String> {
+    let status = response.status();
+    if !status.is_client_error() || status == StatusCode::UNPROCESSABLE_ENTITY {
+        return None;
+    }
+    let held = header_str(response, "x-oauth-scopes").map(split_scopes)?;
+    if held.is_empty() {
+        return None;
+    }
+    let accepted = header_str(response, "x-accepted-oauth-scopes").map(split_scopes)?;
+    if accepted.iter().any(|scope| holds(&held, scope)) {
+        return None;
+    }
+    accepted.into_iter().next()
+}
+
+/// `held` のどれかが `scope` を含むか。
+fn holds(held: &[String], scope: &str) -> bool {
+    held.iter().any(|h| implies(h, scope))
+}
+
+/// スコープ `held` を持っていれば `scope` も持っているか。**含み方は gh と同じ**
+/// （`repo` は `public_repo` などを、`admin:x` は `read:x` / `write:x` を、`write:x` は
+/// `read:x` を含む）。
+fn implies(held: &str, scope: &str) -> bool {
+    if held == scope {
+        return true;
+    }
+    match held {
+        "repo" => {
+            return matches!(
+                scope,
+                "repo:status"
+                    | "repo_deployment"
+                    | "public_repo"
+                    | "repo:invite"
+                    | "security_events"
+            )
+        }
+        "user" => return matches!(scope, "read:user" | "user:email" | "user:follow"),
+        "codespace" => return scope == "codespace:secrets",
+        _ => {}
+    }
+    if let Some(rest) = held.strip_prefix("admin:") {
+        return scope.strip_prefix("read:") == Some(rest)
+            || scope.strip_prefix("write:") == Some(rest);
+    }
+    held.strip_prefix("write:")
+        .is_some_and(|rest| scope.strip_prefix("read:") == Some(rest))
 }
 
 /// 応答の `x-ratelimit-*` から残量を組む。**どれか 1 つでも欠けたら `None`**。
@@ -1241,30 +1295,127 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_saml_403_carries_the_scopes_and_the_saml_flag() {
-        let response = ResponseTemplate::new(403)
-            .insert_header("x-accepted-oauth-scopes", "repo, read:org")
-            .set_body_string("Resource protected by organization SAML enforcement.");
+    async fn a_saml_403_is_forbidden_with_the_saml_flag_even_with_scope_headers() {
+        // **スコープの話ではない。** トークンは受け付けるスコープを持っているので、
+        // ヘッダが付いていても `MissingScope` にしない（持っていれば理由は別にある）。
+        let response = with_headers(
+            ResponseTemplate::new(403)
+                .set_body_string("Resource protected by organization SAML enforcement."),
+            &[
+                ("x-accepted-oauth-scopes", "repo"),
+                ("x-oauth-scopes", "gist, repo"),
+            ],
+        );
         let err = repo_err(response).await;
-        let GithubError::Forbidden {
-            needed_scopes,
-            saml,
-            body_head,
-        } = err
-        else {
+        assert_eq!(err.to_string(), "GitHub API: 403 SAML SSO の承認が要ります");
+        let GithubError::Forbidden { saml, body_head } = err else {
             panic!("Forbidden ではない: {err:?}");
         };
         assert!(saml);
-        assert_eq!(
-            needed_scopes,
-            vec!["repo".to_string(), "read:org".to_string()]
-        );
         assert!(body_head.contains("SAML"));
     }
 
     #[tokio::test]
+    async fn a_404_names_the_missing_scope_only_when_the_token_says_what_it_holds() {
+        // **足りないスコープは 404 で返る**（05 の実測。`user/emails`）。
+        let accepted = ("x-accepted-oauth-scopes", "user, user:email");
+        let with_held = with_headers(
+            ResponseTemplate::new(404),
+            &[accepted, ("x-oauth-scopes", "gist, read:org, repo")],
+        );
+        assert_eq!(
+            repo_err(with_held).await,
+            GithubError::MissingScope {
+                status: 404,
+                scope: "user".to_string(),
+            }
+        );
+        // **持っているスコープが判らなければ案内しない**（gh と同じ）。同じ 404 が
+        // ただの `NotFound` に戻ることで、上の入力が効いていることを見る。
+        let without_held = with_headers(ResponseTemplate::new(404), &[accepted]);
+        assert_eq!(repo_err(without_held).await, GithubError::NotFound);
+        // **ヘッダはあるが値が空**の形も同じ。GitHub は空のスコープヘッダを値の無い
+        // まま送ってくる（05 の実測で `X-Accepted-Oauth-Scopes` がそうだった）。
+        let empty_held = with_headers(
+            ResponseTemplate::new(404),
+            &[accepted, ("x-oauth-scopes", "")],
+        );
+        assert_eq!(repo_err(empty_held).await, GithubError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn holding_any_accepted_scope_through_implication_is_not_a_missing_scope() {
+        // **gh と違えた 1 点。** `write:gpg_key` は `read:gpg_key` を含み、受け付ける
+        // スコープはどれか 1 つで足りる。gh はここでも `admin:gpg_key` を足せと言う。
+        let accepted = ("x-accepted-oauth-scopes", "admin:gpg_key, read:gpg_key");
+        let implied = with_headers(
+            ResponseTemplate::new(404),
+            &[accepted, ("x-oauth-scopes", "repo, write:gpg_key")],
+        );
+        assert_eq!(repo_err(implied).await, GithubError::NotFound);
+        // 含まないトークンなら先頭を案内する。
+        let lacking = with_headers(
+            ResponseTemplate::new(404),
+            &[accepted, ("x-oauth-scopes", "repo")],
+        );
+        assert_eq!(
+            repo_err(lacking).await,
+            GithubError::MissingScope {
+                status: 404,
+                scope: "admin:gpg_key".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_headers_do_not_override_422_or_the_rate_limit() {
+        let scopes = [
+            ("x-accepted-oauth-scopes", "repo"),
+            ("x-oauth-scopes", "gist"),
+        ];
+        // 422 は本文の検証エラー（PR 作成の「既にある」など）で、スコープの話ではない。
+        let unprocessable = with_headers(
+            ResponseTemplate::new(422).set_body_string("invalid"),
+            &scopes,
+        );
+        assert!(
+            matches!(
+                repo_err(unprocessable).await,
+                GithubError::Api { status: 422, .. }
+            ),
+            "422 がスコープの案内に化けた"
+        );
+        // **レート制限を先に見る。** 待てば直るものを直らないものとして見せない。
+        let limited = with_headers(
+            with_headers(ResponseTemplate::new(403), &scopes),
+            &[("x-ratelimit-remaining", "0")],
+        );
+        assert!(matches!(
+            repo_err(limited).await,
+            GithubError::RateLimited { .. }
+        ));
+    }
+
+    #[test]
+    fn a_top_level_scope_holds_the_ones_it_groups() {
+        let held = |raw: &str| split_scopes(raw);
+        assert!(holds(&held("repo"), "public_repo"));
+        assert!(holds(&held("repo"), "repo:status"));
+        assert!(holds(&held("user"), "user:email"));
+        assert!(holds(&held("codespace"), "codespace:secrets"));
+        assert!(holds(&held("admin:org"), "read:org"));
+        assert!(holds(&held("admin:org"), "write:org"));
+        assert!(holds(&held("write:org"), "read:org"));
+        // 逆向きには含まない。
+        assert!(!holds(&held("read:org"), "write:org"));
+        assert!(!holds(&held("public_repo"), "repo"));
+        // 接頭辞の後ろが違えば含まない。
+        assert!(!holds(&held("admin:org"), "read:gpg_key"));
+    }
+
+    #[tokio::test]
     async fn a_403_with_no_quota_left_is_rate_limited_not_forbidden() {
-        // 残量ヘッダが 0 のときだけレート制限。無ければスコープ不足の 403。
+        // 残量ヘッダが 0 のときだけレート制限。無ければ `Forbidden` の 403。
         let response = ResponseTemplate::new(403)
             .insert_header("x-ratelimit-remaining", "0")
             .insert_header("x-ratelimit-reset", "1789000000");
@@ -1299,7 +1450,7 @@ mod tests {
     #[tokio::test]
     async fn a_secondary_rate_limit_403_is_rate_limited_even_with_quota_left() {
         // 二次制限は残量を減らさずに `retry-after` を付ける。見落とすと
-        // 「スコープが足りない」の案内が、待てば直るものに対して出る。
+        // `Forbidden` に落ち、待てば直るものを直らないものとして見せる。
         let response = ResponseTemplate::new(403)
             .insert_header("x-ratelimit-remaining", "4999")
             .insert_header("retry-after", "60");

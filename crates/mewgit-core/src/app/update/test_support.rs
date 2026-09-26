@@ -19,7 +19,7 @@ use crate::git_read::{
 };
 use crate::test_util::{
     fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid,
-    fake_remote, fake_snapshot, fake_upstream, reply,
+    fake_remote, fake_snapshot, fake_upstream, reply, FAKE_NOW,
 };
 
 /// グラフに使える行数。`ui` が決めた値が [`Msg::Layout`] で来る想定。
@@ -31,7 +31,7 @@ use crate::test_util::{
 pub(super) const ROWS: usize = 20;
 
 pub(super) fn state() -> AppState {
-    let mut state = AppState::new(RepoInfo::default(), Config::default());
+    let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
     state.graph.viewport = ROWS;
     state
 }
@@ -420,15 +420,20 @@ pub(super) fn exec_done_of(op: GitOp, result: Result<ExecOutput, ExecError>) -> 
     }))
 }
 
-/// 通知の要約行の予算（セル）。**端末の幅そのもの**で、80 桁を想定している
-/// （01 の「失敗の案内文」）。フッターの 2 行目がキーヒントなので、1 行目は幅いっぱい
-/// 使える。
+/// ランタイムが 250ms ごとに送る `Tick`（時刻は `FAKE_NOW`）。
+pub(super) fn tick() -> Msg {
+    Msg::Tick(FAKE_NOW)
+}
+
+/// 通知の要約行の予算（セル）。**80 桁の端末から、前に添える時刻の 9 セル
+/// （`HH:MM:SS` と空白）を引いた残り**（01 の「失敗の案内文」）。フッターの 2 行目が
+/// キーヒントなので、1 行目は時刻のほかは幅いっぱい使える。
 ///
 /// **見張りは複数あって、新しい産出元を自分では拾わない**（`CLAUDE.md`）——
 /// `exec_advice` / `A` / `o` / PR の集計が別々に回している。通知を出す場所を足したら、
 /// そこでもこれを見る。**実際に描いて確かめるのは `mewgit-tui` 側**
 /// （`a_notice_of_the_full_width_fits_on_its_own_line`）。
-pub(super) const NOTICE_CELLS: usize = 80;
+pub(super) const NOTICE_CELLS: usize = 71;
 
 /// 端末に描いたときの桁数。**案内文は ASCII と日本語だけ**なので、非 ASCII を
 /// 2 桁と数えれば実際の幅と一致する（合成文字や絵文字を入れたらここが嘘になる）。

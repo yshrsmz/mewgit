@@ -325,7 +325,8 @@ pub struct Check { name, state: CheckState, url: Option<String> }
 pub enum GithubError {
     InvalidHost { host },                          // ベース URL を組めないホスト
     Unauthorized,                                  // 401
-    Forbidden { needed_scopes: Vec<String>, saml: bool, body_head: String },  // 403（SAML / スコープ / IP allowlist）
+    MissingScope { status: u16, scope: String },   // 4xx のうち、足りないスコープが判ったもの
+    Forbidden { saml: bool, body_head: String },   // 403（SAML / fine-grained PAT / IP allowlist）
     NotFound,                                      // 404（権限不足でも返る）
     RateLimited { reset_at: Option<i64> },         // `None` = いつ戻るか判らない
     Network { message: String },
@@ -345,8 +346,39 @@ pub enum GithubError {
 
 403 の本文に `SAML` / `Resource protected by organization SAML enforcement` が含まれる場合は `Forbidden` に `saml: true` を付け、案内を「トークンの SSO 承認」に切り替える。
 
-**レート制限を `Forbidden` より先に見る。** GitHub は使い切った要求に **403** を返す
-ことがある（429 のこともある）ので、順序が逆だと「スコープが足りない」の案内が出て、
+**足りないスコープは 403 ではなく 404 で返ってくる。** 実測（2026-09-25、github.com、
+gh 2.101.0。トークンのスコープは `admin:public_key, gist, read:org, read:packages,
+repo, workflow`）:
+
+| 叩いたもの | ステータス | `X-Accepted-Oauth-Scopes` |
+|---|---|---|
+| `user/emails`（`user:email` を持っていない） | **404** | `user, user:email` |
+| `user/gpg_keys`（`read:gpg_key` を持っていない） | **404** | `admin:gpg_key, read:gpg_key, write:gpg_key` |
+| `repos/{o}/{r}`（200） | 200 | `repo` |
+| `repos/{o}/{r}/pulls`（200） | 200 | **空** |
+| `repos/{o}/{r}/commits/{ref}/check-runs`（200） | 200 | **空** |
+
+そのため**ステータスで分けてから見るのではなく、ステータスの振り分けより先に
+見る**（レート制限の次）。判定は gh（`api/client.go` の `generateScopesSuggestion`）に
+合わせる —— 4xx（422 を除く）で、`X-Oauth-Scopes`（トークンが持っているスコープ）と
+`X-Accepted-Oauth-Scopes`（その API が受け付けるスコープ）がどちらも**空でない**
+こと（空なら gh も案内しない。fine-grained PAT はスコープを持たないので前者が空に
+なると読んでいるが、**fine-grained PAT では叩いていない**）。
+`repo` は `public_repo` などを、`admin:x` は `read:x` / `write:x` を、`write:x` は
+`read:x` を含むとみなす。**gh と 1 つだけ変える** —— gh は「受け付けるスコープのうち、
+持っていない最初の 1 つ」を案内するので、**`read:gpg_key` を持っていても
+`admin:gpg_key` を足せと言う**（受け付けるスコープは**どれか 1 つで足りる**ので、
+1 つでも持っていれば断られた理由は別にある）。こちらは**1 つも持っていないとき
+だけ**先頭を案内する。
+
+**mewgit が叩く API のうち、ヘッダが付くのは `repos/{o}/{r}`（`repo`）と
+`commits/{sha}/status`（`repo, repo:status`）だけ**（2026-09-25 に同じ形で数えた。
+`pulls` の GET / POST、`check-runs`、`reviews` は空）。status は公開リポジトリなら
+スコープ無しで通るので、**実際に効くのはアカウント確認**（04 の probe）で、`A` の
+`NoAccess` の内訳に出る（直し方の組み立ては 04 の「権限不足の案内」）。
+
+**レート制限を `Forbidden` / `MissingScope` より先に見る。** GitHub は使い切った要求に
+**403** を返すことがある（429 のこともある）ので、順序が逆だと
 **待てば直るものを直らないものとして見せる**。
 
 403 をレート制限と読む印は **2 つある**。
@@ -355,7 +387,7 @@ pub enum GithubError {
 - **二次制限**（短時間に叩きすぎ）は**残量を減らさずに** `retry-after` を付ける。
   片方だけ見ていると、二次制限が丸ごと `Forbidden` に落ちる。
 
-どちらの印も無い 403 はスコープ不足なので `Forbidden` のまま。
+どちらの印も無い 403 は `Forbidden` のまま（SAML / fine-grained PAT の権限 / IP allowlist。足りないスコープは上のとおり別の腕）。
 
 **回復時刻は `retry-after` を優先する。** あれが付いているのは二次制限で、
 `x-ratelimit-reset`（一次制限の窓。1 時間先のこともある）は無関係か、そもそも

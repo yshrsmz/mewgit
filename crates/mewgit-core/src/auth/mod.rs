@@ -110,7 +110,18 @@ impl RepoTarget {
 pub struct GhLogin {
     pub host: String,
     pub login: String,
+    /// gh の現在のアカウントか。**環境変数のトークンを含む** —— `GITHUB_TOKEN` を
+    /// export していると、gh はそのエントリを active と報告する（04）。
     pub active: bool,
+    /// **gh の設定上**（keyring / hosts.yml）で現在のアカウントか。
+    ///
+    /// **`gh auth refresh` / `gh auth switch` が相手にするのはこちら。**
+    /// [`active`](Self::active) と分けるのは、環境変数のトークンがあると gh が
+    /// そちらを active と報告し、設定上のエントリを**全部**非 active にするため
+    /// （実測 2026-09-26、gh 2.101.0）。`active` で案内を組むと `gh auth switch` を
+    /// 省き、環境変数を外して打ち直した refresh が**別のアカウントにスコープを
+    /// 足す**（`/code-review` が拾った）。
+    pub stored_active: bool,
     pub scopes: Vec<String>,
     /// gh がそのトークンを検証した結果。
     ///
@@ -321,7 +332,12 @@ impl DegradedReason {
 /// `NoAccess` のとき、どのログインがなぜ落ちたか。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeAttempt {
-    pub login: String,
+    /// **[`GhLogin`] ごと運ぶ**（`Ambiguous` と同じ）。案内が読むのは
+    /// `host`（`gh auth refresh -h` に渡すリポジトリのホスト）と `active`
+    /// （`gh auth refresh` はアクティブなアカウントにしか効かないので、そうで
+    /// なければ `gh auth switch` を先に書く）。04 の「権限不足の案内」。
+    /// 1 フィールドずつ抜くと、案内の材料が増えるたびに型と詰め替えが増える。
+    pub login: GhLogin,
     pub failure: AttemptFailure,
 }
 
@@ -333,7 +349,18 @@ pub struct ProbeAttempt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttemptFailure {
     /// HTTP のステータスで断られた（401 / 403 / 404）。**このアカウントでは無理**。
-    Denied { status: u16 },
+    Denied {
+        status: u16,
+        /// 応答のヘッダから判った、足りないスコープ（05 の `MissingScope`）。
+        /// 判らなければ `None`（ヘッダが無い / トークンが既に持っている）。
+        missing_scope: Option<String>,
+    },
+    /// SAML SSO の承認が要る 403。**トークンを org に承認すれば通る**ので、
+    /// 案内が `Denied` と違う。
+    ///
+    /// **`Denied` に `saml: bool` を足さない**（04）—— `Denied { 404, saml: true }`
+    /// が型で組める。SAML の拒否は常に 403 なので、ステータスを持たない腕にする。
+    SsoRequired,
     /// 断られてはいないが確かめられなかった（回線、TLS バックエンドの初期化、
     /// レート制限）。**もう一度なら通りうる**ので `Denied` と分ける ——
     /// レート制限を `Denied { status: 429 }` に畳むと、待てば直るものを
@@ -347,8 +374,8 @@ pub enum AttemptFailure {
 /// カンマ区切りの OAuth スコープを割る。
 ///
 /// **2 人の利用者がいる。** `gh auth status` の `scopes`（カンマ区切りの 1 本の
-/// 文字列）と、GitHub API が 403 に添える `x-accepted-oauth-scopes`
-/// （`github::client`）。00 の依存の向きで `github` は `auth` の上段なので、
+/// 文字列）と、GitHub API がエラーの応答に添える `x-accepted-oauth-scopes` /
+/// `x-oauth-scopes`（`github::client`）。00 の依存の向きで `github` は `auth` の上段なので、
 /// 下段のここに置いて上から呼ぶ。
 pub(crate) fn split_scopes(raw: &str) -> Vec<String> {
     raw.split(',')

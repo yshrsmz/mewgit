@@ -273,7 +273,13 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       取る。**名前の追跡先には広げない** —— そこでの `merge` は「何を基にしたか」で、
       `checkout -b feat upstream/main` が upstream の `main` の PR に座る（01 の
       「現ブランチの PR」）
-- [ ] 403 の `needed_scopes` 案内
+- [x] 足りないスコープの案内 —— 行の名前は「403 の `needed_scopes` 案内」だったが、
+      **GitHub はスコープ不足を 404 で返す**（05 の実測）ので、ステータスで分ける前に
+      `X-Accepted-Oauth-Scopes` / `X-Oauth-Scopes` を見る（`GithubError::MissingScope`）。
+      ヘッダが付くのは mewgit の API では `repos/{o}/{r}` と commit status だけなので、
+      **出す先は `A` の `NoAccess` の内訳**（`gh auth refresh -h <host> -s <scope>`。
+      アクティブでない login には `gh auth switch` を先に書く。04 の「権限不足の案内」）。
+      SAML の 403 は `AttemptFailure::SsoRequired` に割って「SSO の承認が要ります」
 - [ ] 既定リモートが GitHub でないときの PRs ペインの文言 — いまは
       `TargetState::Unavailable` でも `Cmd::ResolveAccount` が出ないため
       `AccountState::Resolving` のままで、ペインが**永久に「読み込み中…」**になる
@@ -371,12 +377,19 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       いたかを読んでから書き換える。**上の「ステータスバーのキーヒント」が入ると、
       フッターの 2 行目がフォーカス中のペインを別の形でも示す**ので、どちらを先に
       やっても要求が変わらないかを突き合わせる（キーヒントのほうが先に入る）
-- [ ] ステータスバー — 通知の消え方（dismiss / 期限切れ）と履歴表示。
-      **いまは一度出た通知が次の通知まで消えない。** 成功した操作は通知を出さないので、
-      「stage 済みに `s`」の警告が `u` の成功後も出たままになる（01 の「通知」）。
-      **`Notice.detail`（argv と stderr）を出すのもここ。** いまは要約行しか描かないので、
-      git が断った理由（`would be overwritten`、未マージのときの `-D` のヒント）が
-      画面に出ない。不変ルール 4 が「UI まで届ける」と言っているのはこの詳細のこと
+- [x] ステータスバー（1/2）— 通知を次の入力で下ろし、積まれた時刻を添える。
+      **2 本に割った**（2026-09-26）。1 本目だけで「古いメッセージが残り続けて判り
+      づらい」（2026-09-09 の要望）は解け、履歴は表示の器（モーダル）を足す別の関心事
+      なので。**時間で消す形・未読バッジ・常駐の履歴エリアは採らなかった**（理由は
+      01 の「通知」）。時刻は `HH:MM:SS` を前に添えるので、**案内文の予算は 80 → 71 セル**
+      （溢れたら `…`。07 の「ステータスバー」）
+- [ ] ステータスバー（2/2）— 通知の履歴を見るモーダル。**時刻は日付まで**
+      （`ui::time::format`）出し、**`Notice.detail`（argv と stderr）もここで出す。**
+      いまは要約行しか描かないので、git が断った理由（`would be overwritten`、
+      未マージのときの `-D` のヒント）が画面に出ない。不変ルール 4 が「UI まで届ける」と
+      言っているのはこの詳細のこと。**`Modal` に変種を足したら `_` の腕を持つ `match` を
+      grep する**（`update::paste` が受け皿を持っていた。`CLAUDE.md`）。開くキーは
+      フッターの表（`app::keys`）に載せ、`every_hinted_key_does_something` を通す
 - [ ] HEAD の追跡設定を 1 本にする。**いま `branch.<HEAD>.remote` は 2 箇所にある**
       —— `RepoInfo.head`（`HeadInfo::Branch.upstream`。PR の座り先と PR 作成の
       `head` が読む）と `BranchState::head()` の `Branch.upstream_config`（`f` と push の

@@ -23,6 +23,8 @@ pub(super) fn modal_key(state: &mut AppState, key: Key) -> Cmd {
         // 違うのは `Enter` で出す `Cmd` だけなので、そこだけ各モーダルが持つ。
         Some(Modal::RemotePicker { .. }) => picker_key(state, key, remote_picked),
         Some(Modal::AccountPicker { .. }) => account_key(state, key),
+        // **確定が無い**（読むだけ）ので、`Enter` は何もしない。
+        Some(Modal::NoticeLog { .. }) => picker_key(state, key, |_| Cmd::None),
         // **骨格を共有しない。** 欄が 4 つあって `Enter` の意味も欄で変わるので、
         // `picker_key` にも `edit_key` 1 本にも収まらない（01 の「PR 作成（`N`）」）。
         Some(Modal::PrCreate { .. }) => pr_create_key(state, key),
@@ -67,15 +69,15 @@ fn confirm_key(state: &mut AppState, key: Key) -> Cmd {
 /// コールバックを持たせない規約とも揃う。
 fn picker_key(state: &mut AppState, key: Key, on_enter: fn(&mut AppState) -> Cmd) -> Cmd {
     match key.code() {
-        // 端の扱いはペインのカーソルと同じ規則（`Modal::move_cursor`）。
+        // 端の扱いはペインのカーソルと同じ規則（`AppState::move_modal_cursor`）。
         // **候補が空なら動かない**（`stepped_index`）ので、選ばせない
         // `AccountPicker` でもここで断らなくてよい。
         KeyCode::Char('j') | KeyCode::Down => {
-            move_modal_cursor(state, 1);
+            state.move_modal_cursor(1);
             Cmd::None
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            move_modal_cursor(state, -1);
+            state.move_modal_cursor(-1);
             Cmd::None
         }
         KeyCode::Enter => on_enter(state),
@@ -106,10 +108,12 @@ fn account_key(state: &mut AppState, key: Key) -> Cmd {
     picker_key(state, key, account_picked)
 }
 
-fn move_modal_cursor(state: &mut AppState, delta: isize) {
-    if let Some(modal) = state.modal.as_mut() {
-        modal.move_cursor(delta);
-    }
+/// 通知の履歴を開く（`L`。01 の「通知」）。カーソルは最新の通知に置く。
+///
+/// **1 件も無くても開く。** 断る通知を積むと、その 1 件が履歴に入って「無い」が嘘になる。
+pub(super) fn open_notice_log(state: &mut AppState) -> Cmd {
+    state.modal = Some(Modal::NoticeLog { cursor: 0 });
+    Cmd::None
 }
 
 /// [`Modal::Input`] のキー処理。**文字キーはすべて入力になる。**
@@ -181,6 +185,7 @@ mod tests {
     };
     use super::super::update;
     use super::*;
+    use crate::app::state::MAX_NOTICES;
     use crate::app::{JobKind, Modal, Msg};
 
     use crate::git_read::{FileStatus, WorktreeSection};
@@ -412,5 +417,120 @@ feat/b
         // モーダル表示中の `q` は終了ではない。入力中に閉じられると困る。
         assert_eq!(update(&mut state, Msg::Key(Key::char('q'))), Cmd::None);
         assert_eq!(state.modal, Some(Modal::Help));
+    }
+
+    /// 通知を `messages` の順に積んだ状態（最後が最新）。
+    fn state_with_notices(messages: &[&str]) -> AppState {
+        let mut state = state();
+        for message in messages {
+            state.push_notice(NoticeLevel::Info, (*message).to_string(), None);
+        }
+        state
+    }
+
+    /// 履歴のカーソルが指している通知の `message`。
+    fn notice_under_cursor(state: &AppState) -> &str {
+        let Some(Modal::NoticeLog { cursor }) = state.modal else {
+            panic!("履歴が開いていません: {:?}", state.modal);
+        };
+        &state.notices[state.notices.len() - 1 - cursor].message
+    }
+
+    #[test]
+    fn l_opens_the_notice_log_on_the_newest_notice() {
+        let mut state = state_with_notices(&["古い", "新しい"]);
+
+        let cmd = press(&mut state, 'L');
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.modal, Some(Modal::NoticeLog { cursor: 0 }));
+        assert_eq!(notice_under_cursor(&state), "新しい");
+        // **開いたキーで下ろしても、履歴からは消えない**（01 の「通知」）。
+        assert_eq!(state.shown_notice(), None);
+        assert_eq!(state.notices.len(), 2);
+    }
+
+    #[test]
+    fn the_notice_log_opens_even_with_no_notices() {
+        // 断る通知を積むと、その 1 件が履歴に入って「無い」が嘘になる（01）。
+        let mut state = state();
+
+        let _ = press(&mut state, 'L');
+        let _ = press(&mut state, 'j');
+
+        assert_eq!(state.modal, Some(Modal::NoticeLog { cursor: 0 }));
+        assert!(state.notices.is_empty());
+    }
+
+    #[test]
+    fn j_and_k_walk_the_notice_log_and_stop_at_the_ends() {
+        let mut state = state_with_notices(&["1", "2", "3"]);
+        let _ = press(&mut state, 'L');
+
+        let _ = press(&mut state, 'j');
+        assert_eq!(notice_under_cursor(&state), "2");
+        let _ = press(&mut state, 'j');
+        let _ = press(&mut state, 'j');
+        assert_eq!(notice_under_cursor(&state), "1");
+        let _ = press(&mut state, 'k');
+        assert_eq!(notice_under_cursor(&state), "2");
+    }
+
+    #[test]
+    fn enter_does_nothing_and_esc_closes_the_notice_log() {
+        let mut state = state_with_notices(&["1", "2"]);
+        let _ = press(&mut state, 'L');
+        let _ = press(&mut state, 'j');
+
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+        assert_eq!(state.modal, Some(Modal::NoticeLog { cursor: 1 }));
+
+        let _ = press_code(&mut state, KeyCode::Esc);
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn a_notice_that_arrives_while_reading_does_not_move_what_is_under_the_cursor() {
+        // 非同期の完了が積んだ 1 件で、読んでいた `detail` が別の失敗のものに
+        // 入れ替わらないこと（01 の「通知」）。
+        let mut state = state_with_notices(&["1", "2", "3"]);
+        let _ = press(&mut state, 'L');
+        let _ = press(&mut state, 'j');
+        assert_eq!(notice_under_cursor(&state), "2");
+
+        state.push_notice(NoticeLevel::Error, "4".to_string(), None);
+
+        assert_eq!(notice_under_cursor(&state), "2");
+        assert_eq!(state.modal, Some(Modal::NoticeLog { cursor: 2 }));
+    }
+
+    #[test]
+    fn a_cursor_on_the_oldest_notice_stays_inside_when_the_cap_drops_it() {
+        // 上限で最古が捨てられたら、残った末尾に寄せる（01 の「通知」）。
+        let names: Vec<String> = (0..MAX_NOTICES).map(|i| i.to_string()).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut state = state_with_notices(&refs);
+        let _ = press(&mut state, 'L');
+        for _ in 0..MAX_NOTICES {
+            let _ = press(&mut state, 'j');
+        }
+        assert_eq!(notice_under_cursor(&state), "0");
+
+        state.push_notice(NoticeLevel::Info, "new".to_string(), None);
+
+        assert_eq!(state.notices.len(), MAX_NOTICES);
+        assert_eq!(notice_under_cursor(&state), "1");
+    }
+
+    #[test]
+    fn pasting_into_the_notice_log_does_nothing() {
+        let mut state = state_with_notices(&["1"]);
+        let _ = press(&mut state, 'L');
+        let before = format!("{state:?}");
+
+        let cmd = update(&mut state, Msg::Paste("x".to_string()));
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(format!("{state:?}"), before);
     }
 }

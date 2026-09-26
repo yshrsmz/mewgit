@@ -383,13 +383,19 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       なので。**時間で消す形・未読バッジ・常駐の履歴エリアは採らなかった**（理由は
       01 の「通知」）。時刻は `HH:MM:SS` を前に添えるので、**案内文の予算は 80 → 71 セル**
       （溢れたら `…`。07 の「ステータスバー」）
-- [ ] ステータスバー（2/2）— 通知の履歴を見るモーダル。**時刻は日付まで**
+- [x] ステータスバー（2/2）— 通知の履歴を見るモーダル。**時刻は日付まで**
       （`ui::time::format`）出し、**`Notice.detail`（argv と stderr）もここで出す。**
       いまは要約行しか描かないので、git が断った理由（`would be overwritten`、
       未マージのときの `-D` のヒント）が画面に出ない。不変ルール 4 が「UI まで届ける」と
       言っているのはこの詳細のこと。**`Modal` に変種を足したら `_` の腕を持つ `match` を
       grep する**（`update::paste` が受け皿を持っていた。`.claude/rules/rust-coding.md`）。開くキーは
       フッターの表（`app::keys`）に載せ、`every_hinted_key_does_something` を通す
+      - **`L` を共通キーに足した**（2026-09-26 にユーザーと決めた）。そのぶん 80 桁の
+        Graph から共通キーの案内が落ち、出るのは CommitDetail だけになった（実測は 07 の
+        「ステータスバー」）。`q:quit` の隣に落とさない枠を作る案も Graph では同じく落ちる
+      - **stderr のタブは空白に展開する**（ratatui が描かないので字下げが消える。実物を
+        描いて判った。07 の「NoticeLog モーダル」）
+      - **中身のスクロールは入れていない**（入りきらなければ最下行を `…`）。受け入れた穴
 - [ ] HEAD の追跡設定を 1 本にする。**いま `branch.<HEAD>.remote` は 2 箇所にある**
       —— `RepoInfo.head`（`HeadInfo::Branch.upstream`。PR の座り先と PR 作成の
       `head` が読む）と `BranchState::head()` の `Branch.upstream_config`（`f` と push の
@@ -463,7 +469,10 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       （00 の「ディレクトリ構成」）。**引き金は行数ではなく、`Modal` / `GraphState` /
       `WorktreeState` / `JobTracker` が独立して育ったかどうか。** M6 は `Modal::Help` と
       `RebaseEditor`、ステータスバーの通知履歴で `Modal` と `Notice` に手が入るので、
-      そこで数え直す
+      そこで数え直す。**通知履歴では数え直して割らなかった** —— 増えたのは
+      `Modal::NoticeLog` の変種 1 つと、`Modal::move_cursor` を `AppState::move_modal_cursor`
+      へ移したことだけで（一覧の長さを `AppState.notices` が持つため）、`Modal` が
+      独立して育ったとは言えない
 - [ ] `git_exec::argv` の `VARIANT_COUNT` を消す。**`variant()` の網羅 `match` から
       離れた場所に変種の本数のコピーが置いてある**（`.claude/rules/rust-coding.md` の「離れた場所に、
       コードの『いま N ある』を書かない」）。**ただの削除では済まない** ——

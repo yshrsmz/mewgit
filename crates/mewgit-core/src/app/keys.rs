@@ -66,6 +66,8 @@ pub const COMMON: &[KeyHint] = &[
     hint(&[Key::char('p')], "pull"),
     hint(&[Key::char('P')], "push"),
     hint(&[Key::char('A')], "account"),
+    // **足したことで 80 桁の Graph から共通キーが落ちた**（07 の実測）。
+    hint(&[Key::char('L')], "通知"),
 ];
 
 /// 上下移動。**ペインをまたいで同じ 1 つを使う**（説明が割れないように）。

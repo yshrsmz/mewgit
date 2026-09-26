@@ -84,7 +84,7 @@ pub struct PushRejection {
 }
 
 /// 保持する通知の上限。超えた分は古いものから捨てる。
-const MAX_NOTICES: usize = 100;
+pub(super) const MAX_NOTICES: usize = 100;
 
 impl AppState {
     /// 開いたリポジトリと設定から初期状態を作る。
@@ -208,6 +208,13 @@ impl AppState {
         });
         while self.notices.len() > MAX_NOTICES {
             self.notices.pop_front();
+        }
+        // **履歴を開いていたら、カーソルを同じ通知に留める**（01 の「通知」）。
+        // `cursor` は新しいほうから数えるので、1 件積むと下の通知が 1 つずれる。
+        // 進めないと、非同期の完了が積んだ 1 件で読んでいた `detail` が入れ替わる。
+        // 末尾を指していて上限で捨てられたら、残った末尾に寄せる。
+        if let Some(Modal::NoticeLog { cursor }) = self.modal.as_mut() {
+            *cursor = (*cursor + 1).min(self.notices.len() - 1);
         }
     }
 
@@ -2269,10 +2276,20 @@ pub enum Modal {
         remotes: Vec<String>,
         cursor: usize,
     },
+    /// 通知の履歴（01 の「通知」）。`L` で開く。**ステータスバーでは読めない
+    /// `detail`（argv と stderr）と日付を出すのはここだけ。**
+    ///
+    /// **一覧は持たない。** 読むのは [`AppState::notices`] で、写しを持つと開いている
+    /// あいだに積まれた通知が出ない。
+    NoticeLog {
+        /// **新しいほうから数えた位置**（0 が最新）。描く順と同じ数え方にして、
+        /// `ui` が添字を裏返さずに済むようにする。
+        cursor: usize,
+    },
     Help,
 }
 
-impl Modal {
+impl AppState {
     /// 一覧から 1 つ選ぶモーダルのカーソルを動かす。カーソルを持たないモーダルでは
     /// 何もしない。
     ///
@@ -2281,23 +2298,33 @@ impl Modal {
     /// （[`BranchState::move_cursor`] / [`CommitFiles::move_cursor`]）。`update` から
     /// [`stepped_index`] を直に呼ぶと、そのために可視性を広げることになる。
     ///
+    /// **`Modal` ではなく `AppState` に置く。** [`Modal::NoticeLog`] の一覧は
+    /// [`AppState::notices`] で、モーダル自身は長さを知らない。
+    ///
     /// [`Modal::RebaseEditor`] が入るときは、ここに腕を足す。
-    pub(super) fn move_cursor(&mut self, delta: isize) {
-        match self {
-            Modal::RemotePicker {
+    pub(super) fn move_modal_cursor(&mut self, delta: isize) {
+        let notices = self.notices.len();
+        match self.modal.as_mut() {
+            Some(Modal::RemotePicker {
                 remotes, cursor, ..
-            } => *cursor = stepped_index(*cursor, remotes.len(), delta),
+            }) => *cursor = stepped_index(*cursor, remotes.len(), delta),
             // **選べない degraded では候補が空**なので、`stepped_index` が 0 を返して
             // 動かない（`NoAccess` の内訳は本文に出る。07）。
-            Modal::AccountPicker { view, cursor } => {
+            Some(Modal::AccountPicker { view, cursor }) => {
                 *cursor = stepped_index(*cursor, view.candidates().len(), delta);
             }
-            Modal::Confirm { .. }
-            | Modal::Input { .. }
-            | Modal::CommitMessage { .. }
-            | Modal::RebaseEditor { .. }
-            | Modal::PrCreate { .. }
-            | Modal::Help => {}
+            Some(Modal::NoticeLog { cursor }) => {
+                *cursor = stepped_index(*cursor, notices, delta);
+            }
+            Some(
+                Modal::Confirm { .. }
+                | Modal::Input { .. }
+                | Modal::CommitMessage { .. }
+                | Modal::RebaseEditor { .. }
+                | Modal::PrCreate { .. }
+                | Modal::Help,
+            )
+            | None => {}
         }
     }
 }
@@ -2487,7 +2514,7 @@ impl AccountView {
     /// `Enter` で選べる候補。
     ///
     /// **読み手が散っているので 1 本にする** —— `ui`（一覧の行・タイトル・キーの
-    /// 案内）、`Modal::move_cursor`、`Enter` の確定。別々に `matches!` を書くと、
+    /// 案内）、`AppState::move_modal_cursor`、`Enter` の確定。別々に `matches!` を書くと、
     /// 選ばせないはずの画面で `Enter` だけが効く。
     ///
     /// **`Waiting` と `Failed` が空なのは意図。** 候補が届いていない画面で `Enter` を

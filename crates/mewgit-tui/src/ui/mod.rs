@@ -63,7 +63,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     // モーダルは最後。下のペインを覆って描く（07）。
     if let Some(modal) = &state.modal {
-        modals::render(frame, frame.area(), modal);
+        modals::render(frame, frame.area(), modal, &state.notices);
     }
 }
 
@@ -541,7 +541,7 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
 /// 切れたことが画面から判らない。
 ///
 /// 出すのは先頭行だけ。toml のパースエラーのように複数行のメッセージがあり、そのまま
-/// 流すと改行が消えて読めなくなる。全文は `Notice.message` に残っている（履歴表示は M6）。
+/// 流すと改行が消えて読めなくなる。全文は `L` の履歴で読む（`modals::notice_log`）。
 fn notice_line(state: &AppState, width: u16) -> Paragraph<'_> {
     let Some(notice) = state.shown_notice() else {
         return Paragraph::new("");
@@ -553,7 +553,7 @@ fn notice_line(state: &AppState, width: u16) -> Paragraph<'_> {
 }
 
 /// `text` を `cells` セルに収める。溢れるときは末尾を `…` に置き換える。
-fn ellipsize(text: &str, cells: u16) -> Cow<'_, str> {
+pub(crate) fn ellipsize(text: &str, cells: u16) -> Cow<'_, str> {
     if fits(text, cells) {
         return Cow::Borrowed(text);
     }
@@ -578,7 +578,7 @@ fn ellipsize(text: &str, cells: u16) -> Cow<'_, str> {
 }
 
 /// 最初の行。改行が無ければ全体。
-fn first_line(text: &str) -> &str {
+pub(crate) fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
 }
 
@@ -709,12 +709,12 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{degraded_label, ellipsize, file_row, fits, pane_area, window, wrapped};
+    use super::{degraded_label, ellipsize, file_row, fits, hint_text, pane_area, window, wrapped};
     use crate::test_util::{
         draw, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status, terminal_with,
     };
     use mewgit_core::app::{
-        update, AppState, Cmd, JobKind, Modal, Msg, NoticeLevel, Pane, TargetState, TermSize,
+        keys, update, AppState, Cmd, JobKind, Modal, Msg, NoticeLevel, Pane, TargetState, TermSize,
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
@@ -1339,13 +1339,14 @@ mod tests {
 
     #[test]
     fn the_common_keys_drop_at_the_width_where_they_would_be_cut() {
-        // **境目を跨ぐ**（`.claude/rules/testing.md`）。Graph + 共通キー + `q:quit` は 75 セルなので、
-        // 75 では出て 74 では落ちる。机上で選んだ幅では、どちらか片側しか踏めない。
-        let fits = hint_bar_of(Pane::Graph, 75);
+        // **境目を跨ぐ**（`.claude/rules/testing.md`）。Graph + 共通キー + `q:quit` は 82 セルなので、
+        // 82 では出て 81 では落ちる。机上で選んだ幅では、どちらか片側しか踏めない。
+        let fits = hint_bar_of(Pane::Graph, 82);
         assert!(fits.contains("f:fetch"), "hints: {fits:?}");
+        assert!(fits.contains("L:通知"), "hints: {fits:?}");
         assert!(fits.contains("n:ブランチ作成"), "hints: {fits:?}");
 
-        let over = hint_bar_of(Pane::Graph, 74);
+        let over = hint_bar_of(Pane::Graph, 81);
         assert!(!over.contains("f:fetch"), "hints: {over:?}");
         assert!(over.contains("n:ブランチ作成"), "hints: {over:?}");
         assert!(over.contains("q:quit"), "hints: {over:?}");
@@ -1354,7 +1355,7 @@ mod tests {
     #[test]
     fn the_prs_pane_drops_the_common_keys_but_keeps_all_of_its_own() {
         // **`N:PR 作成` を足して落ちる側へ移った**（07 の実測: ペインのキーだけで
-        // 43 → 53 セル。共通キーの 33 を足すと 86 で 80 に入らない）。ここが見張る
+        // 43 → 53 セル。いまの共通キーの 40 を足すと 80 に入らない）。ここが見張る
         // のは**どちら側に居るか**で、落とす仕組みの境目は上のテストが見る。
         let prs = hint_bar_of(Pane::Prs, 80);
         assert!(!prs.contains("f:fetch"), "hints: {prs:?}");
@@ -1379,15 +1380,21 @@ mod tests {
     }
 
     #[test]
-    fn the_graph_pane_still_shows_the_common_keys_with_room_to_spare() {
-        // **`Prs` が落ちる側へ移った回に、出る側まで一緒に落ちていないか。**
+    fn the_commit_detail_pane_still_shows_the_common_keys_with_room_to_spare() {
+        // **共通キーに `L:通知` を足した回に、出る側まで一緒に落ちていないか。**
         // 上のテストと対になる —— あちらは落ちる側、こちらは出る側（07 の表）。
-        // **`CommitDetail` は `hint_bar_of` では座れない** —— あのヘルパは WIP 行を
-        // 選んだ状態なので候補に入らない（07 の「ペインとフォーカス」）。
-        let graph = hint_bar_of(Pane::Graph, 80);
-        assert!(graph.contains("f:fetch"), "hints: {graph:?}");
+        // 80 桁で出る側に残ったのは CommitDetail だけ（Graph は 82 で落ちた）。
+        // **`hint_bar_of` では座れない** —— あのヘルパは WIP 行を選んだ状態なので
+        // 候補に入らない（07 の「ペインとフォーカス」）。組む関数を直に呼ぶ。
+        let detail = hint_text(keys::pane(Pane::CommitDetail), 80);
+        assert!(detail.contains("f:fetch"), "hints: {detail:?}");
+        assert!(detail.contains("L:通知"), "hints: {detail:?}");
         // `contains` だけだと、80 桁をちょうど埋めた状態でも通る（#80）。
-        assert!(fits(graph.trim_end(), 79), "余白がありません: {graph:?}");
+        assert!(fits(&detail, 79), "余白がありません: {detail:?}");
+
+        // **Graph は落ちる側へ移った**（07 の実測）。
+        let graph = hint_bar_of(Pane::Graph, 80);
+        assert!(!graph.contains("f:fetch"), "hints: {graph:?}");
     }
 
     #[test]

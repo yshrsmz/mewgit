@@ -115,8 +115,10 @@ pub enum Msg {
     },
 
     // git_exec
-    /// `git` の実行が終わった。進行中操作は運ばない —— `exec_finished` が必ず出す
+    /// `git` の実行が終わった。進行中操作は運ばない —— `exec_finished` が出す
     /// `LoadStatus` の返りに載ってくる（03 の「進行中操作との整合」）。
+    /// `SetAccount` / `UnsetAccount` は `.git/config` しか書かないので `LoadStatus` を
+    /// 出さないが、進行中操作も動かない。
     ExecFinished(Box<ExecDone>),
 
     // auth / github

@@ -20,7 +20,8 @@ use crate::app::{AppState, Cmd, ExecDone, JobKind, NoticeLevel, Region};
 /// `git` の実行が終わった。
 ///
 /// 進行中操作は、ここで出す `LoadStatus` の返り（`WorktreeSnapshot.progress`）で
-/// 入れ替わる（03 の「進行中操作との整合」）。
+/// 入れ替わる（03 の「進行中操作との整合」）。`Reload::Account` だけは `LoadStatus` を
+/// 出さないが、`.git/config` の 1 行では進行中操作は動かない。
 pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     state.jobs.finish(JobKind::Exec);
 

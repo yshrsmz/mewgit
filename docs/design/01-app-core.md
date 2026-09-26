@@ -2538,7 +2538,8 @@ pub fn init(state: &mut AppState) -> Cmd;
   出口で `AppState::issue` を通し、同種のジョブが走っていれば発行しない
 - キー入力は `focus` と `modal` を見て、対応する pane / modal の handler に委譲する。
   ペインが `Cmd` を組み立てるのは `update` の中だけで、`ui` からは呼ばない
-- `ExecFinished` は成功・失敗・中断を問わず `LoadStatus` を発行する。進行中操作は
+- `ExecFinished` は成功・失敗・中断を問わず `LoadStatus` を発行する。**例外は
+  `GitOp::SetAccount` / `UnsetAccount`（`.git/config` の 1 行だけを書く）は出さない —— 進行中操作は動かない**（`update::exec` の `Reload::Account`）。進行中操作は
   その返りで入れ替わる（03 の「進行中操作との整合」）。M6 の `.git/HEAD` 監視も、
   専用の `Msg` を足さずに `LoadStatus` を出す
 - 同種の `Cmd` が実行中なら重複発行しない（`JobTracker` で管理）

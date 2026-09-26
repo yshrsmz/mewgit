@@ -530,7 +530,7 @@ pub enum InProgressOp {
 linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<name>/` に置かれる
 （下の実測）ので、`workdir/.git` を決め打ちすると別のワークツリーの状態を読む。
 
-**判定は上から順**（`git status` の `wt-status.c` と同じ並び）。
+**判定は上から順で、最初に当たった 1 つを採る。** `git status` とは違う —— あちらは複数を同時に出す（`rebase -r` の merge の行がコンフリクトすると `rebase-merge/` と `MERGE_HEAD` が両方在り、両方を出す。下の実測）。**rebase を先に見る**のは、そのとき打つのが `git rebase --continue` / `--abort` だから（merge を採ると M5 の continue / abort が merge 側の argv を組む）。
 
 | 判定 | InProgressOp | 進捗 |
 |---|---|---|
@@ -550,7 +550,9 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 |---|---|---|
 | `git rebase main`（`-i` 無し）でコンフリクト | `rebase-merge/`（`interactive` **も在る**）、`msgnum` 1 / `end` 2 | interactive rebase in progress |
 | `git rebase -i main` で `edit` に止まる | `rebase-merge/`（`amend` が増える）、`done` の最終行 `edit …` | interactive rebase in progress |
-| `git rebase -x false main`（2 コミット） | `msgnum` 1 / **`end` 4** | — |
+| `git rebase -x false <base>`（2 コミット、コンフリクト無し） | `msgnum` 2 / **`end` 4**、`done` の最終行 `exec false` | — |
+| `git rebase -i main` で `edit` にした pick がコンフリクト | `done` の最終行 `edit …`（止まった理由はコンフリクト） | interactive rebase in progress |
+| `git rebase -r main` で merge の行がコンフリクト | `rebase-merge/` **と** `MERGE_HEAD` の両方 | interactive rebase と unmerged paths の両方を出す |
 | `git rebase --apply main` でコンフリクト | `rebase-apply/`（`rebasing` が在る）、`next` / `last` | rebase in progress |
 | `git am` でコンフリクト | `rebase-apply/`（**`applying` が在る**） | You are in the middle of an am session |
 | `git cherry-pick A` でコンフリクト | `CHERRY_PICK_HEAD` | — |
@@ -581,8 +583,8 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 - **`Step` が読めないときは `None`**（ディレクトリは在るのに `msgnum` がまだ無い ——
   外で `git rebase -i` の todo を編集している最中など）。**進行中であることは落とさない**
 - **止まった理由（`edit` / コンフリクト / exec の失敗）は持たない。** `done` の最終行は
-  理由を表さない —— `-x false` で止めた形は最終行が `pick` だった（exec は失敗すると
-  todo に戻される）。07 のモックにあった `(edit)` はこの理由で出さない
+  理由を表さない —— `edit` にした pick がコンフリクトすると、最終行は `edit` なのに
+  止まったのはコンフリクトのため（実測）。07 のモックにあった `(edit)` はこの理由で出さない
 - `MERGE_HEAD` は octopus では複数行になる。`Merge` が持つのは先頭行だけ
 - ファイルが読めない・中身が壊れているときは、その行を「無い」と読んで次の判定へ進む。
   **戻り値が `Option` で `Result` でないのはこのため**（上の「API」）

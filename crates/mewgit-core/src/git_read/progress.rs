@@ -14,8 +14,11 @@ use super::{InProgressOp, Oid, Step};
 /// `git_dir` は**ワークツリーごとの** gitdir（[`RepoReader::git_dir`](super::RepoReader::git_dir)）。
 /// linked worktree の状態は `.git/worktrees/<name>/` に置かれる。
 ///
-/// 判定は `git status`（`wt-status.c`）と同じ並びで上から見る。ファイルが読めない・
-/// 中身が壊れているときはその行を「無い」と読んで次へ進むので、`Result` は返さない。
+/// 判定は上から見て、**最初に当たった 1 つを採る**（`git status` は複数を同時に出す。
+/// `rebase -r` の merge が止まると `rebase-merge/` と `MERGE_HEAD` が両方在るが、
+/// 打つのは rebase の continue / abort なので rebase を先に見る。02）。ファイルが
+/// 読めない・中身が壊れているときはその行を「無い」と読んで次へ進むので、`Result` は
+/// 返さない。
 pub fn in_progress(git_dir: &Path) -> Option<InProgressOp> {
     let merge = git_dir.join("rebase-merge");
     if merge.is_dir() {

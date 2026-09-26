@@ -497,7 +497,8 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 ## 進行中操作との整合
 
 - **`ExecFinished` は進行中操作を運ばない。** `exec_finished` が成功・失敗・中断を
-  問わず出す `LoadStatus` の返り（`WorktreeSnapshot.progress`。02）で入れ替わる。
+  問わず出す `LoadStatus` の返り（`WorktreeSnapshot.progress`。02）で入れ替わる
+  （`GitOp::SetAccount` / `UnsetAccount`（`.git/config` の 1 行だけを書く）は出さない —— 進行中操作は動かない）。
   **以前は「実行結果と 1 通に束ねる」と決めていた**（別々の `Msg` に割ると受け取る順序に
   依存するため）が、束ねると起動時・書き込みのあと・M6 の外部変更の検知で入口が 3 本に
   なり、それぞれに到着順の議論が要った。status に載せれば、古い返りを捨てるのは既存の

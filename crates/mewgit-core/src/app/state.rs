@@ -1647,7 +1647,7 @@ struct PrDetailEntry {
 ///
 /// **集計の鍵の定義はここ 1 つ。** 憶える側（[`PrState::detail_loaded`]）と捨てる側
 /// （[`PrState::loaded`]）が別々に書くと、片方に条件を足したときに**食い違ったまま
-/// 両方のテストが緑になる**（`CLAUDE.md` の「同じ判定を 2 箇所に書かない」）。
+/// 両方のテストが緑になる**（`.claude/rules/rust-coding.md` の「同じ判定を 2 箇所に書かない」）。
 fn in_list(list: &[PullRequest], number: u64, sha: &str) -> bool {
     list.iter()
         .any(|pr| pr.number == number && pr.head.sha == sha)
@@ -1750,7 +1750,7 @@ impl PrState {
     /// この PR の集計。
     ///
     /// **`None` は「まだ引いていない」。** 表に**居ないこと**がそれで、`Err` は
-    /// 「引いたが読めなかった」。**同じ `None` に畳まない**（`CLAUDE.md` の
+    /// 「引いたが読めなかった」。**同じ `None` に畳まない**（`.claude/rules/rust-coding.md` の
     /// 「`None` の理由を 2 つ以上持たせない」）—— 畳むと `ui` が「CI の無い PR」と
     /// 「CI を読めなかった PR」を区別できない。
     ///
@@ -2468,7 +2468,8 @@ pub struct Repick {
 /// 取り直した候補一覧（01 の「候補の取り直し」）。
 ///
 /// **3 値にする。** `Option<Vec<GhLogin>>` だと「待っている」と「引けなかった」が
-/// 同じ `None` になり、本文に理由を出せない（「`None` の理由を 2 つ以上持たせない」）。
+/// 同じ `None` になり、本文に理由を出せない（`.claude/rules/rust-coding.md` の
+/// 「`None` の理由を 2 つ以上持たせない」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountListing {
     /// `Cmd::ListAccounts` の返事待ち。**開いた直後は必ずここ** —— `gh auth status` は

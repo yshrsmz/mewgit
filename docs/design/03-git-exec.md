@@ -534,7 +534,7 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 | `commit` | 断る（unmerged files） | 通る（detached HEAD に積む） | 通り、**操作を結ぶ**（`*_HEAD` が消える） |
 | `commit --amend` | 断る | 通る（`edit` の使い道そのもの） | 断る（`You are in the middle of a cherry-pick -- cannot amend`） |
 | `fetch` / `push` | 通る | 通る | 通る |
-| `branch -m` / `branch -D` | 通る（rebase 中の対象ブランチの `-D` だけは `used by worktree` で断る） | 同左 | 通る |
+| `branch -m` / `branch -D` | 通る（**rebase 中の対象ブランチは両方とも断る** —— `-m` は `is being rebased`、`-D` は `used by worktree`） | 同左 | 通る |
 
 ここから決めたこと ——
 

@@ -424,7 +424,7 @@ fn exec_busy(state: &mut AppState) -> bool {
 /// あちらのモーダルはユーザーが打ったものを持っていない。ここで同じことをすると、
 /// 前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
 /// 「ほかの git 実行が終わるまで待ってください」と出て**打った文字ごと消える**。
-/// 判定は [`AppState::issue`] と同じ `AppState::refuses`。
+/// 判定は [`AppState::issue`] と同じ `AppState::refusal`。
 ///
 /// **2 人目（`Modal::Input`）が出た時点でここへ移した。** 写すと、片方だけ
 /// 「閉じてから返す」形に戻ったときに気付けない（01 の「1 行入力」）。
@@ -445,8 +445,8 @@ fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
 /// 本当の種別で落とす**ので、この関数が在る理由（打った本文を消さない）がそのまま
 /// 破れる（`.claude/rules/rust-coding.md` の「導出できる値を引数に取らせない」）。
 fn submit(state: &mut AppState, cmd: Cmd) -> Cmd {
-    if state.refuses(&cmd) {
-        return Cmd::None;
+    if let Some(instead) = state.refusal(&cmd) {
+        return instead;
     }
 
     // 閉じずに返すと、`Cmd` が落とされたときにモーダルだけが画面に残る。

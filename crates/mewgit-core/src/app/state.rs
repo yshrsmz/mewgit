@@ -120,8 +120,8 @@ impl AppState {
 
     /// `update` が返す [`Cmd`] を発行してよい形にする。
     ///
-    /// 非同期ジョブを生む `Cmd` は [`JobTracker`] に登録し、[`refuses`](Self::refuses) が
-    /// 断るものは [`Cmd::None`] に落とす。判定をここ（`update` の出口）に置くのは、
+    /// 非同期ジョブを生む `Cmd` は [`JobTracker`] に登録し、[`refusal`](Self::refusal) が
+    /// 断るものは代わりの `Cmd` に差し替える。判定をここ（`update` の出口）に置くのは、
     /// ランタイムの `dispatch` が `AppState` に書いてよいのが `notices` だけだから
     /// （01 のランタイム）。
     pub fn issue(&mut self, cmd: Cmd) -> Cmd {
@@ -132,35 +132,43 @@ impl AppState {
                 let issued: Vec<Cmd> = cmds.into_iter().map(|cmd| self.issue(cmd)).collect();
                 Cmd::batch(issued)
             }
-            cmd if self.refuses(&cmd) => Cmd::None,
-            cmd => {
-                if let Some((kind, label)) = cmd.job() {
-                    // 走っていないことは `refuses` が確かめた。
-                    let _ = self.jobs.start(Job::new(kind, label));
+            cmd => match self.refusal(&cmd) {
+                Some(instead) => self.issue(instead),
+                None => {
+                    if let Some((kind, label)) = cmd.job() {
+                        // 走っていないことは `refusal` が確かめた。
+                        let _ = self.jobs.start(Job::new(kind, label));
+                    }
+                    cmd
                 }
-                cmd
-            }
+            },
         }
     }
 
-    /// `cmd` を [`issue`](Self::issue) が落とすなら、理由を通知に積んで真を返す。
+    /// `cmd` を [`issue`](Self::issue) が断るなら、理由を通知に積んで**代わりに出す
+    /// `Cmd`** を返す。通すなら `None`。
     ///
     /// **打った本文を持つモーダルの確定（`update::submit`）も同じ関数で問う** ——
-    /// 落とされると分かっていれば閉じずに断れる。判定を写すと、片方にだけ足した
+    /// 断られると分かっていれば閉じずに断れる。判定を写すと、片方にだけ足した
     /// 断りで本文が消える。**進行中操作を先に診る** —— git の実行が終わっても
     /// 断られるので、待てと言うより出口を言うほうが先に要る。
-    pub(crate) fn refuses(&mut self, cmd: &Cmd) -> bool {
+    ///
+    /// **進行中操作で断ったら status を読み直す。** 世代を進めるのは mewgit の書き込み
+    /// だけなので、端末で rebase を終えても snapshot は「鮮度あり・途中」のまま残る。
+    /// 断ると git を起動しないので、読み直さないと断り続ける（01 の「進行中操作が
+    /// あるときの書き込み」）。
+    pub(crate) fn refusal(&mut self, cmd: &Cmd) -> Option<Cmd> {
         if let Cmd::Exec(op) = cmd {
             if self.refuse_in_progress(op) {
-                return true;
+                return Some(Cmd::LoadStatus);
             }
         }
         match cmd.job_kind() {
             Some(kind) if self.jobs.is_running(kind) => {
                 self.notify_dropped(kind);
-                true
+                Some(Cmd::None)
             }
-            _ => false,
+            _ => None,
         }
     }
 

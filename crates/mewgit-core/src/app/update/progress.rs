@@ -110,6 +110,7 @@ mod tests {
         cells, fake_output, finish_exec, open_input, press, press_code, state_on_branches,
         type_text, worktree_state, NOTICE_CELLS,
     };
+    use super::super::update;
     use super::*;
     use crate::app::{Cmd, KeyCode, Modal, Msg};
     use crate::git_exec::{LocalBranch, PrSource, PullMode};
@@ -241,8 +242,29 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::None);
+        // git は起動せず、代わりに status を読み直す（下の「外で終えた」）。
+        assert_eq!(cmd, Cmd::LoadStatus);
         assert!(shown(&state).starts_with("rebase の途中です"));
+    }
+
+    #[test]
+    fn a_rebase_finished_outside_is_noticed_on_the_next_press() {
+        // 世代を進めるのは mewgit の書き込みだけなので、端末で `rebase --abort` しても
+        // snapshot は「鮮度あり・途中」のまま。断ったときに読み直さないと、git を
+        // 起動しないぶん断り続ける（`/code-review` が拾った。pty で再現した）。
+        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        arrive(&mut state, Some(rebase()));
+        let _ = press(&mut state, 'k');
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::LoadStatus);
+
+        // 読み直した status には進行中操作が無い（外で終えた）。
+        let mut snapshot = fake_snapshot(&["a.txt"], &[], &[]);
+        snapshot.progress = None;
+        let _ = update(&mut state, Msg::StatusLoaded(Box::new(Ok(snapshot))));
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::Exec(GitOp::Switch("another".to_string())));
     }
 
     #[test]
@@ -295,7 +317,7 @@ mod tests {
 
         let cmd = press(&mut state, 'n');
 
-        assert_eq!(cmd, Cmd::None);
+        assert_eq!(cmd, Cmd::LoadStatus);
         assert_eq!(state.modal, None);
         assert!(shown(&state).starts_with("rebase の途中です"));
     }
@@ -321,7 +343,7 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::None);
+        assert_eq!(cmd, Cmd::LoadStatus);
         let (_, _, buf, _) = open_input(&state);
         assert_eq!(buf.text(), "topic");
         assert!(shown(&state).starts_with("rebase の途中です"));

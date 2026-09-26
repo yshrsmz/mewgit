@@ -89,9 +89,10 @@ fn input(
     intent: InputIntent,
 ) -> Cmd {
     // **開く前に断る。** 確定で断ると、打ち終えた名前を捨てさせる（01 の
-    // 「進行中操作があるときの書き込み」）。
+    // 「進行中操作があるときの書き込み」）。断ったら `issue` と同じく読み直す
+    // （`AppState::refusal`）。
     if state.refuse_in_progress(&intent.op(String::new())) {
-        return Cmd::None;
+        return Cmd::LoadStatus;
     }
     state.modal = Some(Modal::Input {
         title,

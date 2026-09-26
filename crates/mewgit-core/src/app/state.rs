@@ -3338,6 +3338,10 @@ mod tests {
             state.notices.front().map(|n| n.message.as_str()),
             Some("notice 5")
         );
+        // **捨てたあとも番号は重ならない**（`Modal::NoticeLog` が番号で選ぶ）。上限を
+        // 2 件以上越えて積まないと、件数で振る形でも重ならずに通る。
+        let seqs: Vec<u64> = state.notices.iter().map(|n| n.seq).collect();
+        assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
     }
 
     #[test]

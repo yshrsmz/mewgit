@@ -812,10 +812,11 @@ mod tests {
     #[test]
     fn a_tab_stop_restarts_on_every_line() {
         // 桁を `\n` で戻さないと、2 行目以降のタブストップが前の行の長さでずれる
-        // （git の stderr は複数行を 1 本の文字列で持つ）。
+        // （git の stderr は複数行を 1 本の文字列で持つ）。**前の行は 8 の倍数に
+        // しない** —— 8 桁ちょうどだと、戻さなくても次のタブストップが同じになる。
         let mut out = String::new();
-        push_expanded(&mut out, "error: x\n\ta.txt\r");
-        assert_eq!(out, "error: x\n        a.txt");
+        push_expanded(&mut out, "error:\n\ta.txt\r");
+        assert_eq!(out, "error:\n        a.txt");
     }
 
     #[test]

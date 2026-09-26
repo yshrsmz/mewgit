@@ -62,6 +62,7 @@ CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace -
 - 一つの PR / コミットは一つの関心事。設計書の変更とコード変更は同じコミットで
 
 **Rust を書くときの規約（踏んだ形と PR 番号）は `.claude/rules/rust-coding.md`**（`crates/**/*.rs` を読むと読み込まれる）。
+**`app` 層の不変条件（`Cmd` / `Msg` / ジョブの扱いで何度も破ったもの）は `.claude/rules/app-invariants.md`**（`app/` と `runtime.rs` を読むと読み込まれる）。
 
 ## テスト
 

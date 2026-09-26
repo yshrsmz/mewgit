@@ -320,7 +320,7 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
 mod tests {
     use super::*;
     use crate::test_util::{
-        draw, pane_row, pane_row_is_reversed, pane_text, state_at, terminal_with,
+        col_of, draw, pane_row, pane_row_is_reversed, pane_text, state_at, terminal_with,
     };
     use crate::ui;
     use mewgit_core::app::{Cmd, Msg, Pane, TermSize};
@@ -811,11 +811,12 @@ mod tests {
     /// （空白ごと反転する。07 の「右上のタブ」）。
     fn tab_modifiers(state: &AppState, title: &str) -> Vec<Modifier> {
         let area = ui::pane_area(Pane::Prs, SIZE, state);
-        let text = pane_text(state, SIZE, Pane::Prs);
-        let header = text.lines().next().unwrap_or_default();
-        let x = area.x + u16::try_from(column_of(header, title)).unwrap();
         let terminal = terminal_with(state, SIZE);
         let buffer = terminal.backend().buffer();
+        let header: String = (area.x..area.right())
+            .map(|x| buffer[(x, area.y)].symbol())
+            .collect();
+        let x = area.x + col_of(&header, title);
         let width = u16::try_from(title.len()).unwrap();
         (x - 1..x + width + 1)
             .map(|x| buffer[(x, area.y)].modifier)

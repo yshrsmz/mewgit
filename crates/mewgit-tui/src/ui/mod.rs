@@ -900,13 +900,13 @@ mod tests {
                 // 描かれている。太いかどうかはその領域にフォーカスがあるかで決まる。
                 let focused = at == corner(focus, size, &state);
                 let (symbol, fg) = if focused {
-                    ("┏", theme::focused().fg)
+                    ("┏", theme::focused().fg.unwrap_or(Color::Reset))
                 } else {
-                    ("┌", None)
+                    ("┌", Color::Reset)
                 };
                 let why = format!("focus={focus:?} pane={pane:?}");
                 assert_eq!(cell.symbol(), symbol, "{why}");
-                assert_eq!(Some(cell.fg).filter(|fg| *fg != Color::Reset), fg, "{why}");
+                assert_eq!(cell.fg, fg, "{why}");
             }
         }
     }

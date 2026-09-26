@@ -2,6 +2,8 @@
 //!
 //! 各ペインは `AppState` を読むだけで、`Cmd` を作らない（不変ルール 2）。
 
+use std::borrow::Cow;
+
 use mewgit_core::app::{AppState, Pane, RightTab};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -113,23 +115,28 @@ fn right_tabs(state: &AppState) -> Line<'static> {
     if !state.focus_candidates().contains(&Pane::Prs) {
         return Line::from(branches::title(state));
     }
-    Line::from(vec![
-        tab(state, RightTab::Branches, branches::title(state)),
-        Span::styled("|", theme::muted()),
-        tab(state, RightTab::Prs, prs::title().to_string()),
-    ])
+    let mut spans = Vec::with_capacity(7);
+    spans.extend(tab(state, RightTab::Branches, branches::title(state)));
+    spans.push(Span::styled("|", theme::muted()));
+    spans.extend(tab(state, RightTab::Prs, prs::title()));
+    Line::from(spans)
 }
 
 /// タブ 1 枚の見出し。いま出ているほうは前後 1 空白ごと反転し、出ていないほうは
 /// 弱く出す（07 の「右上のタブ」）。
 ///
 /// **空白は両方に付ける。** 出ているほうにだけ付けると、切り替えるたびに見出しの
-/// 位置がずれる。
-fn tab(state: &AppState, tab: RightTab, title: String) -> Span<'static> {
+/// 位置がずれる。空白を別の `Span` にするのは、見出しを `format!` で組み直さないため
+/// （枠は毎フレーム組む）。
+fn tab(state: &AppState, tab: RightTab, title: impl Into<Cow<'static, str>>) -> [Span<'static>; 3] {
     let style = if state.right_tab == tab {
         theme::current_tab()
     } else {
         theme::muted()
     };
-    Span::styled(format!(" {title} "), style)
+    [
+        Span::styled(" ", style),
+        Span::styled(title, style),
+        Span::styled(" ", style),
+    ]
 }

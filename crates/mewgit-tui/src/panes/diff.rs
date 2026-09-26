@@ -188,8 +188,8 @@ fn marked(mark: char, content: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::test_util::{
-        deliver_commit_files, draw, pane_text, row_is_reversed, row_of, state_on_first_commit,
-        state_showing_diff, state_with_status,
+        col_of, deliver_commit_files, draw, pane_text, row_is_reversed, row_of,
+        state_on_first_commit, state_showing_diff, state_with_status,
     };
     use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Msg, TermSize};
     use mewgit_core::git_read::{FileDiff, GitReadError, WorktreeSnapshot};
@@ -395,10 +395,11 @@ mod tests {
         let lines = draw(&state, SIZE);
         let row = |needle: &str| lines[row_of(&lines, needle) as usize].clone();
 
-        // 枠(1) + 記号(1) + タブ 8 桁。Diff は出ているあいだ必ずフォーカスがあるので、
-        // 枠は太線（07 の「ペインとフォーカス」）。
-        assert!(row("one").starts_with("┃         one"), "{:?}", row("one"));
-        assert!(row("two").starts_with("┃+        two"), "{:?}", row("two"));
+        // 枠(1) + 記号(1) + タブ 8 桁。**枠の字では比べない** —— フォーカスの強調で
+        // 線の種類が変わる（07 の「ペインとフォーカス」）のはこのテストの関心ではない。
+        assert_eq!(col_of(&row("one"), "one"), 10, "{:?}", row("one"));
+        assert_eq!(col_of(&row("two"), "two"), 10, "{:?}", row("two"));
+        assert_eq!(col_of(&row("two"), "+"), 1, "{:?}", row("two"));
     }
 
     #[test]

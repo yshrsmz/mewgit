@@ -765,8 +765,8 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        degraded_label, ellipsize, file_row, fits, hint_text, pane_area, push_expanded, theme,
-        window, wrapped, SPACES, TAB_WIDTH,
+        degraded_label, ellipsize, file_row, fits, hint_text, pane_area, push_expanded, window,
+        wrapped, SPACES, TAB_WIDTH,
     };
     use crate::test_util::{
         draw, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status, terminal_with,
@@ -781,7 +781,7 @@ mod tests {
         fake_account, fake_ambiguous, fake_no_access, fake_rate_limit, fake_snapshot,
         fetch_pr_details,
     };
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
 
     #[test]
     fn a_file_row_puts_the_status_letter_before_the_path() {
@@ -899,14 +899,17 @@ mod tests {
                 // Diff にフォーカスがあるとき「Graph の枠」の座標には Diff の枠が
                 // 描かれている。太いかどうかはその領域にフォーカスがあるかで決まる。
                 let focused = at == corner(focus, size, &state);
+                // **期待値は `theme::focused()` から取らない。** 取ると、あちらから色を
+                // 消したときに期待値も一緒に消えて通る（`/code-review` が変異で拾った）。
                 let (symbol, fg) = if focused {
-                    ("┏", theme::focused().fg.unwrap_or(Color::Reset))
+                    ("┏", Color::Cyan)
                 } else {
                     ("┌", Color::Reset)
                 };
                 let why = format!("focus={focus:?} pane={pane:?}");
                 assert_eq!(cell.symbol(), symbol, "{why}");
                 assert_eq!(cell.fg, fg, "{why}");
+                assert_eq!(cell.modifier.contains(Modifier::BOLD), focused, "{why}");
             }
         }
     }

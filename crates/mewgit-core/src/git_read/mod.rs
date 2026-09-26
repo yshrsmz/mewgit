@@ -9,6 +9,7 @@
 
 mod diff;
 mod log;
+mod progress;
 mod repo;
 mod status;
 mod thread;
@@ -18,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 pub use git2::Oid;
 pub use log::LogSession;
+pub use progress::in_progress;
 pub use repo::RepoReader;
 pub use thread::ReaderHandle;
 
@@ -619,23 +621,39 @@ pub struct StashEntry {
 }
 
 /// 進行中の操作。continue / skip / abort 以外の書き込みを拒否する判断に使う。
+///
+/// 見分け方と、持たない値（`-i` の有無、止まった理由）は 02 の「進行中操作の検出」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InProgressOp {
+    /// `rebase-merge/` か、`applying` の無い `rebase-apply/`。
     Rebase {
-        interactive: bool,
-        current: usize,
-        total: usize,
-        onto: String,
+        step: Option<Step>,
     },
+    /// `git am`（`rebase-apply/applying`）。**mewgit からは始めない**が、外で始めた am の
+    /// 途中で開いたときに「無い」と読まないために持つ。
+    Am {
+        step: Option<Step>,
+    },
+    /// `oid` が `None` なのは `sequencer/` だけが残った形（複数の pick の途中で 1 つを
+    /// commit で解いた直後）。
     CherryPick {
-        oid: Oid,
+        oid: Option<Oid>,
     },
     Revert {
-        oid: Oid,
+        oid: Option<Oid>,
     },
+    /// octopus では `MERGE_HEAD` が複数行になるが、先頭だけを持つ。
     Merge {
         oid: Oid,
     },
+}
+
+/// rebase / am の進み具合。**git の数えた todo の行数**で、コミット数ではない
+/// （`-x` を付けると exec の行が足される）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Step {
+    pub current: usize,
+    pub total: usize,
 }
 
 #[cfg(test)]

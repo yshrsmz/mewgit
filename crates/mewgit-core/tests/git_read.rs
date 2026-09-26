@@ -3,7 +3,8 @@
 use std::fs;
 
 use mewgit_core::git_read::{
-    GitReadError, HeadInfo, LogPage, Oid, RefLabel, RepoReader, Upstream, UpstreamConfig,
+    in_progress, GitReadError, HeadInfo, InProgressOp, LogPage, Oid, RefLabel, RepoReader, Step,
+    Upstream, UpstreamConfig,
 };
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
@@ -991,4 +992,164 @@ fn branches_is_empty_before_the_first_commit() {
     let reader = RepoReader::open(repo.path()).unwrap();
 
     assert_eq!(reader.branches().unwrap(), Vec::new());
+}
+
+// ---- 進行中操作（02 の「進行中操作の検出」）。表の実測を実物の git で踏む。
+
+/// `main` と `side` が `f` を違う中身で書き換えた形。`side` は 2 コミットで、
+/// 2 つ目（`g`）はコンフリクトしない。`(side の 1 つ目, side の 2 つ目)` を返す。
+fn diverged() -> (TestRepo, Oid, Oid) {
+    let repo = TestRepo::init();
+    repo.commit_file("f", "base");
+    repo.git(&["switch", "-c", "side"]);
+    let first = repo.commit_file("f", "side");
+    let second = repo.commit_file("g", "side2");
+    repo.git(&["switch", "main"]);
+    repo.commit_file("f", "main");
+    (repo, first, second)
+}
+
+fn progress_of(repo: &TestRepo) -> Option<InProgressOp> {
+    let reader = RepoReader::open(repo.path()).unwrap();
+    in_progress(reader.git_dir())
+}
+
+fn step(current: usize, total: usize) -> Option<Step> {
+    Some(Step { current, total })
+}
+
+#[test]
+fn nothing_is_in_progress_in_a_clean_repository() {
+    let (repo, _, _) = diverged();
+    assert_eq!(progress_of(&repo), None);
+}
+
+#[test]
+fn a_stopped_rebase_reports_its_step() {
+    // `-i` を付けない rebase。`rebase-merge/interactive` は付けなくても作られる
+    // ので、`-i` の有無は持たない（02 の実測）。
+    let (repo, _, _) = diverged();
+    repo.git(&["switch", "side"]);
+    assert!(!repo.try_git(&["rebase", "main"]));
+
+    assert_eq!(
+        progress_of(&repo),
+        Some(InProgressOp::Rebase { step: step(1, 2) })
+    );
+}
+
+#[test]
+fn a_stopped_apply_backend_rebase_is_a_rebase() {
+    let (repo, _, _) = diverged();
+    repo.git(&["switch", "side"]);
+    assert!(!repo.try_git(&["rebase", "--apply", "main"]));
+
+    assert_eq!(
+        progress_of(&repo),
+        Some(InProgressOp::Rebase { step: step(1, 2) })
+    );
+}
+
+#[test]
+fn a_stopped_am_is_not_a_rebase() {
+    // 同じ `rebase-apply/` を使うが、`git rebase --continue` は am の途中を断る。
+    let (repo, first, _) = diverged();
+    let patches = repo.path().parent().unwrap().join("patches");
+    repo.git(&[
+        "format-patch",
+        "-q",
+        "-1",
+        &first.to_string(),
+        "-o",
+        patches.to_str().unwrap(),
+    ]);
+    let patch = fs::read_dir(&patches)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(!repo.try_git(&["am", "-3", patch.to_str().unwrap()]));
+
+    assert_eq!(
+        progress_of(&repo),
+        Some(InProgressOp::Am { step: step(1, 1) })
+    );
+}
+
+#[test]
+fn a_stopped_cherry_pick_reports_the_commit() {
+    let (repo, first, _) = diverged();
+    assert!(!repo.try_git(&["cherry-pick", &first.to_string()]));
+
+    assert_eq!(
+        progress_of(&repo),
+        Some(InProgressOp::CherryPick { oid: Some(first) })
+    );
+}
+
+#[test]
+fn a_cherry_pick_sequence_is_still_in_progress_after_committing_the_conflict() {
+    // 解いて commit すると `CHERRY_PICK_HEAD` は消え、`sequencer/` だけが残る。
+    // `git2::Repository::state()` はこの形を「無い」と読む（02）。
+    let (repo, first, second) = diverged();
+    assert!(!repo.try_git(&["cherry-pick", &first.to_string(), &second.to_string()]));
+    assert_eq!(
+        progress_of(&repo),
+        Some(InProgressOp::CherryPick { oid: Some(first) })
+    );
+    repo.commit_file("f", "resolved");
+
+    assert_eq!(
+        progress_of(&repo),
+        Some(InProgressOp::CherryPick { oid: None })
+    );
+}
+
+#[test]
+fn a_stopped_revert_reports_the_commit() {
+    let (repo, first, _) = diverged();
+    repo.git(&["switch", "side"]);
+    repo.commit_file("f", "later");
+    assert!(!repo.try_git(&["revert", "--no-edit", &first.to_string()]));
+
+    assert_eq!(
+        progress_of(&repo),
+        Some(InProgressOp::Revert { oid: Some(first) })
+    );
+}
+
+#[test]
+fn a_stopped_merge_reports_the_merged_commit() {
+    let (repo, _, second) = diverged();
+    assert!(!repo.try_git(&["merge", "side"]));
+
+    assert_eq!(
+        progress_of(&repo),
+        Some(InProgressOp::Merge { oid: second })
+    );
+}
+
+#[test]
+fn a_linked_worktree_reads_its_own_state() {
+    // linked worktree の `MERGE_HEAD` は `.git/worktrees/<name>/` に置かれる。
+    // `workdir/.git` を決め打ちすると、どちらのワークツリーからも読み違える。
+    let (repo, _, second) = diverged();
+    let linked = repo.path().parent().unwrap().join("linked");
+    repo.git(&[
+        "worktree",
+        "add",
+        "-b",
+        "wt",
+        linked.to_str().unwrap(),
+        "main",
+    ]);
+    assert!(!repo.try_git(&["-C", linked.to_str().unwrap(), "merge", "side"]));
+
+    let reader = RepoReader::open(&linked).unwrap();
+    assert_eq!(
+        in_progress(reader.git_dir()),
+        Some(InProgressOp::Merge { oid: second })
+    );
+    assert_eq!(progress_of(&repo), None);
 }

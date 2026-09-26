@@ -34,12 +34,11 @@ impl RepoReader {
     pub fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
     pub fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
     pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;
-    pub fn in_progress(&self) -> Option<InProgressOp>;
 }
 ```
 
 git2 の呼び出しはどれも壊れたリポジトリや I/O エラーで失敗しうるので、参照系も含めてすべて `Result` を返す。
-例外は `in_progress` だけで、これは `.git/` のファイルの有無を見るだけだから「進行中の操作は無い」と区別できない。
+進行中操作の検出（`in_progress`）は `RepoReader` のメソッドではなく自由関数で、`Result` を返さない。`.git/` のファイルの有無を見るだけで、読めないことと「進行中の操作は無い」を区別しても出し分けが無いため（下の「進行中操作の検出」）。
 
 ### open
 
@@ -506,15 +505,83 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
 
 ## 進行中操作の検出
 
-| 判定 | InProgressOp |
-|---|---|
-| `.git/rebase-merge/` 存在 | `Rebase { interactive, current, total, onto }` |
-| `.git/rebase-apply/` 存在 | `Rebase { interactive: false, .. }` |
-| `.git/CHERRY_PICK_HEAD` | `CherryPick { oid }` |
-| `.git/REVERT_HEAD` | `Revert { oid }` |
-| `.git/MERGE_HEAD` | `Merge { oid }` |
+```rust
+pub fn in_progress(git_dir: &Path) -> Option<InProgressOp>;   // 自由関数
 
-`git2::Repository::state()` も参考にするが、rebase の進捗（`msgnum` / `end`）はファイルから直接読む。
+pub enum InProgressOp {
+    Rebase { step: Option<Step> },   // Step { current, total }
+    Am { step: Option<Step> },
+    CherryPick { oid: Option<Oid> },
+    Revert { oid: Option<Oid> },
+    Merge { oid: Oid },
+}
+```
+
+**`RepoReader` のメソッドではなく、gitdir を受ける自由関数にする。** 見るのはファイルだけで
+git2 を使わないので、リーダースレッドを通す理由が無い。起動時（`runtime::open`）と書き込みの
+直後（`Cmd::Exec` のタスク。03 の「進行中操作との整合」）の 2 箇所から、スレッドの要求を
+待たずに呼べる。gitdir は `ReaderHandle::git_dir()` が `workdir()` と同じく同期で返す。
+
+**読む先はワークツリーごとの gitdir**（`git2::Repository::path()`）。linked worktree では
+`MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<name>/` に置かれる（下の実測）ので、
+`workdir/.git` を決め打ちすると別のワークツリーの状態を読む。
+
+**判定は上から順**（`git status` の `wt-status.c` と同じ並び）。
+
+| 判定 | InProgressOp | 進捗 |
+|---|---|---|
+| `rebase-merge/` 存在 | `Rebase` | `msgnum` / `end` |
+| `rebase-apply/applying` 存在 | `Am` | `next` / `last` |
+| `rebase-apply/` 存在（`applying` 無し） | `Rebase` | `next` / `last` |
+| `MERGE_HEAD` | `Merge { oid }`（先頭行） | — |
+| `CHERRY_PICK_HEAD` | `CherryPick { oid: Some }` | — |
+| `REVERT_HEAD` | `Revert { oid: Some }` | — |
+| `sequencer/todo` の先頭行が `pick` / `p` | `CherryPick { oid: None }` | — |
+| `sequencer/todo` の先頭行が `revert` | `Revert { oid: None }` | — |
+
+**実測（git 2.55.0、2026-09-26。一時リポジトリで各状態を作って `.git/` を読んだ）。**
+表の形はここから決めた。
+
+| 作った状態 | `.git/` に在ったもの | `git status` の見出し |
+|---|---|---|
+| `git rebase main`（`-i` 無し）でコンフリクト | `rebase-merge/`（`interactive` **も在る**）、`msgnum` 1 / `end` 2 | interactive rebase in progress |
+| `git rebase -i main` で `edit` に止まる | `rebase-merge/`（`amend` が増える）、`done` の最終行 `edit …` | interactive rebase in progress |
+| `git rebase -x false main`（2 コミット） | `msgnum` 1 / **`end` 4** | — |
+| `git rebase --apply main` でコンフリクト | `rebase-apply/`（`rebasing` が在る）、`next` / `last` | rebase in progress |
+| `git am` でコンフリクト | `rebase-apply/`（**`applying` が在る**） | You are in the middle of an am session |
+| `git cherry-pick A` でコンフリクト | `CHERRY_PICK_HEAD` | — |
+| `git cherry-pick A B` でコンフリクト | `CHERRY_PICK_HEAD` + `sequencer/`（`todo` は `pick …` の 2 行） | — |
+| ↑ を解いて `git commit` した直後 | **`sequencer/` だけ**（`CHERRY_PICK_HEAD` は消える） | Cherry-pick currently in progress |
+| `git revert` でコンフリクト | `REVERT_HEAD` | — |
+| `git merge` でコンフリクト / `--no-commit` | `MERGE_HEAD`（1 行） | — |
+| linked worktree で `git merge` でコンフリクト | `MERGE_HEAD` は `.git/worktrees/<name>/` に在る | — |
+
+ここから決めたこと ——
+
+- **`Rebase` に `interactive` を持たせない。** `-i` の有無で `rebase-merge/` の中身は
+  変わらず（2.26 以降の既定は merge backend）、`git status` 自身も両方を
+  「interactive rebase」と呼ぶ。区別できない値を持つと、読み手が嘘の分岐を書く
+- **`Am` を `Rebase` と分ける。** 同じ `rebase-apply/` だが、am の途中で
+  `git rebase --continue` を打つと git が `It looks like 'git am' is in progress.
+  Cannot rebase.` で断る（実測）。continue / abort の argv が違うので、同じ変種に
+  すると M5 の continue で壊れる。**mewgit から am は始めない**が、外で始めた am の途中で
+  開いたときに「進行中は無い」と読むと、書き込みの拒否（M5）が効かない
+- **`CherryPick` / `Revert` の `oid` は `Option`。** 複数の pick の途中で 1 つを
+  commit で解くと `sequencer/` だけが残る。`git status` はそれも進行中と呼ぶ
+- **`git2::Repository::state()` は使わない。** libgit2 1.9 の実装（`repository.c`）は
+  `rebase-merge/interactive` の有無で `REBASE_INTERACTIVE` を返すので上の区別が
+  できず、`sequencer/todo` は `CHERRY_PICK_HEAD` が在るときしか見ない（`sequencer/`
+  だけの形は `NONE`）。**ファイルが SoT**
+- **進捗（`Step`）は todo の行数で、コミット数ではない。** `-x` は exec の行を足すので、
+  2 コミットの rebase が `end` 4 になる。画面には git の数えたとおり出す
+- **`Step` が読めないときは `None`**（ディレクトリは在るのに `msgnum` がまだ無い ——
+  外で `git rebase -i` の todo を編集している最中など）。**進行中であることは落とさない**
+- **止まった理由（`edit` / コンフリクト / exec の失敗）は持たない。** `done` の最終行は
+  理由を表さない —— `-x false` で止めた形は最終行が `pick` だった（exec は失敗すると
+  todo に戻される）。07 のモックにあった `(edit)` はこの理由で出さない
+- `MERGE_HEAD` は octopus では複数行になる。`Merge` が持つのは先頭行だけ
+- ファイルが読めない・中身が壊れているときは、その行を「無い」と読んで次の判定へ進む。
+  **戻り値が `Option` で `Result` でないのはこのため**（上の「API」）
 
 ## エラー
 
@@ -540,11 +607,12 @@ pub enum GitReadError {
 `git2::Repository` は `Send` だが `Sync` ではない。`RepoReader` は `spawn_blocking` 内で毎回 open するか、専用スレッドに所有させてチャネル経由で使う。後者を採用し、`ReaderHandle` をランタイムに渡す。
 
 ```rust
-pub struct ReaderHandle { /* mpsc::UnboundedSender<Request>, workdir: PathBuf */ }
+pub struct ReaderHandle { /* mpsc::UnboundedSender<Request>, workdir: PathBuf, git_dir: PathBuf */ }
 
 impl ReaderHandle {
     pub fn spawn(path: &Path) -> Result<Self, GitReadError>;
     pub fn workdir(&self) -> &Path;
+    pub fn git_dir(&self) -> &Path;   // ワークツリーごとの gitdir。`in_progress` に渡す
     pub async fn log_page(&self, count: usize, restart: bool) -> Result<LogPage, GitReadError>;
     pub async fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;
     pub async fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;

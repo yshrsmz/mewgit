@@ -413,7 +413,6 @@ GIT_SSH_COMMAND = "<実効> -o BatchMode=yes"
 - タイムアウトは設けない（fetch の長さは予測不能）。代わりに UI から中断できるようにする
   （下の「キャンセル」）
 - **`RebaseInteractive` は `Runner` が実行せずに拒否する**（M5 まで）。todo を差し替えずに `git rebase -i` を走らせると、`GIT_EDITOR=true` により全 `pick` の rebase が実行され、`plan` を黙って捨てた破壊的操作になる。M5 で `--sequence-editor` を配線したら外す
-- **進行中操作（`InProgressOp`）の再検出は M5。** `git_read::in_progress` がまだ無いので、`ExecDone.progress` はランタイムが `None` を入れる
 
 終了状態を得られない経路は 4 つ（`to_commands` の失敗、`RebaseInteractive` の拒否、
 起動の失敗、終了待ちの失敗）。どれも `ExecError::NoResult` で返し、`reason` には git の
@@ -497,8 +496,14 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 
 ## 進行中操作との整合
 
-- `Runner` は `GitOp` 実行後に必ず `InProgressOp`（`git_read::in_progress`）を再検出し、
-  `ExecFinished` の `progress` として一緒に返す。実行結果と進行中操作を別々の `Msg` に
-  割ると `update` が受け取る順序に依存してしまうため、1 通にまとめる
-  （M5。`git_read::in_progress` ができるまではランタイムが `None` を入れる）
-- 進行中操作があるときは、continue / skip / abort 以外の書き込み `GitOp` を拒否する（UI 側でも無効化）
+- `GitOp` の実行が終わったら、**成功・失敗・中断を問わず** `git_read::in_progress` で
+  進行中操作を再検出し、`ExecDone.progress` として結果と一緒に返す。実行結果と
+  進行中操作を別々の `Msg` に割ると `update` が受け取る順序に依存してしまうため、1 通に
+  まとめる
+- **再検出するのは `Runner` ではなくランタイムの `Cmd::Exec` のタスク**（`ExecDone` を
+  組み立てているのがそこなので）。`Runner` は gitdir を知らずに済み、`Runner::new` の
+  引数も増えない。`run_cancelable` が返った**あと**に読むので、中断した git の後始末
+  （`CHERRY_PICK_HEAD` の削除など）が済んだ状態を読む（上の「キャンセル」は殺してから
+  終了を待つ）
+- 進行中操作があるときは、continue / skip / abort 以外の書き込み `GitOp` を拒否する（UI 側でも無効化）。
+  **これは M5 の別タスク**（`docs/plan.md`）で、検出と表示だけが先に入っている

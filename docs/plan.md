@@ -314,7 +314,13 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 
 ## M5: 履歴操作
 
-- [ ] `git_read::in_progress` の検出と `ProgressDetected`、ステータスバー表示
+- [x] `git_read::in_progress` の検出とステータスバー表示。**`ProgressDetected` は
+      このタスクでは使わない** —— 起動時は `runtime::open` が同期で読み（`Cmd` にすると
+      `ExecFinished` と到着順を争う。01 の「起動時の読み込み」）、書き込みのあとは
+      ランタイムが `ExecDone.progress` に入れる（03）。あの `Msg` の producer は M6 の
+      `.git/HEAD` 監視。**検出表は実測で作り直した**（02）—— `-i` の有無は区別できない
+      ので `Rebase.interactive` を消し、`git am`（同じ `rebase-apply/`）を `Am` に分け、
+      `sequencer/` だけが残る形を拾う。バッジに止まった理由（`(edit)`）は出さない（07）
 - [ ] `--sequence-editor` / `--commit-editor` 隠しサブコマンド
 - [ ] `RebasePlan::to_todo` + テスト、`Modal::RebaseEditor`
 - [ ] rebase の continue / skip / abort

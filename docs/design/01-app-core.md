@@ -36,7 +36,7 @@ pub struct AppState {
     pub branches: BranchState,     // ローカルブランチの一覧と選択（下の「ブランチ一覧」）
     pub stashes: Vec<StashEntry>,
     pub prs: PrState,                 // 開いている PR の一覧・カーソル・API の残量（下の「PR ペイン」）
-    pub progress: Option<InProgressOp>, // Rebase | CherryPick | Revert | Merge
+    pub progress: Option<InProgressOp>, // Rebase | Am | CherryPick | Revert | Merge（02）
     pub focus: Pane,
     pub right_tab: RightTab,          // 右列の上に出すタブ（下の「右上のタブ」）
     pub modal: Option<Modal>,
@@ -2527,15 +2527,23 @@ pub fn init(state: &mut AppState) -> Cmd;
 `Msg::TargetResolved` を待ってから出す（上の「`RepoInfo.target` を埋める」）。起動時はまだ何も読んでいないので
 `restart` は偽でよい（`LogSession` が無ければ `restart` の有無に関わらず先頭から開く）。
 
+**進行中操作は `init` より前、`runtime::open` が同期で入れる**（`state.progress`）。
+ファイルを数個読むだけ（02 の「進行中操作の検出」）なので最初のフレームを待たせず、
+`Cmd` にすると**返りと `ExecFinished` の到着順**を考えることになる —— 起動直後に押した
+書き込みが先に終わると、古い「無い」が新しい「在る」を上書きしうる。`Msg::ProgressDetected`
+を起動時に使わないのはこのため。
+
 ## update の原則
 
 - `update` は `AppState` を直接変更し、`Cmd` を返す。I/O を呼ばない。返す `Cmd` は
   出口で `AppState::issue` を通し、同種のジョブが走っていれば発行しない
 - キー入力は `focus` と `modal` を見て、対応する pane / modal の handler に委譲する。
   ペインが `Cmd` を組み立てるのは `update` の中だけで、`ui` からは呼ばない
-- `ExecFinished` は進行中操作を一緒に運ぶ。`Runner` が実行直後に再検出するため（03）、
+- `ExecFinished` は進行中操作を一緒に運ぶ。ランタイムが実行直後に再検出するため（03）、
   `update` から検出を頼み直さない。受けたら成功・失敗を問わず `progress` を反映し
-  `LoadStatus` を発行する。`ProgressDetected` は `.git/HEAD` 監視による外部変更検知用（M6）
+  `LoadStatus` を発行する。`ProgressDetected` は `.git/HEAD` 監視による外部変更検知用（M6）。
+  **それまで producer は無く、`update` は受けても何もしない** —— 起動時の検出は上の
+  「起動時の読み込み」が `Cmd` を通さずに入れる
 - 同種の `Cmd` が実行中なら重複発行しない（`JobTracker` で管理）
 
 ## ランタイム

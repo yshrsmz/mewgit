@@ -19,7 +19,7 @@ use mewgit_core::auth::AccountState;
 use mewgit_core::auth::Backend as _;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
-use mewgit_core::git_read::{GitReadError, ReaderHandle, Timestamp};
+use mewgit_core::git_read::{in_progress, GitReadError, ReaderHandle, Timestamp};
 use mewgit_core::github::{AccountBackend, GithubClient, GithubError};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
@@ -72,7 +72,11 @@ pub fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle), Git
         ..RepoInfo::default()
     };
 
-    Ok((AppState::new(repo, config, Timestamp::now()), reader))
+    let mut state = AppState::new(repo, config, Timestamp::now());
+    // 進行中操作だけはここで同期に読む（01 の「起動時の読み込み」）。ファイルを数個
+    // 見るだけで、`Cmd` にすると起動直後の書き込みの `ExecFinished` と到着順を争う。
+    state.progress = in_progress(reader.git_dir());
+    Ok((state, reader))
 }
 
 /// 描画 → 入力待ち → `update` → `dispatch` を回す。
@@ -294,13 +298,17 @@ impl Runtime {
                 // このタスクが `Msg` にして返す。
                 let (cancel, canceled) = oneshot::channel();
                 self.cancel = Some(cancel);
+                let git_dir = self.reader.git_dir().to_path_buf();
                 tokio::spawn(async move {
                     let result = runner.run_cancelable(&op, canceled).await;
-                    // 進行中操作の再検出は M5（03）。それまではここで `None` を入れる。
+                    // 成功・失敗・中断を問わず読み直す（03 の「進行中操作との整合」）。
+                    // `run_cancelable` は git の終了を待ってから返るので、中断した git の
+                    // 後始末が済んだあとを読む。
+                    let progress = in_progress(&git_dir);
                     let done = ExecDone {
                         op,
                         result,
-                        progress: None,
+                        progress,
                     };
                     let _ = tx.send(Msg::ExecFinished(Box::new(done)));
                 });
@@ -596,7 +604,7 @@ mod tests {
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::git_read::HeadInfo;
+    use mewgit_core::git_read::{HeadInfo, InProgressOp, Oid};
     use mewgit_core::test_util::{fake_account, fake_target, wait_for_pid, BareRepo, TestRepo};
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -844,6 +852,69 @@ mod tests {
         assert_eq!(state.worktree.snapshot.staged.len(), 1);
         assert!(state.worktree.snapshot.untracked.is_empty());
         assert!(state.notices.is_empty(), "{:?}", state.notices);
+    }
+
+    /// `main` と `side` が同じファイルを違う中身で書き換えた形。`side` を
+    /// `main` に cherry-pick するとコンフリクトする。
+    fn conflicting_branches(repo: &TestRepo) -> Oid {
+        repo.commit_file("f", "base");
+        repo.git(&["switch", "-c", "side"]);
+        let side = repo.commit_file("f", "side");
+        repo.git(&["switch", "main"]);
+        repo.commit_file("f", "main");
+        side
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_write_shows_the_operation_it_stopped_in() {
+        // **検出の関数ではなく、ランタイムの `Cmd::Exec` が読み直すことを見る**
+        // （03 の「進行中操作との整合」）。ここで `None` を入れたままだと、
+        // mewgit が止めた操作がバッジに出ない。
+        let repo = TestRepo::init();
+        let side = conflicting_branches(&repo);
+        let (mut state, reader) = opened(&repo);
+        assert_eq!(state.progress, None);
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+
+        let cmd = state.issue(Cmd::Exec(GitOp::CherryPick(vec![side])));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+
+        assert_eq!(
+            state.progress,
+            Some(InProgressOp::CherryPick { oid: Some(side) })
+        );
+    }
+
+    #[tokio::test]
+    async fn an_operation_left_in_progress_is_seen_at_startup_and_cleared_by_abort() {
+        // 起動時は `open` が読む（01 の「起動時の読み込み」）。**起動時だけ入れて
+        // 書き込みのあとに `None` を入れる形**だと、abort 以外の書き込みでもバッジが
+        // 消えるので、abort で消えることだけでなく、消えるまで残ることも見る。
+        let repo = TestRepo::init();
+        let side = conflicting_branches(&repo);
+        assert!(!repo.try_git(&["cherry-pick", &side.to_string()]));
+        let (mut state, reader) = opened(&repo);
+        assert_eq!(
+            state.progress,
+            Some(InProgressOp::CherryPick { oid: Some(side) })
+        );
+        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
+
+        // 進行中操作と関係の無い書き込み（コンフリクトしていないファイルの stage）。
+        repo.write_worktree_file("other.txt", b"x");
+        let cmd = state.issue(Cmd::Exec(GitOp::Stage(vec!["other.txt".into()])));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+        assert!(state.progress.is_some(), "stage で消えました");
+
+        let cmd = state.issue(Cmd::Exec(GitOp::CherryPickAbort));
+        assert!(runtime.dispatch(&mut state, cmd).is_continue());
+        let msg = msgs.recv().await.expect("Msg が返りませんでした");
+        let _ = update(&mut state, msg);
+        assert_eq!(state.progress, None);
     }
 
     #[tokio::test]

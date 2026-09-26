@@ -6,7 +6,7 @@
 //! **ここにあるのは入口と、2 つ以上のモジュールが使う道具だけ** —— `focus` /
 //! `confirm` / `submit_exec` / `edit_key` / `exec_busy`（**利用者は
 //! `grep -rn "<名前>(" crates/mewgit-core/src/app/update/` で数える。ここに数を
-//! 書かない** —— `CLAUDE.md` の「離れた場所に『いま N ある』を書かない」）。
+//! 書かない** —— `.claude/rules/rust-coding.md` の「離れた場所に『いま N ある』を書かない」）。
 //! ペインごとのキー処理はそれぞれのモジュールにある（01 の「この文書とコードの対応」）。
 //!
 //! **利用者が 1 つしかない道具はここに置かない** —— `test_support` と同じ数え方で、
@@ -88,7 +88,7 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 /// ```
 ///
 /// **ここに一覧も数も写さない** —— 導出できる値を離れた場所に置いたコピーになる
-/// （`CLAUDE.md`）。**印は索引であって導出ではない**ので、**忘れた印は見えない**。
+/// （`.claude/rules/rust-coding.md`）。**印は索引であって導出ではない**ので、**忘れた印は見えない**。
 /// そこで**別の見方と突き合わせられる形にしてある** —— `update/` の production で
 /// [`load_more`] / `load_commit` / [`load_diff`] / `reload_log` / `prs::fan_out` /
 /// `JobTracker::is_fresh` を呼ぶ場所は、**次の 1 つを除いて全部どれかの印の下にある**。
@@ -437,7 +437,7 @@ fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
 /// `submit(state, JobKind::Exec, Cmd::CreatePr(..))` という**食い違った対**が型で
 /// 組める —— 組むと**走っていない種別を見てモーダルを閉じ、そのあと `issue` が
 /// 本当の種別で落とす**ので、この関数が在る理由（打った本文を消さない）がそのまま
-/// 破れる（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
+/// 破れる（`.claude/rules/rust-coding.md` の「導出できる値を引数に取らせない」）。
 fn submit(state: &mut AppState, cmd: Cmd) -> Cmd {
     // 副作用を持たない `Cmd` は落とされようが無いので、そのまま閉じて返す。
     if cmd.job_kind().is_some_and(|kind| busy(state, kind)) {
@@ -569,7 +569,7 @@ mod tests {
     ///
     /// **[`keys::COMMON`] と [`keys::QUIT`] は 1 つの状態でしか回さない。** あれは
     /// `update_key` が `match state.focus` より手前で受けるので、ペインごとに押しても
-    /// 踏む経路は同じ（`CLAUDE.md` の「通る組み合わせを足しても見張りは増えない」）。
+    /// 踏む経路は同じ（`.claude/rules/testing.md` の「通る組み合わせを足しても見張りは増えない」）。
     #[test]
     fn every_hinted_key_does_something() {
         for pane in [

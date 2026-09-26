@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn the_draft_box_is_checked_when_draft_is_on() {
-        // **肯定まで 1 本で見る**（`CLAUDE.md` の「否定を見る assert は…」）。
+        // **肯定まで 1 本で見る**（`.claude/rules/testing.md` の「否定を見る assert は…」）。
         // `[ ]` だけを見る assert は、`draft` を読まない実装でも通る。
         let off = draw(&state_with_pr("t", "", "main", false, PrField::Draft), SIZE).join("\n");
         let on = draw(&state_with_pr("t", "", "main", true, PrField::Draft), SIZE).join("\n");

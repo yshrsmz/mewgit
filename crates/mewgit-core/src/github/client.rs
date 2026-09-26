@@ -711,7 +711,7 @@ fn implies(held: &str, scope: &str) -> bool {
 /// 残量を出さない（`None`）だけで、エラーにはしない。
 ///
 /// **読むのはここ。** 3 つとも同じ型の `Option<i64>` なので、[`RateLimit`] 側に
-/// 引数で渡す形だと入れ替えても誰も気付かない（`CLAUDE.md` の「導出できる値を引数に
+/// 引数で渡す形だと入れ替えても誰も気付かない（`.claude/rules/rust-coding.md` の「導出できる値を引数に
 /// 取らせない」）。ヘッダの読み方は [`header_i64`] と同じ場所に置く。
 fn rate_limit_of(response: &Response) -> Option<RateLimit> {
     if header_str(response, "x-ratelimit-resource").is_some_and(|bucket| bucket != "core") {
@@ -736,7 +736,7 @@ fn header_i64(response: &Response, name: &str) -> Option<i64> {
 mod tests {
     use super::*;
     // **テストからしか届かない名前はここに置く**（`cargo fix` がヘッダから落とす。
-    // `CLAUDE.md` の「`cargo fix` は…」）。
+    // `.claude/rules/rust-coding.md` の「`cargo fix` は…」）。
     use crate::github::{CheckState, PrStatus, RepoRef};
     use serde_json::json;
     use std::sync::{Arc, Mutex};

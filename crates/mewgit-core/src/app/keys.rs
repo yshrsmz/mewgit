@@ -5,7 +5,7 @@
 //! ここを読む。2 本に分けると、上書きしたときにヒントだけが既定の字を出す。
 //!
 //! **表示の字は持たない。** `j/k` や `Enter` という並びは `ui` が [`KeyCode`] から
-//! 組む（導出できる値を離れた場所に置かない。`CLAUDE.md`）。
+//! 組む（導出できる値を離れた場所に置かない。`.claude/rules/rust-coding.md`）。
 //!
 //! **`Tab` / `Shift+Tab` / `Ctrl-C` は入っていない。** いま読むのが 2 行目だけなので、
 //! そこに描かないものを入れても誰も読まない行になる。足すのは `Modal::Help` のタスク
@@ -103,7 +103,7 @@ const PRS: &[KeyHint] = &[
     hint(&[Key::new(KeyCode::Enter)], "切替"),
     hint(&[Key::char('o')], "ブラウザ"),
     // **Branches の `r`（改名）とは別のキー。** キーマップはペインごとに割れて
-    // いるので衝突しない（`CLAUDE.md` の「『押せる』は画面ごとに数える」）。
+    // いるので衝突しない（`.claude/rules/rust-coding.md` の「『押せる』は画面ごとに数える」）。
     hint(&[Key::char('r')], "更新"),
     hint(&[Key::char('N')], "PR 作成"),
     BACK,

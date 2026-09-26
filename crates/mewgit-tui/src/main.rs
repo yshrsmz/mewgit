@@ -3,7 +3,7 @@
 //! 隠しサブコマンド `--sequence-editor <path>` / `--commit-editor <path>` は
 //! interactive rebase 用（`docs/design/03-git-exec.md`）。M5 で実装する。
 //!
-//! ここは配線だけで、実端末が必要なためテストを書かない（CLAUDE.md の例外）。
+//! ここは配線だけで、実端末が必要なためテストを書かない（`.claude/rules/testing.md` の例外）。
 //! 分岐のある処理は `runtime` 側に置く。
 
 mod input;

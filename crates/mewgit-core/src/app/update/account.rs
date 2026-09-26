@@ -80,7 +80,7 @@ fn account_view(account: &AccountState, target: &TargetState) -> Result<AccountV
 
 /// 開いている [`Modal::AccountPicker`] の中身。
 ///
-/// **キーを受ける 3 本が同じ分解を書いていたので寄せた**（`CLAUDE.md` の「2 つ目の
+/// **キーを受ける 3 本が同じ分解を書いていたので寄せた**（`.claude/rules/rust-coding.md` の「2 つ目の
 /// 利用者が出た時点で共有先を作る」）。`None` の腕は**どれも踏めない** ——
 /// [`modal_key`](super::modal_key) が `Modal::AccountPicker` に一致したときだけ
 /// この 3 本を呼ぶ。踏めない腕を 3 本に散らさないためでもある。
@@ -158,7 +158,7 @@ pub(super) fn account_reresolve(state: &mut AppState) -> Cmd {
 /// なるが、その形は組めない —— この `Cmd` を出すのは [`open_account`] だけで、
 /// あれは必ず [`AccountListing::Waiting`] を置き、2 通目は
 /// [`AppState::issue`](crate::app::AppState::issue) が落とす。**踏めない状態を
-/// 見張るコードを置かない**（`CLAUDE.md`）。カーソルも同じで、待っているあいだは
+/// 見張るコードを置かない**（`.claude/rules/testing.md`）。カーソルも同じで、待っているあいだは
 /// 候補が空なので `j` / `k` が動かせない（`stepped_index`）。
 pub(super) fn accounts_listed(
     state: &mut AppState,
@@ -693,7 +693,7 @@ mod tests {
     fn every_notice_that_a_prints_fits_the_notice_line() {
         // **予算はフッター 1 行目の幅**（01 の「失敗の案内文」）。`A` は通知の
         // **新しい産出元**なので、`exec_advice` を回している見張りは自分では拾わない
-        // （CLAUDE.md の「共有した見張りは新しい産出元を自分では拾わない」）。
+        // （`.claude/rules/testing.md` の「共有した見張りは新しい産出元を自分では拾わない」）。
         //
         // **回すのは通知に落ちる腕を並べたもの。** `Resolved` と `Degraded` は
         // モーダルを開くので出てこない。**範囲を実装側の集合から導かずに並べている**

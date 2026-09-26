@@ -149,7 +149,7 @@ pub fn window(len: usize, must_show: Range<usize>, height: usize) -> Range<usize
 /// モーダルはみな、あの 1 本を通る）。編集中はカーソルが枠の右端を越えるので横に
 /// ずらす必要があり、ここに横位置を足すと、「長い行は右で切れるだけ」を意図している
 /// diff と一覧まで一般化することになる。前提の成り立たない利用者を共有基盤に
-/// 押し込まない（CLAUDE.md）。
+/// 押し込まない（`.claude/rules/rust-coding.md`）。
 ///
 /// **折り返さない**（`Wrap` を付けない）。diff は桁の揃いが意味を持ち、一覧のパスも
 /// 折り返すと行とカーソルの対応が崩れる。
@@ -1339,7 +1339,7 @@ mod tests {
 
     #[test]
     fn the_common_keys_drop_at_the_width_where_they_would_be_cut() {
-        // **境目を跨ぐ**（`CLAUDE.md`）。Graph + 共通キー + `q:quit` は 75 セルなので、
+        // **境目を跨ぐ**（`.claude/rules/testing.md`）。Graph + 共通キー + `q:quit` は 75 セルなので、
         // 75 では出て 74 では落ちる。机上で選んだ幅では、どちらか片側しか踏めない。
         let fits = hint_bar_of(Pane::Graph, 75);
         assert!(fits.contains("f:fetch"), "hints: {fits:?}");

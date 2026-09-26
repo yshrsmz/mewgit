@@ -388,7 +388,7 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       いまは要約行しか描かないので、git が断った理由（`would be overwritten`、
       未マージのときの `-D` のヒント）が画面に出ない。不変ルール 4 が「UI まで届ける」と
       言っているのはこの詳細のこと。**`Modal` に変種を足したら `_` の腕を持つ `match` を
-      grep する**（`update::paste` が受け皿を持っていた。`CLAUDE.md`）。開くキーは
+      grep する**（`update::paste` が受け皿を持っていた。`.claude/rules/rust-coding.md`）。開くキーは
       フッターの表（`app::keys`）に載せ、`every_hinted_key_does_something` を通す
 - [ ] HEAD の追跡設定を 1 本にする。**いま `branch.<HEAD>.remote` は 2 箇所にある**
       —— `RepoInfo.head`（`HeadInfo::Branch.upstream`。PR の座り先と PR 作成の
@@ -465,16 +465,16 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       `RebaseEditor`、ステータスバーの通知履歴で `Modal` と `Notice` に手が入るので、
       そこで数え直す
 - [ ] `git_exec::argv` の `VARIANT_COUNT` を消す。**`variant()` の網羅 `match` から
-      離れた場所に変種の本数のコピーが置いてある**（CLAUDE.md の「離れた場所に、
+      離れた場所に変種の本数のコピーが置いてある**（`.claude/rules/rust-coding.md` の「離れた場所に、
       コードの『いま N ある』を書かない」）。**ただの削除では済まない** ——
-      `covers_every_variant` は「`to_argv` は全 `GitOp` をカバーする」（同じく CLAUDE.md）
+      `covers_every_variant` は「`to_argv` は全 `GitOp` をカバーする」（同じく `.claude/rules/testing.md`）
       の見張りなので、消すとカバー要求のほうが破れる。塞ぐ形は、各変種の代表値を返す
       網羅 `match`（`fn every_variant() -> Vec<GitOp>`）を 1 本置き、`cases()` が
       その集合を全部含むことを `BTreeSet` で比べること —— 変種を足すとそちらが
       コンパイルエラーになるので、数を書かずに漏れが出る
 - [ ] `scripts/screen.py` が全角文字のあとで 1 桁落とすのを直す。**桁を根拠にする
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
-      地続きに見える（実測は `CLAUDE.md` の pty の節）。いまは生の
+      地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の
       `ESC[<行>;<桁>H` を読んで回避している
 - [ ] `.git/HEAD` mtime 監視での外部変更検知
 - [ ] README、リリースワークフロー（`cargo dist` or release-please）

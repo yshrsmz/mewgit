@@ -101,7 +101,7 @@ pub(super) fn files_loaded(index: u8, result: Result<Vec<FileEntry>, GitReadErro
 /// `pane` に届くまで `Tab` を押す。返すのは**最後の 1 回**が出した `Cmd`。
 ///
 /// **回数を書かない。** 巡回の並びはグラフの選択と `config.github.enabled` で変わるので、
-/// 固定の回数は別の状態で黙って外れる（`CLAUDE.md`）。
+/// 固定の回数は別の状態で黙って外れる（`.claude/skills/pty-check/SKILL.md`）。
 ///
 /// **途中の回の `Cmd` は捨てる。** 通過するペインが何かを頼む状態で使うと、そのジョブが
 /// [`AppState::issue`] に登録されたまま残り、**後続の `assert_eq!(…, Cmd::None)` が門では
@@ -429,7 +429,7 @@ pub(super) fn tick() -> Msg {
 /// （`HH:MM:SS` と空白）を引いた残り**（01 の「失敗の案内文」）。フッターの 2 行目が
 /// キーヒントなので、1 行目は時刻のほかは幅いっぱい使える。
 ///
-/// **見張りは複数あって、新しい産出元を自分では拾わない**（`CLAUDE.md`）——
+/// **見張りは複数あって、新しい産出元を自分では拾わない**（`.claude/rules/testing.md`）——
 /// `exec_advice` / `A` / `o` / PR の集計が別々に回している。通知を出す場所を足したら、
 /// そこでもこれを見る。**実際に描いて確かめるのは `mewgit-tui` 側**
 /// （`a_notice_of_the_full_width_fits_on_its_own_line`）。

@@ -124,7 +124,7 @@ pub async fn resolve<B: Backend + Sync>(
             Ok(token) => passed.push((login, token)),
             // **`Undetermined` は「除外できた」ではない。** 断られていない候補は
             // 下の fold で数え直す（`AttemptFailure` に 3 つ目を足したので、
-            // 出口も 3 つで数える。`CLAUDE.md`）。
+            // 出口も 3 つで数える。`.claude/rules/rust-coding.md`）。
             Err(failure @ AttemptFailure::Undetermined { .. }) => {
                 attempts.push(ProbeAttempt {
                     login: login.clone(),

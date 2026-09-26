@@ -51,7 +51,7 @@ const HIDDEN_CELLS: &str = "\" Hidden by multi-width symbols:";
 /// **取り出しはここ 1 本。** `height - 2` を各テストが持つと、フッターの高さや置き場所を
 /// 変えたときに一斉に嘘になる。**行番号は `ui::footer` から出す**（`ui::pane_area` と
 /// 同じ理由）。**`ui` の `mod tests` ではなくここに置く** —— `runtime` のテストも
-/// 通知の行を見る（テストの共有先は `test_util`。`CLAUDE.md`）。
+/// 通知の行を見る（テストの共有先は `test_util`。`.claude/rules/rust-coding.md`）。
 pub fn notice_bar(state: &AppState, size: TermSize) -> String {
     footer_row(state, size, 0)
 }

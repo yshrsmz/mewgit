@@ -45,7 +45,7 @@ pub(super) fn lines(state: &AppState) -> Rows {
 
     // **状態の桁は出す行から導く。** `OPEN` と `DRAFT` で 1 桁違うので、揃えないと
     // タイトルの開始位置がずれる。**定数に書かない** —— 語を足したときに片方だけ
-    // 古くなる（`CLAUDE.md` の「離れた場所に『いま N ある』を書かない」）。
+    // 古くなる（`.claude/rules/rust-coding.md` の「離れた場所に『いま N ある』を書かない」）。
     // 語はすべて ASCII なので `len()` がそのまま表示幅。
     let width = state
         .prs
@@ -114,7 +114,7 @@ fn column(cells: impl Iterator<Item = String>) -> Vec<String> {
 ///
 /// **`AppState` ごとは受け取らない。** 要るのは `theme` と `login` と組み終えたセル
 /// だけで、`AppState` を渡すと「状態から引いた login と、引数の login が食い違う対」が
-/// 型として組める（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
+/// 型として組める（`.claude/rules/rust-coding.md` の「導出できる値を引数に取らせない」）。
 /// **セルも組み終えたものを受ける** —— 幅は一覧ぜんぶから決まるので、1 行だけ見て
 /// 出せない。
 fn pr_row(

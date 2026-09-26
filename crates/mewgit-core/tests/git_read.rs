@@ -131,7 +131,7 @@ fn remotes_read_the_default_branch_from_the_remote_head_symref() {
         .map(|r| (r.name.as_str(), r.head_branch.as_deref()))
         .collect();
     // **`Some` と `None` を 1 本で見る。** `None` だけを見る assert は、symref を
-    // 1 行も書かなくても通る（`CLAUDE.md` の「否定を見る assert は…」）。
+    // 1 行も書かなくても通る（`.claude/rules/testing.md` の「否定を見る assert は…」）。
     // `upstream` が `None` なのは、一度も fetch していないリモートの形（02）。
     assert_eq!(heads, [("origin", Some("trunk")), ("upstream", None)]);
 }
@@ -969,7 +969,7 @@ fn branches_drops_a_non_utf8_name() {
     let oid = repo.head_oid().to_string();
     // **loose ref としては作れない。** ref 名がそのままファイル名になるので、macOS の
     // APFS が `Illegal byte sequence` で弾く（非 UTF-8 のパスを index にだけ入れるのと
-    // 同じ制約。CLAUDE.md）。`packed-refs` は 1 つのファイルの中身なので通る。
+    // 同じ制約。`.claude/rules/testing.md`）。`packed-refs` は 1 つのファイルの中身なので通る。
     let mut packed = b"# pack-refs with: peeled fully-peeled sorted \n".to_vec();
     packed.extend_from_slice(oid.as_bytes());
     packed.extend_from_slice(b" refs/heads/\xff\xfe\n");

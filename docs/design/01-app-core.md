@@ -113,7 +113,7 @@ impl AppState {
   ため**で、時間で消す形（Tick で期限切れ）を採らなかった理由もこれ。時間に依存しないので、
   遷移のテストに時計も要らない
 - **下ろした旗は通知ごとに持つ**（`Notice.dismissed`）。`AppState` に 1 つの旗で持つと、
-  「出ている」と「通知が 1 件も無い」が同時に立つ形が組める（`CLAUDE.md` の「旗と値を
+  「出ている」と「通知が 1 件も無い」が同時に立つ形が組める（`.claude/rules/rust-coding.md` の「旗と値を
   割らない」）。ステータスバーが読むのは `AppState::shown_notice`（最新の 1 件で、
   下ろしていないもの）。**下ろしても履歴からは消えない**
 - **通知には積まれた時刻を刻む**（`Notice.at`）。**時計を読むのはランタイムだけ** ——
@@ -1172,7 +1172,7 @@ PRs ペインの `r` で、**カーソル行の集計を落として一覧を引
   Prs は巡回候補に残るので今日踏める）。`TargetState` の `Unasked`（待てば変わる）と
   `Unavailable`（恒久）が潰れるのも同じ形で、**どちらも状態が既に持っている区別**。
   材料を 1 つ足した瞬間に `else` の側が黙って嘘になる形でもある
-  （`CLAUDE.md` の「離れた場所に『いま N ある』を書かない」）
+  （`.claude/rules/rust-coding.md` の「離れた場所に『いま N ある』を書かない」）
 - **`A` の通知（`account_view` の `Err`）も同じ値から文言を採る。** どちらも通知 1 行で
   **予算が同じ**なので、#73 の「置かれる場所の予算が違うなら別の文言でよい」は
   当たらない。**枠の内側 30 セルのペイン（07）とは分けてよい**
@@ -1190,7 +1190,7 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
 - **置き場所は `PrState`。** 落とす引き金（`PrState::forget`）と、突き合わせる世代
   （`PrState::epoch`）が両方そこにある。`AppState` の直下に置くと、**落とす責務だけが
   別の場所に離れる** —— アカウントが変わったときに落とすものが 2 つになった時点で
-  共有先は 1 つにする（`CLAUDE.md`）
+  共有先は 1 つにする（`.claude/rules/rust-coding.md`）
 - **世代で弾く。** 残量は**そのトークンの予算**なので、アカウントを切り替えたあとに
   前のトークンの扇形が返す数は嘘になる。`(reset, used)` は「どちらの応答が新しいか」
   しか答えられない（#89 の「鍵が答えられる問いを数える」）。`Msg::RateLimitSeen` が
@@ -1633,7 +1633,7 @@ conventional_remote = リモートが 1 本ならそれ → origin → 決まら
 キーも Remotes ペインも無く、`P` も同じ `conventional_remote` を通るので `-u` の
 提案すら出ない（実機で確認）。外で `git branch --set-upstream-to=…` しても、
 ブランチ一覧を読み直すのは ref を動かす書き込みのあとだけなので**再起動するまで
-効かない**（`.git/HEAD` の監視は M6）。CLAUDE.md の「案内にキーを書いたら、その案内が
+効かない**（`.git/HEAD` の監視は M6）。`.claude/rules/rust-coding.md` の「案内にキーを書いたら、その案内が
 出ている画面でそのキーが効くかを数える」の一般形 —— **案内が求める操作を自分が
 持っているかを数える** —— を踏み外していた。
 
@@ -1667,7 +1667,7 @@ conventional_remote = リモートが 1 本ならそれ → origin → 決まら
 - **指示を足すのは、その操作を持たない側。** `NoRemote` が運ぶのは**診断だけ**で
   （「origin がありません（fork, upstream）」）、「。追跡先を設定してください」は
   `P` の通知が足す（`NoRemote::into_notice`）。モーダルの本文に足すと、**その操作を
-  今まさに提供しているモーダルの中で、外でやれと言う**ことになる —— CLAUDE.md の
+  今まさに提供しているモーダルの中で、外でやれと言う**ことになる —— `.claude/rules/rust-coding.md` の
   「案内が求める操作を自分が持っているかを数える」の裏返し（`/code-review` が拾った）。
   **`Nobody` には足さない** —— 待つか `git remote add` するかで、こちらから出せる
   「次に何をするか」が無く、「追跡先を設定してください」はリモートが 1 本も無い相手には
@@ -1967,7 +1967,7 @@ degraded なら `[r]`、`.git/config` 由来なら `[u]`、どちらも無けれ
 
 **3 だけは git の規則そのものではない。** git は `branch.<name>.pushRemote` と
 `remote.pushDefault` も見る。読むこと自体は `git_read` にならできる（`upstream_config`
-と同じ形）が、**上流と同じ判断だとは書かない**（CLAUDE.md）。食い違っても確認モーダルに
+と同じ形）が、**上流と同じ判断だとは書かない**（`.claude/rules/rust-coding.md`）。食い違っても確認モーダルに
 出た行き先を見て `n` で止められるので、危ないのは「見ずに `y`」だけ。**読む判断は M6 へ送った**（plan.md）。fetch の
 [`default_remote`](#既定リモート) には畳まない —— **git 自身が fetch と push で違う規則を
 持っている**ので、畳むと fetch の既定へ push することになる（04 の「既定リモート」）。
@@ -2228,7 +2228,7 @@ impl JobKind {
   してよいか」を問うとき（`AppState::diff_is_current` / `worktree_is_current`）だけ
 - **領域は `JobKind::region()` から引く。** `is_fresh` に領域を渡させると、
   `finish(LoadStatus)` の刻印を `Region::Log` と比べる形が組めてしまい、常に「古い」に
-  なって頼み直しを回す（`CLAUDE.md` の「旗と値を割らない」が 1 段上がった形）
+  なって頼み直しを回す（`.claude/rules/rust-coding.md` の「旗と値を割らない」が 1 段上がった形）
 
 **畳んだもの**: `DiffState.freshness`（→ `DiffView.epoch`)、`WorktreeState.stale` と
 `loaded`（→ `snapshot_epoch: Option<u64>`）、`GraphState.reload_pending`（→ `Region::Log`
@@ -2328,14 +2328,14 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
 ```
 
 - **持つのは `Key` で、`j/k` や `Enter` という字は `ui` が `KeyCode` から組む。**
-  表示の字を表にも書くと、導出できる値のコピーになる（`CLAUDE.md`）
+  表示の字を表にも書くと、導出できる値のコピーになる（`.claude/rules/rust-coding.md`）
 - **ラベルは core が持つ。** 通知の文言と同じ扱いで、`ui` は並べるだけ（不変ルール 2）
 - **同じ動作の別名は入れない。** `j` / `k` の代わりに効く `Down` / `Up` は表に無い
   —— 案内に出すものの一覧なので、出さないものを入れると「表 → 実際に押せる」の
   見張りが通るだけで案内は変わらない。**逆向き（`match` の腕が全部表にあるか）は
   `match` から導けない**ので、そこは見張れない
 - **`Tab` / `Shift+Tab` / `Ctrl-C` は入っていない。** いま表を読むのは 2 行目だけで、
-  そこに描かないものを入れると誰も読まない行になる（`CLAUDE.md` の「読まれない状態」）。
+  そこに描かないものを入れると誰も読まない行になる（`.claude/rules/rust-coding.md` の「読まれない状態」）。
   足すのは `Modal::Help` のタスク
 - **押して無反応なキーを表に入れない見張り**は `every_hinted_key_does_something`
   （`update` を通して 1 打鍵ずつ叩き、`Cmd` か `AppState` が動くことを見る）。
@@ -2561,7 +2561,7 @@ loop {
 
 `run` は `Backend` とイベントストリームをジェネリックに取る。`TestBackend` と
 `futures::stream::iter` を渡してループ全体をテストできるようにするため。テストを
-書かない例外は端末の raw mode 切替・復元と `main.rs` の配線だけ（CLAUDE.md）。
+書かない例外は端末の raw mode 切替・復元と `main.rs` の配線だけ（`.claude/rules/testing.md`）。
 
 - `event_to_msg` は `Option<Msg>`。マウス・フォーカス・ペーストは対応する `Msg` が無いので落とす。
   実装は `mewgit-tui/src/input.rs`（`keymap` の名前は 08 のキーバインド設定に取っておく）

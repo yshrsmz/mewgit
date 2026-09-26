@@ -375,7 +375,7 @@ impl AppState {
     /// 述語だけを出すと、理由が要る側（`r` の通知）が**入力をもう一度読んで消去法で
     /// 組み直す**ことになり、状態が既に持っている区別（`Degraded` / `Unasked` /
     /// `Unavailable`）が潰れる。材料を 1 つ足したときに「残るのは◯◯だけ」の側が
-    /// 黙って嘘になる形でもある（`CLAUDE.md`）。
+    /// 黙って嘘になる形でもある（`.claude/rules/rust-coding.md`）。
     ///
     /// **`account_view` と同じ文言を出す**（あちらの `Err` もここから採る）。
     pub fn github_block(&self) -> Option<GithubBlock> {
@@ -388,7 +388,7 @@ impl AppState {
     /// **叩けることと、叩く先を 1 つの答えで返す。** 理由だけを返すと、叩ける側
     /// （PR 作成の `head` を組む `update::prs`）が `target` をもう一度読み直すことに
     /// なり、**「叩けるのに `target` が無い」という到達しない腕**を書かされる
-    /// （`CLAUDE.md` の「旗と値を割らない」）。
+    /// （`.claude/rules/rust-coding.md` の「旗と値を割らない」）。
     ///
     /// **腕の順で答えが変わる組（`Degraded` かつ `Unavailable`）は到達しない** ——
     /// `target` を書くのは `update::account` の 3 箇所だけで、`Degraded` になる
@@ -685,7 +685,7 @@ pub enum GithubBlock {
     /// **「対象をまだ見ていない」を別の腕にしない。** [`TargetState::Unasked`] で
     /// アカウントが `Resolved` になる経路は無い（`Cmd::ResolveAccount` が出るのは
     /// 対象が決まってから）ので、割っても**テストで踏めない腕**が増えるだけ
-    /// （`CLAUDE.md`）。割れているのは「待てば変わる」と「変わらない」で、それは
+    /// （`.claude/rules/testing.md`）。割れているのは「待てば変わる」と「変わらない」で、それは
     /// [`TargetUnavailable`](Self::TargetUnavailable) との境目のほう。
     AccountResolving,
     /// `gh` が無い / 古い / どのアカウントも届かない。**`A` に内訳がある。**
@@ -1508,7 +1508,7 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 ///
 /// **材料は引数に取らない。** 追跡設定は `repo.head` から導けるので、
 /// 別々に渡すと対応の取れない組（`Detached` な `head` に `Some("origin")`）が型で
-/// 組める（`CLAUDE.md` の「導出できる値を引数に取らせない」）。
+/// 組める（`.claude/rules/rust-coding.md` の「導出できる値を引数に取らせない」）。
 ///
 /// **読めない追跡設定は候補にしない**（設定が無い / `.`（ローカル追跡）/ リモートが
 /// 消えている / URL が GitHub の形でない / URL の `merge` がブランチでない）。
@@ -2002,7 +2002,7 @@ impl JobTracker {
     ///
     /// **領域は [`JobKind::region`] から引く。** 呼び出し側に渡させると、
     /// `finish(LoadStatus)` の刻印を `Region::Log` と比べる形が組めてしまい、
-    /// 常に「古い」になって頼み直しを回す（`CLAUDE.md` の「旗と値を割らない」が
+    /// 常に「古い」になって頼み直しを回す（`.claude/rules/rust-coding.md` の「旗と値を割らない」が
     /// 1 段上がった形）。
     ///
     /// **`None` は「刻印が無い」**（走っていなかった）。領域を持つ種別では「古い」に
@@ -2330,7 +2330,7 @@ impl PrField {
     ///
     /// **並びの配列を持たない。** 網羅 `match` で書くと、**変種を足したときに
     /// コンパイルエラーになる** —— 配列にすると長さの辻褄が合ってしまい、足した欄が
-    /// 巡回から黙って漏れる（`CLAUDE.md` の「離れた場所に、コードの『いま N ある』を
+    /// 巡回から黙って漏れる（`.claude/rules/rust-coding.md` の「離れた場所に、コードの『いま N ある』を
     /// 書かない」の、並びの版）。
     pub(super) fn next(self) -> Self {
         match self {

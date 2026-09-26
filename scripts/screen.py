@@ -6,7 +6,7 @@ TUI は毎フレーム全画面を描き直すので、`script` の生出力に�
 （前のフレームの残骸と最新の描画が混ざる）。カーソル移動と消去だけを解釈して
 仮想画面に描き直すと、終了直前の 1 枚がそのまま出る。
 
-使い方は `CLAUDE.md` の pty の節を参照。
+使い方は `.claude/skills/pty-check/SKILL.md`を参照。
 
     python3 scripts/screen.py out.txt [幅] [高さ]
 

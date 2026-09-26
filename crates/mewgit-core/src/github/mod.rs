@@ -46,7 +46,7 @@ pub struct PullRequest {
 /// **`head` は `<branch>`、fork から出すなら `<owner>:<branch>`。** どちらを組むかは
 /// `app` の判断で、ここは受け取った字をそのまま載せる —— **どのリポジトリに head が
 /// あるかを答えられるのは `app`** で、`github` はリポジトリのローカルな設定を
-/// 知らない（`CLAUDE.md` の「層をまたぐ述語は…」）。`app` は人が欄で選んだ候補から
+/// 知らない（`.claude/rules/rust-coding.md` の「層をまたぐ述語は…」）。`app` は人が欄で選んだ候補から
 /// 組む（01 の「head の組み立て」）。
 ///
 /// **`title` が空でも組める。** 断るのは `app` 側（打った本文を消さずに
@@ -176,7 +176,7 @@ pub struct ReviewSummary {
 /// 嘘を出すことになる。
 ///
 /// **`used` は持たない。** `limit - remaining` で出るので、持つと同じ値の置き場所が
-/// 2 つになる（`CLAUDE.md` の「導出できる値を引数に取らせない」）。新しさの比較に
+/// 2 つになる（`.claude/rules/rust-coding.md` の「導出できる値を引数に取らせない」）。新しさの比較に
 /// 要るのは [`RateLimit::newer`] の中だけ。
 ///
 /// **バケットは `core` の 1 つ。** `search` を使う経路は無いと決めてある（05）ので、
@@ -216,7 +216,7 @@ impl RateLimit {
     /// **`Option` ごと共有先にする。** 畳む側は 2 人 —— 同じジョブの中を畳む
     /// [`GithubClient`] と、ジョブをまたぐ `app::PrState` —— で、どちらも
     /// 「1 度目は無条件、2 度目からは [`RateLimit::newer`]」を書いていた
-    /// （`CLAUDE.md` の「2 つ目の利用者が出た時点で共有先を作る」）。
+    /// （`.claude/rules/rust-coding.md` の「2 つ目の利用者が出た時点で共有先を作る」）。
     pub fn keep_newer(slot: &mut Option<Self>, seen: Self) {
         *slot = Some(slot.map_or(seen, |held| held.newer(seen)));
     }
@@ -280,7 +280,7 @@ impl GithubError {
     ///
     /// 扇形（[`GithubClient::pr_details`]）が 1 件目で受けたときに残りを頼むかを
     /// これで決める。**答えられるのは `github` だけ**なので、呼ぶ側で
-    /// `matches!(err, GithubError::RateLimited { .. })` と書かない（`CLAUDE.md` の
+    /// `matches!(err, GithubError::RateLimited { .. })` と書かない（`.claude/rules/rust-coding.md` の
     /// 「層をまたぐ述語は、その名前が約束している問いに誰が答えられるかで置き場所を
     /// 決める」）。**腕を足したときに選ばせる**ため網羅 `match` にしてある。
     ///

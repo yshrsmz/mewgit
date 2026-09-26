@@ -46,7 +46,7 @@ pub(super) fn prs_key(state: &mut AppState, key: Key) -> Cmd {
 /// 場面なので、「ありません」で止めると行き止まりになる（#63 の「案内が求める操作を、
 /// そもそも自分が持っているか」）。**`N` がこのペインで効くことは
 /// [`prs_key`] が答えている** —— 案内を出しているのと同じペインのキーなので、
-/// 画面ごとに数え直す必要が無い（`CLAUDE.md`）。
+/// 画面ごとに数え直す必要が無い（`.claude/rules/rust-coding.md`）。
 fn open_pr(state: &mut AppState) -> Cmd {
     match state.prs.selected() {
         Some(pr) => Cmd::OpenPr { number: pr.number },
@@ -533,7 +533,7 @@ pub(super) fn pr_created(state: &mut AppState, result: Result<u64, GithubError>)
 /// 動かないので前の 2 つでは拾えない**）。
 ///
 /// **ここが失敗からの出口でもある。** 引けなかった答えは自分では落ちないので、
-/// `f` / `A` / `r` のどれかで引き直せる形にしておく（`CLAUDE.md` の「状態を消すのが
+/// `f` / `A` / `r` のどれかで引き直せる形にしておく（`.claude/rules/rust-coding.md` の「状態を消すのが
 /// 『その状態を根拠に断つキー』の先にあるなら、断つ前に消し方を数える」）。
 ///
 /// **出口は一覧だけでなく集計にも要る。** 集計を落とすのは `PrState::loaded`（届いた
@@ -927,7 +927,7 @@ mod tests {
     fn n_fills_the_base_from_the_default_remotes_head_and_leaves_it_empty_without_one() {
         // **base は `refs/remotes/<既定リモート>/HEAD`**（01 の「PR 作成（`N`）」）。
         // **`Some` と `None` を 1 本で見る** —— 空欄のほうだけを見る assert は、
-        // `head_branch` を 1 行も置かなくても通る（`CLAUDE.md`）。
+        // `head_branch` を 1 行も置かなくても通る（`.claude/rules/testing.md`）。
         let mut state = state_for_create("feat/x");
         state.repo.remotes = vec![Remote {
             name: "origin".to_string(),
@@ -2167,7 +2167,7 @@ mod tests {
         //
         // **順序の片方（タブが先 → 一覧が後）を踏むのもここ。** 逆
         // （一覧が先 → タブが後）は `nothing_is_asked_for_until_the_prs_tab_is_opened`
-        // にある（`CLAUDE.md` の「非同期の返信が 2 本あるならテストは両方の順序を
+        // にある（`.claude/rules/rust-coding.md` の「非同期の返信が 2 本あるならテストは両方の順序を
         // 回す」の、片方がキーの版）。**専用の 1 本は置かない** —— 置いてみたが、
         // こちらと別に単独で落ちる変異が無かった（実測）。
         let mut state = state_on_prs_tab("feat/x");
@@ -2294,7 +2294,7 @@ mod tests {
             notice.detail
         );
         // **ステータスバーの予算**（01 の「失敗の案内文」）。**見張りは複数あって、
-        // 新しい産出元を自分では拾わない**（`CLAUDE.md`）—— `exec_advice` も `A` も
+        // 新しい産出元を自分では拾わない**（`.claude/rules/testing.md`）—— `exec_advice` も `A` も
         // `o` も別々に見ているので、通知を出す場所を足したらここにも足す。
         // **本文に `GithubError` の `Display` が乗る**ので、腕を足したときに超えうる。
         assert!(

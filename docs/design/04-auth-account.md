@@ -249,7 +249,7 @@ conventional_remote = リモートが 1 本ならそれ → origin → 決まら
 **`RepoInfo.target` は `default_remote` を呼ばない。** ブランチの追跡設定を混ぜると、
 `Msg::BranchesLoaded` と `Msg::RepoInfoLoaded` の**どちらが先に届くかで答えが割れる**
 ——`init` が両方を別々のジョブとして出すので順序は決まらず、しかも `target` は
-1 回きり決めて latch するので二度と直らない。`CLAUDE.md` が「ループテストは非同期の
+1 回きり決めて latch するので二度と直らない。`.claude/rules/testing.md` が「ループテストは非同期の
 返信の順序に依存できない」と書いている、その順序に production が乗ってしまう。
 **ブランチを切り替えても `target` は変わらない**という事実とも噛み合わない。
 `/simplify` の altitude が拾った。

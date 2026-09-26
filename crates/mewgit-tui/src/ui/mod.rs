@@ -546,30 +546,22 @@ fn notice_line(state: &AppState, width: u16) -> Paragraph<'_> {
     let Some(notice) = state.shown_notice() else {
         return Paragraph::new("");
     };
-    let mut spans = Vec::with_capacity(2);
-    // 最初の `Tick` より前に積まれた通知は時刻を持たない。ランタイムは起動時に
-    // 時計を入れるので、実物では出ない形（テストの状態で出る）。
-    if let Some(at) = notice.at {
-        spans.push(Span::styled(
-            format!("{} ", time::clock(at)),
-            theme::muted(),
-        ));
-    }
-    let room = usize::from(width).saturating_sub(spans.iter().map(Span::width).sum());
-    spans.push(Span::raw(ellipsize(first_line(&notice.message), room)));
-    Paragraph::new(Line::from(spans))
+    let at = Span::styled(format!("{} ", time::clock(notice.at)), theme::muted());
+    let room = width.saturating_sub(u16::try_from(at.width()).unwrap_or(u16::MAX));
+    let message = Span::raw(ellipsize(first_line(&notice.message), room));
+    Paragraph::new(Line::from(vec![at, message]))
 }
 
 /// `text` を `cells` セルに収める。溢れるときは末尾を `…` に置き換える。
-fn ellipsize(text: &str, cells: usize) -> Cow<'_, str> {
-    if Span::raw(text).width() <= cells {
+fn ellipsize(text: &str, cells: u16) -> Cow<'_, str> {
+    if fits(text, cells) {
         return Cow::Borrowed(text);
     }
     if cells == 0 {
         return Cow::Borrowed("");
     }
     // `…` の 1 セルを先に取っておく。
-    let mut left = cells - 1;
+    let mut left = usize::from(cells - 1);
     let mut end = 0;
     for (i, c) in text.char_indices() {
         let w = Span::raw(&text[i..i + c.len_utf8()]).width();
@@ -723,7 +715,6 @@ mod tests {
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::git_read::Timestamp;
     use mewgit_core::github::GithubError;
     use mewgit_core::test_util::{
         fake_account, fake_ambiguous, fake_no_access, fake_rate_limit, fake_snapshot,
@@ -1230,22 +1221,12 @@ mod tests {
     }
 
     /// 通知を 1 件だけ積んで描いた通知の行。既定サイズ（80x24）で見る。
-    ///
-    /// **時計を入れてから積む。** ランタイムは起動時に時計を入れるので、時刻の無い
-    /// 通知は実物では出ない（`runtime::open`）。入れないと時刻の 9 セルぶん予算が
-    /// 広く見える。
+    /// 時刻は `FAKE_NOW`（10:03:26）。
     fn notice_bar_with(message: &str) -> String {
         let mut state = state_at("/repo");
-        state.now = Some(TEN_O_THREE);
         state.push_notice(NoticeLevel::Error, message.to_string(), None);
         notice_bar(&state, TermSize::default())
     }
-
-    /// 2026-09-26 10:03:26 +0900。
-    const TEN_O_THREE: Timestamp = Timestamp {
-        seconds: 1_790_384_606,
-        offset_minutes: 540,
-    };
 
     #[test]
     fn a_notice_leads_with_the_time_it_was_raised() {

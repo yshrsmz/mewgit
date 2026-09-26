@@ -204,12 +204,20 @@ impl Timestamp {
     /// `Signature` を作らないと時刻を取り出せないので置いているだけ。
     pub fn now() -> Self {
         // 名前もメールも空でなく `<` `>` を含まない定数なので、`Err` は来ない。
-        let when = git2::Signature::now("mewgit", "mewgit")
+        git2::Signature::now("mewgit", "mewgit")
             .expect("定数の名前とメールは常に通る")
-            .when();
+            .when()
+            .into()
+    }
+}
+
+/// git2 の日時を層の値型にする。オフセットは git2 の値が持っていたもの
+/// （コミットならコミットに刻まれたもの。02）。
+impl From<git2::Time> for Timestamp {
+    fn from(time: git2::Time) -> Self {
         Self {
-            seconds: when.seconds(),
-            offset_minutes: when.offset_minutes(),
+            seconds: time.seconds(),
+            offset_minutes: time.offset_minutes(),
         }
     }
 }
@@ -662,6 +670,9 @@ mod tests {
         // 秒の境目をまたぐぶんだけ許す。
         assert!((before..=before + 1).contains(&now.seconds), "{now:?}");
         // 実在するオフセットは UTC-12:00 から UTC+14:00 まで。
-        assert!((-12 * 60..=14 * 60).contains(&now.offset_minutes), "{now:?}");
+        assert!(
+            (-12 * 60..=14 * 60).contains(&now.offset_minutes),
+            "{now:?}"
+        );
     }
 }

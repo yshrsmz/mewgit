@@ -44,7 +44,7 @@ pub struct AppState {
     pub notices: VecDeque<Notice>,    // エラー・情報のトースト
     pub term: TermSize,               // 端末サイズ。レイアウト分岐に使う
     pub tick: u64,                    // Msg::Tick が来た回数。スピナーの駒を選ぶ
-    pub now: Option<Timestamp>,       // 最後の Msg::Tick の時刻。通知に刻む（下の「通知」）
+    pub now: Timestamp,               // いまの時刻（起動時に受け取り、Tick で更新）。通知に刻む
     pub config: Config,               // 起動時に確定。実行中は再読込しない（08）
 }
 ```
@@ -120,7 +120,9 @@ impl AppState {
   `Msg::Tick(Timestamp)` で運び、`update` は `AppState.now` に写して `push_notice` が
   刻む。`update` の中で時計を読むと、同じ入力から違う状態ができて遷移をテストできない。
   そのぶん刻まれる時刻は最大 1 周期（250ms）古い。**起動時の設定の警告は最初の
-  `Tick` より前に積まれる**ので、`runtime::open` が `now` を入れてから返す。
+  `Tick` より前に積まれる**ので、`AppState::new` が時刻を引数に取る（時計の無い状態を
+  組めると、その通知だけが時刻を持たない。`Option` にしていた版は、その腕が本番では
+  通らないまま描画とテストに残っていた）。
   時刻は見る人のローカルのタイムゾーンで持つ（`Timestamp::now`。オフセットは
   libgit2 の `git_signature_now` に数えさせ、日時のクレートは足さない）
 - **履歴の表示と `detail` の表示は M6 の次のタスク**（plan.md）

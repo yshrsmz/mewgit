@@ -145,7 +145,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         // 来るので、ここから `Cmd` を出すと git を 1 秒に 4 回叩くことになる）。
         Msg::Tick(now) => {
             state.tick = state.tick.wrapping_add(1);
-            state.now = Some(now);
+            state.now = now;
             Cmd::None
         }
 
@@ -455,7 +455,7 @@ mod tests {
     use super::test_support::{
         commit_loads, cursor, detail_ok, diff_state, exec_done_of, more, on_first_commit,
         on_first_commit_with_files, press, press_code, state, state_on_branches,
-        state_with_commits, state_with_page, tab_to, tick, worktree_state, NOW, ROWS,
+        state_with_commits, state_with_page, tab_to, tick, worktree_state, ROWS,
     };
     use super::*;
     use crate::app::{keys, Modal, RightTab, TermSize};
@@ -463,8 +463,10 @@ mod tests {
 
     use crate::git_exec::ExecError;
 
+    use crate::git_read::Timestamp;
     use crate::test_util::{
         fake_pull_request, fake_snapshot, fake_target, pr_list_loaded, put_on_branch, reply,
+        FAKE_NOW,
     };
 
     /// 最新の通知の文言。下ろしていれば `None`。
@@ -526,13 +528,18 @@ mod tests {
 
     #[test]
     fn a_notice_carries_the_time_of_the_last_tick() {
+        // 起動時は `AppState::new` に渡した時刻、以後は `Tick` が運んだ時刻。
         let mut state = state();
         state.push_notice(NoticeLevel::Info, "前".to_string(), None);
-        let _ = update(&mut state, tick());
+        let later = Timestamp {
+            seconds: FAKE_NOW.seconds + 1,
+            ..FAKE_NOW
+        };
+        let _ = update(&mut state, Msg::Tick(later));
         state.push_notice(NoticeLevel::Info, "後".to_string(), None);
 
         let at: Vec<_> = state.notices.iter().map(|notice| notice.at).collect();
-        assert_eq!(at, [None, Some(NOW)]);
+        assert_eq!(at, [FAKE_NOW, later]);
     }
 
     /// 案内に出すキーの表（`app::keys`）は、`update_key` の `match` に対する 2 本目の

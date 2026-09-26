@@ -12,7 +12,9 @@ use mewgit_core::git_read::Timestamp;
 
 /// `2026-09-06 15:35:55 +0900` の形にする。
 pub fn format(time: Timestamp) -> String {
-    let (year, month, day, secs) = wall_clock(time);
+    let local = local_seconds(time);
+    let (year, month, day) = civil_from_days(local.div_euclid(SECONDS_PER_DAY));
+    let secs = local.rem_euclid(SECONDS_PER_DAY);
 
     let sign = if time.offset_minutes < 0 { '-' } else { '+' };
     let offset = time.offset_minutes.unsigned_abs();
@@ -27,14 +29,12 @@ pub fn format(time: Timestamp) -> String {
 
 /// `15:35:55` の形にする。ステータスバーの通知に添える（07 の「ステータスバー」）。
 pub fn clock(time: Timestamp) -> String {
-    hms(wall_clock(time).3)
+    hms(local_seconds(time).rem_euclid(SECONDS_PER_DAY))
 }
 
-/// オフセットを足した「そのタイムゾーンでの壁時計」に直して、`(年, 月, 日, その日の秒)`。
-fn wall_clock(time: Timestamp) -> (i64, u32, u32, i64) {
-    let local = time.seconds + i64::from(time.offset_minutes) * 60;
-    let (year, month, day) = civil_from_days(local.div_euclid(SECONDS_PER_DAY));
-    (year, month, day, local.rem_euclid(SECONDS_PER_DAY))
+/// オフセットを足した「そのタイムゾーンでの壁時計」の、epoch からの秒数。
+fn local_seconds(time: Timestamp) -> i64 {
+    time.seconds + i64::from(time.offset_minutes) * 60
 }
 
 fn hms(secs: i64) -> String {

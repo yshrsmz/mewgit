@@ -72,11 +72,7 @@ pub fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle), Git
         ..RepoInfo::default()
     };
 
-    let mut state = AppState::new(repo, config);
-    // **最初の `Tick` より前にも通知は積まれる**（`main.rs` の設定の警告）。
-    // ここで時計を入れておかないと、起動時の警告だけが時刻を持たない。
-    state.now = Some(Timestamp::now());
-    Ok((state, reader))
+    Ok((AppState::new(repo, config, Timestamp::now()), reader))
 }
 
 /// 描画 → 入力待ち → `update` → `dispatch` を回す。

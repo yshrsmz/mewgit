@@ -59,7 +59,7 @@ fn confirm_key(state: &mut AppState, key: Key) -> Cmd {
 /// 一覧から 1 つ選ぶモーダルのキー処理。`j` / `k` で選び、`Enter` で確定、`Esc` で閉じる。
 ///
 /// **確定だけを `on_enter` に委ねる。** 骨格（カーソル・閉じ方・受けないキー）は
-/// [`Modal::RemotePicker`] と [`Modal::AccountPicker`] で同じで、2 本に写すと
+/// 一覧から 1 つ選ぶモーダルで同じで（利用者は `modal_key` の腕が並べている）、写すと
 /// ピッカーのキーを 1 つ足したときに片方だけ古くなる（描画側を
 /// `modals::picker` に寄せたのと同じ数え方。07）。**閉じるかどうかも `on_enter` が
 /// 決める** —— [`confirm_key`] は先に閉じてから返すが、`Cmd` が
@@ -111,8 +111,10 @@ fn account_key(state: &mut AppState, key: Key) -> Cmd {
 /// 通知の履歴を開く（`L`。01 の「通知」）。カーソルは最新の通知に置く。
 ///
 /// **1 件も無くても開く。** 断る通知を積むと、その 1 件が履歴に入って「無い」が嘘になる。
+/// そのときは最初に積まれる通知の番号（0）を選んでおく。
 pub(super) fn open_notice_log(state: &mut AppState) -> Cmd {
-    state.modal = Some(Modal::NoticeLog { cursor: 0 });
+    let selected = state.notices.back().map_or(0, |last| last.seq);
+    state.modal = Some(Modal::NoticeLog { selected });
     Cmd::None
 }
 
@@ -428,12 +430,14 @@ feat/b
         state
     }
 
-    /// 履歴のカーソルが指している通知の `message`。
+    /// 履歴のカーソルが指している通知の `message`。**描く側と同じ
+    /// `notice_log_row` を通す**（捨てられた通知を選んでいるときの寄せ方も含めて）。
     fn notice_under_cursor(state: &AppState) -> &str {
-        let Some(Modal::NoticeLog { cursor }) = state.modal else {
+        let Some(Modal::NoticeLog { selected }) = state.modal else {
             panic!("履歴が開いていません: {:?}", state.modal);
         };
-        &state.notices[state.notices.len() - 1 - cursor].message
+        let row = state.notice_log_row(selected).expect("通知がありません");
+        &state.notices[state.notices.len() - 1 - row].message
     }
 
     #[test]
@@ -443,7 +447,6 @@ feat/b
         let cmd = press(&mut state, 'L');
 
         assert_eq!(cmd, Cmd::None);
-        assert_eq!(state.modal, Some(Modal::NoticeLog { cursor: 0 }));
         assert_eq!(notice_under_cursor(&state), "新しい");
         // **開いたキーで下ろしても、履歴からは消えない**（01 の「通知」）。
         assert_eq!(state.shown_notice(), None);
@@ -458,8 +461,12 @@ feat/b
         let _ = press(&mut state, 'L');
         let _ = press(&mut state, 'j');
 
-        assert_eq!(state.modal, Some(Modal::NoticeLog { cursor: 0 }));
+        assert!(matches!(state.modal, Some(Modal::NoticeLog { .. })));
         assert!(state.notices.is_empty());
+
+        // 開いたあとに積まれた最初の 1 件に座る。
+        state.push_notice(NoticeLevel::Error, "最初".to_string(), None);
+        assert_eq!(notice_under_cursor(&state), "最初");
     }
 
     #[test]
@@ -481,9 +488,10 @@ feat/b
         let mut state = state_with_notices(&["1", "2"]);
         let _ = press(&mut state, 'L');
         let _ = press(&mut state, 'j');
+        let open = state.modal.clone();
 
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
-        assert_eq!(state.modal, Some(Modal::NoticeLog { cursor: 1 }));
+        assert_eq!(state.modal, open);
 
         let _ = press_code(&mut state, KeyCode::Esc);
         assert_eq!(state.modal, None);
@@ -501,15 +509,19 @@ feat/b
         state.push_notice(NoticeLevel::Error, "4".to_string(), None);
 
         assert_eq!(notice_under_cursor(&state), "2");
-        assert_eq!(state.modal, Some(Modal::NoticeLog { cursor: 2 }));
+        // 積まれたほうは一覧の先頭に居る。`k` で 1 つ上がると「3」、もう 1 つで「4」。
+        let _ = press(&mut state, 'k');
+        let _ = press(&mut state, 'k');
+        assert_eq!(notice_under_cursor(&state), "4");
     }
 
     #[test]
     fn a_cursor_on_the_oldest_notice_stays_inside_when_the_cap_drops_it() {
-        // 上限で最古が捨てられたら、残った末尾に寄せる（01 の「通知」）。
-        let names: Vec<String> = (0..MAX_NOTICES).map(|i| i.to_string()).collect();
-        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut state = state_with_notices(&refs);
+        // 上限で最古が捨てられたら、残った最古に寄せる（01 の「通知」）。
+        let mut state = state();
+        for i in 0..MAX_NOTICES {
+            state.push_notice(NoticeLevel::Info, i.to_string(), None);
+        }
         let _ = press(&mut state, 'L');
         for _ in 0..MAX_NOTICES {
             let _ = press(&mut state, 'j');
@@ -520,6 +532,9 @@ feat/b
 
         assert_eq!(state.notices.len(), MAX_NOTICES);
         assert_eq!(notice_under_cursor(&state), "1");
+        // **動かす起点も同じ寄せ方**（`notice_log_row`）。`k` で 1 つ新しいほうへ。
+        let _ = press(&mut state, 'k');
+        assert_eq!(notice_under_cursor(&state), "2");
     }
 
     #[test]

@@ -130,15 +130,17 @@ impl AppState {
   カーソル行の `message` の全文と `detail` を出す（07 の「NoticeLog モーダル」）。
   **ステータスバーでは読めない証拠（argv と stderr）が画面に出るのはここだけ**で、
   不変ルール 4 の「UI まで届ける」はこのモーダルで閉じる
-- **`cursor` は新しいほうから数えた位置**（0 が最新）。描く順と同じ数え方にして、
-  `ui` が添字を裏返さずに済むようにする。**開いているあいだに通知が積まれたら
-  `cursor` を 1 つ進める**（`AppState::push_notice`）—— 進めないと、非同期の完了が
-  積んだ 1 件のせいでカーソルの下の通知が黙って入れ替わり、読んでいた `detail` が
-  別の失敗のものになる。上限で古いものが捨てられて末尾を指していたら、残った末尾に
-  寄せる。**一覧の長さは `AppState.notices` が持つ**ので、`j` / `k` も `AppState` が
-  動かす（`AppState::move_modal_cursor`。モーダル自身は一覧の長さを知らない）
+- **選んでいる通知は番号で持つ**（`Notice.seq`。`push_notice` が積んだ順に振る）。
+  **添字で持たない** —— 開いているあいだに非同期の完了が 1 件積むと、添字の下の通知が
+  黙って入れ替わり、読んでいた `detail` が別の失敗のものになる。最初の版は添字を
+  持って `push_notice` が補正していたが、共有の入口が 1 つのモーダルを知る形になった
+  （`/simplify` の altitude が拾った）。**描く行は `AppState::notice_log_row`** の 1 本で、
+  上限で捨てられた通知を選んでいたら最古の行に寄せる。`ui` と `j` / `k`
+  （`AppState::move_modal_cursor`。一覧は `AppState.notices` にあるのでモーダル自身は
+  中身を知らない）が同じ 1 本を読む
 - **通知が 1 件も無くても開く**（「まだありません」と出す）。断る通知を積むと、
-  その 1 件が履歴に入って「無い」が嘘になる
+  その 1 件が履歴に入って「無い」が嘘になる。そのときは次に積まれる番号（0）を
+  選んでおくので、開いたあとの最初の 1 件に座る
 
 ## Pane と Modal
 
@@ -156,7 +158,7 @@ pub enum Modal {
     PrCreate { title: TextBuffer, body: TextBuffer, base: TextBuffer, draft: bool, field: PrField },
     AccountPicker { view: AccountView, cursor: usize },
     RemotePicker { reason: String, remotes: Vec<String>, cursor: usize },
-    NoticeLog { cursor: usize },   // 通知の履歴（上の「通知」）
+    NoticeLog { selected: u64 },   // 通知の履歴。選んでいる Notice.seq（上の「通知」）
     Help,
 }
 ```

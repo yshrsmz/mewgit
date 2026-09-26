@@ -8,9 +8,7 @@
 //! うえ、長さに上限が無い（stderr）。一覧に取る行数を先に決めて中身に残りを渡すので、
 //! 割り方が逆になる。
 
-use std::collections::VecDeque;
-
-use mewgit_core::app::{Notice, NoticeLevel};
+use mewgit_core::app::{AppState, Notice, NoticeLevel};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
@@ -35,42 +33,45 @@ const EMPTY: &str = "通知はまだありません";
 /// 一覧と中身の区切りに取る行数。
 const RULE_ROWS: u16 = 1;
 
-/// 通知の履歴を描く。一覧は新しい順で、`cursor` も新しいほうから数える
+/// 通知の履歴を描く。一覧は新しい順で、`selected` の通知を反転して中身を下に出す
 /// （`Modal::NoticeLog`）。
-pub fn render(frame: &mut Frame, area: Rect, notices: &VecDeque<Notice>, cursor: usize) {
+pub fn render(frame: &mut Frame, area: Rect, state: &AppState, selected: u64) {
     let block = modals::block(TITLE);
     let width = modals::inner_width(area, WIDTH, &block);
 
-    let Some(last) = notices.len().checked_sub(1) else {
+    // **描く行は core が決める**（`AppState::notice_log_row`）。`j` / `k` も同じ 1 本を
+    // 読むので、捨てられた通知を選んでいたときの寄せ方が食い違わない。
+    let Some(cursor) = state.notice_log_row(selected) else {
         let (text, rows) = ui::wrapped(EMPTY, width);
         let inner = modals::place(frame, area, block, WIDTH, rows, HINT);
         frame.render_widget(text, inner);
         return;
     };
-    // `cursor` は core が一覧の中に保っている（`AppState::push_notice`）。ここで
-    // 丸めるのは、外れていても描画で落ちないためだけ。
-    let cursor = cursor.min(last);
+    let newest_first = || state.notices.iter().rev();
 
-    let mut rows: Vec<Line<'_>> = notices.iter().rev().map(|n| row(n, width)).collect();
-    let (content, content_rows) = ui::wrapped(content(&notices[last - cursor]), width);
-    let list_rows = u16::try_from(rows.len()).unwrap_or(u16::MAX);
+    let mut rows: Vec<Line<'_>> = newest_first().map(|n| row(n, width)).collect();
+    let chosen = newest_first()
+        .nth(cursor)
+        .expect("notice_log_row は一覧の中を返す");
+    let (content, content_rows) = ui::wrapped(content(chosen), width);
 
     let inner = modals::place(
         frame,
         area,
         block,
         WIDTH,
-        list_rows
+        u16::try_from(rows.len())
+            .unwrap_or(u16::MAX)
             .saturating_add(RULE_ROWS)
             .saturating_add(content_rows),
         HINT,
     );
 
-    // **一覧に取るのは内側の半分まで。** 一覧を先に満たすと、100 件のときに中身が
-    // 0 行になり、開いた理由（`detail` を読む）が消える（07）。
-    let list_height = list_rows.min((inner.height / 2).max(1));
+    // **一覧に取るのは内側の半分まで**（ペインの一覧と同じ規則）。一覧を先に満たすと、
+    // 100 件のときに中身が 0 行になり、開いた理由（`detail` を読む）が消える（07）。
+    // 高さ 1 でも一覧は 1 行残す（カーソル行が見えないまま `j` が効くのを避ける）。
     let [list, rule, body] = Layout::vertical([
-        Constraint::Length(list_height),
+        Constraint::Length(ui::capped_rows(rows.len(), inner.height).max(1)),
         Constraint::Length(RULE_ROWS),
         Constraint::Min(0),
     ])
@@ -106,14 +107,11 @@ pub fn render(frame: &mut Frame, area: Rect, notices: &VecDeque<Notice>, cursor:
 /// **重さを字でも出す。** 色だけにすると、色の出ない端末で区別が消える（07）。
 fn row(notice: &Notice, width: u16) -> Line<'_> {
     let (mark, style) = level(notice.level);
-    let at = Span::styled(format!("{} ", time::format(notice.at)), theme::muted());
-    let mark = Span::styled(format!("{mark} "), style);
-    let used = u16::try_from(at.width() + mark.width()).unwrap_or(u16::MAX);
-    let message = Span::raw(ui::ellipsize(
-        ui::first_line(&notice.message),
-        width.saturating_sub(used),
-    ));
-    Line::from(vec![at, mark, message])
+    let lead = vec![
+        Span::styled(format!("{} ", time::format(notice.at)), theme::muted()),
+        Span::styled(format!("{mark} "), style),
+    ];
+    ui::lead_line(lead, &notice.message, width)
 }
 
 /// 重さの字とその色。
@@ -130,46 +128,36 @@ fn level(level: NoticeLevel) -> (char, Style) {
 /// カーソル行の中身 —— `message` の全文、空行、`detail` の全文。
 ///
 /// **`message` を 1 行目で切らない。** toml のパースエラーのように複数行の案内がある
-/// （ステータスバーが 1 行目だけを描くのはこのため。07）。
+/// （ステータスバーが 1 行目だけを描くのはこのため。07）。**タブは開く**
+/// （`ui::push_expanded`）—— git の stderr は上書きされるファイルをタブで字下げする。
 fn content(notice: &Notice) -> Text<'static> {
-    let mut text = Text::from(expand_tabs(&notice.message));
+    let mut out = String::new();
+    ui::push_expanded(&mut out, &notice.message);
     if let Some(detail) = &notice.detail {
-        text.push_line(Line::default());
-        text.extend(Text::from(expand_tabs(detail)));
+        out.push_str("\n\n");
+        ui::push_expanded(&mut out, detail);
     }
-    text
+    Text::from(out)
 }
-
-/// タブを空白 [`TAB_WIDTH`] 個に置き換える。
-///
-/// **ratatui はタブを描かない**（幅 0 の字として落ちる）。git の stderr は対象の
-/// ファイルをタブで字下げして並べる（`would be overwritten by checkout:` の続き）ので、
-/// そのままだと字下げが消えて見出しと区別できない（07）。
-fn expand_tabs(text: &str) -> String {
-    text.replace('\t', &" ".repeat(TAB_WIDTH))
-}
-
-const TAB_WIDTH: usize = 4;
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, row_is_reversed, row_of, state_with_modal};
+    use crate::test_util::{draw, row_is_reversed, row_of, state_at};
     use crate::ui::time;
-    use mewgit_core::app::{update, AppState, Key, Modal, Msg, NoticeLevel, TermSize};
+    use mewgit_core::app::{update, AppState, Key, Msg, NoticeLevel, TermSize};
 
     const SIZE: TermSize = TermSize {
         width: 80,
         height: 24,
     };
 
-    /// 通知を `(重さ, message, detail)` の順に積み、履歴を開いた状態（最後が最新）。
+    /// 通知を `(重さ, message, detail)` の順に積み、`L` で履歴を開いた状態（最後が最新）。
     fn log_of(notices: &[(NoticeLevel, &str, Option<&str>)]) -> AppState {
-        let mut state = state_with_modal(Modal::NoticeLog { cursor: 0 });
+        let mut state = state_at("/repo");
         for (level, message, detail) in notices {
             state.push_notice(*level, (*message).to_string(), detail.map(str::to_string));
         }
-        // 積むたびにカーソルが同じ通知に留まるので、最新へ戻す。
-        state.modal = Some(Modal::NoticeLog { cursor: 0 });
+        let _ = update(&mut state, Msg::Key(Key::char('L')));
         state
     }
 
@@ -234,7 +222,7 @@ mod tests {
 
         let text = draw(&state, SIZE).join("\n");
 
-        assert!(text.contains("│    src/main.rs"), "{text}");
+        assert!(text.contains("│        src/main.rs"), "{text}");
     }
 
     #[test]
@@ -251,7 +239,7 @@ mod tests {
 
     #[test]
     fn an_empty_log_says_so() {
-        let state = state_with_modal(Modal::NoticeLog { cursor: 0 });
+        let state = log_of(&[]);
 
         let text = draw(&state, SIZE).join("\n");
 
@@ -262,13 +250,16 @@ mod tests {
     #[test]
     fn a_full_log_still_leaves_room_for_the_detail() {
         // 一覧を先に満たすと、100 件のときに中身が 0 行になる（07）。
-        let names: Vec<String> = (0..100).map(|i| format!("通知 {i}")).collect();
-        let mut notices: Vec<(NoticeLevel, &str, Option<&str>)> = names
-            .iter()
-            .map(|name| (NoticeLevel::Info, name.as_str(), None))
-            .collect();
-        notices.push((NoticeLevel::Error, "最新", Some("stderr の中身")));
-        let state = log_of(&notices);
+        let mut state = state_at("/repo");
+        for i in 0..99 {
+            state.push_notice(NoticeLevel::Info, format!("通知 {i}"), None);
+        }
+        state.push_notice(
+            NoticeLevel::Error,
+            "最新".to_string(),
+            Some("stderr の中身".to_string()),
+        );
+        let _ = update(&mut state, Msg::Key(Key::char('L')));
 
         let lines = draw(&state, SIZE);
         let text = lines.join("\n");
@@ -309,10 +300,15 @@ mod tests {
     fn a_detail_that_fits_has_no_ellipsis() {
         let state = log_of(&[(NoticeLevel::Error, "失敗しました", Some("stderr 0"))]);
 
-        let text = draw(&state, SIZE).join("\n");
+        let lines = draw(&state, SIZE);
+        let text = lines.join("\n");
 
         assert!(text.contains("stderr 0"), "{text}");
-        assert!(!text.contains('…'), "{text}");
+        // **箱の行頭だけを見る。** 下のペインの「読み込み中…」も `…` を持つ。
+        let marked = lines
+            .iter()
+            .any(|line| line.trim_start_matches('│').starts_with('…'));
+        assert!(!marked, "{text}");
     }
 
     #[test]

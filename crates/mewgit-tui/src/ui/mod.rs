@@ -63,7 +63,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     // モーダルは最後。下のペインを覆って描く（07）。
     if let Some(modal) = &state.modal {
-        modals::render(frame, frame.area(), modal, &state.notices);
+        modals::render(frame, frame.area(), modal, state);
     }
 }
 
@@ -547,13 +547,62 @@ fn notice_line(state: &AppState, width: u16) -> Paragraph<'_> {
         return Paragraph::new("");
     };
     let at = Span::styled(format!("{} ", time::clock(notice.at)), theme::muted());
-    let room = width.saturating_sub(u16::try_from(at.width()).unwrap_or(u16::MAX));
-    let message = Span::raw(ellipsize(first_line(&notice.message), room));
-    Paragraph::new(Line::from(vec![at, message]))
+    Paragraph::new(lead_line(vec![at], &notice.message, width))
+}
+
+/// `lead`（時刻など）の後ろに `message` の 1 行目を置き、`width` に収まるように
+/// 末尾を `…` にした 1 行。
+///
+/// **ステータスバーと通知の履歴の一覧が同じ組み方をする**（07）。前置きの幅を引いて
+/// 残りに詰める規則を 2 本に写すと、溢れ方を直したときに片方だけ古くなる。
+pub(crate) fn lead_line<'a>(mut lead: Vec<Span<'a>>, message: &'a str, width: u16) -> Line<'a> {
+    let used: usize = lead.iter().map(Span::width).sum();
+    let room = width.saturating_sub(u16::try_from(used).unwrap_or(u16::MAX));
+    lead.push(Span::raw(ellipsize(first_line(message), room)));
+    Line::from(lead)
+}
+
+/// タブ幅。`\t` を次のタブストップまで開く。
+const TAB_WIDTH: usize = 8;
+
+/// タブを開くのに使う空白。[`TAB_WIDTH`] 桁ぶんを切り出して使う。
+const SPACES: &str = "        ";
+
+/// `text` を `out` に足す。`\t` は [`TAB_WIDTH`] 桁のタブストップまで空白に開き、
+/// `\r` は落とす。桁は `\n` で 0 に戻す。
+///
+/// **ratatui はタブを描かない**（幅 0 の字として落ちる）。1 個の空白に潰すと
+/// インデントが崩れ、diff では上下の行の対応が、git の stderr では見出しと字下げした
+/// ファイル名の区別が読めなくなる。**Diff ペインと通知の履歴が同じ規則を使う** ——
+/// 同じ git の出力を 2 通りに描かない。
+///
+/// `\r` は落とさないと CRLF のファイルで制御文字が画面に出る。桁は文字数で数えるので、
+/// タブの手前に全角文字があるとタブストップがずれる（タブはほぼインデントに使われる
+/// ので、実際には手前は空白だけになる）。
+pub fn push_expanded(out: &mut String, text: &str) {
+    let mut column = 0;
+    for ch in text.chars() {
+        match ch {
+            '\t' => {
+                let pad = TAB_WIDTH - column % TAB_WIDTH;
+                out.push_str(&SPACES[..pad]);
+                column += pad;
+            }
+            '\r' => {}
+            '\n' => {
+                out.push(ch);
+                column = 0;
+            }
+            ch => {
+                out.push(ch);
+                column += 1;
+            }
+        }
+    }
 }
 
 /// `text` を `cells` セルに収める。溢れるときは末尾を `…` に置き換える。
-pub(crate) fn ellipsize(text: &str, cells: u16) -> Cow<'_, str> {
+fn ellipsize(text: &str, cells: u16) -> Cow<'_, str> {
     if fits(text, cells) {
         return Cow::Borrowed(text);
     }
@@ -578,7 +627,7 @@ pub(crate) fn ellipsize(text: &str, cells: u16) -> Cow<'_, str> {
 }
 
 /// 最初の行。改行が無ければ全体。
-pub(crate) fn first_line(text: &str) -> &str {
+fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
 }
 
@@ -598,7 +647,9 @@ fn hint_line(state: &AppState, width: u16) -> Paragraph<'static> {
 
 /// `width` に収まるヒントの並び。
 ///
-/// 落とす順は**共通キー → ペインのキーの末尾**で、`q:quit` は落とさない（07）。
+/// 落とす順は**共通キーの末尾 → ペインのキーの末尾**で、`q:quit` は落とさない（07）。
+/// **共通キーも 1 つずつ落とす。** 丸ごと落とすと、共通キーを 1 つ足しただけで
+/// 80 桁の Graph から `f` / `p` / `P` / `A` まで消えた（`L` を足した回）。
 ///
 /// **収まるかは組んだ字から数える。** 幅だけを別に算術で出すと、組む側と数える側で
 /// 規則が 2 本になる（`.claude/rules/rust-coding.md` の「出力を 1 本にしても入力が 2 本なら結果はずれる」）。
@@ -621,12 +672,13 @@ fn hint_text(pane: &[KeyHint], width: u16) -> String {
             })
     };
 
-    // 共通キーまで出せるなら出す。
-    let full = line(pane, keys::COMMON);
-    if fits(&full, width) {
-        return full;
+    // 共通キーを末尾から落とし、それでも入らなければペインのキーを末尾から。
+    for common in (1..=keys::COMMON.len()).rev() {
+        let text = line(pane, &keys::COMMON[..common]);
+        if fits(&text, width) {
+            return text;
+        }
     }
-    // 入らなければ共通キーを落とし、それでも入らなければペインのキーを末尾から。
     let mut keep = pane.len();
     loop {
         let text = line(&pane[..keep], &[]);
@@ -709,7 +761,10 @@ fn repo_label(state: &AppState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{degraded_label, ellipsize, file_row, fits, hint_text, pane_area, window, wrapped};
+    use super::{
+        degraded_label, ellipsize, file_row, fits, hint_text, pane_area, push_expanded, window,
+        wrapped, SPACES, TAB_WIDTH,
+    };
     use crate::test_util::{
         draw, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status, terminal_with,
     };
@@ -746,6 +801,21 @@ mod tests {
         let mut renamed = fake_entry("new.txt", FileStatus::Renamed);
         renamed.old_path = Some("old.txt".into());
         assert_eq!(file_row(&renamed), " R old.txt -> new.txt");
+    }
+
+    #[test]
+    fn the_spaces_used_for_a_tab_are_wide_enough() {
+        // `SPACES[..pad]` は `pad` が `TAB_WIDTH` まで伸びる。短いと panic する。
+        assert_eq!(SPACES.len(), TAB_WIDTH);
+    }
+
+    #[test]
+    fn a_tab_stop_restarts_on_every_line() {
+        // 桁を `\n` で戻さないと、2 行目以降のタブストップが前の行の長さでずれる
+        // （git の stderr は複数行を 1 本の文字列で持つ）。
+        let mut out = String::new();
+        push_expanded(&mut out, "error: x\n\ta.txt\r");
+        assert_eq!(out, "error: x\n        a.txt");
     }
 
     #[test]
@@ -1342,23 +1412,25 @@ mod tests {
         // **境目を跨ぐ**（`.claude/rules/testing.md`）。Graph + 共通キー + `q:quit` は 82 セルなので、
         // 82 では出て 81 では落ちる。机上で選んだ幅では、どちらか片側しか踏めない。
         let fits = hint_bar_of(Pane::Graph, 82);
-        assert!(fits.contains("f:fetch"), "hints: {fits:?}");
         assert!(fits.contains("L:通知"), "hints: {fits:?}");
         assert!(fits.contains("n:ブランチ作成"), "hints: {fits:?}");
 
+        // **落とすのは共通キーの末尾 1 つだけ**（07）。丸ごと落とすと、共通キーを
+        // 1 つ足しただけで `f` / `p` / `P` / `A` まで消える。
         let over = hint_bar_of(Pane::Graph, 81);
-        assert!(!over.contains("f:fetch"), "hints: {over:?}");
+        assert!(!over.contains("L:通知"), "hints: {over:?}");
+        assert!(over.contains("A:account"), "hints: {over:?}");
         assert!(over.contains("n:ブランチ作成"), "hints: {over:?}");
         assert!(over.contains("q:quit"), "hints: {over:?}");
     }
 
     #[test]
     fn the_prs_pane_drops_the_common_keys_but_keeps_all_of_its_own() {
-        // **`N:PR 作成` を足して落ちる側へ移った**（07 の実測: ペインのキーだけで
-        // 43 → 53 セル。いまの共通キーの 40 を足すと 80 に入らない）。ここが見張る
-        // のは**どちら側に居るか**で、落とす仕組みの境目は上のテストが見る。
+        // **ペインのキーだけで 64 セル**（07 の実測）なので、80 桁では共通キーが
+        // 末尾から落ちる。ここが見張るのは**ペインのキーが先に残る**ことで、落とす
+        // 仕組みの境目は上のテストが見る。
         let prs = hint_bar_of(Pane::Prs, 80);
-        assert!(!prs.contains("f:fetch"), "hints: {prs:?}");
+        assert!(!prs.contains("L:通知"), "hints: {prs:?}");
 
         // **落とすのは共通キーだけ。** ペインのキーが 1 つでも欠けると、
         // 「いまここで何ができるか」の唯一の案内が減る（07）。
@@ -1373,17 +1445,12 @@ mod tests {
         ] {
             assert!(prs.contains(key), "{key} が落ちた: {prs:?}");
         }
-
-        // **余白まで見る**（#80）。ペインのキーだけで 80 桁にはまだ余る（セル数は
-        // 07 の実測）—— ここを埋め切ると次に落ちるのは `Esc:戻る` のほうになる。
-        assert!(fits(prs.trim_end(), 79), "80 桁で余白がありません: {prs:?}");
     }
 
     #[test]
-    fn the_commit_detail_pane_still_shows_the_common_keys_with_room_to_spare() {
-        // **共通キーに `L:通知` を足した回に、出る側まで一緒に落ちていないか。**
+    fn the_commit_detail_pane_still_shows_every_common_key_with_room_to_spare() {
         // 上のテストと対になる —— あちらは落ちる側、こちらは出る側（07 の表）。
-        // 80 桁で出る側に残ったのは CommitDetail だけ（Graph は 82 で落ちた）。
+        // 80 桁で共通キーが全部出る側の代表が CommitDetail（数は 07 の実測）。
         // **`hint_bar_of` では座れない** —— あのヘルパは WIP 行を選んだ状態なので
         // 候補に入らない（07 の「ペインとフォーカス」）。組む関数を直に呼ぶ。
         let detail = hint_text(keys::pane(Pane::CommitDetail), 80);
@@ -1392,9 +1459,10 @@ mod tests {
         // `contains` だけだと、80 桁をちょうど埋めた状態でも通る（#80）。
         assert!(fits(&detail, 79), "余白がありません: {detail:?}");
 
-        // **Graph は落ちる側へ移った**（07 の実測）。
+        // **Graph は `L` だけが落ちる**（07 の実測）。
         let graph = hint_bar_of(Pane::Graph, 80);
-        assert!(!graph.contains("f:fetch"), "hints: {graph:?}");
+        assert!(graph.contains("A:account"), "hints: {graph:?}");
+        assert!(!graph.contains("L:通知"), "hints: {graph:?}");
     }
 
     #[test]

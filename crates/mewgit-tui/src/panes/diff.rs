@@ -15,12 +15,6 @@ use ratatui::Frame;
 
 use crate::ui::{self, theme};
 
-/// タブ幅。`\t` をここまで開く。
-const TAB_WIDTH: usize = 8;
-
-/// タブを開くのに使う空白。[`TAB_WIDTH`] 桁ぶんを切り出して使う。
-const SPACES: &str = "        ";
-
 /// Diff ペインを描く。
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     // **対象は 1 フレームに 1 回だけ導く。** `wanted_diff` は `PathBuf` を作るので、
@@ -180,33 +174,13 @@ fn hunk_line<'a>(line: &HunkLine) -> Line<'a> {
 /// パッチに戻す入力は `content` のままで、こちらは表示専用。記号と本文を 1 つの
 /// `String` に組むのは、`format!` でもう一度丸ごとコピーしないため。
 ///
-/// `\t` は [`TAB_WIDTH`] 桁のタブストップまで空白に開く。1 個の空白に潰すと
-/// インデントが崩れて、上下の行の対応が読めなくなる。桁は**本文の先頭から**数える。
-/// 先頭の `-` / `+` / ` ` を含めて数えると、変更行と文脈行でタブストップが 1 桁ずれる。
-/// 桁は文字数で数えるので、タブの手前に全角文字があるとタブストップがずれる
-/// （タブはほぼインデントに使われるので、実際には手前は空白だけになる）。
-///
-/// `\r` は落とす。落とさないと CRLF のファイルで制御文字が画面に出る。
+/// タブは [`ui::push_expanded`] で開く。桁は**本文の先頭から**数える —— 先頭の
+/// `-` / `+` / ` ` を含めて数えると、変更行と文脈行でタブストップが 1 桁ずれるので、
+/// 記号を足してから本文を別に渡す。
 fn marked(mark: char, content: &[u8]) -> String {
     let mut out = String::with_capacity(content.len() + 1);
     out.push(mark);
-
-    let mut column = 0;
-    for ch in String::from_utf8_lossy(content).chars() {
-        match ch {
-            '\t' => {
-                let pad = TAB_WIDTH - column % TAB_WIDTH;
-                out.push_str(&SPACES[..pad]);
-                column += pad;
-            }
-            '\r' => {}
-            ch => {
-                out.push(ch);
-                column += 1;
-            }
-        }
-    }
-
+    ui::push_expanded(&mut out, &String::from_utf8_lossy(content));
     out
 }
 
@@ -424,12 +398,6 @@ mod tests {
         // 枠(1) + 記号(1) + タブ 8 桁。
         assert!(row("one").starts_with("│         one"), "{:?}", row("one"));
         assert!(row("two").starts_with("│+        two"), "{:?}", row("two"));
-    }
-
-    #[test]
-    fn the_spaces_used_for_a_tab_are_wide_enough() {
-        // `SPACES[..pad]` は `pad` が `TAB_WIDTH` まで伸びる。短いと panic する。
-        assert_eq!(SPACES.len(), TAB_WIDTH);
     }
 
     #[test]

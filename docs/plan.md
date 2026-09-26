@@ -280,6 +280,11 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       **出す先は `A` の `NoAccess` の内訳**（`gh auth refresh -h <host> -s <scope>`。
       アクティブでない login には `gh auth switch` を先に書く。04 の「権限不足の案内」）。
       SAML の 403 は `AttemptFailure::SsoRequired` に割って「SSO の承認が要ります」
+- [ ] SAML の承認 URL を案内に載せる — `X-GitHub-SSO` ヘッダが何を返すかを確かめて
+      いない（SAML を強制する org が手元に無い）。**踏む org が出てから**、ヘッダの値を
+      実測して `AttemptFailure::SsoRequired` に URL を持たせ、`A` の内訳に出す
+      （04 の「権限不足の案内」）。送り先だった「通知の履歴」は、承認 URL を運ぶ値が
+      無いまま済んだので、ここへ移した
 - [ ] 既定リモートが GitHub でないときの PRs ペインの文言 — いまは
       `TargetState::Unavailable` でも `Cmd::ResolveAccount` が出ないため
       `AccountState::Resolving` のままで、ペインが**永久に「読み込み中…」**になる
@@ -390,9 +395,11 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       言っているのはこの詳細のこと。**`Modal` に変種を足したら `_` の腕を持つ `match` を
       grep する**（`update::paste` が受け皿を持っていた。`.claude/rules/rust-coding.md`）。開くキーは
       フッターの表（`app::keys`）に載せ、`every_hinted_key_does_something` を通す
-      - **`L` を共通キーに足した**（2026-09-26 にユーザーと決めた）。そのぶん 80 桁の
-        Graph から共通キーの案内が落ち、出るのは CommitDetail だけになった（実測は 07 の
-        「ステータスバー」）。`q:quit` の隣に落とさない枠を作る案も Graph では同じく落ちる
+      - **`L` を共通キーの末尾に足した**（2026-09-26 にユーザーと決めた）。あわせて
+        **共通キーを丸ごとではなく末尾から 1 つずつ落とす**形にした —— 丸ごとだと 80 桁の
+        Graph から `f` / `p` / `P` / `A` まで消えた（`/simplify` の altitude が拾った）。
+        80 桁の Graph で落ちるのは `L` だけで、`L` の案内が 80 桁で見えるのは
+        CommitDetail だけ（実測は 07 の「ステータスバー」）
       - **stderr のタブは空白に展開する**（ratatui が描かないので字下げが消える。実物を
         描いて判った。07 の「NoticeLog モーダル」）
       - **中身のスクロールは入れていない**（入りきらなければ最下行を `…`）。受け入れた穴
@@ -420,6 +427,10 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 - [ ] 端末幅 < 100 のレイアウト。**枠付きペインの折り返しが 1 セルはみ出す件もここ** ——
       `ui::pane_block` に `Padding::right(1)` を足す（`modals::block` は
       `Modal::AccountPicker` のタスクで入れた。07 の「モーダル」）。
+      **`render_rows` を見える行だけ組む形にするのもここ**（07 の「見えない行の
+      組み立て」）。`NoticeLog` は一覧に加えて**中身（上限の無い stderr）の全文**も
+      毎フレーム組むので、中身も「見える行 + 1 行」で打ち切る（detail 5000 行で
+      1 フレーム 7.1ms。実測は 07）
       **モーダルのキーの案内が切れる境目もここで見る** —— `AccountPicker` の
       いちばん長い案内（`[u] 指定を解除` 付きと `[r] 解決し直す` 付き。どちらも
       14 セルなので並ぶ）は 57 セルで、箱の内側

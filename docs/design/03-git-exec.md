@@ -473,7 +473,11 @@ op で変わる分（非 FF は 4 通り）を表に書けないうえ、「次�
 ただし `target.host` は**既定リモートのホスト**で、失敗した `GitOp` が使ったリモートとは
 限らない（`Push` は自分でリモート名を運ぶ）。**案内にホストを入れるなら、`GitOp` 側から
 辿る**（#49 の「完了時に `state` から取る値は、発行時と同じである保証を数える」）。
-出すかどうかは M6 の `Notice.detail` の表示と同じタスクへ送る。
+**入れないと決めた**（2026-09-26、通知の履歴のタスク）。stderr は `Notice.detail` に
+残って `L` の履歴で読め、**ssh は認証の失敗で自分からホストを名乗る** ——
+`git@github.com: Permission denied (publickey).`（鍵を渡さずに `git ls-remote
+git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSSH 10.3p1）。
+失敗した `GitOp` から辿る配線を足さなくても、どのホストで断られたかは画面に出る。
 
 分類するのは git の出力があるとき、つまり `ExecError::Failed` だけ。`NoResult` には
 `kind` が無い（分類関数を通らない）。

@@ -677,5 +677,6 @@ jiro: SAML SSO の承認が要ります（HTTP 403）
 - **`gh auth switch` で戻す手順は書かない。** mewgit はアクティブかどうかで
   アカウントを選ばない（手順 4 は全員を probe する）ので、切り替えたままでも
   mewgit の側は変わらない。gh の既定が変わったことを戻すかは本人の判断
-- **SAML の承認 URL は載せない。** 載せる先は M6 の `detail`（`X-GitHub-SSO` が何を
-  返すかは確かめていない）
+- **SAML の承認 URL は載せない。** `X-GitHub-SSO` が何を返すかを確かめていない
+  （SAML を強制する org が手元に無い）。載せるなら内訳の本文か `Notice.detail`
+  （`L` の履歴で読める）で、**踏む org が出てから**（`docs/plan.md` の M4 の行）

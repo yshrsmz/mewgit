@@ -458,7 +458,7 @@ mod tests {
                 notice.message
             );
             // **案内に差し替えても証拠は捨てない**（不変ルール 4）。argv は `detail`
-            // に残り、履歴表示（M6）から読める。
+            // に残り、`L` の履歴から読める。
             let detail = notice.detail.as_deref().expect("detail がありません");
             assert!(detail.contains("git push origin main"), "detail: {detail}");
             // **1 行に収まる幅か。** 超えると末尾が `…` に切れ、「どうすればよいか」

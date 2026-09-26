@@ -23,8 +23,8 @@
 （`Oid`、`InProgressOp`、`Hunk` など）だけは他の 3 つから参照してよい**。git の概念を
 表す語彙を 4 回定義し直さないため。逆向き（`git_read` が他の 3 つを使う）と、
 `graph` / `git_exec` / `github` の相互参照はしない。進行中操作の**検出**は `git_read`
-の責務で、書き込みの直後に呼んで結果に添えるのはランタイム（`mewgit-tui`）の
-`Cmd::Exec` のタスク（02・03 参照）。
+の責務で、`status()` が同じ読み取りの中で検出して `WorktreeSnapshot` に載せる
+（02・03 参照）。
 
 ## クレート分割（Cargo workspace）
 

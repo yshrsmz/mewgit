@@ -18,7 +18,7 @@ use std::path::Path;
 use crate::{modals, panes};
 use mewgit_core::app::{keys, AppState, GraphSelection, Key, KeyCode, KeyHint, Pane, TermSize};
 use mewgit_core::auth::{gh, AccountState, DegradedReason};
-use mewgit_core::git_read::{short_oid, FileEntry, FileStatus, InProgressOp, Oid, Step};
+use mewgit_core::git_read::{short_oid, FileEntry, FileStatus, InProgressOp, Step};
 use mewgit_core::github::RateLimit;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -549,7 +549,7 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
 /// 流すと改行が消えて読めなくなる。全文は `L` の履歴で読む（`modals::notice_log`）。
 fn status_line(state: &AppState, width: u16) -> Paragraph<'_> {
     let mut lead = Vec::new();
-    if let Some(op) = &state.progress {
+    if let Some(op) = &state.worktree.snapshot.progress {
         lead.push(Span::styled(
             format!(" {} ", progress_label(op)),
             theme::in_progress(),
@@ -570,20 +570,17 @@ fn status_line(state: &AppState, width: u16) -> Paragraph<'_> {
 ///
 /// **止まった理由（`edit` など）は出さない** —— 検出側が持っていない（02）。
 fn progress_label(op: &InProgressOp) -> String {
-    let with_step = |name: &str, step: &Option<Step>| match step {
-        Some(step) => format!("{name} {}/{}", step.current, step.total),
-        None => name.to_string(),
+    let step = |step: &Option<Step>| step.map(|step| format!("{}/{}", step.current, step.total));
+    let (name, detail) = match op {
+        InProgressOp::Rebase { step: s } => ("REBASE", step(s)),
+        InProgressOp::Am { step: s } => ("AM", step(s)),
+        InProgressOp::CherryPick { oid } => ("CHERRY-PICK", oid.as_ref().map(short_oid)),
+        InProgressOp::Revert { oid } => ("REVERT", oid.as_ref().map(short_oid)),
+        InProgressOp::Merge { oid } => ("MERGE", Some(short_oid(oid))),
     };
-    let with_oid = |name: &str, oid: Option<&Oid>| match oid {
-        Some(oid) => format!("{name} {}", short_oid(oid)),
+    match detail {
+        Some(detail) => format!("{name} {detail}"),
         None => name.to_string(),
-    };
-    match op {
-        InProgressOp::Rebase { step } => with_step("REBASE", step),
-        InProgressOp::Am { step } => with_step("AM", step),
-        InProgressOp::CherryPick { oid } => with_oid("CHERRY-PICK", oid.as_ref()),
-        InProgressOp::Revert { oid } => with_oid("REVERT", oid.as_ref()),
-        InProgressOp::Merge { oid } => with_oid("MERGE", Some(oid)),
     }
 }
 
@@ -803,7 +800,8 @@ mod tests {
         push_expanded, window, wrapped, SPACES, TAB_WIDTH,
     };
     use crate::test_util::{
-        draw, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status, terminal_with,
+        draw, footer_area, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status,
+        terminal_with,
     };
     use mewgit_core::app::{
         keys, update, AppState, Cmd, JobKind, Modal, Msg, NoticeLevel, Pane, TargetState, TermSize,
@@ -1643,7 +1641,7 @@ mod tests {
         // 通知は次の入力で下ろすが、進行中操作は continue / abort するまで終わらない
         // （07 の「ステータスバー」）。**通知が無い行にも出る**ことまで見る。
         let mut state = state_at("/repo");
-        state.progress = Some(InProgressOp::Rebase {
+        state.worktree.snapshot.progress = Some(InProgressOp::Rebase {
             step: Some(Step {
                 current: 3,
                 total: 7,
@@ -1665,9 +1663,9 @@ mod tests {
     fn the_progress_badge_is_set_apart_from_the_notice() {
         // 反転だけだとタブやカーソル行と同じ見た目になる（`theme::in_progress`）。
         let mut state = state_at("/repo");
-        state.progress = Some(InProgressOp::Merge { oid: fake_oid(1) });
+        state.worktree.snapshot.progress = Some(InProgressOp::Merge { oid: fake_oid(1) });
         let terminal = terminal_with(&state, TermSize::default());
-        let y = ui_footer_row(0);
+        let y = footer_area(TermSize::default(), 0).y;
         let buffer = terminal.backend().buffer();
 
         let badge = &buffer[(1, y)];
@@ -1680,10 +1678,6 @@ mod tests {
         assert!(buffer[(0, y)].modifier.contains(Modifier::REVERSED));
         assert!(buffer[(width - 1, y)].modifier.contains(Modifier::REVERSED));
         assert!(!buffer[(width, y)].modifier.contains(Modifier::REVERSED));
-    }
-
-    fn ui_footer_row(row: usize) -> u16 {
-        super::footer(TermSize::default())[row].y
     }
 
     #[test]
@@ -1724,7 +1718,7 @@ mod tests {
         // 切れる（07 の「ステータスバー」）。**24 と 25 はリテラルのまま置く** ——
         // 上の `a_notice_of_the_full_width_fits_on_its_own_line` と同じ理由。
         let mut state = state_at("/repo");
-        state.progress = Some(InProgressOp::CherryPick {
+        state.worktree.snapshot.progress = Some(InProgressOp::CherryPick {
             oid: Some(fake_oid(1)),
         });
 

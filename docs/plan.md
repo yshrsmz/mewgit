@@ -314,11 +314,11 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 
 ## M5: 履歴操作
 
-- [x] `git_read::in_progress` の検出とステータスバー表示。**`ProgressDetected` は
-      このタスクでは使わない** —— 起動時は `runtime::open` が同期で読み（`Cmd` にすると
-      `ExecFinished` と到着順を争う。01 の「起動時の読み込み」）、書き込みのあとは
-      ランタイムが `ExecDone.progress` に入れる（03）。あの `Msg` の producer は M6 の
-      `.git/HEAD` 監視。**検出表は実測で作り直した**（02）—— `-i` の有無は区別できない
+- [x] `git_read::in_progress` の検出とステータスバー表示。**`ProgressDetected` と
+      `ExecDone.progress` は消した** —— 検出は `status()` が同じ読み取りで行い、
+      `WorktreeSnapshot.progress` として `LoadStatus` の返りに載る（起動時も書き込みの
+      あとも同じ入口。古い返りは世代が捨てる。01 の「起動時の読み込み」、03）。
+      **検出表は実測で作り直した**（02）—— `-i` の有無は区別できない
       ので `Rebase.interactive` を消し、`git am`（同じ `rebase-apply/`）を `Am` に分け、
       `sequencer/` だけが残る形を拾う。バッジに止まった理由（`(edit)`）は出さない（07）
 - [ ] `--sequence-editor` / `--commit-editor` 隠しサブコマンド
@@ -521,5 +521,6 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の
       `ESC[<行>;<桁>H` を読んで回避している
-- [ ] `.git/HEAD` mtime 監視での外部変更検知
+- [ ] `.git/HEAD` mtime 監視での外部変更検知。**進行中操作も `LoadStatus` を出せば
+      入れ替わる**（`Msg::ProgressDetected` は消した。01 の「update の原則」）
 - [ ] README、リリースワークフロー（`cargo dist` or release-please）

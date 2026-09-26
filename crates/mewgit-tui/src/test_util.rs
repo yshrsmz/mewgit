@@ -6,7 +6,7 @@ use mewgit_core::config::Config;
 use mewgit_core::git_read::{Commit, FileEntry, GitReadError, LogPage, WorktreeSnapshot};
 use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents, reply, FAKE_NOW};
 use ratatui::backend::TestBackend;
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::Line;
 use ratatui::Terminal;
@@ -62,15 +62,21 @@ pub fn hint_bar(state: &AppState, size: TermSize) -> String {
 }
 
 fn footer_row(state: &AppState, size: TermSize, row: usize) -> String {
-    // **その行が在ることまで見る。** 低い端末ではフッターに 2 行渡らず、通知の行が
-    // 0 行になる（`ui::split` が足りないぶんを通知から削る）。`y` だけを信じると
-    // **別の行を通知として読む**か、範囲外で理由の無い panic になる。
+    draw(state, size)[footer_area(size, row).y as usize].clone()
+}
+
+/// フッターの `row` 行目（0 が通知、1 がキーヒント）の領域。
+///
+/// **その行が在ることまで見る。** 低い端末ではフッターに 2 行渡らず、通知の行が
+/// 0 行になる（`ui::split` が足りないぶんを通知から削る）。`y` だけを信じると
+/// **別の行を通知として読む**か、範囲外で理由の無い panic になる。
+pub fn footer_area(size: TermSize, row: usize) -> Rect {
     let area = ui::footer(size)[row];
     assert!(
         area.height > 0,
         "{size:?} にはフッターの {row} 行目が無い（低すぎる端末）"
     );
-    draw(state, size)[area.y as usize].clone()
+    area
 }
 
 /// `needle` を含む行が何行目か。無ければ panic する。

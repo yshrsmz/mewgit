@@ -23,8 +23,6 @@ pub struct ReaderHandle {
     /// `open` が確定させたワークツリーのルート。スレッドに聞き直さずに済むよう、
     /// 起動時に 1 回だけ受け取って持つ。
     workdir: PathBuf,
-    /// ワークツリーごとの gitdir。`workdir` と同じく起動時に 1 回だけ受け取る。
-    git_dir: PathBuf,
     /// `core.sshCommand` の値。`workdir` と同じく起動時に 1 回だけ読む。
     ssh_command: Option<String>,
 }
@@ -75,7 +73,6 @@ impl ReaderHandle {
     pub fn spawn(path: &Path) -> Result<Self, GitReadError> {
         let reader = RepoReader::open(path)?;
         let workdir = reader.workdir().to_path_buf();
-        let git_dir = reader.git_dir().to_path_buf();
         let ssh_command = reader.ssh_command();
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -90,7 +87,6 @@ impl ReaderHandle {
         Ok(Self {
             tx,
             workdir,
-            git_dir,
             ssh_command,
         })
     }
@@ -98,14 +94,6 @@ impl ReaderHandle {
     /// ワークツリーのルート。`open` が確定させた値で、引数に渡したパスとは限らない。
     pub fn workdir(&self) -> &Path {
         &self.workdir
-    }
-
-    /// ワークツリーごとの gitdir。[`in_progress`](super::in_progress) に渡す。
-    ///
-    /// 進行中操作の検出はファイルを見るだけなので、スレッドを通さずに呼べるよう
-    /// 同期で返す（02 の「進行中操作の検出」）。
-    pub fn git_dir(&self) -> &Path {
-        &self.git_dir
     }
 
     /// `core.sshCommand` の値。`Runner` に渡して `BatchMode` を重ねるのに使う

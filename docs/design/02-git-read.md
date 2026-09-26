@@ -38,7 +38,7 @@ impl RepoReader {
 ```
 
 git2 の呼び出しはどれも壊れたリポジトリや I/O エラーで失敗しうるので、参照系も含めてすべて `Result` を返す。
-進行中操作の検出（`in_progress`）は `RepoReader` のメソッドではなく自由関数で、`Result` を返さない。`.git/` のファイルの有無を見るだけで、読めないことと「進行中の操作は無い」を区別しても出し分けが無いため（下の「進行中操作の検出」）。
+進行中操作の検出（`in_progress`）は自由関数で、`Result` を返さない。`.git/` のファイルの有無を見るだけで、読めないことと「進行中の操作は無い」を区別しても出し分けが無いため（下の「進行中操作の検出」）。`status()` の中で呼ばれる。
 
 ### open
 
@@ -374,6 +374,7 @@ pub struct WorktreeSnapshot {
     pub unstaged: Vec<FileEntry>,
     pub untracked: Vec<FileEntry>,
     pub conflicted: Vec<FileEntry>,
+    pub progress: Option<InProgressOp>,   // 区画ではない。下の「進行中操作の検出」
 }
 
 pub struct FileEntry {
@@ -506,7 +507,7 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
 ## 進行中操作の検出
 
 ```rust
-pub fn in_progress(git_dir: &Path) -> Option<InProgressOp>;   // 自由関数
+pub fn in_progress(git_dir: &Path) -> Option<InProgressOp>;   // git2 を使わない自由関数
 
 pub enum InProgressOp {
     Rebase { step: Option<Step> },   // Step { current, total }
@@ -517,14 +518,17 @@ pub enum InProgressOp {
 }
 ```
 
-**`RepoReader` のメソッドではなく、gitdir を受ける自由関数にする。** 見るのはファイルだけで
-git2 を使わないので、リーダースレッドを通す理由が無い。起動時（`runtime::open`）と書き込みの
-直後（`Cmd::Exec` のタスク。03 の「進行中操作との整合」）の 2 箇所から、スレッドの要求を
-待たずに呼べる。gitdir は `ReaderHandle::git_dir()` が `workdir()` と同じく同期で返す。
+**`status()` が同じ読み取りの中で呼び、`WorktreeSnapshot.progress` に載せる。** 別の
+読み取り（起動時の同期読みや、書き込みの直後に `ExecFinished` へ添える形）にすると、
+入口ごとに到着順の議論が要る —— `LoadStatus` に載せれば、古い返りを捨てるのは既存の
+世代（01 の「実行中ジョブ › 世代」）の 1 本で、`conflicted` と進行中操作が同じ時点の
+値になる。`git status` 自身も両方を 1 回で出す。**関数を gitdir を受ける自由関数に
+しておくのは**、ファイルしか見ないのでテストで gitdir に見立てたディレクトリを渡せる
+ようにするため。
 
-**読む先はワークツリーごとの gitdir**（`git2::Repository::path()`）。linked worktree では
-`MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<name>/` に置かれる（下の実測）ので、
-`workdir/.git` を決め打ちすると別のワークツリーの状態を読む。
+**読む先はワークツリーごとの gitdir**（`RepoReader::git_dir()` = `git2::Repository::path()`）。
+linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<name>/` に置かれる
+（下の実測）ので、`workdir/.git` を決め打ちすると別のワークツリーの状態を読む。
 
 **判定は上から順**（`git status` の `wt-status.c` と同じ並び）。
 
@@ -607,12 +611,11 @@ pub enum GitReadError {
 `git2::Repository` は `Send` だが `Sync` ではない。`RepoReader` は `spawn_blocking` 内で毎回 open するか、専用スレッドに所有させてチャネル経由で使う。後者を採用し、`ReaderHandle` をランタイムに渡す。
 
 ```rust
-pub struct ReaderHandle { /* mpsc::UnboundedSender<Request>, workdir: PathBuf, git_dir: PathBuf */ }
+pub struct ReaderHandle { /* mpsc::UnboundedSender<Request>, workdir: PathBuf */ }
 
 impl ReaderHandle {
     pub fn spawn(path: &Path) -> Result<Self, GitReadError>;
     pub fn workdir(&self) -> &Path;
-    pub fn git_dir(&self) -> &Path;   // ワークツリーごとの gitdir。`in_progress` に渡す
     pub async fn log_page(&self, count: usize, restart: bool) -> Result<LogPage, GitReadError>;
     pub async fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;
     pub async fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;

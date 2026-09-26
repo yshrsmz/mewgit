@@ -206,6 +206,22 @@ impl TestRepo {
         }
     }
 
+    /// `main` と `side` が `f` を違う中身で書き換えた形。`main` に居る状態で返す。
+    ///
+    /// `side` は 2 コミットで、1 つ目が `f` を、2 つ目が `g` を触る。`side` の 1 つ目を
+    /// `main` に取り込む操作（cherry-pick / rebase / merge / am）はコンフリクトで止まり、
+    /// 2 つ目は止まらない。返すのは `(1 つ目, 2 つ目)`。
+    pub fn diverged() -> (Self, Oid, Oid) {
+        let repo = Self::init();
+        repo.commit_file("f", "base");
+        repo.git(&["switch", "-c", "side"]);
+        let first = repo.commit_file("f", "side");
+        let second = repo.commit_file("g", "side2");
+        repo.git(&["switch", "main"]);
+        repo.commit_file("f", "main");
+        (repo, first, second)
+    }
+
     /// ワークツリーのルート。
     pub fn path(&self) -> &Path {
         &self.sandbox.root
@@ -755,6 +771,7 @@ pub fn fake_snapshot(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> 
         unstaged: entries(unstaged),
         untracked: entries(untracked),
         conflicted: Vec::new(),
+        progress: None,
     }
 }
 

@@ -2,7 +2,7 @@
 
 use git2::StatusOptions;
 
-use super::{file_entry, FileStatus, GitReadError, RepoReader, WorktreeSnapshot};
+use super::{file_entry, in_progress, FileStatus, GitReadError, RepoReader, WorktreeSnapshot};
 
 impl RepoReader {
     /// staged / unstaged / untracked / conflicted に分けたワーキングツリーの状態。
@@ -55,6 +55,7 @@ impl RepoReader {
         }
 
         snapshot.sort_sections();
+        snapshot.progress = in_progress(self.git_dir());
         Ok(snapshot)
     }
 }

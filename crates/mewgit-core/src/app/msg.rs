@@ -3,8 +3,8 @@
 use crate::auth::{Account, AuthError, DegradedReason, GhLogin, ResolvedTarget};
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
-    Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, InProgressOp,
-    LogPage, Oid, RefIndex, Remote, Timestamp, WorktreeSnapshot,
+    Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, LogPage, Oid,
+    RefIndex, Remote, Timestamp, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 
@@ -115,10 +115,9 @@ pub enum Msg {
     },
 
     // git_exec
-    /// `git` の実行が終わった。`Runner` が実行直後に再検出した進行中操作を一緒に運ぶ（03）。
+    /// `git` の実行が終わった。進行中操作は運ばない —— `exec_finished` が必ず出す
+    /// `LoadStatus` の返りに載ってくる（03 の「進行中操作との整合」）。
     ExecFinished(Box<ExecDone>),
-    /// `.git/HEAD` の監視など、`GitOp` 以外の経路で進行中操作が変わった（M6）。
-    ProgressDetected(Option<InProgressOp>),
 
     // auth / github
     /// [`Cmd::ResolveTarget`](super::Cmd::ResolveTarget) の結果（01 の
@@ -224,9 +223,6 @@ pub struct RepoSnapshot {
 pub struct ExecDone {
     pub op: GitOp,
     pub result: Result<ExecOutput, ExecError>,
-    /// 実行直後に再検出した進行中操作。実行結果と別の `Msg` に割ると `update` が
-    /// 受け取る順序に依存するので、1 通にまとめる（03）。
-    pub progress: Option<InProgressOp>,
 }
 
 #[cfg(test)]

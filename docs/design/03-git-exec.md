@@ -490,20 +490,22 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 3. `GIT_SEQUENCE_EDITOR="cp T"` 相当のスクリプトを渡して `git rebase -i <onto>` を実行
    - 実際には `sh -c 'cat "$1" > "$2"'` 形式のヘルパーではなく、自バイナリを `--sequence-editor <T>` サブコマンド付きで指定する（外部依存ゼロ）
 4. `reword` は `GIT_EDITOR` にも自バイナリを指定し、あらかじめ集めたメッセージを書き込む
-5. 停止したら `ExecFinished` に添えた `progress` で `Rebase` モードに入り、continue / skip / abort を提供
+5. 停止したら、書き込みのあとの `LoadStatus` が運ぶ進行中操作（`WorktreeSnapshot.progress`）で `Rebase` モードに入り、continue / skip / abort を提供
 
 自バイナリをエディタとして使う場合、`mewgit --sequence-editor <path>` / `mewgit --commit-editor <path>` の隠しサブコマンドを用意する。
 
 ## 進行中操作との整合
 
-- `GitOp` の実行が終わったら、**成功・失敗・中断を問わず** `git_read::in_progress` で
-  進行中操作を再検出し、`ExecDone.progress` として結果と一緒に返す。実行結果と
-  進行中操作を別々の `Msg` に割ると `update` が受け取る順序に依存してしまうため、1 通に
-  まとめる
-- **再検出するのは `Runner` ではなくランタイムの `Cmd::Exec` のタスク**（`ExecDone` を
-  組み立てているのがそこなので）。`Runner` は gitdir を知らずに済み、`Runner::new` の
-  引数も増えない。`run_cancelable` が返った**あと**に読むので、中断した git の後始末
-  （`CHERRY_PICK_HEAD` の削除など）が済んだ状態を読む（上の「キャンセル」は殺してから
-  終了を待つ）
+- **`ExecFinished` は進行中操作を運ばない。** `exec_finished` が成功・失敗・中断を
+  問わず出す `LoadStatus` の返り（`WorktreeSnapshot.progress`。02）で入れ替わる。
+  **以前は「実行結果と 1 通に束ねる」と決めていた**（別々の `Msg` に割ると受け取る順序に
+  依存するため）が、束ねると起動時・書き込みのあと・M6 の外部変更の検知で入口が 3 本に
+  なり、それぞれに到着順の議論が要った。status に載せれば、古い返りを捨てるのは既存の
+  世代の 1 本で済む（01 の「起動時の読み込み」）。**代わりにバッジは status が届くまで
+  1 往復遅れる**が、そのあいだは `conflicted` の一覧も同じだけ遅れており、世代の門が
+  その窓を「まだ信じない」と読むので食い違いにはならない（2026-09-26、`/simplify` の
+  指摘を受けてユーザーと決めた）
+- `Runner` は gitdir を知らない。中断した git の後始末（`CHERRY_PICK_HEAD` の削除など）は
+  `run_cancelable` が終了を待ってから返るので、`LoadStatus` はそのあとを読む
 - 進行中操作があるときは、continue / skip / abort 以外の書き込み `GitOp` を拒否する（UI 側でも無効化）。
   **これは M5 の別タスク**（`docs/plan.md`）で、検出と表示だけが先に入っている

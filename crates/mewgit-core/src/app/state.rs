@@ -9,8 +9,8 @@ use crate::auth::url::RemoteUrl;
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
 use crate::git_exec::RebasePlan;
 use crate::git_read::{
-    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
-    RefIndex, Remote, StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
+    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, Oid, RefIndex, Remote,
+    StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 use crate::graph::{GraphRow, LaneState};
@@ -37,7 +37,6 @@ pub struct AppState {
     pub push_rejected: Option<PushRejection>,
     pub stashes: Vec<StashEntry>,
     pub prs: PrState,
-    pub progress: Option<InProgressOp>,
     pub focus: Pane,
     /// 右列の上に出すタブ。
     ///
@@ -107,7 +106,6 @@ impl AppState {
             push_rejected: None,
             stashes: Vec::new(),
             prs: PrState::default(),
-            progress: None,
             focus: Pane::default(),
             right_tab: RightTab::default(),
             modal: None,

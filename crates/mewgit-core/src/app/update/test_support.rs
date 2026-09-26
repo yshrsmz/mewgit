@@ -413,11 +413,7 @@ pub(super) fn exec_done(result: Result<ExecOutput, ExecError>) -> Msg {
 
 /// `op` の実行結果。ref を動かすかどうかで `exec_finished` の出す `Cmd` が変わる。
 pub(super) fn exec_done_of(op: GitOp, result: Result<ExecOutput, ExecError>) -> Msg {
-    Msg::ExecFinished(Box::new(ExecDone {
-        op,
-        result,
-        progress: None,
-    }))
+    Msg::ExecFinished(Box::new(ExecDone { op, result }))
 }
 
 /// ランタイムが 250ms ごとに送る `Tick`（時刻は `FAKE_NOW`）。

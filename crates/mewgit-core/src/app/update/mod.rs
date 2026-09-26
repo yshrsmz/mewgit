@@ -161,7 +161,6 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::BranchesLoaded(result) => branches_loaded(state, *result),
         Msg::DiffLoaded { target, result } => diff_loaded(state, target, *result),
         Msg::ExecFinished(done) => exec_finished(state, *done),
-        Msg::ProgressDetected(_) => Cmd::None,
         Msg::TargetResolved(resolved) => target_resolved(state, *resolved),
         Msg::AccountResolved(result) => account_resolved(state, result),
         Msg::AccountsListed(result) => accounts_listed(state, result),

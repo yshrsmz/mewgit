@@ -425,9 +425,14 @@ pub struct WorktreeSnapshot {
     pub unstaged: Vec<FileEntry>,
     pub untracked: Vec<FileEntry>,
     pub conflicted: Vec<FileEntry>,
+    /// 進行中の操作（02 の「進行中操作の検出」）。**区画ではない**が、`git status` と
+    /// 同じく「いまのワークツリーの状態」なので同じ読み取りで運ぶ —— 別の読み取りに
+    /// すると、`conflicted` と進行中操作が別々の時点の値になる。鮮度は
+    /// `WorktreeState::snapshot_epoch` の 1 本で判る（01）。
+    pub progress: Option<InProgressOp>,
 }
 
-/// ワーキングツリーのどの区画か。[`WorktreeSnapshot`] のフィールドと 1 対 1。
+/// ワーキングツリーのどの区画か。[`WorktreeSnapshot`] の区画のフィールドと 1 対 1。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WorktreeSection {
     Staged,
@@ -449,6 +454,7 @@ impl WorktreeSnapshot {
             unstaged,
             untracked,
             conflicted,
+            progress: _,
         } = self;
         for section in [staged, unstaged, untracked, conflicted] {
             section.sort_by(|a, b| a.path.cmp(&b.path));

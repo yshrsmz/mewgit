@@ -19,11 +19,10 @@ use crate::app::{AppState, Cmd, ExecDone, JobKind, NoticeLevel, Region};
 
 /// `git` の実行が終わった。
 ///
-/// 進行中操作は `Runner` が実行直後に再検出したものをそのまま使う（03）。ここから
-/// 検出を頼み直さない。
+/// 進行中操作は、ここで出す `LoadStatus` の返り（`WorktreeSnapshot.progress`）で
+/// 入れ替わる（03 の「進行中操作との整合」）。
 pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     state.jobs.finish(JobKind::Exec);
-    state.progress = done.progress;
 
     if let Err(err) = &done.result {
         // **要約行は案内文、証拠は `detail`。** ステータスバーは `message` の 1 行目

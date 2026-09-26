@@ -97,9 +97,12 @@ Rust の toolchain は `rust-toolchain.toml` が SoT。rustup がこれを読ん
   付いて `ratatui::crossterm::event::EventStream` が消え、もう片方は lock に crossterm が
   2 版並んだ）。手順は `gh pr checkout` → `git merge origin/main` →
   `cargo build --workspace --locked`
-- **Renovate のブランチは古い main から切られている。** テスト数が減っていたらそれを
-  疑う。評価の前に `git merge origin/main`（rebase / force-push はしない。Renovate の
-  元コミットを改変しないため）。`Cargo.lock` が衝突したら**main の lock を取り直して
+- **Renovate のブランチが古い main の上にあることがある。** Renovate は main が進むと
+  自分でリベースするので**いつもではない** —— 古いのは、そのリベースより先にこちらが
+  触ったとき。テスト数が減っていたらそれを疑う。**評価の前に確かめ**
+  （`git merge-base --is-ancestor origin/main HEAD` が失敗したら古い）、古いときだけ
+  `git merge origin/main`（rebase / force-push はしない。Renovate の元コミットを
+  改変しないため）。`Cargo.lock` が衝突したら**main の lock を取り直して
   引き直す** —— `git checkout origin/main -- Cargo.lock && cargo update --offline
   --workspace`。`Cargo.toml` 側に新しい版が書いてあるので正しく入り直る。競合マーカーを
   手で消さない

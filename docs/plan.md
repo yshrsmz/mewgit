@@ -326,7 +326,7 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 - [x] 進行中操作があるときの書き込み `GitOp` 拒否。**continue / abort より先に入れる**
       （2026-09-27 に順序を入れ替えた）。**断るのは HEAD か作業ツリー全体を動かすもの
       だけ**（03 の「進行中に通す書き込み」）
-- [ ] rebase の continue / skip / abort。**`m` で開くメニュー**（lazygit と同じ）に
+- [x] rebase の continue / skip / abort。**`m` で開くメニュー**（lazygit と同じ）に
       進行中操作の種類で絞った項目を出し、abort は `Modal::Confirm` を通す。**merge の
       abort（`GitOp::MergeAbort`）もここで足す** —— 書き込みの拒否が switch / pull を断るので、
       無いと merge の途中から mewgit で抜ける手が commit しか無い。am は端末の
@@ -335,9 +335,13 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       rebase 中の対象ブランチの改名（`r`）は git が `is being rebased` で断り、打った名前が
       消える。`InProgressOp::Rebase` に元のブランチ（`rebase-merge/head-name` /
       `rebase-apply/head-name`。どちらも `refs/heads/<name>` の 1 行、git 2.55.0 で確認）を
-      持たせ、`refusal` がそのブランチの `BranchRename` / `BranchDelete` を断る
-- [ ] cherry-pick（単一 / 複数）と continue / abort
-- [ ] revert（mainline 選択）と continue / abort
+      持たせ、`refusal` がそのブランチの `BranchRename` / `BranchDelete` を断る。
+      **メニューには cherry-pick / revert の continue / abort も入れた**（2026-09-27 に
+      ユーザーと決めた）—— 端末で始めた cherry-pick の途中で、断りの通知が「continue か
+      abort で」と言うのに mewgit に出口が無かった。**`m` はフッターに出さず、断りの通知が
+      案内する**（01 の「進行中操作のメニュー（`m`）」）
+- [ ] cherry-pick（単一 / 複数）の開始。continue / abort は上の `m` メニューに入っている
+- [ ] revert（mainline 選択）の開始。continue / abort は上の `m` メニューに入っている
 - [ ] `ui::panes::stash` — 一覧 / diff / push / apply / pop / drop、部分 stash
 
 ## M6: 仕上げ
@@ -368,6 +372,8 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       - **`Tab` / `Shift+Tab` / `Ctrl-C` は表に入れなかった。** 2 行目に描かないものを
         入れると誰も読まない行になるので、下の `Modal::Help` の行へ送った
 - [ ] `Modal::Help` — 上の表の全部を出す。**`?:help` をフッターに出すのもここ**。
+      **`m`（進行中操作のメニュー）も表に足す** —— フッターには出さないと決めた（M5）ので、
+      一覧で見られるのはここだけになる。
       **`app::keys` の表に `Tab` / `Shift+Tab` / `Ctrl-C` を足すのもここ** —— いまの表は
       フッターの 2 行目に描くぶん（ペインのキー・共通キー・`q`）しか持っていない。
       `Ctrl-C` は「`Exec` が走っていれば中断、そうでなければ終了」の 2 つを兼ねるので、

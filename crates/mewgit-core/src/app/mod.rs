@@ -24,4 +24,4 @@ pub use state::{
     PrLoad, PrState, PushRejection, Region, Repick, RepoInfo, RightTab, TargetState, TermSize,
     TextBuffer, WorktreeState,
 };
-pub use update::{init, update};
+pub use update::{init, progress_menu, update, MenuItem, ProgressMenu};

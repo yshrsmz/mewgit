@@ -9,8 +9,8 @@ use crate::auth::url::RemoteUrl;
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
 use crate::git_exec::{GitOp, RebasePlan};
 use crate::git_read::{
-    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, Oid, RefIndex, Remote,
-    StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
+    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, InProgressOp, Oid,
+    RefIndex, Remote, StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 use crate::graph::{GraphRow, LaneState};
@@ -2327,6 +2327,17 @@ pub enum Modal {
         /// [`AppState::notice_log_row`]。
         selected: u64,
     },
+    /// 進行中操作から出る手（continue / skip / abort）を選ぶ（01 の「進行中操作の
+    /// メニュー（`m`）」）。`m` で開く。
+    ///
+    /// **項目は持たない。** 開いた時点の `progress` から
+    /// [`progress_menu`](super::progress_menu) が導く（描く側も同じものを読む）。
+    /// `progress` を写しで持つのは、開いているあいだに status が届いて進行中操作が
+    /// 入れ替わっても、**カーソルの下の項目が動かない**ようにするため。
+    ProgressMenu {
+        progress: InProgressOp,
+        cursor: usize,
+    },
     Help,
 }
 
@@ -2362,6 +2373,10 @@ impl AppState {
             // 動かない（`NoAccess` の内訳は本文に出る。07）。
             Some(Modal::AccountPicker { view, cursor }) => {
                 *cursor = stepped_index(*cursor, view.candidates().len(), delta);
+            }
+            Some(Modal::ProgressMenu { progress, cursor }) => {
+                let len = super::progress_menu(progress).map_or(0, |menu| menu.items.len());
+                *cursor = stepped_index(*cursor, len, delta);
             }
             // **通知が無ければ動かない**（`notice_log_row` が `None`）。
             Some(Modal::NoticeLog { selected }) => {

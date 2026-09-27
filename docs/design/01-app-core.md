@@ -18,7 +18,7 @@ ratatui / crossterm には依存しない（不変ルール 6）。`ui` は下�
 | 「`RepoInfo.target` を埋める」「アカウントの選び直し」（+ 04） | `update/account.rs` |
 | 「Pane と Modal」とその `###`（コミットメッセージの編集 / 1 行入力） | `update/modal.rs`（骨格）と、確定して何をするかは各モジュール |
 | 「ログの読み直し」の**適用側**、「失敗の案内文」 | `update/exec.rs` |
-| 「進行中操作があるときの書き込み」 | `update/progress.rs`（落とす場所は `state.rs` の `AppState::issue`） |
+| 「進行中操作があるときの書き込み」とその `###`（メニュー） | `update/progress.rs`（落とす場所は `state.rs` の `AppState::issue`） |
 | 「キー入力」「起動時の読み込み」「update の原則」 | `update/mod.rs` |
 
 **「ログの読み直し」だけ 2 つに割れている。** 頼む側（どこまで積んだか、追いつき）は
@@ -2074,6 +2074,7 @@ pub struct PushRejection {
 | `NonFastForward` + `Push { set_upstream: true }` | Branches で改名する |
 | `NonFastForward` + `Push { .. }` | `p` で取り込むか `P` をもう一度 |
 | `NonFastForward` + `Pull` | 履歴が分かれている（merge / rebase は M5） |
+| `Conflict` + rebase / cherry-pick / revert（開始・continue・skip） | 解消して `git add` したら `m` で continue する（**`Warn`**） |
 | それ以外 | 無し（`Display` に落とす） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
@@ -2113,6 +2114,15 @@ pub struct PushRejection {
   `あ×35` / `あ×36`**（バッジの隣は `あ×24` / `あ×25`）で、**リテラルのまま置いてある**
   —— 予算が変わったときに赤くして数え直させるため。算出に変えない。**予算の経緯** —— 72（同じ行の右端に `q:quit` が居た）→ 80（ヒントを 2 行目へ
   移した）→ 71（時刻を前に添えた。2026-09-26）
+- **`Conflict` は `Warn` で出す。** continue / skip のあとに次のコミットでまた止まった
+  形で（03 の「continue / skip / abort の終わり方」）、進行中操作は残ってバッジの数が
+  進む。**想定どおりの停止を赤で出すと、壊れたように読める。** 案内は「`git add` したら」
+  —— **Conflicted の行は mewgit では stage できない**（上の「ワーキングツリー」）ので、
+  解消の印は端末で付ける。**op で絞る**のは、merge のコンフリクト（M5 で merge を始める
+  経路が入ったとき）を結ぶのは continue ではなく commit だから。**この文と、進行中操作の
+  断り（下の「進行中操作があるときの書き込み」）は必ずバッジと並ぶ**ので、71 セルに
+  収めても末尾が `…` に切れる（pty で `REBASE 2/2` の隣を撮って判った）。**言うべきことを
+  前に置き、要る所で文を終える**（「…したら m から continue」で止める）
 - **argv は画面から退く。** これまでステータスバーに出ていた `git <argv>` は
   `detail` の 1 行目に移り、`L` の履歴（上の「通知」）で読む。**1 行目を 2 つで分けない**
   —— 案内文は端末の幅いっぱいまで使う前提で書いてある（上）ので、argv を前に置くと
@@ -2169,12 +2179,45 @@ git が自分で断る —— 03 の表で断らないのは stash だけで、s
 - **`Modal::Input` を開く入口**（`update::branches::input`）は、確定で出す `GitOp`
   （`InputIntent::op` に空の名前）を開く前に問う。**名前を打ち終えてから断られない**。
   確定と同じ `GitOp` から判じるので、開き手ごとに「断るか」を数えない（`r` の改名は
-  通る操作なので開く。**rebase 中の対象ブランチの改名は git が断る**ので、そのときは
-  打った名前が消える —— どのブランチを rebase しているかを snapshot が持っていない。
-  03 の表。塞ぐのは M5 の continue のタスク）
+  通る操作なので開く。**ただし rebase 中の対象ブランチの改名は開く前に断る** ——
+  git が `is being rebased` で断るので、開くと打った名前が消える。どのブランチかは
+  `InProgressOp::Rebase.branch`（02）。削除（`d` / `D`）も同じ判定で断る。03 の表）
 
 **通知の文言は進行中操作の種類で決まる**（71 セルの予算。上の「失敗の案内文」）。何の途中かと、
-出口を言う —— rebase / cherry-pick / revert は continue か abort、merge は commit、am は端末。
+出口を言う —— rebase / cherry-pick / revert は「`m` から continue か abort」、merge は
+「commit で結ぶか `m` から abort」、am は端末。**`m` を案内するのはここだけ**（下の
+「進行中操作のメニュー（`m`）」）。
+
+### 進行中操作のメニュー（`m`）
+
+**`m` で開く `Modal::ProgressMenu` に、進行中の操作で打てる手を並べる**（lazygit と同じ
+キー）。**専用の「rebase モード」は持たない** —— 止まっていることはバッジが出し、断る
+書き込みは上の `refusal` が断るので、モードで分けるものが残っていない。
+
+| 進行中操作 | 項目 |
+|---|---|
+| `Rebase` | continue / skip / abort |
+| `CherryPick` / `Revert` | continue / abort |
+| `Merge` | abort（結ぶのは `c` の commit。03 の表） |
+| `Am` | **開かない**。端末で `git am --continue` / `--abort` を案内する |
+| 無い | **開かない**。通知を出して `Cmd::LoadStatus` を返す |
+
+- **共通キー**（どのペインでも効く。`L` と同じ段）。押す場面はコンフリクトの解消の途中で、
+  どのペインに居るかは決まっていない
+- **項目は `(label, GitOp)` の列。** 何を出すかは `update::progress::menu` の網羅 `match`
+  1 本で決め、確定は `GitOp` をそのまま出す。**abort は `Modal::Confirm` を挟む**
+  （不変ルール 5）。**skip は挟まない** —— 止まったコミットを捨てるが、`CLAUDE.md` の
+  確認対象（force push、`branch -D`、discard、abort 系）に入っておらず、lazygit も挟まない。
+  確認するかは項目に持たせず `GitOp` から導く（`is_abort`。持たせると同じ判断が 2 つになる）
+- **確定は `submit_exec`**（1 行入力と同じ）。git が走っていれば閉じずに断る
+- **開くときの snapshot の鮮度は問わない。** 古い snapshot の `Rebase` で開いて、実は
+  終わっていれば git が `No rebase in progress?` で断り、`exec_finished` の `LoadStatus` が
+  バッジを直す。**無いときに `LoadStatus` を返すのは、mewgit が進行中操作を始められない
+  から** —— 端末で rebase を始めた直後に `m` を押すのがいちばんよく踏む形で、snapshot は
+  まだ「無い」。1 回目は通知で終わるが、2 回目は開く（上の「3 つ目の向き」と同じ逃げ方）
+- **フッターの 2 行目には出さない**（2026-09-27 にユーザーと決めた）。`m` が要るのは進行中の
+  あいだだけで、そのときは断りの通知かバッジが必ず目に入る。80 桁の Graph では共通キーの
+  `L` がもう落ちていて、足しても出ない。**`Modal::Help` には載せる**（`docs/plan.md` の Help の行）
 
 ## 実行中ジョブ
 
@@ -2416,6 +2459,8 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
   —— 案内に出すものの一覧なので、出さないものを入れると「表 → 実際に押せる」の
   見張りが通るだけで案内は変わらない。**逆向き（`match` の腕が全部表にあるか）は
   `match` から導けない**ので、そこは見張れない
+- **`m`（進行中操作のメニュー）も入っていない。** 進行中のあいだしか要らず、案内は
+  断りの通知が持つ（上の「進行中操作のメニュー（`m`）」）。`Modal::Help` のタスクで足す
 - **`Tab` / `Shift+Tab` / `Ctrl-C` は入っていない。** いま表を読むのは 2 行目だけで、
   そこに描かないものを入れると誰も読まない行になる（`.claude/rules/rust-coding.md` の「読まれない状態」）。
   足すのは `Modal::Help` のタスク

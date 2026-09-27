@@ -572,7 +572,7 @@ fn status_line(state: &AppState, width: u16) -> Paragraph<'_> {
 fn progress_label(op: &InProgressOp) -> String {
     let step = |step: &Option<Step>| step.map(|step| format!("{}/{}", step.current, step.total));
     let (name, detail) = match op {
-        InProgressOp::Rebase { step: s } => ("REBASE", step(s)),
+        InProgressOp::Rebase { step: s, .. } => ("REBASE", step(s)),
         InProgressOp::Am { step: s } => ("AM", step(s)),
         InProgressOp::CherryPick { oid } => ("CHERRY-PICK", oid.as_ref().map(short_oid)),
         InProgressOp::Revert { oid } => ("REVERT", oid.as_ref().map(short_oid)),
@@ -1646,6 +1646,7 @@ mod tests {
                 current: 3,
                 total: 7,
             }),
+            branch: Some("topic".to_string()),
         });
         state.push_notice(NoticeLevel::Error, "push に失敗しました".to_string(), None);
         let bar = notice_bar(&state, TermSize::default());
@@ -1689,8 +1690,17 @@ mod tests {
             total: 2,
         });
         for (op, label) in [
-            (InProgressOp::Rebase { step }, "REBASE 1/2".to_string()),
-            (InProgressOp::Rebase { step: None }, "REBASE".to_string()),
+            (
+                InProgressOp::Rebase { step, branch: None },
+                "REBASE 1/2".to_string(),
+            ),
+            (
+                InProgressOp::Rebase {
+                    step: None,
+                    branch: None,
+                },
+                "REBASE".to_string(),
+            ),
             (InProgressOp::Am { step }, "AM 1/2".to_string()),
             (
                 InProgressOp::CherryPick { oid: Some(oid) },

@@ -30,15 +30,20 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         // しか描かない（07）ので、そこを argv で埋めると案内が画面に出ない
         // （01 の「失敗の案内文」）。
         let detail = exec_detail(err);
-        let message = exec_advice(&done.op, err)
-            .map(str::to_string)
-            .unwrap_or_else(|| err.to_string());
+        let advice = exec_advice(&done.op, err);
         // **中断は失敗ではない。** 押した本人が止めたものを `Error` で出すと、
-        // 頼んでいないことが壊れたように読める。
+        // 頼んでいないことが壊れたように読める。**コンフリクトで止まったのも同じ** ——
+        // continue のあとに次のコミットでまた止まるのは想定どおりの結末で、進行中操作は
+        // 残ってバッジの数が進む（01 の「失敗の案内文」）。
         let level = match err {
             ExecError::Canceled { .. } => NoticeLevel::Info,
+            ExecError::Failed {
+                kind: ExecErrorKind::Conflict,
+                ..
+            } if advice.is_some() => NoticeLevel::Warn,
             ExecError::NoResult { .. } | ExecError::Failed { .. } => NoticeLevel::Error,
         };
+        let message = advice.map_or_else(|| err.to_string(), str::to_string);
         state.push_notice(level, message, Some(detail));
     }
 
@@ -146,6 +151,10 @@ impl Reload {
             | GitOp::Discard(_)
             | GitOp::DiscardUntracked(_)
             | GitOp::DiscardAdded(_) => Reload::Nothing,
+
+            // **ブランチに居たまま index とワークツリーを戻すだけ**で、HEAD の ref は
+            // 動かない（`MERGE_HEAD` はグラフが walk に押す ref ではない）。
+            GitOp::MergeAbort => Reload::Nothing,
 
             // **ラベルと HEAD は動くが、行は動かない。** グラフのラベルは行に焼き込まず
             // `GraphState.refs` から引く（07）ので、`Cmd::LoadRepoInfo` だけで足りる。
@@ -289,9 +298,29 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
             Some("HTTPS 認証に失敗しました。gh auth setup-git を実行してください")
         }
         ExecErrorKind::NonFastForward => non_fast_forward_advice(op),
-        // `Conflict` の案内は進行中モードへの遷移ごと M5（03）。それまでは stderr を
-        // 出すほうが情報が多い。
-        ExecErrorKind::Conflict | ExecErrorKind::Other => None,
+        ExecErrorKind::Conflict => conflict_advice(op),
+        ExecErrorKind::Other => None,
+    }
+}
+
+/// コンフリクトで止まったときの案内。**続きが continue の操作だけ**に出す。
+///
+/// merge のコンフリクト（M5 で merge を始める経路が入ったとき）を結ぶのは continue では
+/// なく commit なので、同じ文を出すと嘘になる（01 の「失敗の案内文」）。
+/// **「`git add` したら」** —— Conflicted の行は mewgit では stage できない（01 の
+/// 「ワーキングツリー」）ので、解消の印は端末で付ける。
+fn conflict_advice(op: &GitOp) -> Option<&'static str> {
+    match op {
+        GitOp::RebaseInteractive { .. }
+        | GitOp::RebaseContinue
+        | GitOp::RebaseSkip
+        | GitOp::CherryPick(_)
+        | GitOp::CherryPickContinue
+        | GitOp::Revert { .. }
+        | GitOp::RevertContinue => {
+            Some("コンフリクトで停止。解消して git add したら m から continue")
+        }
+        _ => None,
     }
 }
 
@@ -471,6 +500,72 @@ mod tests {
                 notice.message
             );
         }
+    }
+
+    #[test]
+    fn stopping_at_the_next_conflict_is_a_warning_with_the_way_on() {
+        // continue / skip のあとに次のコミットでまた止まるのは想定どおりの結末で、
+        // 進行中操作は残る（03 の「continue / skip / abort の終わり方」）。赤で出すと
+        // 壊れたように読める。
+        for op in [
+            GitOp::RebaseContinue,
+            GitOp::RebaseSkip,
+            GitOp::CherryPickContinue,
+            GitOp::RevertContinue,
+        ] {
+            let mut state = state();
+            finish_exec(
+                &mut state,
+                op.clone(),
+                Err(failed_with(ExecErrorKind::Conflict)),
+            );
+
+            let notice = state.notices.back().expect("通知がありません");
+            assert_eq!(notice.level, NoticeLevel::Warn, "{op:?}");
+            assert!(
+                notice.message.contains("m から continue"),
+                "{op:?}: {}",
+                notice.message
+            );
+            assert!(cells(&notice.message) <= NOTICE_CELLS, "{}", notice.message);
+        }
+    }
+
+    #[test]
+    fn an_unresolved_continue_stays_red_with_what_git_said() {
+        // 解消せずに continue した形は `Other`（stdout の `needs merge`）。git の文言が
+        // そのまま理由なので、案内に差し替えない。
+        let mut state = state();
+        finish_exec(
+            &mut state,
+            GitOp::RebaseContinue,
+            Err(failed_with(ExecErrorKind::Other)),
+        );
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        assert!(
+            !notice.message.contains("m から continue"),
+            "{}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn a_conflict_that_continue_does_not_conclude_is_not_told_to_continue() {
+        // merge のコンフリクトを結ぶのは commit で、continue ではない（01）。
+        let mut state = state();
+        finish_exec(
+            &mut state,
+            GitOp::Pull {
+                mode: PullMode::Merge,
+            },
+            Err(failed_with(ExecErrorKind::Conflict)),
+        );
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        assert!(!notice.message.contains("continue"), "{}", notice.message);
     }
 
     #[test]

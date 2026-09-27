@@ -218,6 +218,7 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
         }
         GitOp::RevertContinue => argv.extend(["revert".into(), "--continue".into()]),
         GitOp::RevertAbort => argv.extend(["revert".into(), "--abort".into()]),
+        GitOp::MergeAbort => argv.extend(["merge".into(), "--abort".into()]),
         GitOp::StashPush {
             message,
             include_untracked,
@@ -451,6 +452,7 @@ impl GitOp {
                 "cherry-pick"
             }
             GitOp::Revert { .. } | GitOp::RevertContinue | GitOp::RevertAbort => "revert",
+            GitOp::MergeAbort => "merge",
             GitOp::StashPush { .. }
             | GitOp::StashApply(_)
             | GitOp::StashPop(_)
@@ -506,6 +508,7 @@ mod tests {
             GitOp::Revert { .. } => "Revert",
             GitOp::RevertContinue => "RevertContinue",
             GitOp::RevertAbort => "RevertAbort",
+            GitOp::MergeAbort => "MergeAbort",
             GitOp::StashPush { .. } => "StashPush",
             GitOp::StashApply(_) => "StashApply",
             GitOp::StashPop(_) => "StashPop",
@@ -519,7 +522,7 @@ mod tests {
     /// [`variant`] のアームの数。`GitOp` に変種を足すと `variant` の網羅 `match` が
     /// コンパイルエラーになり、ここに来る。アームと一緒にこの数と [`cases`] も足す
     /// （足し忘れは `covers_every_variant` が落とす）。
-    const VARIANT_COUNT: usize = 33;
+    const VARIANT_COUNT: usize = 34;
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
     fn cases() -> Vec<(GitOp, Vec<&'static str>)> {
@@ -731,6 +734,7 @@ mod tests {
             ),
             (GitOp::RevertContinue, vec!["revert", "--continue"]),
             (GitOp::RevertAbort, vec!["revert", "--abort"]),
+            (GitOp::MergeAbort, vec!["merge", "--abort"]),
             (
                 GitOp::StashPush {
                     message: Some("wip".into()),

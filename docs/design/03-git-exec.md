@@ -21,6 +21,7 @@ pub enum GitOp {
     RebaseContinue, RebaseSkip, RebaseAbort,
     CherryPick(Vec<Oid>), CherryPickContinue, CherryPickAbort,
     Revert { oids: Vec<Oid>, mainline: Option<u32> }, RevertContinue, RevertAbort,
+    MergeAbort,
     StashPush { message, include_untracked, paths: Option<Vec<PathBuf>> },
     StashApply(usize), StashPop(usize), StashDrop(usize),
     SetAccount { login }, UnsetAccount,
@@ -98,6 +99,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `CherryPickContinue` / `Abort` | `cherry-pick --continue` / `--abort` |
 | `Revert { oids, mainline }` | `revert [--mainline <n>] <oids>` |
 | `RevertContinue` / `Abort` | `revert --continue` / `--abort` |
+| `MergeAbort` | `merge --abort` |
 | `StashPush { .. }` | `stash push [--include-untracked] [--message <m>] [-- <paths>]` |
 | `StashApply(i)` / `Pop` / `Drop` | `stash apply` / `pop` / `drop` `stash@{i}` |
 | `SetAccount { login }` | `config --local -- mewgit.user <login>` |
@@ -490,7 +492,7 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 3. `GIT_SEQUENCE_EDITOR="cp T"` 相当のスクリプトを渡して `git rebase -i <onto>` を実行
    - 実際には `sh -c 'cat "$1" > "$2"'` 形式のヘルパーではなく、自バイナリを `--sequence-editor <T>` サブコマンド付きで指定する（外部依存ゼロ）
 4. `reword` は `GIT_EDITOR` にも自バイナリを指定し、あらかじめ集めたメッセージを書き込む
-5. 停止したら、書き込みのあとの `LoadStatus` が運ぶ進行中操作（`WorktreeSnapshot.progress`）で `Rebase` モードに入り、continue / skip / abort を提供
+5. 停止したら、書き込みのあとの `LoadStatus` が運ぶ進行中操作（`WorktreeSnapshot.progress`）がバッジに出て、`m` のメニューから continue / skip / abort を打つ（01 の「進行中操作のメニュー（`m`）」。専用のモードは持たない）
 
 自バイナリをエディタとして使う場合、`mewgit --sequence-editor <path>` / `mewgit --commit-editor <path>` の隠しサブコマンドを用意する。
 
@@ -545,11 +547,38 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
   なく守り
 - **通すのは解消に要るもの**（stage / unstage / ハンク / discard、`Commit`。amend も ——
   cherry-pick / merge の途中の amend は git が断る）**と、実測で無害なもの**（fetch、push、
-  ブランチの改名・削除）。**変種ごとの振り分けは `app::update::progress::refusal` の
+  ブランチの改名・削除 —— **ただし rebase 中の対象ブランチは断る**。git も断るが、`r` は
+  打った名前が消えるので入力を開く前に断りたい。対象ブランチは `rebase-*/head-name` から
+  読む（02 の「進行中操作の検出」））。**変種ごとの振り分けは `app::update::progress::refusal` の
   網羅 `match` が正**で、ここには写さない
 - **continue / skip / abort は、進行中の操作と種類が合うときだけ通す**（cherry-pick の途中の
-  `RebaseContinue` は断る）。**am には通すものが無い** —— mewgit から am は始めず、
+  `RebaseContinue` は断る）。**merge は `MergeAbort` だけ** —— merge の continue に当たる
+  `GitOp` は無く、結ぶのは `Commit`。switch / pull を断るので、`MergeAbort` が無いと
+  merge の途中から mewgit で抜ける手が commit しか無い。`rebase -r` の merge で止まった形は
+  rebase として検出する（02）ので、`MergeAbort` は断り、rebase の abort を案内する。**am には通すものが無い** —— mewgit から am は始めず、
   `GitOp` にも無い。端末で `git am --continue` / `--abort` を打つよう案内する
 - **UI 側でキーを無効化しない**（フッターのキーヒントも消さない）。押せば断りの理由が
   通知に出るので、消えたキーを探させるより読める。ヒントを状態で出し分けると、
   `app::keys` の表が 1 本でなくなる（07 の「ステータスバー」）
+
+### continue / skip / abort の終わり方
+
+**結果は 3 通り**（`.claude/rules/rust-coding.md` の「二値だった結果に 3 つ目を足したら」）。
+`Runner` と同じ `GIT_EDITOR=true LC_ALL=C` で、一時リポジトリを作り直して叩いた
+（git 2.55.0、2026-09-27）。**`GIT_EDITOR=true` なので、continue がコミットメッセージの
+エディタで止まることは無い**（解消したコミットは元のメッセージのまま積まれる）。
+
+| 操作 | exit | stdout / stderr | 分類 |
+|---|---|---|---|
+| 解消して `rebase --continue` → 最後まで | 0 | stderr `Successfully rebased and updated refs/heads/<b>.` | 成功 |
+| `edit` で止まったあと `rebase --continue` | 0 | 同上 | 成功 |
+| 解消して `rebase --continue` / `rebase --skip` → **次のコミットでまたコンフリクト** | 1 | stdout `CONFLICT (content)`、stderr `could not apply` | `Conflict` |
+| 解消して `cherry-pick --continue` → 次の pick でコンフリクト | 1 | 同上 | `Conflict` |
+| 解消せずに `rebase --continue` | 1 | stdout `a: needs merge` / `You must edit all merge conflicts` | `Other` |
+| 解消せずに `cherry-pick --continue` | 128 | stderr `Committing is not possible because you have unmerged files.` | `Other` |
+| `rebase --abort` / `merge --abort` | 0 | 何も出さない | 成功 |
+
+**`Conflict` は失敗ではなく「次で止まった」** —— 進行中操作は残り、バッジの数が進む。
+そこで赤を出すと壊れたように読めるので、`app` は `Warn` で次の手を案内する（01 の
+「失敗の案内文」）。**解消していない `Other` は赤のまま** —— git の文言（`needs merge`）が
+そのまま理由になる。

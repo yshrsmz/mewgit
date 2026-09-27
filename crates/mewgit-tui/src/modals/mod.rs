@@ -9,6 +9,7 @@ pub mod input;
 pub mod notice_log;
 pub mod picker;
 pub mod pr_create;
+pub mod progress_menu;
 pub mod remote_picker;
 
 use mewgit_core::app::{AppState, Modal, TextBuffer};
@@ -63,6 +64,7 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
             },
         ),
         Modal::NoticeLog { selected } => notice_log::render(frame, area, state, *selected),
+        Modal::ProgressMenu { menu, cursor } => progress_menu::render(frame, area, menu, *cursor),
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
         Modal::RebaseEditor { .. } | Modal::Help => {}
     }

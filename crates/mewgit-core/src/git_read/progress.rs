@@ -24,6 +24,7 @@ pub fn in_progress(git_dir: &Path) -> Option<InProgressOp> {
     if merge.is_dir() {
         return Some(InProgressOp::Rebase {
             step: step(&merge, "msgnum", "end"),
+            branch: head_name(&merge),
         });
     }
     let apply = git_dir.join("rebase-apply");
@@ -34,7 +35,10 @@ pub fn in_progress(git_dir: &Path) -> Option<InProgressOp> {
         return Some(if apply.join("applying").exists() {
             InProgressOp::Am { step }
         } else {
-            InProgressOp::Rebase { step }
+            InProgressOp::Rebase {
+                step,
+                branch: head_name(&apply),
+            }
         });
     }
     if let Some(oid) = head_file(git_dir, "MERGE_HEAD") {
@@ -70,6 +74,16 @@ fn step(dir: &Path, current: &str, total: &str) -> Option<Step> {
     })
 }
 
+/// `dir/head-name` のブランチ名。**detached HEAD で始めた rebase では
+/// `detached HEAD` の 1 行**なので、`refs/heads/` で始まらなければ `None`
+/// （merge / apply の両 backend で同じ形。02 の実測）。
+fn head_name(dir: &Path) -> Option<String> {
+    let body = fs::read_to_string(dir.join("head-name")).ok()?;
+    body.trim_end()
+        .strip_prefix("refs/heads/")
+        .map(str::to_string)
+}
+
 /// `MERGE_HEAD` などの先頭行の Oid。octopus の `MERGE_HEAD` は複数行になるが、
 /// 先頭だけを採る。
 fn head_file(git_dir: &Path, name: &str) -> Option<Oid> {
@@ -102,7 +116,26 @@ mod tests {
 
         assert_eq!(
             in_progress(dir.path()),
-            Some(InProgressOp::Rebase { step: None })
+            Some(InProgressOp::Rebase {
+                step: None,
+                branch: None
+            })
+        );
+    }
+
+    #[test]
+    fn a_rebase_started_on_a_detached_head_has_no_branch() {
+        // 実物の git が書く字そのまま（git 2.55.0）。
+        let dir = git_dir();
+        fs::create_dir(dir.path().join("rebase-merge")).unwrap();
+        fs::write(dir.path().join("rebase-merge/head-name"), "detached HEAD\n").unwrap();
+
+        assert_eq!(
+            in_progress(dir.path()),
+            Some(InProgressOp::Rebase {
+                step: None,
+                branch: None
+            })
         );
     }
 

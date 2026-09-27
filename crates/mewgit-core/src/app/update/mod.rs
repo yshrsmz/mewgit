@@ -28,6 +28,8 @@ use graph::{
     commit_detail_key, commit_detail_loaded, commit_files_loaded, graph_key, load_more, log_loaded,
 };
 use modal::{modal_key, open_notice_log};
+use progress::open_progress_menu;
+pub use progress::{progress_menu, MenuItem, ProgressMenu};
 use prs::{
     open_pr_finished, pr_created, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key,
     rate_limit_seen,
@@ -252,6 +254,11 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
     if key == Key::char('L') {
         return open_notice_log(state);
     }
+    // **進行中操作のメニューも共通キー。** 押すのはコンフリクトの解消の途中で、どの
+    // ペインに居るかは決まっていない（01 の「進行中操作のメニュー（`m`）」）。
+    if key == Key::char('m') {
+        return open_progress_menu(state);
+    }
 
     // フォーカスの巡回もペインより先に見る。ペインごとに書くと、あとから足した
     // ペインが `Tab` を受けずに閉じ込められる。`Shift+Tab` は `BackTab`（修飾なし）に
@@ -314,6 +321,7 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
             | Modal::RemotePicker { .. }
             | Modal::AccountPicker { .. }
             | Modal::NoticeLog { .. }
+            | Modal::ProgressMenu { .. }
             | Modal::RebaseEditor { .. }
             | Modal::Help,
         )

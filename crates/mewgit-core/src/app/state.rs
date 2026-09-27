@@ -17,7 +17,7 @@ use crate::graph::{GraphRow, LaneState};
 
 use crate::config::Config;
 
-use super::Cmd;
+use super::{Cmd, ProgressMenu};
 
 /// アプリ全体の状態。
 ///
@@ -2327,6 +2327,16 @@ pub enum Modal {
         /// [`AppState::notice_log_row`]。
         selected: u64,
     },
+    /// 進行中操作から出る手（continue / skip / abort）を選ぶ（01 の「進行中操作の
+    /// メニュー（`m`）」）。`m` で開く。
+    ///
+    /// **開いた時点で組んだメニューを持つ**（`RemotePicker` の `remotes` と同じ）。
+    /// 開いているあいだに status が届いて進行中操作が入れ替わっても、**カーソルの下の
+    /// 項目が動かない**。
+    ProgressMenu {
+        menu: ProgressMenu,
+        cursor: usize,
+    },
     Help,
 }
 
@@ -2362,6 +2372,9 @@ impl AppState {
             // 動かない（`NoAccess` の内訳は本文に出る。07）。
             Some(Modal::AccountPicker { view, cursor }) => {
                 *cursor = stepped_index(*cursor, view.candidates().len(), delta);
+            }
+            Some(Modal::ProgressMenu { menu, cursor }) => {
+                *cursor = stepped_index(*cursor, menu.items.len(), delta);
             }
             // **通知が無ければ動かない**（`notice_log_row` が `None`）。
             Some(Modal::NoticeLog { selected }) => {

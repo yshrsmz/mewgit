@@ -326,7 +326,7 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 - [x] 進行中操作があるときの書き込み `GitOp` 拒否。**continue / abort より先に入れる**
       （2026-09-27 に順序を入れ替えた）。**断るのは HEAD か作業ツリー全体を動かすもの
       だけ**（03 の「進行中に通す書き込み」）
-- [ ] rebase の continue / skip / abort。**`m` で開くメニュー**（lazygit と同じ）に
+- [x] rebase の continue / skip / abort。**`m` で開くメニュー**（lazygit と同じ）に
       進行中操作の種類で絞った項目を出し、abort は `Modal::Confirm` を通す。**merge の
       abort（`GitOp::MergeAbort`）もここで足す** —— 書き込みの拒否が switch / pull を断るので、
       無いと merge の途中から mewgit で抜ける手が commit しか無い。am は端末の
@@ -335,9 +335,13 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       rebase 中の対象ブランチの改名（`r`）は git が `is being rebased` で断り、打った名前が
       消える。`InProgressOp::Rebase` に元のブランチ（`rebase-merge/head-name` /
       `rebase-apply/head-name`。どちらも `refs/heads/<name>` の 1 行、git 2.55.0 で確認）を
-      持たせ、`refusal` がそのブランチの `BranchRename` / `BranchDelete` を断る
-- [ ] cherry-pick（単一 / 複数）と continue / abort
-- [ ] revert（mainline 選択）と continue / abort
+      持たせ、`refusal` がそのブランチの `BranchRename` / `BranchDelete` を断る。
+      **メニューには cherry-pick / revert の continue / abort も入れた**（2026-09-27 に
+      ユーザーと決めた）—— 端末で始めた cherry-pick の途中で、断りの通知が「continue か
+      abort で」と言うのに mewgit に出口が無かった。**`m` はフッターに出さず、断りの通知が
+      案内する**（01 の「進行中操作のメニュー（`m`）」）
+- [ ] cherry-pick（単一 / 複数）の開始。continue / abort は上の `m` メニューに入っている
+- [ ] revert（mainline 選択）の開始。continue / abort は上の `m` メニューに入っている
 - [ ] `ui::panes::stash` — 一覧 / diff / push / apply / pop / drop、部分 stash
 
 ## M6: 仕上げ
@@ -368,6 +372,8 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       - **`Tab` / `Shift+Tab` / `Ctrl-C` は表に入れなかった。** 2 行目に描かないものを
         入れると誰も読まない行になるので、下の `Modal::Help` の行へ送った
 - [ ] `Modal::Help` — 上の表の全部を出す。**`?:help` をフッターに出すのもここ**。
+      **`m`（進行中操作のメニュー）も表に足す** —— フッターには出さないと決めた（M5）ので、
+      一覧で見られるのはここだけになる。
       **`app::keys` の表に `Tab` / `Shift+Tab` / `Ctrl-C` を足すのもここ** —— いまの表は
       フッターの 2 行目に描くぶん（ペインのキー・共通キー・`q`）しか持っていない。
       `Ctrl-C` は「`Exec` が走っていれば中断、そうでなければ終了」の 2 つを兼ねるので、
@@ -539,7 +545,32 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       と `index` の mtime** なら 8 通りとも変わる（実測の表は 01 の「進行中操作が
       あるときの書き込み」）。**これで #120 が残した「外で終えた直後の 1 回目は断られる」
       が塞がる** —— 見張りは「外で `rebase --abort` / `merge --abort` したあと、キーを
-      押す前に監視の `LoadStatus` が届き、1 回目の `Enter` が通る」
+      押す前に監視の `LoadStatus` が届き、1 回目の `Enter` が通る」。
+      **gitdir と `index` だけではエディタでの保存を拾わない**（実測 2026-09-27、
+      git 2.55.0 —— コンフリクト中の `b` を保存しても、コンフリクトしていない `a` を
+      保存しても、`index` も gitdir も mtime が変わらない。`git add b` で両方変わる）。
+      コンフリクトの解消は `git add` が index を動かすので拾える（保存だけでは git 自身が
+      `UU` のままで、Conflicted のままが正しい表示）。**拾えないのは普通の編集で、
+      Unstaged に出てこない**。塞ぐにはワーキングツリーも監視する（`.gitignore` の下を
+      除く・大きなツリーでの負荷を測る）か、status を手で読み直すキーを足すかを
+      このタスクで決める。
+      **ハンク操作の守りもこれに乗っている。** diff のキャッシュと「最新の `view` か」の
+      判定（01 の「diff のキャッシュと鮮度」）は mewgit の書き込みで進む世代しか見ない
+      ので、**外で編集したあとも古いハンクを出したまま押させる**。実測（2026-09-27、
+      git 2.55.0、pty）—— `line2 → two-A` の差分を開いたまま外で `two-B` に書き換えて
+      `s` を押すと、**index に `two-A`（HEAD にもワーキングツリーにも無い内容）が入り**
+      `MM` になる。通知は出ない。`x` は `git apply --reverse` がコンテキスト不一致で断り、
+      ワーキングツリーは無傷（赤の通知が出る）。**見えていたものを stage したので
+      壊れてはいないが、見えていたものが古いことを知る手段が無い**。ワーキングツリーの
+      監視を採ればここも塞がる（世代が進む）。手で読み直すキーを採るなら、ハンク操作の
+      直前にファイルが読んだ時点と同じかを確かめる守りを別に足す。
+      **決める前に調べること**（2026-09-27 にユーザーと「着手時に調べて決める」とした）——
+      (a) lazygit / gitui など他のクライアントがワーキングツリーの変化をどう拾っているか
+      （ファイル監視か、一定間隔の読み直しか、端末のフォーカス復帰か。設定の既定値と、
+      大きなリポジトリでの扱い）、(b) 端末のフォーカスイベント（crossterm の
+      `FocusGained`）を送らない端末があるか、(c) 監視に使うクレートが依存の規則
+      （`.claude/rules/dependencies.md`。build script・公開日）に収まるか。候補は
+      ワーキングツリーの監視 / 手で読み直すキー / フォーカス復帰で読み直す、の 3 つ
 - [ ] テストで status を届ける 3 行（`reply(state, Cmd::LoadStatus, Msg::StatusLoaded(..))`）を
       `test_support` のヘルパ 1 本に寄せ、`worktree_state` もそれを呼ぶ形にする。いまは
       diff / graph / exec / worktree / mod / progress の各テストにインラインで散っている

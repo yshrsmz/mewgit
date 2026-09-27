@@ -142,6 +142,9 @@ pub enum GitOp {
     },
     RevertContinue,
     RevertAbort,
+    /// merge を始める前に戻す（`merge --abort`）。**continue に当たる変種は無い** ——
+    /// merge を結ぶのは `Commit`（03 の「進行中に通す書き込み」）。
+    MergeAbort,
     StashPush {
         message: Option<String>,
         include_untracked: bool,

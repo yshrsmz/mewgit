@@ -1022,7 +1022,10 @@ fn a_stopped_rebase_reports_its_step() {
 
     assert_eq!(
         progress_of(repo.path()),
-        Some(InProgressOp::Rebase { step: step(1, 2) })
+        Some(InProgressOp::Rebase {
+            step: step(1, 2),
+            branch: Some("side".to_string()),
+        })
     );
 }
 
@@ -1034,7 +1037,10 @@ fn a_stopped_apply_backend_rebase_is_a_rebase() {
 
     assert_eq!(
         progress_of(repo.path()),
-        Some(InProgressOp::Rebase { step: step(1, 2) })
+        Some(InProgressOp::Rebase {
+            step: step(1, 2),
+            branch: Some("side".to_string()),
+        })
     );
 }
 

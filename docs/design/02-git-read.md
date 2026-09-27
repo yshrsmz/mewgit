@@ -510,7 +510,7 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
 pub fn in_progress(git_dir: &Path) -> Option<InProgressOp>;   // git2 を使わない自由関数
 
 pub enum InProgressOp {
-    Rebase { step: Option<Step> },   // Step { current, total }
+    Rebase { step: Option<Step>, branch: Option<String> },   // Step { current, total }
     Am { step: Option<Step> },
     CherryPick { oid: Option<Oid> },
     Revert { oid: Option<Oid> },
@@ -534,9 +534,9 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 
 | 判定 | InProgressOp | 進捗 |
 |---|---|---|
-| `rebase-merge/` 存在 | `Rebase` | `msgnum` / `end` |
+| `rebase-merge/` 存在 | `Rebase`（`branch` は `head-name`） | `msgnum` / `end` |
 | `rebase-apply/applying` 存在 | `Am` | `next` / `last` |
-| `rebase-apply/` 存在（`applying` 無し） | `Rebase` | `next` / `last` |
+| `rebase-apply/` 存在（`applying` 無し） | `Rebase`（`branch` は `head-name`） | `next` / `last` |
 | `MERGE_HEAD` | `Merge { oid }`（先頭行） | — |
 | `CHERRY_PICK_HEAD` | `CherryPick { oid: Some }` | — |
 | `REVERT_HEAD` | `Revert { oid: Some }` | — |
@@ -585,6 +585,12 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 - **止まった理由（`edit` / コンフリクト / exec の失敗）は持たない。** `done` の最終行は
   理由を表さない —— `edit` にした pick がコンフリクトすると、最終行は `edit` なのに
   止まったのはコンフリクトのため（実測）。07 のモックにあった `(edit)` はこの理由で出さない
+- **`Rebase` は元のブランチ（`branch`）を持つ。** rebase 中の対象ブランチは git が
+  改名（`is being rebased`）も削除（`used by worktree`）も断る（03 の表）ので、`app` が
+  入力を開く前に断るのに要る。`head-name` は merge / apply の両 backend で
+  `refs/heads/<name>` の 1 行、**detached HEAD で始めた rebase では `detached HEAD`** の
+  1 行（実測 2026-09-27、git 2.55.0）。`refs/heads/` で始まらなければ `None`
+  （対象のブランチが無い）。読めなくても `Rebase` であることは落とさない（`Step` と同じ）
 - `MERGE_HEAD` は octopus では複数行になる。`Merge` が持つのは先頭行だけ
 - ファイルが読めない・中身が壊れているときは、その行を「無い」と読んで次の判定へ進む。
   **戻り値が `Option` で `Result` でないのはこのため**（上の「API」）

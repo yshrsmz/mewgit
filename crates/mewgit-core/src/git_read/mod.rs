@@ -635,6 +635,12 @@ pub enum InProgressOp {
     /// `rebase-merge/` か、`applying` の無い `rebase-apply/`。
     Rebase {
         step: Option<Step>,
+        /// rebase しているブランチ（`head-name` の `refs/heads/` を外したもの）。
+        /// detached HEAD で始めた rebase と、読めないときは `None`。
+        ///
+        /// **このブランチは git が改名も削除も断る**（03 の表）ので、`app` が入力を
+        /// 開く前に断るのに使う（01 の「進行中操作があるときの書き込み」）。
+        branch: Option<String>,
     },
     /// `git am`（`rebase-apply/applying`）。**mewgit からは始めない**が、外で始めた am の
     /// 途中で開いたときに「無い」と読まないために持つ。

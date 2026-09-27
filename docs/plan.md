@@ -331,7 +331,11 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       abort（`GitOp::MergeAbort`）もここで足す** —— 書き込みの拒否が switch / pull を断るので、
       無いと merge の途中から mewgit で抜ける手が commit しか無い。am は端末の
       `git am --continue` / `--abort` を案内するだけ（2026-09-27 にユーザーと決めた。01 の
-      「進行中操作があるときの書き込み」）
+      「進行中操作があるときの書き込み」）。**#120 が残した穴もここで塞ぐ** ——
+      rebase 中の対象ブランチの改名（`r`）は git が `is being rebased` で断り、打った名前が
+      消える。`InProgressOp::Rebase` に元のブランチ（`rebase-merge/head-name` /
+      `rebase-apply/head-name`。どちらも `refs/heads/<name>` の 1 行、git 2.55.0 で確認）を
+      持たせ、`refusal` がそのブランチの `BranchRename` / `BranchDelete` を断る
 - [ ] cherry-pick（単一 / 複数）と continue / abort
 - [ ] revert（mainline 選択）と continue / abort
 - [ ] `ui::panes::stash` — 一覧 / diff / push / apply / pop / drop、部分 stash
@@ -528,6 +532,12 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の
       `ESC[<行>;<桁>H` を読んで回避している
-- [ ] `.git/HEAD` mtime 監視での外部変更検知。**進行中操作も `LoadStatus` を出せば
-      入れ替わる**（`Msg::ProgressDetected` は消した。01 の「update の原則」）
+- [ ] 外部変更検知。**進行中操作も `LoadStatus` を出せば入れ替わる**
+      （`Msg::ProgressDetected` は消した。01 の「update の原則」）。**見るのは
+      `.git/HEAD` だけでは足りない** —— cherry-pick / merge / revert を外で終えても
+      HEAD の mtime は変わらない。**ワークツリーごとの gitdir（`RepoReader::git_dir()`）
+      と `index` の mtime** なら 8 通りとも変わる（実測の表は 01 の「進行中操作が
+      あるときの書き込み」）。**これで #120 が残した「外で終えた直後の 1 回目は断られる」
+      が塞がる** —— 見張りは「外で `rebase --abort` / `merge --abort` したあと、キーを
+      押す前に監視の `LoadStatus` が届き、1 回目の `Enter` が通る」
 - [ ] README、リリースワークフロー（`cargo dist` or release-please）

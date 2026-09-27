@@ -540,4 +540,9 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       あるときの書き込み」）。**これで #120 が残した「外で終えた直後の 1 回目は断られる」
       が塞がる** —— 見張りは「外で `rebase --abort` / `merge --abort` したあと、キーを
       押す前に監視の `LoadStatus` が届き、1 回目の `Enter` が通る」
+- [ ] テストで status を届ける 3 行（`reply(state, Cmd::LoadStatus, Msg::StatusLoaded(..))`）を
+      `test_support` のヘルパ 1 本に寄せ、`worktree_state` もそれを呼ぶ形にする。いまは
+      diff / graph / exec / worktree / mod / progress の各テストにインラインで散っている
+      （#120 の `/simplify` が拾い、範囲外として見送った）。`WorktreeSnapshot` に
+      フィールドが増えたときに直す場所が 1 つになる
 - [ ] README、リリースワークフロー（`cargo dist` or release-please）

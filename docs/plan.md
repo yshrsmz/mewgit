@@ -545,7 +545,15 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       と `index` の mtime** なら 8 通りとも変わる（実測の表は 01 の「進行中操作が
       あるときの書き込み」）。**これで #120 が残した「外で終えた直後の 1 回目は断られる」
       が塞がる** —— 見張りは「外で `rebase --abort` / `merge --abort` したあと、キーを
-      押す前に監視の `LoadStatus` が届き、1 回目の `Enter` が通る」
+      押す前に監視の `LoadStatus` が届き、1 回目の `Enter` が通る」。
+      **gitdir と `index` だけではエディタでの保存を拾わない**（実測 2026-09-27、
+      git 2.55.0 —— コンフリクト中の `b` を保存しても、コンフリクトしていない `a` を
+      保存しても、`index` も gitdir も mtime が変わらない。`git add b` で両方変わる）。
+      コンフリクトの解消は `git add` が index を動かすので拾える（保存だけでは git 自身が
+      `UU` のままで、Conflicted のままが正しい表示）。**拾えないのは普通の編集で、
+      Unstaged に出てこない**。塞ぐにはワーキングツリーも監視する（`.gitignore` の下を
+      除く・大きなツリーでの負荷を測る）か、status を手で読み直すキーを足すかを
+      このタスクで決める
 - [ ] テストで status を届ける 3 行（`reply(state, Cmd::LoadStatus, Msg::StatusLoaded(..))`）を
       `test_support` のヘルパ 1 本に寄せ、`worktree_state` もそれを呼ぶ形にする。いまは
       diff / graph / exec / worktree / mod / progress の各テストにインラインで散っている

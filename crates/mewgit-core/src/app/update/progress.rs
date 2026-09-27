@@ -101,7 +101,7 @@ fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<String> {
 }
 
 /// rebase しているブランチを改名・削除しようとしたときの断り文句。
-const REBASING_BRANCH: &str = "rebase 中のブランチは改名・削除できません。m から終えてください";
+const REBASING_BRANCH: &str = "rebase 中は改名・削除できません。m から終えて";
 
 /// 何の途中か（git のサブコマンドの字）。
 fn verb(progress: &InProgressOp) -> &'static str {
@@ -114,7 +114,8 @@ fn verb(progress: &InProgressOp) -> &'static str {
     }
 }
 
-/// 何の途中かと、そこから出る手。**71 セルに収める**（01 の「失敗の案内文」）。
+/// 何の途中かと、そこから出る手。**必ずバッジと並ぶ**ので、71 セルではなくバッジの隣の
+/// 幅に収める（01 の「失敗の案内文」）。
 ///
 /// **`m` を案内するのはここだけ**（フッターには出さない。01 の「進行中操作の
 /// メニュー（`m`）」）。
@@ -122,18 +123,13 @@ fn advice(progress: &InProgressOp) -> String {
     match progress {
         InProgressOp::Rebase { .. }
         | InProgressOp::CherryPick { .. }
-        | InProgressOp::Revert { .. } => format!(
-            "{} の途中です。m から continue か abort で終えてください",
-            verb(progress)
-        ),
+        | InProgressOp::Revert { .. } => {
+            format!("{} の途中。m から continue か abort", verb(progress))
+        }
         // merge の continue に当たる `GitOp` は無い。結ぶのは commit（03 の表）。
-        InProgressOp::Merge { .. } => {
-            "merge の途中です。commit で結ぶか、m から abort してください".to_string()
-        }
+        InProgressOp::Merge { .. } => "merge の途中。commit で結ぶか m から abort".to_string(),
         // mewgit から am は始めず、`GitOp` にも無い（02 の「進行中操作の検出」）。
-        InProgressOp::Am { .. } => {
-            "am の途中です。端末で git am --continue か --abort を打ってください".to_string()
-        }
+        InProgressOp::Am { .. } => "am の途中。端末で git am --continue か --abort".to_string(),
     }
 }
 
@@ -263,7 +259,7 @@ pub(super) fn progress_picked(state: &mut AppState) -> Cmd {
 mod tests {
     use super::super::test_support::{
         cells, exec_done_of, fake_output, finish_exec, open_input, press, press_code,
-        state_on_branches, type_text, worktree_state, NOTICE_CELLS,
+        state_on_branches, type_text, worktree_state, BESIDE_BADGE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -386,9 +382,12 @@ mod tests {
     fn every_advice_fits_the_notice_line() {
         for progress in every_progress() {
             let message = advice(&progress);
-            assert!(cells(&message) <= NOTICE_CELLS, "{message}");
+            assert!(cells(&message) <= BESIDE_BADGE_CELLS, "{message}");
         }
-        assert!(cells(REBASING_BRANCH) <= NOTICE_CELLS, "{REBASING_BRANCH}");
+        assert!(
+            cells(REBASING_BRANCH) <= BESIDE_BADGE_CELLS,
+            "{REBASING_BRANCH}"
+        );
     }
 
     #[test]
@@ -653,7 +652,7 @@ mod tests {
 
         // git は起動せず、代わりに status を読み直す（下の「外で終えた」）。
         assert_eq!(cmd, Cmd::LoadStatus);
-        assert!(shown(&state).starts_with("rebase の途中です"));
+        assert!(shown(&state).starts_with("rebase の途中"));
     }
 
     #[test]
@@ -755,7 +754,7 @@ mod tests {
 
         assert_eq!(cmd, Cmd::LoadStatus);
         assert_eq!(state.modal, None);
-        assert!(shown(&state).starts_with("rebase の途中です"));
+        assert!(shown(&state).starts_with("rebase の途中"));
     }
 
     #[test]
@@ -782,6 +781,6 @@ mod tests {
         assert_eq!(cmd, Cmd::LoadStatus);
         let (_, _, buf, _) = open_input(&state);
         assert_eq!(buf.text(), "topic");
-        assert!(shown(&state).starts_with("rebase の途中です"));
+        assert!(shown(&state).starts_with("rebase の途中"));
     }
 }

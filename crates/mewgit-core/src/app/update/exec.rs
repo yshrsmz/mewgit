@@ -324,9 +324,7 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::CherryPick(_)
         | GitOp::CherryPickContinue
         | GitOp::Revert { .. }
-        | GitOp::RevertContinue => {
-            Some("コンフリクトで停止。解消して git add したら m から continue")
-        }
+        | GitOp::RevertContinue => Some("コンフリクト。git add したら m から continue"),
         // merge のコンフリクトを結ぶのは commit。
         GitOp::Pull {
             mode: PullMode::Merge,
@@ -414,7 +412,7 @@ mod tests {
         cells, commit, commit_op, exec_done, exec_done_of, failed_with, fake_output, finish_exec,
         forced_push_op, issued, page_loaded, press, push_op, reject_non_fast_forward, reload,
         repo_snapshot, state, state_for_push, state_with_commits, state_with_page, tracked_head,
-        with_branches, worktree_state, HEADS_MAIN, NOTICE_CELLS,
+        with_branches, worktree_state, BESIDE_BADGE_CELLS, HEADS_MAIN, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -571,7 +569,14 @@ mod tests {
                 "{op:?}: {}",
                 notice.message
             );
-            assert!(cells(&notice.message) <= NOTICE_CELLS, "{}", notice.message);
+            // **必ずバッジと並ぶ**ので、71 ではなくバッジの隣の幅に収める（`/code-review` が
+            // `CHERRY-PICK` の隣で `m か…` まで削られるのを描いて拾った）。
+            assert!(
+                cells(&notice.message) <= BESIDE_BADGE_CELLS,
+                "{} セル: {}",
+                cells(&notice.message),
+                notice.message
+            );
         }
     }
 

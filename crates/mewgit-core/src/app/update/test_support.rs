@@ -431,6 +431,13 @@ pub(super) fn tick() -> Msg {
 /// （`a_notice_of_the_full_width_fits_on_its_own_line`）。
 pub(super) const NOTICE_CELLS: usize = 71;
 
+/// 進行中操作のバッジと**必ず並ぶ**通知の予算。いちばん長いバッジ（`CHERRY-PICK abc1234`）の
+/// 隣で切れずに出る幅で、**実際に描いて確かめるのは `mewgit-tui` 側**
+/// （`a_notice_beside_the_longest_badge_is_cut_short_not_pushed_off` が `あ×24` = 48 を通す）。
+/// コンフリクトで止まった案内と、進行中の断りはここに収めないと、言うべき手（`m`）が
+/// `…` に削られる（01 の「失敗の案内文」）。
+pub(super) const BESIDE_BADGE_CELLS: usize = 48;
+
 /// 端末に描いたときの桁数。**案内文は ASCII と日本語だけ**なので、非 ASCII を
 /// 2 桁と数えれば実際の幅と一致する（合成文字や絵文字を入れたらここが嘘になる）。
 pub(super) fn cells(text: &str) -> usize {

@@ -10,7 +10,7 @@
 //! いるのはこちらで、`GitOp` の隣に置くと git の事実を約束しながら中身は UI の
 //! 方針、という形になる（[`Reload`] の doc）。
 
-use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput, GitOp};
+use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput, GitOp, PullMode};
 
 use super::account::resolve_again;
 use super::graph::reload_log;
@@ -309,18 +309,58 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
 /// なく commit なので、同じ文を出すと嘘になる（01 の「失敗の案内文」）。
 /// **「`git add` したら」** —— Conflicted の行は mewgit では stage できない（01 の
 /// 「ワーキングツリー」）ので、解消の印は端末で付ける。
+///
+/// 網羅 `match` にしているのは、`GitOp` に変種を足したときに「コンフリクトで止まった
+/// あと continue で結ぶ操作か」を選ばせるため（`pull --rebase` を受け皿に落として
+/// いた）。
 fn conflict_advice(op: &GitOp) -> Option<&'static str> {
     match op {
         GitOp::RebaseInteractive { .. }
         | GitOp::RebaseContinue
         | GitOp::RebaseSkip
+        | GitOp::Pull {
+            mode: PullMode::Rebase,
+        }
         | GitOp::CherryPick(_)
         | GitOp::CherryPickContinue
         | GitOp::Revert { .. }
         | GitOp::RevertContinue => {
             Some("コンフリクトで停止。解消して git add したら m から continue")
         }
-        _ => None,
+        // merge のコンフリクトを結ぶのは commit。
+        GitOp::Pull {
+            mode: PullMode::Merge,
+        } => None,
+        // コンフリクトで止まる経路が無い（ff-only と、index / ref だけを触る書き込み）。
+        GitOp::Pull {
+            mode: PullMode::FastForwardOnly,
+        }
+        | GitOp::Stage(_)
+        | GitOp::Unstage(_)
+        | GitOp::StageHunk { .. }
+        | GitOp::UnstageHunk { .. }
+        | GitOp::DiscardHunk { .. }
+        | GitOp::Discard(_)
+        | GitOp::DiscardUntracked(_)
+        | GitOp::DiscardAdded(_)
+        | GitOp::Commit { .. }
+        | GitOp::BranchCreate { .. }
+        | GitOp::Switch(_)
+        | GitOp::BranchDelete { .. }
+        | GitOp::BranchRename { .. }
+        | GitOp::Fetch { .. }
+        | GitOp::Push { .. }
+        | GitOp::RebaseAbort
+        | GitOp::CherryPickAbort
+        | GitOp::RevertAbort
+        | GitOp::MergeAbort
+        | GitOp::StashDrop(_)
+        | GitOp::SetAccount { .. }
+        | GitOp::UnsetAccount
+        | GitOp::CheckoutPr(_) => None,
+        // stash の apply / pop は index とワークツリーにコンフリクトを残すが、進行中操作には
+        // ならない（continue が無い）。push は作業ツリーを片付けるだけ。
+        GitOp::StashPush { .. } | GitOp::StashApply(_) | GitOp::StashPop(_) => None,
     }
 }
 
@@ -512,6 +552,10 @@ mod tests {
             GitOp::RebaseSkip,
             GitOp::CherryPickContinue,
             GitOp::RevertContinue,
+            // 止まると進行中操作は `Rebase` になり、`m` から continue できる。
+            GitOp::Pull {
+                mode: PullMode::Rebase,
+            },
         ] {
             let mut state = state();
             finish_exec(

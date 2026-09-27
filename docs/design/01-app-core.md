@@ -2074,7 +2074,7 @@ pub struct PushRejection {
 | `NonFastForward` + `Push { set_upstream: true }` | Branches で改名する |
 | `NonFastForward` + `Push { .. }` | `p` で取り込むか `P` をもう一度 |
 | `NonFastForward` + `Pull` | 履歴が分かれている（merge / rebase は M5） |
-| `Conflict` + rebase / cherry-pick / revert（開始・continue・skip） | 解消して `git add` したら `m` で continue する（**`Warn`**） |
+| `Conflict` + rebase / cherry-pick / revert（開始・continue・skip）/ `pull --rebase` | 解消して `git add` したら `m` で continue する（**`Warn`**） |
 | それ以外 | 無し（`Display` に落とす） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
@@ -2204,8 +2204,9 @@ git が自分で断る —— 03 の表で断らないのは stash だけで、s
 
 - **共通キー**（どのペインでも効く。`L` と同じ段）。押す場面はコンフリクトの解消の途中で、
   どのペインに居るかは決まっていない
-- **項目は `(label, GitOp)` の列。** 何を出すかは `update::progress::menu` の網羅 `match`
-  1 本で決め、確定は `GitOp` をそのまま出す。**abort は `Modal::Confirm` を挟む**
+- **項目は `(語, 説明, GitOp)` の列。** 何を出すかは `update::progress::progress_menu` の
+  網羅 `match` 1 本で決め、**開いた時点で組んだものをモーダルが持つ**（開いているあいだに
+  status が届いても、カーソルの下の項目が動かない）。確定は `GitOp` をそのまま出す。**abort は `Modal::Confirm` を挟む**
   （不変ルール 5）。**skip は挟まない** —— 止まったコミットを捨てるが、`CLAUDE.md` の
   確認対象（force push、`branch -D`、discard、abort 系）に入っておらず、lazygit も挟まない。
   確認するかは項目に持たせず `GitOp` から導く（`is_abort`。持たせると同じ判断が 2 つになる）

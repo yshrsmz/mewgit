@@ -29,6 +29,7 @@ use graph::{
 };
 use modal::{modal_key, open_notice_log};
 use progress::open_progress_menu;
+pub use progress::{progress_menu, MenuItem, ProgressMenu};
 use prs::{
     open_pr_finished, pr_created, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key,
     rate_limit_seen,
@@ -43,8 +44,6 @@ mod exec;
 mod graph;
 mod modal;
 mod progress;
-
-pub use progress::{progress_menu, MenuItem, ProgressMenu};
 mod prs;
 mod remote;
 #[cfg(test)]

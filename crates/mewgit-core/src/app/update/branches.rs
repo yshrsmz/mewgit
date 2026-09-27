@@ -88,6 +88,13 @@ fn input(
     buf: TextBuffer,
     intent: InputIntent,
 ) -> Cmd {
+    // **開く前に断る。** 確定で断ると、打ち終えた名前を捨てさせる（01 の
+    // 「進行中操作があるときの書き込み」）。断ったら `issue` と同じく読み直す
+    // （`AppState::refusal`）。
+    if state.refuse_in_progress(&intent.op(String::new())) {
+        // 続きを頼む: 開く前に断った書き込みの代わりの status の読み直し。
+        return Cmd::LoadStatus;
+    }
     state.modal = Some(Modal::Input {
         title,
         prompt,

@@ -4,14 +4,12 @@
 //! あり（[`super::account::account_picked`] など）、ここが持つのは骨格 ——
 //! カーソル・閉じ方・受けないキー。
 
-use crate::git_exec::GitOp;
-
 use super::account::{account_picked, account_reresolve, account_unset};
 use super::prs::pr_create_key;
 use super::remote::remote_picked;
 use super::worktree::commit_message_key;
 use super::{edit_key, submit_exec};
-use crate::app::{AppState, Cmd, InputIntent, Key, KeyCode, Modal, NoticeLevel};
+use crate::app::{AppState, Cmd, Key, KeyCode, Modal, NoticeLevel};
 
 /// モーダルのキー処理。表示中の入力はすべてここが受ける。
 pub(super) fn modal_key(state: &mut AppState, key: Key) -> Cmd {
@@ -147,7 +145,7 @@ fn input_key(state: &mut AppState, key: Key) -> Cmd {
     Cmd::None
 }
 
-/// 入力を確定し、[`InputIntent`] の指す `GitOp` を出す。
+/// 入力を確定し、[`InputIntent`](crate::app::InputIntent) の指す `GitOp` を出す。
 ///
 /// **名前が正しいかは手前で判定しない**（不変ルール 4）。`git check-ref-format` の規則を
 /// 写すことになり、写した規則は git の版が変わっても追随しない。**空だけは断る** —
@@ -163,18 +161,7 @@ fn input_submit(state: &mut AppState) -> Cmd {
         return Cmd::None;
     }
 
-    let name = buf.text();
-    let op = match intent {
-        InputIntent::BranchCreate { start } => GitOp::BranchCreate {
-            name,
-            start: start.clone(),
-            switch: true,
-        },
-        InputIntent::BranchRename { from } => GitOp::BranchRename {
-            from: from.clone(),
-            to: name,
-        },
-    };
+    let op = intent.op(buf.text());
     submit_exec(state, op)
 }
 
@@ -189,6 +176,7 @@ mod tests {
     use super::*;
     use crate::app::state::MAX_NOTICES;
     use crate::app::{JobKind, Modal, Msg};
+    use crate::git_exec::GitOp;
 
     use crate::git_read::{FileStatus, WorktreeSection};
 

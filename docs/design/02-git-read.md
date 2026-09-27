@@ -571,7 +571,7 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
   `git rebase --continue` を打つと git が `It looks like 'git am' is in progress.
   Cannot rebase.` で断る（実測）。continue / abort の argv が違うので、同じ変種に
   すると M5 の continue で壊れる。**mewgit から am は始めない**が、外で始めた am の途中で
-  開いたときに「進行中は無い」と読むと、書き込みの拒否（M5）が効かない
+  開いたときに「進行中は無い」と読むと、書き込みの拒否（01 の「進行中操作があるときの書き込み」）が効かない
 - **`CherryPick` / `Revert` の `oid` は `Option`。** 複数の pick の途中で 1 つを
   commit で解くと `sequencer/` だけが残る。`git status` はそれも進行中と呼ぶ
 - **`git2::Repository::state()` は使わない。** libgit2 1.9 の実装（`repository.c`）は

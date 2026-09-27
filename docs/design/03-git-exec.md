@@ -508,5 +508,48 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
   指摘を受けてユーザーと決めた）
 - `Runner` は gitdir を知らない。中断した git の後始末（`CHERRY_PICK_HEAD` の削除など）は
   `run_cancelable` が終了を待ってから返るので、`LoadStatus` はそのあとを読む
-- 進行中操作があるときは、continue / skip / abort 以外の書き込み `GitOp` を拒否する（UI 側でも無効化）。
-  **これは M5 の別タスク**（`docs/plan.md`）で、検出と表示だけが先に入っている
+- 進行中操作があるときは、**HEAD か作業ツリー全体を動かす書き込み**を `app` が
+  git を起動する前に断る（下の「進行中に通す書き込み」。判定の置き場所は 01 の
+  「進行中操作があるときの書き込み」）
+
+### 進行中に通す書き込み
+
+**以前は「continue / skip / abort 以外の書き込み `GitOp` を拒否する（UI 側でも無効化）」と
+書いていたが、そのとおりに作るとコンフリクトから抜けられない。** 解消には stage
+（`git add`）が要り、merge を結ぶのは `commit` で（merge の continue に当たる `GitOp` は
+無い）、rebase の `edit` で止まったところで打つのは `commit --amend` だから。
+
+**実測（git 2.55.0、2026-09-27）。** 状態 × 操作の組ごとに一時リポジトリを作り直して叩いた
+（1 つのリポジトリで続けて叩くと、前の操作が状態を変える —— `stash push` が
+`CHERRY_PICK_HEAD` を消したあとの `commit` は「cherry-pick の途中の commit」ではない）。
+「解消済み」はコンフリクトしたファイルを `git add` したあと。
+
+| 操作 | コンフリクト中（3 種とも） | 解消済みの rebase | 解消済みの cherry-pick / merge |
+|---|---|---|---|
+| `switch` | 断る（`cannot switch branch while rebasing` など） | 断る | 断る |
+| `pull --ff-only` | 断る（unmerged files） | 断る（detached HEAD） | 断る（`You have not concluded your …`） |
+| `cherry-pick` / `revert` | 断る（unmerged files） | 断る（local changes would be overwritten） | 断る |
+| `rebase` の開始 | 断る | 断る（`already a rebase-merge directory`） | 断る（index contains uncommitted changes） |
+| `stash push` | 断る（`could not write index`） | **通る**（解消した内容を stash が持っていく。`rebase-merge/` は残る） | **通り、`CHERRY_PICK_HEAD` / `MERGE_HEAD` が消える** |
+| `commit` | 断る（unmerged files） | 通る（detached HEAD に積む） | 通り、**操作を結ぶ**（`*_HEAD` が消える） |
+| `commit --amend` | 断る | 通る（`edit` の使い道そのもの） | 断る（`You are in the middle of a cherry-pick -- cannot amend`） |
+| `fetch` / `push` | 通る | 通る | 通る |
+| `branch -m` / `branch -D` | 通る（**rebase 中の対象ブランチは両方とも断る** —— `-m` は `is being rebased`、`-D` は `used by worktree`） | 同左 | 通る |
+
+ここから決めたこと ——
+
+- **断るのは HEAD か作業ツリー全体を動かす書き込み**（switch、pull、PR の取り出し、
+  cherry-pick / revert / rebase の開始、stash の push / apply / pop など）。**git が自分で
+  断るものも断る** —— 押すたびに赤い通知と argv を出すより、何の途中かと出口を先に言う
+  ほうが読める。**`stash` だけは git が受けて進行中操作を壊す**ので、これは案内の都合では
+  なく守り
+- **通すのは解消に要るもの**（stage / unstage / ハンク / discard、`Commit`。amend も ——
+  cherry-pick / merge の途中の amend は git が断る）**と、実測で無害なもの**（fetch、push、
+  ブランチの改名・削除）。**変種ごとの振り分けは `app::update::progress::refusal` の
+  網羅 `match` が正**で、ここには写さない
+- **continue / skip / abort は、進行中の操作と種類が合うときだけ通す**（cherry-pick の途中の
+  `RebaseContinue` は断る）。**am には通すものが無い** —— mewgit から am は始めず、
+  `GitOp` にも無い。端末で `git am --continue` / `--abort` を打つよう案内する
+- **UI 側でキーを無効化しない**（フッターのキーヒントも消さない）。押せば断りの理由が
+  通知に出るので、消えたキーを探させるより読める。ヒントを状態で出し分けると、
+  `app::keys` の表が 1 本でなくなる（07 の「ステータスバー」）

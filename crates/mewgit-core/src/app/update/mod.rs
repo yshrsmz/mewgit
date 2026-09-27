@@ -41,6 +41,7 @@ mod diff;
 mod exec;
 mod graph;
 mod modal;
+mod progress;
 mod prs;
 mod remote;
 #[cfg(test)]
@@ -84,7 +85,7 @@ pub fn update(state: &mut AppState, msg: Msg) -> Cmd {
 /// 印があり、**一覧はそこから出る**。
 ///
 /// ```text
-/// grep -rnE "^ *// 続きを頼む" crates/mewgit-core/src/app/update/
+/// grep -rnE "^ *// 続きを頼む" crates/mewgit-core/src/app/
 /// ```
 ///
 /// **ここに一覧も数も写さない** —— 導出できる値を離れた場所に置いたコピーになる
@@ -423,7 +424,7 @@ fn exec_busy(state: &mut AppState) -> bool {
 /// あちらのモーダルはユーザーが打ったものを持っていない。ここで同じことをすると、
 /// 前の git 実行（遅い pre-commit hook など）が走っているあいだに確定したときに
 /// 「ほかの git 実行が終わるまで待ってください」と出て**打った文字ごと消える**。
-/// 判定は [`AppState::issue`] と同じ `jobs.is_running`。
+/// 判定は [`AppState::issue`] と同じ `AppState::refusal`。
 ///
 /// **2 人目（`Modal::Input`）が出た時点でここへ移した。** 写すと、片方だけ
 /// 「閉じてから返す」形に戻ったときに気付けない（01 の「1 行入力」）。
@@ -431,7 +432,8 @@ fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
     submit(state, Cmd::Exec(op))
 }
 
-/// 編集中のモーダルを確定して `cmd` を返す。走っていれば閉じずに断る。
+/// 編集中のモーダルを確定して `cmd` を返す。`issue` が落とすなら閉じずに断る
+/// （同種が走っている、進行中操作がある）。
 ///
 /// **2 人目（`Modal::PrCreate`）が出た時点で `submit_exec` から割った。**
 /// `Cmd::Exec` かどうかではなく、**[`AppState::issue`] に落とされうる `Cmd` を
@@ -443,9 +445,8 @@ fn submit_exec(state: &mut AppState, op: GitOp) -> Cmd {
 /// 本当の種別で落とす**ので、この関数が在る理由（打った本文を消さない）がそのまま
 /// 破れる（`.claude/rules/rust-coding.md` の「導出できる値を引数に取らせない」）。
 fn submit(state: &mut AppState, cmd: Cmd) -> Cmd {
-    // 副作用を持たない `Cmd` は落とされようが無いので、そのまま閉じて返す。
-    if cmd.job_kind().is_some_and(|kind| busy(state, kind)) {
-        return Cmd::None;
+    if let Some(instead) = state.refusal(&cmd) {
+        return instead;
     }
 
     // 閉じずに返すと、`Cmd` が落とされたときにモーダルだけが画面に残る。

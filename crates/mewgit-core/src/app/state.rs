@@ -17,7 +17,7 @@ use crate::graph::{GraphRow, LaneState};
 
 use crate::config::Config;
 
-use super::{Cmd, ProgressMenu};
+use super::{keys, Cmd, ProgressMenu};
 
 /// アプリ全体の状態。
 ///
@@ -2349,7 +2349,14 @@ pub enum Modal {
         parents: Vec<ParentChoice>,
         cursor: usize,
     },
-    Help,
+    /// キーの一覧（07 の「Help モーダル」）。`?` で開く。
+    ///
+    /// **行は持たない。** 描く行は [`keys::help`](super::keys::help) が
+    /// [`AppState::focus`] から組む —— モーダル表示中はフォーカスが動かないので、開いた
+    /// ときのペインのまま。`cursor` は窓を動かすためだけ（読むだけの一覧）。
+    Help {
+        cursor: usize,
+    },
 }
 
 /// [`Modal::MainlinePicker`] の 1 行。
@@ -2400,6 +2407,9 @@ impl AppState {
             Some(Modal::MainlinePicker {
                 parents, cursor, ..
             }) => *cursor = stepped_index(*cursor, parents.len(), delta),
+            Some(Modal::Help { cursor }) => {
+                *cursor = stepped_index(*cursor, keys::help(self.focus).len(), delta);
+            }
             // **通知が無ければ動かない**（`notice_log_row` が `None`）。
             Some(Modal::NoticeLog { selected }) => {
                 if let Some(seq) = notice {
@@ -2411,8 +2421,7 @@ impl AppState {
                 | Modal::Input { .. }
                 | Modal::CommitMessage { .. }
                 | Modal::RebaseEditor { .. }
-                | Modal::PrCreate { .. }
-                | Modal::Help,
+                | Modal::PrCreate { .. },
             )
             | None => {}
         }

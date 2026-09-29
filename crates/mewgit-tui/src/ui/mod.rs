@@ -681,41 +681,23 @@ fn hint_line(state: &AppState, width: u16) -> Paragraph<'static> {
 
 /// `width` に収まるヒントの並び。
 ///
-/// 落とす順は**共通キーの末尾 → ペインのキーの末尾**で、`q:quit` は落とさない（07）。
-/// **共通キーも 1 つずつ落とす。** 丸ごと落とすと、共通キーを 1 つ足しただけで
-/// 80 桁の Graph から `f` / `p` / `P` / `A` まで消えた（`L` を足した回）。
+/// 並びは `ペインのキー  ?:help q:quit` で、**落とすのはペインのキーの末尾から**。
+/// `?:help` と `q:quit` は落とさない —— 落ちたキーを辿る入口と、終了の入口だから（07）。
+/// **共通キーは出さない**（`?` の一覧にだけ出す。07 の「ステータスバー」）。
 ///
 /// **収まるかは組んだ字から数える。** 幅だけを別に算術で出すと、組む側と数える側で
 /// 規則が 2 本になる（`.claude/rules/rust-coding.md` の「出力を 1 本にしても入力が 2 本なら結果はずれる」）。
-/// そのぶん 1 フレームで数十の `String` を捨てる（幅が足りないときは落とす回数だけ
-/// 組み直す）が、描画は 250ms ごと（1 秒 4 回）。実測（release、10,000 回平均。
-/// レビューで測った値）—— Graph 幅 80 で 342ns、Worktree 幅 80 で 711ns、
-/// 落とす形の Worktree 幅 30 で 2.18µs。
+/// そのぶん幅が足りないときは落とす回数だけ組み直すが、描画は 250ms ごと（1 秒 4 回）で、
+/// 組む数はペインのキーの本数（最大 8）で頭打ち。
 fn hint_text(pane: &[KeyHint], width: u16) -> String {
-    let line = |pane: &[KeyHint], common: &[KeyHint]| {
-        let groups = [joined(pane), joined(common), joined(&[keys::QUIT])];
-        groups
-            .iter()
-            .filter(|group| !group.is_empty())
-            .fold(String::new(), |mut out, group| {
-                if !out.is_empty() {
-                    out.push_str(SEP);
-                }
-                out.push_str(group);
-                out
-            })
-    };
-
-    // 共通キーを末尾から落とし、それでも入らなければペインのキーを末尾から。
-    for common in (1..=keys::COMMON.len()).rev() {
-        let text = line(pane, &keys::COMMON[..common]);
-        if fits(&text, width) {
-            return text;
-        }
-    }
+    let tail = joined(&[keys::HELP, keys::QUIT]);
     let mut keep = pane.len();
     loop {
-        let text = line(&pane[..keep], &[]);
+        let text = if keep == 0 {
+            tail.clone()
+        } else {
+            format!("{}{SEP}{tail}", joined(&pane[..keep]))
+        };
         if keep == 0 || fits(&text, width) {
             return text;
         }
@@ -734,20 +716,25 @@ fn joined(hints: &[KeyHint]) -> String {
     })
 }
 
-/// 案内 1 つの字（`j/k:移動`）を `out` に足す。
-///
-/// **フッターの 2 行目を組むのはここだけ。** 表（`app::keys`）はキーしか持たない（01）。
-/// **モーダルは自前の `HINT` を持っている**（`modals::*`。あちらは箱の中で予算が違う）ので、
-/// 綴りが 2 通りある —— 揃えるのは `Modal::Help` のタスク（07 の「ステータスバー」）。
+/// 案内 1 つの字（`j/k:移動`）を `out` に足す。フッターの 2 行目が使う。
 fn push_hint(out: &mut String, hint: &KeyHint) {
+    push_keys(out, hint);
+    out.push(':');
+    out.push_str(hint.label());
+}
+
+/// 案内のキーの字（`j/k`）を `out` に足す。
+///
+/// **表（`app::keys`）はキーしか持たない**ので、字にするのはここ（01）。フッターの 2 行目と
+/// `?` の一覧（`modals::help`）が使う。**モーダルは自前の `HINT` を持っている**
+/// （`modals::*`。あちらは箱の中で予算が違う）ので、綴りが 2 通りある（07）。
+pub(crate) fn push_keys(out: &mut String, hint: &KeyHint) {
     for (i, key) in hint.keys().iter().enumerate() {
         if i > 0 {
             out.push('/');
         }
         push_key(out, key);
     }
-    out.push(':');
-    out.push_str(hint.label());
 }
 
 /// キー 1 つの字。
@@ -762,12 +749,16 @@ fn push_key(out: &mut String, key: &Key) {
         out.push_str("Alt-");
     }
     match key.code() {
+        // **`Ctrl` と組む文字は大文字で書く**（`Ctrl-C`）。端末の慣習で、小文字だと
+        // `c` のキーと見分けにくい。
+        KeyCode::Char(c) if mods.ctrl => out.push(c.to_ascii_uppercase()),
         KeyCode::Char(c) => out.push(c),
         KeyCode::Enter => out.push_str("Enter"),
         KeyCode::Esc => out.push_str("Esc"),
-        // **表に入っているのはこの 3 つだけ**（`app::keys`）。`Tab` / `Ctrl-C` を足すのは
-        // `Modal::Help` のタスクなので、**字を先に書かない** —— 書いても描かれないので
-        // 間違っていても見えない（`Debug` の字が出る形にしてある）。
+        KeyCode::Tab => out.push_str("Tab"),
+        KeyCode::BackTab => out.push_str("Shift+Tab"),
+        // **表に入っているのは上の字だけ**（`app::keys`）。ほかを足したら字もここに足す
+        // —— 書き忘れると `Debug` の字が出るので、画面で気付ける。
         other => {
             let _ = write!(out, "{other:?}");
         }
@@ -796,8 +787,8 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        degraded_label, ellipsize, file_row, fits, hint_text, pane_area, progress_label,
-        push_expanded, window, wrapped, SPACES, TAB_WIDTH,
+        degraded_label, ellipsize, file_row, hint_text, pane_area, progress_label, push_expanded,
+        window, wrapped, SPACES, TAB_WIDTH,
     };
     use crate::test_util::{
         draw, footer_area, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status,
@@ -1445,71 +1436,60 @@ mod tests {
     }
 
     #[test]
-    fn the_common_keys_drop_where_the_pane_keys_fill_the_line() {
-        // 幅 80 では Worktree のキーだけで 1 行が埋まる（**セル数の表は 07 の
-        // 「ステータスバー」の 1 本**。ここに写すと腐る）。**出る側は下の境目の
-        // テストが見る** —— 両方で見ると、同じことを 2 箇所で数えることになる。
-        let worktree = hint_bar_of(Pane::Worktree, 80);
-        assert!(!worktree.contains("f:fetch"), "hints: {worktree:?}");
-        // 落とすのは共通キーのほうで、ペインのキーは残る（07）。
-        assert!(worktree.contains("Esc:戻る"), "hints: {worktree:?}");
-        assert!(worktree.contains("q:quit"), "hints: {worktree:?}");
-    }
-
-    #[test]
-    fn the_common_keys_drop_at_the_width_where_they_would_be_cut() {
-        // **境目を跨ぐ**（`.claude/rules/testing.md`）。Graph + 共通キー + `q:quit` がちょうど
-        // 収まる幅では出て、1 セル狭いと落ちる。机上で選んだ幅では、どちらか片側しか踏めない。
-        // **幅は組んだ字から導く** —— 数を写すと、Graph にキーを足すたびに揃える先が増える（07）。
-        let full =
-            ratatui::text::Span::raw(hint_text(keys::pane(Pane::Graph), u16::MAX)).width() as u16;
-        let fits = hint_bar_of(Pane::Graph, full);
-        assert!(fits.contains("L:通知"), "hints: {fits:?}");
-        assert!(fits.contains("n:ブランチ作成"), "hints: {fits:?}");
-
-        // **落とすのは共通キーの末尾 1 つだけ**（07）。丸ごと落とすと、共通キーを
-        // 1 つ足しただけで `f` / `p` / `P` / `A` まで消える。
-        let over = hint_bar_of(Pane::Graph, full - 1);
-        assert!(!over.contains("L:通知"), "hints: {over:?}");
-        assert!(over.contains("A:account"), "hints: {over:?}");
-        assert!(over.contains("n:ブランチ作成"), "hints: {over:?}");
-        assert!(over.contains("q:quit"), "hints: {over:?}");
-    }
-
-    #[test]
-    fn the_prs_pane_drops_the_common_keys_but_keeps_all_of_its_own() {
-        // **ペインのキーだけで 64 セル**（07 の実測）なので、80 桁では共通キーが
-        // 末尾から落ちる。ここが見張るのは**ペインのキーが先に残る**ことで、落とす
-        // 仕組みの境目は上のテストが見る。
-        let prs = hint_bar_of(Pane::Prs, 80);
-        assert!(!prs.contains("L:通知"), "hints: {prs:?}");
-
-        // **落とすのは共通キーだけ。** ペインのキーが 1 つでも欠けると、
-        // 「いまここで何ができるか」の唯一の案内が減る（07）。
-        for key in [
-            "j/k:移動",
-            "Enter:切替",
-            "o:ブラウザ",
-            "r:更新",
-            "N:PR 作成",
-            "Esc:戻る",
-            "q:quit",
+    fn the_footer_ends_with_help_and_quit_and_never_shows_the_common_keys() {
+        // 共通キーは `?` の一覧にだけ出す（07 の「ステータスバー」）。**幅が余っても出さない**
+        // ので、無限の幅でも見る —— 余った幅で出す旧い規則に戻すと、ここが落ちる。
+        for pane in [
+            Pane::Graph,
+            Pane::Branches,
+            Pane::Prs,
+            Pane::Worktree,
+            Pane::CommitDetail,
+            Pane::Diff,
         ] {
-            assert!(prs.contains(key), "{key} が落ちた: {prs:?}");
+            for width in [80, u16::MAX] {
+                let hints = hint_text(keys::pane(pane), width);
+                assert!(hints.ends_with("  ?:help q:quit"), "{pane:?}: {hints:?}");
+                assert!(!hints.contains("f:fetch"), "{pane:?}: {hints:?}");
+            }
         }
     }
 
     #[test]
-    fn the_commit_detail_pane_still_shows_every_common_key_with_room_to_spare() {
-        // 上のテストと対になる —— あちらは落ちる側、こちらは出る側（07 の表）。
-        // 80 桁で共通キーが全部出る側の代表が CommitDetail（数は 07 の実測）。
-        // **`hint_bar_of` では座れない** —— あのヘルパは WIP 行を選んだ状態なので
-        // 候補に入らない（07 の「ペインとフォーカス」）。組む関数を直に呼ぶ。
-        let detail = hint_text(keys::pane(Pane::CommitDetail), 80);
-        assert!(detail.contains("f:fetch"), "hints: {detail:?}");
-        assert!(detail.contains("L:通知"), "hints: {detail:?}");
-        // `contains` だけだと、80 桁をちょうど埋めた状態でも通る（#80）。
-        assert!(fits(&detail, 79), "余白がありません: {detail:?}");
+    fn the_pane_keys_drop_from_the_end_at_the_width_where_they_would_be_cut() {
+        // **境目を跨ぐ**（`.claude/rules/testing.md`）。**幅は組んだ字から導く** —— 数を写すと、
+        // キーを足すたびに揃える先が増える（07）。Worktree はペインのキーがいちばん長く、
+        // 80 桁で末尾が落ちる側の代表（07 の実測）。
+        let full = ratatui::text::Span::raw(hint_text(keys::pane(Pane::Worktree), u16::MAX)).width()
+            as u16;
+        assert!(full > 80, "80 桁で落ちる前提が崩れています: {full}");
+        let fits = hint_bar_of(Pane::Worktree, full);
+        assert!(fits.contains("Esc:戻る"), "hints: {fits:?}");
+
+        // 1 セル狭いと**末尾の 1 つだけ**落ち、`?:help` と `q:quit` は残る。
+        let over = hint_bar_of(Pane::Worktree, full - 1);
+        assert!(!over.contains("Esc:戻る"), "hints: {over:?}");
+        assert!(over.contains("C:amend"), "hints: {over:?}");
+        assert!(over.contains("?:help q:quit"), "hints: {over:?}");
+    }
+
+    #[test]
+    fn every_pane_but_worktree_shows_all_of_its_keys_at_80() {
+        // `?:help` に替えた理由（07）。**Graph に `y` / `v` を足して共通キーが落ちていた**のが
+        // 引き金なので、80 桁でペインのキーが全部出ることを見張る。
+        for pane in [
+            Pane::Graph,
+            Pane::Branches,
+            Pane::Prs,
+            Pane::CommitDetail,
+            Pane::Diff,
+        ] {
+            assert_eq!(
+                hint_text(keys::pane(pane), 80),
+                hint_text(keys::pane(pane), u16::MAX),
+                "{pane:?} が 80 桁で落ちています"
+            );
+        }
     }
 
     #[test]
@@ -1517,7 +1497,7 @@ mod tests {
         // 幅が足りないときに落とすのはペインのキーで、末尾から（07）。終了の入口が
         // 落ちると、そもそも抜けられない。
         let narrow = hint_bar_of(Pane::Worktree, 30);
-        assert!(narrow.contains("q:quit"), "hints: {narrow:?}");
+        assert!(narrow.contains("?:help q:quit"), "hints: {narrow:?}");
         assert!(narrow.contains("j/k:移動"), "hints: {narrow:?}");
         assert!(!narrow.contains("Esc:戻る"), "hints: {narrow:?}");
     }

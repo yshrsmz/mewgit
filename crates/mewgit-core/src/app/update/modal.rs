@@ -29,6 +29,8 @@ pub(super) fn modal_key(state: &mut AppState, key: Key) -> Cmd {
         Some(Modal::ProgressMenu { .. }) => picker_key(state, key, progress_picked),
         // 確定は確認モーダルへ移る（`mainline_picked`）。
         Some(Modal::MainlinePicker { .. }) => picker_key(state, key, mainline_picked),
+        // **確定が無い**（読むだけ）。`NoticeLog` と同じ。
+        Some(Modal::Help { .. }) => picker_key(state, key, |_| Cmd::None),
         // **骨格を共有しない。** 欄が 4 つあって `Enter` の意味も欄で変わるので、
         // `picker_key` にも `edit_key` 1 本にも収まらない（01 の「PR 作成（`N`）」）。
         Some(Modal::PrCreate { .. }) => pr_create_key(state, key),
@@ -399,7 +401,7 @@ feat/b
     #[test]
     fn esc_closes_the_modal() {
         let mut state = AppState {
-            modal: Some(Modal::Help),
+            modal: Some(Modal::Help { cursor: 0 }),
             ..state()
         };
 
@@ -413,13 +415,13 @@ feat/b
     #[test]
     fn modal_swallows_other_keys() {
         let mut state = AppState {
-            modal: Some(Modal::Help),
+            modal: Some(Modal::Help { cursor: 0 }),
             ..state()
         };
 
         // モーダル表示中の `q` は終了ではない。入力中に閉じられると困る。
         assert_eq!(update(&mut state, Msg::Key(Key::char('q'))), Cmd::None);
-        assert_eq!(state.modal, Some(Modal::Help));
+        assert_eq!(state.modal, Some(Modal::Help { cursor: 0 }));
     }
 
     /// 通知を `messages` の順に積んだ状態（最後が最新）。

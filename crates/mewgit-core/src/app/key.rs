@@ -106,7 +106,7 @@ impl Key {
     }
 
     /// `Ctrl` + 文字。
-    pub fn ctrl(c: char) -> Self {
+    pub const fn ctrl(c: char) -> Self {
         Self::with_mods(
             KeyCode::Char(c),
             Modifiers {

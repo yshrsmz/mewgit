@@ -259,6 +259,12 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
     if key == Key::char('m') {
         return open_progress_menu(state);
     }
+    // **キーの一覧も共通キー。** フッターから落ちたキーと共通キーを辿る入口はここだけ
+    // （07 の「Help モーダル」）。
+    if key == Key::char('?') {
+        state.modal = Some(Modal::Help { cursor: 0 });
+        return Cmd::None;
+    }
 
     // フォーカスの巡回もペインより先に見る。ペインごとに書くと、あとから足した
     // ペインが `Tab` を受けずに閉じ込められる。`Shift+Tab` は `BackTab`（修飾なし）に
@@ -324,7 +330,7 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
             | Modal::ProgressMenu { .. }
             | Modal::MainlinePicker { .. }
             | Modal::RebaseEditor { .. }
-            | Modal::Help,
+            | Modal::Help { .. },
         )
         | None => {}
     }
@@ -581,7 +587,7 @@ mod tests {
     /// ヒントはペイン単位なので、カーソル行によっては理由を出して断るのが正しい
     /// （コミットの diff での `s` など。07）。
     ///
-    /// **[`keys::COMMON`] と [`keys::QUIT`] は 1 つの状態でしか回さない。** あれは
+    /// **[`keys::COMMON`]（`?` と `q` も入っている）は 1 つの状態でしか回さない。** あれは
     /// `update_key` が `match state.focus` より手前で受けるので、ペインごとに押しても
     /// 踏む経路は同じ（`.claude/rules/testing.md` の「通る組み合わせを足しても見張りは増えない」）。
     #[test]
@@ -598,8 +604,37 @@ mod tests {
                 assert_reacts(pane, hint);
             }
         }
-        for hint in keys::COMMON.iter().chain(std::iter::once(&keys::QUIT)) {
+        // 狙いの要素が入っていることを先に見る（`.claude/rules/testing.md` の「production の
+        // 集合から範囲を導く見張り」）。
+        assert!(keys::COMMON.contains(&keys::HELP) && keys::COMMON.contains(&keys::QUIT));
+        for hint in keys::COMMON {
             assert_reacts(Pane::Graph, hint);
+        }
+    }
+
+    #[test]
+    fn question_mark_opens_the_key_list_from_any_pane_and_the_cursor_stops_at_its_end() {
+        // 共通キー（07 の「Help モーダル」）。ペインの `match` より先に見るので、ペインの
+        // キーに食われない。
+        for pane in [Pane::Graph, Pane::Worktree] {
+            let mut state = state();
+            state.focus = pane;
+            assert_eq!(update(&mut state, Msg::Key(Key::char('?'))), Cmd::None);
+            assert_eq!(state.modal, Some(Modal::Help { cursor: 0 }), "{pane:?}");
+
+            // 窓を動かすためのカーソルは、そのペインの一覧の長さで止まる。
+            let rows = keys::help(pane).len();
+            for _ in 0..rows + 3 {
+                let _ = update(&mut state, Msg::Key(Key::char('j')));
+            }
+            assert_eq!(
+                state.modal,
+                Some(Modal::Help { cursor: rows - 1 }),
+                "{pane:?}"
+            );
+
+            let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Esc)));
+            assert_eq!(state.modal, None);
         }
     }
 
@@ -959,7 +994,7 @@ mod tests {
         // raw mode では SIGINT が届かず、モーダル中は `q` が入力文字になる。
         // 常に効く脱出口でないと閉じ込められる。
         let mut state = AppState {
-            modal: Some(Modal::Help),
+            modal: Some(Modal::Help { cursor: 0 }),
             ..state()
         };
         assert_eq!(update(&mut state, Msg::Key(Key::ctrl('c'))), Cmd::Quit);

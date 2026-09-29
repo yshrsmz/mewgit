@@ -2351,10 +2351,12 @@ pub enum Modal {
     },
     /// キーの一覧（07 の「Help モーダル」）。`?` で開く。
     ///
-    /// **行は持たない。** 描く行は [`keys::help`](super::keys::help) が
-    /// [`AppState::focus`] から組む —— モーダル表示中はフォーカスが動かないので、開いた
-    /// ときのペインのまま。`cursor` は窓を動かすためだけ（読むだけの一覧）。
+    /// **開いたときのペインを持つ。** [`AppState::focus`] を描くたびに読むと、開いている
+    /// あいだに届いた status で `reseat_focus`（`update` の出口で毎回通る）がフォーカスを
+    /// 移したとき、一覧が別のペインのものに入れ替わる。行は持たず、描く行は
+    /// [`keys::help`](super::keys::help) が `pane` から組む。`cursor` は窓を動かすためだけ。
     Help {
+        pane: Pane,
         cursor: usize,
     },
 }
@@ -2407,8 +2409,8 @@ impl AppState {
             Some(Modal::MainlinePicker {
                 parents, cursor, ..
             }) => *cursor = stepped_index(*cursor, parents.len(), delta),
-            Some(Modal::Help { cursor }) => {
-                *cursor = stepped_index(*cursor, keys::help(self.focus).len(), delta);
+            Some(Modal::Help { pane, cursor }) => {
+                *cursor = stepped_index(*cursor, keys::help(*pane).len(), delta);
             }
             // **通知が無ければ動かない**（`notice_log_row` が `None`）。
             Some(Modal::NoticeLog { selected }) => {

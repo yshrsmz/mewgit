@@ -45,14 +45,18 @@ pub fn render(frame: &mut Frame, area: Rect, picker: Picker<'_>) {
     let width = modals::inner_width(area, modals::WIDTH, &block);
     let no_body = picker.body.width() == 0;
     let (body_text, body_rows) = ui::wrapped(picker.body, width);
-    let body_rows = if no_body { 0 } else { body_rows };
+    let (body_rows, gap) = if no_body {
+        (0, 0)
+    } else {
+        (body_rows, LIST_GAP_ROWS)
+    };
 
     // 一覧は折り返さない。1 行に収まらない行は端で切れる。
     let rows = u16::try_from(picker.rows.len()).unwrap_or(u16::MAX);
-    let list_rows = match (picker.rows.is_empty(), no_body) {
-        (true, _) => 0,
-        (false, true) => rows,
-        (false, false) => rows.saturating_add(LIST_GAP_ROWS),
+    let list_rows = if picker.rows.is_empty() {
+        0
+    } else {
+        rows.saturating_add(gap)
     };
     let inner = modals::place(
         frame,
@@ -82,17 +86,13 @@ pub fn render(frame: &mut Frame, area: Rect, picker: Picker<'_>) {
     //
     // **空行は本文の枠に含める。** 3 本に割って真ん中を捨てると、捨てる束縛と制約が
     // 1 つずつ増えるだけで結果は同じ（`Paragraph` は上詰め）。
-    let list = if no_body {
-        inner
-    } else {
-        let [body_area, list] = Layout::vertical([
-            Constraint::Max(body_rows.saturating_add(LIST_GAP_ROWS)),
-            Constraint::Min(1),
-        ])
-        .areas(inner);
-        frame.render_widget(body_text, body_area);
-        list
-    };
+    let [body_area, list] = Layout::vertical([
+        Constraint::Max(body_rows.saturating_add(gap)),
+        Constraint::Min(1),
+    ])
+    .areas(inner);
+
+    frame.render_widget(body_text, body_area);
 
     // カーソル行はペインと同じ反転（`theme::selected`）。一覧から 1 つ選ぶ形が
     // 同じなので、見た目も揃える。**その場で塗る** —— 1 行のために `Vec` を

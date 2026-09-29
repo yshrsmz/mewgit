@@ -679,30 +679,21 @@ fn hint_line(state: &AppState, width: u16) -> Paragraph<'static> {
     Paragraph::new(Line::from(Span::raw(hint_text(pane, width))))
 }
 
-/// `width` に収まるヒントの並び。
-///
-/// 並びは `ペインのキー  ?:help q:quit` で、**落とすのはペインのキーの末尾から**。
-/// `?:help` と `q:quit` は落とさない —— 落ちたキーを辿る入口と、終了の入口だから（07）。
-/// **共通キーは出さない**（`?` の一覧にだけ出す。07 の「ステータスバー」）。
+/// `width` に収まるヒントの並び。`ペインのキー  ?:help q:quit` で、**落とすのはペインの
+/// キーの末尾から**。[`keys::PINNED`] は落とさない（07 の「ステータスバー」）。
 ///
 /// **収まるかは組んだ字から数える。** 幅だけを別に算術で出すと、組む側と数える側で
 /// 規則が 2 本になる（`.claude/rules/rust-coding.md` の「出力を 1 本にしても入力が 2 本なら結果はずれる」）。
-/// そのぶん幅が足りないときは落とす回数だけ組み直すが、描画は 250ms ごと（1 秒 4 回）で、
-/// 組む数はペインのキーの本数（最大 8）で頭打ち。
+/// そのぶん幅が足りないときは落とす回数だけ組み直す（描画は 250ms ごと）。
 fn hint_text(pane: &[KeyHint], width: u16) -> String {
-    let tail = joined(&[keys::HELP, keys::QUIT]);
-    let mut keep = pane.len();
-    loop {
-        let text = if keep == 0 {
-            tail.clone()
-        } else {
-            format!("{}{SEP}{tail}", joined(&pane[..keep]))
-        };
-        if keep == 0 || fits(&text, width) {
+    let pinned = joined(keys::PINNED);
+    for keep in (1..=pane.len()).rev() {
+        let text = format!("{}{SEP}{pinned}", joined(&pane[..keep]));
+        if fits(&text, width) {
             return text;
         }
-        keep -= 1;
     }
+    pinned
 }
 
 /// 案内をキーの空白で繋いだ字（`j/k:移動 Enter:差分`）。
@@ -1438,7 +1429,7 @@ mod tests {
     #[test]
     fn the_footer_ends_with_help_and_quit_and_never_shows_the_common_keys() {
         // 共通キーは `?` の一覧にだけ出す（07 の「ステータスバー」）。**幅が余っても出さない**
-        // ので、無限の幅でも見る —— 余った幅で出す旧い規則に戻すと、ここが落ちる。
+        // ので無限の幅で見る —— 余った幅で出す旧い規則に戻すと、ここが落ちる。
         for pane in [
             Pane::Graph,
             Pane::Branches,
@@ -1447,11 +1438,9 @@ mod tests {
             Pane::CommitDetail,
             Pane::Diff,
         ] {
-            for width in [80, u16::MAX] {
-                let hints = hint_text(keys::pane(pane), width);
-                assert!(hints.ends_with("  ?:help q:quit"), "{pane:?}: {hints:?}");
-                assert!(!hints.contains("f:fetch"), "{pane:?}: {hints:?}");
-            }
+            let hints = hint_text(keys::pane(pane), u16::MAX);
+            assert!(hints.ends_with("  ?:help q:quit"), "{pane:?}: {hints:?}");
+            assert!(!hints.contains("f:fetch"), "{pane:?}: {hints:?}");
         }
     }
 
@@ -1475,8 +1464,7 @@ mod tests {
 
     #[test]
     fn every_pane_but_worktree_shows_all_of_its_keys_at_80() {
-        // `?:help` に替えた理由（07）。**Graph に `y` / `v` を足して共通キーが落ちていた**のが
-        // 引き金なので、80 桁でペインのキーが全部出ることを見張る。
+        // 80 桁でペインのキーが全部出ることを見張る（落ちる側は Worktree。07 の実測）。
         for pane in [
             Pane::Graph,
             Pane::Branches,

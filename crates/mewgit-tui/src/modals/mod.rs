@@ -73,8 +73,8 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
             parents,
             cursor,
         } => mainline_picker::render(frame, area, target, summary, parents, *cursor),
+        Modal::Help { pane, cursor } => help::render(frame, area, *pane, *cursor),
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
-        Modal::Help { cursor } => help::render(frame, area, state.focus, *cursor),
         Modal::RebaseEditor { .. } => {}
     }
 }

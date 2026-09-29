@@ -2,7 +2,7 @@
 //!
 //! **行は core が組む**（`keys::help`）。ここは字にして `modals::picker` に並べるだけ。
 
-use mewgit_core::app::{keys, HelpRow, Pane};
+use mewgit_core::app::{keys, HelpRow, HelpSection, KeyHint, Pane};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
@@ -15,18 +15,26 @@ const TITLE: &str = "キー";
 /// キーの案内。`update::picker_key` が受けるキーと揃える（`Enter` は何もしない）。
 const HINT: &str = "[j/k] 移動   [Esc] 閉じる";
 
-/// キーの字の桁。**いちばん長い `Tab/Shift+Tab` に 2 桁足す**（説明の頭を揃える）。
-const KEY_CELLS: usize = "Tab/Shift+Tab".len() + 2;
-
 /// `pane` のキーとどこでも効くキーを並べる。
 pub fn render(frame: &mut Frame, area: Rect, pane: Pane, cursor: usize) {
+    let rows = keys::help(pane);
+    // **キーの字の桁は並べる行から導く**（いちばん長いキーに 2 桁足して、説明の頭を揃える）。
+    let key_cells = rows
+        .iter()
+        .filter_map(|row| match row {
+            HelpRow::Key(hint) => Some(keys_text(hint).len()),
+            HelpRow::Heading(_) => None,
+        })
+        .max()
+        .unwrap_or(0)
+        + 2;
     picker::render(
         frame,
         area,
         Picker {
             title: TITLE,
             body: "".into(),
-            rows: keys::help(pane).into_iter().map(row).collect(),
+            rows: rows.into_iter().map(|row| line(row, key_cells)).collect(),
             cursor,
             hint: HINT,
         },
@@ -34,18 +42,29 @@ pub fn render(frame: &mut Frame, area: Rect, pane: Pane, cursor: usize) {
 }
 
 /// 1 行。見出しは淡色（`theme::muted`）、キーは `  j/k          移動`。
-fn row(row: HelpRow) -> Line<'static> {
+fn line(row: HelpRow, key_cells: usize) -> Line<'static> {
     match row {
-        HelpRow::Heading(title) => Line::from(Span::styled(title, theme::muted())),
-        HelpRow::Key(hint) => {
-            let mut keys = String::new();
-            ui::push_keys(&mut keys, hint);
-            Line::from(vec![
-                Span::raw(format!("  {keys:<KEY_CELLS$}")),
-                Span::raw(hint.label()),
-            ])
-        }
+        HelpRow::Heading(section) => Line::from(Span::styled(heading(section), theme::muted())),
+        HelpRow::Key(hint) => Line::from(vec![
+            Span::raw(format!("  {:<key_cells$}", keys_text(hint))),
+            Span::raw(hint.label()),
+        ]),
     }
+}
+
+/// 段の見出し。
+fn heading(section: HelpSection) -> &'static str {
+    match section {
+        HelpSection::Pane => "このペイン",
+        HelpSection::Anywhere => "どこでも",
+    }
+}
+
+/// キーの字（`j/k`）。**ASCII だけ**なので、桁はバイト数で数えてよい。
+fn keys_text(hint: &KeyHint) -> String {
+    let mut out = String::new();
+    ui::push_keys(&mut out, hint);
+    out
 }
 
 #[cfg(test)]
@@ -59,9 +78,7 @@ mod tests {
     };
 
     fn state_with_help(pane: Pane, cursor: usize) -> AppState {
-        let mut state = state_with_modal(Modal::Help { cursor });
-        state.focus = pane;
-        state
+        state_with_modal(Modal::Help { pane, cursor })
     }
 
     #[test]
@@ -70,9 +87,7 @@ mod tests {
 
         let text = draw(&state, SIZE).join("\n");
 
-        assert!(text.contains("このペイン"), "{text}");
         assert!(text.contains("ブランチ作成"), "{text}");
-        assert!(text.contains("どこでも"), "{text}");
         // フッターから外した共通キーと、表に足した `m` / `Tab` / `Ctrl-C`。
         for key in [
             "fetch",
@@ -116,5 +131,18 @@ mod tests {
             row_is_reversed(&state, short, "quit"),
             "カーソル行が反転していない"
         );
+    }
+
+    #[test]
+    fn the_list_is_of_the_pane_it_was_opened_on_even_if_the_focus_moved() {
+        // 開いているあいだに届いた status で `reseat_focus` がフォーカスを移しても、一覧は
+        // 開いたときのペインのまま（`Modal::Help` の doc）。
+        let mut state = state_with_help(Pane::Worktree, 0);
+        state.focus = Pane::Graph;
+
+        let text = draw(&state, SIZE).join("\n");
+
+        assert!(text.contains("stage"), "{text}");
+        assert!(!text.contains("ブランチ作成"), "{text}");
     }
 }

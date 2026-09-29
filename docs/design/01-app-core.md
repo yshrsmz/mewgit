@@ -732,10 +732,14 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   選ばせる意味が無い
 - **取り消す変更が無かった revert は `Warn` で理由を出す**（下の「失敗の案内文」）。
   git は何も残さず exit 1 で返るので、進行中操作にはならない
-- **skip は `m` のメニューに足さない**（2026-09-29 にユーザーと決めた）。1 本だけの revert は
-  空で止まらず、コンフリクトで止まったときの skip は abort と同じ結果になる。**空で止まる
-  のは複数の revert の途中だけ**（`sequencer/` だけが残る。03）なので、複数の revert を
-  入れるタスク（`docs/plan.md`）で足す
+- **`m` のメニューの revert に skip を足した**（2026-09-29 にユーザーと決めた）。1 本だけの
+  revert でも、**コンフリクトを HEAD 側の内容で解くと continue が空で断られ、`REVERT_HEAD`
+  が残る**（03 の「revert の開始」）。continue では抜けられず、git の hint も `--skip` を
+  指す。最初は「1 本だけの revert は空で止まらない」を根拠に足さないと決めていたが、
+  それは開始だけを測った結論で、`/code-review` が continue の形で反証した
+- **空で断られた continue / skip は「変更が空で止まった。m から skip」を `Warn` で出す**
+  （下の「失敗の案内文」）。開始の「取り消し済み」とは分ける —— 同じ `NoChanges` でも、
+  こちらは進行中操作が残っている
 
 ## ワーキングツリー
 
@@ -2137,6 +2141,7 @@ pub struct PushRejection {
 | `Conflict` + rebase / cherry-pick / revert（開始・continue・skip）/ `pull --rebase` | 解消して `git add` したら `m` で continue する（**`Warn`**） |
 | `Empty` + cherry-pick（開始・continue・skip） | `m` から skip する（**`Warn`**） |
 | `NoChanges` + revert（開始、1 本だけ） | 取り消す変更が無い（**`Warn`**） |
+| `NoChanges` + revert（continue・skip） | `m` から skip する（**`Warn`**） |
 | それ以外 | 無し（`Display` に落とす） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
@@ -2179,15 +2184,15 @@ pub struct PushRejection {
 - **`Empty` も `Warn` で出す。** cherry-pick の変更が空で止まった形で、`CHERRY_PICK_HEAD` が
   残ってバッジが出る。**continue は同じ理由で断られる**ので、案内するのは skip（03 の
   「continue / skip / abort の終わり方」）。文は「変更が空で止まった。m から skip」
-  （31 セル。バッジの隣の 48 に収まる）。**cherry-pick の系統の op だけに出す** —— revert は
-  空でも止まらず（03）、rebase で空の pick に当たったときの出力は確かめていない。ほかで出たら
+  （31 セル。バッジの隣の 48 に収まる）。**cherry-pick の系統の op だけに出す** —— revert が
+  空で止まった形は stderr が空で `NoChanges` に落ちる（下）。rebase で空の pick に当たったときの出力は確かめていない。ほかで出たら
   案内の無い `Display` に落とすほうが嘘を言わない
 - **`NoChanges` も `Warn` で出す。** 1 本だけの revert で取り消す変更が無かった形で、git は
   `REVERT_HEAD` を残さず exit 1 で返り、**stderr は空**（03 の「revert の開始」）。案内が
   無いと argv だけの赤い通知になり、理由が見えない。文は「取り消す変更がありません
-  （取り消し済み）」。**1 本だけの revert に限る** —— 複数の revert は途中が空だと
-  `sequencer/` を残して止まり、同じ文言を出す（03）ので、「取り消し済み」と言うと進行中の
-  操作を隠す。**`git commit` も同じ文言を出すが、あちらは `Display` のまま**。**stderr が
+  （取り消し済み）」。**開始の 1 本だけの revert に限る** —— continue / skip と複数の
+  revert は同じ文言で**進行中のまま**止まる（03）ので、「取り消し済み」と言うと進行中の
+  操作を隠す。continue / skip には `Empty` と同じ「変更が空で止まった。m から skip」を出す。**`git commit` も同じ文言を出すが、あちらは `Display` のまま**。**stderr が
   空の失敗は理由が画面に出ない**（`ExecError` が stdout を運ばない。`docs/plan.md` の M6）
 - **`Conflict` は `Warn` で出す。** continue / skip のあとに次のコミットでまた止まった
   形で（03 の「continue / skip / abort の終わり方」）、進行中操作は残ってバッジの数が
@@ -2280,7 +2285,7 @@ git が自分で断る —— 03 の表で断らないのは stash だけで、s
 |---|---|
 | `Rebase` | continue / skip / abort |
 | `CherryPick` | continue / skip / abort |
-| `Revert` | continue / abort |
+| `Revert` | continue / skip / abort |
 | `Merge` | abort（結ぶのは `c` の commit。03 の表） |
 | `Am` | **開かない**。端末で `git am --continue` / `--abort` を案内する |
 | 無い | **開かない**。通知を出して `Cmd::LoadStatus` を返す |

@@ -623,6 +623,45 @@ async fn a_revert_with_nothing_to_undo_ends_without_leaving_a_revert_in_progress
 }
 
 #[tokio::test]
+async fn a_revert_resolved_to_nothing_stops_on_continue_and_skip_gets_out() {
+    // 1 本だけの revert でも、コンフリクトを HEAD 側の内容で解くと continue は空で
+    // 断られ、`REVERT_HEAD` が残る（03 の「revert の開始」）。stderr は空。
+    let repo = TestRepo::init();
+    repo.commit_bytes("file.txt", b"1\n", "c1");
+    let c2 = repo.commit_bytes("file.txt", b"2\n", "c2");
+    let head = repo.commit_bytes("file.txt", b"3\n", "c3");
+    let revert_head = repo.path().join(".git").join("REVERT_HEAD");
+    let revert = GitOp::Revert {
+        oids: vec![c2],
+        mainline: None,
+    };
+
+    let err = repo
+        .runner()
+        .run(&revert)
+        .await
+        .expect_err("コンフリクトするはずです");
+    assert_eq!(failure_kind(&err), ExecErrorKind::Conflict);
+    repo.write_worktree_file("file.txt", b"3\n");
+    repo.git(&["add", "file.txt"]);
+
+    let err = repo
+        .runner()
+        .run(&GitOp::RevertContinue)
+        .await
+        .expect_err("空で断られるはずです");
+    assert_eq!(failure_kind(&err), ExecErrorKind::NoChanges);
+    assert!(revert_head.exists());
+
+    repo.runner()
+        .run(&GitOp::RevertSkip)
+        .await
+        .expect("skip できませんでした");
+    assert!(!revert_head.exists());
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), head.to_string());
+}
+
+#[tokio::test]
 async fn batch_mode_is_layered_onto_the_user_ssh_command() {
     // **`GIT_TERMINAL_PROMPT=0` は ssh に効かない**ので、agent に載っていない鍵だと
     // raw mode の画面ごと止まる。`-o BatchMode=yes` で即失敗させる（03 の

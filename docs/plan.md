@@ -346,16 +346,15 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       （2026-09-29 にユーザーと決めた。03 の「cherry-pick の開始」に実測の表）
 - [x] revert（単一、mainline 選択）の開始。**Graph の `v` → merge コミットなら
       `MainlinePicker` で残す側の親 → 確認 → `revert [--mainline N] <oid>`**。取り消す
-      変更が無い形は `ExecErrorKind::NoChanges` で `Warn` を出す。**skip はメニューに
-      足さなかった**（2026-09-29 にユーザーと決めた）—— 1 本だけの revert は空で止まらない
-      （03 の「revert の開始」に実測の表）
+      変更が無い形は `ExecErrorKind::NoChanges` で `Warn` を出す。**`m` のメニューの revert に
+      skip を足した**（2026-09-29 にユーザーと決めた）—— 1 本だけでも、コンフリクトを HEAD
+      側で解くと continue が空で断られる（03 の「revert の開始」に実測の表）
 - [ ] cherry-pick / revert（複数）の開始。**単一と割った**（2026-09-29）—— グラフに印を
       付ける仕組み（どのキーで付けるか、描き方、古い順に並べ直すこと）を両方で共有する
-      （01 の「cherry-pick の開始（`y`）」）。**revert の skip もここで `m` のメニューに
-      足す** —— 複数の revert は途中が空だと `sequencer/` だけを残して止まる（03 の
-      「revert の開始」の参考行）。その形を 02 の検出が `Revert` と読めるかも確かめる。
-      **空で止まった複数の revert の案内もここで決める**（`NoChanges` の案内は 1 本だけの
-      revert に絞ってある。01 の「失敗の案内文」）。**印を付けるキーを Graph に足すと、
+      （01 の「cherry-pick の開始（`y`）」）。**複数の revert の開始が空で止まったときの
+      案内をここで決める** —— 途中が空だと `sequencer/` だけを残して止まる（03 の
+      「revert の開始」の参考行）が、`NoChanges` の案内は開始では 1 本だけの revert に
+      絞ってある（01 の「失敗の案内文」）。**印を付けるキーを Graph に足すと、
       80 桁で共通キーの `f` まで落ちる**（07 の実測）—— `Modal::Help` と `?:help` を
       先に入れるかを着手時に決める
 - [ ] `ui::panes::stash` — 一覧 / diff / push / apply / pop / drop、部分 stash

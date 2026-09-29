@@ -592,10 +592,9 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 **空で止まった pick は continue では抜けられない**（上の表の 2 行。2026-09-29 に測った）。
 `GIT_EDITOR=true` でも同じで、git は `commit --allow-empty` か `--skip` を求める。
 **出口は skip か abort** なので、`m` のメニューの cherry-pick に skip を入れた（01 の
-「進行中操作のメニュー（`m`）」）。**revert には入れていない** —— 1 本だけの revert は
-変更が空でも止まらず（下の「revert の開始」の表）、空で抜けられない形を作らない。
-**空で止まるのは複数の revert の途中だけ**なので、skip は複数の revert のタスクで足す
-（01 の「revert の開始（`v`）」）。
+「進行中操作のメニュー（`m`）」）。**revert にも入れた** —— 解消した結果が空だと continue が
+同じように断られる（下の「revert の開始」の表。stderr は空で、`Empty` ではなく
+`NoChanges` に落ちる）。
 
 **`Conflict` は失敗ではなく「次で止まった」** —— 進行中操作は残り、バッジの数が進む。
 そこで赤を出すと壊れたように読めるので、`app` は `Warn` で次の手を案内する（01 の
@@ -654,6 +653,9 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 | 同上、untracked がある | 1 | stdout `nothing added to commit but untracked files present` | 無し | `NoChanges` |
 | 同上、tracked が dirty | 1 | stdout `no changes added to commit` | 無し | `NoChanges` |
 | コンフリクトのあと `revert --skip` | 0 | 何も出さない | 無し（HEAD は元のまま） | 成功 |
+| コンフリクトを **HEAD 側の内容で解いて** `revert --continue` | 1 | stdout `You are currently reverting commit …` + `nothing to commit`、**stderr 空** | **`REVERT_HEAD`**（進行中のまま） | `NoChanges` |
+| ↑ のあと `revert --skip` | 0 | 何も出さない | 無し（HEAD は元のまま） | 成功 |
+| （参考）複数の revert で skip した先が空 | 1 | stdout `nothing to commit`、stderr 空 | **`sequencer/` だけ**（`todo` の先頭行は `revert …`） | `NoChanges` |
 | （参考）複数の revert で途中が空 | 1 | stdout `Revert currently in progress.` + 上の 3 つの結びのどれか | **`sequencer/` だけ**（`REVERT_HEAD` は無い） | `NoChanges` |
 
 - **どの失敗でも HEAD は動かない**（1 本だけのとき）。cherry-pick と同じく、成功したときだけ
@@ -662,6 +664,11 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
   （表の 2 行）。画面では「残す側の親」と言う（01、07）
 - **取り消す変更が無い形は `NoChanges` に分ける**（上の「エラー分類」）。stderr が空なので、
   `Other` のままだと argv だけの赤い通知になる
+- **1 本だけでも continue で空になる。** コンフリクトを HEAD 側の内容で解くと、開始と
+  同じ文言で断られるが **`REVERT_HEAD` が残る**。**`NoChanges` は進行中操作が残ったかを
+  言わない**ので、案内は op で分ける（開始なら「取り消し済み」、continue / skip なら
+  「m から skip」。01 の「失敗の案内文」）。skip の先が空でも `sequencer/` が残って止まり、
+  `todo` の先頭行が `revert` なので 02 の検出が `Revert` と読む（`m` の skip が届く）
 - **複数の revert で途中が空だと止まる**（参考行）。`sequencer/` だけが残る形で、
   `REVERT_HEAD` が無いので skip で抜ける。これを拾うのは複数の revert のタスク ——
   02 の検出表は `sequencer/` だけの形を `sequencer/todo` の先頭行で見るので、そこで

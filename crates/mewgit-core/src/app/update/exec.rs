@@ -221,6 +221,7 @@ impl Reload {
             | GitOp::CherryPickAbort
             | GitOp::Revert { .. }
             | GitOp::RevertContinue
+            | GitOp::RevertSkip
             | GitOp::RevertAbort
             // PR の取り出しは fetch で新しいコミットを入れ、ブランチを作り、HEAD を
             // 動かす。**手順の途中で止まっても前の手順の結果は残る**（03 の「複数の
@@ -343,7 +344,8 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::CherryPickContinue
         | GitOp::CherryPickSkip
         | GitOp::Revert { .. }
-        | GitOp::RevertContinue => Some("コンフリクト。git add したら m から continue"),
+        | GitOp::RevertContinue
+        | GitOp::RevertSkip => Some("コンフリクト。git add したら m から continue"),
         // merge のコンフリクトを結ぶのは commit。
         GitOp::Pull {
             mode: PullMode::Merge,
@@ -384,8 +386,8 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
 /// cherry-pick の変更が空で止まったときの案内。**continue は同じ理由で断られる**ので、
 /// 出口は skip（1 本なら abort と同じ結果。03 の「continue / skip / abort の終わり方」）。
 ///
-/// **案内するのは cherry-pick の系統だけ。** 1 本だけの revert は空でも止まらない（03 の
-/// 「revert の開始」）。rebase で空の pick に当たったときの出力は確かめていないので、ほかの op で
+/// **案内するのは cherry-pick の系統だけ。** revert が空で止まった形は stderr が空で、
+/// `Empty` ではなく `NoChanges` に落ちる（[`no_changes_advice`]）。rebase で空の pick に当たったときの出力は確かめていないので、ほかの op で
 /// 出たら、案内の無い `Display` に落ちるほうが嘘を言わない。
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由 —— revert の skip などを
@@ -418,6 +420,7 @@ fn empty_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::CherryPickAbort
         | GitOp::Revert { .. }
         | GitOp::RevertContinue
+        | GitOp::RevertSkip
         | GitOp::RevertAbort
         | GitOp::MergeAbort
         | GitOp::StashPush { .. }
@@ -430,12 +433,13 @@ fn empty_advice(op: &GitOp) -> Option<&'static str> {
     }
 }
 
-/// 積むものが無く、何も始まらずに終わったときの案内（[`ExecErrorKind::NoChanges`]）。
+/// 積む変更が無かったときの案内（[`ExecErrorKind::NoChanges`]。03 の「revert の開始」）。
 ///
-/// **1 本だけの revert だけ**（03 の「revert の開始」）。**複数の revert は途中が空だと
-/// `sequencer/` を残して止まり、同じ文言を出す**ので、「取り消し済み」と言うと進行中の
-/// 操作を隠す —— 案内は複数の revert のタスクで決める。**commit も同じ文言を出す**が、
-/// あちらは `Display` のまま。continue の類で出たときの出力は確かめていないので案内しない。
+/// **同じ文言で、進行中操作が残るかが op で割れる。** 1 本だけの revert の開始では何も
+/// 残らない（「取り消し済み」）。continue / skip では `REVERT_HEAD` か `sequencer/` が残り、
+/// continue は同じ理由で断られるので出口は skip。**複数の revert の開始も `sequencer/` を
+/// 残して止まる**が、mewgit から始める経路がまだ無いので案内しない（複数の revert の
+/// タスク）。**commit も同じ文言を出す**が、あちらは `Display` のまま。
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由。
 fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
@@ -443,6 +447,8 @@ fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
         GitOp::Revert { oids, .. } if oids.len() == 1 => {
             Some("取り消す変更がありません（取り消し済み）")
         }
+        // 解消した結果が空で、continue が断られた（`REVERT_HEAD` は残る）。
+        GitOp::RevertContinue | GitOp::RevertSkip => Some("変更が空で止まった。m から skip"),
         GitOp::Revert { .. }
         | GitOp::Stage(_)
         | GitOp::Unstage(_)
@@ -468,7 +474,6 @@ fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::CherryPickContinue
         | GitOp::CherryPickSkip
         | GitOp::CherryPickAbort
-        | GitOp::RevertContinue
         | GitOp::RevertAbort
         | GitOp::MergeAbort
         | GitOp::StashPush { .. }
@@ -671,6 +676,7 @@ mod tests {
             GitOp::CherryPickContinue,
             GitOp::CherryPickSkip,
             GitOp::RevertContinue,
+            GitOp::RevertSkip,
             // 止まると進行中操作は `Rebase` になり、`m` から continue できる。
             GitOp::Pull {
                 mode: PullMode::Rebase,
@@ -683,7 +689,10 @@ mod tests {
             GitOp::CherryPickSkip,
         ]
         .map(|op| (op, ExecErrorKind::Empty, "m から skip"));
-        for (op, kind, way) in conflict.into_iter().chain(empty) {
+        // revert は空で止まっても stderr が空で、`NoChanges` に落ちる（03 の「revert の開始」）。
+        let no_changes = [GitOp::RevertContinue, GitOp::RevertSkip]
+            .map(|op| (op, ExecErrorKind::NoChanges, "m から skip"));
+        for (op, kind, way) in conflict.into_iter().chain(empty).chain(no_changes) {
             let mut state = state();
             finish_exec(&mut state, op.clone(), Err(failed_with(kind)));
 

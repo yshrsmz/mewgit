@@ -218,6 +218,7 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
             argv.extend(oids.iter().map(Oid::to_string));
         }
         GitOp::RevertContinue => argv.extend(["revert".into(), "--continue".into()]),
+        GitOp::RevertSkip => argv.extend(["revert".into(), "--skip".into()]),
         GitOp::RevertAbort => argv.extend(["revert".into(), "--abort".into()]),
         GitOp::MergeAbort => argv.extend(["merge".into(), "--abort".into()]),
         GitOp::StashPush {
@@ -453,7 +454,10 @@ impl GitOp {
             | GitOp::CherryPickContinue
             | GitOp::CherryPickSkip
             | GitOp::CherryPickAbort => "cherry-pick",
-            GitOp::Revert { .. } | GitOp::RevertContinue | GitOp::RevertAbort => "revert",
+            GitOp::Revert { .. }
+            | GitOp::RevertContinue
+            | GitOp::RevertSkip
+            | GitOp::RevertAbort => "revert",
             GitOp::MergeAbort => "merge",
             GitOp::StashPush { .. }
             | GitOp::StashApply(_)
@@ -510,6 +514,7 @@ mod tests {
             GitOp::CherryPickAbort => "CherryPickAbort",
             GitOp::Revert { .. } => "Revert",
             GitOp::RevertContinue => "RevertContinue",
+            GitOp::RevertSkip => "RevertSkip",
             GitOp::RevertAbort => "RevertAbort",
             GitOp::MergeAbort => "MergeAbort",
             GitOp::StashPush { .. } => "StashPush",
@@ -525,7 +530,7 @@ mod tests {
     /// [`variant`] のアームの数。`GitOp` に変種を足すと `variant` の網羅 `match` が
     /// コンパイルエラーになり、ここに来る。アームと一緒にこの数と [`cases`] も足す
     /// （足し忘れは `covers_every_variant` が落とす）。
-    const VARIANT_COUNT: usize = 35;
+    const VARIANT_COUNT: usize = 36;
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
     fn cases() -> Vec<(GitOp, Vec<&'static str>)> {
@@ -737,6 +742,7 @@ mod tests {
                 vec!["revert", "0000000000000000000000000000000000000003"],
             ),
             (GitOp::RevertContinue, vec!["revert", "--continue"]),
+            (GitOp::RevertSkip, vec!["revert", "--skip"]),
             (GitOp::RevertAbort, vec!["revert", "--abort"]),
             (GitOp::MergeAbort, vec!["merge", "--abort"]),
             (

@@ -145,6 +145,9 @@ pub enum GitOp {
         mainline: Option<u32>,
     },
     RevertContinue,
+    /// 止まった revert を捨てて次へ進む（`revert --skip`）。**解消した結果が空で continue が
+    /// 断られた形から出る手**（03 の「revert の開始」）。
+    RevertSkip,
     RevertAbort,
     /// merge を始める前に戻す（`merge --abort`）。**continue に当たる変種は無い** ——
     /// merge を結ぶのは `Commit`（03 の「進行中に通す書き込み」）。

@@ -90,7 +90,7 @@ fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<String> {
         GitOp::CherryPickContinue | GitOp::CherryPickSkip | GitOp::CherryPickAbort => {
             matches!(progress, InProgressOp::CherryPick { .. })
         }
-        GitOp::RevertContinue | GitOp::RevertAbort => {
+        GitOp::RevertContinue | GitOp::RevertSkip | GitOp::RevertAbort => {
             matches!(progress, InProgressOp::Revert { .. })
         }
         // `rebase -r` の merge で止まった形は `Rebase` として検出する（02）ので、
@@ -197,6 +197,9 @@ pub fn progress_menu(progress: &InProgressOp) -> Option<ProgressMenu> {
             RESOLVE,
             vec![
                 item("continue", "解消した内容で続ける", GitOp::RevertContinue),
+                // **解消した結果が空で continue が断られた形から出る手**（03 の
+                // 「revert の開始」）。
+                item("skip", "止まったコミットを捨てて続ける", GitOp::RevertSkip),
                 item("abort", "revert を始める前に戻す", GitOp::RevertAbort),
             ],
         ),
@@ -517,7 +520,7 @@ mod tests {
             ),
             (
                 InProgressOp::Revert { oid: None },
-                vec![GitOp::RevertContinue, GitOp::RevertAbort],
+                vec![GitOp::RevertContinue, GitOp::RevertSkip, GitOp::RevertAbort],
             ),
             // merge の continue に当たる `GitOp` は無い（結ぶのは commit）。
             (

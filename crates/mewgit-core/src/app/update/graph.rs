@@ -5,7 +5,9 @@
 //! 判断を並べて読めるように 1 つのモジュールに置いてある。
 
 use crate::git_exec::GitOp;
-use crate::git_read::{short_oid, CommitDetail, FileEntry, GitReadError, HeadInfo, LogPage, Oid};
+use crate::git_read::{
+    short_oid, Commit, CommitDetail, FileEntry, GitReadError, HeadInfo, LogPage, Oid,
+};
 
 use super::branches::open_branch_create;
 use super::diff::{load_diff, open_diff};
@@ -47,13 +49,7 @@ pub(super) fn graph_key(state: &mut AppState, key: Key) -> Cmd {
 /// **進行中操作は手前で見ない。** 断るのは確定のあとの `AppState::issue`（ブランチの
 /// 削除と同じ。01 の「進行中操作があるときの書き込み」）。
 fn cherry_pick(state: &mut AppState) -> Cmd {
-    // WIP 行。積むコミットが無い。
-    let Some(commit) = state.graph.cursor_commit() else {
-        state.push_notice(
-            NoticeLevel::Info,
-            "cherry-pick するコミットの行を選んでください".to_string(),
-            None,
-        );
+    let Some(commit) = picked_commit(state, "cherry-pick") else {
         return Cmd::None;
     };
     // **merge コミットは手前で断る。** git は `-m` が無いと exit 128 で断り
@@ -66,14 +62,18 @@ fn cherry_pick(state: &mut AppState) -> Cmd {
         );
         return Cmd::None;
     }
-    let oid = commit.oid;
     let body = format!(
         "{} {} を {} に積みます。",
-        short_oid(&oid),
+        short_oid(&commit.oid),
         commit.summary,
         head_name(state)
     );
-    confirm(state, "cherry-pick", body, GitOp::CherryPick(vec![oid]))
+    confirm(
+        state,
+        "cherry-pick",
+        body,
+        GitOp::CherryPick(vec![commit.oid]),
+    )
 }
 
 /// `v`。カーソルの指すコミットを取り消すコミットを HEAD に積む（01 の「revert の開始（`v`）」）。
@@ -82,32 +82,13 @@ fn cherry_pick(state: &mut AppState) -> Cmd {
 /// **merge コミットは残す側の親を選ばせてから確認へ進む**（[`Modal::MainlinePicker`]）。
 /// git は `-m` が無いと exit 128 で断る（03 の「revert の開始」）。
 fn revert(state: &mut AppState) -> Cmd {
-    // WIP 行。取り消すコミットが無い。
-    let Some(commit) = state.graph.cursor_commit() else {
-        state.push_notice(
-            NoticeLevel::Info,
-            "revert するコミットの行を選んでください".to_string(),
-            None,
-        );
+    let Some(commit) = picked_commit(state, "revert") else {
         return Cmd::None;
     };
-    let target = commit.oid;
-    let summary = commit.summary.clone();
     if commit.parents.len() <= 1 {
-        let body = format!(
-            "{} {} を取り消すコミットを {} に積みます。",
-            short_oid(&target),
-            summary,
-            head_name(state)
-        );
-        let op = GitOp::Revert {
-            oids: vec![target],
-            mainline: None,
-        };
-        return confirm(state, "revert", body, op);
+        return confirm_revert(state, commit.oid, &commit.summary, None);
     }
-    // **親の summary は読み込み済みのグラフからだけ引く。** 読み足しを待たせるより、
-    // oid だけで選ばせるほうが軽い（`ParentChoice::summary`）。
+    // `ParentChoice::summary`
     let parents = commit
         .parents
         .iter()
@@ -122,8 +103,8 @@ fn revert(state: &mut AppState) -> Cmd {
         })
         .collect();
     state.modal = Some(Modal::MainlinePicker {
-        target,
-        summary,
+        target: commit.oid,
+        summary: commit.summary,
         parents,
         cursor: 0,
     });
@@ -131,8 +112,6 @@ fn revert(state: &mut AppState) -> Cmd {
 }
 
 /// [`Modal::MainlinePicker`] の `Enter`。選んだ親を残す側として確認へ進む。
-///
-/// **番号は `cursor + 1`**（git の `--mainline` は 1 始まり）。
 pub(super) fn mainline_picked(state: &mut AppState) -> Cmd {
     let picked = match &state.modal {
         Some(Modal::MainlinePicker {
@@ -142,25 +121,57 @@ pub(super) fn mainline_picked(state: &mut AppState) -> Cmd {
             cursor,
         }) => parents
             .get(*cursor)
-            .map(|parent| (*target, summary.clone(), parent.oid, *cursor + 1)),
+            .map(|parent| (*target, summary.clone(), (*cursor, parent.oid))),
         _ => None,
     };
-    let Some((target, summary, parent, mainline)) = picked else {
+    let Some((target, summary, keep)) = picked else {
         state.modal = None;
         return Cmd::None;
     };
-    let mainline = u32::try_from(mainline).unwrap_or(u32::MAX);
-    let body = format!(
-        "{} {} を取り消すコミットを {} に積みます。残す側は {} 番目の親 {} です。",
+    confirm_revert(state, target, &summary, Some(keep))
+}
+
+/// `y` / `v` が積む相手。**WIP 行では断る**（積むコミットも取り消すコミットも無い）。
+///
+/// **写しを返す**のは、呼び出し側が続けて `state` を書き換える（通知・モーダル）ため。
+fn picked_commit(state: &mut AppState, verb: &str) -> Option<Commit> {
+    let commit = state.graph.cursor_commit().cloned();
+    if commit.is_none() {
+        state.push_notice(
+            NoticeLevel::Info,
+            format!("{verb} するコミットの行を選んでください"),
+            None,
+        );
+    }
+    commit
+}
+
+/// revert の確認を開く。`keep` は merge コミットで残す側の親（[`Modal::MainlinePicker`] の
+/// 添字と oid）。**添字 + 1 が `--mainline`**（git は 1 始まり）。
+fn confirm_revert(
+    state: &mut AppState,
+    target: Oid,
+    summary: &str,
+    keep: Option<(usize, Oid)>,
+) -> Cmd {
+    let mut body = format!(
+        "{} {} を取り消すコミットを {} に積みます。",
         short_oid(&target),
         summary,
-        head_name(state),
-        mainline,
-        short_oid(&parent)
+        head_name(state)
     );
+    let mainline = keep.map(|(index, parent)| {
+        let mainline = index + 1;
+        body.push_str(&format!(
+            "残す側は {mainline} 番目の親 {} です。",
+            short_oid(&parent)
+        ));
+        // 親の数を超えないので u32 に収まる。
+        u32::try_from(mainline).expect("親の番号が u32 に収まりません")
+    });
     let op = GitOp::Revert {
         oids: vec![target],
-        mainline: Some(mainline),
+        mainline,
     };
     confirm(state, "revert", body, op)
 }
@@ -1242,14 +1253,19 @@ mod tests {
 
     // ---- commit / amend ----
 
-    #[test]
-    fn y_on_a_commit_asks_before_cherry_picking_it_onto_head() {
-        let mut state = state_with_commits(3);
+    /// HEAD を `main` にする。確認の本文が積む先の名前を出すかを見るため。
+    fn on_main(state: &mut AppState) {
         state.repo.head = Some(HeadInfo::Branch {
             name: "main".to_string(),
             oid: fake_oid(9),
             upstream: None,
         });
+    }
+
+    #[test]
+    fn y_on_a_commit_asks_before_cherry_picking_it_onto_head() {
+        let mut state = state_with_commits(3);
+        on_main(&mut state);
         let _ = press(&mut state, 'j');
         let oid = cursor(&state);
 
@@ -1307,11 +1323,7 @@ mod tests {
     #[test]
     fn v_on_a_commit_asks_before_reverting_it_onto_head() {
         let mut state = state_with_commits(3);
-        state.repo.head = Some(HeadInfo::Branch {
-            name: "main".to_string(),
-            oid: fake_oid(9),
-            upstream: None,
-        });
+        on_main(&mut state);
         let _ = press(&mut state, 'j');
         let oid = cursor(&state);
 

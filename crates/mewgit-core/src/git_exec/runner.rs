@@ -478,8 +478,7 @@ mod tests {
 
     #[test]
     fn an_empty_cherry_pick_stays_empty_though_its_status_says_nothing_to_commit() {
-        // **stdout の末尾に `nothing to commit` が出る**（git 2.55.0 で実測した出力そのまま）。
-        // `NoChanges` を先に見ると、進行中操作が残っているのに「何も始まらなかった」と読む。
+        // git 2.55.0 で実測した出力そのまま。
         let stdout = "On branch main\nYou are currently cherry-picking commit 5ac5991.\n  (all conflicts fixed: run \"git cherry-pick --continue\")\n  (use \"git cherry-pick --skip\" to skip this patch)\n  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)\n\nnothing to commit, working tree clean\n";
         let stderr =
             "The previous cherry-pick is now empty, possibly due to conflict resolution.\n";

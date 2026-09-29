@@ -197,16 +197,14 @@ impl Reload {
             // 成否から「いま何が設定されているか」は読めない。
             GitOp::SetAccount { .. } | GitOp::UnsetAccount => Reload::Account,
 
-            // **1 本だけの cherry-pick は、失敗したなら HEAD は元のまま**（コンフリクト・
-            // 変更が空で止まった形・`-m` の無い merge コミット・ワークツリーとの衝突。
-            // 03 の「cherry-pick の開始」の実測）。下の `Commit` と同じ理由で、読み直すと
-            // `GraphState::restart` がグラフの位置を先頭に戻す —— `y` を押したコミットを
-            // 見失う。**複数では下の腕に落ちる**（途中まで積んでから止まる）。
-            GitOp::CherryPick(oids) if oids.len() == 1 => Reload::one_shot(moved),
-            // **1 本だけの revert も同じ**（コンフリクト・取り消す変更が無い・`-m` の無い
-            // merge コミット・無い親の番号・ワークツリーとの衝突。03 の「revert の開始」の
-            // 実測）。
-            GitOp::Revert { oids, .. } if oids.len() == 1 => Reload::one_shot(moved),
+            // **1 本だけの cherry-pick / revert は、失敗したなら HEAD は元のまま**
+            // （03 の「cherry-pick の開始」「revert の開始」の実測）。下の `Commit` と同じ
+            // 理由で、読み直すと `GraphState::restart` がグラフの位置を先頭に戻す ——
+            // `y` / `v` を押したコミットを見失う。**複数では下の腕に落ちる**（途中まで
+            // 積んでから止まる）。
+            GitOp::CherryPick(oids) | GitOp::Revert { oids, .. } if oids.len() == 1 => {
+                Reload::one_shot(moved)
+            }
 
             // walk に入るコミットの集合が変わる。**失敗しても途中まで ref が
             // 動いていることがある**ので成否を見ない。fetch / pull は一部の ref だけ
@@ -386,8 +384,8 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
 /// cherry-pick の変更が空で止まったときの案内。**continue は同じ理由で断られる**ので、
 /// 出口は skip（1 本なら abort と同じ結果。03 の「continue / skip / abort の終わり方」）。
 ///
-/// **案内するのは cherry-pick の系統だけ。** revert は空でも止まらない（03 の「cherry-pick の
-/// 開始」の参考行）。rebase で空の pick に当たったときの出力は確かめていないので、ほかの op で
+/// **案内するのは cherry-pick の系統だけ。** 1 本だけの revert は空でも止まらない（03 の
+/// 「revert の開始」）。rebase で空の pick に当たったときの出力は確かめていないので、ほかの op で
 /// 出たら、案内の無い `Display` に落ちるほうが嘘を言わない。
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由 —— revert の skip などを
@@ -434,17 +432,19 @@ fn empty_advice(op: &GitOp) -> Option<&'static str> {
 
 /// 積むものが無く、何も始まらずに終わったときの案内（[`ExecErrorKind::NoChanges`]）。
 ///
-/// **revert だけ。** 1 本だけの revert で変更が空になると、git は `REVERT_HEAD` を
-/// 残さず exit 1 で返り、stderr は空（03 の「revert の開始」）—— 分けないと argv だけの
-/// 赤い通知になる。**commit も同じ文言を出す**が、あちらは `Display` のまま（何を stage
-/// すればよいかは git の stdout が `detail` で言う）。continue の類で出たときの出力は
-/// 確かめていないので案内しない。
+/// **1 本だけの revert だけ**（03 の「revert の開始」）。**複数の revert は途中が空だと
+/// `sequencer/` を残して止まり、同じ文言を出す**ので、「取り消し済み」と言うと進行中の
+/// 操作を隠す —— 案内は複数の revert のタスクで決める。**commit も同じ文言を出す**が、
+/// あちらは `Display` のまま。continue の類で出たときの出力は確かめていないので案内しない。
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由。
 fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
     match op {
-        GitOp::Revert { .. } => Some("取り消す変更がありません（取り消し済み）"),
-        GitOp::Stage(_)
+        GitOp::Revert { oids, .. } if oids.len() == 1 => {
+            Some("取り消す変更がありません（取り消し済み）")
+        }
+        GitOp::Revert { .. }
+        | GitOp::Stage(_)
         | GitOp::Unstage(_)
         | GitOp::StageHunk { .. }
         | GitOp::UnstageHunk { .. }
@@ -729,6 +729,26 @@ mod tests {
         assert_eq!(notice.level, NoticeLevel::Warn);
         assert!(
             notice.message.contains("取り消す変更"),
+            "{}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn several_reverts_with_nothing_to_undo_are_not_told_it_was_undone() {
+        // 複数の revert は途中が空だと `sequencer/` を残して止まる（03 の「revert の開始」）。
+        // 「取り消し済み」と言うと進行中の操作を隠す。
+        let mut state = state();
+        let op = GitOp::Revert {
+            oids: vec![fake_oid(1), fake_oid(2)],
+            mainline: None,
+        };
+        finish_exec(&mut state, op, Err(failed_with(ExecErrorKind::NoChanges)));
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        assert!(
+            !notice.message.contains("取り消し済み"),
             "{}",
             notice.message
         );

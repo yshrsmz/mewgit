@@ -365,10 +365,10 @@ pub enum ExecErrorKind {
     /// **進行中操作は残り、continue は同じ理由で断られる** —— 出る手は skip か abort
     /// （03 の「continue / skip / abort の終わり方」）。
     Empty,
-    /// 積むものが無く、**何も始まらずに終わった**（`nothing to commit` の類。stdout に
-    /// 出る）。**[`ExecErrorKind::Empty`] の「進行中操作が残らない」版** —— 1 本だけの
-    /// revert で変更が空になると、`REVERT_HEAD` を残さず exit 1 で返る（03 の
-    /// 「revert の開始」）。stderr は空なので、分けないと理由の無い赤い通知になる。
+    /// 積む変更が無かった（stdout の `nothing to commit` の類。03 の「エラー分類」）。
+    /// **文言で分けた種別で、進行中操作が残ったかは言わない** —— 1 本だけの revert では
+    /// 何も残らないが、複数の revert の途中では `sequencer/` が残る（03 の「revert の
+    /// 開始」）。どちらかを決めるのは op を見る `app` の側。
     NoChanges,
     NonFastForward,
     Other,

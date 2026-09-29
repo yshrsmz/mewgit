@@ -2136,7 +2136,7 @@ pub struct PushRejection {
 | `NonFastForward` + `Pull` | 履歴が分かれている（merge / rebase は M5） |
 | `Conflict` + rebase / cherry-pick / revert（開始・continue・skip）/ `pull --rebase` | 解消して `git add` したら `m` で continue する（**`Warn`**） |
 | `Empty` + cherry-pick（開始・continue・skip） | `m` から skip する（**`Warn`**） |
-| `NoChanges` + revert（開始） | 取り消す変更が無い（**`Warn`**） |
+| `NoChanges` + revert（開始、1 本だけ） | 取り消す変更が無い（**`Warn`**） |
 | それ以外 | 無し（`Display` に落とす） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
@@ -2185,8 +2185,10 @@ pub struct PushRejection {
 - **`NoChanges` も `Warn` で出す。** 1 本だけの revert で取り消す変更が無かった形で、git は
   `REVERT_HEAD` を残さず exit 1 で返り、**stderr は空**（03 の「revert の開始」）。案内が
   無いと argv だけの赤い通知になり、理由が見えない。文は「取り消す変更がありません
-  （取り消し済み）」。**`git commit` も同じ文言を出すが、あちらは `Display` のまま** ——
-  commit の `NoChanges` に何を言うべきかはこのタスクで決めていない
+  （取り消し済み）」。**1 本だけの revert に限る** —— 複数の revert は途中が空だと
+  `sequencer/` を残して止まり、同じ文言を出す（03）ので、「取り消し済み」と言うと進行中の
+  操作を隠す。**`git commit` も同じ文言を出すが、あちらは `Display` のまま**。**stderr が
+  空の失敗は理由が画面に出ない**（`ExecError` が stdout を運ばない。`docs/plan.md` の M6）
 - **`Conflict` は `Warn` で出す。** continue / skip のあとに次のコミットでまた止まった
   形で（03 の「continue / skip / abort の終わり方」）、進行中操作は残ってバッジの数が
   進む。**想定どおりの停止を赤で出すと、壊れたように読める。** 案内は「`git add` したら」

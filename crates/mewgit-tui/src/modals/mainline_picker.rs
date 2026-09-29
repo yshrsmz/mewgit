@@ -53,11 +53,15 @@ pub fn render(
 
 /// 1 行。`1  abc1234 summary`。**summary は読み込み済みの親だけ**（`ParentChoice::summary`）。
 fn row(index: usize, parent: &ParentChoice) -> Line<'static> {
-    let oid = short_oid(&parent.oid);
-    match &parent.summary {
-        Some(summary) => Line::from(format!("{}  {oid} {summary}", index + 1)),
-        None => Line::from(format!("{}  {oid}", index + 1)),
-    }
+    let summary = parent
+        .summary
+        .as_deref()
+        .map_or(String::new(), |s| format!(" {s}"));
+    Line::from(format!(
+        "{}  {}{summary}",
+        index + 1,
+        short_oid(&parent.oid)
+    ))
 }
 
 #[cfg(test)]

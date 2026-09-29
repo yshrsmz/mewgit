@@ -380,9 +380,9 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
 /// cherry-pick の変更が空で止まったときの案内。**continue は同じ理由で断られる**ので、
 /// 出口は skip（1 本なら abort と同じ結果。03 の「continue / skip / abort の終わり方」）。
 ///
-/// **git がこの文言を出すのは cherry-pick の系統だけ**（revert は空でも止まらず、rebase は
-/// 空の pick を既定で落とす。03 の実測）。ほかの op で出たら、案内の無い `Display` に
-/// 落ちるほうが嘘を言わない。
+/// **案内するのは cherry-pick の系統だけ。** revert は空でも止まらない（03 の「cherry-pick の
+/// 開始」の参考行）。rebase で空の pick に当たったときの出力は確かめていないので、ほかの op で
+/// 出たら、案内の無い `Display` に落ちるほうが嘘を言わない。
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由 —— revert の skip などを
 /// 足したときに、空で止まったあと skip で抜ける操作かを選ばせる。
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn an_empty_stop_outside_cherry_pick_is_not_told_to_skip() {
-        // git がこの文言を出すのは cherry-pick の系統だけ。ほかで出たら `Display` に落とす。
+        // 案内するのは cherry-pick の系統だけ。ほかで出たら `Display` に落とす。
         let mut state = state();
         finish_exec(
             &mut state,

@@ -605,7 +605,8 @@ skip を足すかは revert の開始のタスクで決める。
 | 同上、detached HEAD | 0 | stdout `[detached HEAD d4b7235] t1` | 無し | 成功 |
 | 同上、**別のファイル**が dirty | 0 | 同上 | dirty のまま | 成功 |
 | 同上、**同じファイル**が dirty | 128 | stderr `Your local changes to the following files would be overwritten by merge` | 無し | `Other` |
-| HEAD 自身・HEAD の祖先・merge で取り込み済みのコミット | 1 | stderr `The previous cherry-pick is now empty` | **`CHERRY_PICK_HEAD`** | `Empty` |
+| HEAD 自身・HEAD の祖先・merge で取り込み済みのコミット（後の履歴が同じ箇所を変えていない） | 1 | stderr `The previous cherry-pick is now empty` | **`CHERRY_PICK_HEAD`** | `Empty` |
+| HEAD の祖先で、**後のコミットが同じ箇所を変えている** | 1 | stdout `CONFLICT (content)`、stderr `could not apply` | `CHERRY_PICK_HEAD`、`UU` | `Conflict` |
 | コンフリクトするコミット | 1 | stdout `CONFLICT (content)`、stderr `could not apply` | `CHERRY_PICK_HEAD`、`UU` | `Conflict` |
 | merge コミット | 128 | stderr `is a merge but no -m option was given` | 無し | `Other` |
 | （参考）revert で変更が空になる | 1 | stdout `nothing added to commit`、stderr 空 | **無し**（`REVERT_HEAD` は残らない） | `Other` |

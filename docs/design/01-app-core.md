@@ -696,6 +696,8 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   断っても失うものが無い
 - **HEAD 自身や、もう取り込み済みのコミットも手前で断らない。** git は変更が空で止まり
   （`CHERRY_PICK_HEAD` が残る）、`Empty` の案内が `m` の skip を指す（下の「失敗の案内文」）。
+  **後の履歴が同じ箇所を変えていれば、空ではなくコンフリクトで止まる**（03 の表）ので、
+  `Conflict` の案内になる。どちらでも HEAD は動かない。
   取り込み済みかどうかは HEAD からの到達だけでは決まらない（merge で取り込んだ変更も空になる）
   ので、判定を mewgit に写さない
 - **1 本だけの pick は、失敗したらログを読み直さない**（上の「ログの読み直し」）
@@ -2145,8 +2147,9 @@ pub struct PushRejection {
 - **`Empty` も `Warn` で出す。** cherry-pick の変更が空で止まった形で、`CHERRY_PICK_HEAD` が
   残ってバッジが出る。**continue は同じ理由で断られる**ので、案内するのは skip（03 の
   「continue / skip / abort の終わり方」）。文は「変更が空で止まった。m から skip」
-  （31 セル。バッジの隣の 48 に収まる）。**cherry-pick の系統の op だけに出す** —— git が
-  この文を出すのはそこだけで、ほかで出たら案内の無い `Display` に落とすほうが嘘を言わない
+  （31 セル。バッジの隣の 48 に収まる）。**cherry-pick の系統の op だけに出す** —— revert は
+  空でも止まらず（03）、rebase で空の pick に当たったときの出力は確かめていない。ほかで出たら
+  案内の無い `Display` に落とすほうが嘘を言わない
 - **`Conflict` は `Warn` で出す。** continue / skip のあとに次のコミットでまた止まった
   形で（03 の「continue / skip / abort の終わり方」）、進行中操作は残ってバッジの数が
   進む。**想定どおりの停止を赤で出すと、壊れたように読める。** 案内は「`git add` したら」

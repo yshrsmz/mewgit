@@ -225,8 +225,8 @@ fn is_abort(op: &GitOp) -> bool {
 /// `m`。進行中操作のメニューを開く（01 の「進行中操作のメニュー（`m`）」）。
 ///
 /// **snapshot の鮮度は問わない** —— 終わっていれば git が断り、`exec_finished` の
-/// `LoadStatus` がバッジを直す。**開けないときは読み直す** —— mewgit は進行中操作を
-/// 始められないので、端末で始めた直後に押すのがいちばんよく踏む形で、snapshot は
+/// `LoadStatus` がバッジを直す。**開けないときは読み直す** —— mewgit から始められるのは
+/// cherry-pick だけで、端末で rebase などを始めた直後に押すのがいちばんよく踏む形で、snapshot は
 /// まだ「無い」。1 回目は通知で終わり、2 回目は開く。
 pub(super) fn open_progress_menu(state: &mut AppState) -> Cmd {
     let progress = state.worktree.snapshot.progress.as_ref();

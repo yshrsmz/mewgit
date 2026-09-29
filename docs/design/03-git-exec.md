@@ -460,8 +460,16 @@ op で分けている。**#49 の「分類の読み手が増えたら偽陽性�
 | `Authentication failed` | `HttpsAuthFailed` |
 | `CONFLICT` / `could not apply` | `Conflict` |
 | `is now empty` | `Empty` |
+| `nothing to commit` / `nothing added to commit` / `no changes added to commit` | `NoChanges` |
 | `non-fast-forward` / `fetch first` / `stale info` / `Not possible to fast-forward` | `NonFastForward` |
 | その他 | `Other` |
+
+**`NoChanges` は `Empty` より後ろ。** 空で止まった cherry-pick の stdout の末尾にも
+`nothing to commit, working tree clean` が出る（git 2.55.0 で実測）ので、先に見ると
+進行中操作が残っているのに「何も始まらなかった」と読む。**3 つの語は作業ツリーの状態で
+割れる同じ結び**（clean / untracked がある / tracked が dirty。下の「revert の開始」）。
+**`git commit` も同じ語を出す**（stage したものが無いとき）ので `Commit` の失敗も
+`NoChanges` になるが、案内は op で分けてあり、commit には出さない（01 の「失敗の案内文」）。
 
 **案内文は 01 の「失敗の案内文」が持つ。** ここに文言まで並べると、同じ kind でも
 op で変わる分（非 FF は 4 通り）を表に書けないうえ、「次に何のキーを押すか」は
@@ -584,9 +592,9 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 **空で止まった pick は continue では抜けられない**（上の表の 2 行。2026-09-29 に測った）。
 `GIT_EDITOR=true` でも同じで、git は `commit --allow-empty` か `--skip` を求める。
 **出口は skip か abort** なので、`m` のメニューの cherry-pick に skip を入れた（01 の
-「進行中操作のメニュー（`m`）」）。**revert には入れていない** —— revert は変更が空でも
-止まらず（下の「cherry-pick の開始」の表）、空で抜けられない形を作らない。revert の
-skip を足すかは revert の開始のタスクで決める。
+「進行中操作のメニュー（`m`）」）。**revert にも入れた** —— 解消した結果が空だと continue が
+同じように断られる（下の「revert の開始」の表。stderr は空で、`Empty` ではなく
+`NoChanges` に落ちる）。
 
 **`Conflict` は失敗ではなく「次で止まった」** —— 進行中操作は残り、バッジの数が進む。
 そこで赤を出すと壊れたように読めるので、`app` は `Warn` で次の手を案内する（01 の
@@ -609,7 +617,6 @@ skip を足すかは revert の開始のタスクで決める。
 | HEAD の祖先で、**後のコミットが同じ箇所を変えている** | 1 | stdout `CONFLICT (content)`、stderr `could not apply` | `CHERRY_PICK_HEAD`、`UU` | `Conflict` |
 | コンフリクトするコミット | 1 | stdout `CONFLICT (content)`、stderr `could not apply` | `CHERRY_PICK_HEAD`、`UU` | `Conflict` |
 | merge コミット | 128 | stderr `is a merge but no -m option was given` | 無し | `Other` |
-| （参考）revert で変更が空になる | 1 | stdout `nothing added to commit`、stderr 空 | **無し**（`REVERT_HEAD` は残らない） | `Other` |
 
 - **どの失敗でも HEAD は動かない**（1 本だけのとき）。書き込みのあとの読み直し
   （01 の「ログの読み直し」）は、成功したときだけログまで読み直す。複数では途中まで
@@ -622,5 +629,48 @@ skip を足すかは revert の開始のタスクで決める。
   `dropping … patch contents already upstream`）が、**成功は通知に出さないので、押しても
   何も起きなかったように見える**
 - **merge コミットは `app` が手前で断る**（`GitOp::CherryPick` は mainline を運ばない）。
-  mainline を選ぶのは revert の開始のタスク（`Revert { mainline }`）
+  mainline を選ぶのは revert の開始（下）
+
+### revert の開始
+
+**`GitOp::Revert` は 1 本だけの形で使う**（01 の「revert の開始（`v`）」）。一時リポジトリを
+作り直して叩いた（git 2.55.0、`GIT_EDITOR=true LC_ALL=C`、2026-09-29）。fixture は
+`c1`（`a`）→ `c2`（`b`）→ `c3`（`a` を書き換え）の main に、`c1` から分けた topic（`t`）を
+`--no-ff` で merge した形。
+
+| 選んだコミット・状態 | exit | stdout / stderr | 残るもの | 分類 |
+|---|---|---|---|---|
+| 親が 1 つのコミット | 0 | stdout `[main 18dbc69] Revert "c2"` | 無し（HEAD が進む） | 成功 |
+| 同上、**別のファイル**が dirty | 0 | 同上 | dirty のまま | 成功 |
+| 同上、**同じファイル**が dirty | 128 | stderr `Your local changes to the following files would be overwritten by merge` | 無し | `Other` |
+| merge コミット、`-m` 無し | 128 | stderr `is a merge but no -m option was given` | 無し | `Other` |
+| merge コミット、`-m 1` | 0 | stdout `Revert "merge"`、**topic 側の `t` を消す** | 無し | 成功 |
+| merge コミット、`-m 2` | 0 | stdout `Revert "merge"`、**main 側の `b` を消し `a` を戻す** | 無し | 成功 |
+| merge コミット、`-m 3`（無い親） | 128 | stderr `does not have parent 3` | 無し | `Other` |
+| 親が 1 つのコミットに `-m 1` | 0 | 成功と同じ | 無し | 成功 |
+| 後の履歴が同じ箇所を変えている（`c1`） | 1 | stdout `CONFLICT (modify/delete)`、stderr `could not revert` | `REVERT_HEAD`、`UD`（**`sequencer/` は無し**） | `Conflict` |
+| 取り消し済みのコミット | 1 | stdout `nothing to commit, working tree clean`、**stderr 空** | **無し**（`REVERT_HEAD` も `sequencer/` も残らない） | `NoChanges` |
+| 同上、untracked がある | 1 | stdout `nothing added to commit but untracked files present` | 無し | `NoChanges` |
+| 同上、tracked が dirty | 1 | stdout `no changes added to commit` | 無し | `NoChanges` |
+| コンフリクトのあと `revert --skip` | 0 | 何も出さない | 無し（HEAD は元のまま） | 成功 |
+| コンフリクトを **HEAD 側の内容で解いて** `revert --continue` | 1 | stdout `You are currently reverting commit …` + `nothing to commit`、**stderr 空** | **`REVERT_HEAD`**（進行中のまま） | `NoChanges` |
+| ↑ のあと `revert --skip` | 0 | 何も出さない | 無し（HEAD は元のまま） | 成功 |
+| （参考）複数の revert で skip した先が空 | 1 | stdout `nothing to commit`、stderr 空 | **`sequencer/` だけ**（`todo` の先頭行は `revert …`） | `NoChanges` |
+| （参考）複数の revert で途中が空 | 1 | stdout `Revert currently in progress.` + 上の 3 つの結びのどれか | **`sequencer/` だけ**（`REVERT_HEAD` は無い） | `NoChanges` |
+
+- **どの失敗でも HEAD は動かない**（1 本だけのとき）。cherry-pick と同じく、成功したときだけ
+  ログまで読み直す（01 の「ログの読み直し」）
+- **`--mainline N` は N 番目の親を残す。** `-m 1` と `-m 2` で消えるファイルが逆になる
+  （表の 2 行）。画面では「残す側の親」と言う（01、07）
+- **取り消す変更が無い形は `NoChanges` に分ける**（上の「エラー分類」）。stderr が空なので、
+  `Other` のままだと argv だけの赤い通知になる
+- **1 本だけでも continue で空になる。** コンフリクトを HEAD 側の内容で解くと、開始と
+  同じ文言で断られるが **`REVERT_HEAD` が残る**。**`NoChanges` は進行中操作が残ったかを
+  言わない**ので、案内は op で分ける（開始なら「取り消し済み」、continue / skip なら
+  「m から skip」。01 の「失敗の案内文」）。skip の先が空でも `sequencer/` が残って止まり、
+  `todo` の先頭行が `revert` なので 02 の検出が `Revert` と読む（`m` の skip が届く）
+- **複数の revert で途中が空だと止まる**（参考行）。`sequencer/` だけが残る形で、
+  `REVERT_HEAD` が無いので skip で抜ける。これを拾うのは複数の revert のタスク ——
+  02 の検出表は `sequencer/` だけの形を `sequencer/todo` の先頭行で見るので、そこで
+  `Revert` と読めるかも一緒に確かめる
 

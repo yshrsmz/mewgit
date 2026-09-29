@@ -569,6 +569,99 @@ async fn an_empty_cherry_pick_stops_and_only_skip_gets_out() {
 }
 
 #[tokio::test]
+async fn reverting_a_merge_keeps_the_parent_named_by_mainline() {
+    // `--mainline 1` は 1 番目の親（main）を残し、side から入った変更を取り消す
+    // （03 の「revert の開始」の実測）。番号の向きを取り違えると main 側が消える。
+    let repo = TestRepo::init();
+    repo.commit_bytes("file.txt", b"base\n", "base");
+    repo.git(&["switch", "-qc", "side"]);
+    repo.commit_bytes("side.txt", b"side\n", "side");
+    repo.git(&["switch", "-q", "main"]);
+    repo.commit_bytes("main.txt", b"main\n", "main");
+    repo.git(&["merge", "-q", "--no-ff", "side", "-m", "merge"]);
+    let merge = repo.git(&["rev-parse", "HEAD"]);
+
+    repo.runner()
+        .run(&GitOp::Revert {
+            oids: vec![merge.trim().parse().expect("oid ではありません")],
+            mainline: Some(1),
+        })
+        .await
+        .expect("revert できませんでした");
+
+    assert!(!repo.path().join("side.txt").exists());
+    assert!(repo.path().join("main.txt").exists());
+    assert_eq!(repo.porcelain(), "");
+}
+
+#[tokio::test]
+async fn a_revert_with_nothing_to_undo_ends_without_leaving_a_revert_in_progress() {
+    // 取り消し済みのコミットをもう一度 revert すると、exit 1 で `REVERT_HEAD` を残さずに
+    // 返る（03 の「revert の開始」）。**stderr は空**なので、stdout で `NoChanges` に分ける。
+    let repo = TestRepo::init();
+    repo.commit_bytes("file.txt", b"base\n", "base");
+    let next = repo.commit_bytes("other.txt", b"next\n", "next");
+    let revert = GitOp::Revert {
+        oids: vec![next],
+        mainline: None,
+    };
+    repo.runner()
+        .run(&revert)
+        .await
+        .expect("1 回目の revert ができませんでした");
+    let head = repo.git(&["rev-parse", "HEAD"]);
+
+    let err = repo
+        .runner()
+        .run(&revert)
+        .await
+        .expect_err("取り消す変更が無いはずです");
+
+    assert_eq!(failure_kind(&err), ExecErrorKind::NoChanges);
+    assert!(!repo.path().join(".git").join("REVERT_HEAD").exists());
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), head);
+}
+
+#[tokio::test]
+async fn a_revert_resolved_to_nothing_stops_on_continue_and_skip_gets_out() {
+    // 1 本だけの revert でも、コンフリクトを HEAD 側の内容で解くと continue は空で
+    // 断られ、`REVERT_HEAD` が残る（03 の「revert の開始」）。stderr は空。
+    let repo = TestRepo::init();
+    repo.commit_bytes("file.txt", b"1\n", "c1");
+    let c2 = repo.commit_bytes("file.txt", b"2\n", "c2");
+    let head = repo.commit_bytes("file.txt", b"3\n", "c3");
+    let revert_head = repo.path().join(".git").join("REVERT_HEAD");
+    let revert = GitOp::Revert {
+        oids: vec![c2],
+        mainline: None,
+    };
+
+    let err = repo
+        .runner()
+        .run(&revert)
+        .await
+        .expect_err("コンフリクトするはずです");
+    assert_eq!(failure_kind(&err), ExecErrorKind::Conflict);
+    repo.write_worktree_file("file.txt", b"3\n");
+    repo.git(&["add", "file.txt"]);
+
+    let err = repo
+        .runner()
+        .run(&GitOp::RevertContinue)
+        .await
+        .expect_err("空で断られるはずです");
+    assert_eq!(failure_kind(&err), ExecErrorKind::NoChanges);
+    assert!(revert_head.exists());
+
+    repo.runner()
+        .run(&GitOp::RevertSkip)
+        .await
+        .expect("skip できませんでした");
+    assert!(!revert_head.exists());
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), head.to_string());
+}
+
+#[tokio::test]
 async fn batch_mode_is_layered_onto_the_user_ssh_command() {
     // **`GIT_TERMINAL_PROMPT=0` は ssh に効かない**ので、agent に載っていない鍵だと
     // raw mode の画面ごと止まる。`-o BatchMode=yes` で即失敗させる（03 の

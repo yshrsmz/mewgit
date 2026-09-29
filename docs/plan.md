@@ -344,16 +344,29 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       コミットは手前で断る。**変更が空で止まった pick は continue で抜けられない**ので、
       `m` のメニューの cherry-pick に skip を足し、`ExecErrorKind::Empty` で案内する
       （2026-09-29 にユーザーと決めた。03 の「cherry-pick の開始」に実測の表）
-- [ ] cherry-pick（複数）の開始。**単一と割った**（2026-09-29）—— グラフに印を付ける
-      仕組みが要り、**同じ仕組みを revert の開始も使う**ので、revert の開始のあとで
-      共有の形を決める（01 の「cherry-pick の開始（`y`）」）
-- [ ] revert（mainline 選択）の開始。continue / abort は上の `m` メニューに入っている。
-      **skip をメニューに足すかはここで決める** —— revert は変更が空でも止まらない
-      （cherry-pick とは違う。03 の「cherry-pick の開始」の参考行）
+- [x] revert（単一、mainline 選択）の開始。**Graph の `v` → merge コミットなら
+      `MainlinePicker` で残す側の親 → 確認 → `revert [--mainline N] <oid>`**。取り消す
+      変更が無い形は `ExecErrorKind::NoChanges` で `Warn` を出す。**`m` のメニューの revert に
+      skip を足した**（2026-09-29 にユーザーと決めた）—— 1 本だけでも、コンフリクトを HEAD
+      側で解くと continue が空で断られる（03 の「revert の開始」に実測の表）
+- [ ] cherry-pick / revert（複数）の開始。**単一と割った**（2026-09-29）—— グラフに印を
+      付ける仕組み（どのキーで付けるか、描き方、古い順に並べ直すこと）を両方で共有する
+      （01 の「cherry-pick の開始（`y`）」）。**複数の revert の開始が空で止まったときの
+      案内をここで決める** —— 途中が空だと `sequencer/` だけを残して止まる（03 の
+      「revert の開始」の参考行）が、`NoChanges` の案内は開始では 1 本だけの revert に
+      絞ってある（01 の「失敗の案内文」）。**印を付けるキーを Graph に足すと、
+      80 桁で共通キーの `f` まで落ちる**（07 の実測）—— `Modal::Help` と `?:help` を
+      先に入れるかを着手時に決める
 - [ ] `ui::panes::stash` — 一覧 / diff / push / apply / pop / drop、部分 stash
 
 ## M6: 仕上げ
 
+- [ ] **stderr が空の git の失敗に理由を出す。** `ExecError::Failed` は stdout を
+      運ばないので、stdout にだけ理由を書く失敗（`git commit` で stage したものが無い、
+      複数の revert が空で止まった形など。03 の「revert の開始」）は、通知にも `L` の
+      履歴にも argv しか出ない。**塞ぐには `Failed` に stdout を足し、stderr が空なら
+      stdout の結びの行を `detail` と要約に使う**（01 の「失敗の案内文」）。1 本だけの
+      revert は `NoChanges` の案内で先に塞いである
 - [x] ステータスバーのキーヒント。**M4 の残りより先にやる**（2026-09-19 に決めた）。
       フッターを **2 行**にして 1 行目を通知、2 行目をフォーカス中のペインのキーにする。
       **キーの一覧は `app` に置く唯一の表**で、下の `Modal::Help` と `config.keymap` が

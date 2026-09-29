@@ -88,6 +88,7 @@ const GRAPH: &[KeyHint] = &[
     hint(&[Key::new(KeyCode::Enter)], "右へ"),
     hint(&[Key::char('n')], "ブランチ作成"),
     hint(&[Key::char('y')], "cherry-pick"),
+    hint(&[Key::char('v')], "revert"),
 ];
 
 const BRANCHES: &[KeyHint] = &[

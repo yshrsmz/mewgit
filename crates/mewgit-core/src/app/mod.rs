@@ -20,8 +20,8 @@ pub use msg::{ExecDone, Msg, RepoSnapshot};
 pub use state::{
     AccountListing, AccountView, AppState, BranchLoad, BranchState, CommitFiles, DiffCursor,
     DiffState, DiffView, GithubBlock, GraphLine, GraphSelection, GraphState, InputIntent, Job,
-    JobKind, JobTracker, Modal, Motion, Notice, NoticeLevel, Pane, PrField, PrHead, PrHeads,
-    PrLoad, PrState, PushRejection, Region, Repick, RepoInfo, RightTab, TargetState, TermSize,
-    TextBuffer, WorktreeState,
+    JobKind, JobTracker, Modal, Motion, Notice, NoticeLevel, Pane, ParentChoice, PrField, PrHead,
+    PrHeads, PrLoad, PrState, PushRejection, Region, Repick, RepoInfo, RightTab, TargetState,
+    TermSize, TextBuffer, WorktreeState,
 };
 pub use update::{init, progress_menu, update, MenuItem, ProgressMenu};

@@ -2337,7 +2337,28 @@ pub enum Modal {
         menu: ProgressMenu,
         cursor: usize,
     },
+    /// merge コミットを revert するとき、**残す側の親**（`--mainline`）を選ぶ（01 の
+    /// 「revert の開始（`v`）」）。Graph の `v` が merge コミットで開く。
+    ///
+    /// **開いた時点のコミットと親を写して持つ**（`RemotePicker` の `remotes` と同じ）。
+    /// 開いているあいだにログが読み直されても、選んだ番号が別のコミットの親を指さない。
+    /// `cursor` の添字 + 1 が `--mainline` の番号。
+    MainlinePicker {
+        target: Oid,
+        summary: String,
+        parents: Vec<ParentChoice>,
+        cursor: usize,
+    },
     Help,
+}
+
+/// [`Modal::MainlinePicker`] の 1 行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentChoice {
+    pub oid: Oid,
+    /// **読み込み済みのグラフに在るときだけ**（01 の「revert の開始（`v`）」）。
+    /// 無いときに読み足さない —— oid だけでも選べ、読み足しを待たせるほうが重い。
+    pub summary: Option<String>,
 }
 
 impl AppState {
@@ -2376,6 +2397,9 @@ impl AppState {
             Some(Modal::ProgressMenu { menu, cursor }) => {
                 *cursor = stepped_index(*cursor, menu.items.len(), delta);
             }
+            Some(Modal::MainlinePicker {
+                parents, cursor, ..
+            }) => *cursor = stepped_index(*cursor, parents.len(), delta),
             // **通知が無ければ動かない**（`notice_log_row` が `None`）。
             Some(Modal::NoticeLog { selected }) => {
                 if let Some(seq) = notice {

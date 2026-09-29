@@ -35,11 +35,12 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         // 頼んでいないことが壊れたように読める。**コンフリクトで止まったのも同じ** ——
         // continue のあとに次のコミットでまた止まるのは想定どおりの結末で、進行中操作は
         // 残ってバッジの数が進む（01 の「失敗の案内文」）。**変更が空で止まった pick も**
-        // 進行中操作が残り、出口は `m` の skip にある。
+        // 進行中操作が残り、出口は `m` の skip にある。**取り消す変更が無かった revert** は
+        // 何も始まらずに終わっただけで、壊れたものが無い。
         let level = match err {
             ExecError::Canceled { .. } => NoticeLevel::Info,
             ExecError::Failed {
-                kind: ExecErrorKind::Conflict | ExecErrorKind::Empty,
+                kind: ExecErrorKind::Conflict | ExecErrorKind::Empty | ExecErrorKind::NoChanges,
                 ..
             } if advice.is_some() => NoticeLevel::Warn,
             ExecError::NoResult { .. } | ExecError::Failed { .. } => NoticeLevel::Error,
@@ -196,12 +197,14 @@ impl Reload {
             // 成否から「いま何が設定されているか」は読めない。
             GitOp::SetAccount { .. } | GitOp::UnsetAccount => Reload::Account,
 
-            // **1 本だけの cherry-pick は、失敗したなら HEAD は元のまま**（コンフリクト・
-            // 変更が空で止まった形・`-m` の無い merge コミット・ワークツリーとの衝突。
-            // 03 の「cherry-pick の開始」の実測）。下の `Commit` と同じ理由で、読み直すと
-            // `GraphState::restart` がグラフの位置を先頭に戻す —— `y` を押したコミットを
-            // 見失う。**複数では下の腕に落ちる**（途中まで積んでから止まる）。
-            GitOp::CherryPick(oids) if oids.len() == 1 => Reload::one_shot(moved),
+            // **1 本だけの cherry-pick / revert は、失敗したなら HEAD は元のまま**
+            // （03 の「cherry-pick の開始」「revert の開始」の実測）。下の `Commit` と同じ
+            // 理由で、読み直すと `GraphState::restart` がグラフの位置を先頭に戻す ——
+            // `y` / `v` を押したコミットを見失う。**複数では下の腕に落ちる**（途中まで
+            // 積んでから止まる）。
+            GitOp::CherryPick(oids) | GitOp::Revert { oids, .. } if oids.len() == 1 => {
+                Reload::one_shot(moved)
+            }
 
             // walk に入るコミットの集合が変わる。**失敗しても途中まで ref が
             // 動いていることがある**ので成否を見ない。fetch / pull は一部の ref だけ
@@ -218,6 +221,7 @@ impl Reload {
             | GitOp::CherryPickAbort
             | GitOp::Revert { .. }
             | GitOp::RevertContinue
+            | GitOp::RevertSkip
             | GitOp::RevertAbort
             // PR の取り出しは fetch で新しいコミットを入れ、ブランチを作り、HEAD を
             // 動かす。**手順の途中で止まっても前の手順の結果は残る**（03 の「複数の
@@ -313,6 +317,7 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
         ExecErrorKind::NonFastForward => non_fast_forward_advice(op),
         ExecErrorKind::Conflict => conflict_advice(op),
         ExecErrorKind::Empty => empty_advice(op),
+        ExecErrorKind::NoChanges => no_changes_advice(op),
         ExecErrorKind::Other => None,
     }
 }
@@ -339,7 +344,8 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::CherryPickContinue
         | GitOp::CherryPickSkip
         | GitOp::Revert { .. }
-        | GitOp::RevertContinue => Some("コンフリクト。git add したら m から continue"),
+        | GitOp::RevertContinue
+        | GitOp::RevertSkip => Some("コンフリクト。git add したら m から continue"),
         // merge のコンフリクトを結ぶのは commit。
         GitOp::Pull {
             mode: PullMode::Merge,
@@ -380,8 +386,8 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
 /// cherry-pick の変更が空で止まったときの案内。**continue は同じ理由で断られる**ので、
 /// 出口は skip（1 本なら abort と同じ結果。03 の「continue / skip / abort の終わり方」）。
 ///
-/// **案内するのは cherry-pick の系統だけ。** revert は空でも止まらない（03 の「cherry-pick の
-/// 開始」の参考行）。rebase で空の pick に当たったときの出力は確かめていないので、ほかの op で
+/// **案内するのは cherry-pick の系統だけ。** revert が空で止まった形は stderr が空で、
+/// `Empty` ではなく `NoChanges` に落ちる（[`no_changes_advice`]）。rebase で空の pick に当たったときの出力は確かめていないので、ほかの op で
 /// 出たら、案内の無い `Display` に落ちるほうが嘘を言わない。
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由 —— revert の skip などを
@@ -414,6 +420,60 @@ fn empty_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::CherryPickAbort
         | GitOp::Revert { .. }
         | GitOp::RevertContinue
+        | GitOp::RevertSkip
+        | GitOp::RevertAbort
+        | GitOp::MergeAbort
+        | GitOp::StashPush { .. }
+        | GitOp::StashApply(_)
+        | GitOp::StashPop(_)
+        | GitOp::StashDrop(_)
+        | GitOp::SetAccount { .. }
+        | GitOp::UnsetAccount
+        | GitOp::CheckoutPr(_) => None,
+    }
+}
+
+/// 積む変更が無かったときの案内（[`ExecErrorKind::NoChanges`]。03 の「revert の開始」）。
+///
+/// **同じ文言で、進行中操作が残るかが op で割れる。** 1 本だけの revert の開始では何も
+/// 残らない（「取り消し済み」）。continue / skip では `REVERT_HEAD` か `sequencer/` が残り、
+/// continue は同じ理由で断られるので出口は skip。**複数の revert の開始も `sequencer/` を
+/// 残して止まる**が、mewgit から始める経路がまだ無いので案内しない（複数の revert の
+/// タスク）。**commit も同じ文言を出す**が、あちらは `Display` のまま。
+///
+/// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由。
+fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
+    match op {
+        GitOp::Revert { oids, .. } if oids.len() == 1 => {
+            Some("取り消す変更がありません（取り消し済み）")
+        }
+        // 解消した結果が空で、continue が断られた（`REVERT_HEAD` は残る）。
+        GitOp::RevertContinue | GitOp::RevertSkip => Some("変更が空で止まった。m から skip"),
+        GitOp::Revert { .. }
+        | GitOp::Stage(_)
+        | GitOp::Unstage(_)
+        | GitOp::StageHunk { .. }
+        | GitOp::UnstageHunk { .. }
+        | GitOp::DiscardHunk { .. }
+        | GitOp::Discard(_)
+        | GitOp::DiscardUntracked(_)
+        | GitOp::DiscardAdded(_)
+        | GitOp::Commit { .. }
+        | GitOp::BranchCreate { .. }
+        | GitOp::Switch(_)
+        | GitOp::BranchDelete { .. }
+        | GitOp::BranchRename { .. }
+        | GitOp::Fetch { .. }
+        | GitOp::Pull { .. }
+        | GitOp::Push { .. }
+        | GitOp::RebaseInteractive { .. }
+        | GitOp::RebaseContinue
+        | GitOp::RebaseSkip
+        | GitOp::RebaseAbort
+        | GitOp::CherryPick(_)
+        | GitOp::CherryPickContinue
+        | GitOp::CherryPickSkip
+        | GitOp::CherryPickAbort
         | GitOp::RevertAbort
         | GitOp::MergeAbort
         | GitOp::StashPush { .. }
@@ -616,6 +676,7 @@ mod tests {
             GitOp::CherryPickContinue,
             GitOp::CherryPickSkip,
             GitOp::RevertContinue,
+            GitOp::RevertSkip,
             // 止まると進行中操作は `Rebase` になり、`m` から continue できる。
             GitOp::Pull {
                 mode: PullMode::Rebase,
@@ -628,7 +689,10 @@ mod tests {
             GitOp::CherryPickSkip,
         ]
         .map(|op| (op, ExecErrorKind::Empty, "m から skip"));
-        for (op, kind, way) in conflict.into_iter().chain(empty) {
+        // revert は空で止まっても stderr が空で、`NoChanges` に落ちる（03 の「revert の開始」）。
+        let no_changes = [GitOp::RevertContinue, GitOp::RevertSkip]
+            .map(|op| (op, ExecErrorKind::NoChanges, "m から skip"));
+        for (op, kind, way) in conflict.into_iter().chain(empty).chain(no_changes) {
             let mut state = state();
             finish_exec(&mut state, op.clone(), Err(failed_with(kind)));
 
@@ -658,6 +722,63 @@ mod tests {
         let notice = state.notices.back().expect("通知がありません");
         assert_eq!(notice.level, NoticeLevel::Error);
         assert!(!notice.message.contains("skip"), "{}", notice.message);
+    }
+
+    #[test]
+    fn a_revert_with_nothing_to_undo_says_so_as_a_warning() {
+        // stderr は空で、分けないと argv だけの赤い通知になる（03 の「revert の開始」）。
+        let mut state = state();
+        let op = GitOp::Revert {
+            oids: vec![fake_oid(1)],
+            mainline: None,
+        };
+        finish_exec(&mut state, op, Err(failed_with(ExecErrorKind::NoChanges)));
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Warn);
+        assert!(
+            notice.message.contains("取り消す変更"),
+            "{}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn several_reverts_with_nothing_to_undo_are_not_told_it_was_undone() {
+        // 複数の revert は途中が空だと `sequencer/` を残して止まる（03 の「revert の開始」）。
+        // 「取り消し済み」と言うと進行中の操作を隠す。
+        let mut state = state();
+        let op = GitOp::Revert {
+            oids: vec![fake_oid(1), fake_oid(2)],
+            mainline: None,
+        };
+        finish_exec(&mut state, op, Err(failed_with(ExecErrorKind::NoChanges)));
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        assert!(
+            !notice.message.contains("取り消し済み"),
+            "{}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn a_commit_with_nothing_staged_stays_red() {
+        // `git commit` も同じ文言を出すが、案内は revert だけ（`no_changes_advice`）。
+        let mut state = state();
+        finish_exec(
+            &mut state,
+            GitOp::Commit {
+                message: "m".to_string(),
+                amend: false,
+            },
+            Err(failed_with(ExecErrorKind::NoChanges)),
+        );
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        assert!(!notice.message.contains("取り消す"), "{}", notice.message);
     }
 
     #[test]
@@ -1006,6 +1127,24 @@ mod tests {
             Reload::after(&GitOp::CherryPick(vec![fake_oid(1), fake_oid(2)]), false),
             Reload::RefsAndLog
         );
+        // **1 本だけの revert も**（03 の「revert の開始」の実測）。mainline の有無で変わらない。
+        for mainline in [None, Some(1)] {
+            let one = GitOp::Revert {
+                oids: vec![fake_oid(1)],
+                mainline,
+            };
+            assert_eq!(Reload::after(&one, false), Reload::Refs, "{mainline:?}");
+            assert_eq!(
+                Reload::after(&one, true),
+                Reload::RefsAndLog,
+                "{mainline:?}"
+            );
+        }
+        let many = GitOp::Revert {
+            oids: vec![fake_oid(1), fake_oid(2)],
+            mainline: None,
+        };
+        assert_eq!(Reload::after(&many, false), Reload::RefsAndLog);
         // PR の取り出しは手順の途中で止まっても前の手順の結果が残る（fetch が
         // ブランチを作ったあとで `switch` が断る。03 の「複数の手順を持つ書き込み」）。
         assert_eq!(

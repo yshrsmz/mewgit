@@ -394,6 +394,14 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
         ExecErrorKind::Conflict
     } else if has("is now empty") {
         ExecErrorKind::Empty
+    } else if has("nothing to commit")
+        || has("nothing added to commit")
+        || has("no changes added to commit")
+    {
+        // 作業ツリーの状態で 3 通りに割れる（clean / untracked がある / tracked が
+        // dirty。03 の「revert の開始」）。**`Empty` より後ろ** —— 空で止まった
+        // cherry-pick の stdout にも status が出るので、先に見ると進行中を見落とす。
+        ExecErrorKind::NoChanges
     } else if has("non-fast-forward")
         || has("fetch first")
         || has("stale info")
@@ -466,6 +474,28 @@ mod tests {
         let stdout = "On branch main\nYou are currently cherry-picking commit 13100af.\n  (all conflicts fixed: run \"git cherry-pick --continue\")\n  (use \"git cherry-pick --skip\" to skip this patch)\n";
         let stderr = "The previous cherry-pick is now empty, possibly due to conflict resolution.\nIf you wish to commit it anyway, use:\n\n    git commit --allow-empty\n\nOtherwise, please use 'git cherry-pick --skip'\n";
         assert_eq!(classify(stdout, stderr), ExecErrorKind::Empty);
+    }
+
+    #[test]
+    fn an_empty_cherry_pick_stays_empty_though_its_status_says_nothing_to_commit() {
+        // git 2.55.0 で実測した出力そのまま。
+        let stdout = "On branch main\nYou are currently cherry-picking commit 5ac5991.\n  (all conflicts fixed: run \"git cherry-pick --continue\")\n  (use \"git cherry-pick --skip\" to skip this patch)\n  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)\n\nnothing to commit, working tree clean\n";
+        let stderr =
+            "The previous cherry-pick is now empty, possibly due to conflict resolution.\n";
+        assert_eq!(classify(stdout, stderr), ExecErrorKind::Empty);
+    }
+
+    #[test]
+    fn a_revert_with_nothing_to_undo_is_no_changes_in_every_worktree_state() {
+        // 1 本だけの revert で変更が空になった形。stderr は空で、stdout の結びが
+        // 作業ツリーの状態で割れる（git 2.55.0 で実測。03 の「revert の開始」）。
+        for stdout in [
+            "On branch main\nnothing to commit, working tree clean\n",
+            "On branch main\nUntracked files:\n  (use \"git add <file>...\" to include in what will be committed)\n\tu\n\nnothing added to commit but untracked files present (use \"git add\" to track)\n",
+            "On branch main\nChanges not staged for commit:\n\tmodified:   a\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\n",
+        ] {
+            assert_eq!(classify(stdout, ""), ExecErrorKind::NoChanges, "{stdout}");
+        }
     }
 
     #[test]

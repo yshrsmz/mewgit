@@ -145,6 +145,9 @@ pub enum GitOp {
         mainline: Option<u32>,
     },
     RevertContinue,
+    /// 止まった revert を捨てて次へ進む（`revert --skip`）。**解消した結果が空で continue が
+    /// 断られた形から出る手**（03 の「revert の開始」）。
+    RevertSkip,
     RevertAbort,
     /// merge を始める前に戻す（`merge --abort`）。**continue に当たる変種は無い** ——
     /// merge を結ぶのは `Commit`（03 の「進行中に通す書き込み」）。
@@ -365,6 +368,11 @@ pub enum ExecErrorKind {
     /// **進行中操作は残り、continue は同じ理由で断られる** —— 出る手は skip か abort
     /// （03 の「continue / skip / abort の終わり方」）。
     Empty,
+    /// 積む変更が無かった（stdout の `nothing to commit` の類。03 の「エラー分類」）。
+    /// **文言で分けた種別で、進行中操作が残ったかは言わない** —— 1 本だけの revert では
+    /// 何も残らないが、複数の revert の途中では `sequencer/` が残る（03 の「revert の
+    /// 開始」）。どちらかを決めるのは op を見る `app` の側。
+    NoChanges,
     NonFastForward,
     Other,
 }

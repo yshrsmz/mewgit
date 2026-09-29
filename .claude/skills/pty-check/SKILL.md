@@ -62,3 +62,15 @@ Branches のキーヒントが `r:改名d:削除` に見えるが、生の出力
 env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   sh -c "cd <dir> && git init -q -b main . && ..."
 ```
+
+**他の TUI（lazygit / gitui / tig）を撮るときは `HOME` を scratchpad に向ける**（設定と
+状態を持ち込まない・書き込ませない）。**lazygit は初回起動でダイアログが出る**ので、
+`Enter` で閉じてから撮る。**`q` で終わらずに止まることがある**（2026-09-30、lazygit
+0.65.1 で 120 秒のタイムアウトまで返らなかった）ので、キーの列の最後に `Ctrl-C` を
+2 回足す。**複数のサイズを 1 つのコマンドで回さない** —— 1 つが止まると全部が
+バックグラウンドへ回され、残ったプロセスを `pkill` で片付けることになる。
+
+```
+(sleep 2.5; printf '\r'; sleep 1.5; printf 'q'; sleep 0.7; printf '\003'; sleep 0.5; printf '\003') \
+  | script -q /dev/null sh -c "stty rows 24 cols 80; cd <repo>; exec env HOME=<scratchpad>/home lazygit" > out.txt 2>&1
+```

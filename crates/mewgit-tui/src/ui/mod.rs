@@ -1458,15 +1458,15 @@ mod tests {
 
     #[test]
     fn the_common_keys_drop_at_the_width_where_they_would_be_cut() {
-        // **境目を跨ぐ**（`.claude/rules/testing.md`）。Graph + 共通キー + `q:quit` は 82 セルなので、
-        // 82 では出て 81 では落ちる。机上で選んだ幅では、どちらか片側しか踏めない。
-        let fits = hint_bar_of(Pane::Graph, 82);
+        // **境目を跨ぐ**（`.claude/rules/testing.md`）。Graph + 共通キー + `q:quit` は 96 セルなので、
+        // 96 では出て 95 では落ちる。机上で選んだ幅では、どちらか片側しか踏めない。
+        let fits = hint_bar_of(Pane::Graph, 96);
         assert!(fits.contains("L:通知"), "hints: {fits:?}");
         assert!(fits.contains("n:ブランチ作成"), "hints: {fits:?}");
 
         // **落とすのは共通キーの末尾 1 つだけ**（07）。丸ごと落とすと、共通キーを
         // 1 つ足しただけで `f` / `p` / `P` / `A` まで消える。
-        let over = hint_bar_of(Pane::Graph, 81);
+        let over = hint_bar_of(Pane::Graph, 95);
         assert!(!over.contains("L:通知"), "hints: {over:?}");
         assert!(over.contains("A:account"), "hints: {over:?}");
         assert!(over.contains("n:ブランチ作成"), "hints: {over:?}");
@@ -1508,10 +1508,10 @@ mod tests {
         // `contains` だけだと、80 桁をちょうど埋めた状態でも通る（#80）。
         assert!(fits(&detail, 79), "余白がありません: {detail:?}");
 
-        // **Graph は `L` だけが落ちる**（07 の実測）。
+        // **Graph は `A` と `L` が落ちる**（07 の実測。`y:cherry-pick` を足した回から）。
         let graph = hint_bar_of(Pane::Graph, 80);
-        assert!(graph.contains("A:account"), "hints: {graph:?}");
-        assert!(!graph.contains("L:通知"), "hints: {graph:?}");
+        assert!(graph.contains("P:push"), "hints: {graph:?}");
+        assert!(!graph.contains("A:account"), "hints: {graph:?}");
     }
 
     #[test]

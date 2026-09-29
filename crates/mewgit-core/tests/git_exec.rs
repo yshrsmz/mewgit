@@ -535,6 +535,40 @@ async fn a_conflicting_cherry_pick_is_classified_as_conflict() {
 }
 
 #[tokio::test]
+async fn an_empty_cherry_pick_stops_and_only_skip_gets_out() {
+    // HEAD の祖先を積むと変更が空で止まり、`CHERRY_PICK_HEAD` が残る。continue は
+    // 同じ理由で断られ、抜けられるのは skip か abort（03 の「continue / skip / abort の
+    // 終わり方」）。**stdout に小文字の `conflicts` が出る**ので `Conflict` に落ちないことも見る。
+    let repo = TestRepo::init();
+    let base = repo.commit_bytes("file.txt", b"base\n", "base");
+    // **別のファイルに積む。** 同じファイルを変えると、祖先の pick は空ではなく
+    // コンフリクトで止まる（最初に書いた形はそちらを見ていた）。
+    repo.commit_bytes("other.txt", b"next\n", "next");
+    let pick_head = repo.path().join(".git").join("CHERRY_PICK_HEAD");
+
+    let err = repo
+        .runner()
+        .run(&GitOp::CherryPick(vec![base]))
+        .await
+        .expect_err("変更が空で止まるはずです");
+    assert_eq!(failure_kind(&err), ExecErrorKind::Empty);
+    assert!(pick_head.exists());
+
+    let err = repo
+        .runner()
+        .run(&GitOp::CherryPickContinue)
+        .await
+        .expect_err("continue では抜けられないはずです");
+    assert_eq!(failure_kind(&err), ExecErrorKind::Empty);
+
+    repo.runner()
+        .run(&GitOp::CherryPickSkip)
+        .await
+        .expect("skip できませんでした");
+    assert!(!pick_head.exists());
+}
+
+#[tokio::test]
 async fn batch_mode_is_layered_onto_the_user_ssh_command() {
     // **`GIT_TERMINAL_PROMPT=0` は ssh に効かない**ので、agent に載っていない鍵だと
     // raw mode の画面ごと止まる。`-o BatchMode=yes` で即失敗させる（03 の

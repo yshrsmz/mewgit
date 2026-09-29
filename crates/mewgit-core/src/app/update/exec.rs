@@ -34,11 +34,12 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         // **中断は失敗ではない。** 押した本人が止めたものを `Error` で出すと、
         // 頼んでいないことが壊れたように読める。**コンフリクトで止まったのも同じ** ——
         // continue のあとに次のコミットでまた止まるのは想定どおりの結末で、進行中操作は
-        // 残ってバッジの数が進む（01 の「失敗の案内文」）。
+        // 残ってバッジの数が進む（01 の「失敗の案内文」）。**変更が空で止まった pick も**
+        // 進行中操作が残り、出口は `m` の skip にある。
         let level = match err {
             ExecError::Canceled { .. } => NoticeLevel::Info,
             ExecError::Failed {
-                kind: ExecErrorKind::Conflict,
+                kind: ExecErrorKind::Conflict | ExecErrorKind::Empty,
                 ..
             } if advice.is_some() => NoticeLevel::Warn,
             ExecError::NoResult { .. } | ExecError::Failed { .. } => NoticeLevel::Error,
@@ -195,6 +196,19 @@ impl Reload {
             // 成否から「いま何が設定されているか」は読めない。
             GitOp::SetAccount { .. } | GitOp::UnsetAccount => Reload::Account,
 
+            // **1 本だけの cherry-pick は、失敗したなら HEAD は元のまま**（コンフリクト・
+            // 変更が空で止まった形・`-m` の無い merge コミット・ワークツリーとの衝突。
+            // 03 の「cherry-pick の開始」の実測）。下の `Commit` と同じ理由で、読み直すと
+            // `GraphState::restart` がグラフの位置を先頭に戻す —— `y` を押したコミットを
+            // 見失う。**複数では下の腕に落ちる**（途中まで積んでから止まる）。
+            GitOp::CherryPick(oids) if oids.len() == 1 => {
+                if moved {
+                    Reload::RefsAndLog
+                } else {
+                    Reload::Refs
+                }
+            }
+
             // walk に入るコミットの集合が変わる。**失敗しても途中まで ref が
             // 動いていることがある**ので成否を見ない。fetch / pull は一部の ref だけ
             // 更新して落ちうるし、rebase / cherry-pick / revert は途中で止まる。
@@ -206,6 +220,7 @@ impl Reload {
             | GitOp::RebaseAbort
             | GitOp::CherryPick(_)
             | GitOp::CherryPickContinue
+            | GitOp::CherryPickSkip
             | GitOp::CherryPickAbort
             | GitOp::Revert { .. }
             | GitOp::RevertContinue
@@ -299,6 +314,7 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
         }
         ExecErrorKind::NonFastForward => non_fast_forward_advice(op),
         ExecErrorKind::Conflict => conflict_advice(op),
+        ExecErrorKind::Empty => empty_advice(op),
         ExecErrorKind::Other => None,
     }
 }
@@ -323,6 +339,7 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
         }
         | GitOp::CherryPick(_)
         | GitOp::CherryPickContinue
+        | GitOp::CherryPickSkip
         | GitOp::Revert { .. }
         | GitOp::RevertContinue => Some("コンフリクト。git add したら m から continue"),
         // merge のコンフリクトを結ぶのは commit。
@@ -360,6 +377,20 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
         // ならない（continue が無い）。push は作業ツリーを片付けるだけ。
         GitOp::StashPush { .. } | GitOp::StashApply(_) | GitOp::StashPop(_) => None,
     }
+}
+
+/// cherry-pick の変更が空で止まったときの案内。**continue は同じ理由で断られる**ので、
+/// 出口は skip（1 本なら abort と同じ結果。03 の「continue / skip / abort の終わり方」）。
+///
+/// **網羅 `match` にしない。** git がこの文言を出すのは cherry-pick の系統だけで
+/// （revert は空でも止まらず、rebase は空の pick を既定で落とす。03 の実測）、ほかの
+/// op で出たら案内の無い `Display` に落ちるほうが嘘を言わない。
+fn empty_advice(op: &GitOp) -> Option<&'static str> {
+    matches!(
+        op,
+        GitOp::CherryPick(_) | GitOp::CherryPickContinue | GitOp::CherryPickSkip
+    )
+    .then_some("変更が空で止まった。m から skip")
 }
 
 /// 非 FF で断られたときの案内。**押すキーが op で違う**（01 の「失敗の案内文」）。
@@ -549,6 +580,7 @@ mod tests {
             GitOp::RebaseContinue,
             GitOp::RebaseSkip,
             GitOp::CherryPickContinue,
+            GitOp::CherryPickSkip,
             GitOp::RevertContinue,
             // 止まると進行中操作は `Rebase` になり、`m` から continue できる。
             GitOp::Pull {
@@ -578,6 +610,50 @@ mod tests {
                 notice.message
             );
         }
+    }
+
+    #[test]
+    fn an_empty_cherry_pick_is_a_warning_that_points_to_skip() {
+        // 変更が空で止まった pick は進行中操作が残り、continue は同じ理由で断られる
+        // （03 の「continue / skip / abort の終わり方」）。出口は `m` の skip。
+        for op in [
+            GitOp::CherryPick(vec![fake_oid(1)]),
+            GitOp::CherryPickContinue,
+            GitOp::CherryPickSkip,
+        ] {
+            let mut state = state();
+            finish_exec(
+                &mut state,
+                op.clone(),
+                Err(failed_with(ExecErrorKind::Empty)),
+            );
+
+            let notice = state.notices.back().expect("通知がありません");
+            assert_eq!(notice.level, NoticeLevel::Warn, "{op:?}");
+            assert!(
+                notice.message.contains("m から skip"),
+                "{op:?}: {}",
+                notice.message
+            );
+            // バッジ（`CHERRY-PICK abc1234`）と必ず並ぶ。
+            assert!(
+                cells(&notice.message) <= BESIDE_BADGE_CELLS,
+                "{} セル: {}",
+                cells(&notice.message),
+                notice.message
+            );
+        }
+
+        // cherry-pick の系統でなければ案内しない（git がこの文言を出すのはそこだけ）。
+        let mut state = state();
+        finish_exec(
+            &mut state,
+            GitOp::RebaseContinue,
+            Err(failed_with(ExecErrorKind::Empty)),
+        );
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        assert!(!notice.message.contains("skip"), "{}", notice.message);
     }
 
     #[test]
@@ -910,6 +986,20 @@ mod tests {
         );
         assert_eq!(
             Reload::after(&GitOp::RebaseAbort, false),
+            Reload::RefsAndLog
+        );
+        // **1 本だけの cherry-pick は 1 回で決まる**（コンフリクトでも空でも HEAD は
+        // 元のまま。03 の「cherry-pick の開始」の実測）。複数は途中まで積んでから止まる。
+        assert_eq!(
+            Reload::after(&GitOp::CherryPick(vec![fake_oid(1)]), false),
+            Reload::Refs
+        );
+        assert_eq!(
+            Reload::after(&GitOp::CherryPick(vec![fake_oid(1)]), true),
+            Reload::RefsAndLog
+        );
+        assert_eq!(
+            Reload::after(&GitOp::CherryPick(vec![fake_oid(1), fake_oid(2)]), false),
             Reload::RefsAndLog
         );
         // PR の取り出しは手順の途中で止まっても前の手順の結果が残る（fetch が

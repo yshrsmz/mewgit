@@ -208,6 +208,7 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
             argv.extend(oids.iter().map(Oid::to_string));
         }
         GitOp::CherryPickContinue => argv.extend(["cherry-pick".into(), "--continue".into()]),
+        GitOp::CherryPickSkip => argv.extend(["cherry-pick".into(), "--skip".into()]),
         GitOp::CherryPickAbort => argv.extend(["cherry-pick".into(), "--abort".into()]),
         GitOp::Revert { oids, mainline } => {
             argv.push("revert".into());
@@ -448,9 +449,10 @@ impl GitOp {
             | GitOp::RebaseContinue
             | GitOp::RebaseSkip
             | GitOp::RebaseAbort => "rebase",
-            GitOp::CherryPick(_) | GitOp::CherryPickContinue | GitOp::CherryPickAbort => {
-                "cherry-pick"
-            }
+            GitOp::CherryPick(_)
+            | GitOp::CherryPickContinue
+            | GitOp::CherryPickSkip
+            | GitOp::CherryPickAbort => "cherry-pick",
             GitOp::Revert { .. } | GitOp::RevertContinue | GitOp::RevertAbort => "revert",
             GitOp::MergeAbort => "merge",
             GitOp::StashPush { .. }
@@ -504,6 +506,7 @@ mod tests {
             GitOp::RebaseAbort => "RebaseAbort",
             GitOp::CherryPick(_) => "CherryPick",
             GitOp::CherryPickContinue => "CherryPickContinue",
+            GitOp::CherryPickSkip => "CherryPickSkip",
             GitOp::CherryPickAbort => "CherryPickAbort",
             GitOp::Revert { .. } => "Revert",
             GitOp::RevertContinue => "RevertContinue",
@@ -522,7 +525,7 @@ mod tests {
     /// [`variant`] のアームの数。`GitOp` に変種を足すと `variant` の網羅 `match` が
     /// コンパイルエラーになり、ここに来る。アームと一緒にこの数と [`cases`] も足す
     /// （足し忘れは `covers_every_variant` が落とす）。
-    const VARIANT_COUNT: usize = 34;
+    const VARIANT_COUNT: usize = 35;
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
     fn cases() -> Vec<(GitOp, Vec<&'static str>)> {
@@ -712,6 +715,7 @@ mod tests {
                 ],
             ),
             (GitOp::CherryPickContinue, vec!["cherry-pick", "--continue"]),
+            (GitOp::CherryPickSkip, vec!["cherry-pick", "--skip"]),
             (GitOp::CherryPickAbort, vec!["cherry-pick", "--abort"]),
             (
                 GitOp::Revert {

@@ -87,7 +87,7 @@ fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<String> {
         GitOp::RebaseContinue | GitOp::RebaseSkip | GitOp::RebaseAbort => {
             matches!(progress, InProgressOp::Rebase { .. })
         }
-        GitOp::CherryPickContinue | GitOp::CherryPickAbort => {
+        GitOp::CherryPickContinue | GitOp::CherryPickSkip | GitOp::CherryPickAbort => {
             matches!(progress, InProgressOp::CherryPick { .. })
         }
         GitOp::RevertContinue | GitOp::RevertAbort => {
@@ -179,6 +179,13 @@ pub fn progress_menu(progress: &InProgressOp) -> Option<ProgressMenu> {
                     "解消した内容で続ける",
                     GitOp::CherryPickContinue,
                 ),
+                // **変更が空で止まった pick から出る手**（continue は同じ理由で断られる。
+                // 03 の「continue / skip / abort の終わり方」）。
+                item(
+                    "skip",
+                    "止まったコミットを捨てて続ける",
+                    GitOp::CherryPickSkip,
+                ),
                 item(
                     "abort",
                     "cherry-pick を始める前に戻す",
@@ -259,7 +266,7 @@ pub(super) fn progress_picked(state: &mut AppState) -> Cmd {
 mod tests {
     use super::super::test_support::{
         cells, exec_done_of, fake_output, finish_exec, open_input, press, press_code,
-        state_on_branches, type_text, worktree_state, BESIDE_BADGE_CELLS,
+        state_on_branches, state_with_commits, type_text, worktree_state, BESIDE_BADGE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -374,6 +381,7 @@ mod tests {
         // cherry-pick の途中の `rebase --continue` は git が別の操作として扱う。
         assert!(refusal(&cherry_pick(), &GitOp::RebaseContinue).is_some());
         assert!(refusal(&rebase(), &GitOp::RevertAbort).is_some());
+        assert!(refusal(&rebase(), &GitOp::CherryPickSkip).is_some());
         // am には mewgit から打てる出口が無い。
         assert!(refusal(&InProgressOp::Am { step: None }, &GitOp::RebaseContinue).is_some());
     }
@@ -468,6 +476,22 @@ mod tests {
         assert_eq!(shown(&state), REBASING_BRANCH);
     }
 
+    #[test]
+    fn y_in_the_middle_of_a_rebase_is_refused_when_confirmed() {
+        // 手前では見ず、確定のあとの `AppState::issue` で断る（ブランチの削除と同じ。
+        // 01 の「cherry-pick の開始（`y`）」）。
+        let mut state = state_with_commits(3);
+        arrive(&mut state, Some(rebase()));
+        let _ = press(&mut state, 'j');
+        let _ = press(&mut state, 'y');
+        assert!(matches!(state.modal, Some(Modal::Confirm { .. })));
+
+        let cmd = press(&mut state, 'y');
+
+        assert_eq!(cmd, Cmd::LoadStatus);
+        assert_eq!(shown(&state), advice(&rebase()));
+    }
+
     /// 開いているメニューの項目の `GitOp`。
     fn menu_ops(state: &AppState) -> Vec<GitOp> {
         let Some(Modal::ProgressMenu { menu, .. }) = &state.modal else {
@@ -485,7 +509,11 @@ mod tests {
             ),
             (
                 cherry_pick(),
-                vec![GitOp::CherryPickContinue, GitOp::CherryPickAbort],
+                vec![
+                    GitOp::CherryPickContinue,
+                    GitOp::CherryPickSkip,
+                    GitOp::CherryPickAbort,
+                ],
             ),
             (
                 InProgressOp::Revert { oid: None },

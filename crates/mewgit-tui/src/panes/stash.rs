@@ -171,7 +171,8 @@ mod tests {
         let lines = draw(&state, SIZE);
         let header = &lines[row_of(&lines, "Branches (12)") as usize];
 
-        assert!(header.contains(" Stash |"), "{header}");
+        assert!(header.contains("Stash"), "{header}");
+        // **末尾の見出しが空白ごと残っていること。** 切れると ` PR` や ` PRs` で止まる。
         assert!(header.contains(" PRs "), "{header}");
     }
 }

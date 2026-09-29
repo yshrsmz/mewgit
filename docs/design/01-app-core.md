@@ -161,7 +161,7 @@ pub enum Modal {
     NoticeLog { selected: u64 },   // 通知の履歴。選んでいる Notice.seq（上の「通知」）
     ProgressMenu { menu: ProgressMenu, cursor: usize },
     MainlinePicker { target: Oid, summary: String, parents: Vec<ParentChoice>, cursor: usize },
-    Help { cursor: usize },        // キーの一覧（07 の「Help モーダル」）。行は keys::help
+    Help { pane: Pane, cursor: usize }, // キーの一覧（07 の「Help モーダル」）。開いたときのペインを持つ。行は keys::help
 }
 ```
 
@@ -2558,7 +2558,7 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
   （`update` を通して 1 打鍵ずつ叩き、`Cmd` か `AppState` が動くことを見る）。
   `update_key` の `match` に対する 2 本目の一覧なので、**表だけが古くなる形を塞ぐ**
 - **「いま押せるか」に答えるのは [`live`] のほう。** モーダル表示中はキーを全部モーダルが
-  受けるので（上の「キー入力」）、ペインのキーも `COMMON` も `QUIT` も効かない。
+  受けるので（上の「キー入力」）、ペインのキーも `COMMON` も `PINNED` も効かない。
   **`ui` に `modal.is_some()` を書かせない** —— 書くと振り分けの規則の写しが 2 本になる
 - **表はまだ「どのキーか」と「何と書くか」しか持っていない。** dispatch と突き合わせる
   **アクションの同一性が無い**ので、上の見張りが「表 → dispatch」の片側しか見られない。

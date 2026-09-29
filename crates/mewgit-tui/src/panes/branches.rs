@@ -3,7 +3,7 @@
 //! 右列の上に置く。下の Working tree / コミット詳細と違い、**左の選択では
 //! 入れ替わらない**（ブランチ一覧はグラフで何を選んでいるかと無関係）。
 
-use mewgit_core::app::{AppState, BranchLoad};
+use mewgit_core::app::{AppState, ListLoad};
 use mewgit_core::git_read::Branch;
 use ratatui::text::{Line, Span};
 
@@ -87,10 +87,10 @@ const BEHIND: (&str, &str) = ("↓", "v");
 /// 失敗は状態から見る（消去法で導かない。01 の「失敗の記憶」）。
 fn placeholder(state: &AppState) -> &'static str {
     match state.branches.load() {
-        BranchLoad::Failed => "ブランチを読み込めませんでした",
+        ListLoad::Failed => "ブランチを読み込めませんでした",
         // 届いていて空。`git init` の直後。
-        BranchLoad::Loaded => "ブランチはありません",
-        BranchLoad::Pending => ui::LOADING,
+        ListLoad::Loaded => "ブランチはありません",
+        ListLoad::Pending => ui::LOADING,
     }
 }
 

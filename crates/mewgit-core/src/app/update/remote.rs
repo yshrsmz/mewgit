@@ -8,7 +8,7 @@ use crate::git_read::{short_oid, Remote};
 
 use super::confirm;
 use crate::app::state::Tracked;
-use crate::app::{AppState, BranchLoad, Cmd, JobKind, Modal, NoticeLevel, PushRejection};
+use crate::app::{AppState, Cmd, JobKind, ListLoad, Modal, NoticeLevel, PushRejection};
 
 /// `P`。HEAD のブランチを push する（01 の「push の行き先」）。
 ///
@@ -109,7 +109,7 @@ fn push_plan(state: &AppState) -> PushPlan {
     let branches = &state.branches;
     // **空の `Vec` からは「まだ届いていない」と detached / unborn を区別できない**
     // ので `load` を見る（01 の「ブランチ一覧」で `bool` 2 つにしなかったのと同じ）。
-    if branches.load() != BranchLoad::Loaded {
+    if branches.load() != ListLoad::Loaded {
         return PushPlan::Refused("ブランチ一覧をまだ読めていません".to_string());
     }
     let Some(head) = branches.head() else {

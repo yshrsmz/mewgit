@@ -7,7 +7,7 @@ use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
     lossy, signature, Branch, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex, RefLabel,
-    Remote, Upstream, UpstreamConfig,
+    Remote, StashEntry, Upstream, UpstreamConfig,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -241,6 +241,31 @@ impl RepoReader {
         // git2 の列挙順は安定していない（`RefIndex::new` と同じ理由）。
         branches.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(branches)
+    }
+
+    /// stash の一覧。`stash@{0}`（いちばん新しいもの）から順に並ぶ。
+    ///
+    /// **`refs/stash` の reflog を読む。** `git stash list` が辿るのと同じもの
+    /// （`git log --walk-reflogs refs/stash`）で、reflog の位置がそのまま
+    /// `stash@{index}` の index になる。**`git2::Repository::stash_foreach` を使わない**
+    /// のは `&mut self` を取るからで、読み取りを `&self` に揃えている `RepoReader` には
+    /// 合わない（git2 0.21。02 の「stash 一覧」）。
+    ///
+    /// stash が 1 つも無い（`refs/stash` が無い）ときは空の `Vec`。libgit2 は reflog の
+    /// ファイルが無ければ空の reflog を返す。
+    pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError> {
+        let reflog = self.repo.reflog("refs/stash")?;
+        Ok(reflog
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| StashEntry {
+                index,
+                // 非 UTF-8 のメッセージも行ごと落とさない。落とすと後ろの index が
+                // ずれ、apply / drop が別の stash に当たる。
+                message: entry.message_bytes().map(lossy).unwrap_or_default(),
+                oid: entry.id_new(),
+            })
+            .collect())
     }
 
     /// 追跡 ref から読めた値と、それに対する ahead / behind。

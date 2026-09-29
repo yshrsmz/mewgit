@@ -35,7 +35,7 @@ pub struct AppState {
     /// 直前の `P` が `NonFastForward` で断られたこと。次の `P` を確認モーダル経由の
     /// force push に上げる（01 の「force push」）。
     pub push_rejected: Option<PushRejection>,
-    pub stashes: Vec<StashEntry>,
+    pub stashes: StashState,
     pub prs: PrState,
     pub focus: Pane,
     /// 右列の上に出すタブ。
@@ -104,7 +104,7 @@ impl AppState {
             diff: DiffState::default(),
             branches: BranchState::default(),
             push_rejected: None,
-            stashes: Vec::new(),
+            stashes: StashState::default(),
             prs: PrState::default(),
             focus: Pane::default(),
             right_tab: RightTab::default(),
@@ -199,6 +199,7 @@ impl AppState {
             | JobKind::LoadRepoInfo
             | JobKind::LoadStatus
             | JobKind::LoadBranches
+            | JobKind::LoadStashes
             | JobKind::LoadDiff
             | JobKind::ResolveTarget
             | JobKind::ResolveAccount
@@ -302,7 +303,14 @@ impl AppState {
             // `None` を返すので、入る前は必ず `None`（入れるかを問う相手にならない）。
             //
             // **末尾で照合する。** 添字で削ると、並びを変えたときに別のペインが落ちる。
-            GraphSelection::Wip if self.wanted_worktree_diff().is_none() => {
+            //
+            // **stash の diff を出しているあいだは外さない**（01 の「Stash ペイン」）。
+            // 出しているのはワーキングツリーの行ではないので、変更の無いワーキング
+            // ツリーで stash を開くと、外した瞬間に `reseat_focus` が Graph へ戻す。
+            GraphSelection::Wip
+                if self.diff.source == DiffSource::Selection
+                    && self.wanted_worktree_diff().is_none() =>
+            {
                 let all = self.pick(Pane::WIP_FOCUS, Pane::WIP_FOCUS_NO_PRS);
                 all.strip_suffix(&[Pane::Diff]).unwrap_or(all)
             }
@@ -352,9 +360,17 @@ impl AppState {
     /// **PRs タブは残るので `prs::fan_out` は出うる**（`wanted_details` の門は
     /// `focus` ではなく見えているタブを見る）—— 通すと、その `Cmd` を捨てる形に
     /// なる。座り直しに要るのは `focus` の代入だけ。
+    ///
+    /// **Diff ペインを離れたら [`DiffState::source`] も戻す**（01 の「Stash ペイン」）。
+    /// 離れる経路は `Esc` / `Tab` / `Shift+Tab` / 座り直しと複数あり、経路ごとに書くと
+    /// 足し忘れが静かに通る —— 残ると、`Tab` で入り直したときにグラフの選択ではなく
+    /// 前に開いた stash の diff が出る。**座り直しより後に見る**（座り直しも離れる経路）。
     pub fn reseat_focus(&mut self) {
         if !self.focus_candidates().contains(&self.focus) {
             self.focus = Pane::Graph;
+        }
+        if self.focus != Pane::Diff {
+            self.diff.source = DiffSource::Selection;
         }
         self.right_tab = self.visible_right_tab();
     }
@@ -381,6 +397,13 @@ impl AppState {
         // 左の領域を Graph と差し替えて出すので、見せているかは `focus` で判る（07）。
         if self.focus != Pane::Diff {
             return None;
+        }
+
+        // **Stash ペインから来たならその stash 全体**（01 の「Stash ペイン」）。
+        // コミットと違って `path: None` で頼む —— stash のファイル一覧を別に出す場所が
+        // 無く、Diff ペインが全ファイルを見出し付きで並べる（07 の「Diff ペイン」）。
+        if let DiffSource::Stash(oid) = self.diff.source {
+            return Some(DiffTarget::Stash { oid, path: None });
         }
 
         // **見る一覧はグラフの選択で変わる。** WIP 行ならワーキングツリー、コミット
@@ -775,14 +798,18 @@ impl Default for TermSize {
 
 /// 右列の上に出せるタブ（01 の「PR ペイン › 右上のタブ」）。
 ///
-/// **[`Pane`] をそのまま持たない。** 入りうる値は 2 つだけなので、`Pane` で持つと
-/// 読む側が「ほかの値は来ない」という注釈付きの `_ =>` を置くことになり、
-/// **M5 で `Stash` が 3 枚目に入ったときにコンパイラが何も言わない**（`Branches` が
-/// 黙って描かれる）。写像は [`of`](Self::of) の 1 本だけ。
+/// **[`Pane`] をそのまま持たない。** 入りうる値は右列の上のペインだけなので、`Pane` で
+/// 持つと読む側が「ほかの値は来ない」という注釈付きの `_ =>` を置くことになり、
+/// タブを足したときにコンパイラが何も言わない（`Branches` が黙って描かれる）。
+/// 3 枚目の `Stash` を足したときは、読む側の網羅 `match` が全部コンパイルエラーに
+/// なった。写像は [`of`](Self::of) の 1 本だけ。
+///
+/// 並びは `Pane` の宣言順（`Branches | Stash | Prs`）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RightTab {
     #[default]
     Branches,
+    Stash,
     Prs,
 }
 
@@ -791,8 +818,9 @@ impl RightTab {
     pub fn of(pane: Pane) -> Option<RightTab> {
         match pane {
             Pane::Branches => Some(RightTab::Branches),
+            Pane::Stash => Some(RightTab::Stash),
             Pane::Prs => Some(RightTab::Prs),
-            Pane::Graph | Pane::Stash | Pane::Worktree | Pane::CommitDetail | Pane::Diff => None,
+            Pane::Graph | Pane::Worktree | Pane::CommitDetail | Pane::Diff => None,
         }
     }
 
@@ -800,6 +828,7 @@ impl RightTab {
     pub fn pane(self) -> Pane {
         match self {
             RightTab::Branches => Pane::Branches,
+            RightTab::Stash => Pane::Stash,
             RightTab::Prs => Pane::Prs,
         }
     }
@@ -826,6 +855,7 @@ impl Pane {
     const WIP_FOCUS: &'static [Pane] = &[
         Pane::Graph,
         Pane::Branches,
+        Pane::Stash,
         Pane::Prs,
         Pane::Worktree,
         Pane::Diff,
@@ -836,8 +866,13 @@ impl Pane {
     /// **`Prs` は真ん中にあるので末尾で落とせない。** `Diff` のように
     /// `strip_suffix` で削る形にすると並びの意味が 2 通りになるので、一覧をもう 1 本
     /// 置く（`Prs` が落ちる条件は起動時に固まるので、揺れるのは `Diff` だけ）。
-    const WIP_FOCUS_NO_PRS: &'static [Pane] =
-        &[Pane::Graph, Pane::Branches, Pane::Worktree, Pane::Diff];
+    const WIP_FOCUS_NO_PRS: &'static [Pane] = &[
+        Pane::Graph,
+        Pane::Branches,
+        Pane::Stash,
+        Pane::Worktree,
+        Pane::Diff,
+    ];
 
     /// コミットを選んでいるあいだの巡回先。右は [`GraphSelection::right_pane`] が決める。
     ///
@@ -852,22 +887,28 @@ impl Pane {
     /// [`AppState::focus_candidates`] が末尾を落として候補から外すため。こちらの
     /// 一覧は落とさないので、並びの制約は無い。
     ///
-    /// **`Branches` と `Prs` も両方に入る。** どちらも右列の上に出ていて、左の選択で
-    /// 中身が変わらないため（07 の「レイアウト」）。`Prs` が落ちるのは
+    /// **`Branches` と `Stash` と `Prs` も両方に入る。** どれも右列の上に出ていて、左の
+    /// 選択で中身が変わらないため（07 の「レイアウト」）。`Prs` が落ちるのは
     /// `config.github.enabled = false` のときだけで、**`AccountState` では変えない**
     /// —— 変えると起動直後に解決が返った瞬間に `Tab` の行き先が増える（01 の
     /// 「右上のタブ」）。
     const COMMIT_FOCUS: &'static [Pane] = &[
         Pane::Graph,
         Pane::Branches,
+        Pane::Stash,
         Pane::Prs,
         Pane::CommitDetail,
         Pane::Diff,
     ];
 
     /// `config.github.enabled = false` のときの [`COMMIT_FOCUS`](Self::COMMIT_FOCUS)。
-    const COMMIT_FOCUS_NO_PRS: &'static [Pane] =
-        &[Pane::Graph, Pane::Branches, Pane::CommitDetail, Pane::Diff];
+    const COMMIT_FOCUS_NO_PRS: &'static [Pane] = &[
+        Pane::Graph,
+        Pane::Branches,
+        Pane::Stash,
+        Pane::CommitDetail,
+        Pane::Diff,
+    ];
 
     /// `panes` の並びのうち `delta` 個先。端では反対側に回る。
     ///
@@ -1281,6 +1322,29 @@ pub struct DiffState {
     /// 回さないため）。対象が違えば一度も試していないので頼む。落とすのは読み込みの
     /// 成功と、ワーキングツリーのカーソル移動。
     pub failed: Option<DiffTarget>,
+    /// Diff ペインに何の diff を出しているか（01 の「Stash ペイン」）。
+    ///
+    /// **Diff ペインに居るあいだだけ意味を持つ。** 離れたら
+    /// [`AppState::reseat_focus`] が `Selection` に戻すので、`Tab` で入り直したときは
+    /// グラフの選択の diff が出る。
+    pub source: DiffSource,
+}
+
+/// Diff ペインに出す diff の出どころ（01 の「Stash ペイン」）。
+///
+/// **`Enter` で来た側を憶える。** グラフの選択（WIP 行かコミット）は Diff ペインに
+/// 居るあいだも画面の状態として残っているので、そちらからは導けるが、Stash ペインの
+/// どの行から来たかは残らない。`Esc` の戻り先と [`AppState::wanted_diff`] がこれを読む。
+///
+/// **stash は index ではなく oid で持つ。** index は push / drop で指す相手が変わる
+/// （[`StashState::loaded`]）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DiffSource {
+    /// グラフの選択。WIP 行ならワーキングツリー、コミットならそのファイル一覧。
+    #[default]
+    Selection,
+    /// Stash ペインの `Enter`。
+    Stash(Oid),
 }
 
 impl DiffState {
@@ -1416,18 +1480,21 @@ pub struct BranchState {
     pub branches: Vec<Branch>,
     pub cursor: usize,
     /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分けるのに要る。
-    load: BranchLoad,
+    load: ListLoad,
 }
 
-/// ブランチ一覧の読み込みがどこまで進んだか。
+/// 一覧（ブランチ・stash）の読み込みがどこまで進んだか。
 ///
 /// **`bool` を 2 つ（`loaded` / `failed`）にしない。** 4 通りのうち「まだ届いて
 /// いないのに失敗した」が表現でき、どのテストからも踏めない腕になる（01）。
 ///
 /// **`ui` には述語ではなくこの enum を見せる**（[`BranchState::load`]）。`has_failed`
 /// のような述語を並べると、段階を足したときに `ui` の else に黙って落ちる。
+///
+/// **2 つ目の利用者（[`StashState`]）が出た時点で `BranchLoad` から改名した。**
+/// 写すと、段階を足すときに片方だけ古くなる。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum BranchLoad {
+pub enum ListLoad {
     /// まだ届いていない。
     #[default]
     Pending,
@@ -1451,20 +1518,20 @@ impl BranchState {
             // detached / unborn ではどの行にも印が付かないので先頭に座る。
             .unwrap_or(0);
         self.branches = branches;
-        self.load = BranchLoad::Loaded;
+        self.load = ListLoad::Loaded;
     }
 
     /// 読み込みが失敗した。**読めていた一覧は捨てない**（`StatusLoaded` と同じ理由。
     /// 捨てると画面から消えるだけになる）。
     pub(super) fn failed(&mut self) {
-        self.load = BranchLoad::Failed;
+        self.load = ListLoad::Failed;
     }
 
     /// 読み込みの段階。一覧が空のときに `ui` が出す文言をここから決める
     /// （07 の「Branches ペイン」）。
     ///
     /// **`jobs.is_running` の否定から消去法で導かない**（01 の「失敗の記憶」）。
-    pub fn load(&self) -> BranchLoad {
+    pub fn load(&self) -> ListLoad {
         self.load
     }
 
@@ -1495,6 +1562,61 @@ impl BranchState {
     /// 行が 1 つも無ければ据え置く（[`stepped_index`]）。
     pub(super) fn move_cursor(&mut self, delta: isize) {
         self.cursor = stepped_index(self.cursor, self.branches.len(), delta);
+    }
+}
+
+/// Stash ペインの状態（01 の「Stash ペイン」）。
+#[derive(Debug, Default)]
+pub struct StashState {
+    /// `stash@{0}` から順。`git_read::stashes` の戻り値そのまま。
+    pub entries: Vec<StashEntry>,
+    pub cursor: usize,
+    /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分ける（[`BranchState`] と
+    /// 同じ理由）。
+    load: ListLoad,
+}
+
+impl StashState {
+    /// 届いた一覧で置き換える。
+    ///
+    /// **カーソルは選んでいた stash の oid で座り直す**（01 の「Stash ペイン」）。
+    /// **index では座り直さない** —— push は先頭に 1 つ足し、drop / pop は後ろを
+    /// 1 つずつ詰めるので、同じ index が別の stash を指す（git 2.55 で確認）。
+    /// 選んでいたものが消えたら（drop / pop）、**同じ位置に留まる**（末尾を越えたら
+    /// 末尾）。消えた 1 つの次の stash がそこへ詰めてくるので、続けて drop できる。
+    pub(super) fn loaded(&mut self, entries: Vec<StashEntry>) {
+        let selected = self.selected().map(|stash| stash.oid);
+        self.cursor = selected
+            .and_then(|oid| entries.iter().position(|stash| stash.oid == oid))
+            .unwrap_or_else(|| self.cursor.min(entries.len().saturating_sub(1)));
+        self.entries = entries;
+        self.load = ListLoad::Loaded;
+    }
+
+    /// 読み込みが失敗した。読めていた一覧は捨てない（[`BranchState::failed`] と同じ）。
+    pub(super) fn failed(&mut self) {
+        self.load = ListLoad::Failed;
+    }
+
+    /// 読み込みの段階（[`BranchState::load`] と同じ）。
+    pub fn load(&self) -> ListLoad {
+        self.load
+    }
+
+    /// カーソルの指す stash。一覧が空なら `None`。
+    pub fn selected(&self) -> Option<&StashEntry> {
+        self.entries.get(self.cursor)
+    }
+
+    /// `oid` の stash。一覧に無ければ `None`（Diff ペインの見出しに `stash@{n}` を
+    /// 出すのに使う。07 の「Diff ペイン」）。
+    pub fn find(&self, oid: Oid) -> Option<&StashEntry> {
+        self.entries.iter().find(|stash| stash.oid == oid)
+    }
+
+    /// カーソルを `delta` 行動かす。端では止まる（[`BranchState::move_cursor`] と同じ）。
+    pub(super) fn move_cursor(&mut self, delta: isize) {
+        self.cursor = stepped_index(self.cursor, self.entries.len(), delta);
     }
 }
 
@@ -1698,9 +1820,9 @@ fn in_list(list: &[PullRequest], number: u64, sha: &str) -> bool {
 
 /// PR 一覧の読み込みがどこまで進んだか。
 ///
-/// **`bool` を 2 つにしない**（[`BranchLoad`] と同じ理由）。
+/// **`bool` を 2 つにしない**（[`ListLoad`] と同じ理由）。
 ///
-/// **[`BranchLoad`] と違って `Failed` が理由を持つ。** 案内に出すのが「読み込めません
+/// **[`ListLoad`] と違って `Failed` が理由を持つ。** 案内に出すのが「読み込めません
 /// でした」だけでは足りない —— 401 / 403 / レート制限は**次に何をするかが違う**ので、
 /// [`GithubError`] をそのまま運んで `ui` に出させる（07 の「PRs ペイン」）。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -2152,6 +2274,7 @@ pub enum JobKind {
     LoadRepoInfo,
     LoadStatus,
     LoadBranches,
+    LoadStashes,
     LoadDiff,
     Exec,
     ResolveTarget,
@@ -2184,8 +2307,12 @@ impl JobKind {
             // CI が回り直し、マージすれば open から消える）。世代を見ないと、書き込みの
             // 最中に飛んでいた要求の答え（書き込み前の GitHub の状態）が採られ、
             // そのあとの引き直しは `AppState::issue` に落とされたまま誰も拾わない。
+            // **stash の一覧もここ。** 読むのは `refs/stash` の reflog で、git が
+            // 動かすのは ref（01 の「Stash ペイン」）。stash の書き込みで `Refs` を
+            // 進めるのは、書き込みのキーを足す回（`update::Reload`）。
             JobKind::LoadRepoInfo
             | JobKind::LoadBranches
+            | JobKind::LoadStashes
             | JobKind::LoadHeadMessage
             | JobKind::FetchPrList => Some(Region::Refs),
             // 積んだログの行。ref が動いて walk に入る集合が変わったときだけ古くなる。
@@ -3227,7 +3354,7 @@ mod tests {
         ]);
 
         assert_eq!(cursor_name(&branches), Some("main"));
-        assert_eq!(branches.load(), BranchLoad::Loaded);
+        assert_eq!(branches.load(), ListLoad::Loaded);
     }
 
     #[test]
@@ -3305,7 +3432,7 @@ mod tests {
 
         branches.failed();
 
-        assert_eq!(branches.load(), BranchLoad::Failed);
+        assert_eq!(branches.load(), ListLoad::Failed);
         assert_eq!(branches.branches.len(), 1);
     }
 

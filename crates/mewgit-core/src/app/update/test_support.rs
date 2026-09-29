@@ -15,11 +15,11 @@ use crate::config::Config;
 use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput};
 use crate::git_read::{
     Branch, Commit, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, HeadInfo, LogPage,
-    Oid, RefIndex, Remote, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
+    Oid, RefIndex, Remote, StashEntry, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
 };
 use crate::test_util::{
     fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid,
-    fake_remote, fake_snapshot, fake_upstream, reply, FAKE_NOW,
+    fake_remote, fake_snapshot, fake_stash, fake_upstream, reply, FAKE_NOW,
 };
 
 /// グラフに使える行数。`ui` が決めた値が [`Msg::Layout`] で来る想定。
@@ -255,6 +255,28 @@ pub(super) fn load_branches(state: &mut AppState, names: &[(&str, bool)]) {
         .map(|(name, is_head)| fake_branch(name, *is_head))
         .collect();
     let _ = with_branches(state, Ok(branches));
+}
+
+/// stash 一覧の返信を届ける。**発行してから届ける**（`test_util::reply`）。
+pub(super) fn with_stashes(
+    state: &mut AppState,
+    result: Result<Vec<StashEntry>, GitReadError>,
+) -> Cmd {
+    reply(
+        state,
+        Cmd::LoadStashes,
+        Msg::StashesLoaded(Box::new(result)),
+    )
+}
+
+/// `n` 件の stash が届き、Stash ペインにフォーカスがある状態。グラフは WIP 行で、
+/// ワーキングツリーの一覧はまだ届いていない —— **WIP 側の `Diff` は巡回の候補から
+/// 外れている**（01 の「Pane と Modal」）。stash の diff がそれでも開けることを見る土台。
+pub(super) fn state_on_stashes(n: usize) -> AppState {
+    let mut state = state_with_commits(2);
+    let _ = with_stashes(&mut state, Ok((0..n).map(fake_stash).collect()));
+    let _ = tab_to(&mut state, Pane::Stash);
+    state
 }
 
 /// `d` / `D` を押したときの確認モーダルの本文と `on_yes`。

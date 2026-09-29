@@ -82,7 +82,7 @@ pub const COMMON: &[KeyHint] = &[
 /// 上下移動。**ペインをまたいで同じ 1 つを使う**（説明が割れないように）。
 const MOVE: KeyHint = hint(&[Key::char('j'), Key::char('k')], "移動");
 
-/// 左のグラフへ戻る（Diff だけは `Enter` で来た側 —— Working tree かコミット詳細）。
+/// 左のグラフへ戻る（Diff だけは `Enter` で来た側 —— Working tree、コミット詳細、Stash）。
 ///
 /// **「1 つ前のペイン」ではない。** `Esc` の行き先は各ペインが決めていて、右列のペインは
 /// どれも無条件に `Pane::Graph` を指す（巡回でどこから来ても同じ）。ラベルを「戻る」に
@@ -106,6 +106,13 @@ const BRANCHES: &[KeyHint] = &[
     hint(&[Key::char('r')], "改名"),
     hint(&[Key::char('d')], "削除"),
     hint(&[Key::char('D')], "強制削除"),
+    BACK,
+];
+
+const STASH: &[KeyHint] = &[
+    MOVE,
+    // Worktree / コミット詳細の `Enter` と同じ語。どれも左に Diff を出す。
+    hint(&[Key::new(KeyCode::Enter)], "差分"),
     BACK,
 ];
 
@@ -162,14 +169,13 @@ pub enum HelpRow {
 /// `Modal::Help` の行。**そのペインのキー → どこでも効くキー**の 2 段（07 の
 /// 「Help モーダル」）。ほかのペインのキーは出さない —— 押せるのは今いるペインのものだけ。
 ///
-/// **キーの無いペインでは見出しごと出さない**（空の段を見せない）。
+/// **キーの無いペインは無い**（Stash がキーを持った時点で最後の 1 つが消えた）ので、
+/// 「空の段を見せない」分岐は置かない —— 踏めない腕はテストで見張れずに腐る。
 pub fn help(pane: Pane) -> Vec<HelpRow> {
     let here = self::pane(pane);
     let mut rows = Vec::with_capacity(here.len() + COMMON.len() + PINNED.len() + 2);
-    if !here.is_empty() {
-        rows.push(HelpRow::Heading(HelpSection::Pane));
-        rows.extend(here.iter().map(HelpRow::Key));
-    }
+    rows.push(HelpRow::Heading(HelpSection::Pane));
+    rows.extend(here.iter().map(HelpRow::Key));
     rows.push(HelpRow::Heading(HelpSection::Anywhere));
     rows.extend(COMMON.iter().chain(PINNED).map(HelpRow::Key));
     rows
@@ -201,9 +207,7 @@ pub fn pane(pane: Pane) -> &'static [KeyHint] {
         Pane::Worktree => WORKTREE,
         Pane::CommitDetail => COMMIT_DETAIL,
         Pane::Diff => DIFF,
-        // **Stash はまだ無い**（M5 のペイン）。巡回候補にも入っていないので、
-        // フォーカスがここに来ることはない。
-        Pane::Stash => &[],
+        Pane::Stash => STASH,
     }
 }
 
@@ -221,13 +225,5 @@ mod tests {
             .expect("どこでもの見出しがありません");
         assert_eq!(anywhere, 1 + pane(Pane::Graph).len());
         assert_eq!(rows.len(), anywhere + 1 + COMMON.len() + PINNED.len());
-    }
-
-    #[test]
-    fn a_pane_without_keys_shows_no_empty_heading() {
-        // Stash はまだキーを持たない。空の段を見せない。
-        let rows = help(Pane::Stash);
-        assert_eq!(rows[0], HelpRow::Heading(HelpSection::Anywhere));
-        assert!(!rows.contains(&HelpRow::Heading(HelpSection::Pane)));
     }
 }

@@ -55,7 +55,7 @@ crates/
   mewgit-core/src/
     app/        state.rs  msg.rs  cmd.rs  key.rs  keys.rs
       update/   mod.rs  graph.rs  worktree.rs  diff.rs  branches.rs
-                remote.rs  account.rs  modal.rs  exec.rs  prs.rs  progress.rs
+                remote.rs  account.rs  modal.rs  exec.rs  prs.rs  progress.rs  stash.rs
                 test_support.rs（`#[cfg(test)]`）
     graph/      lane.rs
     git_read/   repo.rs   log.rs  diff.rs  status.rs  thread.rs  progress.rs
@@ -66,7 +66,7 @@ crates/
   mewgit-tui/src/
     main.rs   runtime.rs  input.rs
     ui/       mod.rs    lanes.rs  theme.rs  time.rs
-    panes/    graph.rs  worktree.rs  diff.rs  commit.rs  branches.rs  prs.rs
+    panes/    graph.rs  worktree.rs  diff.rs  commit.rs  branches.rs  stash.rs  prs.rs
     modals/   confirm.rs  input.rs  commit_message.rs  picker.rs
               remote_picker.rs  account_picker.rs
 ```

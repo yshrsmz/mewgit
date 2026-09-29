@@ -12,7 +12,7 @@ use super::remote::{conventional_remote, NoRemote};
 use super::{edit_key, focus, multiline_edit_key, submit};
 use crate::app::state::current_row;
 use crate::app::{
-    AppState, BranchLoad, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHeads,
+    AppState, Cmd, JobKind, Key, KeyCode, ListLoad, Modal, NoticeLevel, Pane, PrField, PrHeads,
     RepoInfo, TextBuffer,
 };
 use crate::git_read::HeadInfo;
@@ -82,7 +82,7 @@ fn checkout(state: &mut AppState) -> Cmd {
     let refusal = match (conventional_remote(state), state.repo.target.resolved()) {
         // **`target` を決めたのと同じ規則でリモートを選ぶ**（PR 作成の base と同じ）。
         // 一覧はそのリポジトリの PR なので、そこを指しているリモートから取る。
-        (Ok(remote), Some(target)) if state.branches.load() == BranchLoad::Loaded => {
+        (Ok(remote), Some(target)) if state.branches.load() == ListLoad::Loaded => {
             let plan = checkout_plan(pr, remote, target, &state.branches.branches);
             return Cmd::Exec(GitOp::CheckoutPr(Box::new(plan)));
         }
@@ -2510,7 +2510,7 @@ mod tests {
         let mut state = state_on_branch("main");
         state.repo.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
         load_branches(&mut state, branches);
-        assert_eq!(state.branches.load(), BranchLoad::Loaded);
+        assert_eq!(state.branches.load(), ListLoad::Loaded);
         state.focus = Pane::Prs;
         state
     }

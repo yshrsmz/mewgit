@@ -15,7 +15,8 @@ use super::diff::load_diff;
 use super::diff::open_diff;
 use super::{confirm, exec_busy, focus, multiline_edit_key, submit_exec};
 use crate::app::{
-    AppState, Cmd, GraphSelection, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
+    AppState, Cmd, DiffSource, GraphSelection, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane,
+    TextBuffer,
 };
 
 /// ワーキングツリーペインのキー処理。
@@ -221,6 +222,9 @@ const CONFLICTED: &str = "コンフリクトしたファイルは操作できま
 /// コミットの diff で `s` / `u` / `x` を断る文言。
 pub(super) const COMMIT_DIFF: &str = "コミットの差分は変更できません";
 
+/// stash の diff で `s` / `u` / `x` を断る文言。
+pub(super) const STASH_DIFF: &str = "stash の差分は変更できません";
+
 /// 出している diff が最新でないときに断る文言。
 ///
 /// 「まだ届いていない」「読み込めなかった」「書き込みより前のもの」の 3 つに使う。
@@ -268,10 +272,18 @@ pub(super) fn act(state: &mut AppState, action: Action) -> Cmd {
     // conflicted の断りは Worktree ペインの側で出る
     // （[`a_conflicted_row_is_refused_with_a_notice`]）。
     //
-    // **`DiffTarget::Range` を Diff ペインに出すときはここを見直す**（stash や比較
-    // ビュー、M3 以降）。WIP 行を選んだまま stash の diff を出せるようになると、
-    // この判定だけでは足りない（そのハンクは worktree のファイルに当たらない）。
-    // いま出す経路が無いので、踏めない腕は先に入れない。
+    // **stash の diff はグラフの選択より先に断る**（01 の「Stash ペイン」）。WIP 行を
+    // 選んだまま Stash ペインから Diff を開けるので、グラフの選択だけを見ると、stash の
+    // ハンクを見ながらワーキングツリーの選択行を stage することになる。**見るのは
+    // `DiffSource`** —— Diff ペインを離れれば `reseat_focus` が `Selection` に戻すので、
+    // Worktree ペインの `s` がここで断られることは無い。
+    //
+    // **`DiffTarget::Range` を Diff ペインに出すときも同じ形でここに足す**（比較
+    // ビュー。いま出す経路が無いので、踏めない腕は先に入れない）。
+    if let DiffSource::Stash(_) = state.diff.source {
+        state.push_notice(NoticeLevel::Warn, STASH_DIFF.to_string(), None);
+        return Cmd::None;
+    }
     if !matches!(state.graph.selection(), GraphSelection::Wip) {
         state.push_notice(NoticeLevel::Warn, COMMIT_DIFF.to_string(), None);
         return Cmd::None;

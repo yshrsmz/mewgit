@@ -1146,3 +1146,72 @@ fn a_linked_worktree_reads_its_own_state() {
     );
     assert_eq!(progress_of(repo.path()), None);
 }
+
+// --- stash 一覧（02 の「stash 一覧」）---------------------------------------------
+
+#[test]
+fn stashes_is_empty_before_anything_is_stashed() {
+    // `refs/stash` が無い形。**`Err` にしない** —— stash を 1 度もしていない
+    // リポジトリのほうが普通で、そこで Stash ペインを失敗にすると毎回赤くなる。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert_eq!(reader.stashes().unwrap(), []);
+}
+
+#[test]
+fn stashes_lists_the_newest_first_with_the_index_git_uses() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.write_worktree_file("file.txt", b"older\n");
+    repo.git(&["stash", "push", "-q"]);
+    repo.write_worktree_file("file.txt", b"newer\n");
+    repo.git(&["stash", "push", "-q", "-m", "custom message"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let stashes = reader.stashes().unwrap();
+
+    // index も oid も git の `stash@{n}` と同じもの（apply / drop にそのまま渡す）。
+    let listed: Vec<_> = stashes
+        .iter()
+        .map(|stash| (stash.index, stash.oid, stash.message.as_str()))
+        .collect();
+    let first = repo.rev_parse("HEAD");
+    assert_eq!(
+        listed,
+        [
+            (0, repo.rev_parse("stash@{0}"), "On main: custom message"),
+            (
+                1,
+                repo.rev_parse("stash@{1}"),
+                format!("WIP on main: {} first", &first.to_string()[..7]).as_str()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn stashes_follows_the_index_shift_after_a_drop() {
+    // drop すると後ろの stash が 1 つずつ詰まる（git 2.55 で確認）。一覧は reflog を
+    // 読み直すので、読み直せば git と同じ番号になる。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    for message in ["a", "b", "c"] {
+        repo.write_worktree_file("file.txt", format!("{message}\n").as_bytes());
+        repo.git(&["stash", "push", "-q", "-m", message]);
+    }
+    repo.git(&["stash", "drop", "-q", "stash@{1}"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let messages: Vec<_> = reader
+        .stashes()
+        .unwrap()
+        .into_iter()
+        .map(|stash| (stash.index, stash.message))
+        .collect();
+    assert_eq!(
+        messages,
+        [(0, "On main: c".to_string()), (1, "On main: a".to_string())]
+    );
+}

@@ -516,6 +516,16 @@ pub enum DiffTarget {
         to: Oid,
         path: Option<PathBuf>,
     },
+    /// stash 1 件の中身。`oid` は stash コミット（`stash@{n}` が指すもの）。
+    ///
+    /// **[`DiffTarget::Commit`] で代用しない。** 第一親（stash した時点の HEAD）との
+    /// 差は tracked な変更だけで、`--include-untracked` で退避したファイルは
+    /// **第 3 親のツリー**に入っている（git 2.55 で確認）。こちらはそれを「追加」として
+    /// 同じ diff に混ぜる（02 の「stash の diff」）。
+    Stash {
+        oid: Oid,
+        path: Option<PathBuf>,
+    },
 }
 
 impl DiffTarget {
@@ -525,7 +535,8 @@ impl DiffTarget {
             DiffTarget::IndexVsWorktree(path)
             | DiffTarget::HeadVsIndex(path)
             | DiffTarget::Commit { path, .. }
-            | DiffTarget::Range { path, .. } => path.as_deref(),
+            | DiffTarget::Range { path, .. }
+            | DiffTarget::Stash { path, .. } => path.as_deref(),
         }
     }
 }

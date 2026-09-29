@@ -4,7 +4,7 @@ use crate::auth::{Account, AuthError, DegradedReason, GhLogin, ResolvedTarget};
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, LogPage, Oid,
-    RefIndex, Remote, Timestamp, WorktreeSnapshot,
+    RefIndex, Remote, StashEntry, Timestamp, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 
@@ -100,6 +100,9 @@ pub enum Msg {
     /// **要求した内容は運ばない。** 一覧はリポジトリ全体で 1 つなので、
     /// `CommitDetailLoaded` の `oid` に当たる「どれを頼んだか」が無い。
     BranchesLoaded(Box<Result<Vec<Branch>, GitReadError>>),
+    /// stash の一覧。`BranchesLoaded` と同じ理由で `Result` を運び、要求した内容は
+    /// 運ばない。
+    StashesLoaded(Box<Result<Vec<StashEntry>, GitReadError>>),
     /// 対象の diff。`LogLoaded` と同じ理由で `Result` を運ぶ。失敗の通り道が無いと
     /// `JobKind::LoadDiff` が走ったまま残り、以後の `Cmd::LoadDiff` が黙って落ちる。
     ///

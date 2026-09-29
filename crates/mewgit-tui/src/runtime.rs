@@ -278,6 +278,15 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
+            Cmd::LoadStashes => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::StashesLoaded(Box::new(reader.stashes().await)));
+                });
+                ControlFlow::Continue(())
+            }
+
             Cmd::LoadStatus => {
                 let reader = self.reader.clone();
                 let tx = self.tx.clone();

@@ -35,6 +35,7 @@ use prs::{
     rate_limit_seen,
 };
 use remote::{fetch, push};
+use stash::{stash_key, stashes_loaded};
 use worktree::{head_message_loaded, status_loaded, worktree_key};
 
 mod account;
@@ -46,6 +47,7 @@ mod modal;
 mod progress;
 mod prs;
 mod remote;
+mod stash;
 #[cfg(test)]
 mod test_support;
 mod worktree;
@@ -64,6 +66,7 @@ pub fn init(state: &mut AppState) -> Cmd {
         },
         Cmd::LoadStatus,
         Cmd::LoadBranches,
+        Cmd::LoadStashes,
     ]);
     state.issue(cmd)
 }
@@ -162,6 +165,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         // `Msg` に変種を足したときに実装漏れをコンパイルエラーにするため。
         Msg::StatusLoaded(result) => status_loaded(state, *result),
         Msg::BranchesLoaded(result) => branches_loaded(state, *result),
+        Msg::StashesLoaded(result) => stashes_loaded(state, *result),
         Msg::DiffLoaded { target, result } => diff_loaded(state, target, *result),
         Msg::ExecFinished(done) => exec_finished(state, *done),
         Msg::TargetResolved(resolved) => target_resolved(state, *resolved),
@@ -284,9 +288,7 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         Pane::CommitDetail => commit_detail_key(state, key),
         Pane::Diff => diff_key(state, key),
         Pane::Prs => prs_key(state, key),
-        // Stash ペインのキー処理は M5 で足す。巡回の候補
-        // （`AppState::focus_candidates`）に入っていないので、いまここには来ない。
-        Pane::Stash => Cmd::None,
+        Pane::Stash => stash_key(state, key),
     }
 }
 
@@ -476,7 +478,7 @@ mod tests {
 
     use super::test_support::{
         commit_loads, cursor, detail_ok, diff_state, exec_done_of, more, on_first_commit,
-        on_first_commit_with_files, press, press_code, state, state_on_branches,
+        on_first_commit_with_files, press, press_code, state, state_on_branches, state_on_stashes,
         state_with_commits, state_with_page, tab_to, tick, worktree_state, ROWS,
     };
     use super::*;
@@ -597,6 +599,7 @@ mod tests {
         for pane in [
             Pane::Graph,
             Pane::Branches,
+            Pane::Stash,
             Pane::Prs,
             Pane::Worktree,
             Pane::CommitDetail,
@@ -714,8 +717,11 @@ mod tests {
                 let _ = press(&mut state, 'j');
                 state
             }
-            // 巡回候補に入っていないペイン。表も空なので回すものが無い。
-            Pane::Stash => panic!("Stash はまだ無い（M5）"),
+            Pane::Stash => {
+                let mut state = state_on_stashes(3);
+                let _ = press(&mut state, 'j');
+                state
+            }
         }
     }
 
@@ -729,10 +735,13 @@ mod tests {
         // WIP 行に戻す。コミットを選んでいるあいだ Worktree は巡回に入らない（01）。
         let _ = press(&mut state, 'k');
 
-        // 巡回の並びは `Pane` の宣言順なので、Graph の次は Branches、その次が
-        // Prs（01 の「右上のタブ」）。
+        // 巡回の並びは `Pane` の宣言順なので、Graph の次は Branches、Stash、Prs
+        // （01 の「右上のタブ」）。
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
         assert_eq!(state.focus, Pane::Branches);
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
+        assert_eq!(state.focus, Pane::Stash);
+        assert_eq!(state.right_tab, RightTab::Stash);
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
         assert_eq!(state.focus, Pane::Prs);
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
@@ -747,7 +756,7 @@ mod tests {
         assert_eq!(state.graph.cursor, 0);
         assert_eq!(state.worktree.cursor, 1);
 
-        for _ in 0..3 {
+        for _ in 0..4 {
             let _ = update(&mut state, Msg::Key(Key::new(KeyCode::BackTab)));
         }
         assert_eq!(state.focus, Pane::Graph);
@@ -768,12 +777,14 @@ mod tests {
                 more(&state),
                 Cmd::LoadStatus,
                 Cmd::LoadBranches,
+                Cmd::LoadStashes,
             ])
         );
         assert!(state.jobs.is_running(JobKind::LoadLog));
         assert!(state.jobs.is_running(JobKind::LoadRepoInfo));
         assert!(state.jobs.is_running(JobKind::LoadStatus));
         assert!(state.jobs.is_running(JobKind::LoadBranches));
+        assert!(state.jobs.is_running(JobKind::LoadStashes));
     }
 
     #[test]

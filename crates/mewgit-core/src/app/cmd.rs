@@ -66,8 +66,10 @@ pub enum Cmd {
     LoadBranches,
     /// stash の一覧を読む（02 の「stash 一覧」、01 の「Stash ペイン」）。
     ///
-    /// **[`Cmd::LoadBranches`] に乗せない。** 古くなる書き込みが違う —— ブランチは
-    /// commit でも動くが、`refs/stash` を動かすのは stash の書き込みだけ。
+    /// **[`Cmd::LoadBranches`] に乗せない。** 古くなる書き込みが違う —— `update::Reload`
+    /// の `Refs`（switch やブランチの作成）は `refs/stash` を動かさないが、`RefsAndLog`
+    /// の pull / rebase は autostash で動かしうる（01 の「Stash ペイン」）。出すのは
+    /// 起動時と `RefsAndLog` のあと。
     LoadStashes,
     /// git CLI の実行（03 参照）。
     Exec(GitOp),

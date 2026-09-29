@@ -2329,8 +2329,9 @@ impl JobKind {
             // 最中に飛んでいた要求の答え（書き込み前の GitHub の状態）が採られ、
             // そのあとの引き直しは `AppState::issue` に落とされたまま誰も拾わない。
             // **stash の一覧もここ。** 読むのは `refs/stash` の reflog で、git が
-            // 動かすのは ref（01 の「Stash ペイン」）。stash の書き込みで `Refs` を
-            // 進めるのは、書き込みのキーを足す回（`update::Reload`）。
+            // 動かすのは ref（01 の「Stash ペイン」）。autostash の pull / rebase
+            // （`Reload::RefsAndLog`）は `Refs` を進める。stash の書き込み自体で進めるのは、
+            // 書き込みのキーを足す回（`update::Reload`）。
             JobKind::LoadRepoInfo
             | JobKind::LoadBranches
             | JobKind::LoadStashes

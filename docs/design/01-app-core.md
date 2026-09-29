@@ -1052,16 +1052,28 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
 - **一覧は `ListLoad` の 3 状態**（「ブランチ一覧」と同じ理由）。stash が 1 つも無い
   のは正常で、「読み込み中…」と同じ見た目にしない。**2 つ目の利用者が出たので
   `BranchLoad` を `ListLoad` に改名して共有した**
-- **読むのは起動時だけ**（`init` の `Cmd::LoadStashes`）。**一覧だけの PR には
-  `refs/stash` を動かす書き込みが無い**ので、端末で作った stash は再起動するまで
-  出ない（Branches で外のブランチ作成が出ないのと同じ）。書き込みのあとに読み直す
-  配線は (2) で `update::Reload` に足す
+- **読むのは起動時と、`Reload::RefsAndLog` の書き込みのあと。** **stash の書き込み
+  でなくても `refs/stash` は動く** —— `merge.autoStash` / `rebase.autoStash` を設定して
+  いると、mewgit の `p`（`pull --ff-only`）や `m` の rebase の continue が **exit 0 のまま
+  `stash@{0}: autostash` を積み、コンフリクトを残す**（実測、git 2.55.0。
+  `git -c merge.autoStash=true pull --ff-only` で `Created autostash` → exit 0 →
+  `stash list` に `autostash`、`status` に `UU f`）。git は「変更は stash にある」と
+  案内するので、一覧を読み直さないと退避された変更が再起動まで画面のどこにも出ない
+  （`/code-review` が拾った。最初の版は「`refs/stash` を動かすのは stash の書き込み
+  だけ」と書いて起動時しか読んでいなかった）。**autostash の起きうる op に絞らない**
+  —— 払うのは reflog 1 本の読み取りで、`RefsAndLog` はそれより重いログの読み直しを
+  既に払っている。**端末で作った stash は、次に `RefsAndLog` の書き込みをするか
+  再起動するまで出ない**（Branches で外のブランチ作成が出ないのと同じ。外部変更の
+  検知は M6）。stash の書き込み（(2)）のあとに読み直す配線は、そのとき `update::Reload`
+  に足す
 - **`JobKind::LoadStashes` の領域は `Region::Refs`。** 読むのは `refs/stash` の reflog で、
-  git が動かすのは ref。**いまの `Reload::Nothing`（stash の書き込み）は `Refs` を
-  進めない** —— (2) で stash の書き込みの `Reload` を決めるときに揃える（上の
+  git が動かすのは ref。`RefsAndLog` は `Refs` を進めるので、読み込みの最中に pull が
+  終われば返りは捨てられて頼み直される。**いまの `Reload::Nothing`（stash の書き込み）は
+  `Refs` を進めない** —— (2) で stash の書き込みの `Reload` を決めるときに揃える（上の
   「ログの読み直し」の `GitOp::moves_refs()` の段落が予告している嘘）
-- **`Cmd::LoadBranches` に乗せない。** 古くなる書き込みが違う（ブランチは commit でも
-  動くが、`refs/stash` を動かすのは stash の書き込みだけ）
+- **`Cmd::LoadBranches` に乗せない。** 古くなる書き込みが違う —— `Reload::Refs` の
+  書き込み（switch、ブランチの作成 / 改名、非 force の push）は `refs/stash` を動かさない
+  （`switch` に autostash は無い）
 - **カーソルは選んでいた stash の oid で座り直す。** **index では座り直さない** ——
   push は先頭に 1 つ足し、drop / pop は後ろを詰めるので、同じ index が別の stash を
   指す（02 の「stash 一覧」に実測）。**選んでいたものが消えたら同じ位置に留まる**

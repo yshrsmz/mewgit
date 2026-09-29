@@ -366,7 +366,7 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 - [x] `ui::panes::stash` の一覧と、`Enter` で左に出す diff（untracked を含む）。
       **stash のタスクは 3 本に割った**（2026-09-30 にユーザーと決めた。01 の「Stash
       ペイン」）—— 一覧と diff だけで、端末で作った stash を見られる。右上のタブが
-      `Branches | Stash | PRs` になる。**読むのは起動時だけ**（書き込みが無いので）
+      `Branches | Stash | PRs` になる。**読むのは起動時と `Reload::RefsAndLog` のあと**（autostash の `pull` / rebase でも積まれる。01）
 - [ ] stash の push（全体）/ apply / pop / drop。**`z` / `Z`（07 のキー表）と、apply /
       drop のキーを決める**。drop は `Modal::Confirm`。**書き込みのあとに一覧を読み直す
       `Reload` を決め、`Region::Refs` を進める**（いまの `Reload::Nothing` は `Refs` を

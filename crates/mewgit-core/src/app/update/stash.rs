@@ -65,12 +65,13 @@ pub(super) fn stashes_loaded(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        diff_ok, fake_diff, press, press_code, state, state_on_stashes, tab_to, with_stashes,
-        worktree_state,
+        diff_ok, exec_done_of, fake_diff, fake_output, issued, press, press_code, state,
+        state_on_stashes, tab_to, with_stashes, worktree_state,
     };
     use super::super::worktree::STASH_DIFF;
     use super::*;
     use crate::app::{update, ListLoad, Msg, Region};
+    use crate::git_exec::{GitOp, PullMode};
     use crate::git_read::{DiffTarget, WorktreeSection};
     use crate::test_util::{fake_snapshot, fake_stash};
 
@@ -126,6 +127,27 @@ mod tests {
         );
 
         assert_eq!(cmd, Cmd::LoadStashes);
+    }
+
+    #[test]
+    fn a_pull_reads_the_stashes_again_for_an_autostash() {
+        // `merge.autoStash` を設定していると、`pull --ff-only` が exit 0 のまま
+        // `stash@{0}: autostash` を積む（01 の「Stash ペイン」に実測）。stash の書き込み
+        // ではないが、一覧を読み直さないと退避された変更が画面に出ない。
+        let mut state = state_on_stashes(0);
+        let pull = GitOp::Pull {
+            mode: PullMode::FastForwardOnly,
+        };
+        let _ = state.issue(Cmd::Exec(pull.clone()));
+
+        let cmd = update(&mut state, exec_done_of(pull, Ok(fake_output())));
+
+        assert!(issued(&cmd, &Cmd::LoadStashes), "{cmd:?}");
+        let _ = update(
+            &mut state,
+            Msg::StashesLoaded(Box::new(Ok(vec![fake_stash(0)]))),
+        );
+        assert_eq!(state.stashes.entries, [fake_stash(0)]);
     }
 
     #[test]

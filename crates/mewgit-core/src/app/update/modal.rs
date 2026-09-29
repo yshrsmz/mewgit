@@ -24,7 +24,7 @@ pub(super) fn modal_key(state: &mut AppState, key: Key) -> Cmd {
         Some(Modal::RemotePicker { .. }) => picker_key(state, key, remote_picked),
         Some(Modal::AccountPicker { .. }) => account_key(state, key),
         // **確定が無い**（読むだけ）ので、`Enter` は何もしない。
-        Some(Modal::NoticeLog { .. }) => picker_key(state, key, |_| Cmd::None),
+        Some(Modal::NoticeLog { .. } | Modal::Help { .. }) => picker_key(state, key, |_| Cmd::None),
         // abort だけは確認モーダルへ移る（`progress_picked`）。
         Some(Modal::ProgressMenu { .. }) => picker_key(state, key, progress_picked),
         // 確定は確認モーダルへ移る（`mainline_picked`）。
@@ -181,6 +181,7 @@ mod tests {
     use super::super::update;
     use super::*;
     use crate::app::state::MAX_NOTICES;
+    use crate::app::Pane;
     use crate::app::{JobKind, Modal, Msg};
     use crate::git_exec::GitOp;
 
@@ -399,7 +400,10 @@ feat/b
     #[test]
     fn esc_closes_the_modal() {
         let mut state = AppState {
-            modal: Some(Modal::Help),
+            modal: Some(Modal::Help {
+                pane: Pane::Graph,
+                cursor: 0,
+            }),
             ..state()
         };
 
@@ -413,13 +417,16 @@ feat/b
     #[test]
     fn modal_swallows_other_keys() {
         let mut state = AppState {
-            modal: Some(Modal::Help),
+            modal: Some(Modal::Help {
+                pane: Pane::Graph,
+                cursor: 0,
+            }),
             ..state()
         };
 
         // モーダル表示中の `q` は終了ではない。入力中に閉じられると困る。
         assert_eq!(update(&mut state, Msg::Key(Key::char('q'))), Cmd::None);
-        assert_eq!(state.modal, Some(Modal::Help));
+        assert!(matches!(state.modal, Some(Modal::Help { .. })));
     }
 
     /// 通知を `messages` の順に積んだ状態（最後が最新）。

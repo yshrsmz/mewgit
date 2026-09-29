@@ -1,16 +1,14 @@
 //! 案内に出すキーとその説明の表。設計は 01 の「案内に出すキーの表」。
 //!
-//! **キーの一覧はここ 1 本。** いま読むのはステータスバーの 2 行目（07 の
-//! 「ステータスバー」）で、あとから入る `Modal::Help` と `config.keymap` の上書き（08）も
+//! **キーの一覧はここ 1 本。** 読むのはステータスバーの 2 行目（07 の「ステータスバー」）と
+//! `Modal::Help`（07 の「Help モーダル」）で、あとから入る `config.keymap` の上書き（08）も
 //! ここを読む。2 本に分けると、上書きしたときにヒントだけが既定の字を出す。
 //!
 //! **表示の字は持たない。** `j/k` や `Enter` という並びは `ui` が [`KeyCode`] から
 //! 組む（導出できる値を離れた場所に置かない。`.claude/rules/rust-coding.md`）。
 //!
-//! **`Tab` / `Shift+Tab` / `Ctrl-C` は入っていない。** いま読むのが 2 行目だけなので、
-//! そこに描かないものを入れても誰も読まない行になる。足すのは `Modal::Help` のタスク
-//! （`docs/plan.md` の M6）。**モーダル自身のキーの案内も入っていない** —— あちらは
-//! 箱の中に自前の `HINT` を持っている（`modals::*`。07 の「ステータスバー」）。
+//! **モーダル自身のキーの案内は入っていない** —— あちらは箱の中に自前の `HINT` を
+//! 持っている（`modals::*`。予算が違うので表に寄せない。07 の「ステータスバー」）。
 //!
 //! **まだ持っていないのはアクションの同一性。** キーと表示の文言しか無いので、この表は
 //! `update_key` の `match` の手書きの写しで、見張れるのは「表 → dispatch」の片側だけ
@@ -54,21 +52,31 @@ const fn hint(keys: &'static [Key], label: &'static str) -> KeyHint {
     KeyHint { keys, label }
 }
 
-/// 終了。**幅が足りなくても落とさない**（07）。
+/// キーの一覧（`Modal::Help`）を開く。
+pub const HELP: KeyHint = hint(&[Key::char('?')], "help");
+
+/// 終了。
 pub const QUIT: KeyHint = hint(&[Key::char('q')], "quit");
 
-/// どのペインでも効くキー（`update_key` がペインの `match` より先に受ける）。
-///
-/// **出すのは幅が余るペインだけ**（07）。落とす順が「共通キーの末尾 → ペインのキーの
-/// 末尾」なのは、ペインのキーが「いまここで何ができるか」の唯一の案内だから。
-/// **並びは落ちにくい順** —— 入りきらないときは末尾から 1 つずつ落ちる。
+/// **フッターに必ず出し、幅が足りなくても落とさない**キー（07 の「ステータスバー」）。
+/// どのペインでも効く。
+pub const PINNED: &[KeyHint] = &[HELP, QUIT];
+
+/// どのペインでも効くキーのうち、**フッターには出さないもの**（`Modal::Help` だけが読む。
+/// 07 の「ステータスバー」）。`update_key` がペインの `match` より先に受ける。
 pub const COMMON: &[KeyHint] = &[
     hint(&[Key::char('f')], "fetch"),
     hint(&[Key::char('p')], "pull"),
     hint(&[Key::char('P')], "push"),
     hint(&[Key::char('A')], "account"),
-    // **末尾に置く** —— 入りきらないときに最初に落ちる（どのペインで何が落ちるかは 07 の実測）。
     hint(&[Key::char('L')], "通知"),
+    hint(&[Key::char('m')], "進行中操作のメニュー"),
+    hint(
+        &[Key::new(KeyCode::Tab), Key::new(KeyCode::BackTab)],
+        "ペイン移動",
+    ),
+    // git が走っていれば中断、そうでなければ終了（`update_key` の先頭）。
+    hint(&[Key::ctrl('c')], "中断 / 終了"),
 ];
 
 /// 上下移動。**ペインをまたいで同じ 1 つを使う**（説明が割れないように）。
@@ -135,13 +143,45 @@ const DIFF: &[KeyHint] = &[
     BACK,
 ];
 
+/// [`help`] の段。見出しの字は `ui` が持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpSection {
+    /// 開いたときのペインのキー。
+    Pane,
+    /// どのペインでも効くキー（[`COMMON`] と [`PINNED`]）。
+    Anywhere,
+}
+
+/// [`help`] の 1 行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpRow {
+    Heading(HelpSection),
+    Key(&'static KeyHint),
+}
+
+/// `Modal::Help` の行。**そのペインのキー → どこでも効くキー**の 2 段（07 の
+/// 「Help モーダル」）。ほかのペインのキーは出さない —— 押せるのは今いるペインのものだけ。
+///
+/// **キーの無いペインでは見出しごと出さない**（空の段を見せない）。
+pub fn help(pane: Pane) -> Vec<HelpRow> {
+    let here = self::pane(pane);
+    let mut rows = Vec::with_capacity(here.len() + COMMON.len() + PINNED.len() + 2);
+    if !here.is_empty() {
+        rows.push(HelpRow::Heading(HelpSection::Pane));
+        rows.extend(here.iter().map(HelpRow::Key));
+    }
+    rows.push(HelpRow::Heading(HelpSection::Anywhere));
+    rows.extend(COMMON.iter().chain(PINNED).map(HelpRow::Key));
+    rows
+}
+
 /// **いま**押せるペインのキー。`None` は「この表のどれも押せない」。
 ///
 /// **モーダル表示中が `None`。** そのあいだキーは全部モーダルが受けるので
-/// （`update_key`）、ペインのキーも [`COMMON`] も [`QUIT`] も効かない。
+/// （`update_key`）、ペインのキーも [`COMMON`] も [`PINNED`] も効かない。
 /// **`ui` に `modal.is_some()` を書かせない**ため、ここが答える —— あちらに書くと
 /// 振り分けの規則の写しが 2 本になる。**モーダル自身のキーの案内は各モーダルが
-/// 持っている**（`modals::*` の `HINT`。表に入れるのは `Modal::Help` のタスク）。
+/// 持っている**（`modals::*` の `HINT`。表には寄せない。07）。
 pub fn live(state: &AppState) -> Option<&'static [KeyHint]> {
     if state.modal.is_some() {
         return None;
@@ -164,5 +204,30 @@ pub fn pane(pane: Pane) -> &'static [KeyHint] {
         // **Stash はまだ無い**（M5 のペイン）。巡回候補にも入っていないので、
         // フォーカスがここに来ることはない。
         Pane::Stash => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_help_has_the_pane_keys_then_the_keys_that_work_anywhere() {
+        let rows = help(Pane::Graph);
+        assert_eq!(rows[0], HelpRow::Heading(HelpSection::Pane));
+        let anywhere = rows
+            .iter()
+            .position(|row| *row == HelpRow::Heading(HelpSection::Anywhere))
+            .expect("どこでもの見出しがありません");
+        assert_eq!(anywhere, 1 + pane(Pane::Graph).len());
+        assert_eq!(rows.len(), anywhere + 1 + COMMON.len() + PINNED.len());
+    }
+
+    #[test]
+    fn a_pane_without_keys_shows_no_empty_heading() {
+        // Stash はまだキーを持たない。空の段を見せない。
+        let rows = help(Pane::Stash);
+        assert_eq!(rows[0], HelpRow::Heading(HelpSection::Anywhere));
+        assert!(!rows.contains(&HelpRow::Heading(HelpSection::Pane)));
     }
 }

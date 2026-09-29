@@ -5,6 +5,7 @@
 pub mod account_picker;
 pub mod commit_message;
 pub mod confirm;
+pub mod help;
 pub mod input;
 pub mod mainline_picker;
 pub mod notice_log;
@@ -72,8 +73,9 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
             parents,
             cursor,
         } => mainline_picker::render(frame, area, target, summary, parents, *cursor),
+        Modal::Help { pane, cursor } => help::render(frame, area, *pane, *cursor),
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
-        Modal::RebaseEditor { .. } | Modal::Help => {}
+        Modal::RebaseEditor { .. } => {}
     }
 }
 

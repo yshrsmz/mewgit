@@ -159,7 +159,9 @@ pub enum Modal {
     AccountPicker { view: AccountView, cursor: usize },
     RemotePicker { reason: String, remotes: Vec<String>, cursor: usize },
     NoticeLog { selected: u64 },   // 通知の履歴。選んでいる Notice.seq（上の「通知」）
-    Help,
+    ProgressMenu { menu: ProgressMenu, cursor: usize },
+    MainlinePicker { target: Oid, summary: String, parents: Vec<ParentChoice>, cursor: usize },
+    Help { pane: Pane, cursor: usize }, // キーの一覧（07 の「Help モーダル」）。開いたときのペインを持つ。行は keys::help
 }
 ```
 
@@ -2305,8 +2307,8 @@ git が自分で断る —— 03 の表で断らないのは stash だけで、s
   あるから** —— 端末で rebase を始めた直後に `m` を押すのがいちばんよく踏む形で、snapshot は
   まだ「無い」。1 回目は通知で終わるが、2 回目は開く（上の「3 つ目の向き」と同じ逃げ方）
 - **フッターの 2 行目には出さない**（2026-09-27 にユーザーと決めた）。`m` が要るのは進行中の
-  あいだだけで、そのときは断りの通知かバッジが必ず目に入る。80 桁の Graph では共通キーの
-  末尾がもう落ちていて、足しても出ない（07 の「ステータスバー」の実測）。**`Modal::Help` には載せる**（`docs/plan.md` の Help の行）
+  あいだだけで、そのときは断りの通知かバッジが必ず目に入る。いまは共通キー自体をフッターに
+  出さない（07 の「ステータスバー」）。**`?` の一覧（`Modal::Help`）には載せた**
 
 ## 実行中ジョブ
 
@@ -2520,8 +2522,8 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 ### 案内に出すキーの表
 
 **キーとその説明の一覧は `app/keys.rs` の 1 本。** ステータスバーの 2 行目（07 の
-「ステータスバー」）と、あとから入る `Modal::Help` と `config.keymap` の上書き（08）が
-**同じ表を読む**。2 本に分けると、上書きしたときにヒントだけが既定の字を出す。
+「ステータスバー」）と `Modal::Help`（07 の「Help モーダル」）と、あとから入る
+`config.keymap` の上書き（08）が**同じ表を読む**。2 本に分けると、上書きしたときにヒントだけが既定の字を出す。
 
 ```rust
 pub struct KeyHint { /* 非公開 */ }
@@ -2531,10 +2533,12 @@ impl KeyHint {
     pub fn label(&self) -> &'static str; // 何が起きるか
 }
 
-/// 終了。幅が足りなくても落とさない（07）。
-pub const QUIT: KeyHint;
-/// どのペインでも効くキー（`f` / `p` / `P` / `A`）。幅が余るペインでだけ出す。
+/// `?`（キーの一覧）と `q`。フッターに必ず出し、幅が足りなくても落とさない（07）。
+pub const PINNED: &[KeyHint];
+/// どのペインでも効くキーのうち、**フッターには出さないもの**。`Modal::Help` だけが読む（07）。
 pub const COMMON: &[KeyHint];
+/// `Modal::Help` の行（見出しとキー）。そのペインのキー → どこでも効くキーの順。
+pub fn help(pane: Pane) -> Vec<HelpRow>;
 /// **いま**押せるペインのキー。`None` は「この表のどれも押せない」（モーダル表示中）。
 pub fn live(state: &AppState) -> Option<&'static [KeyHint]>;
 /// そのペインで押せるキー。網羅 `match` なので、`Pane` を足すと実装漏れが落ちる。
@@ -2548,16 +2552,13 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
   —— 案内に出すものの一覧なので、出さないものを入れると「表 → 実際に押せる」の
   見張りが通るだけで案内は変わらない。**逆向き（`match` の腕が全部表にあるか）は
   `match` から導けない**ので、そこは見張れない
-- **`m`（進行中操作のメニュー）も入っていない。** 進行中のあいだしか要らず、案内は
-  断りの通知が持つ（上の「進行中操作のメニュー（`m`）」）。`Modal::Help` のタスクで足す
-- **`Tab` / `Shift+Tab` / `Ctrl-C` は入っていない。** いま表を読むのは 2 行目だけで、
-  そこに描かないものを入れると誰も読まない行になる（`.claude/rules/rust-coding.md` の「読まれない状態」）。
-  足すのは `Modal::Help` のタスク
+- **`m` / `Tab` / `Shift+Tab` / `Ctrl-C` は `COMMON` に入っている**（`Modal::Help` で
+  足した）。読むのは `?` の一覧だけで、フッターには出ない
 - **押して無反応なキーを表に入れない見張り**は `every_hinted_key_does_something`
   （`update` を通して 1 打鍵ずつ叩き、`Cmd` か `AppState` が動くことを見る）。
   `update_key` の `match` に対する 2 本目の一覧なので、**表だけが古くなる形を塞ぐ**
 - **「いま押せるか」に答えるのは [`live`] のほう。** モーダル表示中はキーを全部モーダルが
-  受けるので（上の「キー入力」）、ペインのキーも `COMMON` も `QUIT` も効かない。
+  受けるので（上の「キー入力」）、ペインのキーも `COMMON` も `PINNED` も効かない。
   **`ui` に `modal.is_some()` を書かせない** —— 書くと振り分けの規則の写しが 2 本になる
 - **表はまだ「どのキーか」と「何と書くか」しか持っていない。** dispatch と突き合わせる
   **アクションの同一性が無い**ので、上の見張りが「表 → dispatch」の片側しか見られない。

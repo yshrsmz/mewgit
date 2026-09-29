@@ -48,3 +48,10 @@ paths:
 - **PR の扇形（`fan_out`）を頼む場所は PR ごとに増えたり減ったりする**（#96 では
   `refresh` から外した）。足す・外す前に呼び出し元を数え直す
   （`grep -rn "fan_out(" crates/mewgit-core/src/app/update/`）
+- **モーダル表示中も状態は動く。** キーはモーダルが受けるが、非同期の `Msg`（status や
+  ログの返り）は届き続け、`update` の出口（`reseat_focus` / `issue`）は毎回走る。
+  **モーダルが開いたときの前提（どのペインか、どの行か）は、描くたびに `AppState` から
+  読まずにモーダルに写して持つ**（`RemotePicker` の `remotes`、`MainlinePicker` の
+  `parents`、`Help` の `pane`）。#127 では「表示中はフォーカスが動かない」と doc に書いて
+  `focus` を読み、`/simplify` の altitude に反証された（候補から外れたペインへ
+  `reseat_focus` が移すと、一覧が別のペインのものに入れ替わる）

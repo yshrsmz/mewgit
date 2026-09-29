@@ -353,13 +353,13 @@ pub(super) fn log_loaded(
 mod tests {
     use super::super::test_support::{
         commit, commit_loads, cursor, detail_ok, diff_ok, fake_diff, files_loaded, files_of, more,
-        on_first_commit, page_loaded, press, press_code, reload, state, state_with_commits,
-        state_with_page, tick, ROWS,
+        on_first_commit, open_confirm, page_loaded, press, press_code, reload, state,
+        state_with_commits, state_with_page, tick, ROWS,
     };
     use super::super::worktree::COMMIT_DIFF;
     use super::super::{init, update};
     use super::*;
-    use crate::app::{GraphSelection, Modal, Msg};
+    use crate::app::{GraphSelection, Msg};
 
     use crate::git_read::{DiffTarget, FileStatus};
     use crate::graph::LaneState;
@@ -1163,9 +1163,7 @@ mod tests {
         let cmd = press(&mut state, 'y');
 
         assert_eq!(cmd, Cmd::None);
-        let Some(Modal::Confirm { body, on_yes, .. }) = &state.modal else {
-            panic!("確認が開いていません: {:?}", state.modal);
-        };
+        let (body, on_yes) = open_confirm(&state);
         // どのコミットをどこへ積むかを押す前に見せる（01 の「cherry-pick の開始（`y`）」）。
         assert!(body.contains(&short_oid(&oid)), "{body}");
         assert!(body.contains("commit 0"), "{body}");

@@ -67,7 +67,7 @@ pub const COMMON: &[KeyHint] = &[
     hint(&[Key::char('p')], "pull"),
     hint(&[Key::char('P')], "push"),
     hint(&[Key::char('A')], "account"),
-    // **末尾に置く** —— 80 桁の Graph では、`A` とここが落ちる（07 の実測）。
+    // **末尾に置く** —— 入りきらないときに最初に落ちる（どのペインで何が落ちるかは 07 の実測）。
     hint(&[Key::char('L')], "通知"),
 ];
 

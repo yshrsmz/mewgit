@@ -201,13 +201,7 @@ impl Reload {
             // 03 の「cherry-pick の開始」の実測）。下の `Commit` と同じ理由で、読み直すと
             // `GraphState::restart` がグラフの位置を先頭に戻す —— `y` を押したコミットを
             // 見失う。**複数では下の腕に落ちる**（途中まで積んでから止まる）。
-            GitOp::CherryPick(oids) if oids.len() == 1 => {
-                if moved {
-                    Reload::RefsAndLog
-                } else {
-                    Reload::Refs
-                }
-            }
+            GitOp::CherryPick(oids) if oids.len() == 1 => Reload::one_shot(moved),
 
             // walk に入るコミットの集合が変わる。**失敗しても途中まで ref が
             // 動いていることがある**ので成否を見ない。fetch / pull は一部の ref だけ
@@ -236,13 +230,17 @@ impl Reload {
             // **中断は「失敗」ではない**（[`ref_may_have_moved`]）。
             GitOp::Commit { .. }
             | GitOp::BranchDelete { .. }
-            | GitOp::Push { lease: Some(_), .. } => {
-                if moved {
-                    Reload::RefsAndLog
-                } else {
-                    Reload::Refs
-                }
-            }
+            | GitOp::Push { lease: Some(_), .. } => Reload::one_shot(moved),
+        }
+    }
+
+    /// 1 回で決まる書き込み。**失敗したなら ref は元のまま**なので、ログまでは読み直さない
+    /// （`GraphState::restart` がグラフの位置を先頭に戻すため）。
+    fn one_shot(moved: bool) -> Self {
+        if moved {
+            Reload::RefsAndLog
+        } else {
+            Reload::Refs
         }
     }
 }
@@ -382,15 +380,50 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
 /// cherry-pick の変更が空で止まったときの案内。**continue は同じ理由で断られる**ので、
 /// 出口は skip（1 本なら abort と同じ結果。03 の「continue / skip / abort の終わり方」）。
 ///
-/// **網羅 `match` にしない。** git がこの文言を出すのは cherry-pick の系統だけで
-/// （revert は空でも止まらず、rebase は空の pick を既定で落とす。03 の実測）、ほかの
-/// op で出たら案内の無い `Display` に落ちるほうが嘘を言わない。
+/// **git がこの文言を出すのは cherry-pick の系統だけ**（revert は空でも止まらず、rebase は
+/// 空の pick を既定で落とす。03 の実測）。ほかの op で出たら、案内の無い `Display` に
+/// 落ちるほうが嘘を言わない。
+///
+/// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由 —— revert の skip などを
+/// 足したときに、空で止まったあと skip で抜ける操作かを選ばせる。
 fn empty_advice(op: &GitOp) -> Option<&'static str> {
-    matches!(
-        op,
-        GitOp::CherryPick(_) | GitOp::CherryPickContinue | GitOp::CherryPickSkip
-    )
-    .then_some("変更が空で止まった。m から skip")
+    match op {
+        GitOp::CherryPick(_) | GitOp::CherryPickContinue | GitOp::CherryPickSkip => {
+            Some("変更が空で止まった。m から skip")
+        }
+        GitOp::Stage(_)
+        | GitOp::Unstage(_)
+        | GitOp::StageHunk { .. }
+        | GitOp::UnstageHunk { .. }
+        | GitOp::DiscardHunk { .. }
+        | GitOp::Discard(_)
+        | GitOp::DiscardUntracked(_)
+        | GitOp::DiscardAdded(_)
+        | GitOp::Commit { .. }
+        | GitOp::BranchCreate { .. }
+        | GitOp::Switch(_)
+        | GitOp::BranchDelete { .. }
+        | GitOp::BranchRename { .. }
+        | GitOp::Fetch { .. }
+        | GitOp::Pull { .. }
+        | GitOp::Push { .. }
+        | GitOp::RebaseInteractive { .. }
+        | GitOp::RebaseContinue
+        | GitOp::RebaseSkip
+        | GitOp::RebaseAbort
+        | GitOp::CherryPickAbort
+        | GitOp::Revert { .. }
+        | GitOp::RevertContinue
+        | GitOp::RevertAbort
+        | GitOp::MergeAbort
+        | GitOp::StashPush { .. }
+        | GitOp::StashApply(_)
+        | GitOp::StashPop(_)
+        | GitOp::StashDrop(_)
+        | GitOp::SetAccount { .. }
+        | GitOp::UnsetAccount
+        | GitOp::CheckoutPr(_) => None,
+    }
 }
 
 /// 非 FF で断られたときの案内。**押すキーが op で違う**（01 の「失敗の案内文」）。
@@ -572,11 +605,12 @@ mod tests {
     }
 
     #[test]
-    fn stopping_at_the_next_conflict_is_a_warning_with_the_way_on() {
+    fn stopping_at_the_next_conflict_or_an_empty_pick_is_a_warning_with_the_way_on() {
         // continue / skip のあとに次のコミットでまた止まるのは想定どおりの結末で、
         // 進行中操作は残る（03 の「continue / skip / abort の終わり方」）。赤で出すと
-        // 壊れたように読める。
-        for op in [
+        // 壊れたように読める。**変更が空で止まった pick も同じ**で、continue は同じ理由で
+        // 断られるので出口は skip。
+        let conflict = [
             GitOp::RebaseContinue,
             GitOp::RebaseSkip,
             GitOp::CherryPickContinue,
@@ -586,21 +620,21 @@ mod tests {
             GitOp::Pull {
                 mode: PullMode::Rebase,
             },
-        ] {
+        ]
+        .map(|op| (op, ExecErrorKind::Conflict, "m から continue"));
+        let empty = [
+            GitOp::CherryPick(vec![fake_oid(1)]),
+            GitOp::CherryPickContinue,
+            GitOp::CherryPickSkip,
+        ]
+        .map(|op| (op, ExecErrorKind::Empty, "m から skip"));
+        for (op, kind, way) in conflict.into_iter().chain(empty) {
             let mut state = state();
-            finish_exec(
-                &mut state,
-                op.clone(),
-                Err(failed_with(ExecErrorKind::Conflict)),
-            );
+            finish_exec(&mut state, op.clone(), Err(failed_with(kind)));
 
             let notice = state.notices.back().expect("通知がありません");
-            assert_eq!(notice.level, NoticeLevel::Warn, "{op:?}");
-            assert!(
-                notice.message.contains("m から continue"),
-                "{op:?}: {}",
-                notice.message
-            );
+            assert_eq!(notice.level, NoticeLevel::Warn, "{op:?} {kind:?}");
+            assert!(notice.message.contains(way), "{op:?}: {}", notice.message);
             // **必ずバッジと並ぶ**ので、71 ではなくバッジの隣の幅に収める（`/code-review` が
             // `CHERRY-PICK` の隣で `m か…` まで削られるのを描いて拾った）。
             assert!(
@@ -613,38 +647,8 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_cherry_pick_is_a_warning_that_points_to_skip() {
-        // 変更が空で止まった pick は進行中操作が残り、continue は同じ理由で断られる
-        // （03 の「continue / skip / abort の終わり方」）。出口は `m` の skip。
-        for op in [
-            GitOp::CherryPick(vec![fake_oid(1)]),
-            GitOp::CherryPickContinue,
-            GitOp::CherryPickSkip,
-        ] {
-            let mut state = state();
-            finish_exec(
-                &mut state,
-                op.clone(),
-                Err(failed_with(ExecErrorKind::Empty)),
-            );
-
-            let notice = state.notices.back().expect("通知がありません");
-            assert_eq!(notice.level, NoticeLevel::Warn, "{op:?}");
-            assert!(
-                notice.message.contains("m から skip"),
-                "{op:?}: {}",
-                notice.message
-            );
-            // バッジ（`CHERRY-PICK abc1234`）と必ず並ぶ。
-            assert!(
-                cells(&notice.message) <= BESIDE_BADGE_CELLS,
-                "{} セル: {}",
-                cells(&notice.message),
-                notice.message
-            );
-        }
-
-        // cherry-pick の系統でなければ案内しない（git がこの文言を出すのはそこだけ）。
+    fn an_empty_stop_outside_cherry_pick_is_not_told_to_skip() {
+        // git がこの文言を出すのは cherry-pick の系統だけ。ほかで出たら `Display` に落とす。
         let mut state = state();
         finish_exec(
             &mut state,

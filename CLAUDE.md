@@ -15,6 +15,10 @@ TUI 版 GitKraken。Rust + ratatui。認証はローカルの `~/.ssh` と `gh` 
 
 **設計書を書く・直すときの教訓は `.claude/rules/design-docs.md`**（`docs/` を読むと読み込まれる）。
 
+**この `CLAUDE.md` は入口だけ。** 規約は `.claude/rules/`（path 付きで、触るファイルに応じて
+読み込まれる）、手順は `.claude/skills/`。**教訓や過去の判断を探すときは、grep の対象に
+`.claude/` も含める**（`docs/` だけを探すと、規約に移した教訓が見つからない）。
+
 ## 不変のルール
 
 1. **読み取りは git2、書き込みは `git` CLI**。git2 で commit / checkout / rebase / stash を実行しない（hook が走らないため）。

@@ -344,12 +344,16 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       コミットは手前で断る。**変更が空で止まった pick は continue で抜けられない**ので、
       `m` のメニューの cherry-pick に skip を足し、`ExecErrorKind::Empty` で案内する
       （2026-09-29 にユーザーと決めた。03 の「cherry-pick の開始」に実測の表）
-- [ ] cherry-pick（複数）の開始。**単一と割った**（2026-09-29）—— グラフに印を付ける
-      仕組みが要り、**同じ仕組みを revert の開始も使う**ので、revert の開始のあとで
-      共有の形を決める（01 の「cherry-pick の開始（`y`）」）
-- [ ] revert（mainline 選択）の開始。continue / abort は上の `m` メニューに入っている。
-      **skip をメニューに足すかはここで決める** —— revert は変更が空でも止まらない
-      （cherry-pick とは違う。03 の「cherry-pick の開始」の参考行）
+- [x] revert（単一、mainline 選択）の開始。**Graph の `v` → merge コミットなら
+      `MainlinePicker` で残す側の親 → 確認 → `revert [--mainline N] <oid>`**。取り消す
+      変更が無い形は `ExecErrorKind::NoChanges` で `Warn` を出す。**skip はメニューに
+      足さなかった**（2026-09-29 にユーザーと決めた）—— 1 本だけの revert は空で止まらない
+      （03 の「revert の開始」に実測の表）
+- [ ] cherry-pick / revert（複数）の開始。**単一と割った**（2026-09-29）—— グラフに印を
+      付ける仕組み（どのキーで付けるか、描き方、古い順に並べ直すこと）を両方で共有する
+      （01 の「cherry-pick の開始（`y`）」）。**revert の skip もここで `m` のメニューに
+      足す** —— 複数の revert は途中が空だと `sequencer/` だけを残して止まる（03 の
+      「revert の開始」の参考行）。その形を 02 の検出が `Revert` と読めるかも確かめる
 - [ ] `ui::panes::stash` — 一覧 / diff / push / apply / pop / drop、部分 stash
 
 ## M6: 仕上げ

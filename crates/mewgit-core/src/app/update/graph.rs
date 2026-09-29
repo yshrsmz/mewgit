@@ -10,7 +10,10 @@ use crate::git_read::{short_oid, CommitDetail, FileEntry, GitReadError, HeadInfo
 use super::branches::open_branch_create;
 use super::diff::{load_diff, open_diff};
 use super::{confirm, focus};
-use crate::app::{AppState, Cmd, CommitFiles, GraphLine, JobKind, Key, KeyCode, NoticeLevel, Pane};
+use crate::app::{
+    AppState, Cmd, CommitFiles, GraphLine, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane,
+    ParentChoice,
+};
 
 /// グラフペインのキー処理。
 ///
@@ -31,6 +34,7 @@ pub(super) fn graph_key(state: &mut AppState, key: Key) -> Cmd {
             open_branch_create(state, start)
         }
         KeyCode::Char('y') => cherry_pick(state),
+        KeyCode::Char('v') => revert(state),
         _ => Cmd::None,
     }
 }
@@ -70,6 +74,95 @@ fn cherry_pick(state: &mut AppState) -> Cmd {
         head_name(state)
     );
     confirm(state, "cherry-pick", body, GitOp::CherryPick(vec![oid]))
+}
+
+/// `v`。カーソルの指すコミットを取り消すコミットを HEAD に積む（01 の「revert の開始（`v`）」）。
+///
+/// **確認モーダルを挟む**のも、**進行中操作を手前で見ない**のも `y` と同じ理由。
+/// **merge コミットは残す側の親を選ばせてから確認へ進む**（[`Modal::MainlinePicker`]）。
+/// git は `-m` が無いと exit 128 で断る（03 の「revert の開始」）。
+fn revert(state: &mut AppState) -> Cmd {
+    // WIP 行。取り消すコミットが無い。
+    let Some(commit) = state.graph.cursor_commit() else {
+        state.push_notice(
+            NoticeLevel::Info,
+            "revert するコミットの行を選んでください".to_string(),
+            None,
+        );
+        return Cmd::None;
+    };
+    let target = commit.oid;
+    let summary = commit.summary.clone();
+    if commit.parents.len() <= 1 {
+        let body = format!(
+            "{} {} を取り消すコミットを {} に積みます。",
+            short_oid(&target),
+            summary,
+            head_name(state)
+        );
+        let op = GitOp::Revert {
+            oids: vec![target],
+            mainline: None,
+        };
+        return confirm(state, "revert", body, op);
+    }
+    // **親の summary は読み込み済みのグラフからだけ引く。** 読み足しを待たせるより、
+    // oid だけで選ばせるほうが軽い（`ParentChoice::summary`）。
+    let parents = commit
+        .parents
+        .iter()
+        .map(|&oid| ParentChoice {
+            oid,
+            summary: state
+                .graph
+                .lines
+                .iter()
+                .find(|line| line.commit.oid == oid)
+                .map(|line| line.commit.summary.clone()),
+        })
+        .collect();
+    state.modal = Some(Modal::MainlinePicker {
+        target,
+        summary,
+        parents,
+        cursor: 0,
+    });
+    Cmd::None
+}
+
+/// [`Modal::MainlinePicker`] の `Enter`。選んだ親を残す側として確認へ進む。
+///
+/// **番号は `cursor + 1`**（git の `--mainline` は 1 始まり）。
+pub(super) fn mainline_picked(state: &mut AppState) -> Cmd {
+    let picked = match &state.modal {
+        Some(Modal::MainlinePicker {
+            target,
+            summary,
+            parents,
+            cursor,
+        }) => parents
+            .get(*cursor)
+            .map(|parent| (*target, summary.clone(), parent.oid, *cursor + 1)),
+        _ => None,
+    };
+    let Some((target, summary, parent, mainline)) = picked else {
+        state.modal = None;
+        return Cmd::None;
+    };
+    let mainline = u32::try_from(mainline).unwrap_or(u32::MAX);
+    let body = format!(
+        "{} {} を取り消すコミットを {} に積みます。残す側は {} 番目の親 {} です。",
+        short_oid(&target),
+        summary,
+        head_name(state),
+        mainline,
+        short_oid(&parent)
+    );
+    let op = GitOp::Revert {
+        oids: vec![target],
+        mainline: Some(mainline),
+    };
+    confirm(state, "revert", body, op)
 }
 
 /// 確認の本文に出す積む先。**表示だけに使う**（git は HEAD に積むので、ここが古くても
@@ -1209,5 +1302,105 @@ mod tests {
             "{}",
             notice.message
         );
+    }
+
+    #[test]
+    fn v_on_a_commit_asks_before_reverting_it_onto_head() {
+        let mut state = state_with_commits(3);
+        state.repo.head = Some(HeadInfo::Branch {
+            name: "main".to_string(),
+            oid: fake_oid(9),
+            upstream: None,
+        });
+        let _ = press(&mut state, 'j');
+        let oid = cursor(&state);
+
+        let cmd = press(&mut state, 'v');
+
+        assert_eq!(cmd, Cmd::None);
+        let (body, on_yes) = open_confirm(&state);
+        // どのコミットを取り消し、どこへ積むかを押す前に見せる（01 の「revert の開始（`v`）」）。
+        assert!(body.contains(&short_oid(&oid)), "{body}");
+        assert!(body.contains("commit 0"), "{body}");
+        assert!(body.contains("main"), "{body}");
+        let expected = Cmd::Exec(GitOp::Revert {
+            oids: vec![oid],
+            mainline: None,
+        });
+        assert_eq!(on_yes, &expected);
+        assert_eq!(press(&mut state, 'y'), expected);
+    }
+
+    #[test]
+    fn v_on_the_wip_row_has_nothing_to_revert() {
+        let mut state = state_with_commits(3);
+        assert_eq!(state.graph.selection(), GraphSelection::Wip);
+
+        let cmd = press(&mut state, 'v');
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.modal, None);
+        let notice = state.shown_notice().expect("通知が出ていません");
+        assert!(
+            notice.message.contains("コミットの行"),
+            "{}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn v_on_a_merge_commit_picks_the_parent_to_keep_before_asking() {
+        // 1 番目の親は読み込み済み（commit 1）、2 番目は読み込んでいない。
+        let mut state = state_with_commits(3);
+        let unloaded = fake_oid(42);
+        state.graph.lines[0].commit.parents = vec![fake_oid(1), unloaded];
+        let _ = press(&mut state, 'j');
+        let target = cursor(&state);
+
+        assert_eq!(press(&mut state, 'v'), Cmd::None);
+
+        let Some(Modal::MainlinePicker { parents, .. }) = &state.modal else {
+            panic!("親を選ぶモーダルが開いていません: {:?}", state.modal);
+        };
+        // **読み込み済みの親だけ summary を持つ**（`ParentChoice::summary`）。
+        assert_eq!(
+            parents,
+            &vec![
+                ParentChoice {
+                    oid: fake_oid(1),
+                    summary: Some("commit 1".to_string()),
+                },
+                ParentChoice {
+                    oid: unloaded,
+                    summary: None,
+                },
+            ]
+        );
+
+        // 2 番目を選ぶと `--mainline 2`（git は 1 始まり）。確認を挟む。
+        let _ = press(&mut state, 'j');
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+        let (body, on_yes) = open_confirm(&state);
+        assert!(body.contains("2 番目の親"), "{body}");
+        assert!(body.contains(&short_oid(&unloaded)), "{body}");
+        let expected = Cmd::Exec(GitOp::Revert {
+            oids: vec![target],
+            mainline: Some(2),
+        });
+        assert_eq!(on_yes, &expected);
+        assert_eq!(press(&mut state, 'y'), expected);
+    }
+
+    #[test]
+    fn esc_on_the_parent_picker_reverts_nothing() {
+        let mut state = state_with_commits(3);
+        state.graph.lines[0].commit.parents = vec![fake_oid(1), fake_oid(2)];
+        let _ = press(&mut state, 'j');
+        let _ = press(&mut state, 'v');
+        assert!(matches!(state.modal, Some(Modal::MainlinePicker { .. })));
+
+        assert_eq!(press_code(&mut state, KeyCode::Esc), Cmd::None);
+
+        assert_eq!(state.modal, None);
     }
 }

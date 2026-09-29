@@ -10,7 +10,7 @@ ratatui / crossterm には依存しない（不変ルール 6）。`ui` は下�
 
 | 節 | モジュール |
 |---|---|
-| 「グラフの行」とその `###`（追加ページ / ログの読み直しの発行 / コミット詳細 / ファイル一覧 / cherry-pick の開始） | `update/graph.rs` |
+| 「グラフの行」とその `###`（追加ページ / ログの読み直しの発行 / コミット詳細 / ファイル一覧 / cherry-pick の開始 / revert の開始） | `update/graph.rs` |
 | 「ワーキングツリー」「書き込みのあとの status」「失敗の記憶」 | `update/worktree.rs` |
 | 「diff の遅延取得」「diff のキャッシュと鮮度」 | `update/diff.rs` |
 | 「ブランチ一覧」 | `update/branches.rs` |
@@ -550,7 +550,9 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   一部の ref だけ更新して落ちうるし、rebase / cherry-pick / revert は途中で止まる。
   commit / branch 削除 / force push は 1 回で決まるので、失敗したなら ref は元のまま。
   **1 本だけの cherry-pick も 1 回で決まる側**（コンフリクトでも空でも HEAD は動かない。
-  03 の「cherry-pick の開始」）—— `y` を押したコミットの位置を失わない。
+  03 の「cherry-pick の開始」）—— `y` を押したコミットの位置を失わない。**1 本だけの
+  revert も同じ**（コンフリクト・取り消す変更が無い・mainline の誤りでも HEAD は動かない。
+  03 の「revert の開始」）。
   **読み直しは行を捨てるだけでなく `GraphState::restart` がカーソルとスクロールを
   先頭に戻す**ので、pre-commit hook に弾かれただけでグラフの位置を失う
 - **新しい `Cmd` の変種にせず `LoadLog` のフィールドにする。** `job_kind` が
@@ -705,6 +707,35 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 **複数のコミットは別のタスクに割った**（`docs/plan.md` の M5）。グラフに印を付ける仕組み
 （どのキーで付けるか、描き方、古い順に並べ直すこと）が要り、**同じ仕組みを revert の開始も
 使う**。revert の開始が入る前に決めると、共有の形を cherry-pick 側だけから選ぶことになる。
+
+### revert の開始（`v`）
+
+**Graph の `v` で、カーソルの指すコミットを取り消すコミットを HEAD に積む**（1 本だけ）。
+確認を挟むこと、WIP 行で断ること、進行中操作を手前で見ないこと、失敗でログを読み直さない
+ことは `y`（上）と同じ。確認の本文は「`abc1234 <summary>` を取り消すコミットを `<ブランチ>`
+に積みます。」。
+
+- **merge コミットは残す側の親を選ばせてから確認へ進む**（`Modal::MainlinePicker`。
+  2026-09-29 にユーザーと決めた）。git は `-m` が無いと exit 128 で断る（03 の
+  「revert の開始」）。`-m 1` 固定にしなかったのは、**`-m 2`（main 側の変更を取り消す）を
+  mewgit から打てなくなる**から。lazygit も親を選ばせる
+- **選ぶのは「残す側」だと画面で言う。** `--mainline N` は N 番目の親を本流として残し、
+  ほかの親から入った変更を取り消す（03 の実測で `-m 1` は topic 側、`-m 2` は main 側の
+  ファイルを消した）。「親を選ぶ」だけだと、取り消す側を選ぶと読める。確認の本文にも
+  「残す側は N 番目の親 `<oid>` です。」を足す
+- **親の summary は読み込み済みのグラフからだけ引く**（`ParentChoice::summary`）。読み
+  込んでいない親は oid だけ出す。**読み足さない** —— oid だけでも選べ、読み足しを待たせる
+  ほうが重い。merge の 1 番目の親はふつう直下の行なので、たいてい summary が出る
+- **開いた時点のコミットと親を写して持つ**（`RemotePicker` の `remotes` と同じ）。開いて
+  いるあいだにログが読み直されても、選んだ番号が別のコミットの親を指さない
+- **親が 1 つのコミットには mainline を付けない。** git は付けても通す（03 の表）が、
+  選ばせる意味が無い
+- **取り消す変更が無かった revert は `Warn` で理由を出す**（下の「失敗の案内文」）。
+  git は何も残さず exit 1 で返るので、進行中操作にはならない
+- **skip は `m` のメニューに足さない**（2026-09-29 にユーザーと決めた）。1 本だけの revert は
+  空で止まらず、コンフリクトで止まったときの skip は abort と同じ結果になる。**空で止まる
+  のは複数の revert の途中だけ**（`sequencer/` だけが残る。03）なので、複数の revert を
+  入れるタスク（`docs/plan.md`）で足す
 
 ## ワーキングツリー
 
@@ -2105,6 +2136,7 @@ pub struct PushRejection {
 | `NonFastForward` + `Pull` | 履歴が分かれている（merge / rebase は M5） |
 | `Conflict` + rebase / cherry-pick / revert（開始・continue・skip）/ `pull --rebase` | 解消して `git add` したら `m` で continue する（**`Warn`**） |
 | `Empty` + cherry-pick（開始・continue・skip） | `m` から skip する（**`Warn`**） |
+| `NoChanges` + revert（開始） | 取り消す変更が無い（**`Warn`**） |
 | それ以外 | 無し（`Display` に落とす） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
@@ -2150,6 +2182,11 @@ pub struct PushRejection {
   （31 セル。バッジの隣の 48 に収まる）。**cherry-pick の系統の op だけに出す** —— revert は
   空でも止まらず（03）、rebase で空の pick に当たったときの出力は確かめていない。ほかで出たら
   案内の無い `Display` に落とすほうが嘘を言わない
+- **`NoChanges` も `Warn` で出す。** 1 本だけの revert で取り消す変更が無かった形で、git は
+  `REVERT_HEAD` を残さず exit 1 で返り、**stderr は空**（03 の「revert の開始」）。案内が
+  無いと argv だけの赤い通知になり、理由が見えない。文は「取り消す変更がありません
+  （取り消し済み）」。**`git commit` も同じ文言を出すが、あちらは `Display` のまま** ——
+  commit の `NoChanges` に何を言うべきかはこのタスクで決めていない
 - **`Conflict` は `Warn` で出す。** continue / skip のあとに次のコミットでまた止まった
   形で（03 の「continue / skip / abort の終わり方」）、進行中操作は残ってバッジの数が
   進む。**想定どおりの停止を赤で出すと、壊れたように読める。** 案内は「`git add` したら」

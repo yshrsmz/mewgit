@@ -322,6 +322,7 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
             | Modal::AccountPicker { .. }
             | Modal::NoticeLog { .. }
             | Modal::ProgressMenu { .. }
+            | Modal::MainlinePicker { .. }
             | Modal::RebaseEditor { .. }
             | Modal::Help,
         )

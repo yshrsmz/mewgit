@@ -5,6 +5,7 @@
 //! カーソル・閉じ方・受けないキー。
 
 use super::account::{account_picked, account_reresolve, account_unset};
+use super::graph::mainline_picked;
 use super::progress::progress_picked;
 use super::prs::pr_create_key;
 use super::remote::remote_picked;
@@ -26,6 +27,8 @@ pub(super) fn modal_key(state: &mut AppState, key: Key) -> Cmd {
         Some(Modal::NoticeLog { .. }) => picker_key(state, key, |_| Cmd::None),
         // abort だけは確認モーダルへ移る（`progress_picked`）。
         Some(Modal::ProgressMenu { .. }) => picker_key(state, key, progress_picked),
+        // 確定は確認モーダルへ移る（`mainline_picked`）。
+        Some(Modal::MainlinePicker { .. }) => picker_key(state, key, mainline_picked),
         // **骨格を共有しない。** 欄が 4 つあって `Enter` の意味も欄で変わるので、
         // `picker_key` にも `edit_key` 1 本にも収まらない（01 の「PR 作成（`N`）」）。
         Some(Modal::PrCreate { .. }) => pr_create_key(state, key),

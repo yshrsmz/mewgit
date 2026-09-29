@@ -6,6 +6,7 @@ pub mod account_picker;
 pub mod commit_message;
 pub mod confirm;
 pub mod input;
+pub mod mainline_picker;
 pub mod notice_log;
 pub mod picker;
 pub mod pr_create;
@@ -65,6 +66,12 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
         ),
         Modal::NoticeLog { selected } => notice_log::render(frame, area, state, *selected),
         Modal::ProgressMenu { menu, cursor } => progress_menu::render(frame, area, menu, *cursor),
+        Modal::MainlinePicker {
+            target,
+            summary,
+            parents,
+            cursor,
+        } => mainline_picker::render(frame, area, target, summary, parents, *cursor),
         // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
         Modal::RebaseEditor { .. } | Modal::Help => {}
     }

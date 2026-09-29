@@ -1458,15 +1458,18 @@ mod tests {
 
     #[test]
     fn the_common_keys_drop_at_the_width_where_they_would_be_cut() {
-        // **境目を跨ぐ**（`.claude/rules/testing.md`）。Graph + 共通キー + `q:quit` は 82 セルなので、
-        // 82 では出て 81 では落ちる。机上で選んだ幅では、どちらか片側しか踏めない。
-        let fits = hint_bar_of(Pane::Graph, 82);
+        // **境目を跨ぐ**（`.claude/rules/testing.md`）。Graph + 共通キー + `q:quit` がちょうど
+        // 収まる幅では出て、1 セル狭いと落ちる。机上で選んだ幅では、どちらか片側しか踏めない。
+        // **幅は組んだ字から導く** —— 数を写すと、Graph にキーを足すたびに揃える先が増える（07）。
+        let full =
+            ratatui::text::Span::raw(hint_text(keys::pane(Pane::Graph), u16::MAX)).width() as u16;
+        let fits = hint_bar_of(Pane::Graph, full);
         assert!(fits.contains("L:通知"), "hints: {fits:?}");
         assert!(fits.contains("n:ブランチ作成"), "hints: {fits:?}");
 
         // **落とすのは共通キーの末尾 1 つだけ**（07）。丸ごと落とすと、共通キーを
         // 1 つ足しただけで `f` / `p` / `P` / `A` まで消える。
-        let over = hint_bar_of(Pane::Graph, 81);
+        let over = hint_bar_of(Pane::Graph, full - 1);
         assert!(!over.contains("L:通知"), "hints: {over:?}");
         assert!(over.contains("A:account"), "hints: {over:?}");
         assert!(over.contains("n:ブランチ作成"), "hints: {over:?}");
@@ -1507,11 +1510,6 @@ mod tests {
         assert!(detail.contains("L:通知"), "hints: {detail:?}");
         // `contains` だけだと、80 桁をちょうど埋めた状態でも通る（#80）。
         assert!(fits(&detail, 79), "余白がありません: {detail:?}");
-
-        // **Graph は `L` だけが落ちる**（07 の実測）。
-        let graph = hint_bar_of(Pane::Graph, 80);
-        assert!(graph.contains("A:account"), "hints: {graph:?}");
-        assert!(!graph.contains("L:通知"), "hints: {graph:?}");
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub enum GitOp {
     Push { remote, src, dst: Option<String>, set_upstream, lease: Option<Oid> },
     RebaseInteractive { onto: String, plan: RebasePlan },
     RebaseContinue, RebaseSkip, RebaseAbort,
-    CherryPick(Vec<Oid>), CherryPickContinue, CherryPickAbort,
+    CherryPick(Vec<Oid>), CherryPickContinue, CherryPickSkip, CherryPickAbort,
     Revert { oids: Vec<Oid>, mainline: Option<u32> }, RevertContinue, RevertAbort,
     MergeAbort,
     StashPush { message, include_untracked, paths: Option<Vec<PathBuf>> },
@@ -96,7 +96,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `RebaseInteractive { onto }` | `rebase --interactive <onto>` |
 | `RebaseContinue` / `Skip` / `Abort` | `rebase --continue` / `--skip` / `--abort` |
 | `CherryPick(oids)` | `cherry-pick <oids>` |
-| `CherryPickContinue` / `Abort` | `cherry-pick --continue` / `--abort` |
+| `CherryPickContinue` / `Skip` / `Abort` | `cherry-pick --continue` / `--skip` / `--abort` |
 | `Revert { oids, mainline }` | `revert [--mainline <n>] <oids>` |
 | `RevertContinue` / `Abort` | `revert --continue` / `--abort` |
 | `MergeAbort` | `merge --abort` |
@@ -459,6 +459,7 @@ op で分けている。**#49 の「分類の読み手が増えたら偽陽性�
 | `Permission denied (publickey)` | `SshAuthFailed` |
 | `Authentication failed` | `HttpsAuthFailed` |
 | `CONFLICT` / `could not apply` | `Conflict` |
+| `is now empty` | `Empty` |
 | `non-fast-forward` / `fetch first` / `stale info` / `Not possible to fast-forward` | `NonFastForward` |
 | その他 | `Other` |
 
@@ -577,8 +578,49 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 | 解消せずに `rebase --continue` | 1 | stdout `a: needs merge` / `You must edit all merge conflicts` | `Other` |
 | 解消せずに `cherry-pick --continue` | 128 | stderr `Committing is not possible because you have unmerged files.` | `Other` |
 | `rebase --abort` / `merge --abort` | 0 | 何も出さない | 成功 |
+| 変更が空で止まった pick のあと `cherry-pick --continue` | 1 | stderr `The previous cherry-pick is now empty`（止まったときと同じ文） | `Empty` |
+| 変更が空で止まった pick のあと `cherry-pick --skip` / `--abort` | 0 | 何も出さない | 成功 |
+
+**空で止まった pick は continue では抜けられない**（上の表の 2 行。2026-09-29 に測った）。
+`GIT_EDITOR=true` でも同じで、git は `commit --allow-empty` か `--skip` を求める。
+**出口は skip か abort** なので、`m` のメニューの cherry-pick に skip を入れた（01 の
+「進行中操作のメニュー（`m`）」）。**revert には入れていない** —— revert は変更が空でも
+止まらず（下の「cherry-pick の開始」の表）、空で抜けられない形を作らない。revert の
+skip を足すかは revert の開始のタスクで決める。
 
 **`Conflict` は失敗ではなく「次で止まった」** —— 進行中操作は残り、バッジの数が進む。
 そこで赤を出すと壊れたように読めるので、`app` は `Warn` で次の手を案内する（01 の
 「失敗の案内文」）。**解消していない `Other` は赤のまま** —— git の文言（`needs merge`）が
 そのまま理由になる。
+
+### cherry-pick の開始
+
+**`GitOp::CherryPick` は 1 本だけの形で使う**（01 の「cherry-pick の開始（`y`）」。複数は
+`docs/plan.md` で別の行に割った）。一時リポジトリを作り直して叩いた（git 2.55.0、
+`GIT_EDITOR=true LC_ALL=C`、2026-09-29）。
+
+| 選んだコミット・状態 | exit | stdout / stderr | 残るもの | 分類 |
+|---|---|---|---|---|
+| 別のブランチのコミット | 0 | stdout `[main c708635] t1` | 無し（HEAD が進む） | 成功 |
+| 同上、detached HEAD | 0 | stdout `[detached HEAD d4b7235] t1` | 無し | 成功 |
+| 同上、**別のファイル**が dirty | 0 | 同上 | dirty のまま | 成功 |
+| 同上、**同じファイル**が dirty | 128 | stderr `Your local changes to the following files would be overwritten by merge` | 無し | `Other` |
+| HEAD 自身・HEAD の祖先・merge で取り込み済みのコミット（後の履歴が同じ箇所を変えていない） | 1 | stderr `The previous cherry-pick is now empty` | **`CHERRY_PICK_HEAD`** | `Empty` |
+| HEAD の祖先で、**後のコミットが同じ箇所を変えている** | 1 | stdout `CONFLICT (content)`、stderr `could not apply` | `CHERRY_PICK_HEAD`、`UU` | `Conflict` |
+| コンフリクトするコミット | 1 | stdout `CONFLICT (content)`、stderr `could not apply` | `CHERRY_PICK_HEAD`、`UU` | `Conflict` |
+| merge コミット | 128 | stderr `is a merge but no -m option was given` | 無し | `Other` |
+| （参考）revert で変更が空になる | 1 | stdout `nothing added to commit`、stderr 空 | **無し**（`REVERT_HEAD` は残らない） | `Other` |
+
+- **どの失敗でも HEAD は動かない**（1 本だけのとき）。書き込みのあとの読み直し
+  （01 の「ログの読み直し」）は、成功したときだけログまで読み直す。複数では途中まで
+  積んでから止まるので、成否を見ずに読み直す
+- **空で止まった形は `Empty` に分ける。** `Other` のままだと赤い `Display` に落ち、
+  stdout の `all conflicts fixed: run "git cherry-pick --continue"` に従うと同じ理由で
+  断られる。**`CONFLICT` は大文字で見る** —— この形の stdout にも小文字の `conflicts` が
+  出る
+- **`--empty=drop` は付けない。** 空の pick を落として exit 0 で返る（stderr に
+  `dropping … patch contents already upstream`）が、**成功は通知に出さないので、押しても
+  何も起きなかったように見える**
+- **merge コミットは `app` が手前で断る**（`GitOp::CherryPick` は mainline を運ばない）。
+  mainline を選ぶのは revert の開始のタスク（`Revert { mainline }`）
+

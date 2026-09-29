@@ -4,11 +4,12 @@
 //! **どれも「届いた返信がいま見ているコミットのものか」を数える**ので、追いつきの
 //! 判断を並べて読めるように 1 つのモジュールに置いてある。
 
-use crate::git_read::{CommitDetail, FileEntry, GitReadError, LogPage, Oid};
+use crate::git_exec::GitOp;
+use crate::git_read::{short_oid, CommitDetail, FileEntry, GitReadError, HeadInfo, LogPage, Oid};
 
 use super::branches::open_branch_create;
 use super::diff::{load_diff, open_diff};
-use super::focus;
+use super::{confirm, focus};
 use crate::app::{AppState, Cmd, CommitFiles, GraphLine, JobKind, Key, KeyCode, NoticeLevel, Pane};
 
 /// グラフペインのキー処理。
@@ -29,7 +30,54 @@ pub(super) fn graph_key(state: &mut AppState, key: Key) -> Cmd {
             let start = state.graph.cursor_commit().map(|commit| commit.oid);
             open_branch_create(state, start)
         }
+        KeyCode::Char('y') => cherry_pick(state),
         _ => Cmd::None,
+    }
+}
+
+/// `y`。カーソルの指すコミットを HEAD に cherry-pick する（01 の「cherry-pick の開始（`y`）」）。
+///
+/// **確認モーダルを挟む**（2026-09-29 にユーザーと決めた）。破壊的ではないが、積んだ
+/// コミットを戻す手が mewgit に無く、どのコミットをどこへ積むかを押す前に見せる。
+///
+/// **進行中操作は手前で見ない。** 断るのは確定のあとの `AppState::issue`（ブランチの
+/// 削除と同じ。01 の「進行中操作があるときの書き込み」）。
+fn cherry_pick(state: &mut AppState) -> Cmd {
+    // WIP 行。積むコミットが無い。
+    let Some(commit) = state.graph.cursor_commit() else {
+        state.push_notice(
+            NoticeLevel::Info,
+            "cherry-pick するコミットの行を選んでください".to_string(),
+            None,
+        );
+        return Cmd::None;
+    };
+    // **merge コミットは手前で断る。** git は `-m` が無いと exit 128 で断り
+    // （03 の実測）、`GitOp::CherryPick` は mainline を運ばない。
+    if commit.parents.len() > 1 {
+        state.push_notice(
+            NoticeLevel::Warn,
+            "merge コミットは cherry-pick できません".to_string(),
+            None,
+        );
+        return Cmd::None;
+    }
+    let oid = commit.oid;
+    let body = format!(
+        "{} {} を {} に積みます。",
+        short_oid(&oid),
+        commit.summary,
+        head_name(state)
+    );
+    confirm(state, "cherry-pick", body, GitOp::CherryPick(vec![oid]))
+}
+
+/// 確認の本文に出す積む先。**表示だけに使う**（git は HEAD に積むので、ここが古くても
+/// 積む先は変わらない）。
+fn head_name(state: &AppState) -> &str {
+    match &state.repo.head {
+        Some(HeadInfo::Branch { name, .. } | HeadInfo::Unborn { name }) => name.as_str(),
+        Some(HeadInfo::Detached(_)) | None => "HEAD",
     }
 }
 
@@ -305,8 +353,8 @@ pub(super) fn log_loaded(
 mod tests {
     use super::super::test_support::{
         commit, commit_loads, cursor, detail_ok, diff_ok, fake_diff, files_loaded, files_of, more,
-        on_first_commit, page_loaded, press, press_code, reload, state, state_with_commits,
-        state_with_page, tick, ROWS,
+        on_first_commit, open_confirm, page_loaded, press, press_code, reload, state,
+        state_with_commits, state_with_page, tick, ROWS,
     };
     use super::super::worktree::COMMIT_DIFF;
     use super::super::{init, update};
@@ -1100,4 +1148,66 @@ mod tests {
     }
 
     // ---- commit / amend ----
+
+    #[test]
+    fn y_on_a_commit_asks_before_cherry_picking_it_onto_head() {
+        let mut state = state_with_commits(3);
+        state.repo.head = Some(HeadInfo::Branch {
+            name: "main".to_string(),
+            oid: fake_oid(9),
+            upstream: None,
+        });
+        let _ = press(&mut state, 'j');
+        let oid = cursor(&state);
+
+        let cmd = press(&mut state, 'y');
+
+        assert_eq!(cmd, Cmd::None);
+        let (body, on_yes) = open_confirm(&state);
+        // どのコミットをどこへ積むかを押す前に見せる（01 の「cherry-pick の開始（`y`）」）。
+        assert!(body.contains(&short_oid(&oid)), "{body}");
+        assert!(body.contains("commit 0"), "{body}");
+        assert!(body.contains("main"), "{body}");
+        let expected = Cmd::Exec(GitOp::CherryPick(vec![oid]));
+        assert_eq!(on_yes, &expected);
+        assert_eq!(press(&mut state, 'y'), expected);
+    }
+
+    #[test]
+    fn y_on_the_wip_row_has_nothing_to_pick() {
+        let mut state = state_with_commits(3);
+        assert_eq!(state.graph.selection(), GraphSelection::Wip);
+
+        let cmd = press(&mut state, 'y');
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.modal, None);
+        let notice = state.shown_notice().expect("通知が出ていません");
+        assert!(
+            notice.message.contains("コミットの行"),
+            "{}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn y_on_a_merge_commit_is_refused_before_git_runs() {
+        // `-m` が無いと git は exit 128 で断る（03 の実測）。`GitOp::CherryPick` は
+        // mainline を運ばないので、確認を開く前に断る。
+        let mut state = state_with_commits(3);
+        state.graph.lines[0].commit.parents = vec![fake_oid(1), fake_oid(2)];
+        let _ = press(&mut state, 'j');
+
+        let cmd = press(&mut state, 'y');
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.modal, None);
+        let notice = state.shown_notice().expect("通知が出ていません");
+        assert_eq!(notice.level, NoticeLevel::Warn);
+        assert!(
+            notice.message.contains("merge コミット"),
+            "{}",
+            notice.message
+        );
+    }
 }

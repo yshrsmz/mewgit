@@ -10,7 +10,7 @@ ratatui / crossterm には依存しない（不変ルール 6）。`ui` は下�
 
 | 節 | モジュール |
 |---|---|
-| 「グラフの行」とその `###`（追加ページ / ログの読み直しの発行 / コミット詳細 / ファイル一覧） | `update/graph.rs` |
+| 「グラフの行」とその `###`（追加ページ / ログの読み直しの発行 / コミット詳細 / ファイル一覧 / cherry-pick の開始） | `update/graph.rs` |
 | 「ワーキングツリー」「書き込みのあとの status」「失敗の記憶」 | `update/worktree.rs` |
 | 「diff の遅延取得」「diff のキャッシュと鮮度」 | `update/diff.rs` |
 | 「ブランチ一覧」 | `update/branches.rs` |
@@ -549,6 +549,8 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 - **失敗した書き込みで読み直すのは、途中まで ref が動きうる操作だけ。** fetch / pull は
   一部の ref だけ更新して落ちうるし、rebase / cherry-pick / revert は途中で止まる。
   commit / branch 削除 / force push は 1 回で決まるので、失敗したなら ref は元のまま。
+  **1 本だけの cherry-pick も 1 回で決まる側**（コンフリクトでも空でも HEAD は動かない。
+  03 の「cherry-pick の開始」）—— `y` を押したコミットの位置を失わない。
   **読み直しは行を捨てるだけでなく `GraphState::restart` がカーソルとスクロールを
   先頭に戻す**ので、pre-commit hook に弾かれただけでグラフの位置を失う
 - **新しい `Cmd` の変種にせず `LoadLog` のフィールドにする。** `job_kind` が
@@ -676,6 +678,33 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   通り過ぎたコミットの一覧は最初から要求されないが、それは「詳細と一覧は 1 つの関数から
   頼む」（片方だけ書き足す事故を防ぐ）を崩す。**いまは素直な側を採っている。**
   実際に待たされるのが見えたら、02 の pathspec による絞り込みと一緒に測り直す
+
+### cherry-pick の開始（`y`）
+
+**Graph の `y` で、カーソルの指すコミットを HEAD に cherry-pick する**（1 本だけ）。
+
+- **確認モーダルを挟む**（2026-09-29 にユーザーと決めた）。`CLAUDE.md` の確認対象
+  （force push、`branch -D`、discard、abort 系）には入らないが、積んだコミットを戻す手
+  （reset）が mewgit に無い。本文は「`abc1234 <summary>` を `<ブランチ>` に積みます。」で、
+  **どのコミットをどこへ積むかを押す前に見せる**。積む先の名前は `RepoInfo.head` から
+  取る表示だけの値（detached なら `HEAD`）で、git は HEAD に積むので古くても行き先は変わらない
+- **WIP 行では断る**（積むコミットが無い）。通知で行を選ぶよう言う
+- **merge コミットは確認を開く前に断る。** git は `-m` が無いと exit 128 で断り
+  （03 の「cherry-pick の開始」）、`GitOp::CherryPick` は mainline を運ばない
+- **進行中操作は手前で見ない。** 確定のあとの `AppState::issue` が断る（下の「進行中操作が
+  あるときの書き込み」。ブランチの削除と同じ）。確認は打った文字を持たないので、閉じてから
+  断っても失うものが無い
+- **HEAD 自身や、もう取り込み済みのコミットも手前で断らない。** git は変更が空で止まり
+  （`CHERRY_PICK_HEAD` が残る）、`Empty` の案内が `m` の skip を指す（下の「失敗の案内文」）。
+  **後の履歴が同じ箇所を変えていれば、空ではなくコンフリクトで止まる**（03 の表）ので、
+  `Conflict` の案内になる。どちらでも HEAD は動かない。
+  取り込み済みかどうかは HEAD からの到達だけでは決まらない（merge で取り込んだ変更も空になる）
+  ので、判定を mewgit に写さない
+- **1 本だけの pick は、失敗したらログを読み直さない**（上の「ログの読み直し」）
+
+**複数のコミットは別のタスクに割った**（`docs/plan.md` の M5）。グラフに印を付ける仕組み
+（どのキーで付けるか、描き方、古い順に並べ直すこと）が要り、**同じ仕組みを revert の開始も
+使う**。revert の開始が入る前に決めると、共有の形を cherry-pick 側だけから選ぶことになる。
 
 ## ワーキングツリー
 
@@ -2075,6 +2104,7 @@ pub struct PushRejection {
 | `NonFastForward` + `Push { .. }` | `p` で取り込むか `P` をもう一度 |
 | `NonFastForward` + `Pull` | 履歴が分かれている（merge / rebase は M5） |
 | `Conflict` + rebase / cherry-pick / revert（開始・continue・skip）/ `pull --rebase` | 解消して `git add` したら `m` で continue する（**`Warn`**） |
+| `Empty` + cherry-pick（開始・continue・skip） | `m` から skip する（**`Warn`**） |
 | それ以外 | 無し（`Display` に落とす） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
@@ -2114,6 +2144,12 @@ pub struct PushRejection {
   `あ×35` / `あ×36`**（バッジの隣は `あ×24` / `あ×25`）で、**リテラルのまま置いてある**
   —— 予算が変わったときに赤くして数え直させるため。算出に変えない。**予算の経緯** —— 72（同じ行の右端に `q:quit` が居た）→ 80（ヒントを 2 行目へ
   移した）→ 71（時刻を前に添えた。2026-09-26）
+- **`Empty` も `Warn` で出す。** cherry-pick の変更が空で止まった形で、`CHERRY_PICK_HEAD` が
+  残ってバッジが出る。**continue は同じ理由で断られる**ので、案内するのは skip（03 の
+  「continue / skip / abort の終わり方」）。文は「変更が空で止まった。m から skip」
+  （31 セル。バッジの隣の 48 に収まる）。**cherry-pick の系統の op だけに出す** —— revert は
+  空でも止まらず（03）、rebase で空の pick に当たったときの出力は確かめていない。ほかで出たら
+  案内の無い `Display` に落とすほうが嘘を言わない
 - **`Conflict` は `Warn` で出す。** continue / skip のあとに次のコミットでまた止まった
   形で（03 の「continue / skip / abort の終わり方」）、進行中操作は残ってバッジの数が
   進む。**想定どおりの停止を赤で出すと、壊れたように読める。** 案内は「`git add` したら」
@@ -2152,7 +2188,8 @@ git が自分で断る —— 03 の表で断らないのは stash だけで、s
 
 **3 つ目の向き —— 外で終えたのに「鮮度あり・途中」のまま残る。** 世代を進めるのは mewgit の
 書き込みだけなので、端末で `git rebase --continue` / `--abort` しても snapshot は古く
-ならない。**いまの mewgit には進行中操作を始めるキーが無く、必ず外で始まる**ので普通に踏む。
+ならない。**mewgit から始められるのは cherry-pick だけで、rebase / revert / merge / am は
+必ず外で始まる**ので普通に踏む。
 断ると git を起動しないぶん読み直しも起きず、断り続ける（`/code-review` が拾い、pty で
 再現した）。**断ったら代わりに `Cmd::LoadStatus` を出す** —— 1 回目は断られるが、外で
 終わっていれば 2 回目は通る。1 回目も消すには外部の変更の検知（M6。`docs/plan.md` の行）が要る。
@@ -2203,7 +2240,8 @@ git が自分で断る —— 03 の表で断らないのは stash だけで、s
 | 進行中操作 | 項目 |
 |---|---|
 | `Rebase` | continue / skip / abort |
-| `CherryPick` / `Revert` | continue / abort |
+| `CherryPick` | continue / skip / abort |
+| `Revert` | continue / abort |
 | `Merge` | abort（結ぶのは `c` の commit。03 の表） |
 | `Am` | **開かない**。端末で `git am --continue` / `--abort` を案内する |
 | 無い | **開かない**。通知を出して `Cmd::LoadStatus` を返す |
@@ -2219,12 +2257,12 @@ git が自分で断る —— 03 の表で断らないのは stash だけで、s
 - **確定は `submit_exec`**（1 行入力と同じ）。git が走っていれば閉じずに断る
 - **開くときの snapshot の鮮度は問わない。** 古い snapshot の `Rebase` で開いて、実は
   終わっていれば git が `No rebase in progress?` で断り、`exec_finished` の `LoadStatus` が
-  バッジを直す。**無いときに `LoadStatus` を返すのは、mewgit が進行中操作を始められない
-  から** —— 端末で rebase を始めた直後に `m` を押すのがいちばんよく踏む形で、snapshot は
+  バッジを直す。**無いときに `LoadStatus` を返すのは、mewgit から始められない進行中操作が
+  あるから** —— 端末で rebase を始めた直後に `m` を押すのがいちばんよく踏む形で、snapshot は
   まだ「無い」。1 回目は通知で終わるが、2 回目は開く（上の「3 つ目の向き」と同じ逃げ方）
 - **フッターの 2 行目には出さない**（2026-09-27 にユーザーと決めた）。`m` が要るのは進行中の
   あいだだけで、そのときは断りの通知かバッジが必ず目に入る。80 桁の Graph では共通キーの
-  `L` がもう落ちていて、足しても出ない。**`Modal::Help` には載せる**（`docs/plan.md` の Help の行）
+  末尾がもう落ちていて、足しても出ない（07 の「ステータスバー」の実測）。**`Modal::Help` には載せる**（`docs/plan.md` の Help の行）
 
 ## 実行中ジョブ
 

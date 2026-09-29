@@ -340,8 +340,16 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       ユーザーと決めた）—— 端末で始めた cherry-pick の途中で、断りの通知が「continue か
       abort で」と言うのに mewgit に出口が無かった。**`m` はフッターに出さず、断りの通知が
       案内する**（01 の「進行中操作のメニュー（`m`）」）
-- [ ] cherry-pick（単一 / 複数）の開始。continue / abort は上の `m` メニューに入っている
-- [ ] revert（mainline 選択）の開始。continue / abort は上の `m` メニューに入っている
+- [x] cherry-pick（単一）の開始。**Graph の `y` → 確認 → `cherry-pick <oid>`**。merge
+      コミットは手前で断る。**変更が空で止まった pick は continue で抜けられない**ので、
+      `m` のメニューの cherry-pick に skip を足し、`ExecErrorKind::Empty` で案内する
+      （2026-09-29 にユーザーと決めた。03 の「cherry-pick の開始」に実測の表）
+- [ ] cherry-pick（複数）の開始。**単一と割った**（2026-09-29）—— グラフに印を付ける
+      仕組みが要り、**同じ仕組みを revert の開始も使う**ので、revert の開始のあとで
+      共有の形を決める（01 の「cherry-pick の開始（`y`）」）
+- [ ] revert（mainline 選択）の開始。continue / abort は上の `m` メニューに入っている。
+      **skip をメニューに足すかはここで決める** —— revert は変更が空でも止まらない
+      （cherry-pick とは違う。03 の「cherry-pick の開始」の参考行）
 - [ ] `ui::panes::stash` — 一覧 / diff / push / apply / pop / drop、部分 stash
 
 ## M6: 仕上げ
@@ -431,8 +439,8 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       - **`L` を共通キーの末尾に足した**（2026-09-26 にユーザーと決めた）。あわせて
         **共通キーを丸ごとではなく末尾から 1 つずつ落とす**形にした —— 丸ごとだと 80 桁の
         Graph から `f` / `p` / `P` / `A` まで消えた（`/simplify` の altitude が拾った）。
-        80 桁の Graph で落ちるのは `L` だけで、`L` の案内が 80 桁で見えるのは
-        CommitDetail だけ（実測は 07 の「ステータスバー」）
+        このとき 80 桁の Graph で落ちたのは `L` だけで、`L` の案内が 80 桁で見えるのは
+        CommitDetail だけだった（実測は 07 の「ステータスバー」。`y` を足してからは `A` も落ちる）
       - **stderr のタブは空白に展開する**（ratatui が描かないので字下げが消える。実物を
         描いて判った。07 の「NoticeLog モーダル」）
       - **中身のスクロールは入れていない**（入りきらなければ最下行を `…`）。受け入れた穴

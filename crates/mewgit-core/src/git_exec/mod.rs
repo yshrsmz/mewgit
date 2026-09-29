@@ -135,6 +135,10 @@ pub enum GitOp {
     RebaseAbort,
     CherryPick(Vec<Oid>),
     CherryPickContinue,
+    /// 止まった pick を捨てて次へ進む（`cherry-pick --skip`）。**変更が空で止まった
+    /// pick から出る手**で、continue は同じ理由で断られる（03 の「continue / skip /
+    /// abort の終わり方」）。
+    CherryPickSkip,
     CherryPickAbort,
     Revert {
         oids: Vec<Oid>,
@@ -357,6 +361,10 @@ pub enum ExecErrorKind {
     SshAuthFailed,
     HttpsAuthFailed,
     Conflict,
+    /// cherry-pick の結果が空で止まった（`The previous cherry-pick is now empty`）。
+    /// **進行中操作は残り、continue は同じ理由で断られる** —— 出る手は skip か abort
+    /// （03 の「continue / skip / abort の終わり方」）。
+    Empty,
     NonFastForward,
     Other,
 }

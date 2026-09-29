@@ -392,6 +392,8 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
         ExecErrorKind::HttpsAuthFailed
     } else if has("CONFLICT") || has("could not apply") {
         ExecErrorKind::Conflict
+    } else if has("is now empty") {
+        ExecErrorKind::Empty
     } else if has("non-fast-forward")
         || has("fetch first")
         || has("stale info")
@@ -454,6 +456,16 @@ mod tests {
         let stdout = "Auto-merging f\nCONFLICT (content): Merge conflict in f\n\
                       Automatic merge failed; fix conflicts and then commit the result.\n";
         assert_eq!(classify(stdout, ""), ExecErrorKind::Conflict);
+    }
+
+    #[test]
+    fn an_empty_cherry_pick_is_not_a_conflict() {
+        // HEAD の祖先を cherry-pick した形（git 2.55.0 で実測した出力そのまま）。
+        // **stdout の `all conflicts fixed` は小文字**なので `CONFLICT` には当たらない。
+        // 当たると「git add したら continue」を案内し、continue は同じ理由で断られる。
+        let stdout = "On branch main\nYou are currently cherry-picking commit 13100af.\n  (all conflicts fixed: run \"git cherry-pick --continue\")\n  (use \"git cherry-pick --skip\" to skip this patch)\n";
+        let stderr = "The previous cherry-pick is now empty, possibly due to conflict resolution.\nIf you wish to commit it anyway, use:\n\n    git commit --allow-empty\n\nOtherwise, please use 'git cherry-pick --skip'\n";
+        assert_eq!(classify(stdout, stderr), ExecErrorKind::Empty);
     }
 
     #[test]

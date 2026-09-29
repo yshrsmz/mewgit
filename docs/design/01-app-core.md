@@ -87,9 +87,9 @@ pub struct DiffView {
 中に置くと印ごと消える。
 
 `Vec<Hunk>` に平坦化しない。`GitOp::StageHunk { path, patch }` に渡す `path` を
-復元できなくなるうえ、`DiffTarget` の `path` は全変種で `Option` なので複数ファイルに
-またがる diff を表せる形になっている。**複数ファイルが届くのは stash の diff だけ**
-（`DiffTarget::Stash { path: None }`。下の「Stash ペイン」）。ワーキングツリーと
+復元できなくなるうえ、`DiffTarget` は複数ファイルにまたがる diff を表せる形になって
+いる。**複数ファイルが届くのは stash の diff だけ**（`DiffTarget::Stash(oid)` は `path` を
+持たない。下の「Stash ペイン」）。ワーキングツリーと
 コミットの diff は一覧で選んだ 1 件に `path` で絞ってある（下の「diff の遅延取得」）。
 
 ## 通知
@@ -1035,6 +1035,8 @@ pub struct StashState {
 }
 
 pub enum DiffSource { Selection, Stash(Oid) }  // DiffState.source
+
+pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_origin() が解く
 ```
 
 右列の上の 3 枚目のタブ（`Branches | Stash | Prs`。07 の「右上のタブ」）。
@@ -1065,7 +1067,7 @@ pub enum DiffSource { Selection, Stash(Oid) }  // DiffState.source
   指す（02 の「stash 一覧」に実測）。**選んでいたものが消えたら同じ位置に留まる**
   （末尾を越えたら末尾）。消えた 1 つの次がそこへ詰めてくるので、続けて drop できる
 - **`Enter` は左に stash 全体の diff を出す**（2026-09-30 にユーザーと決めた）。
-  `DiffTarget::Stash { oid, path: None }` で、Diff ペインはファイルの見出しを挟んで
+  `DiffTarget::Stash(oid)` で、Diff ペインはファイルの見出しを挟んで
   全ファイルを縦に並べる（07 の「Diff ペイン」）。**右下には出さない** —— 右下は
   「グラフで選んでいるものの中身」で、Stash の選択では入れ替わらない（07 の
   「レイアウト」）。Stash ペインの中でファイル一覧へ潜る形も比べたが、ペインに 2 段の
@@ -1076,21 +1078,28 @@ pub enum DiffSource { Selection, Stash(Oid) }  // DiffState.source
   出さないと、`-u` で退避したファイルが画面から消えて見える
 - **どこから来たかは `DiffState.source` が持つ**（`Selection | Stash(Oid)`）。グラフの
   選択は Diff ペインに居るあいだも画面の状態として残るので導けるが、Stash ペインの
-  どの行から来たかは残らない。**oid で持つ**（index は指す相手が変わる）。読むのは
-  `AppState::wanted_diff`（`Stash` ならその stash 全体）と Diff の `Esc`（`Stash` なら
-  Stash ペインへ戻る）
+  どの行から来たかは残らない。**oid で持つ**（index は指す相手が変わる）
+- **読む側は `DiffSource` を直に見ず、`AppState::diff_origin()` を網羅 `match` する。**
+  `DiffSource` とグラフの選択を `Worktree | Commit(oid) | Stash(oid)` の 3 値に解いたもの
+  で、読むのは出す diff（`wanted_diff`）・巡回の候補・Diff の `Esc` の戻り先・`s` / `u` /
+  `x` の可否。**各所で `DiffSource` とグラフの選択を 2 段で見る形にしない** —— 最初の
+  版はそうしていて、出どころを足したときにコンパイラが何も言わず、段の順序（stash を
+  先に見る）を 4 箇所で守ることになっていた（`/simplify` の altitude が拾った）。
+  **巡回の候補も同じ関数から出る** —— `wanted_diff` から `focus` の門を外した
+  `diff_candidate` を候補の判定が読むので、stash の diff を出しているあいだ `Diff` は
+  候補から外れない
 - **Diff ペインを離れたら `Selection` に戻す。** 離れる経路は `Esc` / `Tab` /
   `Shift+Tab` / 座り直しと複数あるので、**`update` の出口の `reseat_focus` 1 箇所**で
   戻す（`right_tab` と同じ出口）。残ると、`Tab` で Diff に入り直したときにグラフの
   選択ではなく前に開いた stash の diff が出る
 - **stash の diff を出しているあいだ、WIP 側の `Diff` を候補から外さない**（上の
-  「Pane と Modal」）。外すと、変更の無いワーキングツリーで `Enter` した瞬間に座り直しが
-  Graph へ戻す
+  「Pane と Modal」。`diff_candidate` が `Some` を返すので外れない）。外すと、変更の無い
+  ワーキングツリーで `Enter` した瞬間に座り直しが Graph へ戻す
 - **stash の diff では `s` / `u` / `x` を断る**（「stash の差分は変更できません」）。
-  **グラフの選択より先に見る** —— コミットの diff を断る守りはグラフの選択を見るので、
-  WIP 行を選んだまま Stash から開いた diff では素通りし、**stash のハンクを見ながら
-  ワーキングツリーの選択行を stage する**。見るのは `DiffState.source` で、Diff ペインを
-  離れれば `Selection` に戻るので Worktree ペインの `s` はここで断られない
+  グラフの選択だけを見ると、WIP 行を選んだまま Stash から開いた diff では素通りし、
+  **stash のハンクを見ながらワーキングツリーの選択行を stage する**。見るのは
+  `diff_origin()` で、Diff ペインを離れれば `Worktree` か `Commit` に戻るので、Worktree
+  ペインの `s` はここで断られない
 
 ## PR ペイン
 

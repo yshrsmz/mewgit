@@ -18,10 +18,10 @@ pub use key::{Key, KeyCode, Modifiers};
 pub use keys::{HelpRow, HelpSection, KeyHint};
 pub use msg::{ExecDone, Msg, RepoSnapshot};
 pub use state::{
-    AccountListing, AccountView, AppState, BranchState, CommitFiles, DiffCursor, DiffSource,
-    DiffState, DiffView, GithubBlock, GraphLine, GraphSelection, GraphState, InputIntent, Job,
-    JobKind, JobTracker, ListLoad, Modal, Motion, Notice, NoticeLevel, Pane, ParentChoice, PrField,
-    PrHead, PrHeads, PrLoad, PrState, PushRejection, Region, Repick, RepoInfo, RightTab,
-    StashState, TargetState, TermSize, TextBuffer, WorktreeState,
+    AccountListing, AccountView, AppState, BranchState, CommitFiles, DiffCursor, DiffOrigin,
+    DiffSource, DiffState, DiffView, GithubBlock, GraphLine, GraphSelection, GraphState,
+    InputIntent, Job, JobKind, JobTracker, ListLoad, Modal, Motion, Notice, NoticeLevel, Pane,
+    ParentChoice, PrField, PrHead, PrHeads, PrLoad, PrState, PushRejection, Region, Repick,
+    RepoInfo, RightTab, StashState, TargetState, TermSize, TextBuffer, WorktreeState,
 };
 pub use update::{init, progress_menu, update, MenuItem, ProgressMenu};

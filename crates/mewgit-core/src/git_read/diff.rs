@@ -44,7 +44,7 @@ impl RepoReader {
                 self.repo
                     .diff_tree_to_tree(Some(&from), Some(&to), Some(&mut opts))?
             }
-            DiffTarget::Stash { oid, .. } => self.stash_diff(*oid, &mut opts)?,
+            DiffTarget::Stash(oid) => self.stash_diff(*oid, &mut opts)?,
         };
 
         // `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの delta には効かない。

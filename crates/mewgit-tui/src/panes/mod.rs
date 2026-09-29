@@ -113,17 +113,19 @@ impl TopPane {
 /// **タブは常に 2 枚以上**（`Stash` は GitHub を切っても残る）ので、どれか 1 枚を
 /// 強調する。
 fn right_tabs(state: &AppState) -> Line<'static> {
-    let candidates = state.focus_candidates();
-    let titles: [(RightTab, Cow<'static, str>); 3] = [
-        (RightTab::Branches, branches::title(state).into()),
-        (RightTab::Stash, stash::title().into()),
-        (RightTab::Prs, prs::title().into()),
-    ];
     let mut spans = Vec::new();
-    for (right_tab, title) in titles {
-        if !candidates.contains(&right_tab.pane()) {
-            continue;
-        }
+    // **並びも候補から導く**（`Pane` の宣言順）。見出しは網羅 `match` で引くので、
+    // タブを足せばここがコンパイルエラーになる。
+    let tabs = state
+        .focus_candidates()
+        .iter()
+        .filter_map(|&pane| RightTab::of(pane));
+    for right_tab in tabs {
+        let title: Cow<'static, str> = match right_tab {
+            RightTab::Branches => branches::title(state).into(),
+            RightTab::Stash => stash::title().into(),
+            RightTab::Prs => prs::title().into(),
+        };
         if !spans.is_empty() {
             spans.push(Span::styled("|", theme::muted()));
         }

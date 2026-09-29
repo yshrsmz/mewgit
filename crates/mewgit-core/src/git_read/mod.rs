@@ -502,7 +502,7 @@ pub enum FileStatus {
     Conflicted,
 }
 
-/// diff の対象。`path` を指定すると 1 ファイルに絞る。
+/// diff の対象。`path` を指定すると 1 ファイルに絞る（`Stash` は絞らない）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffTarget {
     IndexVsWorktree(Option<PathBuf>),
@@ -522,21 +522,22 @@ pub enum DiffTarget {
     /// 差は tracked な変更だけで、`--include-untracked` で退避したファイルは
     /// **第 3 親のツリー**に入っている（git 2.55 で確認）。こちらはそれを「追加」として
     /// 同じ diff に混ぜる（02 の「stash の diff」）。
-    Stash {
-        oid: Oid,
-        path: Option<PathBuf>,
-    },
+    ///
+    /// **`path` を持たない。** 絞る経路が無い —— Stash ペインは全ファイルを
+    /// 1 枚に並べる（01 の「Stash ペイン」）。持たせると、組む側が毎回 `None` を書き、
+    /// 読む側は「1 ファイルに絞る経路がある」と読む。
+    Stash(Oid),
 }
 
 impl DiffTarget {
-    /// 絞り込みのパス。全変種が持つので、変種ごとの `match` を呼び出し側に配らない。
+    /// 絞り込みのパス。`None` は対象全体。変種ごとの `match` を呼び出し側に配らない。
     pub fn path(&self) -> Option<&Path> {
         match self {
             DiffTarget::IndexVsWorktree(path)
             | DiffTarget::HeadVsIndex(path)
             | DiffTarget::Commit { path, .. }
-            | DiffTarget::Range { path, .. }
-            | DiffTarget::Stash { path, .. } => path.as_deref(),
+            | DiffTarget::Range { path, .. } => path.as_deref(),
+            DiffTarget::Stash(_) => None,
         }
     }
 }
@@ -635,6 +636,20 @@ pub struct StashEntry {
     pub index: usize,
     pub message: String,
     pub oid: Oid,
+}
+
+impl StashEntry {
+    /// `stash@{index}`。画面に出す名前（[`stash_ref`]）。
+    pub fn name(&self) -> String {
+        stash_ref(self.index)
+    }
+}
+
+/// `stash@{index}`。**表記はここ 1 本** —— `git_exec` の argv と画面の名前が同じ関数を
+/// 通るので、画面の `stash@{n}` を端末の `git stash show stash@{n}` にそのまま打てる。
+/// `git_exec` から呼ぶのは値の語彙（00 の「レイヤー構成」）と同じ扱い。
+pub fn stash_ref(index: usize) -> String {
+    format!("stash@{{{index}}}")
 }
 
 /// 進行中の操作。HEAD か作業ツリー全体を動かす書き込みを断る判断に使う（03 の

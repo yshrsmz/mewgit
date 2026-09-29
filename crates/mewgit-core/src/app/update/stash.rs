@@ -191,10 +191,7 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        let wanted = DiffTarget::Stash {
-            oid: fake_stash(1).oid,
-            path: None,
-        };
+        let wanted = DiffTarget::Stash(fake_stash(1).oid);
         // **ワーキングツリーに差分を出せる行が無くても開く**（`state_on_stashes` は WIP
         // 側の `Diff` が候補から外れている形）。外れたままだと `reseat_focus` が Graph へ
         // 戻す。
@@ -260,10 +257,7 @@ mod tests {
             );
             let _ = with_stashes(&mut state, Ok(vec![fake_stash(0)]));
             let _ = tab_to(&mut state, Pane::Stash);
-            let target = DiffTarget::Stash {
-                oid: fake_stash(0).oid,
-                path: None,
-            };
+            let target = DiffTarget::Stash(fake_stash(0).oid);
             let _ = press_code(&mut state, KeyCode::Enter);
             let _ = update(&mut state, diff_ok(target, fake_diff("a.txt", 1)));
 

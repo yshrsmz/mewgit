@@ -44,7 +44,7 @@ pub(super) fn lines(state: &AppState) -> Rows {
 /// なる。
 fn row(stash: &StashEntry) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!(" stash@{{{}}}", stash.index), theme::muted()),
+        Span::styled(format!(" {}", stash.name()), theme::muted()),
         Span::raw(format!("  {}", stash.message)),
     ])
 }
@@ -61,32 +61,18 @@ fn placeholder(state: &AppState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, pane_text, row_is_reversed, row_of, state_at};
-    use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Msg, Pane, TermSize};
+    use crate::test_util::{
+        draw, pane_text, row_is_reversed, row_of, state_at, tab_to, with_stashes,
+    };
+    use mewgit_core::app::{update, AppState, Cmd, Key, Msg, Pane, TermSize};
     use mewgit_core::git_read::{GitReadError, StashEntry};
     use mewgit_core::test_util::{fake_branch, fake_stash, reply};
-
-    /// 一覧の返信を届ける。**`update` を通す**ので `JobTracker` も本番と同じ。
-    fn with_stashes(state: &mut AppState, result: Result<Vec<StashEntry>, GitReadError>) {
-        let _ = reply(
-            state,
-            Cmd::LoadStashes,
-            Msg::StashesLoaded(Box::new(result)),
-        );
-    }
-
-    /// `Tab` で Stash のタブへ入る（01 の「右上のタブ」）。
-    fn tab_to_stash(state: &mut AppState) {
-        while state.focus != Pane::Stash {
-            let _ = update(state, Msg::Key(Key::new(KeyCode::Tab)));
-        }
-    }
 
     /// 一覧が届き、Stash のタブを出した状態。
     fn on_stash_tab(entries: Vec<StashEntry>) -> AppState {
         let mut state = state_at("/repo");
         with_stashes(&mut state, Ok(entries));
-        tab_to_stash(&mut state);
+        tab_to(&mut state, Pane::Stash);
         state
     }
 
@@ -135,7 +121,7 @@ mod tests {
     fn a_pending_list_reads_as_loading() {
         let mut state = state_at("/repo");
         let _ = state.issue(Cmd::LoadStashes);
-        tab_to_stash(&mut state);
+        tab_to(&mut state, Pane::Stash);
 
         let text = pane_text(&state, SIZE, Pane::Stash);
 
@@ -146,7 +132,7 @@ mod tests {
     fn a_list_that_failed_says_so_instead_of_loading() {
         let mut state = state_at("/repo");
         with_stashes(&mut state, Err(GitReadError::ReaderGone));
-        tab_to_stash(&mut state);
+        tab_to(&mut state, Pane::Stash);
 
         let text = pane_text(&state, SIZE, Pane::Stash);
 

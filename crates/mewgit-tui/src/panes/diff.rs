@@ -51,15 +51,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 /// 左が Graph から差し替わっているので、出さないと何の diff かを画面から辿れない。
 /// 届いていれば rename の旧い名前まで出せる。まだなら選んでいるパスだけ出す。
 ///
-/// **stash は `stash@{n}` を名乗る**（ファイル数に関わらず）。ファイル名はそれぞれの
-/// 見出しに出る（[`names_file`]）。
+/// **対象全体（`path` が `None`）なら、対象そのものを名乗る**（stash は `stash@{n}`）。
+/// ファイル名はそれぞれの見出しに出る（[`names_file`]）。
 fn title(state: &AppState, view: Option<&DiffView>, wanted: Option<&DiffTarget>) -> String {
-    if let Some(DiffTarget::Stash { oid, .. }) = wanted {
-        // 一覧から消えていれば（読み直しで drop を見た）番号は名乗れない。
-        return match state.stashes.find(*oid) {
-            Some(stash) => format!("Diff: stash@{{{}}}", stash.index),
-            None => "Diff: stash".to_string(),
-        };
+    if let Some(target) = wanted.filter(|target| target.path().is_none()) {
+        return whole(state, target);
     }
     match view.map(|view| view.files.as_slice()) {
         Some([file]) => format!(
@@ -160,13 +156,27 @@ fn lines(view: &DiffView) -> (Vec<Line<'_>>, Range<usize>) {
     (lines, cursor)
 }
 
+/// 対象全体の diff の枠のタイトル（[`title`]）。
+fn whole(state: &AppState, target: &DiffTarget) -> String {
+    match target {
+        // 一覧から消えていれば（読み直しで drop を見た）番号は名乗れない。
+        DiffTarget::Stash(oid) => match state.stashes.find(*oid) {
+            Some(stash) => format!("Diff: {}", stash.name()),
+            None => "Diff: stash".to_string(),
+        },
+        // `path: None` で組む経路は stash だけ（`AppState::wanted_diff`）。
+        _ => "Diff".to_string(),
+    }
+}
+
 /// 枠のタイトルがファイルを名乗るか（[`title`]）。
 ///
-/// **名乗るのは 1 ファイルだけの diff で、stash ではないとき。** stash は 1 ファイル
-/// でも `stash@{n}` を名乗るので、ファイル名は見出しに出す —— 出さないと、どの
-/// ファイルの差分かが画面のどこにも無い。
+/// **対象が `path` で 1 ファイルに絞られているときだけ。** 絞っていない diff は、
+/// 1 ファイルしか無くても対象そのもの（`stash@{n}`）を名乗るので、ファイル名は見出しに
+/// 出す —— 出さないと、どのファイルの差分かが画面のどこにも無い。「stash なら」と
+/// 変種で書くと、`path: None` の対象を足すたびにここへ足すことになる。
 fn names_file(view: &DiffView) -> bool {
-    view.files.len() == 1 && !matches!(view.target, DiffTarget::Stash { .. })
+    view.target.path().is_some()
 }
 
 /// ハンクの 1 行。先頭に種別の記号を付ける。
@@ -208,8 +218,8 @@ fn marked(mark: char, content: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::test_util::{
-        col_of, deliver_commit_files, draw, pane_text, row_is_reversed, row_of,
-        state_on_first_commit, state_showing_diff, state_with_status,
+        col_of, deliver_commit_files, draw, pane_text, row_is_reversed, row_of, state_at,
+        state_on_first_commit, state_showing_diff, state_with_status, tab_to, with_stashes,
     };
     use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Msg, TermSize};
     use mewgit_core::git_read::{FileDiff, GitReadError, WorktreeSnapshot};
@@ -617,15 +627,9 @@ mod tests {
     /// stash が 2 つ届いた一覧で `stash@{1}` を選び、`Enter` で左に diff を開いて
     /// `files` を届けた状態（01 の「Stash ペイン」）。
     fn state_showing_stash(files: Vec<FileDiff>) -> AppState {
-        let mut state = crate::test_util::state_at("/repo");
-        let _ = mewgit_core::test_util::reply(
-            &mut state,
-            Cmd::LoadStashes,
-            Msg::StashesLoaded(Box::new(Ok(vec![fake_stash(0), fake_stash(1)]))),
-        );
-        while state.focus != Pane::Stash {
-            let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
-        }
+        let mut state = state_at("/repo");
+        with_stashes(&mut state, Ok(vec![fake_stash(0), fake_stash(1)]));
+        tab_to(&mut state, Pane::Stash);
         let _ = update(&mut state, Msg::Key(Key::char('j')));
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
         assert_eq!(state.focus, Pane::Diff);

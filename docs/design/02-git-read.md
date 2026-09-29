@@ -244,7 +244,10 @@ Stash ペイン（01 の「Stash ペイン」）が使う。
 
 ### stash の diff
 
-`DiffTarget::Stash { oid, path }` は stash 1 件の中身（下の「diff とハンク」の対象の 1 つ）。
+`DiffTarget::Stash(oid)` は stash 1 件の中身（下の「diff とハンク」の対象の 1 つ）。
+**`path` を持たない** —— 絞る経路が無い（Stash ペインは全ファイルを 1 枚に並べる。
+01 の「Stash ペイン」）。持たせると、組む側が毎回 `None` を書き、読む側は「1 ファイルに
+絞る経路がある」と読む。
 
 - **stash コミットの親は「stash した時点の HEAD」「index」「untracked」の順**で、3 つ目は
   `--include-untracked` を付けたときだけある（実測。`git rev-list --parents` で 3 つか
@@ -474,7 +477,7 @@ pub enum DiffTarget {
     HeadVsIndex(Option<PathBuf>),
     Commit { oid: Oid, path: Option<PathBuf> },
     Range { from: Oid, to: Oid, path: Option<PathBuf> },
-    Stash { oid: Oid, path: Option<PathBuf> },  // 上の「stash の diff」
+    Stash(Oid),  // 上の「stash の diff」。path を持たない
 }
 
 impl DiffTarget {

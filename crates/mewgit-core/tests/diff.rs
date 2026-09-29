@@ -618,12 +618,7 @@ fn a_stash_diff_shows_what_was_stashed_against_the_base() {
     let stash = repo.rev_parse("stash@{0}");
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let diff = reader
-        .diff(DiffTarget::Stash {
-            oid: stash,
-            path: None,
-        })
-        .unwrap();
+    let diff = reader.diff(DiffTarget::Stash(stash)).unwrap();
 
     assert_eq!(files(&diff), [("a.txt", None, FileStatus::Modified)]);
     assert_eq!(
@@ -647,12 +642,7 @@ fn a_stash_diff_includes_the_untracked_files_as_added() {
     let stash = repo.rev_parse("stash@{0}");
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let diff = reader
-        .diff(DiffTarget::Stash {
-            oid: stash,
-            path: None,
-        })
-        .unwrap();
+    let diff = reader.diff(DiffTarget::Stash(stash)).unwrap();
     let as_commit = reader
         .diff(DiffTarget::Commit {
             oid: stash,
@@ -675,37 +665,10 @@ fn a_stash_diff_includes_the_untracked_files_as_added() {
 }
 
 #[test]
-fn a_stash_diff_narrows_to_an_untracked_path() {
-    // `path` での絞り込みは混ぜたあとに効く（`file_diffs`）。untracked 側だけを
-    // 選んでも落ちない。
-    let repo = TestRepo::init();
-    repo.commit_file("a.txt", "a");
-    repo.write_worktree_file("a.txt", b"a2\n");
-    repo.write_worktree_file("new.txt", b"new\n");
-    repo.git(&["stash", "push", "-q", "--include-untracked"]);
-    let stash = repo.rev_parse("stash@{0}");
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let diff = reader
-        .diff(DiffTarget::Stash {
-            oid: stash,
-            path: Some("new.txt".into()),
-        })
-        .unwrap();
-
-    assert_eq!(files(&diff), [("new.txt", None, FileStatus::Added)]);
-}
-
-#[test]
 fn a_stash_diff_reports_a_missing_stash() {
     let repo = TestRepo::init();
     repo.commit_file("a.txt", "a");
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    assert!(reader
-        .diff(DiffTarget::Stash {
-            oid: fake_oid(7),
-            path: None,
-        })
-        .is_err());
+    assert!(reader.diff(DiffTarget::Stash(fake_oid(7))).is_err());
 }

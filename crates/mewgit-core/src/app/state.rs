@@ -299,18 +299,14 @@ impl AppState {
             // コミット側で同じことを避けたのは、あちらの増減が**同じ行のまま時間で
             // 起きる**（一覧が届く）ためで、こちらはユーザーが動かした結果。
             //
-            // **`wanted_diff()` では判定できない。** あちらは `focus != Pane::Diff` で
-            // `None` を返すので、入る前は必ず `None`（入れるかを問う相手にならない）。
+            // **見るのは `diff_candidate()` で、`wanted_diff()` ではない。** あちらは
+            // `focus != Pane::Diff` で `None` を返すので、入る前は必ず `None`（入れるかを
+            // 問う相手にならない）。**stash の diff を出しているあいだは `Some`** なので
+            // 外れない（01 の「Stash ペイン」）—— 外すと、変更の無いワーキングツリーで
+            // stash を開いた瞬間に `reseat_focus` が Graph へ戻す。
             //
             // **末尾で照合する。** 添字で削ると、並びを変えたときに別のペインが落ちる。
-            //
-            // **stash の diff を出しているあいだは外さない**（01 の「Stash ペイン」）。
-            // 出しているのはワーキングツリーの行ではないので、変更の無いワーキング
-            // ツリーで stash を開くと、外した瞬間に `reseat_focus` が Graph へ戻す。
-            GraphSelection::Wip
-                if self.diff.source == DiffSource::Selection
-                    && self.wanted_worktree_diff().is_none() =>
-            {
+            GraphSelection::Wip if self.diff_candidate().is_none() => {
                 let all = self.pick(Pane::WIP_FOCUS, Pane::WIP_FOCUS_NO_PRS);
                 all.strip_suffix(&[Pane::Diff]).unwrap_or(all)
             }
@@ -398,27 +394,40 @@ impl AppState {
         if self.focus != Pane::Diff {
             return None;
         }
+        self.diff_candidate()
+    }
 
-        // **Stash ペインから来たならその stash 全体**（01 の「Stash ペイン」）。
-        // コミットと違って `path: None` で頼む —— stash のファイル一覧を別に出す場所が
-        // 無く、Diff ペインが全ファイルを見出し付きで並べる（07 の「Diff ペイン」）。
-        if let DiffSource::Stash(oid) = self.diff.source {
-            return Some(DiffTarget::Stash { oid, path: None });
+    /// Diff ペインに入ったら出すもの。`focus` を問わない（[`wanted_diff`](Self::wanted_diff)
+    /// の中身で、巡回の候補もここを見る）。
+    fn diff_candidate(&self) -> Option<DiffTarget> {
+        match self.diff_origin() {
+            DiffOrigin::Worktree => self.wanted_worktree_diff(),
+            // **`path: None`（コミット全体）は出さない。** 一覧を出すためだけに
+            // 全ファイルのハンクを組むことになる。一覧は `Cmd::LoadCommitFiles`
+            // の担当（01 の「コミットのファイル一覧」）。
+            DiffOrigin::Commit(oid) => Some(DiffTarget::Commit {
+                oid,
+                path: Some(self.graph.selected_file()?.path.clone()),
+            }),
+            // **stash は全体を出す**（01 の「Stash ペイン」）。stash のファイル一覧を
+            // 別に出す場所が無く、Diff ペインが全ファイルを見出し付きで並べる（07）。
+            DiffOrigin::Stash(oid) => Some(DiffTarget::Stash(oid)),
         }
+    }
 
-        // **見る一覧はグラフの選択で変わる。** WIP 行ならワーキングツリー、コミット
-        // なら右ペインのファイル一覧（01 の「diff の遅延取得」）。
-        match self.graph.selection() {
-            GraphSelection::Wip => self.wanted_worktree_diff(),
-            GraphSelection::Commit(line) => {
-                // **`path: None`（コミット全体）は出さない。** 一覧を出すためだけに
-                // 全ファイルのハンクを組むことになる。一覧は `Cmd::LoadCommitFiles`
-                // の担当（01 の「コミットのファイル一覧」）。
-                let path = Some(self.graph.selected_file()?.path.clone());
-                Some(DiffTarget::Commit {
-                    oid: line.commit.oid,
-                    path,
-                })
+    /// Diff ペインの出どころ（01 の「Stash ペイン」）。
+    ///
+    /// **[`DiffSource`] と グラフの選択を 1 つに解く。** Diff ペインを読む側
+    /// （出す diff・巡回の候補・`Esc` の戻り先・`s` / `u` / `x` の可否）はどれもこれを
+    /// 網羅 `match` する —— 各所で `DiffSource` とグラフの選択を 2 段で見る形にすると、
+    /// 出どころを足したときに**コンパイラが何も言わず**、段の順序（stash を先に見る）も
+    /// 各所で守ることになる。
+    pub fn diff_origin(&self) -> DiffOrigin {
+        match (self.diff.source, self.graph.selection()) {
+            (DiffSource::Stash(oid), _) => DiffOrigin::Stash(oid),
+            (DiffSource::Selection, GraphSelection::Wip) => DiffOrigin::Worktree,
+            (DiffSource::Selection, GraphSelection::Commit(line)) => {
+                DiffOrigin::Commit(line.commit.oid)
             }
         }
     }
@@ -1343,6 +1352,18 @@ pub enum DiffSource {
     /// グラフの選択。WIP 行ならワーキングツリー、コミットならそのファイル一覧。
     #[default]
     Selection,
+    /// Stash ペインの `Enter`。
+    Stash(Oid),
+}
+
+/// [`DiffSource`] とグラフの選択を解いた、Diff ペインの出どころ
+/// （[`AppState::diff_origin`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffOrigin {
+    /// WIP 行の選択。ワーキングツリーのファイル。
+    Worktree,
+    /// コミット行の選択。そのコミットのファイル一覧で選んだもの。
+    Commit(Oid),
     /// Stash ペインの `Enter`。
     Stash(Oid),
 }

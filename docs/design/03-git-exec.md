@@ -347,7 +347,7 @@ pub enum ExecError {
   `kind` は分類表に載らない値」という約束を、読む側が毎回思い出すことになる。
   `Canceled` も同じ理由で 3 つ目にした（中断した git の `code` と `stderr` は
   signal の言い換えでしかない）
-- 環境変数: `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`（エラー文の検出を安定させる）、`GIT_EDITOR='<mewgit_bin>' --commit-editor` と `GIT_SEQUENCE_EDITOR='<mewgit_bin>' --sequence-editor`（端末のエディタを起こさない。**どのコマンドにも載せる**。下の「Interactive rebase の実装」）。`with_env` の指定はこの後に重ねるので、テストは上書きできる
+- 環境変数: `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`（エラー文の検出を安定させる）、`GIT_EDITOR='<mewgit_bin>' --commit-editor` と `GIT_SEQUENCE_EDITOR='<mewgit_bin>' --sequence-editor`（端末のエディタを起こさない）、`GIT_CONFIG_*` で `core.commentString=#mewgit#`（**3 つともどのコマンドにも載せる**。下の「Interactive rebase の実装」）。`with_env` の指定はこの後に重ねるので、テストは上書きできる
 - **`GIT_TERMINAL_PROMPT=0` では ssh のパスフレーズ入力を止められない。** `ssh` は
   stdin ではなく `/dev/tty` を直接読むので、agent に載っていない鍵だと止まる
   （タイムアウトは設けない方針。抜けるのは下の「キャンセル」）。**画面は壊れない** ——
@@ -586,6 +586,17 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   HEAD を amend するので、**止まった reword の pick を skip すると別のコミットの
   メッセージを書き換える**（1 本前の pick、先頭なら `onto` の先端。下の表）。todo に
   `git` と直書きするので `general.git_bin` も効かない（どちらも `/code-review` が拾った）
+- **`core.commentString` を `#mewgit#` にする。** reword のメッセージは `--commit-editor`
+  が書くので、git はエディタの出力として cleanup にかけ、コメント文字で始まる行を消す
+  —— `#123 is closed` の行が黙って消え、`#42` だけのメッセージは空として断られ rebase が
+  止まる（`/code-review` が拾った。下の表）。`--cleanup` は reword に効かない。git 自身が
+  書くコメント（squash の `# This is a combination…`）も同じ印で書かれて消えるので、
+  揃ったまま `#` だけが本文に残る。**continue にも要る**のでエディタと同じくどのコマンドにも
+  載せ、argv の `-c` ではなく `GIT_CONFIG_COUNT` / `KEY_n` / `VALUE_n` で渡す（`L` の履歴と
+  argv の表に毎回載せない）。ユーザーが `GIT_CONFIG_COUNT` を使っていれば後ろに足す
+- **エディタが自バイナリになったので、起動中に mewgit のバイナリが消えると、エディタを
+  起こす git（revert / cherry-pick の continue など）が落ちる**はず（以前の `true` では
+  起きない）。パッケージの更新で起きうるが、**確かめていない**
 - **plan は一時ファイルではなく stdin で渡す。** git が editor に stdin を継がせる（下の表）
   ので、ハンクの patch と同じ経路に乗る。`tempfile` を本依存に上げずに済み、後始末も無い
 - **メッセージのファイルは `rebase-merge/` の中に置き、Oid で引く。** 完了でも abort でも
@@ -633,6 +644,8 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
 | commit-msg hook が reword を断る → hook を外して continue | 止まった時点で pick は**元のメッセージでコミット済み**（`rebase-merge/amend` が立ち、`git status` は `editing a commit`）。continue は exit 0 だが**エディタは起こされず**、元のメッセージのまま進む。continue の前に `commit --amend -F <mewgit-reword-<Oid>>` を通すと新しいメッセージが入る |
 | `rebase-merge/` に自分のファイルを置いたまま完了 / `rebase --abort` | どちらも `rebase-merge/` ごと消える |
 | `pick A` / `squash B`（`GIT_EDITOR=true`） | メッセージは `A の件名` + 空行 + `B の件名` |
+| reword のメッセージ `Fix bug` + 空行 + `#123 is closed`（`--commit-editor`） | `#123` の行が消える。`-c core.commentString=#mewgit#` を付けると残り、同じ rebase の squash のメッセージにもコメントの行は残らない |
+| `GIT_CONFIG_COUNT=2`（0 番はユーザーの設定、1 番が `core.commentString`）、reword 2 本の 1 本目がコンフリクト → 解消して continue | 2 本とも `#` の行が残る（`#42 only` だけのメッセージも通る）。0 番の設定も効いたまま |
 
 ## 進行中操作との整合
 

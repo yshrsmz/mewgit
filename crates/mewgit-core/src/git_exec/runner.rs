@@ -241,6 +241,9 @@ impl Runner {
             // interactive rebase 以外では何もしないか断る（03）。
             .env("GIT_EDITOR", &self.commit_editor)
             .env("GIT_SEQUENCE_EDITOR", &self.sequence_editor)
+            .envs(comment_string_config(
+                std::env::var("GIT_CONFIG_COUNT").ok(),
+            ))
             .stdin(if command.stdin.is_some() {
                 Stdio::piped()
             } else {
@@ -269,6 +272,36 @@ impl Runner {
             reason: format!("{} を起動できませんでした: {err}", self.git_bin.display()),
         })
     }
+}
+
+/// reword のメッセージの行頭の `#` を、git にコメントとして読ませないための印。
+const COMMENT_STRING: &str = "#mewgit#";
+
+/// `core.commentString` を [`COMMENT_STRING`] にする `GIT_CONFIG_*`。
+///
+/// **reword のメッセージは `--commit-editor` が書くので、git はエディタの出力として
+/// cleanup にかけ、コメント文字で始まる行を消す** —— `#123 is closed` が黙って消え、
+/// `#42` だけのメッセージは空として断られる（`/code-review` が拾った。03 の実測）。
+/// git 自身が書くコメント（squash の `# This is a combination…` など）も同じ印で
+/// 書かれて消えるので、揃ったまま `#` だけが本文に残る。`--cleanup` は reword に
+/// 効かない。
+///
+/// **どのコマンドにも載せる。** エディタと同じで、止まった reword を continue したときも
+/// 要る。**`-c` を argv に足さない** —— `L` の履歴と argv の表に毎回ノイズが載る。
+/// ユーザーが `GIT_CONFIG_COUNT` を使っていれば、その後ろに足す（上書きしない）。
+fn comment_string_config(count: Option<String>) -> [(String, String); 3] {
+    let index = count.and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+    [
+        (
+            format!("GIT_CONFIG_KEY_{index}"),
+            "core.commentString".to_string(),
+        ),
+        (
+            format!("GIT_CONFIG_VALUE_{index}"),
+            COMMENT_STRING.to_string(),
+        ),
+        ("GIT_CONFIG_COUNT".to_string(), (index + 1).to_string()),
+    ]
 }
 
 /// `GIT_EDITOR` / `GIT_SEQUENCE_EDITOR` の値。git は `sh -c` で起こし、ファイルの
@@ -425,6 +458,26 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_comment_string_is_appended_after_the_users_config() {
+        assert_eq!(
+            comment_string_config(None),
+            [
+                (
+                    "GIT_CONFIG_KEY_0".to_string(),
+                    "core.commentString".to_string()
+                ),
+                ("GIT_CONFIG_VALUE_0".to_string(), COMMENT_STRING.to_string()),
+                ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+            ]
+        );
+        // ユーザーの 0 番と 1 番を残して 2 番に足す。
+        assert_eq!(
+            comment_string_config(Some("2".into()))[0].0,
+            "GIT_CONFIG_KEY_2"
+        );
+    }
 
     #[test]
     fn classifies_by_pattern() {

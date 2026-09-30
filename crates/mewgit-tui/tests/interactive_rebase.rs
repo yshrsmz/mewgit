@@ -36,7 +36,7 @@ async fn the_plan_replaces_the_todo() {
             plan: RebasePlan {
                 entries: vec![
                     entry(RebaseAction::Pick, a, "a"),
-                    entry(reword("B new\n\nbody"), b, "b"),
+                    entry(reword("B new\n\n#123 is closed"), b, "b"),
                     entry(RebaseAction::Fixup, c, "c"),
                     entry(RebaseAction::Drop, d, "d"),
                 ],
@@ -47,7 +47,7 @@ async fn the_plan_replaces_the_todo() {
 
     // fixup は reword の exec より後ろに並ぶが、メッセージは reword のもののまま
     // （fixup はメッセージを捨てる）。
-    assert_eq!(messages(&repo, "HEAD~2"), ["B new\n\nbody", "a"]);
+    assert_eq!(messages(&repo, "HEAD~2"), ["B new\n\n#123 is closed", "a"]);
     assert!(repo.path().join("c.txt").exists(), "fixup の変更が落ちた");
     assert!(!repo.path().join("d.txt").exists(), "drop が効いていない");
     assert!(!repo.path().join(".git/rebase-merge").exists());
@@ -63,7 +63,7 @@ async fn start_rewording_both(repo: &TestRepo, runner: &Runner, first: Oid, seco
             plan: RebasePlan {
                 entries: vec![
                     entry(reword("side new"), first, "side"),
-                    entry(reword("side2 new"), second, "side2"),
+                    entry(reword("#42 only"), second, "side2"),
                 ],
             },
         })
@@ -83,6 +83,7 @@ async fn start_rewording_both(repo: &TestRepo, runner: &Runner, first: Oid, seco
 
 #[tokio::test]
 async fn rewords_survive_continue() {
+    // **行頭の `#` も残る**（`core.commentString` を continue にも載せている。03）。
     // continue は `RebaseInteractive` とは別の `GitOp` なので、`GIT_EDITOR` を
     // rebase の開始にだけ載せると、止まった reword も後ろの reword も元のメッセージの
     // まま通る（03）。
@@ -97,7 +98,7 @@ async fn rewords_survive_continue() {
         .await
         .expect("解消したので最後まで通るはずです");
 
-    assert_eq!(messages(&repo, "main"), ["side2 new", "side new"]);
+    assert_eq!(messages(&repo, "main"), ["#42 only", "side new"]);
     assert!(!repo.path().join(".git/rebase-merge").exists());
 }
 
@@ -115,6 +116,6 @@ async fn skipping_a_stopped_reword_leaves_other_commits_alone() {
         .await
         .expect("skip で最後まで通るはずです");
 
-    assert_eq!(messages(&repo, "main~1"), ["side2 new", "main"]);
+    assert_eq!(messages(&repo, "main~1"), ["#42 only", "main"]);
     assert!(!repo.path().join(".git/rebase-merge").exists());
 }

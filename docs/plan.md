@@ -386,6 +386,14 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 
 ## M6: 仕上げ
 
+- [ ] **起動中に mewgit のバイナリが消えたときのエディタ。** `GIT_EDITOR` /
+      `GIT_SEQUENCE_EDITOR` は `current_exe()` を指すので、パッケージの更新などで
+      バイナリが消えると、エディタを起こす git（revert / cherry-pick の continue など）が
+      落ちるはず（以前の `GIT_EDITOR=true` では起きない。03 の「Interactive rebase の
+      実装」）。**確かめていない** —— まず Linux と macOS で消えたバイナリを起こして
+      実際に落ちるかを叩き、落ちるなら起動時に同じパスが無いことを検知して案内するか、
+      エディタを起こすときに exe の有無を見て `true` 相当に倒すかを決める
+
 - [ ] **hook が reword を断ったあとの continue で、新しいメッセージが消える。** git は
       continue でエディタを起こし直さず、元のメッセージでコミットする（git 自身の挙動。
       03 の「Interactive rebase の実装」に実測）。止まった時点で pick は元のメッセージで

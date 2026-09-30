@@ -15,7 +15,7 @@ pub mod progress_menu;
 pub mod rebase_editor;
 pub mod remote_picker;
 
-use mewgit_core::app::{AppState, Modal, TextBuffer};
+use mewgit_core::app::{AppState, Modal, RewordInput, TextBuffer};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -81,10 +81,12 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
             cursor,
             reword,
             ..
-        } => match reword {
+        } => match (reword, plan.entries.get(*cursor)) {
             // 入力のあいだは一覧を隠す（07 の「RebaseEditor」）。
-            Some(buf) => rebase_editor::render_reword(frame, area, plan, *cursor, buf),
-            None => rebase_editor::render(frame, area, onto, plan, *cursor),
+            (RewordInput::Open(buf), Some(entry)) => {
+                rebase_editor::render_reword(frame, area, &entry.oid, buf);
+            }
+            _ => rebase_editor::render(frame, area, onto, plan, *cursor),
         },
     }
 }

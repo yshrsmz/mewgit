@@ -157,7 +157,7 @@ pub enum Modal {
     Confirm { title: String, body: String, on_yes: Cmd },
     Input { title: String, prompt: String, buf: TextBuffer, intent: InputIntent },
     CommitMessage { buf: TextBuffer, amend: bool },
-    RebaseEditor { onto: Oid, head: Oid, plan: RebasePlan, cursor: usize, reword: Option<TextBuffer> }, // 下の「interactive rebase の開始（`i`）」
+    RebaseEditor { onto: Oid, head: Oid, plan: RebasePlan, cursor: usize, reword: RewordInput }, // 下の「interactive rebase の開始（`i`）」
     PrCreate { title: TextBuffer, body: TextBuffer, base: TextBuffer, draft: bool, field: PrField },
     AccountPicker { view: AccountView, cursor: usize },
     RemotePicker { reason: String, remotes: Vec<String>, cursor: usize },
@@ -762,7 +762,13 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 ```rust
 Modal::RebaseEditor {
     onto: Oid, head: Oid, plan: RebasePlan, cursor: usize,
-    reword: Option<TextBuffer>,   // Some のあいだはカーソルの行の reword のメッセージを打っている
+    reword: RewordInput,
+}
+
+pub enum RewordInput {
+    Closed,             // 一覧を出している
+    Loading(Oid),       // `r` を押し、そのコミットのメッセージ全文を読んでいる
+    Open(TextBuffer),   // カーソルの行のメッセージを打っている
 }
 ```
 
@@ -806,12 +812,12 @@ Modal::RebaseEditor {
   メッセージを打つ入力を別のモーダルとして開くと、戻るときに `onto` / `head` / `plan` /
   `cursor` を丸ごと運んで組み直すことになる。**1 つのモーダルの中でモードを切る先例は
   `PrCreate` の `field`** で、逆に「別のモーダルを開いて前のモーダルへ戻る」先例は無い
-  （`MainlinePicker` → `Confirm` も前へ進むだけ）。`reword` が `Some` のあいだ、打って
-  いるのはカーソルの行のメッセージで、キーは入力が受ける（カーソルは動かない）
+  （`MainlinePicker` → `Confirm` も前へ進むだけ）。`Open` のあいだ、打っているのは
+  カーソルの行のメッセージで、キーは入力が受ける（カーソルは動かない）
 
-| キー（`reword` が `Some`） | 動作 |
+| キー（`Open`） | 動作 |
 |---|---|
-| 文字 / 改行 / 削除 / 移動 | `CommitMessage` と同じ（`update::multiline_edit_key`） |
+| 文字 / 改行 / 削除 / 移動 | `CommitMessage` と同じ（振り分けは `update::multiline_input_key` の 1 本） |
 | `Enter`（修飾なし） | カーソルの行を `RebaseAction::Reword { message }` にして一覧へ戻る |
 | `Esc` | 行を変えずに一覧へ戻る（**エディタは閉じない**） |
 
@@ -824,14 +830,17 @@ Modal::RebaseEditor {
   「違えば頼み直す」（上の「コミット詳細の遅延取得」）ので、エディタの行の Oid を渡すと
   グラフの詳細の追いつきが回る。`JobKind` も種別単位なので、グラフの詳細が走っている
   あいだは reword の読みが落とされる
-- **返事は Oid で行を探して採る。** 届いた時点で `modal` が `RebaseEditor` でない
-  （`Esc` で閉じた、`Enter` で実行した）か、入力がもう開いているか、plan にその Oid が
-  無い（閉じて `i` で開き直した）なら捨てる。採るときはカーソルをその行へ移してから
-  開く —— 待っているあいだに `j` / `k` を打たれても、`r` を押した行を打つ。
-  **Oid の中身は変わらない**ので世代は見ない（`JobKind::region()` は `None`。
-  `LoadCommitDetail` と同じ）。**待っているあいだの 2 回目の `r` は種別単位で落とされ**、
-  1 回目の行が開く（落とした通知は出さない。読みは一瞬で、出すと 1 回目が開いた直後に
-  古い案内が残る）
+- **読んでいるあいだを状態に持つ（`Loading(Oid)`）。** 返事はその Oid と一致したとき
+  だけ採る。エディタを閉じれば待ちごと消えるので、閉じたあとの返事は失敗も含めて黙って
+  捨てる。**持たずに「エディタが開いているか・plan にその Oid があるか」で推し量ると、
+  `r` → 閉じる → 同じ範囲で `i` と打ったときに頼んでいない入力が開く**（`/simplify` が
+  拾った）。採るときはカーソルをその行へ移してから開く —— 待っているあいだに `j` / `k` を
+  打たれても、`r` を押した行を打つ。**Oid の中身は変わらない**ので世代は見ない
+  （`JobKind::region()` は `None`。`LoadCommitDetail` と同じ）
+- **待っているあいだの `r` は何もしない**（1 回目の行が開く。読みは一瞬）。**違う Oid の
+  返事が届いたら、待っている Oid を頼み直す** —— 閉じる前の `r` の読みが走っている
+  あいだに開き直したエディタで `r` を押すと、そちらの `Cmd` は種別単位で落とされていて、
+  頼み直さないと `Loading` が残り続ける
 - **空のメッセージは入力のまま断る**（`commit_submit` と同じ。空白だけも同じ）。
   `RebasePlan::validate()` の `EmptyMessage` に任せると、空の `Reword` を一度 plan に
   置くことになる。`validate()` 側は手で組んだ plan への守りとして残す

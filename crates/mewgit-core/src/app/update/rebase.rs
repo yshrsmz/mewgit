@@ -7,9 +7,11 @@ use std::collections::HashMap;
 
 use super::graph::picked_commit;
 use super::modal::picker_key;
-use super::{confirm, multiline_edit_key, submit_exec};
+use super::{confirm, multiline_input_key, submit_exec, InputKey};
 use crate::app::state::stepped_index;
-use crate::app::{AppState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, TextBuffer};
+use crate::app::{
+    AppState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, RewordInput, TextBuffer,
+};
 use crate::git_exec::{GitOp, RebaseAction, RebaseEntry, RebasePlan};
 use crate::git_read::{short_oid, Commit, GitReadError, HeadInfo, Oid};
 
@@ -43,7 +45,7 @@ pub(super) fn open_rebase_editor(state: &mut AppState) -> Cmd {
         head,
         plan,
         cursor: 0,
-        reword: None,
+        reword: RewordInput::Closed,
     });
     Cmd::None
 }
@@ -111,17 +113,23 @@ fn rebase_op(onto: Oid, head: Oid, plan: RebasePlan) -> GitOp {
 
 /// [`Modal::RebaseEditor`] のキー処理（07 の「RebaseEditor」）。`J` / `K` と動作のキーを
 /// 受け、残り（`j` / `k` / `Enter` / `Esc`）は `picker_key` に委ねる（`account_key` と
-/// 同じ形）。**reword の入力が開いているあいだは、キーはすべて入力が受ける**
-/// （[`reword_key`]）。
+/// 同じ形）。**reword の入力が開いているあいだは、キーはすべて入力が受ける。**
 pub(super) fn rebase_editor_key(state: &mut AppState, key: Key) -> Cmd {
-    if matches!(
-        state.modal,
-        Some(Modal::RebaseEditor {
-            reword: Some(_),
-            ..
-        })
-    ) {
-        return reword_key(state, key);
+    if let Some(Modal::RebaseEditor {
+        reword: RewordInput::Open(buf),
+        ..
+    }) = state.modal.as_mut()
+    {
+        // 振り分けは `CommitMessage` と同じ（`update::multiline_input_key`）。
+        return match multiline_input_key(buf, key) {
+            // **閉じずに一覧へ戻る**（ほかのモーダルの `Esc` と違う。01）。
+            InputKey::Cancel => {
+                close_reword(state);
+                Cmd::None
+            }
+            InputKey::Submit => reword_submit(state),
+            InputKey::Edited => Cmd::None,
+        };
     }
     let action = match key.code() {
         KeyCode::Char('J') => return swap(state, 1),
@@ -147,12 +155,13 @@ pub(super) fn rebase_editor_key(state: &mut AppState, key: Key) -> Cmd {
 ///
 /// **初期値はメッセージ全文**で、読んでから開く（[`commit_message_loaded`]）。グラフの行が
 /// 持つのは件名だけで、件名から始めると本文が黙って消える。**既に `Reword` の行は
-/// 読まない** —— 打ってあるメッセージから始める。
+/// 読まない** —— 打ってあるメッセージから始める。**読んでいるあいだの `r` は何もしない**
+/// （1 回目の行が開く）。
 fn start_reword(state: &mut AppState) -> Cmd {
     let Some(Modal::RebaseEditor {
         plan,
         cursor,
-        reword,
+        reword: reword @ RewordInput::Closed,
         ..
     }) = state.modal.as_mut()
     else {
@@ -162,74 +171,24 @@ fn start_reword(state: &mut AppState) -> Cmd {
         return Cmd::None;
     };
     if let RebaseAction::Reword { message } = &entry.action {
-        *reword = Some(TextBuffer::from_text(message));
+        *reword = RewordInput::Open(TextBuffer::from_text(message));
         return Cmd::None;
     }
+    *reword = RewordInput::Loading(entry.oid);
     Cmd::LoadCommitMessage(entry.oid)
 }
 
-/// reword の初期値が届いた。**Oid で plan の行を探して採る**（01）。
-///
-/// 届いた時点でエディタが閉じている・入力がもう開いている・plan にその Oid が無い
-/// （閉じて `i` で開き直した）なら捨てる。採るときはカーソルをその行へ移してから開く ——
-/// 待っているあいだに `j` / `k` を打たれても、`r` を押した行を打つ。**Oid の中身は
-/// 変わらない**ので世代は見ない（`JobKind::region()` が `None`）。
+/// reword の初期値が届いた。**採るのは `RewordInput::Loading` の Oid と一致したときだけ**
+/// （01）。エディタを閉じれば待ちごと消えるので、閉じたあとの返事は失敗も含めて黙って
+/// 捨てる。採るときはカーソルをその行へ移してから開く —— 待っているあいだに `j` / `k` を
+/// 打たれても、`r` を押した行を打つ。**Oid の中身は変わらない**ので世代は見ない
+/// （`JobKind::region()` が `None`）。
 pub(super) fn commit_message_loaded(
     state: &mut AppState,
     oid: Oid,
     result: Result<String, GitReadError>,
 ) -> Cmd {
     state.jobs.finish(JobKind::LoadCommitMessage);
-    let message = match result {
-        Ok(message) => message,
-        Err(err) => {
-            state.push_notice(NoticeLevel::Error, err.to_string(), None);
-            return Cmd::None;
-        }
-    };
-    let Some(Modal::RebaseEditor {
-        plan,
-        cursor,
-        reword: reword @ None,
-        ..
-    }) = state.modal.as_mut()
-    else {
-        return Cmd::None;
-    };
-    let Some(row) = plan.entries.iter().position(|entry| entry.oid == oid) else {
-        return Cmd::None;
-    };
-    *cursor = row;
-    *reword = Some(TextBuffer::from_text(&message));
-    Cmd::None
-}
-
-/// reword の入力のキー処理。**`Esc` は閉じずに一覧へ戻る**（ほかのモーダルと違う。01）。
-/// 修飾なしの `Enter` で決め、残りの編集は `CommitMessage` と同じ
-/// （[`multiline_edit_key`]）。
-fn reword_key(state: &mut AppState, key: Key) -> Cmd {
-    if key == Key::new(KeyCode::Esc) {
-        if let Some(Modal::RebaseEditor { reword, .. }) = state.modal.as_mut() {
-            *reword = None;
-        }
-        return Cmd::None;
-    }
-    if key == Key::new(KeyCode::Enter) {
-        return reword_submit(state);
-    }
-    if let Some(Modal::RebaseEditor {
-        reword: Some(buf), ..
-    }) = state.modal.as_mut()
-    {
-        multiline_edit_key(buf, key);
-    }
-    Cmd::None
-}
-
-/// reword のメッセージを決めて一覧へ戻る。**空は入力のまま断る**（`commit_submit` と
-/// 同じ）—— `RebasePlan::validate()` の `EmptyMessage` に任せると、空の `Reword` を一度
-/// plan に置くことになる。
-fn reword_submit(state: &mut AppState) -> Cmd {
     let Some(Modal::RebaseEditor {
         plan,
         cursor,
@@ -239,19 +198,61 @@ fn reword_submit(state: &mut AppState) -> Cmd {
     else {
         return Cmd::None;
     };
-    let Some(buf) = reword.take_if(|buf| !buf.is_blank()) else {
+    let RewordInput::Loading(waiting) = *reword else {
+        return Cmd::None;
+    };
+    if waiting != oid {
+        // 続きを頼む: 前のエディタで頼んだ読みが走っているあいだに、開き直したエディタで
+        // `r` を押した。そちらの `Cmd` は種別単位で落とされているので、待ちが残り続ける。
+        return Cmd::LoadCommitMessage(waiting);
+    }
+    match result {
+        Ok(message) => {
+            if let Some(row) = plan.entries.iter().position(|entry| entry.oid == oid) {
+                *cursor = row;
+            }
+            *reword = RewordInput::Open(TextBuffer::from_text(&message));
+        }
+        Err(err) => {
+            *reword = RewordInput::Closed;
+            state.push_notice(NoticeLevel::Error, err.to_string(), None);
+        }
+    }
+    Cmd::None
+}
+
+fn close_reword(state: &mut AppState) {
+    if let Some(Modal::RebaseEditor { reword, .. }) = state.modal.as_mut() {
+        *reword = RewordInput::Closed;
+    }
+}
+
+/// reword のメッセージを決めて一覧へ戻る。**空は入力のまま断る**（`commit_submit` と
+/// 同じ）—— `RebasePlan::validate()` の `EmptyMessage` に任せると、空の `Reword` を一度
+/// plan に置くことになる。
+fn reword_submit(state: &mut AppState) -> Cmd {
+    let Some(Modal::RebaseEditor {
+        plan,
+        cursor,
+        reword: RewordInput::Open(buf),
+        ..
+    }) = state.modal.as_mut()
+    else {
+        return Cmd::None;
+    };
+    if buf.is_blank() {
         state.push_notice(
             NoticeLevel::Warn,
             "reword のメッセージが空です".to_string(),
             None,
         );
         return Cmd::None;
-    };
-    if let Some(entry) = plan.entries.get_mut(*cursor) {
-        entry.action = RebaseAction::Reword {
-            message: buf.text(),
-        };
     }
+    let message = buf.text();
+    if let Some(entry) = plan.entries.get_mut(*cursor) {
+        entry.action = RebaseAction::Reword { message };
+    }
+    close_reword(state);
     Cmd::None
 }
 
@@ -304,12 +305,12 @@ fn submit(state: &mut AppState) -> Cmd {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        enter_with, open_confirm, press, press_code, state_with_commits, ALT,
+        enter_with, open_confirm, press, press_code, state_with_commits, type_text, ALT,
     };
     use super::*;
     use crate::app::{update, Msg};
     use crate::git_read::{InProgressOp, WorktreeSnapshot};
-    use crate::test_util::{fake_oid, fake_snapshot, reply};
+    use crate::test_util::{fake_oid, fake_snapshot, reply, reword};
 
     /// `n` 件の 1 列の履歴（`commit i` の親は `commit i+1`、最後が root）。HEAD は
     /// `commit 0` のブランチで、作業ツリーは鮮度のある空の snapshot。
@@ -618,7 +619,11 @@ mod tests {
     /// reword の入力が開いていれば、打っているメッセージ。
     fn reword_text(state: &AppState) -> Option<String> {
         match &state.modal {
-            Some(Modal::RebaseEditor { reword, .. }) => reword.as_ref().map(TextBuffer::text),
+            Some(Modal::RebaseEditor {
+                reword: RewordInput::Open(buf),
+                ..
+            }) => Some(buf.text()),
+            Some(Modal::RebaseEditor { .. }) => None,
             other => panic!("RebaseEditor が開いていません: {other:?}"),
         }
     }
@@ -665,9 +670,7 @@ mod tests {
         let mut state = rewording("件名");
 
         // `j` / `d` / `r` は入力の文字になる（カーソルも動作も変えない）。
-        for c in ['j', 'd', 'r'] {
-            let _ = press(&mut state, c);
-        }
+        type_text(&mut state, "jdr");
         let _ = update(&mut state, enter_with(ALT));
         let _ = press(&mut state, 'x');
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
@@ -675,12 +678,7 @@ mod tests {
         assert_eq!(reword_text(&state), None);
         let (_, plan, cursor) = editor(&state);
         assert_eq!(cursor, 0);
-        assert_eq!(
-            plan.entries[0].action,
-            RebaseAction::Reword {
-                message: "件名jdr\nx".to_string()
-            }
-        );
+        assert_eq!(plan.entries[0].action, reword("件名jdr\nx"));
         assert_eq!(plan.entries[1].action, RebaseAction::Pick);
 
         // 一覧に戻った `Enter` は実行で、reword を載せた plan を運ぶ。
@@ -743,26 +741,69 @@ mod tests {
     }
 
     #[test]
-    fn a_message_that_arrives_too_late_is_dropped() {
-        // エディタを閉じたあと。
+    fn a_message_nobody_is_waiting_for_is_dropped() {
+        // **同じ範囲で開き直したエディタ**に、閉じる前の `r` の返事が届く。plan には
+        // 同じ Oid があるが、開き直してからは誰も `r` を押していない（`/simplify` が拾った）。
         let mut state = linear(3);
         let _ = press_i_on(&mut state, 1);
-        let _ = press(&mut state, 'r');
+        assert_eq!(press(&mut state, 'r'), Cmd::LoadCommitMessage(fake_oid(1)));
         let _ = press_code(&mut state, KeyCode::Esc);
-        let _ = message_loaded(&mut state, fake_oid(1), "件名");
-        assert_eq!(state.modal, None);
+        let _ = press(&mut state, 'i');
+        let _ = update(
+            &mut state,
+            Msg::CommitMessageLoaded {
+                oid: fake_oid(1),
+                result: Box::new(Ok("件名".to_string())),
+            },
+        );
+        assert_eq!(reword_text(&state), None);
 
         // 入力がもう開いているとき（打った文字を上書きしない）。
         let mut state = rewording("件名");
         let _ = press(&mut state, 'x');
         let _ = message_loaded(&mut state, fake_oid(1), "別の本文");
         assert_eq!(reword_text(&state).as_deref(), Some("件名x"));
+    }
 
-        // plan に無い Oid（閉じて `i` で開き直した）。
+    #[test]
+    fn an_older_reply_asks_again_for_the_row_being_waited_on() {
+        // 閉じる前の `r`（commit 1）の読みが走っているあいだに、開き直したエディタで
+        // 別の行（commit 0）に `r`。後者の `Cmd` は種別単位で落とされる。
         let mut state = linear(3);
         let _ = press_i_on(&mut state, 1);
-        let _ = message_loaded(&mut state, fake_oid(9), "件名");
+        assert_eq!(press(&mut state, 'r'), Cmd::LoadCommitMessage(fake_oid(1)));
+        let _ = press_code(&mut state, KeyCode::Esc);
+        let _ = press(&mut state, 'i');
+        let _ = press(&mut state, 'j');
+        // 出口の `issue` が落とす（commit 1 の読みが走っている）。
+        assert_eq!(press(&mut state, 'r'), Cmd::None);
+
+        let cmd = update(
+            &mut state,
+            Msg::CommitMessageLoaded {
+                oid: fake_oid(1),
+                result: Box::new(Ok("前の件名".to_string())),
+            },
+        );
+
+        assert_eq!(cmd, Cmd::LoadCommitMessage(fake_oid(0)));
         assert_eq!(reword_text(&state), None);
+        let _ = message_loaded(&mut state, fake_oid(0), "いまの件名");
+        assert_eq!(reword_text(&state).as_deref(), Some("いまの件名"));
+    }
+
+    #[test]
+    fn r_while_the_message_is_being_read_does_nothing() {
+        let mut state = linear(3);
+        let _ = press_i_on(&mut state, 1);
+        let _ = press(&mut state, 'r');
+        let _ = press(&mut state, 'j');
+
+        assert_eq!(press(&mut state, 'r'), Cmd::None);
+
+        let _ = message_loaded(&mut state, fake_oid(1), "件名");
+        assert_eq!(editor(&state).2, 0);
+        assert_eq!(reword_text(&state).as_deref(), Some("件名"));
     }
 
     #[test]

@@ -333,7 +333,7 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       「interactive rebase の開始（`i`）」。sequence editor が plan を組んだ HEAD と git の
       `orig-head` を比べる（03）のもここ
 - [x] RebaseEditor の `r`（reword のメッセージ入力）。**戻し方は `Modal::RebaseEditor` の
-      中にモード（`reword: Option<TextBuffer>`）を持つ形**、初期値はメッセージ全文を
+      中にモード（`reword: RewordInput`）を持つ形**、初期値はメッセージ全文を
       `Cmd::LoadCommitMessage` で読む（01 の「interactive rebase の開始（`i`）」）。
       **エディタの凡例をやめてキーの案内を 2 行に折り、箱を 76 に広げた**（2026-09-30 に
       ユーザーと決めた。07 の「モーダルのキーの案内」）

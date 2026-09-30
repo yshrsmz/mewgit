@@ -11,8 +11,8 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
 use ratatui::Frame;
 
+use crate::modals::commit_message;
 use crate::modals::picker::{self, Picker};
-use crate::modals::{self, commit_message};
 use crate::ui::theme;
 
 const TITLE: &str = "interactive rebase";
@@ -63,31 +63,10 @@ pub fn render(frame: &mut Frame, area: Rect, onto: &Oid, plan: &RebasePlan, curs
 }
 
 /// reword のメッセージを打つ入力。**一覧は隠す**（07）—— 入力は複数行で高さが要る。
-/// 箱の形は `CommitMessage` と同じで、題に対象の短縮 Oid を出す。
-pub fn render_reword(
-    frame: &mut Frame,
-    area: Rect,
-    plan: &RebasePlan,
-    cursor: usize,
-    buf: &TextBuffer,
-) {
-    let title = plan.entries.get(cursor).map_or_else(
-        || "reword".to_string(),
-        |entry| format!("reword {}", short_oid(&entry.oid)),
-    );
-    // 折り返さないので、本文の行数はそのままバッファの行数（`commit_message::render`）。
-    let body_rows = u16::try_from(buf.lines.len()).unwrap_or(u16::MAX);
-    let body_area = modals::place(
-        frame,
-        area,
-        modals::block(&title),
-        WIDTH,
-        body_rows,
-        REWORD_HINT,
-    );
-    if let Some(position) = modals::edit_area(frame, body_area, buf) {
-        frame.set_cursor_position(position);
-    }
+/// 箱は `CommitMessage` と同じ（`commit_message::render_editor`）で、題に対象の短縮 Oid を出す。
+pub fn render_reword(frame: &mut Frame, area: Rect, oid: &Oid, buf: &TextBuffer) {
+    let title = format!("reword {}", short_oid(oid));
+    commit_message::render_editor(frame, area, &title, REWORD_HINT, buf);
 }
 
 /// 1 行。`pick    abc1234  summary`。**drop の行は弱く出す**（残らないコミット）。
@@ -114,10 +93,10 @@ fn row(entry: &RebaseEntry) -> Line<'static> {
 mod tests {
     use super::{HINT, REWORD_HINT};
     use crate::test_util::{cursor, draw, row_is_reversed, row_of, state_with_modal};
-    use mewgit_core::app::{AppState, Modal, TermSize, TextBuffer};
+    use mewgit_core::app::{AppState, Modal, RewordInput, TermSize, TextBuffer};
     use mewgit_core::git_exec::{RebaseAction, RebasePlan};
     use mewgit_core::git_read::short_oid;
-    use mewgit_core::test_util::{fake_oid, rebase_entry};
+    use mewgit_core::test_util::{fake_oid, rebase_entry, reword};
 
     const SIZE: TermSize = TermSize {
         width: 80,
@@ -147,7 +126,9 @@ mod tests {
             head: fake_oid(8),
             plan: RebasePlan { entries },
             cursor,
-            reword: reword.map(TextBuffer::from_text),
+            reword: reword.map_or(RewordInput::Closed, |text| {
+                RewordInput::Open(TextBuffer::from_text(text))
+            }),
         })
     }
 
@@ -198,9 +179,7 @@ mod tests {
 
     #[test]
     fn a_reworded_row_shows_the_first_line_of_the_new_message() {
-        let reworded = RebaseAction::Reword {
-            message: "新しい件名\n\n本文".to_string(),
-        };
+        let reworded = reword("新しい件名\n\n本文");
         let state = state_with_editor(&[RebaseAction::Pick, reworded], 0);
 
         let text = draw(&state, SIZE).join("\n");

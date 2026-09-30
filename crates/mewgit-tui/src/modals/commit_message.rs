@@ -30,9 +30,16 @@ pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool) {
     } else {
         "Commit message"
     };
+    render_editor(frame, area, title, HINT, buf);
+}
+
+/// メッセージを打つ箱を描く。**RebaseEditor の reword も同じ箱**で、違うのは題と
+/// キーの案内だけ（07）。写すと、横のずらし方やカーソルの置き方を直したときに片方だけ
+/// 古くなる。
+pub fn render_editor(frame: &mut Frame, area: Rect, title: &str, hint: &str, buf: &TextBuffer) {
     // 折り返さないので、本文の行数はそのままバッファの行数（下の `Paragraph`）。
     let body_rows = u16::try_from(buf.lines.len()).unwrap_or(u16::MAX);
-    let body_area = modals::place(frame, area, modals::block(title), WIDTH, body_rows, HINT);
+    let body_area = modals::place(frame, area, modals::block(title), WIDTH, body_rows, hint);
 
     // **`ui::render_rows` は使わない。** あちらは横位置を持たず、diff と一覧は
     // それでよい（長い行は右で切れるだけ）。編集中はカーソルが右端を越えるので、

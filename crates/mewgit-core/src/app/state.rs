@@ -2491,15 +2491,15 @@ pub enum Modal {
     /// **検証の結果は持たない** —— 描く側も `Enter` も `RebasePlan::validate()` を
     /// その場で呼ぶ。持つと、行を動かすたびに更新を忘れる形が生まれる。
     ///
-    /// **`reword` が `Some` のあいだは、カーソルの行の reword のメッセージを打っている**
-    /// （`r`。01）。別のモーダルにしないのは、戻るときに plan を丸ごと運ぶことになるため
-    /// （`PrCreate` の `field` と同じく、1 つのモーダルの中でモードを切る）。
+    /// **`reword` は `r` の入力**（[`RewordInput`]。01）。別のモーダルにしないのは、戻る
+    /// ときに plan を丸ごと運ぶことになるため（`PrCreate` の `field` と同じく、1 つの
+    /// モーダルの中でモードを切る）。
     RebaseEditor {
         onto: Oid,
         head: Oid,
         plan: RebasePlan,
         cursor: usize,
-        reword: Option<TextBuffer>,
+        reword: RewordInput,
     },
     /// PR を作る（01 の「PR 作成（`N`）」）。`N` で開く。
     ///
@@ -2970,6 +2970,22 @@ impl InputIntent {
 ///
 /// ratatui のウィジェットや `tui-textarea` は状態に持たない（core が UI に依存するため）。
 /// 編集操作は M2 の commit タスクで実装する。
+/// [`Modal::RebaseEditor`] の reword の入力（01 の「interactive rebase の開始（`i`）」）。
+///
+/// **読んでいるあいだを状態に持つ。** 持たないと、返事が届いたときに「誰が頼んだか」を
+/// エディタの形（開いているか、plan にその Oid があるか）から推し量ることになり、`r` →
+/// エディタを閉じる → 同じ範囲で `i` と打つと頼んでいない入力が開く（`/simplify` が拾った）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RewordInput {
+    /// 一覧を出している。
+    #[default]
+    Closed,
+    /// `r` を押し、そのコミットのメッセージ全文を読んでいる。返事はこの Oid のものだけを採る。
+    Loading(Oid),
+    /// カーソルの行のメッセージを打っている。キーはすべて入力が受ける。
+    Open(TextBuffer),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextBuffer {
     pub lines: Vec<String>,

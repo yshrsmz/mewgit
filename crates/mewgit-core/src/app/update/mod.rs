@@ -18,7 +18,7 @@ use crate::git_exec::{GitOp, PullMode};
 
 use super::{
     AppState, Cmd, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
-    PrField, TextBuffer,
+    PrField, RewordInput, TextBuffer,
 };
 use account::{account_resolved, accounts_listed, open_account, repo_info_loaded, target_resolved};
 use branches::{branches_key, branches_loaded};
@@ -328,7 +328,8 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
         // **reword の入力が開いているときだけ受ける**（01 の「interactive rebase の
         // 開始（`i`）」）。一覧のあいだは行き先が無い。
         Some(Modal::RebaseEditor {
-            reword: Some(buf), ..
+            reword: RewordInput::Open(buf),
+            ..
         }) => buf.insert_text(text),
         // **`_` にしない。** ここを受け皿にしていたせいで、`Modal::PrCreate` を
         // 足した回に**貼り付けだけが黙って無反応**になっていた（#63 の
@@ -341,7 +342,10 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
             | Modal::NoticeLog { .. }
             | Modal::ProgressMenu { .. }
             | Modal::MainlinePicker { .. }
-            | Modal::RebaseEditor { reword: None, .. }
+            | Modal::RebaseEditor {
+                reword: RewordInput::Closed | RewordInput::Loading(_),
+                ..
+            }
             | Modal::Help { .. },
         )
         | None => {}
@@ -435,6 +439,31 @@ fn edit_key(buf: &mut TextBuffer, key: Key) -> bool {
 ///
 /// **確定は受けない。** 修飾なしの `Enter` をどう扱うかはモーダルごとの判断で、
 /// ここに入れると「確定して何をするか」まで共有することになる。
+/// [`multiline_input_key`] が振り分けた結果。
+enum InputKey {
+    /// `Esc`。何を捨てるか（モーダルを閉じるか、一覧へ戻るか）はモーダルの側。
+    Cancel,
+    /// 修飾なしの `Enter`。
+    Submit,
+    /// それ以外。バッファに当てた。
+    Edited,
+}
+
+/// 複数行の入力欄のキーの振り分け（`CommitMessage` と RebaseEditor の reword）。
+/// **修飾なしの `Enter` だけが確定**で、修飾付きは改行に落ちる（01 の「コミット
+/// メッセージの編集」）。**振り分けを 1 本にする** —— 入力欄ごとに写すと、`Enter` の
+/// 意味が欄で割れる。
+fn multiline_input_key(buf: &mut TextBuffer, key: Key) -> InputKey {
+    if key == Key::new(KeyCode::Esc) {
+        return InputKey::Cancel;
+    }
+    if key == Key::new(KeyCode::Enter) {
+        return InputKey::Submit;
+    }
+    multiline_edit_key(buf, key);
+    InputKey::Edited
+}
+
 fn multiline_edit_key(buf: &mut TextBuffer, key: Key) {
     // `Ctrl-J` はどの端末でも届く改行。raw mode では `\n` が `Ctrl+j` として来る。
     if key == Key::ctrl('j') {

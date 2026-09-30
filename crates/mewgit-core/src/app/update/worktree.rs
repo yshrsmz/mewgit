@@ -14,7 +14,7 @@ use crate::git_read::{
 use super::diff::load_diff;
 use super::diff::open_diff;
 use super::stash::{open_stash_file, open_stash_push};
-use super::{confirm, exec_busy, focus, multiline_edit_key, submit_exec};
+use super::{confirm, exec_busy, focus, multiline_input_key, submit_exec, InputKey};
 use crate::app::{
     AppState, Cmd, DiffOrigin, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
 };
@@ -72,27 +72,22 @@ fn commit(state: &mut AppState) -> Cmd {
 /// 確定は `Enter`、改行は `Alt+Enter` / `Shift+Enter` / `Ctrl-J`
 /// （01 の「コミットメッセージの編集」）。
 pub(super) fn commit_message_key(state: &mut AppState, key: Key) -> Cmd {
-    // **確認は挟まない。** `modal` は 1 つしか持てず、重ねるにはモーダルのスタックが
-    // 要る。不変ルール 5 が確認を求めるのは git の破壊的操作で、編集中バッファの
-    // 取り消しは含まれない（01）。
-    if key == Key::new(KeyCode::Esc) {
-        state.modal = None;
-        return Cmd::None;
-    }
-
-    // **修飾なしの `Enter` だけが確定。** 修飾付きは下の改行に落ちる。
-    if key == Key::new(KeyCode::Enter) {
-        return commit_submit(state);
-    }
-
     let Some(Modal::CommitMessage { buf, .. }) = state.modal.as_mut() else {
         return Cmd::None;
     };
-
-    // 改行と行移動と 1 行ぶんの編集は `Modal::PrCreate` の body 欄と同じ規則
-    // （`update::multiline_edit_key`）。
-    multiline_edit_key(buf, key);
-    Cmd::None
+    // 振り分けと改行・行移動の規則は RebaseEditor の reword と同じ
+    // （`update::multiline_input_key`）。
+    match multiline_input_key(buf, key) {
+        // **確認は挟まない。** `modal` は 1 つしか持てず、重ねるにはモーダルのスタックが
+        // 要る。不変ルール 5 が確認を求めるのは git の破壊的操作で、編集中バッファの
+        // 取り消しは含まれない（01）。
+        InputKey::Cancel => {
+            state.modal = None;
+            Cmd::None
+        }
+        InputKey::Submit => commit_submit(state),
+        InputKey::Edited => Cmd::None,
+    }
 }
 
 /// コミットメッセージを確定する。

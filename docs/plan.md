@@ -367,12 +367,12 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       **stash のタスクは 3 本に割った**（2026-09-30 にユーザーと決めた。01 の「Stash
       ペイン」）—— 一覧と diff だけで、端末で作った stash を見られる。右上のタブが
       `Branches | Stash | PRs` になる。**読むのは起動時と `Reload::RefsAndLog` のあと**（autostash の `pull` / rebase でも積まれる。01）
-- [ ] stash の push（全体）/ apply / pop / drop。**`z` / `Z`（07 のキー表）と、apply /
-      drop のキーを決める**。drop は `Modal::Confirm`。**書き込みのあとに一覧を読み直す
-      `Reload` を決め、`Region::Refs` を進める**（いまの `Reload::Nothing` は `Refs` を
-      進めない。01 の「Stash ペイン」）。**進行中操作の断りを数え直す** —— 古い snapshot の
-      あいだに stash のキーが押せるようになる（01 の「進行中操作があるときの書き込み」）。
-      push のメッセージと `--include-untracked` の渡し方もここで決める
+- [x] stash の push（全体）/ apply / pop / drop。**`z`（Worktree / Stash）と Stash の
+      `a` / `Z` / `d`**（2026-09-30 にユーザーと決めた。01 の「stash の書き込み」）。push は
+      常に `--include-untracked` で、`Modal::Input` でメッセージを聞く（空なら git の既定）。
+      書き込みのあとは `Reload::Stashes`（`Region::Stash` を進めて一覧を読み直す。merge の abort も autostash を積むのでここ）。**push は古い
+      snapshot でも断る**（解消済みの途中を git が受けて `*_HEAD` を消す。03 の表）、
+      **apply / pop / drop は古い一覧で断る**（index がずれて別の stash に当たる）
 - [ ] 部分 stash。**Worktree のカーソルの 1 ファイル**（2026-09-30 にユーザーと決めた）。
       untracked のパスは `-u` が無いと `pathspec did not match` で落ちる（実測、git 2.55.0）
 

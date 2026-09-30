@@ -17,8 +17,8 @@
 use crate::git_exec::{GitOp, PullMode};
 
 use super::{
-    AppState, Cmd, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane, PrField,
-    TextBuffer,
+    AppState, Cmd, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
+    PrField, TextBuffer,
 };
 use account::{account_resolved, accounts_listed, open_account, repo_info_loaded, target_resolved};
 use branches::{branches_key, branches_loaded};
@@ -366,6 +366,33 @@ fn confirm(state: &mut AppState, title: &str, body: String, op: GitOp) -> Cmd {
         title: title.to_string(),
         body,
         on_yes: Cmd::Exec(op),
+    });
+    Cmd::None
+}
+
+/// 入力モーダルを開く。
+///
+/// **`Modal::Input` を組むのはここ 1 本**（[`confirm`] と同じ形）。フィールドを足せば
+/// リテラルは全部コンパイルエラーになるので、揃えたいのは**開き方**のほう —
+/// 「`Cmd` を返さずに `modal` へ置くだけ」を各キーの腕に散らさない。
+fn input(
+    state: &mut AppState,
+    title: String,
+    prompt: String,
+    buf: TextBuffer,
+    intent: InputIntent,
+) -> Cmd {
+    // **開く前に断る。** 確定で断ると、打ち終えた名前を捨てさせる（01 の
+    // 「進行中操作があるときの書き込み」）。断ったら `issue` と同じく読み直す
+    // （`AppState::refusal`）。
+    if let Some(instead) = state.refuse_write(&intent.op(String::new())) {
+        return instead;
+    }
+    state.modal = Some(Modal::Input {
+        title,
+        prompt,
+        buf,
+        intent,
     });
     Cmd::None
 }

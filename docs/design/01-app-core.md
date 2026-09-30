@@ -539,7 +539,8 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 
 | | 出す `Cmd` | 例 |
 |---|---|---|
-| `Nothing` | `LoadStatus` | stage / unstage / discard、stash |
+| `Nothing` | `LoadStatus` | stage / unstage / discard |
+| `Stashes` | `+ LoadStashes`（`Stash` を進める） | stash の push / apply / pop / drop、merge の abort |
 | `Refs` | `+ LoadRepoInfo` `+ LoadBranches` | checkout、branch 作成 / リネーム、非 force push |
 | `RefsAndLog` | `+ LoadLog { restart }` | commit、fetch / pull、force push、branch 削除、rebase / cherry-pick / revert |
 
@@ -550,10 +551,12 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   `GraphState.refs` から引く（07）ので、**既にあるコミットを指し直すだけの操作では
   行は 1 つも動かない**。ログの読み直しは `LogSession` の作り直しで履歴全体のコストが
   掛かる（02 の「セッションは作り直さず使い回す」）ので、要らないところでは払わない
-- **`git_exec` に `GitOp::moves_refs()` として置かない。** stash が `Nothing` なのは
-  「`refs/stash` をグラフの walk に押していない」からで、git は ref を動かしている。
-  git の事実を約束する名前で UI の方針を返すと、Stash ペインが入ったときに黙って
-  嘘になる。**どの ref を辿るかを知っているのは `app` 側**
+- **`git_exec` に `GitOp::moves_refs()` として置かない。** stash がラベルもログも読み
+  直さないのは「`refs/stash` をグラフの walk に押していない」からで、git は ref を
+  動かしている。git の事実を約束する名前で UI の方針を返すと、Stash ペインが入った
+  ときに黙って嘘になる（**入る前は stash を `Nothing` にしていて、実際に嘘になった**
+  —— `Refs` を進めず、stash の一覧を読み直さなかった）。**どの ref を辿るかを知って
+  いるのは `app` 側**
 - **失敗した書き込みで読み直すのは、途中まで ref が動きうる操作だけ。** fetch / pull は
   一部の ref だけ更新して落ちうるし、rebase / cherry-pick / revert は途中で止まる。
   commit / branch 削除 / force push は 1 回で決まるので、失敗したなら ref は元のまま。
@@ -1064,13 +1067,18 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
   —— 払うのは reflog 1 本の読み取りで、`RefsAndLog` はそれより重いログの読み直しを
   既に払っている。**端末で作った stash は、次に `RefsAndLog` の書き込みをするか
   再起動するまで出ない**（Branches で外のブランチ作成が出ないのと同じ。外部変更の
-  検知は M6）。stash の書き込み（(2)）のあとに読み直す配線は、そのとき `update::Reload`
-  に足す
-- **`JobKind::LoadStashes` の領域は `Region::Refs`。** 読むのは `refs/stash` の reflog で、
-  git が動かすのは ref。`RefsAndLog` は `Refs` を進めるので、読み込みの最中に pull が
-  終われば返りは捨てられて頼み直される。**いまの `Reload::Nothing`（stash の書き込み）は
-  `Refs` を進めない** —— (2) で stash の書き込みの `Reload` を決めるときに揃える（上の
-  「ログの読み直し」の `GitOp::moves_refs()` の段落が予告している嘘）
+  検知は M6）。**stash の書き込みのあとは `Reload::Stashes`**（下）
+- **`JobKind::LoadStashes` の領域は `Region::Stash`**（下の「実行中ジョブ › 世代」）。
+  進めるのは stash の書き込み（`Reload::Stashes`）と `RefsAndLog`（autostash）で、
+  読み込みの最中に pull が終われば返りは捨てられて頼み直される。**`Region::Refs` に
+  相乗りさせない** —— 最初の版はそうしていて、`/simplify` が 2 つ拾った。stash の
+  書き込みで `Refs` を進めると走っている PR 一覧の取得（GitHub の往復）まで捨てられ、
+  逆に switch など `Reload::Refs` の書き込み（一覧を読み直さない）のあとは一覧が古いと
+  判じられて、**最初の apply / pop / drop が必ず 1 回断られる**（下の「stash の
+  書き込み」の鮮度の門）。**stash の書き込みは `Reload::Stashes`** —— `Worktree` と
+  `Stash` を進め、`LoadStatus` と `LoadStashes` を出す（上の「ログの読み直し」の表）。**成否を見ない** —— pop はコンフリクトで exit 1 でも作業ツリーを
+  書き換え（stash は残す）、apply も同じ。ラベルとログは読み直さない（`refs/stash` は
+  グラフの walk に押していない。02 の「ログ列挙」）
 - **`Cmd::LoadBranches` に乗せない。** 古くなる書き込みが違う —— `Reload::Refs` の
   書き込み（switch、ブランチの作成 / 改名、非 force の push）は `refs/stash` を動かさない
   （`switch` に autostash は無い）
@@ -1112,6 +1120,62 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
   **stash のハンクを見ながらワーキングツリーの選択行を stage する**。見るのは
   `diff_origin()` で、Diff ペインを離れれば `Worktree` か `Commit` に戻るので、Worktree
   ペインの `s` はここで断られない
+
+### stash の書き込み
+
+**キーは `z`（push。Worktree と Stash）、Stash ペインの `a`（apply）/ `Z`（pop）/
+`d`（drop）**（2026-09-30 にユーザーと決めた。07 のキー表）。apply / pop / drop の相手は
+カーソル行。**Worktree に `Z`（`stash@{0}` の pop）は置かない** —— どれを pop するかが
+その画面に出ていない。
+
+- **push は常に `--include-untracked`**（2026-09-30 にユーザーと決めた）。「全体」は
+  Worktree ペインに出ているもの全部で、untracked もそこに出る。付けないと、untracked
+  だけの作業ツリーで `git stash push` は **exit 0 のまま `No local changes to save` を
+  stdout に出して何もしない**（実測、git 2.55.0）—— 成功の通知は無いので、押しても
+  何も起きないように見える
+- **push は `Modal::Input` でメッセージを聞く**（2026-09-30 にユーザーと決めた）。
+  **空の確定を通す** —— 空なら `--message` を付けず、git の既定（`WIP on <branch>:
+  <sha> <件名>`）になる。ブランチ名の入力は空を断るので、空を断るかは `InputIntent`
+  が答える（`requires_text`）
+- **push は鮮度のある snapshot でしか通さない**（2026-09-30 にユーザーと決めた）。
+  古ければ「状態を読み直しています。もう一度」で断って `LoadStatus` を出す。
+  **ここが「進行中操作があるときの書き込み」の門の例外** —— あちらは古い snapshot では
+  git に任せるが、**解消済みの cherry-pick / merge の途中の `stash push` は git が
+  受けて `CHERRY_PICK_HEAD` / `MERGE_HEAD` を消す**（03 の表）。書き込みの直後の
+  status 待ちの窓でそれを踏ませない。**外で始めた操作を mewgit が見ていない窓は
+  塞がらない**（世代を進めるのは mewgit の書き込みだけ。外部変更の検知は M6）
+- **鮮度のある snapshot が空なら「退避する変更がありません」で断る**（`c` の
+  「stage された変更がありません」と同じ門）。git に渡すと上の `No local changes to
+  save` で、何も起きないように見える。`-u` を付けるので、untracked だけでも空ではない
+- **apply / pop / drop は、鮮度のある stash 一覧でしか通さない。** 渡すのは
+  `stash@{index}` で、**index は読んだ時点のものでしかない**（02 の「stash 一覧」）。
+  push の直後は一覧が届くまで全部が 1 つずれていて、そこで `d` を押すと**確認に出した
+  のとは別の stash を drop する**。古ければ「stash の一覧を読み直しています。もう一度」で
+  断って `LoadStashes` を出す。**oid では渡せない** —— `git stash drop <oid>` / `pop
+  <oid>` は `is not a stash reference` で断られる（実測、git 2.55.0。apply だけは通る）
+- **判定は `AppState::refusal` に置く**（`AppState::refuse_stash`。進行中操作の門と
+  並べて `AppState::refuse_write` が束ねる）。キー・確認の `y`・入力の確定のどれから
+  来ても同じ門を通る。**入力を開く前も `refuse_write` を問う**（`update::input`）——
+  打ち終えてから断られない。開く前の判定を別に並べると、片方にだけ足した門で本文が消える
+- **drop は `Modal::Confirm`**（不変ルール 5）。本文に `stash@{n}` とメッセージを出す。
+  **開く前に `refusal` 全体を問う** —— git が走っているあいだに確認を開けると、
+  その書き込み（autostash の `pull`）が終わって一覧がずれたあとに `y` が通る。
+  走っていなければ、確認を開いているあいだに始まる書き込みは無い（キーはモーダルが受ける）
+- **pop / apply は確認を挟まない。** 作業ツリーに足すだけで、pop がコンフリクトしても
+  stash は残る（git が `The stash entry is kept` と言う。実測）
+- **pop / apply のコンフリクトは `Warn` で案内する**（「失敗の案内文」）。git は
+  `CONFLICT` を stdout に出して exit 1 で、stderr は空（実測、git 2.55.0）。
+  **進行中操作にはならない**（continue が無い）ので `m` は案内しない
+- **stash の書き込みでなくても `refs/stash` は動く**（上の「Stash ペイン」の autostash）。
+  **`merge --abort` も積む** —— `merge.autoStash` で始めた merge（`pull --no-rebase`）が
+  コンフリクトし、作業ツリーを触ってから abort すると、autostash を戻すところで
+  コンフリクトして **exit 0 のまま `stash@{0}: autostash` を積む**（実測、git 2.55.0。
+  既存の stash は `stash@{1}` にずれる）。HEAD は動かないので `RefsAndLog` ではなく
+  `Reload::Stashes`（`/code-review` が拾った。最初の版は `Nothing` で、鮮度の門が
+  古い一覧を通し、`d` が autostash —— ユーザーの未コミットの変更 —— を消していた）
+- **進行中操作の途中の apply / pop は断ったまま**（`progress::refusal`）。未解消なら
+  git も `could not write index` で断る。解消済みなら git は受けて `*_HEAD` も
+  消さないが、**解消の途中に無関係な変更を混ぜる**（03 の表）
 
 ## PR ペイン
 
@@ -2325,9 +2389,9 @@ pub struct PushRejection {
 `c` の「stage された変更がありません」と同じ門で、**古いときは断らずに git に任せる**。
 書き込みの直後は status が届くまで古く、そこで持っている進行中操作を信じると、abort した
 直後の `Enter` を「rebase の途中です」で断る。逆向き（まだ `None` なのに実は始まっている）は
-git が自分で断る —— 03 の表で断らないのは stash だけで、stash は古い snapshot のあいだに
-押せるキーがまだ無い（Stash ペインの書き込み —— 上の「Stash ペイン」の (2) —— で
-数え直す。一覧と diff だけの (1) には stash の書き込みのキーが無い）。
+git が自分で断る —— 03 の表で断らないのは stash だけで、**stash の push は古い
+snapshot でも断る**（上の「stash の書き込み」）。apply / pop は解消済みの途中でも git が
+受けるが `*_HEAD` を消さない（03 の表）ので、古いあいだは git に任せる。
 
 **3 つ目の向き —— 外で終えたのに「鮮度あり・途中」のまま残る。** 世代を進めるのは mewgit の
 書き込みだけなので、端末で `git rebase --continue` / `--abort` しても snapshot は古く
@@ -2498,7 +2562,7 @@ impl AppState {
 届いた返信が書き込みより前に頼まれたものかは、刻印を比べれば判る。
 
 ```rust
-pub enum Region { Worktree, Refs, Log }
+pub enum Region { Worktree, Refs, Log, Stash }
 
 pub struct JobTracker {
     running: Vec<Job>,
@@ -2522,11 +2586,12 @@ impl JobKind {
 }
 ```
 
-- **カウンタは領域ごとに 3 本。** 1 本にすると、index しか触らない `stage` でもログの
+- **カウンタは領域ごとに 1 本。** 1 本にまとめると、index しか触らない `stage` でもログの
   世代が進み、飛んでいる `LoadLog` を毎回捨てて `LogSession` の作り直し（履歴全体を
   辿り直す。02）を払う。**どの書き込みがどこを古くするかは `update::Reload` が既に
-  持っている**ので、その 3 値（`Nothing` / `Refs` / `RefsAndLog`）を領域の集合に写す。
-  累積で、`Refs` は `Worktree` も含む（書き込みは必ず index / ワークツリーを古くする）
+  持っている**ので、その値を領域の集合に写す。どれも `Worktree` を含む（書き込みは
+  必ず index / ワークツリーを古くする。`Account` だけは何も含まない）。**`Stash` は
+  `refs/stash` の一覧だけ**で、`Refs` とは別に持つ（上の「Stash ペイン」）
 - **刻むのは `JobTracker::start`**（= `AppState::issue` の中）。`Job.epoch` は非公開で、
   組み立てる側は入れられない。入れられる形にすると、刻む場所が `start` の外に増える
 - **進めるのは `exec_finished`。`Cmd` を返す前に進める。** `issue` は `update` の出口

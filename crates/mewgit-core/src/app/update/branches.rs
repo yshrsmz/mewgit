@@ -3,9 +3,9 @@
 use crate::git_exec::GitOp;
 use crate::git_read::{short_oid, Branch, GitReadError, Oid};
 
-use super::{confirm, focus};
+use super::{confirm, focus, input};
 use crate::app::{
-    AppState, Cmd, InputIntent, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
+    AppState, Cmd, InputIntent, JobKind, Key, KeyCode, NoticeLevel, Pane, TextBuffer,
 };
 
 /// Branches ペインのキー処理。
@@ -74,34 +74,6 @@ fn delete_branch(state: &mut AppState, force: bool) -> Cmd {
         ("ブランチを削除", format!("{name} を削除します。"))
     };
     confirm(state, title, body, GitOp::BranchDelete { name, force })
-}
-
-/// 入力モーダルを開く。
-///
-/// **`Modal::Input` を組むのはここ 1 本**（[`confirm`] と同じ形）。フィールドを足せば
-/// リテラルは全部コンパイルエラーになるので、揃えたいのは**開き方**のほう —
-/// 「`Cmd` を返さずに `modal` へ置くだけ」を各キーの腕に散らさない。
-fn input(
-    state: &mut AppState,
-    title: String,
-    prompt: String,
-    buf: TextBuffer,
-    intent: InputIntent,
-) -> Cmd {
-    // **開く前に断る。** 確定で断ると、打ち終えた名前を捨てさせる（01 の
-    // 「進行中操作があるときの書き込み」）。断ったら `issue` と同じく読み直す
-    // （`AppState::refusal`）。
-    if state.refuse_in_progress(&intent.op(String::new())) {
-        // 続きを頼む: 開く前に断った書き込みの代わりの status の読み直し。
-        return Cmd::LoadStatus;
-    }
-    state.modal = Some(Modal::Input {
-        title,
-        prompt,
-        buf,
-        intent,
-    });
-    Cmd::None
 }
 
 /// `n`。ブランチを作る入力モーダルを開く（01 の「1 行入力」）。

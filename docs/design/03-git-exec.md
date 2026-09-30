@@ -530,7 +530,7 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 （`git add`）が要り、merge を結ぶのは `commit` で（merge の continue に当たる `GitOp` は
 無い）、rebase の `edit` で止まったところで打つのは `commit --amend` だから。
 
-**実測（git 2.55.0、2026-09-27）。** 状態 × 操作の組ごとに一時リポジトリを作り直して叩いた
+**実測（git 2.55.0、2026-09-27。`stash apply` / `pop` の行は 2026-09-30）。** 状態 × 操作の組ごとに一時リポジトリを作り直して叩いた
 （1 つのリポジトリで続けて叩くと、前の操作が状態を変える —— `stash push` が
 `CHERRY_PICK_HEAD` を消したあとの `commit` は「cherry-pick の途中の commit」ではない）。
 「解消済み」はコンフリクトしたファイルを `git add` したあと。
@@ -542,6 +542,7 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 | `cherry-pick` / `revert` | 断る（unmerged files） | 断る（local changes would be overwritten） | 断る |
 | `rebase` の開始 | 断る | 断る（`already a rebase-merge directory`） | 断る（index contains uncommitted changes） |
 | `stash push` | 断る（`could not write index`） | **通る**（解消した内容を stash が持っていく。`rebase-merge/` は残る） | **通り、`CHERRY_PICK_HEAD` / `MERGE_HEAD` が消える** |
+| `stash apply` / `pop` | 断る（`could not write index`） | 通る（stash の変更が unstaged で混ざる。`rebase-merge/` は残る） | 通る（同左。**`*_HEAD` は残る**） |
 | `commit` | 断る（unmerged files） | 通る（detached HEAD に積む） | 通り、**操作を結ぶ**（`*_HEAD` が消える） |
 | `commit --amend` | 断る | 通る（`edit` の使い道そのもの） | 断る（`You are in the middle of a cherry-pick -- cannot amend`） |
 | `fetch` / `push` | 通る | 通る | 通る |
@@ -552,8 +553,9 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 - **断るのは HEAD か作業ツリー全体を動かす書き込み**（switch、pull、PR の取り出し、
   cherry-pick / revert / rebase の開始、stash の push / apply / pop など）。**git が自分で
   断るものも断る** —— 押すたびに赤い通知と argv を出すより、何の途中かと出口を先に言う
-  ほうが読める。**`stash` だけは git が受けて進行中操作を壊す**ので、これは案内の都合では
-  なく守り
+  ほうが読める。**`stash push` だけは git が受けて進行中操作を壊す**ので、これは案内の
+  都合ではなく守り（古い snapshot のあいだも断る。01 の「stash の書き込み」）。apply / pop は
+  解消済みなら git が受けて `*_HEAD` を残すが、**解消の途中に無関係な変更を混ぜる**ので断る
 - **通すのは解消に要るもの**（stage / unstage / ハンク / discard、`Commit`。amend も ——
   cherry-pick / merge の途中の amend は git が断る）**と、実測で無害なもの**（fetch、push、
   ブランチの改名・削除 —— **ただし rebase 中の対象ブランチは断る**。git も断るが、`r` は

@@ -501,7 +501,12 @@ op で分けている。**#49 の「分類の読み手が増えたら偽陽性�
 コンフリクトのとき `CONFLICT (content): ...` と `Automatic merge failed` を **stdout** に
 出し、stderr には何も書かない。stderr だけで分類すると `Other` に落ちる
 （git 2.55 で確認）。cherry-pick / rebase は `CONFLICT` が stdout、
-`error: could not apply` が stderr と分かれる。
+`error: could not apply` が stderr と分かれる。**コンフリクトの印は行頭で見る** ——
+複数の cherry-pick は積んだぶんの `[main <oid>] <件名>` を stdout に並べるので、件名に
+`CONFLICT` を含むコミットを積んでから空に当たると、行のどこでも拾う形では `Empty` を
+`Conflict` と取り違え、continue を案内する（`/code-review` が踏んだ）。行頭の形は
+cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で同じ
+（git 2.56.0、2026-10-01 に実測）。
 
 | パターン | kind |
 |---|---|
@@ -509,7 +514,7 @@ op で分けている。**#49 の「分類の読み手が増えたら偽陽性�
 | `SAML SSO` / `organization has enabled or enforced SAML` | `SamlSsoRequired` |
 | `Permission denied (publickey)` | `SshAuthFailed` |
 | `Authentication failed` | `HttpsAuthFailed` |
-| `CONFLICT` / `could not apply` | `Conflict` |
+| 行頭の `CONFLICT (` / `error: could not apply` | `Conflict` |
 | `is now empty` | `Empty` |
 | `nothing to commit` / `nothing added to commit` / `no changes added to commit` | `NoChanges` |
 | `non-fast-forward` / `fetch first` / `stale info` / `Not possible to fast-forward` | `NonFastForward` |
@@ -870,7 +875,7 @@ rebase の reword 以外では何もしないので、同じ結果になる（�
 | revert `m1^..m3`（範囲） | 0 | — | 無し。**新しい順（`m3` → `m1`）に積む** | 成功 |
 | revert `ky hx m3`、`hx` は取り消し済み | 1 | stdout `[main …] Revert "ky"` + `Revert currently in progress.` + `nothing to commit`、stderr 空 | **`sequencer/` だけ**（`todo` の先頭行 `revert … hx`） | `NoChanges` |
 | ↑ から `revert --continue` | 0 | — | 無し。**空の `hx` を落として `m3` まで積む** | 成功 |
-| ↑ から `revert --skip` | 0 | stdout `[main …] Revert "ky"`（残りを積む） | 無し | 成功 |
+| revert `zz hx ky`（`hx` は取り消し済み）で止まったところから `revert --skip` | 0 | stdout `[main …] Revert "ky"`（残りの `ky` を積む） | 無し | 成功 |
 
 - **並べる向きは `app` が決める**（git は渡した順に積む）。cherry-pick は古い順、revert は
   新しい順（表の 1 行目と 6・7 行目）

@@ -52,7 +52,7 @@ pub(super) fn graph_key(state: &mut AppState, key: Key) -> Cmd {
 /// `Space`。カーソルの指すコミットの印を付け外しする（01 の「複数のコミットの
 /// cherry-pick / revert（印）」）。
 fn toggle_mark(state: &mut AppState) -> Cmd {
-    if let Some(commit) = picked_commit(state, "印を付ける") {
+    if let Some(commit) = picked_commit(state, "mark") {
         state.graph.toggle_mark(commit.oid);
     }
     Cmd::None
@@ -1548,8 +1548,9 @@ mod tests {
 
         assert!(state.graph.marks.is_empty());
         let notice = state.shown_notice().expect("通知が出ていません");
+        // `picked_commit` は `{verb} する…` と組むので、動詞は `y` / `v` と同じ git の語の形。
         assert!(
-            notice.message.contains("コミットの行"),
+            notice.message.contains("mark するコミットの行"),
             "{}",
             notice.message
         );

@@ -553,15 +553,15 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
 ```
 
 1. UI で `RebasePlan` を作る（07 の「RebaseEditor」）
-2. `to_commands` が `plan.validate()` を通し、plan を JSON にして stdin に載せる。通らない
+2. `to_commands` が `plan.validate()` を通し、plan と `head` を JSON にして stdin に載せる。通らない
    plan は `ArgvError` で、git を起こさない
 3. `Runner` はいつもどおり `git rebase --interactive --no-update-refs <onto>` を起こす。
    **`Runner` は変種を見ない** —— `GIT_SEQUENCE_EDITOR='<自バイナリ>' --sequence-editor` と
    `GIT_EDITOR='<自バイナリ>' --commit-editor` はどのコマンドにも載っている
 4. git は todo のパスを末尾に足してシェル経由で sequence editor を起こし、**自分の stdin を
-   そのまま継がせる**（下の表）。`--sequence-editor` は stdin から plan を読んで todo を
-   書き、reword のメッセージを todo と同じ `rebase-merge/` に `mewgit-reword-<Oid>` として
-   置く
+   そのまま継がせる**（下の表）。`--sequence-editor` は stdin から plan と plan を組んだ
+   HEAD を読み、**HEAD が git の `rebase-merge/orig-head` と同じことを確かめてから**todo を
+   書き、reword のメッセージを todo と同じ `rebase-merge/` に `mewgit-reword-<Oid>` として置く
 5. git は reword の行ごとに `<gitdir>/COMMIT_EDITMSG` を渡して `GIT_EDITOR` を起こす。
    `--commit-editor` は `<gitdir>/rebase-merge/done` の最終行（`reword <Oid> …`）から
    Oid を引き、置いてあるメッセージを書き込む
@@ -615,6 +615,20 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   （下の表）。書き換えたいなら、あとから reword する。**`RebaseEntry` はメッセージを
   持たない** —— 持つのは `Reword` だけで、値の無い reword は型として作れない
   （`Option` にすると `Pick` に値がある形も作れてしまう）
+- **sequence editor は、plan を組んだ HEAD が `rebase-merge/orig-head` と違えば断る。**
+  plan は UI が読み込み済みのグラフから組む（01 の「interactive rebase の開始（`i`）」）
+  ので、端末で積んだコミットがあると HEAD が古く、**plan に載らなかったコミットを git は
+  黙って落とす**（`rebase.missingCommitsCheck` の既定は `ignore`）。`GitOp::RebaseInteractive`
+  が plan を組んだ HEAD（`head`）を運び、stdin の JSON に plan と並べて載せる。`onto` は
+  Oid で固定され、範囲の merge は UI が開く前に断るので、**HEAD が同じなら範囲も同じ**。
+  断れば git は rebase を始めない（下の表の「sequence editor が非 0」）
+  - **最初は git の既定の todo と plan のコミットを集まりとして突き合わせていた**
+    （`/simplify` の altitude で改めた）。既定の todo は `core.abbrev` の短縮 Oid で、
+    `rebase.abbreviateCommands` / `autoSquash` / `rebaseMerges` で行の形も変わる
+    （下の表）ので、構文を追い続けることになる。`orig-head` は完全な Oid の 1 行
+  - **`-c rebase.missingCommitsCheck=error` を argv に載せる形も採らなかった** —— 落ちる
+    のは todo を書いたあとで、rebase が始まったまま止まり（`rebase-merge/` が残る）、
+    `m` から abort させることになる。`GitOp::verb()` が argv の先頭と揃う約束も崩れる
 - **`--no-update-refs` を必ず付ける。** `rebase.updateRefs=true` だと git は既定の todo に
   `update-ref refs/heads/<b>` の行を入れる（実測）。mewgit は todo を丸ごと書き換える
   ので、付けないとユーザーの設定が黙って効かなくなる。効かないことを argv に書いて
@@ -638,6 +652,9 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
 | sequence editor の環境 | `GIT_EXEC_PATH` / `GIT_PREFIX` / `GIT_SEQUENCE_EDITOR` と呼び出し側の `GIT_*` だけ。**`GIT_DIR` は無い** |
 | sequence editor が非 0 | exit 1、stderr `error: there was a problem with the editor '<editor>'`。HEAD は動かず `rebase-merge/` も残らない |
 | todo が空 | exit 1、stderr `error: nothing to do` |
+| 既定の todo の形（`fixup! C2` / `amend! C2` を含む 4 本を `rebase -i HEAD~4`、sequence editor は写して exit 1） | `pick <7 桁> # C2` の並び。`-c rebase.abbreviateCommands=true` で `p`、`rebase.autoSquash=true` で `fixup <Oid>` と `fixup -C <Oid>` に変わり、`rebase.instructionFormat=%an:%s` は `#` の後ろだけ、`rebase.rebaseMerges=true` は先頭に `label onto` / `reset onto`、`core.abbrev=12` で 12 桁。**どれも HEAD は動かず `rebase-merge/` も残らない** |
+| sequence editor が起きた時点の `rebase-merge/`（ブランチ上 / detached HEAD / linked worktree の 3 形） | `git-rebase-todo`、`.backup`、`head-name`、`interactive`、`onto`、**`orig-head`**（rebase 前の HEAD の完全な Oid 1 行）などが**書き込み済み**。3 形とも同じ |
+| `-c rebase.missingCommitsCheck=error` で、範囲の 1 本を載せない todo | exit 1、`Dropped commits` に落ちた件名。**`rebase-merge/` が残り、rebase は途中のまま**（HEAD は `onto`）。採らなかった形 |
 | todo が全部 `drop` | exit 0、`Successfully rebased`。ブランチは `onto` まで戻る |
 | `reword A <件名>` を `GIT_EDITOR` に印を残すスクリプトを置いて流す（linked worktree） | `<gitdir>/worktrees/<名前>/COMMIT_EDITMSG` を渡して起こされ、**`rebase-merge/` はその隣**。`done` の最終行は `reword <完全な Oid> <件名>` |
 | `reword A` / `pick B`、A がコンフリクト → 解消して continue（`GIT_EDITOR` は印を読んで書き込むスクリプト） | continue で A のエディタが起こされ、新しいメッセージが入る |

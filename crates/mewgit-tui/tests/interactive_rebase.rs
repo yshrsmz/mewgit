@@ -33,6 +33,7 @@ async fn the_plan_replaces_the_todo() {
     runner(&repo)
         .run(&GitOp::RebaseInteractive {
             onto: "HEAD~4".into(),
+            head: d,
             plan: RebasePlan {
                 entries: vec![
                     entry(RebaseAction::Pick, a, "a"),
@@ -60,6 +61,7 @@ async fn start_rewording_both(repo: &TestRepo, runner: &Runner, first: Oid, seco
     let err = runner
         .run(&GitOp::RebaseInteractive {
             onto: "main".into(),
+            head: second,
             plan: RebasePlan {
                 entries: vec![
                     entry(reword("side new"), first, "side"),

@@ -87,7 +87,7 @@ mod tests {
 
         let text = draw(&state, SIZE).join("\n");
 
-        assert!(text.contains("ブランチ作成"), "{text}");
+        assert!(text.contains("cherry-pick"), "{text}");
         // フッターから外した共通キーと、表に足した `m` / `Tab` / `Ctrl-C`。
         for key in [
             "fetch",
@@ -143,6 +143,6 @@ mod tests {
         let text = draw(&state, SIZE).join("\n");
 
         assert!(text.contains("stage"), "{text}");
-        assert!(!text.contains("ブランチ作成"), "{text}");
+        assert!(!text.contains("cherry-pick"), "{text}");
     }
 }

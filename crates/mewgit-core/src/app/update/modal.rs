@@ -8,6 +8,7 @@ use super::account::{account_picked, account_reresolve, account_unset};
 use super::graph::mainline_picked;
 use super::progress::progress_picked;
 use super::prs::pr_create_key;
+use super::rebase::rebase_editor_key;
 use super::remote::remote_picked;
 use super::worktree::commit_message_key;
 use super::{edit_key, submit_exec};
@@ -32,13 +33,7 @@ pub(super) fn modal_key(state: &mut AppState, key: Key) -> Cmd {
         // **骨格を共有しない。** 欄が 4 つあって `Enter` の意味も欄で変わるので、
         // `picker_key` にも `edit_key` 1 本にも収まらない（01 の「PR 作成（`N`）」）。
         Some(Modal::PrCreate { .. }) => pr_create_key(state, key),
-        // 他のモーダルはそれぞれのタスクで実装する。閉じる道だけ開けておく。
-        Some(_) => {
-            if key == Key::new(KeyCode::Esc) {
-                state.modal = None;
-            }
-            Cmd::None
-        }
+        Some(Modal::RebaseEditor { .. }) => rebase_editor_key(state, key),
         None => Cmd::None,
     }
 }
@@ -71,7 +66,11 @@ fn confirm_key(state: &mut AppState, key: Key) -> Cmd {
 ///
 /// **クロージャではなく `fn` を受ける。** 環境を捕まえる必要が無く、`Modal` に
 /// コールバックを持たせない規約とも揃う。
-fn picker_key(state: &mut AppState, key: Key, on_enter: fn(&mut AppState) -> Cmd) -> Cmd {
+pub(super) fn picker_key(
+    state: &mut AppState,
+    key: Key,
+    on_enter: fn(&mut AppState) -> Cmd,
+) -> Cmd {
     match key.code() {
         // 端の扱いはペインのカーソルと同じ規則（`AppState::move_modal_cursor`）。
         // **候補が空なら動かない**（`stepped_index`）ので、選ばせない

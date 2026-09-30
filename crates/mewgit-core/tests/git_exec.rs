@@ -832,6 +832,7 @@ async fn interactive_rebase_leaves_the_branch_alone_when_the_editor_fails() {
         .runner()
         .run(&GitOp::RebaseInteractive {
             onto: "HEAD~1".into(),
+            head: before,
             plan: RebasePlan {
                 entries: vec![RebaseEntry {
                     action: RebaseAction::Drop,

@@ -34,9 +34,15 @@ pub struct Runner {
     /// **`RebaseInteractive` に限らず、どのコマンドにも載せる。** mewgit の書き込みで
     /// sequence editor を起こすのはあれだけで（`pull` はモードを必ず argv で渡すので
     /// `pull.rebase=interactive` でも起きない。03 の実測）、ほかで起きたら plan が無い
-    /// ので editor が非 0 で断る —— `GIT_EDITOR=true` に落ちて既定の todo を黙って
-    /// 採るより閉じた側に倒れる。
+    /// ので editor が非 0 で断る —— 既定の todo を黙って採るより閉じた側に倒れる。
     sequence_editor: OsString,
+    /// `GIT_EDITOR` に入れる値。自バイナリに `--commit-editor` を足したもの。
+    ///
+    /// **これもどのコマンドにも載せる。** 止まった reword を `m` から continue した
+    /// ときにも git はこれを起こすので、`RebaseInteractive` だけに載せると停止点より
+    /// 後ろの reword が元のメッセージのまま通る（03 の実測）。reword 以外で起こされた
+    /// ときは何もしない（`GIT_EDITOR=true` と同じ）。
+    commit_editor: OsString,
     /// 実行時に重ねる環境変数。テストの隔離に使う。
     env: Vec<(OsString, OsString)>,
     /// `GIT_SSH_COMMAND` に入れる値。**生の設定値ではなく、実効 ssh に
@@ -58,14 +64,12 @@ impl Runner {
         ssh: SshCommand,
         mewgit_bin: impl Into<PathBuf>,
     ) -> Self {
+        let mewgit_bin = mewgit_bin.into();
         Self {
             repo_root: repo_root.into(),
             git_bin: git_bin.into(),
-            sequence_editor: {
-                let mut editor = sh_quote(mewgit_bin.into().as_os_str());
-                editor.push(" --sequence-editor");
-                editor
-            },
+            sequence_editor: editor(&mewgit_bin, "--sequence-editor"),
+            commit_editor: editor(&mewgit_bin, "--commit-editor"),
             env: Vec::new(),
             git_ssh_command: match ssh {
                 SshCommand::Shell(command) => Some(command + BATCH_MODE),
@@ -233,8 +237,9 @@ impl Runner {
             .env("GIT_TERMINAL_PROMPT", "0")
             // エラー文のパターン照合を安定させる。
             .env("LC_ALL", "C")
-            // 意図しないエディタ起動を防ぐ。
-            .env("GIT_EDITOR", "true")
+            // 端末のエディタを起こさない。どちらも自バイナリの隠しサブコマンドで、
+            // interactive rebase 以外では何もしないか断る（03）。
+            .env("GIT_EDITOR", &self.commit_editor)
             .env("GIT_SEQUENCE_EDITOR", &self.sequence_editor)
             .stdin(if command.stdin.is_some() {
                 Stdio::piped()
@@ -264,6 +269,15 @@ impl Runner {
             reason: format!("{} を起動できませんでした: {err}", self.git_bin.display()),
         })
     }
+}
+
+/// `GIT_EDITOR` / `GIT_SEQUENCE_EDITOR` の値。git は `sh -c` で起こし、ファイルの
+/// パスを末尾に足す（03 の実測）。
+fn editor(mewgit_bin: &std::path::Path, subcommand: &str) -> OsString {
+    let mut editor = sh_quote(mewgit_bin.as_os_str());
+    editor.push(" ");
+    editor.push(subcommand);
+    editor
 }
 
 /// 中断の合図の受け側。**手順をまたいで 1 本を使い回す**（03 の「複数の手順を

@@ -2,12 +2,14 @@
 //! 「Interactive rebase の実装」。
 //!
 //! `to_commands` が [`RebasePlan`] を JSON にして git の標準入力に流し、`Runner` が
-//! 自バイナリを `GIT_SEQUENCE_EDITOR` に置く。git に起こされた隠しサブコマンドが
-//! 標準入力を継いで [`write_todo`] を呼び、todo と reword のメッセージを
-//! `rebase-merge/` に書く。
+//! 自バイナリを `GIT_SEQUENCE_EDITOR` と `GIT_EDITOR` に置く。git に起こされた隠し
+//! サブコマンドのうち、`--sequence-editor` は標準入力を継いで [`write_todo`] を呼び、
+//! todo と reword のメッセージを `rebase-merge/` に書く。`--commit-editor` は
+//! [`write_commit_message`] を呼び、いま reword しているコミットのメッセージを
+//! 差し込む。
 
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
@@ -62,10 +64,10 @@ pub enum RebasePlanError {
     EmptyMessage { oid: Oid },
 }
 
-/// sequence editor として起こされたときの失敗。git が
-/// `there was a problem with the editor` と並べて stderr に出す。
+/// エディタとして起こされたときの失敗。git が `there was a problem with the editor` と
+/// 並べて stderr に出す。
 #[derive(Debug, thiserror::Error)]
-pub enum SequenceEditorError {
+pub enum EditorError {
     #[error("{}: {source}", .path.display())]
     Io {
         path: PathBuf,
@@ -106,37 +108,26 @@ impl RebasePlan {
         Ok(())
     }
 
-    /// todo ファイルの中身。`dir` は todo を置くディレクトリ（`rebase-merge/`）で、
-    /// reword の `exec` の行が [`reword_path`] の置き場として引く。
+    /// todo ファイルの中身。reword は git 自身の `reword` のまま書き、メッセージは
+    /// git が起こす `GIT_EDITOR`（[`write_commit_message`]）が差し込む。
     ///
-    /// reword は `pick` と `exec git commit --amend` の 2 行にする。**`GIT_EDITOR` で
-    /// 渡さない** —— 止まった rebase を `m` から continue すると `GIT_EDITOR=true` で
-    /// 走るので、停止点より後ろの reword が元のメッセージのまま通る（03）。
-    ///
-    /// **バイト列で返す。** `dir` は UTF-8 とは限らず、git は todo をバイト列として読む。
-    pub fn to_todo(&self, dir: &Path) -> Vec<u8> {
-        let mut todo = Vec::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            let line = |keyword: &str| {
+    /// **`pick` + `exec git commit --amend` の 2 行にしない。** `exec` は直前の pick が
+    /// どうなったかを見ずに HEAD を amend するので、止まった pick を skip すると
+    /// **別のコミット**（1 つ前の pick、先頭なら `onto`）のメッセージを書き換える。
+    /// `general.git_bin` も効かない（`/code-review` が拾った。03）。
+    pub fn to_todo(&self) -> String {
+        self.entries
+            .iter()
+            .map(|entry| {
+                let keyword = entry.action.keyword();
                 format!("{keyword} {} {}\n", entry.oid, single_line(&entry.summary))
-            };
-            match &entry.action {
-                RebaseAction::Reword { .. } => {
-                    todo.extend(line("pick").into_bytes());
-                    todo.extend(b"exec git commit --amend --only --allow-empty -F ");
-                    todo.extend(sh_quote(reword_path(dir, index).as_os_str()).as_bytes());
-                    todo.push(b'\n');
-                }
-                action => todo.extend(line(action.keyword()).into_bytes()),
-            }
-        }
-        todo
+            })
+            .collect()
     }
 }
 
 impl RebaseAction {
-    /// todo の語。`Reword` は [`RebasePlan::to_todo`] が `pick` と `exec` に書き換える
-    /// ので、todo には現れない。
+    /// todo の語。
     fn keyword(&self) -> &'static str {
         match self {
             RebaseAction::Pick => "pick",
@@ -165,10 +156,13 @@ mod oid_hex {
     }
 }
 
-/// `index` 番目の reword のメッセージを置くファイル。todo と同じ `rebase-merge/` に
-/// 置くので、完了でも abort でも git がディレクトリごと消す。
-fn reword_path(dir: &Path, index: usize) -> PathBuf {
-    dir.join(format!("mewgit-reword-{index}"))
+/// `oid` を reword したメッセージを置くファイル。`dir` は `rebase-merge/`。完了でも
+/// abort でも git がディレクトリごと消すので、後始末は要らない。
+///
+/// **Oid で引く。** commit editor が知っているのは `done` の最終行（`reword <Oid> …`）
+/// だけなので、何番目の行かでは引けない。
+fn reword_path(dir: &Path, oid: &str) -> PathBuf {
+    dir.join(format!("mewgit-reword-{oid}"))
 }
 
 /// sequence editor の本体。`plan` は git から継いだ標準入力（`to_commands` が流した
@@ -176,27 +170,65 @@ fn reword_path(dir: &Path, index: usize) -> PathBuf {
 ///
 /// **メッセージを先に書き、todo を最後に書く。** 途中で落ちたら非 0 で返り、git は
 /// rebase を始めずに `rebase-merge/` ごと消す（03 の実測）。
-pub fn write_todo(mut plan: impl Read, todo: &Path) -> Result<(), SequenceEditorError> {
-    let io = |path: &Path| {
-        let path = path.to_path_buf();
-        move |source| SequenceEditorError::Io { path, source }
-    };
+pub fn write_todo(mut plan: impl Read, todo: &Path) -> Result<(), EditorError> {
     let mut json = String::new();
     plan.read_to_string(&mut json)?;
     let plan: RebasePlan = serde_json::from_str(&json)?;
     plan.validate()?;
 
     let dir = todo.parent().unwrap_or(Path::new("."));
-    for (index, entry) in plan.entries.iter().enumerate() {
+    for entry in &plan.entries {
         if let RebaseAction::Reword { message } = &entry.action {
-            let path = reword_path(dir, index);
+            let path = reword_path(dir, &entry.oid.to_string());
             std::fs::write(&path, message).map_err(io(&path))?;
         }
     }
-    std::fs::write(todo, plan.to_todo(dir)).map_err(io(todo))
+    std::fs::write(todo, plan.to_todo()).map_err(io(todo))
 }
 
-/// POSIX シェルの 1 語として引用する。git は todo の `exec` も `GIT_SEQUENCE_EDITOR` も
+/// commit editor の本体。`file` は git が渡したメッセージのファイル
+/// （`<gitdir>/COMMIT_EDITMSG`）。
+///
+/// **いま reword しているコミットのメッセージがあるときだけ書き換える。** 判定は
+/// `<gitdir>/rebase-merge/done` の最終行が `reword <Oid> …` で、[`write_todo`] が
+/// その Oid のメッセージを置いていること。それ以外（squash、revert の continue、
+/// rebase の外）は触らずに 0 で返す —— 以前の `GIT_EDITOR=true` と同じ振る舞い。
+///
+/// `GIT_EDITOR` は `Runner` がどのコマンドにも載せるので、**止まった reword を `m` から
+/// continue したときもここを通る**（03 の実測）。
+pub fn write_commit_message(file: &Path) -> Result<(), EditorError> {
+    let Some(rebase_dir) = file.parent().map(|gitdir| gitdir.join("rebase-merge")) else {
+        return Ok(());
+    };
+    let done = match std::fs::read_to_string(rebase_dir.join("done")) {
+        Ok(done) => done,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io(&rebase_dir.join("done"))(source)),
+    };
+    let mut last = done
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .split_whitespace();
+    let (Some("reword"), Some(oid)) = (last.next(), last.next()) else {
+        return Ok(());
+    };
+    let path = reword_path(&rebase_dir, oid);
+    match std::fs::read(&path) {
+        Ok(message) => std::fs::write(file, message).map_err(io(file)),
+        // 端末で始めた rebase の reword など、mewgit がメッセージを置いていない。
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(io(&path)(source)),
+    }
+}
+
+fn io(path: &Path) -> impl FnOnce(std::io::Error) -> EditorError {
+    let path = path.to_path_buf();
+    move |source| EditorError::Io { path, source }
+}
+
+/// POSIX シェルの 1 語として引用する。git は `GIT_SEQUENCE_EDITOR` も `GIT_EDITOR` も
 /// `sh -c` で起こすので、空白や `'` を含むパスを 1 語で渡すにはこれが要る。
 ///
 /// **バイト列のまま引用する。** 特別扱いするのは `'` だけなので、UTF-8 でないパスも
@@ -231,16 +263,12 @@ mod tests {
         rebase_entry(action, fake_oid(n), &format!("c{n}"))
     }
 
-    fn todo_lines(plan: &RebasePlan, dir: &str) -> Vec<String> {
-        String::from_utf8(plan.to_todo(Path::new(dir)))
-            .unwrap()
-            .lines()
-            .map(str::to_string)
-            .collect()
+    fn todo_lines(plan: &RebasePlan) -> Vec<String> {
+        plan.to_todo().lines().map(str::to_string).collect()
     }
 
     #[test]
-    fn reword_becomes_a_pick_and_an_exec_that_amends_from_the_file() {
+    fn every_action_is_written_as_gits_own_keyword() {
         let plan = RebasePlan {
             entries: vec![
                 entry(RebaseAction::Pick, 1),
@@ -251,11 +279,10 @@ mod tests {
         };
 
         assert_eq!(
-            todo_lines(&plan, "/r x/.git/rebase-merge"),
+            todo_lines(&plan),
             [
                 format!("pick {} c1", fake_oid(1)),
-                format!("pick {} c2", fake_oid(2)),
-                "exec git commit --amend --only --allow-empty -F '/r x/.git/rebase-merge/mewgit-reword-1'".to_string(),
+                format!("reword {} c2", fake_oid(2)),
                 format!("squash {} c3", fake_oid(3)),
                 format!("drop {} c4", fake_oid(4)),
             ]
@@ -267,7 +294,7 @@ mod tests {
         let mut e = entry(RebaseAction::Pick, 1);
         e.summary = "a\nexec rm -rf x".into();
 
-        assert_eq!(todo_lines(&RebasePlan { entries: vec![e] }, "/d").len(), 1);
+        assert_eq!(todo_lines(&RebasePlan { entries: vec![e] }).len(), 1);
     }
 
     #[test]
@@ -330,11 +357,62 @@ mod tests {
 
         write_todo(serde_json::to_vec(&plan).unwrap().as_slice(), &todo).unwrap();
 
-        assert_eq!(std::fs::read(&todo).unwrap(), plan.to_todo(&rebase_dir));
+        assert_eq!(std::fs::read_to_string(&todo).unwrap(), plan.to_todo());
         assert_eq!(
-            std::fs::read_to_string(rebase_dir.join("mewgit-reword-1")).unwrap(),
+            std::fs::read_to_string(rebase_dir.join(format!("mewgit-reword-{}", fake_oid(2))))
+                .unwrap(),
             "new\n\nbody"
         );
+    }
+
+    #[test]
+    fn the_commit_editor_fills_in_only_the_reword_being_committed() {
+        // gitdir を模す。git は `<gitdir>/COMMIT_EDITMSG` を渡し、`rebase-merge/` は
+        // その隣にある（linked worktree でも。03 の実測）。
+        let gitdir = tempfile::tempdir().unwrap();
+        let rebase_dir = gitdir.path().join("rebase-merge");
+        std::fs::create_dir(&rebase_dir).unwrap();
+        let todo = rebase_dir.join("git-rebase-todo");
+        let plan = RebasePlan {
+            entries: vec![entry(RebaseAction::Pick, 1), entry(reword("new"), 2)],
+        };
+        write_todo(serde_json::to_vec(&plan).unwrap().as_slice(), &todo).unwrap();
+        let msg = gitdir.path().join("COMMIT_EDITMSG");
+        let commit_with_done = |done: &str| {
+            std::fs::write(rebase_dir.join("done"), done).unwrap();
+            std::fs::write(&msg, "original\n").unwrap();
+            write_commit_message(&msg).unwrap();
+            std::fs::read_to_string(&msg).unwrap()
+        };
+
+        // `done` の最終行が reword の行なら差し込む。
+        assert_eq!(
+            commit_with_done(&format!(
+                "pick {} c1\nreword {} c2\n",
+                fake_oid(1),
+                fake_oid(2)
+            )),
+            "new"
+        );
+        // squash のメッセージは git が連結したまま（03）。
+        assert_eq!(
+            commit_with_done(&format!(
+                "reword {} c2\nsquash {} c3\n",
+                fake_oid(2),
+                fake_oid(3)
+            )),
+            "original\n"
+        );
+        // 端末で始めた rebase の reword。mewgit のメッセージが無い。
+        assert_eq!(
+            commit_with_done(&format!("reword {} c3\n", fake_oid(3))),
+            "original\n"
+        );
+        // rebase の外（revert の continue など）。
+        std::fs::remove_dir_all(&rebase_dir).unwrap();
+        std::fs::write(&msg, "original\n").unwrap();
+        write_commit_message(&msg).unwrap();
+        assert_eq!(std::fs::read_to_string(&msg).unwrap(), "original\n");
     }
 
     #[test]
@@ -345,10 +423,7 @@ mod tests {
 
         let err = write_todo(b"{\"entries\":[]}".as_slice(), &todo).unwrap_err();
 
-        assert!(matches!(
-            err,
-            SequenceEditorError::Invalid(RebasePlanError::Empty)
-        ));
+        assert!(matches!(err, EditorError::Invalid(RebasePlanError::Empty)));
         assert_eq!(
             std::fs::read_to_string(&todo).unwrap(),
             "pick 1234 original\n"

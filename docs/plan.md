@@ -321,12 +321,12 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       **検出表は実測で作り直した**（02）—— `-i` の有無は区別できない
       ので `Rebase.interactive` を消し、`git am`（同じ `rebase-apply/`）を `Am` に分け、
       `sequencer/` だけが残る形を拾う。バッジに止まった理由（`(edit)`）は出さない（07）
-- [ ] `--sequence-editor` 隠しサブコマンドと `RebasePlan::to_todo` / `validate`、`Runner` の
-      `RebaseInteractive` の拒否を外す。**interactive rebase は 2 本に割った**（2026-09-30）——
-      こちらは git に plan を渡す経路だけで、CLI で触れるものは増えない。`Runner` と
-      サブコマンドを別々に入れると、片方だけでは plan が git に届かず確かめようが無いので
-      1 本にした。**`--commit-editor` は取り下げた** —— reword は `exec git commit --amend`
-      の行で渡す（止まった rebase を `m` から再開しても効く。03 の「Interactive rebase の実装」）
+- [ ] `--sequence-editor` / `--commit-editor` 隠しサブコマンドと `RebasePlan::to_todo` /
+      `validate`、`Runner` の `RebaseInteractive` の拒否を外す。**interactive rebase は 2 本に
+      割った**（2026-09-30）—— こちらは git に plan を渡す経路だけで、CLI で触れるものは
+      増えない。`Runner` とサブコマンドを別々に入れると、片方だけでは plan が git に届かず
+      確かめようが無いので 1 本にした。**2 つのエディタはどのコマンドにも載せる**（止まった
+      rebase を `m` から continue しても reword が効く。03 の「Interactive rebase の実装」）
 - [ ] `Modal::RebaseEditor` と Graph の `i`（07 の「RebaseEditor」）。上の経路に乗せる
 - [x] 進行中操作があるときの書き込み `GitOp` 拒否。**continue / abort より先に入れる**
       （2026-09-27 に順序を入れ替えた）。**断るのは HEAD か作業ツリー全体を動かすもの
@@ -385,6 +385,15 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       （03 の「stash push のパス指定」に実測の表）
 
 ## M6: 仕上げ
+
+- [ ] **hook が reword を断ったあとの continue で、新しいメッセージが消える。** git は
+      continue でエディタを起こし直さず、元のメッセージでコミットする（git 自身の挙動。
+      03 の「Interactive rebase の実装」に実測）。止まった時点で pick は元のメッセージで
+      コミット済み（`rebase-merge/amend` が立ち、`git status` は「editing a commit」）で、
+      **`git commit --amend -F rebase-merge/mewgit-reword-<Oid>` のあと continue すれば
+      新しいメッセージが入る**（実測）。塞ぐには、`m` の continue の前にこの形
+      （`done` の最終行が reword、`amend` と `mewgit-reword-<Oid>` がある）を見分けて amend を
+      先に通す。hook がまた断ったときの案内もそこで決める
 
 - [ ] **stderr が空の git の失敗に理由を出す。** `ExecError::Failed` は stdout を
       運ばないので、stdout にだけ理由を書く失敗（`git commit` で stage したものが無い、

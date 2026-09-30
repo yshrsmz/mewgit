@@ -5,6 +5,7 @@
 //! `docs/design/03-git-exec.md` の「Interactive rebase の実装」。
 
 use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, RebaseAction, RebasePlan, Runner};
+use mewgit_core::git_read::Oid;
 use mewgit_core::test_util::{rebase_entry as entry, reword, TestRepo};
 
 fn runner(repo: &TestRepo) -> Runner {
@@ -52,21 +53,16 @@ async fn the_plan_replaces_the_todo() {
     assert!(!repo.path().join(".git/rebase-merge").exists());
 }
 
-#[tokio::test]
-async fn a_reword_after_a_conflict_survives_continue() {
-    // **`exec` の行で渡す理由そのもの。** continue は `GIT_EDITOR=true` の通常の
-    // 経路で走るので、エディタで渡す形だと停止点より後ろの reword は元のメッセージの
-    // まま通る（03）。
-    let (repo, first, second) = TestRepo::diverged();
+/// `diverged` の side に居て、side の 2 本を reword する rebase を始める。1 本目が
+/// main とコンフリクトして止まる。
+async fn start_rewording_both(repo: &TestRepo, runner: &Runner, first: Oid, second: Oid) {
     repo.git(&["switch", "-q", "side"]);
-    let runner = runner(&repo);
-
     let err = runner
         .run(&GitOp::RebaseInteractive {
             onto: "main".into(),
             plan: RebasePlan {
                 entries: vec![
-                    entry(RebaseAction::Pick, first, "side"),
+                    entry(reword("side new"), first, "side"),
                     entry(reword("side2 new"), second, "side2"),
                 ],
             },
@@ -83,6 +79,16 @@ async fn a_reword_after_a_conflict_survives_continue() {
         ),
         "{err:?}"
     );
+}
+
+#[tokio::test]
+async fn rewords_survive_continue() {
+    // continue は `RebaseInteractive` とは別の `GitOp` なので、`GIT_EDITOR` を
+    // rebase の開始にだけ載せると、止まった reword も後ろの reword も元のメッセージの
+    // まま通る（03）。
+    let (repo, first, second) = TestRepo::diverged();
+    let runner = runner(&repo);
+    start_rewording_both(&repo, &runner, first, second).await;
 
     repo.write_worktree_file("f", b"resolved\n");
     repo.git(&["add", "f"]);
@@ -91,6 +97,24 @@ async fn a_reword_after_a_conflict_survives_continue() {
         .await
         .expect("解消したので最後まで通るはずです");
 
-    assert_eq!(messages(&repo, "main"), ["side2 new", "side"]);
+    assert_eq!(messages(&repo, "main"), ["side2 new", "side new"]);
+    assert!(!repo.path().join(".git/rebase-merge").exists());
+}
+
+#[tokio::test]
+async fn skipping_a_stopped_reword_leaves_other_commits_alone() {
+    // reword を `pick` + `exec git commit --amend` で渡す形だと、pick を skip しても
+    // exec が走り、**HEAD（ここでは main の先端）のメッセージを書き換える**
+    // （`/code-review` が拾った。03）。
+    let (repo, first, second) = TestRepo::diverged();
+    let runner = runner(&repo);
+    start_rewording_both(&repo, &runner, first, second).await;
+
+    runner
+        .run(&GitOp::RebaseSkip)
+        .await
+        .expect("skip で最後まで通るはずです");
+
+    assert_eq!(messages(&repo, "main~1"), ["side2 new", "main"]);
     assert!(!repo.path().join(".git/rebase-merge").exists());
 }

@@ -15,7 +15,8 @@ use crate::git_read::Oid;
 pub use argv::{push_remote_ref, to_commands, ArgvError, GitCommand};
 pub use patch::{hunk_patch, supports_hunk_patch};
 pub use rebase::{
-    write_todo, RebaseAction, RebaseEntry, RebasePlan, RebasePlanError, SequenceEditorError,
+    write_commit_message, write_todo, EditorError, RebaseAction, RebaseEntry, RebasePlan,
+    RebasePlanError,
 };
 pub use runner::Runner;
 

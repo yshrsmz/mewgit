@@ -9,7 +9,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot::{self, error::TryRecvError};
 
-use super::rebase::sh_quote;
+use super::rebase::{sh_quote, HEAD_MOVED_MARKER};
 use super::{to_commands, ExecError, ExecErrorKind, ExecOutput, GitCommand, GitOp};
 use crate::auth::ssh::SshCommand;
 
@@ -426,7 +426,10 @@ fn lossy(bytes: Vec<u8>) -> String {
 fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
     let has = |needle: &str| stderr.contains(needle) || stdout.contains(needle);
 
-    if has("SAML SSO") || has("organization has enabled or enforced SAML") {
+    // mewgit 自身が出す印で、git の語とは衝突しない。先頭なら順序を考えなくてよい。
+    if has(HEAD_MOVED_MARKER) {
+        ExecErrorKind::HeadMoved
+    } else if has("SAML SSO") || has("organization has enabled or enforced SAML") {
         ExecErrorKind::SamlSsoRequired
     } else if has("Permission denied (publickey)") {
         ExecErrorKind::SshAuthFailed
@@ -545,6 +548,20 @@ mod tests {
         let stderr =
             "The previous cherry-pick is now empty, possibly due to conflict resolution.\n";
         assert_eq!(classify(stdout, stderr), ExecErrorKind::Empty);
+    }
+
+    #[test]
+    fn a_sequence_editor_refusing_a_moved_head_is_head_moved() {
+        // 隠しサブコマンドが書く 1 行（`mewgit: <Display>`）に、git が自分の行を並べる。
+        // **印は `Display` から採る** —— 文言を直しても分類が外れないことを見る。
+        let err = crate::git_exec::EditorError::HeadMoved {
+            expected: crate::test_util::fake_oid(7),
+            actual: crate::test_util::fake_oid(0).to_string(),
+        };
+        let stderr = format!(
+            "mewgit: {err}\nerror: there was a problem with the editor 'mewgit --sequence-editor'\n"
+        );
+        assert_eq!(classify("", &stderr), ExecErrorKind::HeadMoved);
     }
 
     #[test]

@@ -505,6 +505,7 @@ op で分けている。**#49 の「分類の読み手が増えたら偽陽性�
 
 | パターン | kind |
 |---|---|
+| `[head-moved]`（mewgit の sequence editor が出す印） | `HeadMoved` |
 | `SAML SSO` / `organization has enabled or enforced SAML` | `SamlSsoRequired` |
 | `Permission denied (publickey)` | `SshAuthFailed` |
 | `Authentication failed` | `HttpsAuthFailed` |
@@ -513,6 +514,11 @@ op で分けている。**#49 の「分類の読み手が増えたら偽陽性�
 | `nothing to commit` / `nothing added to commit` / `no changes added to commit` | `NoChanges` |
 | `non-fast-forward` / `fetch first` / `stale info` / `Not possible to fast-forward` | `NonFastForward` |
 | その他 | `Other` |
+
+**`HeadMoved` は先頭。** 印は mewgit 自身が出す ASCII の定数（`git_exec::rebase` の
+`HEAD_MOVED_MARKER`）で、`EditorError::HeadMoved` の `Display` が埋め、隠しサブコマンドが
+`mewgit: <Display>` として stderr に書く。**日本語の文言を鍵にしない** —— 文言を直すたびに
+分類が外れる。git の語とは衝突しないので、順序を考えなくてよい先頭に置く。
 
 **`NoChanges` は `Empty` より後ろ。** 空で止まった cherry-pick の stdout の末尾にも
 `nothing to commit, working tree clean` が出る（git 2.55.0 で実測）ので、先に見ると
@@ -621,7 +627,9 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   黙って落とす**（`rebase.missingCommitsCheck` の既定は `ignore`）。`GitOp::RebaseInteractive`
   が plan を組んだ HEAD（`head`）を運び、stdin の JSON に plan と並べて載せる。`onto` は
   Oid で固定され、範囲の merge は UI が開く前に断るので、**HEAD が同じなら範囲も同じ**。
-  断れば git は rebase を始めない（下の表の「sequence editor が非 0」）
+  断れば git は rebase を始めない（下の表の「sequence editor が非 0」）。**断りは
+  `ExecErrorKind::HeadMoved` に分ける**（上の「エラー分類」。案内は 01 の「失敗の案内文」）。
+  **見るのは開始だけでよい** —— continue / skip は sequence editor を起こさない（下の表）
   - **最初は git の既定の todo と plan のコミットを集まりとして突き合わせていた**
     （`/simplify` の altitude で改めた）。既定の todo は `core.abbrev` の短縮 Oid で、
     `rebase.abbreviateCommands` / `autoSquash` / `rebaseMerges` で行の形も変わる
@@ -651,6 +659,7 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
 | `GIT_SEQUENCE_EDITOR=<呼ばれたら印を残す>`、`-c pull.rebase=interactive` で `pull --rebase` / `--no-rebase` / `--ff-only` / 素の `pull` | 起こされるのは**素の `pull` だけ**（mewgit はモードを必ず argv で渡す） |
 | sequence editor の環境 | `GIT_EXEC_PATH` / `GIT_PREFIX` / `GIT_SEQUENCE_EDITOR` と呼び出し側の `GIT_*` だけ。**`GIT_DIR` は無い** |
 | sequence editor が非 0 | exit 1、stderr `error: there was a problem with the editor '<editor>'`。HEAD は動かず `rebase-merge/` も残らない |
+| `edit` で止めたあとの `rebase --continue` / `--skip`（sequence editor は呼ばれたら印を残す。git 2.56.0、2026-10-01） | どちらも**起こされない**（印は開始の 1 回だけ）。止まった理由は `git status` の `interactive rebase in progress` で確認 |
 | todo が空 | exit 1、stderr `error: nothing to do` |
 | 既定の todo の形（`fixup! C2` / `amend! C2` を含む 4 本を `rebase -i HEAD~4`、sequence editor は写して exit 1） | `pick <7 桁> # C2` の並び。`-c rebase.abbreviateCommands=true` で `p`、`rebase.autoSquash=true` で `fixup <Oid>` と `fixup -C <Oid>` に変わり、`rebase.instructionFormat=%an:%s` は `#` の後ろだけ、`rebase.rebaseMerges=true` は先頭に `label onto` / `reset onto`、`core.abbrev=12` で 12 桁。**どれも HEAD は動かず `rebase-merge/` も残らない** |
 | sequence editor が起きた時点の `rebase-merge/`（ブランチ上 / detached HEAD / linked worktree の 3 形） | `git-rebase-todo`、`.backup`、`head-name`、`interactive`、`onto`、**`orig-head`**（rebase 前の HEAD の完全な Oid 1 行）などが**書き込み済み**。3 形とも同じ |

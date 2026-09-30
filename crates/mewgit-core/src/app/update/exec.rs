@@ -36,11 +36,16 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         // continue のあとに次のコミットでまた止まるのは想定どおりの結末で、進行中操作は
         // 残ってバッジの数が進む（01 の「失敗の案内文」）。**変更が空で止まった pick も**
         // 進行中操作が残り、出口は `m` の skip にある。**取り消す変更が無かった revert** は
-        // 何も始まらずに終わっただけで、壊れたものが無い。
+        // 何も始まらずに終わっただけで、壊れたものが無い。**HEAD が動いて断った
+        // interactive rebase も**始まっておらず、`i` から開き直せば済む。
         let level = match err {
             ExecError::Canceled { .. } => NoticeLevel::Info,
             ExecError::Failed {
-                kind: ExecErrorKind::Conflict | ExecErrorKind::Empty | ExecErrorKind::NoChanges,
+                kind:
+                    ExecErrorKind::Conflict
+                    | ExecErrorKind::Empty
+                    | ExecErrorKind::NoChanges
+                    | ExecErrorKind::HeadMoved,
                 ..
             } if advice.is_some() => NoticeLevel::Warn,
             ExecError::NoResult { .. } | ExecError::Failed { .. } => NoticeLevel::Error,
@@ -335,6 +340,11 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
         ExecErrorKind::Conflict => conflict_advice(op),
         ExecErrorKind::Empty => empty_advice(op),
         ExecErrorKind::NoChanges => no_changes_advice(op),
+        // 印を出すのは sequence editor だけで、それを起こすのは `RebaseInteractive` の開始
+        // だけ（continue / skip は起こさない。03 の実測）。**打った reword は戻らない**
+        // —— 開き直すと plan は読み直したグラフから組み直される（01 の「失敗の案内文」）。
+        ExecErrorKind::HeadMoved => matches!(op, GitOp::RebaseInteractive { .. })
+            .then_some("rebase を組んだあとに履歴が動きました。i から開き直してください"),
         ExecErrorKind::Other => None,
     }
 }
@@ -562,7 +572,7 @@ mod tests {
     use super::*;
     use crate::app::Msg;
 
-    use crate::git_exec::{ExecErrorKind, LocalBranch, PrSource, PullMode};
+    use crate::git_exec::{ExecErrorKind, LocalBranch, PrSource, PullMode, RebasePlan};
     use crate::git_read::{GitReadError, LogPage, WorktreeSection};
     use crate::test_util::fake_pr_checkout;
 
@@ -742,6 +752,34 @@ mod tests {
         let notice = state.notices.back().expect("通知がありません");
         assert_eq!(notice.level, NoticeLevel::Error);
         assert!(!notice.message.contains("skip"), "{}", notice.message);
+    }
+
+    #[test]
+    fn a_moved_head_before_an_interactive_rebase_is_a_warning_to_reopen() {
+        // sequence editor が断ると git は rebase を始めない（03）。汎用の赤い
+        // 「git の実行に失敗しました」では理由が `L` の stderr にしか出なかった。
+        let mut state = state();
+        let op = GitOp::RebaseInteractive {
+            onto: fake_oid(1).to_string(),
+            head: fake_oid(7),
+            plan: RebasePlan::default(),
+        };
+        finish_exec(&mut state, op, Err(failed_with(ExecErrorKind::HeadMoved)));
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Warn);
+        assert!(
+            notice.message.contains("i から開き直して"),
+            "{}",
+            notice.message
+        );
+        // **バッジとは並ばない**（進行中操作が残らない）ので、予算は 71。
+        assert!(
+            cells(&notice.message) <= NOTICE_CELLS,
+            "{} セル: {}",
+            cells(&notice.message),
+            notice.message
+        );
     }
 
     #[test]

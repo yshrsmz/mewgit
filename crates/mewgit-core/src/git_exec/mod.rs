@@ -357,6 +357,9 @@ pub enum ExecErrorKind {
     /// 開始」）。どちらかを決めるのは op を見る `app` の側。
     NoChanges,
     NonFastForward,
+    /// plan を組んだあとに HEAD が動き、sequence editor が断った（`EditorError::HeadMoved`）。
+    /// git は rebase を始めず、進行中操作は残らない（03 の「Interactive rebase の実装」）。
+    HeadMoved,
     Other,
 }
 

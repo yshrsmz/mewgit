@@ -121,3 +121,33 @@ async fn skipping_a_stopped_reword_leaves_other_commits_alone() {
     assert_eq!(messages(&repo, "main~1"), ["#42 only", "main"]);
     assert!(!repo.path().join(".git/rebase-merge").exists());
 }
+
+#[tokio::test]
+async fn a_head_moved_after_the_plan_is_refused_before_the_rebase_starts() {
+    // 画面で plan を組んだあとに、端末で 1 本積んだ。通すと、plan に載らなかったそのコミットを
+    // git が黙って落とす（03）。
+    let repo = TestRepo::init();
+    repo.commit_file("base.txt", "base");
+    let a = repo.commit_file("a.txt", "a");
+    let moved = repo.commit_file("late.txt", "late");
+
+    let err = runner(&repo)
+        .run(&GitOp::RebaseInteractive {
+            onto: "HEAD~2".into(),
+            head: a,
+            plan: RebasePlan {
+                entries: vec![entry(RebaseAction::Drop, a, "a")],
+            },
+        })
+        .await
+        .expect_err("HEAD が動いたので断るはずです");
+
+    // **止まった理由まで見る** —— 印が stderr に届いて分類されたこと。
+    let ExecError::Failed { kind, stderr, .. } = &err else {
+        panic!("git が失敗として返っていません: {err:?}");
+    };
+    assert_eq!(*kind, ExecErrorKind::HeadMoved, "{stderr}");
+    // git は rebase を始めない（進行中操作が残らない）。HEAD も積んだ先のまま。
+    assert!(!repo.path().join(".git/rebase-merge").exists());
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), moved.to_string());
+}

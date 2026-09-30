@@ -113,15 +113,13 @@ const STASH: &[KeyHint] = &[
     MOVE,
     // Worktree / コミット詳細の `Enter` と同じ語。どれも左に Diff を出す。
     hint(&[Key::new(KeyCode::Enter)], "差分"),
-    STASH_PUSH,
+    // 退避する相手は作業ツリーで、Worktree の `z` と同じ（あちらは `Z` と束ねた行）。
+    hint(&[Key::char('z')], "stash"),
     hint(&[Key::char('a')], "apply"),
     hint(&[Key::char('Z')], "pop"),
     hint(&[Key::char('d')], "drop"),
     BACK,
 ];
-
-/// `z`。Worktree と Stash の両方に出す（退避する相手はどちらでも作業ツリー）。
-const STASH_PUSH: KeyHint = hint(&[Key::char('z')], "stash");
 
 const PRS: &[KeyHint] = &[
     MOVE,
@@ -144,7 +142,10 @@ const WORKTREE: &[KeyHint] = &[
     hint(&[Key::char('x')], "破棄"),
     hint(&[Key::char('c')], "commit"),
     hint(&[Key::char('C')], "amend"),
-    STASH_PUSH,
+    // **`z` と `Z` を 1 行に束ねる**（`j/k` と同じ形）。分けると `?` の一覧が 80x24 に
+    // 収まらない（07 の「Help モーダル」）。`Z` は Stash ペインの `Z`（pop）とは別の動き
+    // —— キーマップはペインごとに割れている（PRs の `r` と同じ）。
+    hint(&[Key::char('z'), Key::char('Z')], "stash 全体/1 ファイル"),
     BACK,
 ];
 

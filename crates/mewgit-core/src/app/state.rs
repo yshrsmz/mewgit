@@ -3,7 +3,7 @@
 //! `ui` はここにある値を描画するだけで、更新は [`update`](crate::app::update) が行う。
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::auth::url::RemoteUrl;
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
@@ -145,7 +145,8 @@ impl AppState {
         }
     }
 
-    /// `op` の前提（進行中操作が無い・持っている値が新しい）が崩れていて断るなら、
+    /// `op` の前提（進行中操作が無い・持っている値が新しい・stash できる中身がある）が
+    /// 崩れていて断るなら、
     /// 理由を通知に積んで代わりに出す `Cmd` を返す。[`refusal`](Self::refusal) のうち
     /// **git が走っているか以外の全部**。
     ///
@@ -157,7 +158,8 @@ impl AppState {
             // 続きを頼む: 進行中操作で断った書き込みの代わりの status の読み直し。
             return Some(Cmd::LoadStatus);
         }
-        // 持っている値の鮮度に頼る書き込み（stash の index、push の守り）。
+        // 持っている値の鮮度と中身に頼る書き込み（stash の index、push の守り、
+        // unmerged / rename の断り）。
         self.refuse_stash(op)
     }
 
@@ -1279,6 +1281,26 @@ impl WorktreeState {
             .iter()
             .map(|&section| self.snapshot.section(section).len())
             .sum()
+    }
+
+    /// `path` に触れる行を、区画と一緒に [`SECTIONS`](Self::SECTIONS) の順で拾う。
+    /// staged と unstaged の両方に出るファイルは 2 つ返る。**rename は元のパスでも当たる**
+    /// —— `git mv a a2` のあとに作った `?? a` を退避すると、git は rename を割る（03 の
+    /// 「stash push のパス指定」）。**パス単位の書き込み**（部分 stash）が「そのパスに
+    /// 何があるか」を問うためのもの。
+    pub fn entries_at<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> impl Iterator<Item = (WorktreeSection, &'a FileEntry)> {
+        Self::SECTIONS
+            .iter()
+            .flat_map(|&section| {
+                self.snapshot
+                    .section(section)
+                    .iter()
+                    .map(move |entry| (section, entry))
+            })
+            .filter(move |(_, entry)| entry.path == path || entry.old_path.as_deref() == Some(path))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2869,9 +2891,13 @@ pub enum InputIntent {
     },
     /// ブランチの名前を変える（`branch --move`）。`from` は元の名前。
     BranchRename { from: String },
-    /// 作業ツリー全体を stash する（`stash push --include-untracked`）。打つのは
+    /// 作業ツリーを stash する（`stash push --include-untracked`）。打つのは
     /// メッセージで、**空なら `--message` を付けない**（git の既定。01 の「stash の書き込み」）。
-    StashPush,
+    StashPush {
+        /// `None` が全体（`z`）、`Some` が Worktree のカーソルの 1 ファイル（`Z`）。
+        /// **開いた時点のパスで持つ** —— 確定までにカーソルが動いても相手は変わらない。
+        path: Option<PathBuf>,
+    },
 }
 
 impl InputIntent {
@@ -2891,12 +2917,14 @@ impl InputIntent {
                 from: from.clone(),
                 to: name,
             },
-            InputIntent::StashPush => GitOp::StashPush {
+            InputIntent::StashPush { path } => GitOp::StashPush {
                 message: (!name.trim().is_empty()).then_some(name),
                 // 「全体」は Worktree ペインに出ているもの全部で、untracked もそこに
-                // 出る（01 の「stash の書き込み」）。
+                // 出る。**1 ファイルでも付ける** —— 無いと untracked のパスは
+                // `pathspec did not match` で落ち、パスで絞ればほかの untracked は
+                // 退避されない（01 の「stash の書き込み」）。
                 include_untracked: true,
-                paths: None,
+                paths: path.clone().map(|path| vec![path]),
             },
         }
     }
@@ -2906,7 +2934,7 @@ impl InputIntent {
     pub fn requires_text(&self) -> bool {
         match self {
             InputIntent::BranchCreate { .. } | InputIntent::BranchRename { .. } => true,
-            InputIntent::StashPush => false,
+            InputIntent::StashPush { .. } => false,
         }
     }
 }

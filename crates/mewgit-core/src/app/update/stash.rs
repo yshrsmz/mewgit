@@ -1,7 +1,9 @@
 //! Stash ペインのキー処理と一覧の受け取り（01 の「Stash ペイン」）。
 
+use std::path::{Path, PathBuf};
+
 use crate::git_exec::GitOp;
-use crate::git_read::{GitReadError, StashEntry};
+use crate::git_read::{FileStatus, GitReadError, StashEntry, WorktreeSection};
 
 use super::{confirm, focus, input};
 use crate::app::{
@@ -33,12 +35,27 @@ pub(super) fn stash_key(state: &mut AppState, key: Key) -> Cmd {
 /// `z`（Worktree と Stash）。メッセージを聞く入力モーダルを開く（01 の「stash の
 /// 書き込み」）。**一覧が空でも開く** —— 退避する相手は作業ツリーで、カーソル行ではない。
 pub(super) fn open_stash_push(state: &mut AppState) -> Cmd {
+    open_push(state, "stash（untracked を含む）".to_string(), None)
+}
+
+/// `Z`（Worktree）。カーソルの 1 ファイルを退避する入力モーダルを開く（01 の「stash の
+/// 書き込み」）。行が無ければ何もしない（`s` / `u` / `x` と同じ）。**rename やコンフリクトの
+/// 断りは開く前の門**（[`AppState::refuse_stash`]）が答える。
+pub(super) fn open_stash_file(state: &mut AppState) -> Cmd {
+    let Some((_, entry)) = state.worktree.selected() else {
+        return Cmd::None;
+    };
+    let path = entry.path.clone();
+    open_push(state, format!("stash（{}）", path.display()), Some(path))
+}
+
+fn open_push(state: &mut AppState, title: String, path: Option<PathBuf>) -> Cmd {
     input(
         state,
-        "stash（untracked を含む）".to_string(),
+        title,
         "メッセージ（空なら git の既定）".to_string(),
         TextBuffer::default(),
-        InputIntent::StashPush,
+        InputIntent::StashPush { path },
     )
 }
 
@@ -77,8 +94,8 @@ fn drop_stash(state: &mut AppState) -> Cmd {
 }
 
 impl AppState {
-    /// stash の書き込みを、持っている値が古いか退避するものが無くて断るなら、理由を
-    /// 通知に積んで代わりに出す `Cmd` を返す（01 の「stash の書き込み」）。
+    /// stash の書き込みを、持っている値が古いか、退避するものの中身が git に渡せなくて
+    /// 断るなら、理由を通知に積んで代わりに出す `Cmd` を返す（01 の「stash の書き込み」）。
     ///
     /// - **push は鮮度のある snapshot でしか通さない。** 解消済みの cherry-pick / merge の
     ///   途中の `stash push` は git が受けて `*_HEAD` を消す（03 の表）。進行中操作の
@@ -88,6 +105,9 @@ impl AppState {
     /// - **apply / pop / drop は鮮度のある一覧でしか通さない。** 渡すのは
     ///   `stash@{index}` で、古い一覧の index は別の stash を指す（oid は drop / pop が
     ///   受けない。`is not a stash reference`）
+    /// - **push は中身でも断る。** unmerged が 1 つでもあれば全体も部分も git が
+    ///   `could not write index` で断り、1 ファイルの rename や staged の削除は
+    ///   git が割ってしまう（[`splits_alone`](Self::splits_alone)）
     ///
     /// 網羅 `match` にしているのは、`GitOp` に変種を足したときに、持っている値の鮮度に
     /// 頼る書き込みかを選ばせるため。
@@ -97,10 +117,19 @@ impl AppState {
                 // 続きを頼む: 古い snapshot で断った push の代わりの status の読み直し。
                 ("状態を読み直しています。もう一度押して", Cmd::LoadStatus)
             }
-            // `-u` を付けるので untracked も数える（`is_empty` は 4 区画の合計）。
-            GitOp::StashPush { .. } if self.worktree.is_empty() => {
+            // unmerged のパスが 1 つでもあると、全体でも別のファイルだけでも git は
+            // `could not write index` で断る（理由は stdout の `needs merge` にしか出ない）。
+            GitOp::StashPush { .. } if !self.worktree.snapshot.conflicted.is_empty() => {
+                (UNMERGED, Cmd::None)
+            }
+            // `-u` を付けるので untracked も数える。
+            GitOp::StashPush { paths, .. } if self.nothing_to_stash(paths.as_deref()) => {
                 ("退避する変更がありません", Cmd::None)
             }
+            // **git が 1 ファイルでは割ってしまう形は断る**（[`AppState::splits_alone`]）。
+            GitOp::StashPush {
+                paths: Some(paths), ..
+            } if paths.iter().any(|path| self.splits_alone(path)) => (SPLITS, Cmd::None),
             GitOp::StashApply(_) | GitOp::StashPop(_) | GitOp::StashDrop(_)
                 if !self.stashes_are_current() =>
             {
@@ -149,6 +178,51 @@ impl AppState {
         };
         self.push_notice(NoticeLevel::Warn, message.to_string(), None);
         Some(instead)
+    }
+}
+
+/// unmerged があるときの push の断り。
+pub(super) const UNMERGED: &str = "コンフリクトを解消してから stash して";
+
+/// 1 ファイルでは git が割ってしまう変更の push の断り。
+pub(super) const SPLITS: &str = "この変更は 1 ファイルでは stash できません。z で全体を";
+
+impl AppState {
+    /// 退避する変更が無いか。`paths` が `None` なら作業ツリー全体、`Some` ならそのパスの
+    /// どれもどの区画にも無い（読み直したら消えていた）。
+    fn nothing_to_stash(&self, paths: Option<&[PathBuf]>) -> bool {
+        paths.map_or_else(
+            || self.worktree.is_empty(),
+            |paths| {
+                paths
+                    .iter()
+                    .all(|path| self.worktree.entries_at(path).next().is_none())
+            },
+        )
+    }
+
+    /// `stash push -u -- <path>` が作業ツリーを中途半端に残すか、stash を作ってから
+    /// exit 1 で終わる形か（03 の「stash push のパス指定」の実測）。
+    ///
+    /// - **rename**（新しいパスでも元のパスでも）—— どう渡しても rename が割れる
+    /// - **staged の削除**（`git rm`、`rm --cached`）—— stash を作ってから `pathspec did
+    ///   not match` か `No valid patches in input` で exit 1。同じパスの untracked の中身
+    ///   次第で exit 0 にもなり、当てにできない
+    /// - **`AD`**（staged の追加を作業ツリーから消した）—— 同じく `No valid patches`
+    ///
+    /// unstaged の削除・`MD`・typechange は exit 0 で済む（同じ表）。
+    fn splits_alone(&self, path: &Path) -> bool {
+        let has = |section, status| {
+            self.worktree
+                .entries_at(path)
+                .any(|(at, entry)| at == section && entry.status == status)
+        };
+        self.worktree
+            .entries_at(path)
+            .any(|(_, entry)| entry.status == FileStatus::Renamed)
+            || has(WorktreeSection::Staged, FileStatus::Deleted)
+            || (has(WorktreeSection::Staged, FileStatus::Added)
+                && has(WorktreeSection::Unstaged, FileStatus::Deleted))
     }
 }
 
@@ -202,10 +276,10 @@ mod tests {
     };
     use super::super::worktree::STASH_DIFF;
     use super::*;
-    use crate::app::{update, ListLoad, Msg, NoticeLevel, Region};
+    use crate::app::{update, ListLoad, Modal, Msg, NoticeLevel, Region};
     use crate::git_exec::{ExecErrorKind, PullMode};
-    use crate::git_read::{DiffTarget, WorktreeSection};
-    use crate::test_util::{fake_snapshot, fake_stash};
+    use crate::git_read::{DiffTarget, FileEntry, WorktreeSnapshot};
+    use crate::test_util::{fake_entry, fake_snapshot, fake_stash};
 
     #[test]
     fn stashes_loaded_fills_in_the_list_and_ends_the_job() {
@@ -443,11 +517,12 @@ mod tests {
         state.shown_notice().map(|notice| notice.message.as_str())
     }
 
-    fn stash_push_op(message: Option<&str>) -> GitOp {
+    /// `z` / `Z` の確定で出る push。`path` が `None` なら全体。
+    fn stash_push_op(message: Option<&str>, path: Option<&str>) -> GitOp {
         GitOp::StashPush {
             message: message.map(str::to_string),
             include_untracked: true,
-            paths: None,
+            paths: path.map(|path| vec![path.into()]),
         }
     }
 
@@ -458,10 +533,10 @@ mod tests {
         let mut state = ready(1, dirty());
 
         let _ = press(&mut state, 'z');
-        assert_eq!(*open_input(&state).3, InputIntent::StashPush);
+        assert_eq!(*open_input(&state).3, InputIntent::StashPush { path: None });
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(stash_push_op(None)));
+        assert_eq!(cmd, Cmd::Exec(stash_push_op(None, None)));
         assert_eq!(state.modal, None);
     }
 
@@ -474,7 +549,7 @@ mod tests {
         type_text(&mut state, "wip");
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(stash_push_op(Some("wip"))));
+        assert_eq!(cmd, Cmd::Exec(stash_push_op(Some("wip"), None)));
     }
 
     #[test]
@@ -483,7 +558,7 @@ mod tests {
 
         let _ = press(&mut state, 'z');
 
-        assert_eq!(*open_input(&state).3, InputIntent::StashPush);
+        assert_eq!(*open_input(&state).3, InputIntent::StashPush { path: None });
     }
 
     #[test]
@@ -533,10 +608,233 @@ mod tests {
         let cmd = press_code(&mut state, KeyCode::Enter);
 
         assert!(
-            !issued(&cmd, &Cmd::Exec(stash_push_op(Some("wip")))),
+            !issued(&cmd, &Cmd::Exec(stash_push_op(Some("wip"), None))),
             "{cmd:?}"
         );
         assert_eq!(open_input(&state).2.text(), "wip");
+    }
+
+    #[test]
+    fn capital_z_in_the_worktree_stashes_only_the_file_under_the_cursor() {
+        // untracked の行でも `-u` 付きで渡す。無いと `pathspec did not match` で落ちる
+        // （03 の「stash push のパス指定」）。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt"], &["new.txt"]),
+            WorktreeSection::Untracked,
+        );
+
+        let _ = press(&mut state, 'Z');
+        assert_eq!(
+            *open_input(&state).3,
+            InputIntent::StashPush {
+                path: Some("new.txt".into())
+            }
+        );
+        assert_eq!(open_input(&state).0, "stash（new.txt）");
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::Exec(stash_push_op(None, Some("new.txt"))));
+    }
+
+    #[test]
+    fn capital_z_keeps_the_path_it_opened_with_when_the_cursor_moves() {
+        // 確定までに一覧が読み直されてカーソルが動いても、退避する相手は開いた時点の行。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt", "b.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press(&mut state, 'Z');
+        state.worktree.cursor = 1;
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::Exec(stash_push_op(None, Some("a.txt"))));
+    }
+
+    #[test]
+    fn capital_z_without_a_row_does_nothing() {
+        let mut state = worktree_state(fake_snapshot(&[], &[], &[]), WorktreeSection::Unstaged);
+
+        assert_eq!(press(&mut state, 'Z'), Cmd::None);
+        assert_eq!(state.modal, None);
+        assert_eq!(message(&state), None);
+    }
+
+    #[test]
+    fn capital_z_on_a_rename_is_refused_before_the_input_opens() {
+        // 新しいパスだけでは元のパスの削除が残り、両方では stash を作ってから exit 1
+        // （03 の「stash push のパス指定」）。どちらの区画の rename でも断る。
+        let renamed = || vec![fake_entry("a.txt", FileStatus::Renamed)];
+        for (section, snapshot) in [
+            (
+                WorktreeSection::Staged,
+                WorktreeSnapshot {
+                    staged: renamed(),
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                WorktreeSection::Unstaged,
+                WorktreeSnapshot {
+                    unstaged: renamed(),
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+        ] {
+            let mut state = worktree_state(snapshot, section);
+
+            let cmd = press(&mut state, 'Z');
+
+            assert_eq!(cmd, Cmd::None, "{section:?}");
+            assert_eq!(state.modal, None, "{section:?}");
+            assert_eq!(message(&state), Some(SPLITS), "{section:?}");
+        }
+    }
+
+    #[test]
+    fn capital_z_on_a_file_git_would_split_is_refused() {
+        // どれも git が stash を作ってから exit 1 か、rename を割る（03 の「stash push の
+        // パス指定」）。カーソルは `a` の行に置く。
+        let entry = fake_entry;
+        let cases = [
+            (
+                "staged の削除",
+                WorktreeSection::Staged,
+                WorktreeSnapshot {
+                    staged: vec![entry("a", FileStatus::Deleted)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                "rm --cached（staged の削除と同じパスの untracked）",
+                WorktreeSection::Untracked,
+                WorktreeSnapshot {
+                    staged: vec![entry("a", FileStatus::Deleted)],
+                    untracked: vec![entry("a", FileStatus::Untracked)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                "AD",
+                WorktreeSection::Unstaged,
+                WorktreeSnapshot {
+                    staged: vec![entry("a", FileStatus::Added)],
+                    unstaged: vec![entry("a", FileStatus::Deleted)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                "rename の元のパスに置いた新しいファイル",
+                WorktreeSection::Untracked,
+                WorktreeSnapshot {
+                    staged: vec![FileEntry {
+                        old_path: Some("a".into()),
+                        ..entry("a2", FileStatus::Renamed)
+                    }],
+                    untracked: vec![entry("a", FileStatus::Untracked)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+        ];
+        for (name, section, snapshot) in cases {
+            let mut state = worktree_state(snapshot, section);
+            assert_eq!(
+                state
+                    .worktree
+                    .selected()
+                    .map(|(_, entry)| entry.path.clone()),
+                Some("a".into()),
+                "{name}"
+            );
+
+            let cmd = press(&mut state, 'Z');
+
+            assert_eq!(cmd, Cmd::None, "{name}");
+            assert_eq!(state.modal, None, "{name}");
+            assert_eq!(message(&state), Some(SPLITS), "{name}");
+        }
+    }
+
+    #[test]
+    fn capital_z_on_changes_git_stashes_cleanly_opens_the_input() {
+        // `MD`・unstaged の削除・staged の追加だけは git が exit 0 で済ませる（03 の表）。
+        // 「削除だから」「追加だから」で断らない —— 断るのは `AD` の組だけ。
+        let cases = [
+            (
+                "MD",
+                WorktreeSnapshot {
+                    staged: vec![fake_entry("a", FileStatus::Modified)],
+                    unstaged: vec![fake_entry("a", FileStatus::Deleted)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                "A",
+                WorktreeSnapshot {
+                    staged: vec![fake_entry("a", FileStatus::Added)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+        ];
+        for (name, snapshot) in cases {
+            let mut state = worktree_state(snapshot, WorktreeSection::Staged);
+
+            let _ = press(&mut state, 'Z');
+
+            assert!(matches!(state.modal, Some(Modal::Input { .. })), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_rename_elsewhere_does_not_stop_stashing_another_file() {
+        let mut state = worktree_state(
+            fake_snapshot(&["moved.txt"], &["a.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        state.worktree.snapshot.staged[0].status = FileStatus::Renamed;
+
+        let _ = press(&mut state, 'Z');
+
+        assert!(matches!(state.modal, Some(Modal::Input { .. })));
+    }
+
+    #[test]
+    fn both_pushes_are_refused_while_any_file_is_conflicted() {
+        // 進行中操作が無くても unmerged は残る（`stash pop` のコンフリクト）。git は全体でも
+        // 別のファイルだけでも `could not write index` で断り、理由を stderr に出さない。
+        for key in ['z', 'Z'] {
+            let mut state = worktree_state(
+                fake_snapshot(&[], &["a.txt"], &[]),
+                WorktreeSection::Unstaged,
+            );
+            state.worktree.snapshot.conflicted = vec![fake_entry("c.txt", FileStatus::Conflicted)];
+
+            let cmd = press(&mut state, key);
+
+            assert_eq!(cmd, Cmd::None, "{key}");
+            assert_eq!(state.modal, None, "{key}");
+            assert_eq!(message(&state), Some(UNMERGED), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_gone_when_the_push_is_confirmed_is_refused() {
+        // 開いたあとに読み直した snapshot から消えていた（端末で commit した など）。
+        // git に渡すと `pathspec did not match` か、tracked なら `No local changes to save`。
+        let mut state = worktree_state(
+            fake_snapshot(&[], &["a.txt", "b.txt"], &[]),
+            WorktreeSection::Unstaged,
+        );
+        let _ = press(&mut state, 'Z');
+        state.worktree.snapshot.unstaged.remove(0);
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert!(
+            !issued(&cmd, &Cmd::Exec(stash_push_op(None, Some("a.txt")))),
+            "{cmd:?}"
+        );
+        assert_eq!(message(&state), Some("退避する変更がありません"));
     }
 
     #[test]
@@ -611,7 +909,7 @@ mod tests {
         // push は先頭に 1 つ足すので、届く前の一覧の `stash@{1}` は別の stash を指す。
         let mut state = ready(2, dirty());
         let _ = press(&mut state, 'j');
-        finish_exec(&mut state, stash_push_op(None), Ok(fake_output()));
+        finish_exec(&mut state, stash_push_op(None, None), Ok(fake_output()));
 
         for key in ['a', 'Z', 'd'] {
             let cmd = press(&mut state, key);

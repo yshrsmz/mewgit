@@ -149,5 +149,5 @@ async fn a_head_moved_after_the_plan_is_refused_before_the_rebase_starts() {
     assert_eq!(*kind, ExecErrorKind::HeadMoved, "{stderr}");
     // git は rebase を始めない（進行中操作が残らない）。HEAD も積んだ先のまま。
     assert!(!repo.path().join(".git/rebase-merge").exists());
-    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), moved.to_string());
+    assert_eq!(repo.head_oid(), moved);
 }

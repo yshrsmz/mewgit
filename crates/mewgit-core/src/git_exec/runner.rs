@@ -554,9 +554,12 @@ mod tests {
     fn a_sequence_editor_refusing_a_moved_head_is_head_moved() {
         // 隠しサブコマンドが書く 1 行（`mewgit: <Display>`）に、git が自分の行を並べる。
         // **印は `Display` から採る** —— 文言を直しても分類が外れないことを見る。
-        let err = crate::git_exec::EditorError::HeadMoved {
-            expected: crate::test_util::fake_oid(7),
-            actual: crate::test_util::fake_oid(0).to_string(),
+        use crate::git_exec::EditorError;
+        use crate::test_util::fake_oid;
+
+        let err = EditorError::HeadMoved {
+            expected: fake_oid(7),
+            actual: fake_oid(0).to_string(),
         };
         let stderr = format!(
             "mewgit: {err}\nerror: there was a problem with the editor 'mewgit --sequence-editor'\n"

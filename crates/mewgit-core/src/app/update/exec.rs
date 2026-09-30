@@ -145,12 +145,10 @@ impl Reload {
     fn regions(self) -> &'static [Region] {
         match self {
             Reload::Nothing => &[Region::Worktree],
-            // `refs/stash` は ref なので `Refs`（`JobKind::LoadStashes` の領域）。走っている
-            // ラベルやブランチ一覧の読み取りも巻き添えで古くなるが、届いた返りが頼み直す
-            // だけで、`Refs` を割って領域を足すほどの差ではない。
-            Reload::Stashes => &[Region::Worktree, Region::Refs],
+            Reload::Stashes => &[Region::Worktree, Region::Stash],
             Reload::Refs => &[Region::Worktree, Region::Refs],
-            Reload::RefsAndLog => &[Region::Worktree, Region::Refs, Region::Log],
+            // autostash の pull / rebase は `refs/stash` も動かす（下の `LoadStashes`）。
+            Reload::RefsAndLog => &[Region::Worktree, Region::Refs, Region::Log, Region::Stash],
             // git の読み取りは何も古くならない（`.git/config` の 1 行だけ）。
             Reload::Account => &[],
         }

@@ -3,8 +3,7 @@
 use crate::git_exec::GitOp;
 use crate::git_read::{GitReadError, StashEntry};
 
-use super::branches::input;
-use super::{confirm, focus};
+use super::{confirm, focus, input};
 use crate::app::{
     AppState, Cmd, DiffSource, InputIntent, JobKind, Key, KeyCode, NoticeLevel, Pane, TextBuffer,
 };
@@ -44,7 +43,7 @@ pub(super) fn open_stash_push(state: &mut AppState) -> Cmd {
 }
 
 /// `a` / `Z`。カーソル行の stash を `op` で書き込む。**鮮度は `issue` が問う**
-/// （[`AppState::refuse_stale_stash`]）。一覧が空なら何もしない（`Enter` と同じ）。
+/// （[`AppState::refuse_stash`]）。一覧が空なら何もしない（`Enter` と同じ）。
 fn on_selected(state: &AppState, op: fn(usize) -> GitOp) -> Cmd {
     state
         .stashes
@@ -59,24 +58,27 @@ fn on_selected(state: &AppState, op: fn(usize) -> GitOp) -> Cmd {
 /// `y` が通り、**確認に出したのとは別の stash を消す**。走っていなければ、確認を
 /// 開いているあいだに始まる書き込みは無い（キーはモーダルが受ける）。
 fn drop_stash(state: &mut AppState) -> Cmd {
+    let Some(index) = state.stashes.selected().map(|stash| stash.index) else {
+        return Cmd::None;
+    };
+    let op = GitOp::StashDrop(index);
+    if let Some(instead) = state.refusal(&Cmd::Exec(op.clone())) {
+        return instead;
+    }
     let Some(stash) = state.stashes.selected() else {
         return Cmd::None;
     };
-    let op = GitOp::StashDrop(stash.index);
     let body = format!(
         "{}（{}）を削除します。取り消せません。",
         stash.name(),
         stash.message
     );
-    if let Some(instead) = state.refusal(&Cmd::Exec(op.clone())) {
-        return instead;
-    }
     confirm(state, "stash を drop", body, op)
 }
 
 impl AppState {
-    /// stash の書き込みを、持っている値が古くて断るなら、理由を通知に積んで代わりに
-    /// 出す `Cmd` を返す（01 の「stash の書き込み」）。
+    /// stash の書き込みを、持っている値が古いか退避するものが無くて断るなら、理由を
+    /// 通知に積んで代わりに出す `Cmd` を返す（01 の「stash の書き込み」）。
     ///
     /// - **push は鮮度のある snapshot でしか通さない。** 解消済みの cherry-pick / merge の
     ///   途中の `stash push` は git が受けて `*_HEAD` を消す（03 の表）。進行中操作の
@@ -89,15 +91,14 @@ impl AppState {
     ///
     /// 網羅 `match` にしているのは、`GitOp` に変種を足したときに、持っている値の鮮度に
     /// 頼る書き込みかを選ばせるため。
-    pub(crate) fn refuse_stale_stash(&mut self, op: &GitOp) -> Option<Cmd> {
+    pub(crate) fn refuse_stash(&mut self, op: &GitOp) -> Option<Cmd> {
         let (message, instead) = match op {
             GitOp::StashPush { .. } if !self.worktree_is_current() => {
                 // 続きを頼む: 古い snapshot で断った push の代わりの status の読み直し。
                 ("状態を読み直しています。もう一度押して", Cmd::LoadStatus)
             }
-            GitOp::StashPush {
-                include_untracked, ..
-            } if nothing_to_stash(self, *include_untracked) => {
+            // `-u` を付けるので untracked も数える（`is_empty` は 4 区画の合計）。
+            GitOp::StashPush { .. } if self.worktree.is_empty() => {
                 ("退避する変更がありません", Cmd::None)
             }
             GitOp::StashApply(_) | GitOp::StashPop(_) | GitOp::StashDrop(_)
@@ -149,15 +150,6 @@ impl AppState {
         self.push_notice(NoticeLevel::Warn, message.to_string(), None);
         Some(instead)
     }
-}
-
-/// 鮮度のある snapshot に退避するものが無いか。`-u` を付けるなら untracked も数える。
-fn nothing_to_stash(state: &AppState, include_untracked: bool) -> bool {
-    let snapshot = &state.worktree.snapshot;
-    snapshot.staged.is_empty()
-        && snapshot.unstaged.is_empty()
-        && snapshot.conflicted.is_empty()
-        && (!include_untracked || snapshot.untracked.is_empty())
 }
 
 /// `Enter`。カーソルの指す stash の diff を左に出す（07 の「Diff ペイン」）。
@@ -254,12 +246,12 @@ mod tests {
     }
 
     #[test]
-    fn a_list_asked_for_before_a_refs_write_is_asked_for_again() {
-        // `refs/stash` は ref なので `Region::Refs`（01 の「Stash ペイン」）。書き込みで
-        // 世代が進んだあとに届いた返信は、書き込み前の一覧かもしれない。
+    fn a_list_asked_for_before_a_stash_write_is_asked_for_again() {
+        // 書き込みで世代が進んだあとに届いた返信は、書き込み前の一覧かもしれない
+        // （01 の「Stash ペイン」）。
         let mut state = state();
         let _ = state.issue(Cmd::LoadStashes);
-        state.jobs.advance(Region::Refs);
+        state.jobs.advance(Region::Stash);
 
         let cmd = update(
             &mut state,
@@ -451,7 +443,7 @@ mod tests {
         state.shown_notice().map(|notice| notice.message.as_str())
     }
 
-    fn push_op(message: Option<&str>) -> GitOp {
+    fn stash_push_op(message: Option<&str>) -> GitOp {
         GitOp::StashPush {
             message: message.map(str::to_string),
             include_untracked: true,
@@ -469,7 +461,7 @@ mod tests {
         assert_eq!(*open_input(&state).3, InputIntent::StashPush);
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(push_op(None)));
+        assert_eq!(cmd, Cmd::Exec(stash_push_op(None)));
         assert_eq!(state.modal, None);
     }
 
@@ -482,7 +474,7 @@ mod tests {
         type_text(&mut state, "wip");
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(push_op(Some("wip"))));
+        assert_eq!(cmd, Cmd::Exec(stash_push_op(Some("wip"))));
     }
 
     #[test]
@@ -540,7 +532,10 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert!(!issued(&cmd, &Cmd::Exec(push_op(Some("wip")))), "{cmd:?}");
+        assert!(
+            !issued(&cmd, &Cmd::Exec(stash_push_op(Some("wip")))),
+            "{cmd:?}"
+        );
         assert_eq!(open_input(&state).2.text(), "wip");
     }
 
@@ -616,7 +611,7 @@ mod tests {
         // push は先頭に 1 つ足すので、届く前の一覧の `stash@{1}` は別の stash を指す。
         let mut state = ready(2, dirty());
         let _ = press(&mut state, 'j');
-        finish_exec(&mut state, push_op(None), Ok(fake_output()));
+        finish_exec(&mut state, stash_push_op(None), Ok(fake_output()));
 
         for key in ['a', 'Z', 'd'] {
             let cmd = press(&mut state, key);
@@ -661,5 +656,16 @@ mod tests {
             notice.message
         );
         assert!(!notice.message.contains("m から"), "{}", notice.message);
+    }
+
+    #[test]
+    fn a_switch_does_not_make_the_list_stale() {
+        // `Reload::Refs` の書き込みは一覧を読み直さない。`refs/stash` の鮮度を `Refs` の
+        // 世代で測ると、switch のあとの最初の `a` が必ず 1 回断られる。
+        let mut state = ready(1, dirty());
+        finish_exec(&mut state, GitOp::Switch("topic".into()), Ok(fake_output()));
+
+        assert!(state.stashes_are_current());
+        assert_eq!(press(&mut state, 'a'), Cmd::Exec(GitOp::StashApply(0)));
     }
 }

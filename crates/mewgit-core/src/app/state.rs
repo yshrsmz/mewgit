@@ -145,6 +145,22 @@ impl AppState {
         }
     }
 
+    /// `op` の前提（進行中操作が無い・持っている値が新しい）が崩れていて断るなら、
+    /// 理由を通知に積んで代わりに出す `Cmd` を返す。[`refusal`](Self::refusal) のうち
+    /// **git が走っているか以外の全部**。
+    ///
+    /// **入力と確認を開く前にもこれを問う**（`update::input`）。門を足すときはここに
+    /// 足せば両方に効く —— 開く前の判定を別に並べると、片方にだけ足した門で打った
+    /// 本文が消える。
+    pub(crate) fn refuse_write(&mut self, op: &GitOp) -> Option<Cmd> {
+        if self.refuse_in_progress(op) {
+            // 続きを頼む: 進行中操作で断った書き込みの代わりの status の読み直し。
+            return Some(Cmd::LoadStatus);
+        }
+        // 持っている値の鮮度に頼る書き込み（stash の index、push の守り）。
+        self.refuse_stash(op)
+    }
+
     /// `cmd` を [`issue`](Self::issue) が断るなら、理由を通知に積んで**代わりに出す
     /// `Cmd`** を返す。通すなら `None`。
     ///
@@ -159,12 +175,7 @@ impl AppState {
     /// あるときの書き込み」）。
     pub(crate) fn refusal(&mut self, cmd: &Cmd) -> Option<Cmd> {
         if let Cmd::Exec(op) = cmd {
-            if self.refuse_in_progress(op) {
-                // 続きを頼む: 進行中操作で断った書き込みの代わりの status の読み直し。
-                return Some(Cmd::LoadStatus);
-            }
-            // 持っている値の鮮度に頼る書き込み（stash の index、push の守り）。
-            if let Some(instead) = self.refuse_stale_stash(op) {
+            if let Some(instead) = self.refuse_write(op) {
                 return Some(instead);
             }
         }
@@ -603,7 +614,7 @@ impl AppState {
     ///
     /// apply / pop / drop は `stash@{index}` で渡すので、古い一覧の index は別の stash を
     /// 指しうる（01 の「stash の書き込み」）。
-    pub fn stashes_are_current(&self) -> bool {
+    pub(crate) fn stashes_are_current(&self) -> bool {
         self.jobs.is_fresh(JobKind::LoadStashes, self.stashes.epoch)
     }
 
@@ -2126,8 +2137,7 @@ impl PrState {
 /// **1 本のカウンタにしない。** index だけを触る `stage` でもログの世代が進み、
 /// 飛んでいる `LoadLog` を毎回捨てて `LogSession` の作り直し（履歴全体を辿り直す。
 /// 02 の「セッションは作り直さず使い回す」）を払うことになる。どの書き込みがどこを
-/// 古くするかは `update::Reload` が持っていて、その 3 値がそのままこの 3 領域に写る
-/// （01 の「実行中ジョブ › 世代」）。
+/// 古くするかは `update::Reload` が持っている（01 の「実行中ジョブ › 世代」）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
     /// index とワークツリー。[`JobKind::LoadStatus`] と [`JobKind::LoadDiff`]。
@@ -2136,6 +2146,13 @@ pub enum Region {
     Refs,
     /// 積んだログの行。[`JobKind::LoadLog`]。
     Log,
+    /// stash の一覧（`refs/stash` の reflog）。[`JobKind::LoadStashes`]。
+    ///
+    /// **`Refs` に相乗りさせない。** stash の書き込みで `Refs` を進めると、走っている
+    /// PR 一覧の取得（GitHub の往復）とブランチ一覧が巻き添えで捨てられ、逆に switch
+    /// などの `Refs` の書き込み（一覧を読み直さない）のあとは、一覧が古いと判じられて
+    /// 最初の apply / pop / drop が必ず 1 回断られる（01 の「stash の書き込み」）。
+    Stash,
 }
 
 impl Region {
@@ -2144,7 +2161,7 @@ impl Region {
     ///
     /// 腕を足してここに足し忘れると添字が範囲外になるので、`region_all_lists_every_arm`
     /// が網羅 `match` でコンパイルエラーにする。
-    pub const ALL: [Region; 3] = [Region::Worktree, Region::Refs, Region::Log];
+    pub const ALL: [Region; 4] = [Region::Worktree, Region::Refs, Region::Log, Region::Stash];
 }
 
 /// 実行中の非同期タスク。スピナー表示と `Cmd` の重複発行防止に使う。
@@ -2346,15 +2363,13 @@ impl JobKind {
             // CI が回り直し、マージすれば open から消える）。世代を見ないと、書き込みの
             // 最中に飛んでいた要求の答え（書き込み前の GitHub の状態）が採られ、
             // そのあとの引き直しは `AppState::issue` に落とされたまま誰も拾わない。
-            // **stash の一覧もここ。** 読むのは `refs/stash` の reflog で、git が
-            // 動かすのは ref（01 の「Stash ペイン」）。autostash の pull / rebase
-            // （`Reload::RefsAndLog`）は `Refs` を進める。stash の書き込み自体で進めるのは、
-            // 書き込みのキーを足す回（`update::Reload`）。
             JobKind::LoadRepoInfo
             | JobKind::LoadBranches
-            | JobKind::LoadStashes
             | JobKind::LoadHeadMessage
             | JobKind::FetchPrList => Some(Region::Refs),
+            // `refs/stash` の reflog。進めるのは stash の書き込みと、autostash の起きうる
+            // `Reload::RefsAndLog`（01 の「Stash ペイン」）。
+            JobKind::LoadStashes => Some(Region::Stash),
             // 積んだログの行。ref が動いて walk に入る集合が変わったときだけ古くなる。
             JobKind::LoadLog => Some(Region::Log),
             // **PR ごとの集計は鍵のほうが強い。** 答えは `(番号, head sha)` を
@@ -3701,6 +3716,7 @@ mod tests {
                 Region::Worktree => "worktree",
                 Region::Refs => "refs",
                 Region::Log => "log",
+                Region::Stash => "stash",
             };
             !name.is_empty()
         }

@@ -540,7 +540,7 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 | | 出す `Cmd` | 例 |
 |---|---|---|
 | `Nothing` | `LoadStatus` | stage / unstage / discard |
-| `Stashes` | `+ LoadStashes`（`Refs` を進める） | stash の push / apply / pop / drop |
+| `Stashes` | `+ LoadStashes`（`Stash` を進める） | stash の push / apply / pop / drop |
 | `Refs` | `+ LoadRepoInfo` `+ LoadBranches` | checkout、branch 作成 / リネーム、非 force push |
 | `RefsAndLog` | `+ LoadLog { restart }` | commit、fetch / pull、force push、branch 削除、rebase / cherry-pick / revert |
 
@@ -1068,11 +1068,15 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
   既に払っている。**端末で作った stash は、次に `RefsAndLog` の書き込みをするか
   再起動するまで出ない**（Branches で外のブランチ作成が出ないのと同じ。外部変更の
   検知は M6）。**stash の書き込みのあとは `Reload::Stashes`**（下）
-- **`JobKind::LoadStashes` の領域は `Region::Refs`。** 読むのは `refs/stash` の reflog で、
-  git が動かすのは ref。`RefsAndLog` は `Refs` を進めるので、読み込みの最中に pull が
-  終われば返りは捨てられて頼み直される。**stash の書き込みは `Reload::Stashes`** ——
-  `Worktree` と `Refs` を進め、`LoadStatus` と `LoadStashes` を出す（上の「ログの
-  読み直し」の表）。**成否を見ない** —— pop はコンフリクトで exit 1 でも作業ツリーを
+- **`JobKind::LoadStashes` の領域は `Region::Stash`**（下の「実行中ジョブ › 世代」）。
+  進めるのは stash の書き込み（`Reload::Stashes`）と `RefsAndLog`（autostash）で、
+  読み込みの最中に pull が終われば返りは捨てられて頼み直される。**`Region::Refs` に
+  相乗りさせない** —— 最初の版はそうしていて、`/simplify` が 2 つ拾った。stash の
+  書き込みで `Refs` を進めると走っている PR 一覧の取得（GitHub の往復）まで捨てられ、
+  逆に switch など `Reload::Refs` の書き込み（一覧を読み直さない）のあとは一覧が古いと
+  判じられて、**最初の apply / pop / drop が必ず 1 回断られる**（下の「stash の
+  書き込み」の鮮度の門）。**stash の書き込みは `Reload::Stashes`** —— `Worktree` と
+  `Stash` を進め、`LoadStatus` と `LoadStashes` を出す（上の「ログの読み直し」の表）。**成否を見ない** —— pop はコンフリクトで exit 1 でも作業ツリーを
   書き換え（stash は残す）、apply も同じ。ラベルとログは読み直さない（`refs/stash` は
   グラフの walk に押していない。02 の「ログ列挙」）
 - **`Cmd::LoadBranches` に乗せない。** 古くなる書き込みが違う —— `Reload::Refs` の
@@ -1149,9 +1153,10 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
   のとは別の stash を drop する**。古ければ「stash の一覧を読み直しています。もう一度」で
   断って `LoadStashes` を出す。**oid では渡せない** —— `git stash drop <oid>` / `pop
   <oid>` は `is not a stash reference` で断られる（実測、git 2.55.0。apply だけは通る）
-- **判定は `AppState::refusal` に置く**（`update::stash::refuse_stale`）。キー・確認の
-  `y`・入力の確定のどれから来ても同じ門を通る。**入力と確認を開く前にも同じ判定を
-  問う** —— 打ち終えてから、確認に `y` を押してから断られない
+- **判定は `AppState::refusal` に置く**（`AppState::refuse_stash`。進行中操作の門と
+  並べて `AppState::refuse_write` が束ねる）。キー・確認の `y`・入力の確定のどれから
+  来ても同じ門を通る。**入力を開く前も `refuse_write` を問う**（`update::input`）——
+  打ち終えてから断られない。開く前の判定を別に並べると、片方にだけ足した門で本文が消える
 - **drop は `Modal::Confirm`**（不変ルール 5）。本文に `stash@{n}` とメッセージを出す。
   **開く前に `refusal` 全体を問う** —— git が走っているあいだに確認を開けると、
   その書き込み（autostash の `pull`）が終わって一覧がずれたあとに `y` が通る。
@@ -2550,7 +2555,7 @@ impl AppState {
 届いた返信が書き込みより前に頼まれたものかは、刻印を比べれば判る。
 
 ```rust
-pub enum Region { Worktree, Refs, Log }
+pub enum Region { Worktree, Refs, Log, Stash }
 
 pub struct JobTracker {
     running: Vec<Job>,
@@ -2574,11 +2579,12 @@ impl JobKind {
 }
 ```
 
-- **カウンタは領域ごとに 3 本。** 1 本にすると、index しか触らない `stage` でもログの
+- **カウンタは領域ごとに 1 本。** 1 本にまとめると、index しか触らない `stage` でもログの
   世代が進み、飛んでいる `LoadLog` を毎回捨てて `LogSession` の作り直し（履歴全体を
   辿り直す。02）を払う。**どの書き込みがどこを古くするかは `update::Reload` が既に
-  持っている**ので、その 3 値（`Nothing` / `Refs` / `RefsAndLog`）を領域の集合に写す。
-  累積で、`Refs` は `Worktree` も含む（書き込みは必ず index / ワークツリーを古くする）
+  持っている**ので、その値を領域の集合に写す。どれも `Worktree` を含む（書き込みは
+  必ず index / ワークツリーを古くする。`Account` だけは何も含まない）。**`Stash` は
+  `refs/stash` の一覧だけ**で、`Refs` とは別に持つ（上の「Stash ペイン」）
 - **刻むのは `JobTracker::start`**（= `AppState::issue` の中）。`Job.epoch` は非公開で、
   組み立てる側は入れられない。入れられる形にすると、刻む場所が `start` の外に増える
 - **進めるのは `exec_finished`。`Cmd` を返す前に進める。** `issue` は `update` の出口

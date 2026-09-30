@@ -1124,9 +1124,32 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
 ### stash の書き込み
 
 **キーは `z`（push。Worktree と Stash）、Stash ペインの `a`（apply）/ `Z`（pop）/
-`d`（drop）**（2026-09-30 にユーザーと決めた。07 のキー表）。apply / pop / drop の相手は
-カーソル行。**Worktree に `Z`（`stash@{0}` の pop）は置かない** —— どれを pop するかが
-その画面に出ていない。
+`d`（drop）、Worktree の `Z`（カーソルの 1 ファイルを push）**（2026-09-30 にユーザーと
+決めた。07 のキー表）。apply / pop / drop の相手はカーソル行。**Worktree の `Z` は pop
+ではない** —— `stash@{0}` の pop を置くと、どれを pop するかがその画面に出ていない。
+`z` の対として部分 stash に使い、キーマップがペインごとに割れているので Stash の `Z`
+（pop）とは衝突しない。
+
+- **部分 stash はカーソルの 1 ファイル**（2026-09-30 にユーザーと決めた）。複数の選択は
+  持たない（Worktree に選択の状態が無い）。**パスは入力を開いた時点のもので持つ**
+  （`InputIntent::StashPush { path }`）—— 確定までに一覧が読み直されてカーソルが
+  動いても、退避する相手は変わらない。staged と unstaged の両方に出るファイルは、
+  どちらの行で押しても両方ぶんが入る（git はパス単位。03 の「stash push のパス指定」）
+- **部分 stash にも `--include-untracked` を付ける** —— 無いと untracked のパスは
+  `pathspec did not match` で落ち、付けてもパスで絞ればほかの untracked は退避されない
+  （03 の「stash push のパス指定」）
+- **rename の行は断る**（「rename は 1 ファイルでは stash できません。z で全体を」）。
+  新しいパスだけ渡すと元のパスの削除が staged のまま残り、両方渡すと stash を作ってから
+  exit 1 で作業ツリーも戻さない（03 の表）
+- **鮮度のある snapshot にそのパスが無ければ「退避する変更がありません」で断る**（全体の
+  「空なら断る」と同じ門）。開いたあとに端末で commit した形
+- **unmerged のファイルがあれば、全体・部分とも断る**（「コンフリクトを解消してから stash
+  して」。2026-09-30 にユーザーと決めた）。git はどちらも `could not write index` で断り、
+  理由（`needs merge`）は stdout にしか出ない。**進行中操作の門は拾わない** ——
+  `stash pop` のコンフリクトは進行中操作にならない
+- **部分 stash は index 全体を記録する**（git の仕様。03 の「stash push のパス指定」）。
+  ほかに staged のファイルがあると stash の中身にも入るが、断らない —— Stash ペインの
+  diff に出るので見える
 
 - **push は常に `--include-untracked`**（2026-09-30 にユーザーと決めた）。「全体」は
   Worktree ペインに出ているもの全部で、untracked もそこに出る。付けないと、untracked
@@ -1153,7 +1176,8 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
   のとは別の stash を drop する**。古ければ「stash の一覧を読み直しています。もう一度」で
   断って `LoadStashes` を出す。**oid では渡せない** —— `git stash drop <oid>` / `pop
   <oid>` は `is not a stash reference` で断られる（実測、git 2.55.0。apply だけは通る）
-- **判定は `AppState::refusal` に置く**（`AppState::refuse_stash`。進行中操作の門と
+- **判定は `AppState::refusal` に置く**（`AppState::refuse_stash`。順は「古い →
+  unmerged がある → 退避する行が無い → rename」。進行中操作の門と
   並べて `AppState::refuse_write` が束ねる）。キー・確認の `y`・入力の確定のどれから
   来ても同じ門を通る。**入力を開く前も `refuse_write` を問う**（`update::input`）——
   打ち終えてから断られない。開く前の判定を別に並べると、片方にだけ足した門で本文が消える

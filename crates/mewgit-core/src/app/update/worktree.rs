@@ -13,7 +13,7 @@ use crate::git_read::{
 
 use super::diff::load_diff;
 use super::diff::open_diff;
-use super::stash::open_stash_push;
+use super::stash::{open_stash_file, open_stash_push};
 use super::{confirm, exec_busy, focus, multiline_edit_key, submit_exec};
 use crate::app::{
     AppState, Cmd, DiffOrigin, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
@@ -38,6 +38,7 @@ pub(super) fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::Char('c') => commit(state),
         KeyCode::Char('C') => amend(state),
         KeyCode::Char('z') => open_stash_push(state),
+        KeyCode::Char('Z') => open_stash_file(state),
         _ => Cmd::None,
     }
 }

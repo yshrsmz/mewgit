@@ -2869,9 +2869,13 @@ pub enum InputIntent {
     },
     /// ブランチの名前を変える（`branch --move`）。`from` は元の名前。
     BranchRename { from: String },
-    /// 作業ツリー全体を stash する（`stash push --include-untracked`）。打つのは
+    /// 作業ツリーを stash する（`stash push --include-untracked`）。打つのは
     /// メッセージで、**空なら `--message` を付けない**（git の既定。01 の「stash の書き込み」）。
-    StashPush,
+    StashPush {
+        /// `None` が全体（`z`）、`Some` が Worktree のカーソルの 1 ファイル（`Z`）。
+        /// **開いた時点のパスで持つ** —— 確定までにカーソルが動いても相手は変わらない。
+        path: Option<PathBuf>,
+    },
 }
 
 impl InputIntent {
@@ -2891,12 +2895,14 @@ impl InputIntent {
                 from: from.clone(),
                 to: name,
             },
-            InputIntent::StashPush => GitOp::StashPush {
+            InputIntent::StashPush { path } => GitOp::StashPush {
                 message: (!name.trim().is_empty()).then_some(name),
                 // 「全体」は Worktree ペインに出ているもの全部で、untracked もそこに
-                // 出る（01 の「stash の書き込み」）。
+                // 出る。**1 ファイルでも付ける** —— 無いと untracked のパスは
+                // `pathspec did not match` で落ち、パスで絞ればほかの untracked は
+                // 退避されない（01 の「stash の書き込み」）。
                 include_untracked: true,
-                paths: None,
+                paths: path.clone().map(|path| vec![path]),
             },
         }
     }
@@ -2906,7 +2912,7 @@ impl InputIntent {
     pub fn requires_text(&self) -> bool {
         match self {
             InputIntent::BranchCreate { .. } | InputIntent::BranchRename { .. } => true,
-            InputIntent::StashPush => false,
+            InputIntent::StashPush { .. } => false,
         }
     }
 }

@@ -211,6 +211,39 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   消す余地を残さない
 - `switch` / `restore` を使うので git 2.23 以降が要る
 
+### stash push のパス指定
+
+部分 stash（Worktree の `Z`。01 の「stash の書き込み」）は `StashPush { paths: Some([1 つ]) }`
+で、**常に `--include-untracked` を付ける**。パスで絞ればほかの untracked は退避されない
+ので、付けて困る形が無い。**実測（git 2.55.0、2026-09-30）** —— `a` / `b` / `c` を
+コミットした一時リポジトリで、状態ごとに作り直して `stash push [-u] -- <path>` を叩いた:
+
+| 状態 | 渡したパス | 結果 |
+|---|---|---|
+| unstaged の modified（ほかに untracked `u`） | `-u -- a` | exit 0。stash は `M a` だけ、`u` は残る |
+| staged だけ / staged と unstaged の両方 | `-u -- a` | exit 0。両方の区画ぶんが 1 つの stash に入る |
+| untracked（ほかに untracked `v`） | `-u -- u` | exit 0。stash は `A u` だけ、`v` は残る |
+| untracked | `-- u`（`-u` 無し） | **exit 1**、`pathspec ':(prefix:0)u' did not match any file(s) known to git` |
+| staged の追加 / 削除 | `-u -- n` / `-u -- b` | exit 0 |
+| staged の rename `a → a2` | `-u -- a2` | exit 0。stash は `R100 a a2` だが、**作業ツリーに `D  a` が staged のまま残る** |
+| 同上 | `-u -- a a2` | **stash を作ってから exit 1**（`fatal: pathspec ':(prefix:0)a' did not match any files`）。作業ツリーは `R  a -> a2` のまま —— 同じ変更が 2 箇所に残る |
+| 同上 | `-u -- a` | exit 1（`pathspec … did not match`）。stash は作られない |
+| `a` が `UU`（`stash pop` のコンフリクト）| `-u -- a`、`-u -- b`、パス無し | **どれも exit 1**、stdout に `a: needs merge`、stderr に `error: could not write index` |
+| `a` を staged、`b` を unstaged で変更 | `-u -- b` | exit 0。**stash には `M a` も入る**（下） |
+
+- **rename は 1 ファイルでは退避させない**（2026-09-30 にユーザーと決めた）。どう渡しても
+  中途半端になる（上の 3 行）。ワークツリー上の rename（`status` が対にした削除と
+  untracked）も同じ `FileStatus::Renamed` で断る
+- **unmerged のパスがあれば、全体でも部分でも断る**（2026-09-30 にユーザーと決めた）。
+  進行中操作の門（`progress::refusal`）は `stash pop` のコンフリクトを拾わない ——
+  あれは進行中操作ではない（continue が無い）。git の理由は stdout にしか出ず、
+  stderr の `could not write index` からは読めない
+- **部分 stash は index 全体を記録する**（git の仕様）。ほかに staged のファイルがあると、
+  それも stash の中身に入り（作業ツリーでは staged のまま残る）、後で `apply` すると
+  そのファイルの変更も戻る（上の表の最後の行を `reset --hard` してから `apply` すると
+  ` M a` / ` M b`）。**断らない** —— stash の diff（Stash ペインの `Enter`）には両方が
+  出るので、入ったものは見える
+
 ## ハンクからパッチを組む
 
 `GitOp` の `patch` を作るのも純粋関数。`git_read` が持つ 1 つの `Hunk`（02 の

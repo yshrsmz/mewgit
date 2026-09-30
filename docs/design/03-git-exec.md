@@ -93,7 +93,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `Fetch { remote, prune }` | `fetch [--prune] [<remote>]` |
 | `Pull { mode }` | `pull --no-rebase` / `--rebase` / `--ff-only` |
 | `Push { .. }` | `push [--force-with-lease=<dst\|src>:<lease>] [--set-upstream] <remote> <src>[:<dst>]` |
-| `RebaseInteractive { onto }` | `rebase --interactive <onto>` |
+| `RebaseInteractive { onto, plan }` | `rebase --interactive --no-update-refs <onto>`（`plan` は JSON にして stdin へ。下の「Interactive rebase の実装」） |
 | `RebaseContinue` / `Skip` / `Abort` | `rebase --continue` / `--skip` / `--abort` |
 | `CherryPick(oids)` | `cherry-pick <oids>` |
 | `CherryPickContinue` / `Skip` / `Abort` | `cherry-pick --continue` / `--skip` / `--abort` |
@@ -309,11 +309,12 @@ diff --git a/<path> b/<path>
 ## Runner
 
 ```rust
-pub struct Runner { repo_root: PathBuf, git_bin: PathBuf, env: Vec<(OsString, OsString)> }
+pub struct Runner { repo_root: PathBuf, git_bin: PathBuf, sequence_editor: OsString, commit_editor: OsString, env: Vec<(OsString, OsString)>, .. }
 
 impl Runner {
-    pub fn new(repo_root: impl Into<PathBuf>, git_bin: impl Into<PathBuf>) -> Self;
-    /// 実行時に重ねる環境変数。テストの隔離と、M5 のエディタ差し替えに使う。
+    pub fn new(repo_root: impl Into<PathBuf>, git_bin: impl Into<PathBuf>, ssh: SshCommand,
+               mewgit_bin: impl Into<PathBuf>) -> Self;
+    /// 実行時に重ねる環境変数。テストの隔離に使う。
     pub fn with_env(self, vars: ...) -> Self;
     pub async fn run(&self, op: &GitOp) -> Result<ExecOutput, ExecError>;
     /// 中断できる形（下の「キャンセル」）。
@@ -324,8 +325,8 @@ impl Runner {
 pub struct ExecOutput { pub argv: Vec<String>, pub stdout: String, pub stderr: String }
 
 pub enum ExecError {
-    /// git の終了状態を得られなかった。argv を組めなかった / Runner が拒否した /
-    /// 起動できなかった / 終了を待てなかった。
+    /// git の終了状態を得られなかった。argv を組めなかった / 起動できなかった /
+    /// 終了を待てなかった。
     NoResult { argv: Vec<String>, reason: String },
     /// ユーザーが中断した（下の「キャンセル」）。
     Canceled { argv: Vec<String> },
@@ -337,12 +338,16 @@ pub enum ExecError {
 - argv と stdin の組み立ては純粋関数 `to_commands()`（「argv への変換」）
 - `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
   引数にしているのは、設定を読んだのに渡し忘れる経路を作らないため
+- `mewgit_bin` は interactive rebase の sequence editor として起こす自バイナリ
+  （`std::env::current_exe()`。下の「Interactive rebase の実装」）。`git_bin` と同じ理由で
+  引数にする。core は自分がどのバイナリに入っているかを知らない。`new` が引用して
+  `GIT_SEQUENCE_EDITOR` と `GIT_EDITOR` の値に組んでおく
 - **`ExecError` を割るのは、失敗の種類で埋まるフィールドが違うため。** 1 つの
   struct にすると「起動していないときは `code` が `None`、`stderr` に git ではない文言、
   `kind` は分類表に載らない値」という約束を、読む側が毎回思い出すことになる。
   `Canceled` も同じ理由で 3 つ目にした（中断した git の `code` と `stderr` は
   signal の言い換えでしかない）
-- 環境変数: `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`（エラー文の検出を安定させる）、`GIT_EDITOR=true`（意図しないエディタ起動を防ぐ）。`with_env` の指定はこの後に重ねるので、テストは上書きできる
+- 環境変数: `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`（エラー文の検出を安定させる）、`GIT_EDITOR='<mewgit_bin>' --commit-editor` と `GIT_SEQUENCE_EDITOR='<mewgit_bin>' --sequence-editor`（端末のエディタを起こさない）、`GIT_CONFIG_*` で `core.commentString=#mewgit#`（**3 つともどのコマンドにも載せる**。下の「Interactive rebase の実装」）。`with_env` の指定はこの後に重ねるので、テストは上書きできる
 - **`GIT_TERMINAL_PROMPT=0` では ssh のパスフレーズ入力を止められない。** `ssh` は
   stdin ではなく `/dev/tty` を直接読むので、agent に載っていない鍵だと止まる
   （タイムアウトは設けない方針。抜けるのは下の「キャンセル」）。**画面は壊れない** ——
@@ -456,15 +461,13 @@ GIT_SSH_COMMAND = "<実効> -o BatchMode=yes"
   **`resolve_ssh_host` をその実効値に向けるのは M4。** いまは呼び出す経路が無く
   （`RepoInfo.target` を埋めるのが M4）、実効値はシェル文字列なので `sh -c` 経由の
   起動に変える必要がある。踏めない腕を先に入れない（04 の「SSH エイリアスの正規化」）
-- stdin は閉じる。例外はハンクの 3 操作（`StageHunk` / `UnstageHunk` / `DiscardHunk`）
-  だけで、どれも `git apply … -` に patch を stdin で渡す
+- stdin は閉じる。例外はハンクの 3 操作（`StageHunk` / `UnstageHunk` / `DiscardHunk`）と
+  `RebaseInteractive`。前者は `git apply … -` に patch を、後者は plan の JSON を渡す
+  （git は読まず、起こした sequence editor が継ぐ）
 - stdout / stderr は表示専用なので lossy で `String` にする
 - タイムアウトは設けない（fetch の長さは予測不能）。代わりに UI から中断できるようにする
   （下の「キャンセル」）
-- **`RebaseInteractive` は `Runner` が実行せずに拒否する**（M5 まで）。todo を差し替えずに `git rebase -i` を走らせると、`GIT_EDITOR=true` により全 `pick` の rebase が実行され、`plan` を黙って捨てた破壊的操作になる。M5 で `--sequence-editor` を配線したら外す
-
-終了状態を得られない経路は 4 つ（`to_commands` の失敗、`RebaseInteractive` の拒否、
-起動の失敗、終了待ちの失敗）。どれも `ExecError::NoResult` で返し、`reason` には git の
+終了状態を得られない経路は 3 つ（`to_commands` の失敗、起動の失敗、終了待ちの失敗）。どれも `ExecError::NoResult` で返し、`reason` には git の
 stderr ではなく mewgit の説明文を入れる。**中断はここに入れない** —— 終了状態は
 得られており（signal で落ちた）、区別したいのは「失敗か、止めたか」だから
 （`ExecError::Canceled`。上の「キャンセル」）。
@@ -541,16 +544,111 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 
 ## Interactive rebase の実装
 
-`git rebase -i` は todo ファイルをエディタで開く。これを自前スクリプトで置き換える。
+`git rebase -i` は todo ファイルをエディタで開く。これを自バイナリで置き換える。
 
-1. UI で `RebasePlan { entries: Vec<(Action, Oid, summary)> }` を作る
-2. todo ファイルの内容を `plan.to_todo()` で生成し、一時ファイル `T` に書く
-3. `GIT_SEQUENCE_EDITOR="cp T"` 相当のスクリプトを渡して `git rebase -i <onto>` を実行
-   - 実際には `sh -c 'cat "$1" > "$2"'` 形式のヘルパーではなく、自バイナリを `--sequence-editor <T>` サブコマンド付きで指定する（外部依存ゼロ）
-4. `reword` は `GIT_EDITOR` にも自バイナリを指定し、あらかじめ集めたメッセージを書き込む
-5. 停止したら、書き込みのあとの `LoadStatus` が運ぶ進行中操作（`WorktreeSnapshot.progress`）がバッジに出て、`m` のメニューから continue / skip / abort を打つ（01 の「進行中操作のメニュー（`m`）」。専用のモードは持たない）
+```rust
+pub struct RebasePlan { pub entries: Vec<RebaseEntry> }
+pub struct RebaseEntry { pub action: RebaseAction, pub oid: Oid, pub summary: String }
+pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, Drop }
+```
 
-自バイナリをエディタとして使う場合、`mewgit --sequence-editor <path>` / `mewgit --commit-editor <path>` の隠しサブコマンドを用意する。
+1. UI で `RebasePlan` を作る（07 の「RebaseEditor」）
+2. `to_commands` が `plan.validate()` を通し、plan を JSON にして stdin に載せる。通らない
+   plan は `ArgvError` で、git を起こさない
+3. `Runner` はいつもどおり `git rebase --interactive --no-update-refs <onto>` を起こす。
+   **`Runner` は変種を見ない** —— `GIT_SEQUENCE_EDITOR='<自バイナリ>' --sequence-editor` と
+   `GIT_EDITOR='<自バイナリ>' --commit-editor` はどのコマンドにも載っている
+4. git は todo のパスを末尾に足してシェル経由で sequence editor を起こし、**自分の stdin を
+   そのまま継がせる**（下の表）。`--sequence-editor` は stdin から plan を読んで todo を
+   書き、reword のメッセージを todo と同じ `rebase-merge/` に `mewgit-reword-<Oid>` として
+   置く
+5. git は reword の行ごとに `<gitdir>/COMMIT_EDITMSG` を渡して `GIT_EDITOR` を起こす。
+   `--commit-editor` は `<gitdir>/rebase-merge/done` の最終行（`reword <Oid> …`）から
+   Oid を引き、置いてあるメッセージを書き込む
+6. 停止したら、書き込みのあとの `LoadStatus` が運ぶ進行中操作（`WorktreeSnapshot.progress`）がバッジに出て、`m` のメニューから continue / skip / abort を打つ（01 の「進行中操作のメニュー（`m`）」。専用のモードは持たない）
+
+決めたことと理由:
+
+- **2 つのエディタはどのコマンドにも載せる。** `RebaseInteractive` のときだけ重ねると、
+  **止まった rebase を `m` の continue で再開したときに `GIT_EDITOR` が届かず**、止まった
+  reword も停止点より後ろの reword も元のメッセージのまま通る（continue は別の `GitOp`）。
+  - `--commit-editor` は reword 以外で起こされたら何もしない（squash、revert / cherry-pick
+    の continue、端末で始めた rebase の reword）。以前の `GIT_EDITOR=true` と同じ振る舞い
+  - `--sequence-editor` を起こすのは `RebaseInteractive` だけで（`pull` はモードを argv で
+    必ず渡すので、`pull.rebase=interactive` でも起きない。下の表）、ほかで起きたら stdin に
+    plan が無いので非 0 で断る。**載せないと既定の todo を黙って採る**ので、閉じた側に
+    倒れるほうを取った
+  - `RebaseInteractive` のときだけ `Runner` が重ねる形（最初の実装）は、`to_commands` と
+    `Runner` の 2 箇所が「git に何を渡すか」を決めることになり、一時ファイルとその寿命の
+    管理も `Runner` に要った（`/simplify` の指摘で改めた）
+- **reword は git 自身の `reword` のまま書く。`pick` + `exec git commit --amend -F` の
+  2 行にしない。** 一度その形で実装したが、`exec` は直前の pick がどうなったかを見ずに
+  HEAD を amend するので、**止まった reword の pick を skip すると別のコミットの
+  メッセージを書き換える**（1 本前の pick、先頭なら `onto` の先端。下の表）。todo に
+  `git` と直書きするので `general.git_bin` も効かない（どちらも `/code-review` が拾った）
+- **`core.commentString` を `#mewgit#` にする。** reword のメッセージは `--commit-editor`
+  が書くので、git はエディタの出力として cleanup にかけ、コメント文字で始まる行を消す
+  —— `#123 is closed` の行が黙って消え、`#42` だけのメッセージは空として断られ rebase が
+  止まる（`/code-review` が拾った。下の表）。`--cleanup` は reword に効かない。git 自身が
+  書くコメント（squash の `# This is a combination…`）も同じ印で書かれて消えるので、
+  揃ったまま `#` だけが本文に残る。**continue にも要る**のでエディタと同じくどのコマンドにも
+  載せ、argv の `-c` ではなく `GIT_CONFIG_COUNT` / `KEY_n` / `VALUE_n` で渡す（`L` の履歴と
+  argv の表に毎回載せない）。ユーザーが `GIT_CONFIG_COUNT` を使っていれば後ろに足す。
+  **`core.commentString` を読むのは git 2.45 以降**（リリースノートより。手元は 2.55 だけで
+  測った）で、それより古い git は未知のキーを黙って無視するので `#` の行が消える形に
+  戻るはず。**確かめていない**（mewgit はまだ git の最低版を決めていない。M6）
+- **エディタが自バイナリになったので、起動中に mewgit のバイナリが消えると、エディタを
+  起こす git（revert / cherry-pick の continue など）が落ちる**はず（以前の `true` では
+  起きない）。パッケージの更新で起きうるが、**確かめていない**
+- **plan は一時ファイルではなく stdin で渡す。** git が editor に stdin を継がせる（下の表）
+  ので、ハンクの patch と同じ経路に乗る。`tempfile` を本依存に上げずに済み、後始末も無い
+- **メッセージのファイルは `rebase-merge/` の中に置き、Oid で引く。** 完了でも abort でも
+  git がディレクトリごと消すので、mewgit が後始末を持たない。commit editor が知って
+  いるのは渡された `COMMIT_EDITMSG` のパスと `done` の最終行だけなので、置き場は
+  その隣（linked worktree でも `COMMIT_EDITMSG` と `rebase-merge/` は同じ gitdir に並ぶ。
+  下の表）、鍵は Oid になる。**`GIT_DIR` は editor に渡らない**（下の表）
+- **hook が reword を断ったあとの continue では、新しいメッセージが消える。** git は
+  continue でエディタを起こし直さず、元のメッセージのまま進む（下の表）。git 自身の
+  挙動で、reword の渡し方を変えても塞がらない。塞ぐ手は `docs/plan.md` の M6
+- **squash のメッセージは git が連結したものを使う。** `--commit-editor` は squash では
+  何もしないので、squash した 2 本のメッセージを空行でつないだものがそのまま入る
+  （下の表）。書き換えたいなら、あとから reword する。**`RebaseEntry` はメッセージを
+  持たない** —— 持つのは `Reword` だけで、値の無い reword は型として作れない
+  （`Option` にすると `Pick` に値がある形も作れてしまう）
+- **`--no-update-refs` を必ず付ける。** `rebase.updateRefs=true` だと git は既定の todo に
+  `update-ref refs/heads/<b>` の行を入れる（実測）。mewgit は todo を丸ごと書き換える
+  ので、付けないとユーザーの設定が黙って効かなくなる。効かないことを argv に書いて
+  おくほうが、`L` の履歴から読める
+- **todo は完全な Oid で書く。** 既定の todo は短縮形だが、git は完全形も受ける。
+  短縮形は mewgit が組んだ時点と git が読む時点で一意性が変わりうる
+- **`validate` が断るもの**: 空の plan、最初の `drop` 以外の行が `squash` / `fixup`
+  （git が `cannot 'squash' without a previous commit` で断る）、空白だけの reword の
+  メッセージ（git が空のメッセージとしてコミットを断り、rebase が途中で止まる）。
+  **全部 `drop` は断らない** —— git は通して、ブランチが `onto` まで戻る。確認を
+  挟むのは UI（07）
+
+実測（git 2.55.0、`LC_ALL=C` の一時リポジトリ、2026-09-30。`GIT_EDITOR` は断りが無ければ
+`true`）:
+
+| 形 | 結果 |
+|---|---|
+| `GIT_SEQUENCE_EDITOR="sh 'dump.sh' extra"`、`-c sequence.editor=false` | 環境変数が勝つ。argv は `extra <gitdir>/rebase-merge/git-rebase-todo`（**シェル経由で、todo のパスが末尾に付く**） |
+| `printf 'drop A\npick B\n' \| GIT_SEQUENCE_EDITOR="sh -c 'cat > \"\$1\"' -" git rebase -i HEAD~2` | exit 0、A が落ちる（**git の stdin が editor に継がれる**） |
+| `GIT_SEQUENCE_EDITOR=<呼ばれたら印を残す>`、`-c pull.rebase=interactive` で `pull --rebase` / `--no-rebase` / `--ff-only` / 素の `pull` | 起こされるのは**素の `pull` だけ**（mewgit はモードを必ず argv で渡す） |
+| sequence editor の環境 | `GIT_EXEC_PATH` / `GIT_PREFIX` / `GIT_SEQUENCE_EDITOR` と呼び出し側の `GIT_*` だけ。**`GIT_DIR` は無い** |
+| sequence editor が非 0 | exit 1、stderr `error: there was a problem with the editor '<editor>'`。HEAD は動かず `rebase-merge/` も残らない |
+| todo が空 | exit 1、stderr `error: nothing to do` |
+| todo が全部 `drop` | exit 0、`Successfully rebased`。ブランチは `onto` まで戻る |
+| `reword A <件名>` を `GIT_EDITOR` に印を残すスクリプトを置いて流す（linked worktree） | `<gitdir>/worktrees/<名前>/COMMIT_EDITMSG` を渡して起こされ、**`rebase-merge/` はその隣**。`done` の最終行は `reword <完全な Oid> <件名>` |
+| `reword A` / `pick B`、A がコンフリクト → 解消して continue（`GIT_EDITOR` は印を読んで書き込むスクリプト） | continue で A のエディタが起こされ、新しいメッセージが入る |
+| `pick A` / `reword B`、A がコンフリクト → 解消して continue（同上） | B に新しいメッセージが入る。**continue を `GIT_EDITOR=true` で打つと元のメッセージのまま** |
+| `reword A` / `pick B`、A がコンフリクト → `rebase --skip` | A が落ち、`onto` の先端はそのまま |
+| `pick A` / `exec git commit --amend -m NEW` / `pick B`、A がコンフリクト → `rebase --skip` | **exec が `onto` の先端を amend する**（先端の件名が NEW に化ける）。採らなかった形 |
+| commit-msg hook が reword を断る → hook を外して continue | 止まった時点で pick は**元のメッセージでコミット済み**（`rebase-merge/amend` が立ち、`git status` は `editing a commit`）。continue は exit 0 だが**エディタは起こされず**、元のメッセージのまま進む。continue の前に `commit --amend -F <mewgit-reword-<Oid>>` を通すと新しいメッセージが入る |
+| `rebase-merge/` に自分のファイルを置いたまま完了 / `rebase --abort` | どちらも `rebase-merge/` ごと消える |
+| `pick A` / `squash B`（`GIT_EDITOR=true`） | メッセージは `A の件名` + 空行 + `B の件名` |
+| reword のメッセージ `Fix bug` + 空行 + `#123 is closed`（`--commit-editor`） | `#123` の行が消える。`-c core.commentString=#mewgit#` を付けると残り、同じ rebase の squash のメッセージにもコメントの行は残らない |
+| `GIT_CONFIG_COUNT=2`（0 番はユーザーの設定、1 番が `core.commentString`）、reword 2 本の 1 本目がコンフリクト → 解消して continue | 2 本とも `#` の行が残る（`#42 only` だけのメッセージも通る）。0 番の設定も効いたまま |
 
 ## 進行中操作との整合
 
@@ -622,9 +720,11 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 ### continue / skip / abort の終わり方
 
 **結果は 3 通り**（`.claude/rules/rust-coding.md` の「二値だった結果に 3 つ目を足したら」）。
-`Runner` と同じ `GIT_EDITOR=true LC_ALL=C` で、一時リポジトリを作り直して叩いた
-（git 2.55.0、2026-09-27）。**`GIT_EDITOR=true` なので、continue がコミットメッセージの
-エディタで止まることは無い**（解消したコミットは元のメッセージのまま積まれる）。
+当時の `Runner` と同じ `GIT_EDITOR=true LC_ALL=C` で、一時リポジトリを作り直して叩いた
+（git 2.55.0、2026-09-27）。**エディタで止まることは無い**（解消したコミットは元の
+メッセージのまま積まれる）。いまの `GIT_EDITOR`（`--commit-editor`）も mewgit が始めた
+rebase の reword 以外では何もしないので、同じ結果になる（下の「Interactive rebase の
+実装」）。
 
 | 操作 | exit | stdout / stderr | 分類 |
 |---|---|---|---|

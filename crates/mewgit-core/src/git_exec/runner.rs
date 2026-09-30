@@ -9,17 +9,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot::{self, error::TryRecvError};
 
+use super::rebase::sh_quote;
 use super::{to_commands, ExecError, ExecErrorKind, ExecOutput, GitCommand, GitOp};
 use crate::auth::ssh::SshCommand;
-
-/// `RebaseInteractive` を拒否する理由。
-///
-/// todo を差し替えずに `git rebase -i` を走らせると、`GIT_EDITOR=true` によって
-/// todo がそのまま採用され、全 `pick` の rebase が実行される。`plan` を黙って
-/// 捨てた破壊的操作になるので、配線が済む M5 まで起動しない。
-const REBASE_INTERACTIVE_UNSUPPORTED: &str =
-    "interactive rebase はまだ実装していません（M5）。plan を渡す経路が無いまま実行すると、\
-     指定した todo を無視した rebase になります";
 
 /// ssh がパスフレーズを訊きに `/dev/tty` を掴むのを止めるオプション。
 ///
@@ -36,8 +28,22 @@ pub struct Runner {
     /// 引く。絶対パスも書ける）から渡す。引数にしているのは、設定を読んだのに
     /// 渡し忘れる経路を作らないため。
     git_bin: PathBuf,
-    /// 実行時に重ねる環境変数。テストの隔離と、M5 の `GIT_SEQUENCE_EDITOR` /
-    /// `GIT_EDITOR` の差し替えに使う。
+    /// `GIT_SEQUENCE_EDITOR` に入れる値。自バイナリを引用して `--sequence-editor` を
+    /// 足したもの（03 の「Interactive rebase の実装」）。
+    ///
+    /// **`RebaseInteractive` に限らず、どのコマンドにも載せる。** mewgit の書き込みで
+    /// sequence editor を起こすのはあれだけで（`pull` はモードを必ず argv で渡すので
+    /// `pull.rebase=interactive` でも起きない。03 の実測）、ほかで起きたら plan が無い
+    /// ので editor が非 0 で断る —— 既定の todo を黙って採るより閉じた側に倒れる。
+    sequence_editor: OsString,
+    /// `GIT_EDITOR` に入れる値。自バイナリに `--commit-editor` を足したもの。
+    ///
+    /// **これもどのコマンドにも載せる。** 止まった reword を `m` から continue した
+    /// ときにも git はこれを起こすので、`RebaseInteractive` だけに載せると停止点より
+    /// 後ろの reword が元のメッセージのまま通る（03 の実測）。reword 以外で起こされた
+    /// ときは何もしない（`GIT_EDITOR=true` と同じ）。
+    commit_editor: OsString,
+    /// 実行時に重ねる環境変数。テストの隔離に使う。
     env: Vec<(OsString, OsString)>,
     /// `GIT_SSH_COMMAND` に入れる値。**生の設定値ではなく、実効 ssh に
     /// [`BATCH_MODE`] を足したもの。** `None` は「触らない」（`GIT_SSH` の環境。
@@ -51,15 +57,19 @@ pub struct Runner {
 impl Runner {
     /// `ssh` は git が実際に使う ssh（`auth::ssh::effective_ssh_from_env`）。
     /// **`git_bin` と同じくコンストラクタの引数にしている**のは、決めたのに渡し忘れる
-    /// 経路を作らないため。
+    /// 経路を作らないため。`mewgit_bin` も同じ（`std::env::current_exe()`）。
     pub fn new(
         repo_root: impl Into<PathBuf>,
         git_bin: impl Into<PathBuf>,
         ssh: SshCommand,
+        mewgit_bin: impl Into<PathBuf>,
     ) -> Self {
+        let mewgit_bin = mewgit_bin.into();
         Self {
             repo_root: repo_root.into(),
             git_bin: git_bin.into(),
+            sequence_editor: editor(&mewgit_bin, "--sequence-editor"),
+            commit_editor: editor(&mewgit_bin, "--commit-editor"),
             env: Vec::new(),
             git_ssh_command: match ssh {
                 SshCommand::Shell(command) => Some(command + BATCH_MODE),
@@ -94,8 +104,7 @@ impl Runner {
 
     /// `git` を実行し、`cancel` が届いたらプロセスグループごと中断する。
     ///
-    /// `git` を起動しないまま失敗する経路が 2 つある（argv を組めなかったときと、
-    /// `RebaseInteractive`）。どちらも [`ExecError::NoResult`] で返す。
+    /// argv を組めなかったときは `git` を起動せずに [`ExecError::NoResult`] で返す。
     ///
     /// **中断は「殺して忘れる」ではなく、殺してから終了を待つ。** 待たずに future を
     /// 捨てると、`git` の後始末（lock ファイルの削除）が済む前に呼び出し側が次の
@@ -109,17 +118,6 @@ impl Runner {
             argv: Vec::new(),
             reason: err.to_string(),
         })?;
-
-        if matches!(op, GitOp::RebaseInteractive { .. }) {
-            return Err(ExecError::NoResult {
-                argv: commands
-                    .into_iter()
-                    .next()
-                    .map(|c| c.argv)
-                    .unwrap_or_default(),
-                reason: REBASE_INTERACTIVE_UNSUPPORTED.to_string(),
-            });
-        }
 
         // **列を先頭から順に叩き、非 0 で止まる**（03 の「複数の手順を持つ書き込み」）。
         // 1 本の変種では 1 周で抜けるので、ここまでの形と変わらない。
@@ -239,8 +237,13 @@ impl Runner {
             .env("GIT_TERMINAL_PROMPT", "0")
             // エラー文のパターン照合を安定させる。
             .env("LC_ALL", "C")
-            // 意図しないエディタ起動を防ぐ。
-            .env("GIT_EDITOR", "true")
+            // 端末のエディタを起こさない。どちらも自バイナリの隠しサブコマンドで、
+            // interactive rebase 以外では何もしないか断る（03）。
+            .env("GIT_EDITOR", &self.commit_editor)
+            .env("GIT_SEQUENCE_EDITOR", &self.sequence_editor)
+            .envs(comment_string_config(
+                std::env::var("GIT_CONFIG_COUNT").ok(),
+            ))
             .stdin(if command.stdin.is_some() {
                 Stdio::piped()
             } else {
@@ -269,6 +272,45 @@ impl Runner {
             reason: format!("{} を起動できませんでした: {err}", self.git_bin.display()),
         })
     }
+}
+
+/// reword のメッセージの行頭の `#` を、git にコメントとして読ませないための印。
+const COMMENT_STRING: &str = "#mewgit#";
+
+/// `core.commentString` を [`COMMENT_STRING`] にする `GIT_CONFIG_*`。
+///
+/// **reword のメッセージは `--commit-editor` が書くので、git はエディタの出力として
+/// cleanup にかけ、コメント文字で始まる行を消す** —— `#123 is closed` が黙って消え、
+/// `#42` だけのメッセージは空として断られる（`/code-review` が拾った。03 の実測）。
+/// git 自身が書くコメント（squash の `# This is a combination…` など）も同じ印で
+/// 書かれて消えるので、揃ったまま `#` だけが本文に残る。`--cleanup` は reword に
+/// 効かない。
+///
+/// **どのコマンドにも載せる。** エディタと同じで、止まった reword を continue したときも
+/// 要る。**`-c` を argv に足さない** —— `L` の履歴と argv の表に毎回ノイズが載る。
+/// ユーザーが `GIT_CONFIG_COUNT` を使っていれば、その後ろに足す（上書きしない）。
+fn comment_string_config(count: Option<String>) -> [(String, String); 3] {
+    let index = count.and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+    [
+        (
+            format!("GIT_CONFIG_KEY_{index}"),
+            "core.commentString".to_string(),
+        ),
+        (
+            format!("GIT_CONFIG_VALUE_{index}"),
+            COMMENT_STRING.to_string(),
+        ),
+        ("GIT_CONFIG_COUNT".to_string(), (index + 1).to_string()),
+    ]
+}
+
+/// `GIT_EDITOR` / `GIT_SEQUENCE_EDITOR` の値。git は `sh -c` で起こし、ファイルの
+/// パスを末尾に足す（03 の実測）。
+fn editor(mewgit_bin: &std::path::Path, subcommand: &str) -> OsString {
+    let mut editor = sh_quote(mewgit_bin.as_os_str());
+    editor.push(" ");
+    editor.push(subcommand);
+    editor
 }
 
 /// 中断の合図の受け側。**手順をまたいで 1 本を使い回す**（03 の「複数の手順を
@@ -416,6 +458,26 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_comment_string_is_appended_after_the_users_config() {
+        assert_eq!(
+            comment_string_config(None),
+            [
+                (
+                    "GIT_CONFIG_KEY_0".to_string(),
+                    "core.commentString".to_string()
+                ),
+                ("GIT_CONFIG_VALUE_0".to_string(), COMMENT_STRING.to_string()),
+                ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+            ]
+        );
+        // ユーザーの 0 番と 1 番を残して 2 番に足す。
+        assert_eq!(
+            comment_string_config(Some("2".into()))[0].0,
+            "GIT_CONFIG_KEY_2"
+        );
+    }
 
     #[test]
     fn classifies_by_pattern() {

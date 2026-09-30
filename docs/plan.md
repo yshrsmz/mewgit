@@ -321,8 +321,13 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       **検出表は実測で作り直した**（02）—— `-i` の有無は区別できない
       ので `Rebase.interactive` を消し、`git am`（同じ `rebase-apply/`）を `Am` に分け、
       `sequencer/` だけが残る形を拾う。バッジに止まった理由（`(edit)`）は出さない（07）
-- [ ] `--sequence-editor` / `--commit-editor` 隠しサブコマンド
-- [ ] `RebasePlan::to_todo` + テスト、`Modal::RebaseEditor`
+- [x] `--sequence-editor` / `--commit-editor` 隠しサブコマンドと `RebasePlan::to_todo` /
+      `validate`、`Runner` の `RebaseInteractive` の拒否を外す。**interactive rebase は 2 本に
+      割った**（2026-09-30）—— こちらは git に plan を渡す経路だけで、CLI で触れるものは
+      増えない。`Runner` とサブコマンドを別々に入れると、片方だけでは plan が git に届かず
+      確かめようが無いので 1 本にした。**2 つのエディタはどのコマンドにも載せる**（止まった
+      rebase を `m` から continue しても reword が効く。03 の「Interactive rebase の実装」）
+- [ ] `Modal::RebaseEditor` と Graph の `i`（07 の「RebaseEditor」）。上の経路に乗せる
 - [x] 進行中操作があるときの書き込み `GitOp` 拒否。**continue / abort より先に入れる**
       （2026-09-27 に順序を入れ替えた）。**断るのは HEAD か作業ツリー全体を動かすもの
       だけ**（03 の「進行中に通す書き込み」）
@@ -380,6 +385,29 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       （03 の「stash push のパス指定」に実測の表）
 
 ## M6: 仕上げ
+
+- [ ] **git の最低版を決める。** いまは書いていない。interactive rebase の reword は
+      `core.commentString`（git 2.45 以降）に頼っており、古い git では行頭の `#` が消える
+      形に黙って戻るはず（03 の「Interactive rebase の実装」。確かめていない）。
+      最低版を決めて、起動時に `git --version` を見て案内するか、古い版では reword の
+      メッセージの行頭の `#` を断るかを選ぶ
+
+- [ ] **起動中に mewgit のバイナリが消えたときのエディタ。** `GIT_EDITOR` /
+      `GIT_SEQUENCE_EDITOR` は `current_exe()` を指すので、パッケージの更新などで
+      バイナリが消えると、エディタを起こす git（revert / cherry-pick の continue など）が
+      落ちるはず（以前の `GIT_EDITOR=true` では起きない。03 の「Interactive rebase の
+      実装」）。**確かめていない** —— まず Linux と macOS で消えたバイナリを起こして
+      実際に落ちるかを叩き、落ちるなら起動時に同じパスが無いことを検知して案内するか、
+      エディタを起こすときに exe の有無を見て `true` 相当に倒すかを決める
+
+- [ ] **hook が reword を断ったあとの continue で、新しいメッセージが消える。** git は
+      continue でエディタを起こし直さず、元のメッセージでコミットする（git 自身の挙動。
+      03 の「Interactive rebase の実装」に実測）。止まった時点で pick は元のメッセージで
+      コミット済み（`rebase-merge/amend` が立ち、`git status` は「editing a commit」）で、
+      **`git commit --amend -F rebase-merge/mewgit-reword-<Oid>` のあと continue すれば
+      新しいメッセージが入る**（実測）。塞ぐには、`m` の continue の前にこの形
+      （`done` の最終行が reword、`amend` と `mewgit-reword-<Oid>` がある）を見分けて amend を
+      先に通す。hook がまた断ったときの案内もそこで決める
 
 - [ ] **stderr が空の git の失敗に理由を出す。** `ExecError::Failed` は stdout を
       運ばないので、stdout にだけ理由を書く失敗（`git commit` で stage したものが無い、

@@ -59,7 +59,7 @@ crates/
                 test_support.rs（`#[cfg(test)]`）
     graph/      lane.rs
     git_read/   repo.rs   log.rs  diff.rs  status.rs  thread.rs  progress.rs
-    git_exec/   argv.rs   runner.rs patch.rs  〔rebase.rs〕
+    git_exec/   argv.rs   runner.rs patch.rs  rebase.rs
     github/     client.rs wire.rs  account.rs
     auth/       gh.rs     resolve.rs probe.rs  ssh.rs  url.rs
     config/     mod.rs
@@ -71,7 +71,7 @@ crates/
               remote_picker.rs  account_picker.rs
 ```
 
-**〔〕はまだ無いファイル**（`rebase.rs` は M5）。**印を付けるのは、実在する行と
+**〔〕はまだ無いファイル**。**印を付けるのは、実在する行と
 混ざると木全体が信用できなくなるため** —— 「この構成に合わせて置く」の意味と
 「ここに在る」の意味が同じ字で書いてあると、読む側は確かめるまでどちらか判らない。
 

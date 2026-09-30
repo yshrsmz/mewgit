@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{GitOp, LocalBranch, PrCheckout, PrSource, PullMode};
+use super::{GitOp, LocalBranch, PrCheckout, PrSource, PullMode, RebasePlanError};
 use crate::git_read::{stash_ref as stash, Oid};
 
 /// `git` に渡す 1 回分の呼び出し。
@@ -35,6 +35,9 @@ pub enum ArgvError {
     /// pathspec が空。`--` だけを置くと「指定なし」= リポジトリ全体になる。
     #[error("パスの指定が空です: git {} -- は対象をリポジトリ全体に広げてしまいます", .argv.join(" "))]
     EmptyPathspec { argv: Vec<String> },
+    /// git に渡すと途中で止まるか断られる plan（03 の「Interactive rebase の実装」）。
+    #[error(transparent)]
+    InvalidRebasePlan(#[from] RebasePlanError),
 }
 
 /// [`GitOp`] を `git` の呼び出しの列に変換する。
@@ -195,10 +198,19 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
             };
             argv.extend([remote.clone(), refspec]);
         }
-        // `plan` は argv に載らない。todo の差し替えは M5（`Runner` はそれまで
-        // このオペを実行せずに拒否する）。
-        GitOp::RebaseInteractive { onto, plan: _ } => {
-            argv.extend(["rebase".into(), "--interactive".into(), onto.clone()]);
+        // `plan` は argv に載らない。JSON にして標準入力に流し、git から継いだ
+        // sequence editor が読む（03）。**`--no-update-refs` は todo を丸ごと書き換えるため** ——
+        // `rebase.updateRefs` が足す `update-ref` の行が黙って消えるより、効かないことを
+        // argv に書いておく。
+        GitOp::RebaseInteractive { onto, plan } => {
+            plan.validate()?;
+            argv.extend([
+                "rebase".into(),
+                "--interactive".into(),
+                "--no-update-refs".into(),
+                onto.clone(),
+            ]);
+            stdin = Some(serde_json::to_vec(plan).expect("文字列だけの値は必ず直列化できる"));
         }
         GitOp::RebaseContinue => argv.extend(["rebase".into(), "--continue".into()]),
         GitOp::RebaseSkip => argv.extend(["rebase".into(), "--skip".into()]),
@@ -697,11 +709,10 @@ mod tests {
                             action: RebaseAction::Pick,
                             oid: fake_oid(1),
                             summary: "c1".into(),
-                            message: None,
                         }],
                     },
                 },
-                vec!["rebase", "--interactive", "main"],
+                vec!["rebase", "--interactive", "--no-update-refs", "main"],
             ),
             (GitOp::RebaseContinue, vec!["rebase", "--continue"]),
             (GitOp::RebaseSkip, vec!["rebase", "--skip"]),
@@ -896,12 +907,15 @@ mod tests {
     }
 
     #[test]
-    fn only_hunk_ops_use_stdin() {
+    fn only_hunk_ops_and_the_rebase_plan_use_stdin() {
         for (op, _) in all_cases() {
             let commands = to_commands(&op).expect("argv を組めませんでした");
             let expects_stdin = matches!(
                 op,
-                GitOp::StageHunk { .. } | GitOp::UnstageHunk { .. } | GitOp::DiscardHunk { .. }
+                GitOp::StageHunk { .. }
+                    | GitOp::UnstageHunk { .. }
+                    | GitOp::DiscardHunk { .. }
+                    | GitOp::RebaseInteractive { .. }
             );
             for command in commands {
                 assert_eq!(command.stdin.is_some(), expects_stdin, "{op:?}");
@@ -952,6 +966,19 @@ mod tests {
                 "{op:?} -> {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_invalid_rebase_plan_is_refused_before_git_runs() {
+        // 空の todo は git が断るが、squash が先頭の todo は git が rebase を始めてから
+        // 止まる。どちらも argv を組む側で止める。
+        let err = to_command(&GitOp::RebaseInteractive {
+            onto: "main".into(),
+            plan: RebasePlan::default(),
+        })
+        .expect_err("空の plan は通ってはいけません");
+
+        assert_eq!(err, ArgvError::InvalidRebasePlan(RebasePlanError::Empty));
     }
 
     #[test]

@@ -76,6 +76,7 @@ use crate::auth::{
     GhLogin, LoginState, ProbeAttempt, RepoTarget,
 };
 use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Runner};
+use crate::git_exec::{RebaseAction, RebaseEntry};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
     LineOrigin, Oid, Remote, Signature, StashEntry, Timestamp, Upstream, WorktreeSnapshot,
@@ -252,8 +253,22 @@ impl TestRepo {
     ///
     /// **統合テストごとに書かない。** テストバイナリは別々にコンパイルされるので、
     /// 各 `tests/*.rs` に置くとファイルを足すたびにコピーが増える。
+    ///
+    /// 自バイナリは**存在しないパス**にしてある。core のテストからは `mewgit` の
+    /// バイナリを引けないので、interactive rebase は git が sequence editor の失敗で
+    /// 断る形になる。**`GIT_EDITOR` だけは `true` に戻す** —— revert / cherry-pick の
+    /// continue もエディタを起こすので、存在しないパスのままだとそちらが落ちる。
+    /// 通しで流すのは [`runner_with_mewgit`](Self::runner_with_mewgit)。
     pub fn runner(&self) -> Runner {
-        Runner::new(self.path(), "git", SshCommand::default()).with_env(self.runner_env())
+        self.runner_with_mewgit(self.path().join("mewgit-is-not-built-here"))
+            .with_env([("GIT_EDITOR", "true")])
+    }
+
+    /// sequence editor に `mewgit_bin` を置いた [`Runner`]。`mewgit` クレートの
+    /// 統合テストが `env!("CARGO_BIN_EXE_mewgit")` を渡す。
+    pub fn runner_with_mewgit(&self, mewgit_bin: impl Into<PathBuf>) -> Runner {
+        Runner::new(self.path(), "git", SshCommand::default(), mewgit_bin)
+            .with_env(self.runner_env())
     }
 
     /// `git` を実行し、成功したかどうかだけを返す。失敗しても panic しない。
@@ -858,6 +873,22 @@ pub fn fake_detail(index: u8, message: &str) -> CommitDetail {
         author_time: when,
         committer: fake_signature(),
         committer_time: when,
+    }
+}
+
+/// interactive rebase の 1 行。
+pub fn rebase_entry(action: RebaseAction, oid: Oid, summary: &str) -> RebaseEntry {
+    RebaseEntry {
+        action,
+        oid,
+        summary: summary.into(),
+    }
+}
+
+/// `message` に書き換える reword。
+pub fn reword(message: &str) -> RebaseAction {
+    RebaseAction::Reword {
+        message: message.into(),
     }
 }
 

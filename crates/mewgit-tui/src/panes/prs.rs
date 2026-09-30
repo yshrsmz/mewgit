@@ -792,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tab_header_names_both_tabs_and_only_one_when_github_is_off() {
+    fn the_tab_header_names_every_tab_and_drops_prs_when_github_is_off() {
         let state = with_list(vec![fake_pull_request(82, "feat/x", "headsha")]);
         let text = pane_text(&state, SIZE, Pane::Prs);
         assert!(text.contains("Branches"), "{text}");
@@ -804,6 +804,7 @@ mod tests {
         off.account = AccountState::Disabled;
         let text = draw(&off, SIZE).join("\n");
         assert!(text.contains("Branches"), "{text}");
+        assert!(text.contains("Stash"), "{text}");
         assert!(!text.contains("PRs"), "{text}");
     }
 
@@ -848,17 +849,16 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_tab_is_not_emphasised() {
-        // GitHub を切るとタブは 1 枚で、選ぶ相手が無い（07）。
+    fn with_github_off_the_tabs_left_are_still_told_apart() {
+        // GitHub を切っても `Stash` が残るので、タブは 2 枚で選ぶ相手がある（07）。
+        // **以前は 1 枚になって強調を外していた**（Stash のタブが入る前）。
         let mut off = state_at("/repo");
         off.account = AccountState::Disabled;
-        let modifiers = tab_modifiers(&off, "Branches");
-        assert!(
-            modifiers
-                .iter()
-                .all(|m| !m.intersects(Modifier::REVERSED | Modifier::DIM)),
-            "{modifiers:?}"
-        );
+        off.reseat_focus();
+
+        let reversed = |m: &Modifier| m.contains(Modifier::REVERSED);
+        assert!(tab_modifiers(&off, "Branches").iter().all(reversed));
+        assert!(tab_modifiers(&off, "Stash").iter().all(|m| !reversed(m)));
     }
 
     #[test]

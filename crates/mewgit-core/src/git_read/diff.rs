@@ -44,6 +44,7 @@ impl RepoReader {
                 self.repo
                     .diff_tree_to_tree(Some(&from), Some(&to), Some(&mut opts))?
             }
+            DiffTarget::Stash(oid) => self.stash_diff(*oid, &mut opts)?,
         };
 
         // `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの delta には効かない。
@@ -90,6 +91,37 @@ impl RepoReader {
         Ok(self
             .repo
             .diff_tree_to_tree(parent.as_ref(), Some(&tree), Some(opts))?)
+    }
+
+    /// stash コミットの中身。第一親との差に、第 3 親（untracked）のツリーを足したもの。
+    ///
+    /// stash コミットの親は「stash した時点の HEAD」「index」「untracked」の順で、
+    /// 3 つ目は `--include-untracked` を付けたときだけある（git 2.55 で確認）。
+    /// **untracked は空ツリーとの差として混ぜる**ので、種別は `Added` になる ——
+    /// 退避したあとの作業ツリーには無いファイルなので、`Untracked` と名乗らせると
+    /// 「いまある未追跡のファイル」と読める。
+    ///
+    /// **index 側（第 2 親）は出さない。** `git stash show` の既定と同じで、stage して
+    /// いたかどうかは apply の `--index` の話になる。
+    ///
+    /// `find_similar` は呼び出し側が混ぜたあとに 1 回だけ掛ける。混ぜる前に掛けると、
+    /// tracked の削除と untracked の追加が rename として対にならない。
+    fn stash_diff(&self, oid: Oid, opts: &mut DiffOptions) -> Result<git2::Diff<'_>, GitReadError> {
+        let stash = self.repo.find_commit(oid)?;
+        let base = stash.parent(0)?.tree()?;
+        let mut diff =
+            self.repo
+                .diff_tree_to_tree(Some(&base), Some(&stash.tree()?), Some(opts))?;
+        // **`parent(2)` の `Err` を「無い」と読まない。** 数で確かめてから引くので、
+        // 壊れたリポジトリで第 3 親が引けないときはそのまま失敗になる。
+        if stash.parent_count() > 2 {
+            let untracked = stash.parent(2)?.tree()?;
+            let untracked = self
+                .repo
+                .diff_tree_to_tree(None, Some(&untracked), Some(opts))?;
+            diff.merge(&untracked)?;
+        }
+        Ok(diff)
     }
 
     /// HEAD のツリー。コミットが 1 つも無ければ `None`（空ツリーと比べる）。

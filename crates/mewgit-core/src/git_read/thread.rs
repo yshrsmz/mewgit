@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, LogPage,
-    LogSession, Oid, RefIndex, Remote, RepoReader, WorktreeSnapshot,
+    LogSession, Oid, RefIndex, Remote, RepoReader, StashEntry, WorktreeSnapshot,
 };
 
 /// リーダースレッドへの窓口。
@@ -50,6 +50,7 @@ enum Request {
     },
     Refs(Reply<RefIndex>),
     Branches(Reply<Vec<Branch>>),
+    Stashes(Reply<Vec<StashEntry>>),
     Head(Reply<HeadInfo>),
     HeadMessage(Reply<Option<String>>),
     Remotes(Reply<Vec<Remote>>),
@@ -161,6 +162,11 @@ impl ReaderHandle {
         self.request(Request::Branches).await
     }
 
+    /// stash の一覧（02 の「stash 一覧」）。
+    pub async fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError> {
+        self.request(Request::Stashes).await
+    }
+
     /// HEAD の状態。
     pub async fn head(&self) -> Result<HeadInfo, GitReadError> {
         self.request(Request::Head).await
@@ -255,6 +261,9 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
             }
             Request::Branches(reply) => {
                 let _ = reply.send(reader.branches());
+            }
+            Request::Stashes(reply) => {
+                let _ = reply.send(reader.stashes());
             }
             Request::Head(reply) => {
                 let _ = reply.send(reader.head());

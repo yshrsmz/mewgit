@@ -606,3 +606,69 @@ fn commit_files_reports_a_missing_commit() {
     // `fake_oid` は実リポジトリの Oid と重ならない（`test_util`）。
     assert!(reader.commit_files(fake_oid(7)).is_err());
 }
+
+// --- stash の diff（02 の「stash の diff」）---------------------------------------
+
+#[test]
+fn a_stash_diff_shows_what_was_stashed_against_the_base() {
+    let repo = TestRepo::init();
+    repo.commit_file("a.txt", "a");
+    repo.write_worktree_file("a.txt", b"a2\n");
+    repo.git(&["stash", "push", "-q"]);
+    let stash = repo.rev_parse("stash@{0}");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::Stash(stash)).unwrap();
+
+    assert_eq!(files(&diff), [("a.txt", None, FileStatus::Modified)]);
+    assert_eq!(
+        lines(&diff[0].hunks[0]),
+        [
+            (LineOrigin::Deletion, "a".to_string()),
+            (LineOrigin::Addition, "a2".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_stash_diff_includes_the_untracked_files_as_added() {
+    // **untracked は第 3 親のツリーに入る**ので、第一親との差（`DiffTarget::Commit`
+    // と同じもの）では出ない（02）。
+    let repo = TestRepo::init();
+    repo.commit_file("a.txt", "a");
+    repo.write_worktree_file("a.txt", b"a2\n");
+    repo.write_worktree_file("new.txt", b"new\n");
+    repo.git(&["stash", "push", "-q", "--include-untracked"]);
+    let stash = repo.rev_parse("stash@{0}");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::Stash(stash)).unwrap();
+    let as_commit = reader
+        .diff(DiffTarget::Commit {
+            oid: stash,
+            path: None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        files(&diff),
+        [
+            ("a.txt", None, FileStatus::Modified),
+            ("new.txt", None, FileStatus::Added),
+        ]
+    );
+    assert_eq!(files(&as_commit), [("a.txt", None, FileStatus::Modified)]);
+    assert_eq!(
+        lines(&diff[1].hunks[0]),
+        [(LineOrigin::Addition, "new".to_string())]
+    );
+}
+
+#[test]
+fn a_stash_diff_reports_a_missing_stash() {
+    let repo = TestRepo::init();
+    repo.commit_file("a.txt", "a");
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert!(reader.diff(DiffTarget::Stash(fake_oid(7))).is_err());
+}

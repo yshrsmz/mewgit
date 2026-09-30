@@ -78,7 +78,7 @@ use crate::auth::{
 use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Runner};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
-    LineOrigin, Oid, Remote, Signature, Timestamp, Upstream, WorktreeSnapshot,
+    LineOrigin, Oid, Remote, Signature, StashEntry, Timestamp, Upstream, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PrStatus, PullRequest, RateLimit, RefSpec, RepoRef};
 use secrecy::SecretString;
@@ -717,6 +717,19 @@ pub fn fake_remote(name: &str) -> Remote {
         name: name.to_string(),
         url: format!("ssh://git@example.invalid/{name}.git"),
         head_branch: None,
+    }
+}
+
+/// `stash@{index}` の 1 件。メッセージは `stash <index>`。
+///
+/// **oid は [`fake_oid`] の 200 番台**で、コミット（`fake_commit` の小さい番号）と
+/// 重ならない。stash を oid で見分ける規則（Diff の出どころ、カーソルの座り直し）を
+/// 見張るので、index ごとに違う oid が要る。
+pub fn fake_stash(index: usize) -> StashEntry {
+    StashEntry {
+        index,
+        message: format!("stash {index}"),
+        oid: fake_oid(200 + index as u8),
     }
 }
 

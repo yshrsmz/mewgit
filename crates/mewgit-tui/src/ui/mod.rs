@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     } else {
         panes::graph::render(frame, left, state);
     }
-    // **右列の上は Branches と PRs のタブ。** 左の選択では入れ替わらないので、
+    // **右列の上は Branches / Stash / PRs のタブ。** 左の選択では入れ替わらないので、
     // 上を先に置いて残りを下のペインに渡す（07 の「レイアウト」）。
     // **組むのはここ 1 回**で、高さの決定と描画の両方に回す。
     let top_pane = panes::TopPane::build(state);
@@ -75,7 +75,7 @@ fn split_body(area: Rect) -> [Rect; 2] {
     Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area)
 }
 
-/// 右列を上のタブ（Branches / PRs）と、その下のペイン（Working tree / コミット詳細）に
+/// 右列を上のタブ（Branches / Stash / PRs）と、その下のペイン（Working tree / コミット詳細）に
 /// 割る。
 ///
 /// **割る位置を決めるのは上のペイン自身**（`panes::TopPane::height`）。組んだ行から
@@ -194,12 +194,11 @@ pub fn pane_area(pane: Pane, size: TermSize, state: &AppState) -> Rect {
     // 右列は上のタブとその下に割れている。割る位置も実際の関数から出す。
     let [top, below] = split_right(state, &panes::TopPane::build(state), right);
     match pane {
-        // **Branches と PRs も同じ領域を差し替えで使う**（07 の「右上のタブ」）。
-        Pane::Branches | Pane::Prs => top,
+        // **Branches / Stash / PRs も同じ領域を差し替えで使う**（07 の「右上のタブ」）。
+        Pane::Branches | Pane::Stash | Pane::Prs => top,
         Pane::Worktree | Pane::CommitDetail => below,
         // **Graph と Diff は同じ領域を差し替えで使う**（07）ので同じ Rect を返す。
-        // Stash はまだ描かないので、来たら左を返すだけ。
-        _ => left,
+        Pane::Graph | Pane::Diff => left,
     }
 }
 

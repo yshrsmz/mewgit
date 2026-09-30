@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use mewgit_core::app::{AppState, Pane, RightTab};
+use mewgit_core::app::{AppState, RightTab};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
@@ -17,12 +17,13 @@ pub mod commit;
 pub mod diff;
 pub mod graph;
 pub mod prs;
+pub mod stash;
 pub mod worktree;
 
 /// 右列の上に出すタブの中身。
 ///
-/// **2 枚で共有する。** `Branches` と `Prs` は同じ領域を差し替えで使い、枠も高さの
-/// 規則も同じなので、ペインごとに持つと片方だけ変えられる（`.claude/rules/rust-coding.md` の「2 つ目の
+/// **タブ全部で共有する。** `Branches` / `Stash` / `Prs` は同じ領域を差し替えで使い、枠も
+/// 高さの規則も同じなので、ペインごとに持つと 1 枚だけ変えられる（`.claude/rules/rust-coding.md` の「2 つ目の
 /// 利用者が出た時点で共有先を作る」）。各ペインが持つのは [`Rows`] を組む関数だけ。
 ///
 /// **組むのは 1 フレームに 1 回。** `ui::render` が組んだものを高さの決定
@@ -49,6 +50,7 @@ impl TopPane {
         let tab = state.right_tab;
         let rows = match tab {
             RightTab::Branches => branches::lines(state),
+            RightTab::Stash => stash::lines(state),
             RightTab::Prs => prs::lines(state),
         };
         TopPane { tab, rows }
@@ -79,8 +81,8 @@ impl TopPane {
 
     /// 描く。領域の高さは [`height`](Self::height) が決める。
     ///
-    /// **カーソル行の反転はここ 1 箇所。** `Branches` と `Prs` は同じ [`Rows`] を
-    /// 出すので、ペインごとに `theme::selected()` を当てると片方だけ落ちる
+    /// **カーソル行の反転はここ 1 箇所。** どのタブも同じ [`Rows`] を出すので、
+    /// ペインごとに `theme::selected()` を当てると 1 枚だけ落ちる
     /// （実際に落ちた —— PRs ペインを一覧に書き直したときに反転が消え、`j` / `k` を
     /// 押しても画面が変わらないまま `o` がカーソル行を開いていた）。
     pub fn render(self, frame: &mut Frame, area: Rect, state: &AppState) {
@@ -100,25 +102,35 @@ impl TopPane {
 
 /// 右列の上のタブ見出し（07 の「右上のタブ」）。
 ///
-/// **2 枚とも同じ関数が組む。** どちらのペインを描いていても見出しは同じものでなければ
-/// ならず、ペインごとに組むと片方だけ古くなる。
+/// **どのタブも同じ関数が組む。** どのペインを描いていても見出しは同じものでなければ
+/// ならず、ペインごとに組むと 1 枚だけ古くなる。
 ///
 /// **出す見出しは巡回候補から導く。** `Tab` で行けないペインの見出しを並べないため
 /// （07）。`config.github.enabled = false` のとき `Prs` が落ちるのはそちら
 /// （`AppState::focus_candidates`）の判断で、ここでは数え直さない —— 数え直すと
 /// 「出ている見出し」と「行ける先」が食い違っても何も落ちない。
 ///
-/// **`Stash` は入らない。** M5 のペインで、まだ候補に入っていない。
-///
-/// **タブが 1 枚なら強調しない**（選ぶ相手が無い。07）。ほかのペインと同じ素の見出し。
+/// **タブは常に 2 枚以上**（`Stash` は GitHub を切っても残る）ので、どれか 1 枚を
+/// 強調する。
 fn right_tabs(state: &AppState) -> Line<'static> {
-    if !state.focus_candidates().contains(&Pane::Prs) {
-        return Line::from(branches::title(state));
+    let mut spans = Vec::new();
+    // **並びも候補から導く**（`Pane` の宣言順）。見出しは網羅 `match` で引くので、
+    // タブを足せばここがコンパイルエラーになる。
+    let tabs = state
+        .focus_candidates()
+        .iter()
+        .filter_map(|&pane| RightTab::of(pane));
+    for right_tab in tabs {
+        let title: Cow<'static, str> = match right_tab {
+            RightTab::Branches => branches::title(state).into(),
+            RightTab::Stash => stash::title().into(),
+            RightTab::Prs => prs::title().into(),
+        };
+        if !spans.is_empty() {
+            spans.push(Span::styled("|", theme::muted()));
+        }
+        spans.extend(tab(state, right_tab, title));
     }
-    let mut spans = Vec::with_capacity(7);
-    spans.extend(tab(state, RightTab::Branches, branches::title(state)));
-    spans.push(Span::styled("|", theme::muted()));
-    spans.extend(tab(state, RightTab::Prs, prs::title()));
     Line::from(spans)
 }
 

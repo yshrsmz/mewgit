@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{GitOp, LocalBranch, PrCheckout, PrSource, PullMode};
-use crate::git_read::Oid;
+use crate::git_read::{stash_ref as stash, Oid};
 
 /// `git` に渡す 1 回分の呼び出し。
 ///
@@ -468,11 +468,6 @@ impl GitOp {
             GitOp::CheckoutPr(_) => "fetch",
         }
     }
-}
-
-/// `stash@{index}`。
-fn stash(index: usize) -> String {
-    format!("stash@{{{index}}}")
 }
 
 #[cfg(test)]

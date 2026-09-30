@@ -14,6 +14,7 @@ ratatui / crossterm には依存しない（不変ルール 6）。`ui` は下�
 | 「ワーキングツリー」「書き込みのあとの status」「失敗の記憶」 | `update/worktree.rs` |
 | 「diff の遅延取得」「diff のキャッシュと鮮度」 | `update/diff.rs` |
 | 「ブランチ一覧」 | `update/branches.rs` |
+| 「Stash ペイン」 | `update/stash.rs`（Diff に出す側は `update/diff.rs`、`s` / `u` / `x` の断りは `update/worktree.rs`） |
 | 「リモート操作」「既定リモート」「push の行き先」「force push」 | `update/remote.rs` |
 | 「`RepoInfo.target` を埋める」「アカウントの選び直し」（+ 04） | `update/account.rs` |
 | 「Pane と Modal」とその `###`（コミットメッセージの編集 / 1 行入力） | `update/modal.rs`（骨格）と、確定して何をするかは各モジュール |
@@ -35,7 +36,7 @@ pub struct AppState {
     pub worktree: WorktreeState,      // staged / unstaged / untracked と選択
     pub diff: DiffState,              // 表示中の diff と、その鮮度
     pub branches: BranchState,     // ローカルブランチの一覧と選択（下の「ブランチ一覧」）
-    pub stashes: Vec<StashEntry>,
+    pub stashes: StashState,          // stash の一覧と選択（下の「Stash ペイン」）
     pub prs: PrState,                 // 開いている PR の一覧・カーソル・API の残量（下の「PR ペイン」）
     pub focus: Pane,
     pub right_tab: RightTab,          // 右列の上に出すタブ（下の「右上のタブ」）
@@ -71,6 +72,7 @@ host / port / owner / repo は `RepoInfo.target: TargetState` に入れる（`Op
 pub struct DiffState {
     pub view: Option<DiffView>,     // 届いている diff。未読込 / 失敗のときは None
     pub failed: Option<DiffTarget>, // 直前に失敗した対象。同じ対象には出し直さない
+    pub source: DiffSource,         // Selection | Stash(Oid)。Enter で来た側（下の「Stash ペイン」）
 }
 
 pub struct DiffView {
@@ -85,10 +87,10 @@ pub struct DiffView {
 中に置くと印ごと消える。
 
 `Vec<Hunk>` に平坦化しない。`GitOp::StageHunk { path, patch }` に渡す `path` を
-復元できなくなるうえ、`DiffTarget` の `path` は全変種で `Option` なので複数ファイルに
-またがる diff を表せる形になっている。**いま `app` が出す対象はすべて `path` で 1 ファイルに
-絞ってある**（コミットの diff も一覧で選んだ 1 件。下の「diff の遅延取得」）ので、複数
-ファイルが届く経路は無い。`Range` や stash を出すときに戻ってくる。
+復元できなくなるうえ、`DiffTarget` は複数ファイルにまたがる diff を表せる形になって
+いる。**複数ファイルが届くのは stash の diff だけ**（`DiffTarget::Stash(oid)` は `path` を
+持たない。下の「Stash ペイン」）。ワーキングツリーと
+コミットの diff は一覧で選んだ 1 件に `path` で絞ってある（下の「diff の遅延取得」）。
 
 ## 通知
 
@@ -167,10 +169,10 @@ pub enum Modal {
 
 巡回に入れるのは実装済みで、**かついま画面に出ているペインだけ**（07）。一覧は定数では
 なく `AppState::focus_candidates()` が状態から返す。グラフが WIP 行を選んでいれば
-`[Graph, Branches, Prs, Worktree, Diff]`、コミットを選んでいれば
-`[Graph, Branches, Prs, CommitDetail, Diff]`（**WIP 側の `Diff` は下の条件で落ちる**）。
-並びは `Pane` の宣言順。**`Branches` と `Prs` はどちらにも入る**（右列の上に常に出て
-いて、左の選択で中身が変わらないため）。**`Prs` が落ちるのは
+`[Graph, Branches, Stash, Prs, Worktree, Diff]`、コミットを選んでいれば
+`[Graph, Branches, Stash, Prs, CommitDetail, Diff]`（**WIP 側の `Diff` は下の条件で落ちる**）。
+並びは `Pane` の宣言順。**`Branches` と `Stash` と `Prs` はどちらにも入る**（右列の上に
+常に出ていて、左の選択で中身が変わらないため）。**`Prs` が落ちるのは
 `config.github.enabled = false` のときだけ**で、`AccountState` では変えない
 （下の「右上のタブ」）。
 **`Diff` はどちらの一覧にも並ぶが、出る diff は違う**（ワーキングツリーのファイルか、
@@ -183,7 +185,10 @@ WIP 側は次の条件で落ちる。**
 （2 者の diff で表せない）は `Diff` を候補から外す。外さないと `Tab` で**グラフが空の
 Diff に差し替わり**、「実装済みで、かついま画面に出ているペインだけ」を `Diff` だけが
 破ることになる。**同じ判定を `Enter` の入口も見る**（`update::open_diff`）ので、
-入り方が 2 つあっても空のペインには入れない。
+入り方が 2 つあっても空のペインには入れない。**stash の diff を出しているあいだは
+絞らない**（`DiffState.source` が `Stash`。下の「Stash ペイン」）—— 出しているのは
+ワーキングツリーの行ではないので、変更の無いワーキングツリーで stash を開いた瞬間に
+座り直しが Graph へ戻してしまう。
 
 **見るのは区画ではなく行。** conflicted の行と変更のある行が並んでいると、`j` / `k` で
 候補が増減する。**それでよい** —— 出せるかどうかは行ごとに決まり、Worktree ペインが
@@ -213,13 +218,14 @@ WIP 行の側が Worktree ペインと**同じスナップショット**を読�
 経路ごとに書くと足し忘れが静かに通る。
 
 **`Graph` を選ぶのは「どちらの選択でも候補にある」からだけではない。** そちらの条件は
-`Branches` と `Prs` も満たす（落ちることがあるのは `Diff` だけ）が、どちらも右列の上に
+`Branches` / `Stash` / `Prs` も満たす（落ちることがあるのは `Diff` だけ）が、どちらも右列の上に
 あり、「グラフの行を選び直したら右の一覧に飛ぶ」という説明の付かない動きになる。
 座り直しはユーザーが選んでいない移動なので、いま見ている左の領域に戻す（07）。
 
 **同じ出口で `right_tab` も揃える**（下の「PR ペイン › 右上のタブ」）。`focus` が
-`Branches` か `Prs` に居るなら `right_tab` はそれと同じでなければならず、書く場所を
-2 つに割ると食い違った状態が残る。
+右列の上（`Branches` / `Stash` / `Prs`）に居るなら `right_tab` はそれと同じでなければ
+ならず、書く場所を 2 つに割ると食い違った状態が残る。**`DiffState.source` を戻すのも
+同じ出口**（Diff ペインを離れたら `Selection`。下の「Stash ペイン」）。
 
 **`Pane::Diff` は左の領域を `Graph` と差し替えで使う**ので、どちらを描くかは `focus`
 だけで決まり、「いまどちらを見せているか」を別に持たない（07）。**`Pane::CommitDetail`
@@ -996,7 +1002,7 @@ untracked の中身を出すようにしてあるので、これで新規ファ�
 pub struct BranchState {
     pub branches: Vec<Branch>,   // 名前順。02 の branches() の戻り値そのまま
     pub cursor: usize,
-    load: BranchLoad,            // Pending | Loaded | Failed
+    load: ListLoad,            // Pending | Loaded | Failed
 }
 ```
 
@@ -1018,6 +1024,94 @@ pub struct BranchState {
   同じ添字が別のブランチを指す。**読み直しは commit のたびに来る**ので
   （上の `update::Reload`）、カーソルを HEAD に戻すだけだと、別のブランチを見ながら
   commit した人のカーソルが毎回飛ぶ
+
+## Stash ペイン
+
+```rust
+pub struct StashState {
+    pub entries: Vec<StashEntry>,  // stash@{0} から順。02 の stashes() の戻り値そのまま
+    pub cursor: usize,
+    load: ListLoad,                // Pending | Loaded | Failed（BranchState と共有）
+}
+
+pub enum DiffSource { Selection, Stash(Oid) }  // DiffState.source
+
+pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_origin() が解く
+```
+
+右列の上の 3 枚目のタブ（`Branches | Stash | Prs`。07 の「右上のタブ」）。
+
+**3 本の PR に割った**（2026-09-30 にユーザーと決めた。`docs/plan.md` の M5）。
+(1) 一覧と `Enter` で開く diff、(2) push（全体）/ apply / pop / drop と、進行中操作の
+断りの数え直し、(3) 部分 stash（Worktree のカーソルの 1 ファイル）。**(1) を先に
+出すのは、書き込みが 1 つも無くても端末で作った stash を見られるから**（07 の
+「一覧と `Enter` の行き先は同じ PR にする」と同じ数え方で、一覧だけでは選ぶ先が無い
+ので diff まで入れる）。(2) と (3) を割るのは、部分 stash だけが「どのファイルを
+退避するか」を選ぶ入口（Worktree のキー）と `-u` の要否（下）を持ち込むから。
+
+- **一覧は `ListLoad` の 3 状態**（「ブランチ一覧」と同じ理由）。stash が 1 つも無い
+  のは正常で、「読み込み中…」と同じ見た目にしない。**2 つ目の利用者が出たので
+  `BranchLoad` を `ListLoad` に改名して共有した**
+- **読むのは起動時と、`Reload::RefsAndLog` の書き込みのあと。** **stash の書き込み
+  でなくても `refs/stash` は動く** —— `merge.autoStash` / `rebase.autoStash` を設定して
+  いると、mewgit の `p`（`pull --ff-only`）や `m` の rebase の continue が **exit 0 のまま
+  `stash@{0}: autostash` を積み、コンフリクトを残す**（実測、git 2.55.0。
+  `git -c merge.autoStash=true pull --ff-only` で `Created autostash` → exit 0 →
+  `stash list` に `autostash`、`status` に `UU f`）。git は「変更は stash にある」と
+  案内するので、一覧を読み直さないと退避された変更が再起動まで画面のどこにも出ない
+  （`/code-review` が拾った。最初の版は「`refs/stash` を動かすのは stash の書き込み
+  だけ」と書いて起動時しか読んでいなかった）。**autostash の起きうる op に絞らない**
+  —— 払うのは reflog 1 本の読み取りで、`RefsAndLog` はそれより重いログの読み直しを
+  既に払っている。**端末で作った stash は、次に `RefsAndLog` の書き込みをするか
+  再起動するまで出ない**（Branches で外のブランチ作成が出ないのと同じ。外部変更の
+  検知は M6）。stash の書き込み（(2)）のあとに読み直す配線は、そのとき `update::Reload`
+  に足す
+- **`JobKind::LoadStashes` の領域は `Region::Refs`。** 読むのは `refs/stash` の reflog で、
+  git が動かすのは ref。`RefsAndLog` は `Refs` を進めるので、読み込みの最中に pull が
+  終われば返りは捨てられて頼み直される。**いまの `Reload::Nothing`（stash の書き込み）は
+  `Refs` を進めない** —— (2) で stash の書き込みの `Reload` を決めるときに揃える（上の
+  「ログの読み直し」の `GitOp::moves_refs()` の段落が予告している嘘）
+- **`Cmd::LoadBranches` に乗せない。** 古くなる書き込みが違う —— `Reload::Refs` の
+  書き込み（switch、ブランチの作成 / 改名、非 force の push）は `refs/stash` を動かさない
+  （`switch` に autostash は無い）
+- **カーソルは選んでいた stash の oid で座り直す。** **index では座り直さない** ——
+  push は先頭に 1 つ足し、drop / pop は後ろを詰めるので、同じ index が別の stash を
+  指す（02 の「stash 一覧」に実測）。**選んでいたものが消えたら同じ位置に留まる**
+  （末尾を越えたら末尾）。消えた 1 つの次がそこへ詰めてくるので、続けて drop できる
+- **`Enter` は左に stash 全体の diff を出す**（2026-09-30 にユーザーと決めた）。
+  `DiffTarget::Stash(oid)` で、Diff ペインはファイルの見出しを挟んで
+  全ファイルを縦に並べる（07 の「Diff ペイン」）。**右下には出さない** —— 右下は
+  「グラフで選んでいるものの中身」で、Stash の選択では入れ替わらない（07 の
+  「レイアウト」）。Stash ペインの中でファイル一覧へ潜る形も比べたが、ペインに 2 段の
+  状態と `Esc` の戻り先がもう 1 つ増えるので採らなかった。**巨大な stash では全ハンクを
+  組む**（コミットで `path: None` を出さない理由と同じコストを払う）のは承知のうえ ——
+  stash は作業の途中を退避したもので、依存の更新のような巨大なコミットほど大きくならない
+- **untracked も出す**（2026-09-30 にユーザーと決めた。02 の「stash の diff」）。
+  出さないと、`-u` で退避したファイルが画面から消えて見える
+- **どこから来たかは `DiffState.source` が持つ**（`Selection | Stash(Oid)`）。グラフの
+  選択は Diff ペインに居るあいだも画面の状態として残るので導けるが、Stash ペインの
+  どの行から来たかは残らない。**oid で持つ**（index は指す相手が変わる）
+- **読む側は `DiffSource` を直に見ず、`AppState::diff_origin()` を網羅 `match` する。**
+  `DiffSource` とグラフの選択を `Worktree | Commit(oid) | Stash(oid)` の 3 値に解いたもの
+  で、読むのは出す diff（`wanted_diff`）・巡回の候補・Diff の `Esc` の戻り先・`s` / `u` /
+  `x` の可否。**各所で `DiffSource` とグラフの選択を 2 段で見る形にしない** —— 最初の
+  版はそうしていて、出どころを足したときにコンパイラが何も言わず、段の順序（stash を
+  先に見る）を 4 箇所で守ることになっていた（`/simplify` の altitude が拾った）。
+  **巡回の候補も同じ関数から出る** —— `wanted_diff` から `focus` の門を外した
+  `diff_candidate` を候補の判定が読むので、stash の diff を出しているあいだ `Diff` は
+  候補から外れない
+- **Diff ペインを離れたら `Selection` に戻す。** 離れる経路は `Esc` / `Tab` /
+  `Shift+Tab` / 座り直しと複数あるので、**`update` の出口の `reseat_focus` 1 箇所**で
+  戻す（`right_tab` と同じ出口）。残ると、`Tab` で Diff に入り直したときにグラフの
+  選択ではなく前に開いた stash の diff が出る
+- **stash の diff を出しているあいだ、WIP 側の `Diff` を候補から外さない**（上の
+  「Pane と Modal」。`diff_candidate` が `Some` を返すので外れない）。外すと、変更の無い
+  ワーキングツリーで `Enter` した瞬間に座り直しが Graph へ戻す
+- **stash の diff では `s` / `u` / `x` を断る**（「stash の差分は変更できません」）。
+  グラフの選択だけを見ると、WIP 行を選んだまま Stash から開いた diff では素通りし、
+  **stash のハンクを見ながらワーキングツリーの選択行を stage する**。見るのは
+  `diff_origin()` で、Diff ペインを離れれば `Worktree` か `Commit` に戻るので、Worktree
+  ペインの `s` はここで断られない
 
 ## PR ペイン
 
@@ -1043,8 +1137,8 @@ pub enum PrLoad { Pending, Loaded, Failed(GithubError) }
   一覧を引き直すのは ref を動かす書き込みのたびなので、この差は毎コミット効く
   （`BranchState::failed` の「捨てると画面から消えるだけになる」）
 - **旗を `bool` 2 つにしない。** 「まだ届いていないのに失敗した」が表現できてしまう
-  （`BranchLoad` と同じ理由）
-- **`Failed` だけ理由を持つ。** `BranchLoad` は値を持たないが、GitHub の失敗は
+  （`ListLoad` と同じ理由）
+- **`Failed` だけ理由を持つ。** `ListLoad` は値を持たないが、GitHub の失敗は
   401 / 403 / レート制限で**次に何をするかが違う**ので `GithubError` を運んで `ui` に
   出させる（07）
 - **鍵を持たない。** 一覧は「いまのリポジトリの open な PR 全部」で、**ブランチにも
@@ -1599,19 +1693,21 @@ remote-tracking ref だけでは、**`gh pr checkout` で取り出した fork �
 
 ### 右上のタブ
 
-`Branches` と `Prs` は**どちらも巡回候補**に入り、`focus` がそのどちらかに来たときだけ
+`Branches` / `Stash` / `Prs` は**どれも巡回候補**に入り、`focus` がそのどれかに来たときだけ
 `right_tab` が追随する。`focus` が左や下にあるあいだは、最後に見ていたタブが残る。
+並びは `Pane` の宣言順（`Branches | Stash | Prs`）。
 
 - **`focus` だけで決めない。** 左の領域（Graph / Diff）は `focus` で決める（07）が、
   右上で同じにすると**チェックの結果を見ながら `j` でグラフを辿った瞬間に消える**。
   07 が右下ペインについて「`focus` で決めると Graph にフォーカスした瞬間に右が消える」と
   断ったのと同じ形
-- **`right_tab` は `Pane` をそのまま持たない**（`enum RightTab { Branches, Prs }`）。
+- **`right_tab` は `Pane` をそのまま持たない**（`enum RightTab { Branches, Stash, Prs }`）。
   `Pane` で持つと、読む側が「ほかの値は来ない」という注釈付きの `_ =>` を置くことに
-  なり、**M5 で `Stash` が 3 枚目に入ったときにコンパイラが何も言わない**（`Branches`
-  が黙って描かれる）。写像は `RightTab::of(Pane)` の 1 本だけで、置くのは
+  なり、タブを足したときにコンパイラが何も言わない（`Branches` が黙って描かれる）。
+  **3 枚目の `Stash` を足したときは、読む側の網羅 `match` が全部コンパイルエラーに
+  なった**（予告どおり）。写像は `RightTab::of(Pane)` の 1 本だけで、置くのは
   `reseat_focus`。**注釈をコメントではなく型にする**
-- **書き込む場所は座り直しと同じ 1 箇所**（`update` の出口）。`focus ∈ {Branches, Prs}`
+- **書き込む場所は座り直しと同じ 1 箇所**（`update` の出口）。`focus ∈ {Branches, Stash, Prs}`
   なら `right_tab = focus` を必ず通すので、`focus` と食い違ったまま残らない
 - **タブの集合を非同期の状態に依らせない。** `Prs` が候補から落ちるのは
   `config.github.enabled = false` のときだけで、`AccountState` では変えない。変えると
@@ -2230,7 +2326,8 @@ pub struct PushRejection {
 書き込みの直後は status が届くまで古く、そこで持っている進行中操作を信じると、abort した
 直後の `Enter` を「rebase の途中です」で断る。逆向き（まだ `None` なのに実は始まっている）は
 git が自分で断る —— 03 の表で断らないのは stash だけで、stash は古い snapshot のあいだに
-押せるキーがまだ無い（M5 の Stash ペインで数え直す）。
+押せるキーがまだ無い（Stash ペインの書き込み —— 上の「Stash ペイン」の (2) —— で
+数え直す。一覧と diff だけの (1) には stash の書き込みのキーが無い）。
 
 **3 つ目の向き —— 外で終えたのに「鮮度あり・途中」のまま残る。** 世代を進めるのは mewgit の
 書き込みだけなので、端末で `git rebase --continue` / `--abort` しても snapshot は古く
@@ -2718,9 +2815,9 @@ pub fn init(state: &mut AppState) -> Cmd;
 ```
 
 `runtime::run` がループに入る前に 1 回呼ぶ。`main.rs` から呼ぶと、テストを書かない
-配線の側に処理が出てしまう。いまは `LoadRepoInfo` と
-`LoadLog { count: config.graph.page_size, restart: false }` と `LoadStatus` と
-`LoadBranches` の 4 つ。
+配線の側に処理が出てしまう。出すのは `LoadRepoInfo`、
+`LoadLog { count: config.graph.page_size, restart: false }`、`LoadStatus`、
+`LoadBranches`、`LoadStashes`。
 **`ResolveTarget` と `ResolveAccount` は `init` からは出さない** —— 前者はリモート
 一覧が要るので `Msg::RepoInfoLoaded` を、後者は `RepoTarget` が要るので
 `Msg::TargetResolved` を待ってから出す（上の「`RepoInfo.target` を埋める」）。起動時はまだ何も読んでいないので

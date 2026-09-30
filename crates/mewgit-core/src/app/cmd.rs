@@ -64,6 +64,13 @@ pub enum Cmd {
     /// `refs/heads/<現在>` を動かすので、ここを外すと Branches ペインが commit 前の
     /// ahead を出したまま残る。
     LoadBranches,
+    /// stash の一覧を読む（02 の「stash 一覧」、01 の「Stash ペイン」）。
+    ///
+    /// **[`Cmd::LoadBranches`] に乗せない。** 古くなる書き込みが違う —— `update::Reload`
+    /// の `Refs`（switch やブランチの作成）は `refs/stash` を動かさないが、`RefsAndLog`
+    /// の pull / rebase は autostash で動かしうる（01 の「Stash ペイン」）。出すのは
+    /// 起動時と `RefsAndLog` のあと。
+    LoadStashes,
     /// git CLI の実行（03 参照）。
     Exec(GitOp),
     /// 走っている [`Cmd::Exec`] を中断する（01 の「実行中ジョブのキャンセル」）。
@@ -208,6 +215,7 @@ impl Cmd {
             Cmd::LoadStatus => Some((JobKind::LoadStatus, "status")),
             Cmd::LoadRepoInfo => Some((JobKind::LoadRepoInfo, "repo")),
             Cmd::LoadBranches => Some((JobKind::LoadBranches, "branches")),
+            Cmd::LoadStashes => Some((JobKind::LoadStashes, "stashes")),
             Cmd::LoadDiff(_) => Some((JobKind::LoadDiff, "diff")),
             // **`Exec` だけは走らせる `GitOp` で説明が変わる**（`fetch` / `push`）。
             // `verb()` は `to_command` の `argv[0]` と同じ語を返す（03）。

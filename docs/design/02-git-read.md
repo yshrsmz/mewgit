@@ -33,7 +33,7 @@ impl RepoReader {
     pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;  // 同上（一覧だけ）
     pub fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
     pub fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
-    pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;
+    pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;  // 下の「stash 一覧」
 }
 ```
 
@@ -211,6 +211,61 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
 時点は同じ**なので、ref を動かす書き込みの後は両方を読み直す。**その配線は切替と削除の
 タスク**（01 の `update::Reload`。一覧を出すだけのタスクには ref を動かす書き込みが
 無いので、足しても踏めない）。
+
+### stash 一覧
+
+```rust
+pub struct StashEntry {
+    pub index: usize,   // stash@{index} の index
+    pub message: String, // "WIP on main: 6dd895c init" / "On main: <-m で付けたもの>"
+    pub oid: Oid,        // stash コミット
+}
+```
+
+Stash ペイン（01 の「Stash ペイン」）が使う。
+
+- **`refs/stash` の reflog を読む。** `git stash list` が辿るのと同じもの
+  （`git log --walk-reflogs refs/stash`）で、reflog の位置（新しい順）がそのまま
+  `stash@{index}` の index になる。**`git2::Repository::stash_foreach` は使わない** ——
+  git2 0.21 では `&mut self` を取り、読み取りを `&self` に揃えている `RepoReader` に
+  合わない
+- **stash が 1 つも無い（`refs/stash` が無い）ときは空の `Vec`**。libgit2 は reflog の
+  ファイルが無ければ空の reflog を返す。`Err` にすると、stash をしたことの無い
+  リポジトリで Stash ペインが毎回失敗になる
+- **メッセージは reflog の本文**。実測（git 2.55.0、2026-09-30）では、`-m` 無しが
+  `WIP on <branch>: <短縮 sha> <HEAD の summary>`、`-m` 付きが `On <branch>: <m>`。
+  **非 UTF-8 でも行ごと落とさない**（lossy にする）—— 落とすと後ろの index がずれ、
+  apply / drop が別の stash に当たる。表示にしか使わない文字列なので「非 UTF-8 の扱い」
+  の後者に入る
+- **drop / pop すると後ろが 1 つずつ詰まる**（`stash@{1}` を drop すると、それまでの
+  `stash@{2}` が `stash@{1}` になる。実測）。push は先頭に 1 つ足すので全部が 1 つ
+  ずれる。**index は読んだ時点のものでしかない**ので、上位は stash を oid で見分ける
+  （01 の「Stash ペイン」）
+
+### stash の diff
+
+`DiffTarget::Stash(oid)` は stash 1 件の中身（下の「diff とハンク」の対象の 1 つ）。
+**`path` を持たない** —— 絞る経路が無い（Stash ペインは全ファイルを 1 枚に並べる。
+01 の「Stash ペイン」）。持たせると、組む側が毎回 `None` を書き、読む側は「1 ファイルに
+絞る経路がある」と読む。
+
+- **stash コミットの親は「stash した時点の HEAD」「index」「untracked」の順**で、3 つ目は
+  `--include-untracked` を付けたときだけある（実測。`git rev-list --parents` で 3 つか
+  4 つ）。**中身は第一親との差に、第 3 親のツリーを空ツリーとの差として混ぜたもの**
+  （`Diff::merge`）
+- **`DiffTarget::Commit` で代用しない。** 第一親との差には untracked が出ない（実測。
+  `-u` で退避した `new.txt` が `git diff stash@{0}^1 stash@{0}` に出ず、
+  `git ls-tree stash@{0}^3` にだけある）。代用すると、mewgit で `-u` 付きで退避した
+  ファイルが画面から消えて見える。`git stash show` も既定では出さないが、あちらは
+  `--include-untracked` で出せる
+- **untracked の種別は `Added`**（空ツリーとの差なので）。`Untracked` と名乗らせると
+  「いまある未追跡のファイル」と読めるが、退避したあとの作業ツリーには無い
+- **index 側（第 2 親）は出さない。** `git stash show` の既定と同じで、stage していたか
+  どうかは apply の `--index` の話になる
+- **`find_similar` は混ぜたあとに 1 回だけ**（呼び出し側の `diff()` が掛ける）。混ぜる前に
+  掛けると、tracked の削除と untracked の追加が rename として対にならない
+- **第 3 親は数で確かめてから引く**（`parent_count() > 2`）。`parent(2)` の `Err` を
+  「無い」と読むと、壊れたリポジトリで引けなかったものが黙って落ちる
 
 ### 非 UTF-8 の扱い
 
@@ -422,6 +477,7 @@ pub enum DiffTarget {
     HeadVsIndex(Option<PathBuf>),
     Commit { oid: Oid, path: Option<PathBuf> },
     Range { from: Oid, to: Oid, path: Option<PathBuf> },
+    Stash(Oid),  // 上の「stash の diff」。path を持たない
 }
 
 impl DiffTarget {
@@ -629,6 +685,8 @@ impl ReaderHandle {
     pub async fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;
     pub async fn head_message(&self) -> Result<Option<String>, GitReadError>;
     pub async fn refs(&self) -> Result<RefIndex, GitReadError>;
+    pub async fn branches(&self) -> Result<Vec<Branch>, GitReadError>;
+    pub async fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;
     pub async fn head(&self) -> Result<HeadInfo, GitReadError>;
     pub async fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;
     pub async fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;

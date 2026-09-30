@@ -3,7 +3,9 @@
 
 use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Modal, Msg, Pane, RepoInfo, TermSize};
 use mewgit_core::config::Config;
-use mewgit_core::git_read::{Commit, FileEntry, GitReadError, LogPage, WorktreeSnapshot};
+use mewgit_core::git_read::{
+    Commit, FileEntry, GitReadError, LogPage, StashEntry, WorktreeSnapshot,
+};
 use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents, reply, FAKE_NOW};
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Position, Rect};
@@ -252,6 +254,30 @@ pub fn state_with_status(snapshot: WorktreeSnapshot) -> AppState {
         Msg::StatusLoaded(Box::new(Ok(snapshot))),
     );
     state
+}
+
+/// stash 一覧の返信を届ける。**発行してから届ける**（[`state_with_status`] と同じ理由）。
+pub fn with_stashes(state: &mut AppState, result: Result<Vec<StashEntry>, GitReadError>) {
+    let _ = reply(
+        state,
+        Cmd::LoadStashes,
+        Msg::StashesLoaded(Box::new(result)),
+    );
+}
+
+/// `pane` に届くまで `Tab` を押す。
+///
+/// **回数を書かない**（巡回の並びは選択と設定で変わる）。**届かなければ panic する**
+/// —— 上限の無いループにすると、候補から外れる変更が入ったときにテストが落ちずに
+/// 止まる（core の `test_support::tab_to` と同じ形）。
+pub fn tab_to(state: &mut AppState, pane: Pane) {
+    for _ in 0..state.focus_candidates().len() {
+        if state.focus == pane {
+            return;
+        }
+        let _ = update(state, Msg::Key(Key::new(KeyCode::Tab)));
+    }
+    assert_eq!(state.focus, pane, "{pane:?} に届きませんでした");
 }
 
 /// ワーキングツリーを読み、`Enter` で Diff ペインを開いた状態。

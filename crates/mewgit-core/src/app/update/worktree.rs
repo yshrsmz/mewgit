@@ -15,7 +15,7 @@ use super::diff::load_diff;
 use super::diff::open_diff;
 use super::{confirm, exec_busy, focus, multiline_edit_key, submit_exec};
 use crate::app::{
-    AppState, Cmd, GraphSelection, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
+    AppState, Cmd, DiffOrigin, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
 };
 
 /// ワーキングツリーペインのキー処理。
@@ -221,6 +221,9 @@ const CONFLICTED: &str = "コンフリクトしたファイルは操作できま
 /// コミットの diff で `s` / `u` / `x` を断る文言。
 pub(super) const COMMIT_DIFF: &str = "コミットの差分は変更できません";
 
+/// stash の diff で `s` / `u` / `x` を断る文言。
+pub(super) const STASH_DIFF: &str = "stash の差分は変更できません";
+
 /// 出している diff が最新でないときに断る文言。
 ///
 /// 「まだ届いていない」「読み込めなかった」「書き込みより前のもの」の 3 つに使う。
@@ -256,9 +259,9 @@ pub(super) fn act(state: &mut AppState, action: Action) -> Cmd {
     // ファイル**を stage する（07 の「Diff ペイン」）。`focus` の候補で
     // `Pane::Worktree` を外しているのと同じ事故を、`Pane::Diff` の側で防ぐ。
     //
-    // **見るのはグラフの選択で、`wanted_diff()` が `None` かどうかではない。**
-    // あちらの `None` は 2 つのことを指す — 「Diff ペインを見せていない」と
-    // 「コミットの一覧がまだ届いていない」。無いことを根拠にすると、**2 つ目で
+    // **見るのは出どころ（`AppState::diff_origin`）で、`wanted_diff()` が `None` か
+    // どうかではない。** あちらの `None` は 2 つのことを指す — 「Diff ペインを見せて
+    // いない」と「コミットの一覧がまだ届いていない」。無いことを根拠にすると、**2 つ目で
     // すり抜ける** —— コミットを選んだまま一覧を待っているあいだ、ワーキングツリーの
     // 選択行に `s` が効く。
     //
@@ -268,13 +271,20 @@ pub(super) fn act(state: &mut AppState, action: Action) -> Cmd {
     // conflicted の断りは Worktree ペインの側で出る
     // （[`a_conflicted_row_is_refused_with_a_notice`]）。
     //
-    // **`DiffTarget::Range` を Diff ペインに出すときはここを見直す**（stash や比較
-    // ビュー、M3 以降）。WIP 行を選んだまま stash の diff を出せるようになると、
-    // この判定だけでは足りない（そのハンクは worktree のファイルに当たらない）。
-    // いま出す経路が無いので、踏めない腕は先に入れない。
-    if !matches!(state.graph.selection(), GraphSelection::Wip) {
-        state.push_notice(NoticeLevel::Warn, COMMIT_DIFF.to_string(), None);
-        return Cmd::None;
+    // **stash の diff も断る**（01 の「Stash ペイン」）。WIP 行を選んだまま Stash
+    // ペインから Diff を開けるので、グラフの選択だけを見ると、stash のハンクを見ながら
+    // ワーキングツリーの選択行を stage することになる。出どころは Diff ペインを離れれば
+    // `Worktree` か `Commit` に戻るので、Worktree ペインの `s` がここで断られることは無い。
+    match state.diff_origin() {
+        DiffOrigin::Worktree => {}
+        DiffOrigin::Commit(_) => {
+            state.push_notice(NoticeLevel::Warn, COMMIT_DIFF.to_string(), None);
+            return Cmd::None;
+        }
+        DiffOrigin::Stash(_) => {
+            state.push_notice(NoticeLevel::Warn, STASH_DIFF.to_string(), None);
+            return Cmd::None;
+        }
     }
 
     let Some((section, status, paths)) = state

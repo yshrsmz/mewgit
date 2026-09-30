@@ -363,7 +363,18 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       `?` の一覧にだけ出す**（07 の「ステータスバー」「Help モーダル」）。一覧は開いたときの
       ペインのキーとどこでも効くキーの 2 段で、`m` / `Tab` / `Shift+Tab` / `Ctrl-C` も
       表に足した。モーダル自身の `HINT` は表に寄せない（07）
-- [ ] `ui::panes::stash` — 一覧 / diff / push / apply / pop / drop、部分 stash
+- [x] `ui::panes::stash` の一覧と、`Enter` で左に出す diff（untracked を含む）。
+      **stash のタスクは 3 本に割った**（2026-09-30 にユーザーと決めた。01 の「Stash
+      ペイン」）—— 一覧と diff だけで、端末で作った stash を見られる。右上のタブが
+      `Branches | Stash | PRs` になる。**読むのは起動時と `Reload::RefsAndLog` のあと**（autostash の `pull` / rebase でも積まれる。01）
+- [ ] stash の push（全体）/ apply / pop / drop。**`z` / `Z`（07 のキー表）と、apply /
+      drop のキーを決める**。drop は `Modal::Confirm`。**書き込みのあとに一覧を読み直す
+      `Reload` を決め、`Region::Refs` を進める**（いまの `Reload::Nothing` は `Refs` を
+      進めない。01 の「Stash ペイン」）。**進行中操作の断りを数え直す** —— 古い snapshot の
+      あいだに stash のキーが押せるようになる（01 の「進行中操作があるときの書き込み」）。
+      push のメッセージと `--include-untracked` の渡し方もここで決める
+- [ ] 部分 stash。**Worktree のカーソルの 1 ファイル**（2026-09-30 にユーザーと決めた）。
+      untracked のパスは `-u` が無いと `pathspec did not match` で落ちる（実測、git 2.55.0）
 
 ## M6: 仕上げ
 

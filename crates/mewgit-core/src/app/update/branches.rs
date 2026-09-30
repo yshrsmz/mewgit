@@ -188,7 +188,7 @@ mod tests {
         state_with_commits, type_text, with_branches,
     };
     use super::*;
-    use crate::app::BranchLoad;
+    use crate::app::ListLoad;
 
     use crate::test_util::fake_branch;
 
@@ -206,7 +206,7 @@ mod tests {
         // 通らないとジョブが走ったまま残り、以後の `LoadBranches` が黙って落ちる。
         assert!(!state.jobs.is_running(JobKind::LoadBranches));
         assert_eq!(state.branches.branches.len(), 2);
-        assert_eq!(state.branches.load(), BranchLoad::Loaded);
+        assert_eq!(state.branches.load(), ListLoad::Loaded);
     }
 
     #[test]
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(cmd, Cmd::None);
         assert!(!state.jobs.is_running(JobKind::LoadBranches));
         // **「読み込み中…」のまま固まらせない。** 印は `ui` が文言を出し分けるのに要る。
-        assert_eq!(state.branches.load(), BranchLoad::Failed);
+        assert_eq!(state.branches.load(), ListLoad::Failed);
         assert_eq!(
             state.notices.back().map(|notice| notice.level),
             Some(NoticeLevel::Error)
@@ -301,7 +301,7 @@ mod tests {
         // いないので、`branches[cursor]` を書くと添字が外れる。
         let mut state = state_with_commits(2);
         state.focus = Pane::Branches;
-        assert_eq!(state.branches.load(), BranchLoad::Pending);
+        assert_eq!(state.branches.load(), ListLoad::Pending);
 
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
         assert_eq!(press(&mut state, 'd'), Cmd::None);
@@ -335,7 +335,7 @@ mod tests {
         // `switch --create` は unborn HEAD でも通る（git 2.55 で確認）。
         let mut state = state_with_commits(2);
         state.focus = Pane::Branches;
-        assert_eq!(state.branches.load(), BranchLoad::Pending);
+        assert_eq!(state.branches.load(), ListLoad::Pending);
 
         let _ = press(&mut state, 'n');
 

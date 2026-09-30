@@ -24,7 +24,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     // （01 の「diff の遅延取得」）。
     let view = state.diff.fresh_view(wanted.as_ref());
 
-    let block = ui::pane_block(title(view, wanted.as_ref()), state.focus == Pane::Diff);
+    let block = ui::pane_block(
+        title(state, view, wanted.as_ref()),
+        state.focus == Pane::Diff,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -47,15 +50,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 ///
 /// 左が Graph から差し替わっているので、出さないと何の diff かを画面から辿れない。
 /// 届いていれば rename の旧い名前まで出せる。まだなら選んでいるパスだけ出す。
-fn title(view: Option<&DiffView>, wanted: Option<&DiffTarget>) -> String {
+///
+/// **対象全体（`path` が `None`）なら、対象そのものを名乗る**（stash は `stash@{n}`）。
+/// ファイル名はそれぞれの見出しに出る（[`names_file`]）。
+fn title(state: &AppState, view: Option<&DiffView>, wanted: Option<&DiffTarget>) -> String {
+    if let Some(target) = wanted.filter(|target| target.path().is_none()) {
+        return whole(state, target);
+    }
     match view.map(|view| view.files.as_slice()) {
         Some([file]) => format!(
             "Diff: {}",
             ui::path_label(&file.path, file.old_path.as_deref())
         ),
         Some(files) if !files.is_empty() => format!("Diff ({} files)", files.len()),
-        // `path` が `None` になるのはコミット全体を指す対象だけ（02）。いまその形を
-        // 組む経路は無いが、組めるようになったら「どのファイルか」は名乗れない。
         _ => match wanted.and_then(DiffTarget::path) {
             Some(path) => format!("Diff: {}", path.display()),
             None => "Diff".to_string(),
@@ -102,7 +109,7 @@ fn no_hunks(view: &DiffView) -> &'static str {
             // 内容が同じで mode だけ変わった。
             _ => "内容の変更はありません（mode だけの変更）",
         },
-        // 複数ファイル（`DiffTarget::Commit`）で 1 つもハンクが無い形。
+        // 複数ファイル（stash）で 1 つもハンクが無い形。
         _ => "内容の変更はありません",
     }
 }
@@ -115,15 +122,15 @@ fn no_hunks(view: &DiffView) -> &'static str {
 /// **返すのは見出しの行番号ではなくハンク全体の範囲。** 見出し 1 行だけを窓に入れる
 /// 形にすると、それが窓の下端に来て本文が 1 行も見えない（07 の「Diff ペイン」）。
 ///
-/// **ファイルの見出しは 2 ファイル以上のときだけ。** 1 ファイルなら枠のタイトルに
-/// 出ているので、同じ名前を 2 度並べても行を消費するだけになる。
+/// **ファイルの見出しは、枠のタイトルがファイルを名乗っていないときだけ**
+/// （[`names_file`]）。名乗っていれば、同じ名前を 2 度並べても行を消費するだけになる。
 fn lines(view: &DiffView) -> (Vec<Line<'_>>, Range<usize>) {
     let mut lines = Vec::new();
     let mut cursor = 0..0;
-    let many = view.files.len() > 1;
+    let headed = !names_file(view);
 
     for (file_index, file) in view.files.iter().enumerate() {
-        if many {
+        if headed {
             let label = ui::path_label(&file.path, file.old_path.as_deref());
             lines.push(Line::from(Span::styled(label, theme::muted())));
         }
@@ -147,6 +154,29 @@ fn lines(view: &DiffView) -> (Vec<Line<'_>>, Range<usize>) {
     }
 
     (lines, cursor)
+}
+
+/// 対象全体の diff の枠のタイトル（[`title`]）。
+fn whole(state: &AppState, target: &DiffTarget) -> String {
+    match target {
+        // 一覧から消えていれば（読み直しで drop を見た）番号は名乗れない。
+        DiffTarget::Stash(oid) => match state.stashes.find(*oid) {
+            Some(stash) => format!("Diff: {}", stash.name()),
+            None => "Diff: stash".to_string(),
+        },
+        // `path: None` で組む経路は stash だけ（`AppState::wanted_diff`）。
+        _ => "Diff".to_string(),
+    }
+}
+
+/// 枠のタイトルがファイルを名乗るか（[`title`]）。
+///
+/// **対象が `path` で 1 ファイルに絞られているときだけ。** 絞っていない diff は、
+/// 1 ファイルしか無くても対象そのもの（`stash@{n}`）を名乗るので、ファイル名は見出しに
+/// 出す —— 出さないと、どのファイルの差分かが画面のどこにも無い。「stash なら」と
+/// 変種で書くと、`path: None` の対象を足すたびにここへ足すことになる。
+fn names_file(view: &DiffView) -> bool {
+    view.target.path().is_some()
 }
 
 /// ハンクの 1 行。先頭に種別の記号を付ける。
@@ -188,12 +218,12 @@ fn marked(mark: char, content: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::test_util::{
-        col_of, deliver_commit_files, draw, pane_text, row_is_reversed, row_of,
-        state_on_first_commit, state_showing_diff, state_with_status,
+        col_of, deliver_commit_files, draw, pane_text, row_is_reversed, row_of, state_at,
+        state_on_first_commit, state_showing_diff, state_with_status, tab_to, with_stashes,
     };
     use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Msg, TermSize};
     use mewgit_core::git_read::{FileDiff, GitReadError, WorktreeSnapshot};
-    use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk};
+    use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk, fake_stash};
 
     /// 既定の 80x24。左は 46 桁になるので、テストはその幅で読める内容にする。
     const SIZE: TermSize = TermSize {
@@ -592,5 +622,50 @@ mod tests {
         let text = draw(&state, SIZE).join("\n");
 
         assert!(text.contains("読み込めませんでした"), "{text}");
+    }
+
+    /// stash が 2 つ届いた一覧で `stash@{1}` を選び、`Enter` で左に diff を開いて
+    /// `files` を届けた状態（01 の「Stash ペイン」）。
+    fn state_showing_stash(files: Vec<FileDiff>) -> AppState {
+        let mut state = state_at("/repo");
+        with_stashes(&mut state, Ok(vec![fake_stash(0), fake_stash(1)]));
+        tab_to(&mut state, Pane::Stash);
+        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        assert_eq!(state.focus, Pane::Diff);
+        deliver(&mut state, files);
+        state
+    }
+
+    #[test]
+    fn a_stash_diff_names_the_stash_and_heads_even_a_single_file() {
+        // タイトルが `stash@{n}` を名乗るので、1 ファイルでも見出しを挟まないと
+        // どのファイルの差分かが画面のどこにも無い（07 の「Diff ペイン」）。
+        let state = state_showing_stash(one_hunk(
+            "a.txt",
+            "@@ -1 +1 @@",
+            &[(LineOrigin::Addition, "new")],
+        ));
+
+        let text = pane_text(&state, SIZE, Pane::Diff);
+
+        assert!(text.contains("Diff: stash@{1}"), "{text}");
+        assert!(text.contains("a.txt"), "{text}");
+        assert!(text.contains("+new"), "{text}");
+    }
+
+    #[test]
+    fn a_stash_diff_heads_every_file() {
+        let state = state_showing_stash(vec![
+            fake_file_diff("a.txt", vec![fake_hunk("@@ -1 +1 @@", &[])]),
+            fake_file_diff("new.txt", vec![fake_hunk("@@ -0,0 +1 @@", &[])]),
+        ]);
+
+        let lines = draw(&state, SIZE);
+
+        assert!(
+            row_of(&lines, "a.txt") < row_of(&lines, "new.txt"),
+            "{lines:?}"
+        );
     }
 }

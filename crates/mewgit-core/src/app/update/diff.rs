@@ -10,7 +10,9 @@ use crate::git_read::{DiffTarget, FileDiff, GitReadError};
 
 use super::focus;
 use super::worktree::{act, Action};
-use crate::app::{AppState, Cmd, DiffCursor, DiffView, JobKind, Key, KeyCode, NoticeLevel, Pane};
+use crate::app::{
+    AppState, Cmd, DiffCursor, DiffOrigin, DiffView, JobKind, Key, KeyCode, NoticeLevel, Pane,
+};
 
 /// `Enter`。左の領域を Diff に差し替える（07）。
 ///
@@ -78,11 +80,21 @@ pub(super) fn diff_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::Char('s') => act(state, Action::Stage),
         KeyCode::Char('u') => act(state, Action::Unstage),
         KeyCode::Char('x') => act(state, Action::Discard),
-        // **戻り先は `Enter` の行き先と同じ 1 つの関数から出す**
-        // （`GraphSelection::right_pane`）。WIP 行なら Working tree、コミットなら
-        // コミット詳細。別々に書くと、来た側と違うペインに戻る腕ができる。
-        KeyCode::Esc => focus(state, state.graph.selection().right_pane()),
+        KeyCode::Esc => focus(state, came_from(state)),
         _ => Cmd::None,
+    }
+}
+
+/// `Esc` の戻り先。`Enter` で来た側。
+///
+/// **Stash ペインから来たならそこへ**（[`AppState::diff_origin`]）。グラフの選択から
+/// 来たなら `Enter` の行き先と同じ 1 つの関数から出す（`GraphSelection::right_pane`）。
+/// WIP 行なら Working tree、コミットならコミット詳細。別々に書くと、来た側と違う
+/// ペインに戻る腕ができる。
+fn came_from(state: &AppState) -> Pane {
+    match state.diff_origin() {
+        DiffOrigin::Stash(_) => Pane::Stash,
+        DiffOrigin::Worktree | DiffOrigin::Commit(_) => state.graph.selection().right_pane(),
     }
 }
 

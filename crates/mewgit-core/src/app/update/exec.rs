@@ -79,10 +79,16 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         // **ブランチ一覧も ref から導かれる。** commit は `refs/heads/<現在>` を
         // 動かすので、読み直さないと Branches ペインが commit 前の ahead のまま残る。
         Reload::Refs => Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches]),
+        // **stash の一覧もここで読む**（01 の「Stash ペイン」）。stash の書き込みでなくても
+        // `refs/stash` は動く —— `merge.autoStash` / `rebase.autoStash` を設定していると、
+        // `pull --ff-only` や `rebase --continue` が exit 0 のまま `stash@{0}: autostash` を
+        // 積む（git 2.55.0 で実測）。読まないと、退避された変更が再起動まで画面に出ない。
+        // 払うのは reflog 1 本の読み取りなので、autostash の起きうる op に絞らない。
         Reload::RefsAndLog => Cmd::batch([
             Cmd::LoadStatus,
             Cmd::LoadRepoInfo,
             Cmd::LoadBranches,
+            Cmd::LoadStashes,
             reload_log(state),
         ]),
         Reload::Account => resolve_again(state),
@@ -963,6 +969,7 @@ mod tests {
                 Cmd::LoadStatus,
                 Cmd::LoadRepoInfo,
                 Cmd::LoadBranches,
+                Cmd::LoadStashes,
                 reload(&state)
             ])
         );
@@ -1003,7 +1010,12 @@ mod tests {
         // 読み直しは落ちている。
         assert_eq!(
             cmd,
-            Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches])
+            Cmd::batch([
+                Cmd::LoadStatus,
+                Cmd::LoadRepoInfo,
+                Cmd::LoadBranches,
+                Cmd::LoadStashes
+            ])
         );
 
         // **走っていたページは積まない。** 積んでも直後の読み直しで捨てるだけで、

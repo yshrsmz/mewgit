@@ -337,13 +337,15 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       `Cmd::LoadCommitMessage` で読む（01 の「interactive rebase の開始（`i`）」）。
       **エディタの凡例をやめてキーの案内を 2 行に折り、箱を 76 に広げた**（2026-09-30 に
       ユーザーと決めた。07 の「モーダルのキーの案内」）
-- [ ] plan を組んだあとに HEAD が動いて sequence editor が断ったときの案内。いまはステータス
+- [x] plan を組んだあとに HEAD が動いて sequence editor が断ったときの案内。いまはステータス
       バーの要約が汎用の「git の実行に失敗しました」で、理由（`EditorError::HeadMoved`）は
       `L` の履歴の stderr にしか出ない（#135 の pty で確認）。**塞ぐには `ExecErrorKind` に
       種別を足し、`runner::classify` が stderr で分ける。** 鍵は日本語の文言にせず、
       `--sequence-editor` が決まった印を stderr に出してそれを照合する（文言を直すたびに
       分類が外れないように）。案内文は 01 の「失敗の案内文」に足す —— 失敗のあとは
       `RefsAndLog` でログが読み直されているので、「履歴が動いた。i からやり直して」で足りる
+      **印は `[head-moved]`**（`git_exec::rebase::HEAD_MOVED_MARKER`。`EditorError` の
+      `Display` が埋める）、**`Warn` で出す**（rebase は始まっておらず、`NoChanges` と同じ数え方）
 - [x] 進行中操作があるときの書き込み `GitOp` 拒否。**continue / abort より先に入れる**
       （2026-09-27 に順序を入れ替えた）。**断るのは HEAD か作業ツリー全体を動かすもの
       だけ**（03 の「進行中に通す書き込み」）

@@ -16,7 +16,7 @@ pub use argv::{push_remote_ref, to_commands, ArgvError, GitCommand};
 pub use patch::{hunk_patch, supports_hunk_patch};
 pub use rebase::{
     write_commit_message, write_todo, EditorError, RebaseAction, RebaseEntry, RebasePlan,
-    RebasePlanError,
+    RebasePlanError, EDITOR_STDERR_PREFIX,
 };
 pub use runner::Runner;
 
@@ -357,6 +357,9 @@ pub enum ExecErrorKind {
     /// 開始」）。どちらかを決めるのは op を見る `app` の側。
     NoChanges,
     NonFastForward,
+    /// plan を組んだあとに HEAD が動き、sequence editor が断った（`EditorError::HeadMoved`）。
+    /// git は rebase を始めず、進行中操作は残らない（03 の「Interactive rebase の実装」）。
+    HeadMoved,
     Other,
 }
 

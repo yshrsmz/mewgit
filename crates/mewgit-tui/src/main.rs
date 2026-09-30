@@ -56,13 +56,16 @@ fn editor(
     write: impl FnOnce(&Path) -> Result<(), git_exec::EditorError>,
 ) -> ExitCode {
     let [file] = args else {
-        eprintln!("mewgit: エディタとしてはファイルのパスを 1 つ受け取ります");
+        eprintln!(
+            "{}エディタとしてはファイルのパスを 1 つ受け取ります",
+            git_exec::EDITOR_STDERR_PREFIX
+        );
         return ExitCode::FAILURE;
     };
     match write(file.as_ref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("mewgit: {err}");
+            eprintln!("{}{err}", git_exec::EDITOR_STDERR_PREFIX);
             ExitCode::FAILURE
         }
     }

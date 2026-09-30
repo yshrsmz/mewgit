@@ -64,6 +64,17 @@ pub enum RebasePlanError {
     EmptyMessage { oid: Oid },
 }
 
+/// エディタとして起こされた mewgit が、失敗を stderr に書くときの行頭。
+/// `runner::classify` が印を行頭で照合するので、書く側と読む側でこれを共有する。
+pub const EDITOR_STDERR_PREFIX: &str = "mewgit: ";
+
+/// [`EditorError::HeadMoved`] の `Display` の先頭に置く印。git が sequence editor の stderr を
+/// 自分の stderr に並べるので、`runner::classify` がこれで
+/// [`ExecErrorKind::HeadMoved`](super::ExecErrorKind::HeadMoved) に分ける。
+///
+/// **日本語の文言を鍵にしない**（直すたびに分類が外れる。03 の「エラー分類」）。
+pub(crate) const HEAD_MOVED_MARKER: &str = "[head-moved]";
+
 /// エディタとして起こされたときの失敗。git が `there was a problem with the editor` と
 /// 並べて stderr に出す。
 #[derive(Debug, thiserror::Error)]
@@ -81,7 +92,9 @@ pub enum EditorError {
     #[error(transparent)]
     Invalid(#[from] RebasePlanError),
     /// plan を組んだあとに HEAD が動いた（[`write_todo`]）。端末で積んだコミットなど。
-    #[error("rebase を組んだあとに HEAD が動きました（{expected} → {actual}）。読み直してからやり直して")]
+    #[error(
+        "{HEAD_MOVED_MARKER} rebase を組んだあとに HEAD が動きました（{expected} → {actual}）。読み直してからやり直して"
+    )]
     HeadMoved { expected: Oid, actual: String },
 }
 

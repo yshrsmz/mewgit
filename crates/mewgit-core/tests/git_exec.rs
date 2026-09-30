@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use mewgit_core::auth::ssh::SshCommand;
 use mewgit_core::auth::{resolve, DegradedReason};
 use mewgit_core::config::Config;
-use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, LocalBranch, PrSource, Runner};
+use mewgit_core::git_exec::{
+    ExecError, ExecErrorKind, GitOp, LocalBranch, PrSource, RebaseAction, RebaseEntry, RebasePlan,
+    Runner,
+};
 use mewgit_core::git_read::Oid;
 use mewgit_core::test_util::{
     fake_fork_source, fake_pr_checkout, fake_target, wait_for_pid, wait_until_gone, BareRepo, Fake,
@@ -677,8 +680,13 @@ async fn batch_mode_is_layered_onto_the_user_ssh_command() {
         "ssh://git@example.invalid/a/b.git",
     ]);
 
-    let runner = Runner::new(repo.path(), "git", SshCommand::Shell(ssh_command.clone()))
-        .with_env(repo.runner_env());
+    let runner = Runner::new(
+        repo.path(),
+        "git",
+        SshCommand::Shell(ssh_command.clone()),
+        "mewgit",
+    )
+    .with_env(repo.runner_env());
     let err = runner
         .run(&GitOp::Fetch {
             remote: Some("origin".into()),
@@ -811,32 +819,43 @@ async fn the_lease_survives_a_fetch() {
 }
 
 #[tokio::test]
-async fn interactive_rebase_is_refused_without_running_git() {
-    // todo を差し替える経路がまだ無い（M5）。走らせると plan を無視した rebase に
-    // なるので、起動しないことをここで見張る。
+async fn interactive_rebase_leaves_the_branch_alone_when_the_editor_fails() {
+    // `runner()` の自バイナリは存在しないパス。sequence editor が起動できなければ、
+    // git は rebase を始めずに断る（03 の実測）。plan を無視した rebase にならない
+    // ことの見張り。通しで流す側は `mewgit` クレートの `tests/interactive_rebase.rs`。
     let repo = TestRepo::init();
     repo.commit("first");
+    repo.commit("second");
     let before = repo.head_oid();
 
     let err = repo
         .runner()
         .run(&GitOp::RebaseInteractive {
-            onto: "main".into(),
-            plan: Default::default(),
+            onto: "HEAD~1".into(),
+            plan: RebasePlan {
+                entries: vec![RebaseEntry {
+                    action: RebaseAction::Drop,
+                    oid: before,
+                    summary: "second".into(),
+                }],
+            },
         })
         .await
-        .expect_err("実行してはいけません");
+        .expect_err("editor が無いので git は断るはずです");
 
-    assert!(
-        matches!(err, ExecError::NoResult { .. }),
-        "git が走ってしまった: {err:?}"
+    let ExecError::Failed { argv, stderr, .. } = &err else {
+        panic!("git が走っていない: {err:?}");
+    };
+    assert_eq!(
+        argv,
+        &["rebase", "--interactive", "--no-update-refs", "HEAD~1"]
     );
-    assert_eq!(err.argv(), ["rebase", "--interactive", "main"]);
+    assert!(
+        stderr.contains("there was a problem with the editor"),
+        "{stderr}"
+    );
     assert_eq!(repo.head_oid(), before);
-    assert!(
-        !repo.path().join(".git/rebase-merge").exists(),
-        "rebase が始まってしまっている"
-    );
+    assert!(!repo.path().join(".git/rebase-merge").exists());
 }
 
 #[tokio::test]
@@ -850,6 +869,7 @@ async fn the_configured_git_binary_is_the_one_that_runs() {
         repo.path(),
         repo.path().join("no-such-git"),
         SshCommand::default(),
+        "mewgit",
     )
     .with_env(repo.runner_env())
     .run(&GitOp::Switch("main".into()))

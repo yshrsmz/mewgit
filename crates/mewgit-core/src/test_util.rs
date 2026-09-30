@@ -252,8 +252,19 @@ impl TestRepo {
     ///
     /// **統合テストごとに書かない。** テストバイナリは別々にコンパイルされるので、
     /// 各 `tests/*.rs` に置くとファイルを足すたびにコピーが増える。
+    ///
+    /// sequence editor の自バイナリは**存在しないパス**にしてある。core のテストからは
+    /// `mewgit` のバイナリを引けないので、interactive rebase は git が editor の失敗で
+    /// 断る形になる。通しで流すのは [`runner_with_mewgit`](Self::runner_with_mewgit)。
     pub fn runner(&self) -> Runner {
-        Runner::new(self.path(), "git", SshCommand::default()).with_env(self.runner_env())
+        self.runner_with_mewgit(self.path().join("mewgit-is-not-built-here"))
+    }
+
+    /// sequence editor に `mewgit_bin` を置いた [`Runner`]。`mewgit` クレートの
+    /// 統合テストが `env!("CARGO_BIN_EXE_mewgit")` を渡す。
+    pub fn runner_with_mewgit(&self, mewgit_bin: impl Into<PathBuf>) -> Runner {
+        Runner::new(self.path(), "git", SshCommand::default(), mewgit_bin)
+            .with_env(self.runner_env())
     }
 
     /// `git` を実行し、成功したかどうかだけを返す。失敗しても panic しない。

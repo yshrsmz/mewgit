@@ -26,11 +26,13 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 futures.workspace = true
 toml = "1.0"
 globset = "0.4"
-tempfile = { version = "3", optional = true }
+# interactive rebase の plan を sequence editor へ渡す一時ファイル（03 の
+# 「Interactive rebase の実装」）。
+tempfile = "3"
 
 [features]
 # 統合テスト用のリポジトリ生成ヘルパ（`test_util`）を有効にする。
-test-util = ["dep:tempfile"]
+test-util = []
 
 [dev-dependencies]
 anyhow.workspace = true

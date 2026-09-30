@@ -96,11 +96,14 @@ where
     // `git_bin` は設定から渡す（03 の「Runner」）。cwd はワークツリーのルートで、
     // 引数に渡されたサブディレクトリではない（02 の `workdir`）。
     // 実効 ssh は `Runner` が受け取る（03 の「BatchMode の重ね方」）。
+    // 自バイナリは interactive rebase の sequence editor になる（03 の
+    // 「Interactive rebase の実装」）。
     let ssh = effective_ssh_from_env(reader.ssh_command());
     let runner = Runner::new(
         state.repo.path.clone(),
         &state.config.general.git_bin,
         ssh.clone(),
+        std::env::current_exe()?,
     );
     let (mut runtime, mut msgs) = Runtime::new(reader, runner, ssh);
 

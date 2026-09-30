@@ -321,8 +321,13 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       **検出表は実測で作り直した**（02）—— `-i` の有無は区別できない
       ので `Rebase.interactive` を消し、`git am`（同じ `rebase-apply/`）を `Am` に分け、
       `sequencer/` だけが残る形を拾う。バッジに止まった理由（`(edit)`）は出さない（07）
-- [ ] `--sequence-editor` / `--commit-editor` 隠しサブコマンド
-- [ ] `RebasePlan::to_todo` + テスト、`Modal::RebaseEditor`
+- [ ] `--sequence-editor` 隠しサブコマンドと `RebasePlan::to_todo` / `validate`、`Runner` の
+      `RebaseInteractive` の拒否を外す。**interactive rebase は 2 本に割った**（2026-09-30）——
+      こちらは git に plan を渡す経路だけで、CLI で触れるものは増えない。`Runner` と
+      サブコマンドを別々に入れると、片方だけでは plan が git に届かず確かめようが無いので
+      1 本にした。**`--commit-editor` は取り下げた** —— reword は `exec git commit --amend`
+      の行で渡す（止まった rebase を `m` から再開しても効く。03 の「Interactive rebase の実装」）
+- [ ] `Modal::RebaseEditor` と Graph の `i`（07 の「RebaseEditor」）。上の経路に乗せる
 - [x] 進行中操作があるときの書き込み `GitOp` 拒否。**continue / abort より先に入れる**
       （2026-09-27 に順序を入れ替えた）。**断るのは HEAD か作業ツリー全体を動かすもの
       だけ**（03 の「進行中に通す書き込み」）

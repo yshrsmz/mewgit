@@ -110,7 +110,7 @@
 **Interactive rebase**
 
 - コミット一覧で pick / reword / edit / squash / fixup / drop を編集し、並べ替えも可能
-- `GIT_SEQUENCE_EDITOR` に自前スクリプトを渡して `git rebase -i` を実行する
+- `GIT_SEQUENCE_EDITOR` に自バイナリ（隠しサブコマンド `--sequence-editor`）を渡して `git rebase -i` を実行する
 - 途中停止（edit / conflict）からの continue / skip / abort を UI で扱う
 
 **cherry-pick**

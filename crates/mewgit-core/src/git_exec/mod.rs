@@ -5,6 +5,7 @@
 
 mod argv;
 mod patch;
+mod rebase;
 mod runner;
 
 use std::path::PathBuf;
@@ -13,6 +14,9 @@ use crate::git_read::Oid;
 
 pub use argv::{push_remote_ref, to_commands, ArgvError, GitCommand};
 pub use patch::{hunk_patch, supports_hunk_patch};
+pub use rebase::{
+    write_todo, RebaseAction, RebaseEntry, RebasePlan, RebasePlanError, SequenceEditorError,
+};
 pub use runner::Runner;
 
 /// 書き込み操作。[`to_commands`] で `git` の argv と標準入力に変換する。
@@ -262,31 +266,6 @@ pub enum PullMode {
     Merge,
     Rebase,
     FastForwardOnly,
-}
-
-/// interactive rebase の todo。`to_todo` で todo ファイルの内容にする。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RebasePlan {
-    pub entries: Vec<RebaseEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebaseEntry {
-    pub action: RebaseAction,
-    pub oid: Oid,
-    pub summary: String,
-    /// `reword` / `squash` で使う書き換え後のメッセージ。
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RebaseAction {
-    Pick,
-    Reword,
-    Edit,
-    Squash,
-    Fixup,
-    Drop,
 }
 
 /// 成功した `git` 実行の結果。`argv` は UI に見せるために必ず保持する。

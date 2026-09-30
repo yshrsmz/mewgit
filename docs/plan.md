@@ -335,6 +335,13 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 - [ ] RebaseEditor の `r`（reword のメッセージ入力）。複数行の入力を開いて RebaseEditor に
       戻る形が要り、`modal` は 1 枠なので戻し方（`Modal` の中にモードを持つか、入力の
       intent に plan を運ぶか）を決める（01 の「interactive rebase の開始（`i`）」）
+- [ ] plan を組んだあとに HEAD が動いて sequence editor が断ったときの案内。いまはステータス
+      バーの要約が汎用の「git の実行に失敗しました」で、理由（`EditorError::HeadMoved`）は
+      `L` の履歴の stderr にしか出ない（#135 の pty で確認）。**塞ぐには `ExecErrorKind` に
+      種別を足し、`runner::classify` が stderr で分ける。** 鍵は日本語の文言にせず、
+      `--sequence-editor` が決まった印を stderr に出してそれを照合する（文言を直すたびに
+      分類が外れないように）。案内文は 01 の「失敗の案内文」に足す —— 失敗のあとは
+      `RefsAndLog` でログが読み直されているので、「履歴が動いた。i からやり直して」で足りる
 - [x] 進行中操作があるときの書き込み `GitOp` 拒否。**continue / abort より先に入れる**
       （2026-09-27 に順序を入れ替えた）。**断るのは HEAD か作業ツリー全体を動かすもの
       だけ**（03 の「進行中に通す書き込み」）

@@ -156,13 +156,14 @@ fn input_key(state: &mut AppState, key: Key) -> Cmd {
 /// **名前が正しいかは手前で判定しない**（不変ルール 4）。`git check-ref-format` の規則を
 /// 写すことになり、写した規則は git の版が変わっても追随しない。**空だけは断る** —
 /// `git switch --create ""` は落ちるが、その時点でモーダルは閉じていて打った文字が
-/// 戻らない（`commit_submit` と同じ理由。01 の「1 行入力」）。
+/// 戻らない（`commit_submit` と同じ理由。01 の「1 行入力」）。stash のメッセージは
+/// 空を通す（[`InputIntent::requires_text`](crate::app::InputIntent::requires_text)）。
 fn input_submit(state: &mut AppState) -> Cmd {
     let Some(Modal::Input { buf, intent, .. }) = &state.modal else {
         return Cmd::None;
     };
 
-    if buf.is_blank() {
+    if intent.requires_text() && buf.is_blank() {
         state.push_notice(NoticeLevel::Warn, "名前が空です".to_string(), None);
         return Cmd::None;
     }

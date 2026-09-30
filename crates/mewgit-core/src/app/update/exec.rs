@@ -76,6 +76,7 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     // 続きを頼む: 書き込みで動いた領域の読み直し（`Reload::after`）。
     match reload {
         Reload::Nothing => Cmd::LoadStatus,
+        Reload::Stashes => Cmd::batch([Cmd::LoadStatus, Cmd::LoadStashes]),
         // **ブランチ一覧も ref から導かれる。** commit は `refs/heads/<現在>` を
         // 動かすので、読み直さないと Branches ペインが commit 前の ahead のまま残る。
         Reload::Refs => Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches]),
@@ -115,6 +116,9 @@ enum Reload {
     Refs,
     /// 索引と、積んだログの両方。
     RefsAndLog,
+    /// index / ワークツリーと、stash の一覧（`refs/stash`）。**ラベルとログは読み直さない**
+    /// —— グラフは `refs/stash` を walk に押していない（02 の「ログ列挙」）。
+    Stashes,
     /// git の読み取りは 1 つも古くならない。**アカウントの解決だけをやり直す**
     /// （`.git/config` の `mewgit.user`。01 の「アカウントの選び直し」）。
     ///
@@ -141,6 +145,10 @@ impl Reload {
     fn regions(self) -> &'static [Region] {
         match self {
             Reload::Nothing => &[Region::Worktree],
+            // `refs/stash` は ref なので `Refs`（`JobKind::LoadStashes` の領域）。走っている
+            // ラベルやブランチ一覧の読み取りも巻き添えで古くなるが、届いた返りが頼み直す
+            // だけで、`Refs` を割って領域を足すほどの差ではない。
+            Reload::Stashes => &[Region::Worktree, Region::Refs],
             Reload::Refs => &[Region::Worktree, Region::Refs],
             Reload::RefsAndLog => &[Region::Worktree, Region::Refs, Region::Log],
             // git の読み取りは何も古くならない（`.git/config` の 1 行だけ）。
@@ -186,11 +194,12 @@ impl Reload {
             // stash は `refs/stash` しか動かさず、グラフはそれを walk に押していない
             // （02 の「ログ列挙」）。ワークツリーの変化は `Cmd::LoadStatus` が拾う。
             // **ここが `app` に置く理由。** グラフが `refs/stash` を押すようになったら
-            // この腕が動く。
+            // この腕が動く。**成否を見ない** —— pop はコンフリクトで exit 1 でも作業ツリーを
+            // 書き換える（stash は残す。01 の「stash の書き込み」）。
             GitOp::StashPush { .. }
             | GitOp::StashApply(_)
             | GitOp::StashPop(_)
-            | GitOp::StashDrop(_) => Reload::Nothing,
+            | GitOp::StashDrop(_) => Reload::Stashes,
 
             // `.git/config` の 1 行だけ。index もワークツリーも ref も動かない。
             //
@@ -352,6 +361,11 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::Revert { .. }
         | GitOp::RevertContinue
         | GitOp::RevertSkip => Some("コンフリクト。git add したら m から continue"),
+        // **進行中操作にはならない**（continue が無い）ので `m` は案内しない。pop は
+        // コンフリクトすると stash を残す（git の `The stash entry is kept`。01 の
+        // 「stash の書き込み」）。
+        GitOp::StashApply(_) => Some("コンフリクト。解消して git add"),
+        GitOp::StashPop(_) => Some("コンフリクト。stash は残してある。解消して git add"),
         // merge のコンフリクトを結ぶのは commit。
         GitOp::Pull {
             mode: PullMode::Merge,
@@ -379,13 +393,11 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::CherryPickAbort
         | GitOp::RevertAbort
         | GitOp::MergeAbort
+        | GitOp::StashPush { .. }
         | GitOp::StashDrop(_)
         | GitOp::SetAccount { .. }
         | GitOp::UnsetAccount
         | GitOp::CheckoutPr(_) => None,
-        // stash の apply / pop は index とワークツリーにコンフリクトを残すが、進行中操作には
-        // ならない（continue が無い）。push は作業ツリーを片付けるだけ。
-        GitOp::StashPush { .. } | GitOp::StashApply(_) | GitOp::StashPop(_) => None,
     }
 }
 
@@ -1093,7 +1105,9 @@ mod tests {
             Reload::Nothing
         );
         // stash は `refs/stash` しか動かさず、グラフはそれを walk に押していない。
-        assert_eq!(Reload::after(&GitOp::StashPop(0), true), Reload::Nothing);
+        // 一覧は読み直す（Stash ペイン）が、ラベルとログは読み直さない。
+        assert_eq!(Reload::after(&GitOp::StashPop(0), true), Reload::Stashes);
+        assert_eq!(Reload::after(&GitOp::StashPop(0), false), Reload::Stashes);
     }
 
     #[test]

@@ -163,6 +163,10 @@ impl AppState {
                 // 続きを頼む: 進行中操作で断った書き込みの代わりの status の読み直し。
                 return Some(Cmd::LoadStatus);
             }
+            // 持っている値の鮮度に頼る書き込み（stash の index、push の守り）。
+            if let Some(instead) = self.refuse_stale_stash(op) {
+                return Some(instead);
+            }
         }
         match cmd.job_kind() {
             Some(kind) if self.jobs.is_running(kind) => {
@@ -592,6 +596,15 @@ impl AppState {
     pub fn worktree_is_current(&self) -> bool {
         self.jobs
             .is_fresh(JobKind::LoadStatus, self.worktree.snapshot_epoch)
+    }
+
+    /// 持っている stash の一覧を**直近の書き込みより後に**読めているか
+    /// （[`worktree_is_current`](Self::worktree_is_current) の stash 版）。
+    ///
+    /// apply / pop / drop は `stash@{index}` で渡すので、古い一覧の index は別の stash を
+    /// 指しうる（01 の「stash の書き込み」）。
+    pub fn stashes_are_current(&self) -> bool {
+        self.jobs.is_fresh(JobKind::LoadStashes, self.stashes.epoch)
     }
 
     /// ワーキングツリーで選んでいる行の diff の対象。
@@ -1595,6 +1608,10 @@ pub struct StashState {
     /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分ける（[`BranchState`] と
     /// 同じ理由）。
     load: ListLoad,
+    /// いつの一覧か（届いた返信の刻印）。`None` はまだ読めていない。
+    /// [`WorktreeState::snapshot_epoch`] と同じ形で、apply / pop / drop に渡す index を
+    /// 信じてよいかの根拠（01 の「stash の書き込み」）。
+    epoch: Option<u64>,
 }
 
 impl StashState {
@@ -1605,13 +1622,14 @@ impl StashState {
     /// 1 つずつ詰めるので、同じ index が別の stash を指す（git 2.55 で確認）。
     /// 選んでいたものが消えたら（drop / pop）、**同じ位置に留まる**（末尾を越えたら
     /// 末尾）。消えた 1 つの次の stash がそこへ詰めてくるので、続けて drop できる。
-    pub(super) fn loaded(&mut self, entries: Vec<StashEntry>) {
+    pub(super) fn loaded(&mut self, entries: Vec<StashEntry>, epoch: Option<u64>) {
         let selected = self.selected().map(|stash| stash.oid);
         self.cursor = selected
             .and_then(|oid| entries.iter().position(|stash| stash.oid == oid))
             .unwrap_or_else(|| self.cursor.min(entries.len().saturating_sub(1)));
         self.entries = entries;
         self.load = ListLoad::Loaded;
+        self.epoch = epoch;
     }
 
     /// 読み込みが失敗した。読めていた一覧は捨てない（[`BranchState::failed`] と同じ）。
@@ -2836,6 +2854,9 @@ pub enum InputIntent {
     },
     /// ブランチの名前を変える（`branch --move`）。`from` は元の名前。
     BranchRename { from: String },
+    /// 作業ツリー全体を stash する（`stash push --include-untracked`）。打つのは
+    /// メッセージで、**空なら `--message` を付けない**（git の既定。01 の「stash の書き込み」）。
+    StashPush,
 }
 
 impl InputIntent {
@@ -2855,6 +2876,22 @@ impl InputIntent {
                 from: from.clone(),
                 to: name,
             },
+            InputIntent::StashPush => GitOp::StashPush {
+                message: (!name.trim().is_empty()).then_some(name),
+                // 「全体」は Worktree ペインに出ているもの全部で、untracked もそこに
+                // 出る（01 の「stash の書き込み」）。
+                include_untracked: true,
+                paths: None,
+            },
+        }
+    }
+
+    /// 空で確定したら断るか。**名前は空を断り、stash のメッセージは空を通す**
+    /// （空なら git の既定のメッセージ）。
+    pub fn requires_text(&self) -> bool {
+        match self {
+            InputIntent::BranchCreate { .. } | InputIntent::BranchRename { .. } => true,
+            InputIntent::StashPush => false,
         }
     }
 }

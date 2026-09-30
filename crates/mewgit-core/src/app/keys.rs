@@ -113,8 +113,15 @@ const STASH: &[KeyHint] = &[
     MOVE,
     // Worktree / コミット詳細の `Enter` と同じ語。どれも左に Diff を出す。
     hint(&[Key::new(KeyCode::Enter)], "差分"),
+    STASH_PUSH,
+    hint(&[Key::char('a')], "apply"),
+    hint(&[Key::char('Z')], "pop"),
+    hint(&[Key::char('d')], "drop"),
     BACK,
 ];
+
+/// `z`。Worktree と Stash の両方に出す（退避する相手はどちらでも作業ツリー）。
+const STASH_PUSH: KeyHint = hint(&[Key::char('z')], "stash");
 
 const PRS: &[KeyHint] = &[
     MOVE,
@@ -137,6 +144,7 @@ const WORKTREE: &[KeyHint] = &[
     hint(&[Key::char('x')], "破棄"),
     hint(&[Key::char('c')], "commit"),
     hint(&[Key::char('C')], "amend"),
+    STASH_PUSH,
     BACK,
 ];
 

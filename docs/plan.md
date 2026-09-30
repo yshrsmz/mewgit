@@ -330,8 +330,8 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 - [ ] `Modal::RebaseEditor` と Graph の `i`（07 の「RebaseEditor」）。上の経路に乗せる。
       **reword は下の別タスクに割った**（2026-09-30 にユーザーと決めた）—— こちらは
       pick / edit / squash / fixup / drop と並べ替え。範囲・断る形は 01 の
-      「interactive rebase の開始（`i`）」。sequence editor が既定の todo と plan の
-      コミットを突き合わせる（03）のもここ
+      「interactive rebase の開始（`i`）」。sequence editor が plan を組んだ HEAD と git の
+      `orig-head` を比べる（03）のもここ
 - [ ] RebaseEditor の `r`（reword のメッセージ入力）。複数行の入力を開いて RebaseEditor に
       戻る形が要り、`modal` は 1 枠なので戻し方（`Modal` の中にモードを持つか、入力の
       intent に plan を運ぶか）を決める（01 の「interactive rebase の開始（`i`）」）
@@ -425,7 +425,7 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       外（端末の `stash pop` など）で作った unmerged を snapshot が知らないまま `z` / `Z` が
       git に届くと、理由は stdout の `needs merge` にだけ出て、stderr は
       `could not write index` だけ（03 の「stash push のパス指定」）。塞ぐには
-      `classify` で `needs merge` を種別に分けて案内する（`refuse_stash` の門は mewgit の
+      `classify` で `needs merge` を種別に分けて案内する（`refuse_by_held_values` の門は mewgit の
       snapshot が見えている範囲でしか効かない）
 - [x] ステータスバーのキーヒント。**M4 の残りより先にやる**（2026-09-19 に決めた）。
       フッターを **2 行**にして 1 行目を通知、2 行目をフォーカス中のペインのキーにする。

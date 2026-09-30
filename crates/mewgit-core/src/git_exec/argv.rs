@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::rebase::SequenceInput;
 use super::{GitOp, LocalBranch, PrCheckout, PrSource, PullMode, RebasePlanError};
 use crate::git_read::{stash_ref as stash, Oid};
 
@@ -202,7 +203,7 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
         // sequence editor が読む（03）。**`--no-update-refs` は todo を丸ごと書き換えるため** ——
         // `rebase.updateRefs` が足す `update-ref` の行が黙って消えるより、効かないことを
         // argv に書いておく。
-        GitOp::RebaseInteractive { onto, plan } => {
+        GitOp::RebaseInteractive { onto, head, plan } => {
             plan.validate()?;
             argv.extend([
                 "rebase".into(),
@@ -210,7 +211,11 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
                 "--no-update-refs".into(),
                 onto.clone(),
             ]);
-            stdin = Some(serde_json::to_vec(plan).expect("文字列だけの値は必ず直列化できる"));
+            let input = SequenceInput {
+                head: *head,
+                plan: plan.clone(),
+            };
+            stdin = Some(serde_json::to_vec(&input).expect("文字列だけの値は必ず直列化できる"));
         }
         GitOp::RebaseContinue => argv.extend(["rebase".into(), "--continue".into()]),
         GitOp::RebaseSkip => argv.extend(["rebase".into(), "--skip".into()]),
@@ -704,6 +709,7 @@ mod tests {
             (
                 GitOp::RebaseInteractive {
                     onto: "main".into(),
+                    head: fake_oid(2),
                     plan: RebasePlan {
                         entries: vec![RebaseEntry {
                             action: RebaseAction::Pick,
@@ -974,6 +980,7 @@ mod tests {
         // 止まる。どちらも argv を組む側で止める。
         let err = to_command(&GitOp::RebaseInteractive {
             onto: "main".into(),
+            head: fake_oid(1),
             plan: RebasePlan::default(),
         })
         .expect_err("空の plan は通ってはいけません");

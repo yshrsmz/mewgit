@@ -133,6 +133,9 @@ pub enum GitOp {
     },
     RebaseInteractive {
         onto: String,
+        /// plan を組んだ時点の HEAD。sequence editor が git の `orig-head` と比べ、
+        /// 違えば rebase を始めさせない（03 の「Interactive rebase の実装」）。
+        head: Oid,
         plan: RebasePlan,
     },
     RebaseContinue,

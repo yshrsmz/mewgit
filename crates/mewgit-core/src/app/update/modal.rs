@@ -33,7 +33,6 @@ pub(super) fn modal_key(state: &mut AppState, key: Key) -> Cmd {
         // **骨格を共有しない。** 欄が 4 つあって `Enter` の意味も欄で変わるので、
         // `picker_key` にも `edit_key` 1 本にも収まらない（01 の「PR 作成（`N`）」）。
         Some(Modal::PrCreate { .. }) => pr_create_key(state, key),
-        // `J` / `K` と動作のキーを受け、`Enter` の前に検証が挟まる（07 の「RebaseEditor」）。
         Some(Modal::RebaseEditor { .. }) => rebase_editor_key(state, key),
         None => Cmd::None,
     }
@@ -67,7 +66,11 @@ fn confirm_key(state: &mut AppState, key: Key) -> Cmd {
 ///
 /// **クロージャではなく `fn` を受ける。** 環境を捕まえる必要が無く、`Modal` に
 /// コールバックを持たせない規約とも揃う。
-fn picker_key(state: &mut AppState, key: Key, on_enter: fn(&mut AppState) -> Cmd) -> Cmd {
+pub(super) fn picker_key(
+    state: &mut AppState,
+    key: Key,
+    on_enter: fn(&mut AppState) -> Cmd,
+) -> Cmd {
     match key.code() {
         // 端の扱いはペインのカーソルと同じ規則（`AppState::move_modal_cursor`）。
         // **候補が空なら動かない**（`stepped_index`）ので、選ばせない

@@ -40,7 +40,7 @@ pub(super) fn open_stash_push(state: &mut AppState) -> Cmd {
 
 /// `Z`（Worktree）。カーソルの 1 ファイルを退避する入力モーダルを開く（01 の「stash の
 /// 書き込み」）。行が無ければ何もしない（`s` / `u` / `x` と同じ）。**rename やコンフリクトの
-/// 断りは開く前の門**（[`AppState::refuse_stash`]）が答える。
+/// 断りは開く前の門**（[`AppState::refuse_by_held_values`]）が答える。
 pub(super) fn open_stash_file(state: &mut AppState) -> Cmd {
     let Some((_, entry)) = state.worktree.selected() else {
         return Cmd::None;
@@ -60,7 +60,7 @@ fn open_push(state: &mut AppState, title: String, path: Option<PathBuf>) -> Cmd 
 }
 
 /// `a` / `Z`。カーソル行の stash を `op` で書き込む。**鮮度は `issue` が問う**
-/// （[`AppState::refuse_stash`]）。一覧が空なら何もしない（`Enter` と同じ）。
+/// （[`AppState::refuse_by_held_values`]）。一覧が空なら何もしない（`Enter` と同じ）。
 fn on_selected(state: &AppState, op: fn(usize) -> GitOp) -> Cmd {
     state
         .stashes
@@ -94,8 +94,9 @@ fn drop_stash(state: &mut AppState) -> Cmd {
 }
 
 impl AppState {
-    /// stash の書き込みを、持っている値が古いか、退避するものの中身が git に渡せなくて
-    /// 断るなら、理由を通知に積んで代わりに出す `Cmd` を返す（01 の「stash の書き込み」）。
+    /// 持っている値（作業ツリーの snapshot と stash の一覧）が古いか、その中身が git に
+    /// 渡せなくて断るなら、理由を通知に積んで代わりに出す `Cmd` を返す（01 の「stash の
+    /// 書き込み」「interactive rebase の開始（`i`）」）。
     ///
     /// - **push は鮮度のある snapshot でしか通さない。** 解消済みの cherry-pick / merge の
     ///   途中の `stash push` は git が受けて `*_HEAD` を消す（03 の表）。進行中操作の
@@ -108,14 +109,23 @@ impl AppState {
     /// - **push は中身でも断る。** unmerged が 1 つでもあれば全体も部分も git が
     ///   `could not write index` で断り、1 ファイルの rename や staged の削除は
     ///   git が割ってしまう（[`splits_alone`](Self::splits_alone)）
+    /// - **interactive rebase も鮮度のある snapshot でしか通さず、tracked の変更で断る。**
+    ///   git は `cannot rebase: You have unstaged changes` で断る（untracked だけなら
+    ///   通す）。`i` がエディタを開く前にここを通るので、並べ替えた plan を失わない。
+    ///   **`rebase.autoStash=true` の人にも断る** —— mewgit はユーザーの git 設定を読まない
     ///
     /// 網羅 `match` にしているのは、`GitOp` に変種を足したときに、持っている値の鮮度に
     /// 頼る書き込みかを選ばせるため。
-    pub(crate) fn refuse_stash(&mut self, op: &GitOp) -> Option<Cmd> {
+    pub(crate) fn refuse_by_held_values(&mut self, op: &GitOp) -> Option<Cmd> {
         let (message, instead) = match op {
-            GitOp::StashPush { .. } if !self.worktree_is_current() => {
-                // 続きを頼む: 古い snapshot で断った push の代わりの status の読み直し。
+            GitOp::StashPush { .. } | GitOp::RebaseInteractive { .. }
+                if !self.worktree_is_current() =>
+            {
+                // 続きを頼む: 古い snapshot で断った書き込みの代わりの status の読み直し。
                 ("状態を読み直しています。もう一度押して", Cmd::LoadStatus)
+            }
+            GitOp::RebaseInteractive { .. } if self.worktree.has_tracked_changes() => {
+                ("変更を commit か stash してから rebase して", Cmd::None)
             }
             // unmerged のパスが 1 つでもあると、全体でも別のファイルだけでも git は
             // `could not write index` で断る（理由は stdout の `needs merge` にしか出ない）。

@@ -160,12 +160,7 @@ impl AppState {
         }
         // 持っている値の鮮度と中身に頼る書き込み（stash の index、push の守り、
         // unmerged / rename の断り）。
-        if let Some(instead) = self.refuse_stash(op) {
-            return Some(instead);
-        }
-        // 作業ツリーに変更があるときの interactive rebase（01 の「interactive rebase の
-        // 開始（`i`）」）。
-        self.refuse_rebase(op)
+        self.refuse_by_held_values(op)
     }
 
     /// `cmd` を [`issue`](Self::issue) が断るなら、理由を通知に積んで**代わりに出す
@@ -1312,6 +1307,16 @@ impl WorktreeState {
         self.len() == 0
     }
 
+    /// tracked のファイルに変更があるか（staged / unstaged / conflicted）。**untracked は
+    /// 数えない** —— git は untracked だけなら rebase を通す（01 の「interactive rebase の
+    /// 開始（`i`）」の実測）。
+    pub(crate) fn has_tracked_changes(&self) -> bool {
+        let snapshot = &self.snapshot;
+        !(snapshot.staged.is_empty()
+            && snapshot.unstaged.is_empty()
+            && snapshot.conflicted.is_empty())
+    }
+
     /// [`SECTIONS`](Self::SECTIONS) の何番目の区画か。
     fn rank(section: WorktreeSection) -> usize {
         Self::SECTIONS
@@ -1531,7 +1536,7 @@ fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Op
 ///
 /// [`GraphState::move_cursor`] は通らない。WIP 行があるので行数が 0 にならず、
 /// カーソルを動かしたらスクロールも寄せる必要があるため。
-fn stepped_index(cursor: usize, len: usize, delta: isize) -> usize {
+pub(crate) fn stepped_index(cursor: usize, len: usize, delta: isize) -> usize {
     let Some(last) = len.checked_sub(1) else {
         return cursor;
     };
@@ -2478,11 +2483,13 @@ pub enum Modal {
     /// interactive rebase の plan を編む（01 の「interactive rebase の開始（`i`）」、07 の
     /// 「RebaseEditor」）。Graph の `i` で開く。
     ///
-    /// **`plan` は古い順**（git の todo と同じ）。`onto` は選択コミットの第 1 親。
+    /// **`plan` は古い順**（git の todo と同じ）。`onto` は選択コミットの第 1 親、`head` は
+    /// plan を組んだ時点の HEAD（`GitOp::RebaseInteractive` の `head`）。
     /// **検証の結果は持たない** —— 描く側も `Enter` も `RebasePlan::validate()` を
     /// その場で呼ぶ。持つと、行を動かすたびに更新を忘れる形が生まれる。
     RebaseEditor {
         onto: Oid,
+        head: Oid,
         plan: RebasePlan,
         cursor: usize,
     },

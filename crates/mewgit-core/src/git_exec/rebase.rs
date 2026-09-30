@@ -80,18 +80,9 @@ pub enum EditorError {
     /// **手で叩かれたときの守り。** `Runner` 経由なら `to_commands` が先に断っている。
     #[error(transparent)]
     Invalid(#[from] RebasePlanError),
-    /// git が書いた既定の todo と plan のコミットが食い違う（[`write_todo`]）。
-    /// **plan を組んだあとに履歴が動いた**ときに起きる（端末で積んだコミットなど）。
-    #[error(
-        "rebase する範囲が画面と食い違っています（画面を開いたあとに履歴が動いた？）。git の todo だけにある: [{}] / 画面の plan だけにある: [{}]",
-        .only_in_git.join(", "),
-        .only_in_plan.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
-    )]
-    Mismatch {
-        /// 既定の todo にあって plan に無いもの（短縮 Oid のまま）。
-        only_in_git: Vec<String>,
-        only_in_plan: Vec<Oid>,
-    },
+    /// plan を組んだあとに HEAD が動いた（[`write_todo`]）。端末で積んだコミットなど。
+    #[error("rebase を組んだあとに HEAD が動きました（{expected} → {actual}）。読み直してからやり直して")]
+    HeadMoved { expected: Oid, actual: String },
 }
 
 impl RebasePlan {
@@ -138,57 +129,6 @@ impl RebasePlan {
     }
 }
 
-impl RebasePlan {
-    /// git が書いた既定の todo（`default`）に並ぶコミットと、plan のコミットが同じ
-    /// 集まりか。**並びと動作は見ない** —— `rebase.autoSquash=true` だと既定の todo は
-    /// 並びも動作も変わる（03 の実測）。
-    ///
-    /// 既定の todo の Oid は短縮形（`core.abbrev` に従う）なので、plan の完全な Oid と
-    /// 前方一致で 1 対 1 に組む。
-    fn matches_todo(&self, default: &str) -> Result<(), EditorError> {
-        let mut unmatched: Vec<Oid> = self.entries.iter().map(|entry| entry.oid).collect();
-        let mut only_in_git = Vec::new();
-        for abbrev in todo_oids(default) {
-            let hit = unmatched
-                .iter()
-                .position(|oid| oid.to_string().starts_with(abbrev));
-            match hit {
-                Some(i) => {
-                    unmatched.swap_remove(i);
-                }
-                None => only_in_git.push(abbrev.to_string()),
-            }
-        }
-        if only_in_git.is_empty() && unmatched.is_empty() {
-            return Ok(());
-        }
-        Err(EditorError::Mismatch {
-            only_in_git,
-            only_in_plan: unmatched,
-        })
-    }
-}
-
-/// 既定の todo に並ぶコミットの Oid（短縮形のまま）。
-///
-/// **コミットを取る行だけを読む。** `label` / `reset`（`rebase.rebaseMerges=true`）や
-/// コメントは飛ばす。`fixup -C <Oid>`（`rebase.autoSquash=true` の `amend!`）の
-/// ように、コマンドと Oid のあいだに `-` で始まる語が挟まる形がある（03 の実測）。
-fn todo_oids(todo: &str) -> impl Iterator<Item = &str> {
-    const TAKES_COMMIT: &[&str] = &[
-        "pick", "p", "reword", "r", "edit", "e", "squash", "s", "fixup", "f", "drop", "d", "merge",
-        "m",
-    ];
-    todo.lines().filter_map(|line| {
-        let mut words = line.split_whitespace();
-        let command = words.next()?;
-        if !TAKES_COMMIT.contains(&command) {
-            return None;
-        }
-        words.find(|word| !word.starts_with('-'))
-    })
-}
-
 impl RebaseAction {
     /// todo の語。RebaseEditor の行もこの字で出す（07）。
     pub fn keyword(&self) -> &'static str {
@@ -201,6 +141,16 @@ impl RebaseAction {
             RebaseAction::Drop => "drop",
         }
     }
+}
+
+/// sequence editor が標準入力から読むもの。`to_commands` が
+/// [`GitOp::RebaseInteractive`](super::GitOp::RebaseInteractive) から組む。
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SequenceInput {
+    /// plan を組んだ時点の HEAD。[`write_todo`] が `orig-head` と比べる。
+    #[serde(with = "oid_hex")]
+    pub head: Oid,
+    pub plan: RebasePlan,
 }
 
 /// `git2::Oid` は serde を実装しないので、16 進の文字列で運ぶ。
@@ -231,22 +181,33 @@ fn reword_path(dir: &Path, oid: &str) -> PathBuf {
 /// sequence editor の本体。`plan` は git から継いだ標準入力（`to_commands` が流した
 /// JSON）、`todo` は git が渡した todo ファイル（`rebase-merge/git-rebase-todo`）。
 ///
-/// **git が書いた既定の todo と plan のコミットが同じ集まりでなければ断る**
-/// （[`EditorError::Mismatch`]）。plan は UI が読み込み済みのグラフから組むので、
+/// **plan を組んだ HEAD が git の `rebase-merge/orig-head` と違えば断る**
+/// （[`EditorError::HeadMoved`]）。plan は UI が読み込み済みのグラフから組むので、
 /// 端末で積んだコミットがあると範囲が古く、**載らなかったコミットを git は黙って
-/// 落とす**（03）。
+/// 落とす**（03）。`onto` は Oid で固定され、範囲の merge は UI が開く前に断るので、
+/// HEAD が同じなら範囲も同じ。
 ///
 /// **メッセージを先に書き、todo を最後に書く。** 途中で落ちたら非 0 で返り、git は
 /// rebase を始めずに `rebase-merge/` ごと消す（03 の実測）。
-pub fn write_todo(mut plan: impl Read, todo: &Path) -> Result<(), EditorError> {
+pub fn write_todo(mut input: impl Read, todo: &Path) -> Result<(), EditorError> {
     let mut json = String::new();
-    plan.read_to_string(&mut json)?;
-    let plan: RebasePlan = serde_json::from_str(&json)?;
+    input.read_to_string(&mut json)?;
+    let SequenceInput { head, plan } = serde_json::from_str(&json)?;
     plan.validate()?;
-    let default = std::fs::read_to_string(todo).map_err(io(todo))?;
-    plan.matches_todo(&default)?;
 
     let dir = todo.parent().unwrap_or(Path::new("."));
+    // sequence editor が起きた時点で git が書いている（ブランチ・detached・linked
+    // worktree のどれでも。03 の実測）。
+    let orig_head = dir.join("orig-head");
+    let actual = std::fs::read_to_string(&orig_head).map_err(io(&orig_head))?;
+    let actual = actual.trim();
+    if actual != head.to_string() {
+        return Err(EditorError::HeadMoved {
+            expected: head,
+            actual: actual.to_string(),
+        });
+    }
+
     for entry in &plan.entries {
         if let RebaseAction::Reword { message } = &entry.action {
             let path = reword_path(dir, &entry.oid.to_string());
@@ -333,16 +294,20 @@ mod tests {
         rebase_entry(action, fake_oid(n), &format!("c{n}"))
     }
 
-    /// git が書く既定の todo を模す。`plan` のコミットを `pick` で並べる。
-    fn default_todo(plan: &RebasePlan) -> String {
-        plan.entries
-            .iter()
-            .map(|entry| format!("pick {} # {}\n", entry.oid, entry.summary))
-            .collect()
+    /// git が起こす sequence editor の周りを模す。`dir` は `rebase-merge/` で、git は
+    /// そこに `orig-head` を書いてから editor を起こす（03 の実測）。HEAD は `fake_oid(0)`。
+    fn with_orig_head(dir: &Path) -> PathBuf {
+        std::fs::write(dir.join("orig-head"), format!("{}\n", fake_oid(0))).unwrap();
+        dir.join("git-rebase-todo")
     }
 
-    fn oid(hex: &str) -> Oid {
-        hex.parse().unwrap()
+    /// `to_commands` が流す標準入力。`head` は plan を組んだ時点の HEAD。
+    fn input(head: Oid, plan: &RebasePlan) -> Vec<u8> {
+        serde_json::to_vec(&SequenceInput {
+            head,
+            plan: plan.clone(),
+        })
+        .unwrap()
     }
 
     fn todo_lines(plan: &RebasePlan) -> Vec<String> {
@@ -423,7 +388,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rebase_dir = dir.path().join("rebase merge");
         std::fs::create_dir(&rebase_dir).unwrap();
-        let todo = rebase_dir.join("git-rebase-todo");
+        let todo = with_orig_head(&rebase_dir);
         // 全部の動作を JSON に通す。
         let plan = RebasePlan {
             entries: vec![
@@ -435,9 +400,8 @@ mod tests {
                 entry(RebaseAction::Drop, 6),
             ],
         };
-        std::fs::write(&todo, default_todo(&plan)).unwrap();
 
-        write_todo(serde_json::to_vec(&plan).unwrap().as_slice(), &todo).unwrap();
+        write_todo(input(fake_oid(0), &plan).as_slice(), &todo).unwrap();
 
         assert_eq!(std::fs::read_to_string(&todo).unwrap(), plan.to_todo());
         assert_eq!(
@@ -454,12 +418,11 @@ mod tests {
         let gitdir = tempfile::tempdir().unwrap();
         let rebase_dir = gitdir.path().join("rebase-merge");
         std::fs::create_dir(&rebase_dir).unwrap();
-        let todo = rebase_dir.join("git-rebase-todo");
+        let todo = with_orig_head(&rebase_dir);
         let plan = RebasePlan {
             entries: vec![entry(RebaseAction::Pick, 1), entry(reword("new"), 2)],
         };
-        std::fs::write(&todo, default_todo(&plan)).unwrap();
-        write_todo(serde_json::to_vec(&plan).unwrap().as_slice(), &todo).unwrap();
+        write_todo(input(fake_oid(0), &plan).as_slice(), &todo).unwrap();
         let msg = gitdir.path().join("COMMIT_EDITMSG");
         let commit_with_done = |done: &str| {
             std::fs::write(rebase_dir.join("done"), done).unwrap();
@@ -501,10 +464,11 @@ mod tests {
     #[test]
     fn write_todo_leaves_the_todo_alone_when_the_plan_is_invalid() {
         let dir = tempfile::tempdir().unwrap();
-        let todo = dir.path().join("git-rebase-todo");
+        let todo = with_orig_head(dir.path());
         std::fs::write(&todo, "pick 1234 original\n").unwrap();
 
-        let err = write_todo(b"{\"entries\":[]}".as_slice(), &todo).unwrap_err();
+        let err =
+            write_todo(input(fake_oid(0), &RebasePlan::default()).as_slice(), &todo).unwrap_err();
 
         assert!(matches!(err, EditorError::Invalid(RebasePlanError::Empty)));
         assert_eq!(
@@ -514,84 +478,29 @@ mod tests {
     }
 
     #[test]
-    fn the_default_todo_is_matched_by_abbreviated_oids_in_any_order_and_form() {
-        let a = oid("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1");
-        let b = oid("b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2");
-        let c = oid("c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3");
-        let plan = RebasePlan {
-            entries: vec![
-                rebase_entry(RebaseAction::Pick, a, "a"),
-                rebase_entry(RebaseAction::Drop, b, "b"),
-                rebase_entry(RebaseAction::Squash, c, "c"),
-            ],
-        };
-        // `rebase.autoSquash` / `abbreviateCommands` / `rebaseMerges` の形（03 の実測）。
-        // 並びと動作は見ない。
-        let default = [
-            "label onto",
-            "reset onto",
-            "p c3c3c3c # c",
-            "fixup -C a1a1a1a1a1a1 # amend! a",
-            "# pick 0000000 # コメント",
-            "pick b2b2b2b # b",
-        ]
-        .join("\n");
-
-        assert!(plan.matches_todo(&default).is_ok());
-    }
-
-    #[test]
-    fn a_default_todo_that_disagrees_with_the_plan_is_refused_both_ways() {
-        let a = oid("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1");
-        let b = oid("b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2");
-        let plan = RebasePlan {
-            entries: vec![rebase_entry(RebaseAction::Pick, a, "a")],
-        };
-
-        // 画面を開いたあとに端末で積んだ 1 本が、git の範囲にだけある。**通すと git が
-        // 黙って落とす**（`rebase.missingCommitsCheck` の既定は `ignore`。03）。
-        let err = plan
-            .matches_todo("pick a1a1a1a # a\npick d4d4d4d # 端末で積んだ\n")
-            .unwrap_err();
-        assert!(
-            matches!(
-                &err,
-                EditorError::Mismatch { only_in_git, only_in_plan }
-                    if only_in_git == &["d4d4d4d"] && only_in_plan.is_empty()
-            ),
-            "{err:?}"
-        );
-        // 逆に plan にだけある（範囲の外のコミットを cherry-pick することになる）。
-        let plan = RebasePlan {
-            entries: vec![
-                rebase_entry(RebaseAction::Pick, a, "a"),
-                rebase_entry(RebaseAction::Pick, b, "b"),
-            ],
-        };
-        let err = plan.matches_todo("pick a1a1a1a # a\n").unwrap_err();
-        assert!(
-            matches!(
-                &err,
-                EditorError::Mismatch { only_in_git, only_in_plan }
-                    if only_in_git.is_empty() && only_in_plan == &[b]
-            ),
-            "{err:?}"
-        );
-    }
-
-    #[test]
-    fn write_todo_leaves_the_todo_alone_when_the_range_disagrees() {
+    fn write_todo_leaves_the_todo_alone_when_head_moved_after_the_plan() {
+        // 画面を開いたあとに端末で 1 本積んだ。**通すと、plan に載らなかったそのコミットを
+        // git が黙って落とす**（`rebase.missingCommitsCheck` の既定は `ignore`。03）。
         let dir = tempfile::tempdir().unwrap();
-        let todo = dir.path().join("git-rebase-todo");
+        let todo = with_orig_head(dir.path());
+        std::fs::write(&todo, "pick 1234 original\n").unwrap();
         let plan = RebasePlan {
             entries: vec![entry(RebaseAction::Pick, 1)],
         };
-        let default = format!("{}pick {} # c2\n", default_todo(&plan), fake_oid(2));
-        std::fs::write(&todo, &default).unwrap();
 
-        let err = write_todo(serde_json::to_vec(&plan).unwrap().as_slice(), &todo).unwrap_err();
+        let err = write_todo(input(fake_oid(7), &plan).as_slice(), &todo).unwrap_err();
 
-        assert!(matches!(err, EditorError::Mismatch { .. }), "{err:?}");
-        assert_eq!(std::fs::read_to_string(&todo).unwrap(), default);
+        assert!(
+            matches!(
+                &err,
+                EditorError::HeadMoved { expected, actual }
+                    if *expected == fake_oid(7) && *actual == fake_oid(0).to_string()
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&todo).unwrap(),
+            "pick 1234 original\n"
+        );
     }
 }

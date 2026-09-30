@@ -75,7 +75,9 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
             cursor,
         } => mainline_picker::render(frame, area, target, summary, parents, *cursor),
         Modal::Help { pane, cursor } => help::render(frame, area, *pane, *cursor),
-        Modal::RebaseEditor { onto, plan, cursor } => {
+        Modal::RebaseEditor {
+            onto, plan, cursor, ..
+        } => {
             rebase_editor::render(frame, area, onto, plan, *cursor);
         }
     }

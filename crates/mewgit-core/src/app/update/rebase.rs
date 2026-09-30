@@ -6,10 +6,12 @@
 use std::collections::HashMap;
 
 use super::graph::picked_commit;
+use super::modal::picker_key;
 use super::{confirm, submit_exec};
+use crate::app::state::stepped_index;
 use crate::app::{AppState, Cmd, Key, KeyCode, Modal, NoticeLevel};
 use crate::git_exec::{GitOp, RebaseAction, RebaseEntry, RebasePlan};
-use crate::git_read::{short_oid, Commit, HeadInfo, Oid, WorktreeSnapshot};
+use crate::git_read::{short_oid, Commit, HeadInfo, Oid};
 
 /// `i`。カーソルの指すコミットから HEAD までを [`Modal::RebaseEditor`] に並べる。
 ///
@@ -20,8 +22,8 @@ pub(super) fn open_rebase_editor(state: &mut AppState) -> Cmd {
     let Some(selected) = picked_commit(state, "rebase") else {
         return Cmd::None;
     };
-    let plan = match plan_to(state, &selected) {
-        Ok(plan) => plan,
+    let (head, plan) = match plan_to(state, &selected) {
+        Ok(found) => found,
         Err(message) => {
             state.push_notice(NoticeLevel::Warn, message.to_string(), None);
             return Cmd::None;
@@ -29,23 +31,28 @@ pub(super) fn open_rebase_editor(state: &mut AppState) -> Cmd {
     };
     // `plan_to` が root コミットを断っているので、親は必ずある。
     let onto = selected.parents[0];
-    if let Some(instead) = state.refuse_write(&rebase_op(onto, &plan)) {
+    let op = rebase_op(onto, head, plan);
+    if let Some(instead) = state.refuse_write(&op) {
         return instead;
     }
+    let GitOp::RebaseInteractive { plan, .. } = op else {
+        unreachable!("rebase_op は RebaseInteractive を組む");
+    };
     state.modal = Some(Modal::RebaseEditor {
         onto,
+        head,
         plan,
         cursor: 0,
     });
     Cmd::None
 }
 
-/// HEAD から `selected` までを第 1 親で辿り、古い順（git の todo の順）に並べた plan。
-/// 組めなければ断りの文言。
+/// HEAD から `selected` までを第 1 親で辿り、古い順（git の todo の順）に並べた plan と、
+/// 辿り始めた HEAD。組めなければ断りの文言。
 ///
 /// **読み込み済みのグラフだけを辿る**（読み足さない。01）。表示行の並びでは切らない ——
 /// 行はレーンをまたいだ topo-order なので、あいだの行が HEAD の祖先とは限らない。
-fn plan_to(state: &AppState, selected: &Commit) -> Result<RebasePlan, &'static str> {
+fn plan_to(state: &AppState, selected: &Commit) -> Result<(Oid, RebasePlan), &'static str> {
     if selected.parents.is_empty() {
         return Err("root コミットからは rebase できません");
     }
@@ -78,14 +85,14 @@ fn plan_to(state: &AppState, selected: &Commit) -> Result<RebasePlan, &'static s
         if at == selected.oid {
             break;
         }
-        match commit.parents.first() {
-            Some(&parent) => at = parent,
-            // root まで辿って届かなかった。
-            None => return Err(UNREACHABLE),
-        }
+        // 親が無い = root まで辿って届かなかった。
+        let Some(&parent) = commit.parents.first() else {
+            return Err(UNREACHABLE);
+        };
+        at = parent;
     }
     entries.reverse();
-    Ok(RebasePlan { entries })
+    Ok((head, RebasePlan { entries }))
 }
 
 /// HEAD から第 1 親で辿って選択に届かないときの断り。**祖先でないのか、まだ読み込んで
@@ -93,47 +100,28 @@ fn plan_to(state: &AppState, selected: &Commit) -> Result<RebasePlan, &'static s
 const UNREACHABLE: &str =
     "HEAD から辿れないコミットです（HEAD の祖先でないか、まだ読み込んでいない）";
 
-fn rebase_op(onto: Oid, plan: &RebasePlan) -> GitOp {
+fn rebase_op(onto: Oid, head: Oid, plan: RebasePlan) -> GitOp {
     GitOp::RebaseInteractive {
         onto: onto.to_string(),
-        plan: plan.clone(),
+        head,
+        plan,
     }
 }
 
-/// [`Modal::RebaseEditor`] のキー処理（07 の「RebaseEditor」）。
-///
-/// **`picker_key` に載せない。** `J` / `K` と動作のキーを受け、`Enter` の前に検証が
-/// 挟まる。`j` / `k` の端の扱いだけは同じ（[`AppState::move_modal_cursor`]）。
+/// [`Modal::RebaseEditor`] のキー処理（07 の「RebaseEditor」）。`J` / `K` と動作のキーを
+/// 受け、残り（`j` / `k` / `Enter` / `Esc`）は `picker_key` に委ねる（`account_key` と
+/// 同じ形）。
 pub(super) fn rebase_editor_key(state: &mut AppState, key: Key) -> Cmd {
     let action = match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => {
-            state.move_modal_cursor(1);
-            return Cmd::None;
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            state.move_modal_cursor(-1);
-            return Cmd::None;
-        }
-        KeyCode::Char('J') => {
-            swap(state, 1);
-            return Cmd::None;
-        }
-        KeyCode::Char('K') => {
-            swap(state, -1);
-            return Cmd::None;
-        }
-        KeyCode::Enter => return submit(state),
-        KeyCode::Esc => {
-            state.modal = None;
-            return Cmd::None;
-        }
+        KeyCode::Char('J') => return swap(state, 1),
+        KeyCode::Char('K') => return swap(state, -1),
         // `r`（reword）はまだ無い（`docs/plan.md` の M5 で次のタスクに割った）。
         KeyCode::Char('p') => RebaseAction::Pick,
         KeyCode::Char('e') => RebaseAction::Edit,
         KeyCode::Char('s') => RebaseAction::Squash,
         KeyCode::Char('f') => RebaseAction::Fixup,
         KeyCode::Char('d') => RebaseAction::Drop,
-        _ => return Cmd::None,
+        _ => return picker_key(state, key, submit),
     };
     if let Some(Modal::RebaseEditor { plan, cursor, .. }) = state.modal.as_mut() {
         if let Some(entry) = plan.entries.get_mut(*cursor) {
@@ -144,81 +132,49 @@ pub(super) fn rebase_editor_key(state: &mut AppState, key: Key) -> Cmd {
 }
 
 /// カーソルの行を `delta` の向きの隣と入れ替える。**カーソルは行について動く。**
-/// 端では動かない（`J` を押し続けて先頭に回り込むと、並べた順が見えないまま崩れる）。
-fn swap(state: &mut AppState, delta: isize) {
-    let Some(Modal::RebaseEditor { plan, cursor, .. }) = state.modal.as_mut() else {
-        return;
-    };
-    let Some(to) = cursor.checked_add_signed(delta) else {
-        return;
-    };
-    if to < plan.entries.len() {
+/// 端の扱いは `j` / `k` と同じ（[`stepped_index`]。回り込まない）。
+fn swap(state: &mut AppState, delta: isize) -> Cmd {
+    if let Some(Modal::RebaseEditor { plan, cursor, .. }) = state.modal.as_mut() {
+        let to = stepped_index(*cursor, plan.entries.len(), delta);
         plan.entries.swap(*cursor, to);
         *cursor = to;
     }
+    Cmd::None
 }
 
 /// `Enter`。**`RebasePlan::validate()` を門にする**（エディタの赤い行も同じ関数を読む）。
 /// 通らなければ閉じずに理由を通知に出す。**全部 `drop` は確認を挟む**（03）。
 fn submit(state: &mut AppState) -> Cmd {
-    let Some(Modal::RebaseEditor { onto, plan, .. }) = &state.modal else {
+    let Some(Modal::RebaseEditor {
+        onto, head, plan, ..
+    }) = &state.modal
+    else {
         return Cmd::None;
     };
-    let (onto, plan) = (*onto, plan.clone());
     if let Err(err) = plan.validate() {
         state.push_notice(NoticeLevel::Warn, err.to_string(), None);
         return Cmd::None;
     }
-    let op = rebase_op(onto, &plan);
-    let all_dropped = plan
+    let onto = *onto;
+    let dropped = plan
         .entries
         .iter()
-        .all(|entry| entry.action == RebaseAction::Drop);
-    if all_dropped {
-        // `confirm` はモーダルを差し替える。断られる書き込みなら開く前に断る
-        // （`submit_exec` と同じ判定）。
-        if let Some(instead) = state.refusal(&Cmd::Exec(op.clone())) {
-            return instead;
-        }
-        let body = format!(
-            "{} 本を全部 drop し、ブランチを {} まで戻します。",
-            plan.entries.len(),
-            short_oid(&onto)
-        );
-        return confirm(state, "rebase", body, op);
+        .all(|entry| entry.action == RebaseAction::Drop)
+        .then_some(plan.entries.len());
+    let op = rebase_op(onto, *head, plan.clone());
+    let Some(count) = dropped else {
+        return submit_exec(state, op);
+    };
+    // `confirm` はモーダルを差し替える。断られる書き込みなら開く前に断る
+    // （`submit_exec` と同じ判定）。
+    if let Some(instead) = state.refusal(&Cmd::Exec(op.clone())) {
+        return instead;
     }
-    submit_exec(state, op)
-}
-
-impl AppState {
-    /// interactive rebase の開始を、作業ツリーの中身で断るなら、理由を通知に積んで
-    /// 代わりに出す `Cmd` を返す（01 の「interactive rebase の開始（`i`）」）。
-    ///
-    /// git は tracked のファイルに変更があると `cannot rebase: You have unstaged changes`
-    /// で断る（untracked だけなら通す）。**`rebase.autoStash=true` の人にも断る** ——
-    /// mewgit はユーザーの git 設定を読まない。**鮮度の無い snapshot では status を
-    /// 読み直す**（stash の push と同じ）。
-    pub(crate) fn refuse_rebase(&mut self, op: &GitOp) -> Option<Cmd> {
-        if !matches!(op, GitOp::RebaseInteractive { .. }) {
-            return None;
-        }
-        let (message, instead) = if !self.worktree_is_current() {
-            // 続きを頼む: 古い snapshot で断った rebase の代わりの status の読み直し。
-            ("状態を読み直しています。もう一度押して", Cmd::LoadStatus)
-        } else if has_tracked_changes(&self.worktree.snapshot) {
-            ("変更を commit か stash してから rebase して", Cmd::None)
-        } else {
-            return None;
-        };
-        self.push_notice(NoticeLevel::Warn, message.to_string(), None);
-        Some(instead)
-    }
-}
-
-/// tracked のファイルに変更があるか（staged / unstaged / conflicted）。untracked は数えない
-/// —— git は untracked だけなら rebase を通す（01 の実測）。
-fn has_tracked_changes(snapshot: &WorktreeSnapshot) -> bool {
-    !(snapshot.staged.is_empty() && snapshot.unstaged.is_empty() && snapshot.conflicted.is_empty())
+    let body = format!(
+        "{count} 本を全部 drop し、ブランチを {} まで戻します。",
+        short_oid(&onto)
+    );
+    confirm(state, "rebase", body, op)
 }
 
 #[cfg(test)]
@@ -226,7 +182,7 @@ mod tests {
     use super::super::test_support::{open_confirm, press, press_code, state_with_commits};
     use super::*;
     use crate::app::Msg;
-    use crate::git_read::InProgressOp;
+    use crate::git_read::{InProgressOp, WorktreeSnapshot};
     use crate::test_util::{fake_oid, fake_snapshot, reply};
 
     /// `n` 件の 1 列の履歴（`commit i` の親は `commit i+1`、最後が root）。HEAD は
@@ -267,7 +223,9 @@ mod tests {
 
     fn editor(state: &AppState) -> (Oid, &RebasePlan, usize) {
         match &state.modal {
-            Some(Modal::RebaseEditor { onto, plan, cursor }) => (*onto, plan, *cursor),
+            Some(Modal::RebaseEditor {
+                onto, plan, cursor, ..
+            }) => (*onto, plan, *cursor),
             other => panic!("RebaseEditor が開いていません: {other:?}"),
         }
     }
@@ -279,10 +237,11 @@ mod tests {
             .collect()
     }
 
-    fn warned(state: &AppState, needle: &str) {
+    /// エディタを開かずに、`level` の通知で断った。
+    fn refused(state: &AppState, level: NoticeLevel, needle: &str) {
         assert_eq!(state.modal, None);
         let notice = state.shown_notice().expect("通知が出ていません");
-        assert_eq!(notice.level, NoticeLevel::Warn);
+        assert_eq!(notice.level, level);
         assert!(notice.message.contains(needle), "{}", notice.message);
     }
 
@@ -292,6 +251,11 @@ mod tests {
 
         assert_eq!(press_i_on(&mut state, 2), Cmd::None);
 
+        let Some(Modal::RebaseEditor { head, .. }) = &state.modal else {
+            panic!("RebaseEditor が開いていません: {:?}", state.modal);
+        };
+        // plan を組んだ HEAD を運ぶ（sequence editor が `orig-head` と比べる。03）。
+        assert_eq!(*head, fake_oid(0));
         let (onto, plan, cursor) = editor(&state);
         // 選択コミットも範囲に入る（`git rebase -i <選択>^` と同じ。01）。
         assert_eq!(onto, fake_oid(3));
@@ -329,13 +293,7 @@ mod tests {
 
         assert_eq!(press(&mut state, 'i'), Cmd::None);
 
-        assert_eq!(state.modal, None);
-        let notice = state.shown_notice().expect("通知が出ていません");
-        assert!(
-            notice.message.contains("コミットの行"),
-            "{}",
-            notice.message
-        );
+        refused(&state, NoticeLevel::Info, "コミットの行");
     }
 
     #[test]
@@ -345,7 +303,7 @@ mod tests {
 
         let _ = press_i_on(&mut state, 2);
 
-        warned(&state, "root");
+        refused(&state, NoticeLevel::Warn, "root");
     }
 
     #[test]
@@ -356,7 +314,7 @@ mod tests {
 
         let _ = press_i_on(&mut state, 2);
 
-        warned(&state, "merge");
+        refused(&state, NoticeLevel::Warn, "merge");
     }
 
     #[test]
@@ -367,7 +325,7 @@ mod tests {
 
         let _ = press_i_on(&mut state, 2);
 
-        warned(&state, "HEAD から辿れない");
+        refused(&state, NoticeLevel::Warn, "HEAD から辿れない");
     }
 
     #[test]
@@ -379,7 +337,7 @@ mod tests {
 
         let _ = press_i_on(&mut state, 1);
 
-        warned(&state, "HEAD");
+        refused(&state, NoticeLevel::Warn, "HEAD");
     }
 
     #[test]
@@ -390,7 +348,7 @@ mod tests {
 
         let _ = press_i_on(&mut state, 1);
 
-        warned(&state, "commit か stash");
+        refused(&state, NoticeLevel::Warn, "commit か stash");
 
         // untracked だけなら git は通す（01 の実測）。
         let mut state = linear(3);
@@ -408,7 +366,7 @@ mod tests {
 
         assert_eq!(press_i_on(&mut state, 1), Cmd::LoadStatus);
 
-        warned(&state, "読み直しています");
+        refused(&state, NoticeLevel::Warn, "読み直しています");
     }
 
     #[test]
@@ -422,8 +380,7 @@ mod tests {
 
         let _ = press_i_on(&mut state, 1);
 
-        assert_eq!(state.modal, None);
-        assert!(state.shown_notice().is_some());
+        refused(&state, NoticeLevel::Warn, "cherry-pick");
     }
 
     #[test]
@@ -492,6 +449,7 @@ mod tests {
             cmd,
             Cmd::Exec(GitOp::RebaseInteractive {
                 onto: fake_oid(2).to_string(),
+                head: fake_oid(0),
                 plan,
             })
         );
@@ -515,6 +473,7 @@ mod tests {
             on_yes,
             &Cmd::Exec(GitOp::RebaseInteractive {
                 onto: fake_oid(2).to_string(),
+                head: fake_oid(0),
                 plan,
             })
         );

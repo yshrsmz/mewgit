@@ -22,11 +22,11 @@ const LEGEND: &str = "p:pick e:edit s:squash f:fixup d:drop  J/K:入れ替え";
 /// キーの案内。`update::rebase::rebase_editor_key` が受けるキーと揃える。
 const HINT: &str = "[j/k] 選ぶ   [Enter] 実行   [Esc] やめる";
 
-/// 動作の桁。**最長の `squash` / `fixup` に 2 桁足す**（Oid の頭を揃える）。
+/// 動作の桁。**最長の `squash` / `reword` に 2 桁足す**（Oid の頭を揃える）。
 const ACTION_CELLS: usize = "squash".len() + 2;
 
-/// plan を古い順に並べる。**通らない plan は理由を本文の下に赤で出す** ——
-/// `RebasePlan::validate()` を描くたびに呼ぶ（結果を `Modal` に持たない。07）。
+/// plan を古い順に並べる。**通らない plan は理由を本文の下に赤で出す**（`Modal::RebaseEditor`
+/// の doc。07）。
 pub fn render(frame: &mut Frame, area: Rect, onto: &Oid, plan: &RebasePlan, cursor: usize) {
     let mut body = Text::from(vec![
         Line::from(format!(
@@ -90,6 +90,7 @@ mod tests {
             .collect();
         state_with_modal(Modal::RebaseEditor {
             onto: fake_oid(9),
+            head: fake_oid(8),
             plan: RebasePlan { entries },
             cursor,
         })

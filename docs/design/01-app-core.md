@@ -157,7 +157,7 @@ pub enum Modal {
     Confirm { title: String, body: String, on_yes: Cmd },
     Input { title: String, prompt: String, buf: TextBuffer, intent: InputIntent },
     CommitMessage { buf: TextBuffer, amend: bool },
-    RebaseEditor { onto: Oid, plan: RebasePlan, cursor: usize }, // 下の「interactive rebase の開始（`i`）」
+    RebaseEditor { onto: Oid, head: Oid, plan: RebasePlan, cursor: usize }, // 下の「interactive rebase の開始（`i`）」
     PrCreate { title: TextBuffer, body: TextBuffer, base: TextBuffer, draft: bool, field: PrField },
     AccountPicker { view: AccountView, cursor: usize },
     RemotePicker { reason: String, remotes: Vec<String>, cursor: usize },
@@ -760,7 +760,7 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 コミットの第 1 親で、`git rebase -i <選択>^` と同じ範囲になる。
 
 ```rust
-Modal::RebaseEditor { onto: Oid, plan: RebasePlan, cursor: usize }
+Modal::RebaseEditor { onto: Oid, head: Oid, plan: RebasePlan, cursor: usize }
 ```
 
 - **plan は読み込み済みのグラフを HEAD から第 1 親で辿って組む。** 表示行の並びでは
@@ -770,13 +770,14 @@ Modal::RebaseEditor { onto: Oid, plan: RebasePlan, cursor: usize }
 - **HEAD は `RepoInfo.head`**（`Branch` の `oid` か `Detached`）。mewgit の書き込みの
   あとは `Reload::Refs` で読み直される（上の「ログの読み直し」）が、**端末で積んだ
   コミットには追いつかない**（M6 の外部変更の検知まで）。**追いつかない HEAD で組んだ
-  plan は git に渡った時点で断られる** —— sequence editor が git の既定の todo と
-  plan のコミットを突き合わせる（03 の「Interactive rebase の実装」）。突き合わせが
-  無いと、plan に載らなかったコミットは git が黙って落とす
-  （`rebase.missingCommitsCheck` の既定は `ignore`）
+  plan は git に渡った時点で断られる** —— `Modal::RebaseEditor` が plan を組んだ HEAD を
+  持ち、`GitOp::RebaseInteractive` で運ぶ。sequence editor が git の `orig-head` と比べる
+  （03 の「Interactive rebase の実装」）。比べないと、plan に載らなかったコミットは git が
+  黙って落とす（`rebase.missingCommitsCheck` の既定は `ignore`）
 - **断るのは開く前。** エディタで並べ替えた plan は、閉じたあとで断ると失われる
   （`y` / `v` の「確認は打った文字を持たない」の裏返し）。進行中操作と作業ツリーの
-  断りは `AppState::refuse_write` の 1 本に置き、**確定（`Enter`）のときの `issue`
+  断りは `AppState::refuse_write` の 1 本（作業ツリーは stash と同じ `refuse_by_held_values`
+  の網羅 `match`）に置き、**確定（`Enter`）のときの `issue`
   にも同じものが効く**
 
 | 断る形 | 理由 |
@@ -1236,7 +1237,7 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
   のとは別の stash を drop する**。古ければ「stash の一覧を読み直しています。もう一度」で
   断って `LoadStashes` を出す。**oid では渡せない** —— `git stash drop <oid>` / `pop
   <oid>` は `is not a stash reference` で断られる（実測、git 2.55.0。apply だけは通る）
-- **判定は `AppState::refusal` に置く**（`AppState::refuse_stash`。順は「古い →
+- **判定は `AppState::refusal` に置く**（`AppState::refuse_by_held_values`。順は「古い →
   unmerged がある → 退避する行が無い → 1 ファイルでは割れる」。進行中操作の門と
   並べて `AppState::refuse_write` が束ねる）。キー・確認の `y`・入力の確定のどれから
   来ても同じ門を通る。**入力を開く前も `refuse_write` を問う**（`update::input`）——

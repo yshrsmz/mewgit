@@ -64,7 +64,11 @@ pub enum RebasePlanError {
     EmptyMessage { oid: Oid },
 }
 
-/// [`EditorError::HeadMoved`] の `Display` に埋める印。git が sequence editor の stderr を
+/// エディタとして起こされた mewgit が、失敗を stderr に書くときの行頭。
+/// `runner::classify` が印を行頭で照合するので、書く側と読む側でこれを共有する。
+pub const EDITOR_STDERR_PREFIX: &str = "mewgit: ";
+
+/// [`EditorError::HeadMoved`] の `Display` の先頭に置く印。git が sequence editor の stderr を
 /// 自分の stderr に並べるので、`runner::classify` がこれで
 /// [`ExecErrorKind::HeadMoved`](super::ExecErrorKind::HeadMoved) に分ける。
 ///

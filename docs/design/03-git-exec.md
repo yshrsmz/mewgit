@@ -505,7 +505,7 @@ op で分けている。**#49 の「分類の読み手が増えたら偽陽性�
 
 | パターン | kind |
 |---|---|
-| `[head-moved]`（mewgit の sequence editor が出す印） | `HeadMoved` |
+| stderr の行頭の `mewgit: [head-moved]`（mewgit の sequence editor が出す印） | `HeadMoved` |
 | `SAML SSO` / `organization has enabled or enforced SAML` | `SamlSsoRequired` |
 | `Permission denied (publickey)` | `SshAuthFailed` |
 | `Authentication failed` | `HttpsAuthFailed` |
@@ -516,9 +516,12 @@ op で分けている。**#49 の「分類の読み手が増えたら偽陽性�
 | その他 | `Other` |
 
 **`HeadMoved` は先頭。** 印は mewgit 自身が出す ASCII の定数（`git_exec::rebase` の
-`HEAD_MOVED_MARKER`）で、`EditorError::HeadMoved` の `Display` が埋め、隠しサブコマンドが
-`mewgit: <Display>` として stderr に書く。**日本語の文言を鍵にしない** —— 文言を直すたびに
-分類が外れる。git の語とは衝突しないので、順序を考えなくてよい先頭に置く。
+`HEAD_MOVED_MARKER`）で、`EditorError::HeadMoved` の `Display` が先頭に埋め、隠しサブコマンドが
+`EDITOR_STDERR_PREFIX`（`mewgit: `）を付けて stderr に書く。**日本語の文言を鍵にしない** ——
+文言を直すたびに分類が外れる。**照合は stderr の行頭だけ** —— git はコミットの件名を出力に
+写す（`error: could not apply <oid>... <件名>`、rebase の stdout にも `# <件名>`。git 2.56.0 で
+実測）ので、行のどこでも拾うと件名が `[head-moved] …` のコミットのコンフリクトを取り違える
+（`/code-review` が踏んだ）。件名は行の途中にしか出ないので、行頭で合わせれば先頭に置いてよい。
 
 **`NoChanges` は `Empty` より後ろ。** 空で止まった cherry-pick の stdout の末尾にも
 `nothing to commit, working tree clean` が出る（git 2.55.0 で実測）ので、先に見ると

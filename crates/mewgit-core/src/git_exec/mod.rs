@@ -16,7 +16,7 @@ pub use argv::{push_remote_ref, to_commands, ArgvError, GitCommand};
 pub use patch::{hunk_patch, supports_hunk_patch};
 pub use rebase::{
     write_commit_message, write_todo, EditorError, RebaseAction, RebaseEntry, RebasePlan,
-    RebasePlanError,
+    RebasePlanError, EDITOR_STDERR_PREFIX,
 };
 pub use runner::Runner;
 

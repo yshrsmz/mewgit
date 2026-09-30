@@ -344,7 +344,7 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
         // だけ（continue / skip は起こさない。03 の実測）。**打った reword は戻らない**
         // —— 開き直すと plan は読み直したグラフから組み直される（01 の「失敗の案内文」）。
         ExecErrorKind::HeadMoved => matches!(op, GitOp::RebaseInteractive { .. })
-            .then_some("rebase を組んだあとに履歴が動きました。i から開き直してください"),
+            .then_some("組んだあとに履歴が動いた。i から開き直して"),
         ExecErrorKind::Other => None,
     }
 }
@@ -773,9 +773,10 @@ mod tests {
             "{}",
             notice.message
         );
-        // **バッジとは並ばない**（進行中操作が残らない）ので、予算は 71。
+        // **バッジと並ぶことがある** —— 端末で止めた cherry-pick が HEAD を動かしていると、
+        // 失敗のあとの status でバッジが出る（`/code-review` が踏んだ。01）。
         assert!(
-            cells(&notice.message) <= NOTICE_CELLS,
+            cells(&notice.message) <= BESIDE_BADGE_CELLS,
             "{} セル: {}",
             cells(&notice.message),
             notice.message

@@ -2437,7 +2437,7 @@ pub struct PushRejection {
 | `Empty` + cherry-pick（開始・continue・skip） | `m` から skip する（**`Warn`**） |
 | `NoChanges` + revert（開始、1 本だけ） | 取り消す変更が無い（**`Warn`**） |
 | `NoChanges` + revert（continue・skip） | `m` から skip する（**`Warn`**） |
-| `HeadMoved` + `RebaseInteractive` | 組んだあとに履歴が動いた。`i` から開き直す（**`Warn`**） |
+| `HeadMoved` + `RebaseInteractive` | 組んだあとに履歴が動いた。`i` から開き直す（**`Warn`**、48 セル） |
 | それ以外 | 無し（`Display` に落とす） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
@@ -2508,12 +2508,16 @@ pub struct PushRejection {
   HEAD が動き、sequence editor が断った形（03 の「Interactive rebase の実装」）。git は
   rebase を始めずに `rebase-merge/` を消すので、**壊れたものも進行中操作も無い**（`NoChanges`
   と同じ数え方）。失敗のあとは `RefsAndLog` でログが読み直されているので、案内は
-  「`i` から開き直して」で足りる。**バッジとは並ばない** —— 進行中操作があれば `i` は
-  開く前に断られ（下の「進行中操作があるときの書き込み」）、古い snapshot で通っても git が
-  既に rebase 中だと断るのは sequence editor より前なので、この kind にならない。予算は 71。
+  「`i` から開き直して」で足りる。**予算はバッジの隣の 48 セル** —— 端末で cherry-pick /
+  revert を止めたまま（`CHERRY_PICK_HEAD` / `sequencer/` が残ったまま）確定すると、git は
+  rebase を断らずに sequence editor を起こす（git 2.56.0 で実測）。その cherry-pick が HEAD を
+  動かしていればこの kind になり、失敗のあとの status でバッジが出る。**そのときも `i` を
+  指したままでよい** —— `i` は開く前に進行中操作で断られ（下の「進行中操作があるときの
+  書き込み」）、断りの通知が何の途中かと出口を言う。当初「バッジとは並ばない」と書いて
+  71 セルの文にしており、`/code-review` が踏んだ
   **打った reword のメッセージは戻らない** —— エディタは確定で閉じており、開き直すと
   plan は読み直したグラフから組み直される（上の「interactive rebase の開始（`i`）」）。
-  文は「rebase を組んだあとに履歴が動きました。i から開き直してください」
+  文は「組んだあとに履歴が動いた。i から開き直して」（43 セル）
 - **argv は画面から退く。** これまでステータスバーに出ていた `git <argv>` は
   `detail` の 1 行目に移り、`L` の履歴（上の「通知」）で読む。**1 行目を 2 つで分けない**
   —— 案内文は端末の幅いっぱいまで使う前提で書いてある（上）ので、argv を前に置くと

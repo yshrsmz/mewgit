@@ -15,10 +15,10 @@ pub mod progress_menu;
 pub mod rebase_editor;
 pub mod remote_picker;
 
-use mewgit_core::app::{AppState, Modal, TextBuffer};
+use mewgit_core::app::{AppState, Modal, RewordInput, TextBuffer};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 
@@ -76,10 +76,18 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
         } => mainline_picker::render(frame, area, target, summary, parents, *cursor),
         Modal::Help { pane, cursor } => help::render(frame, area, *pane, *cursor),
         Modal::RebaseEditor {
-            onto, plan, cursor, ..
-        } => {
-            rebase_editor::render(frame, area, onto, plan, *cursor);
-        }
+            onto,
+            plan,
+            cursor,
+            reword,
+            ..
+        } => match (reword, plan.entries.get(*cursor)) {
+            // 入力のあいだは一覧を隠す（07 の「RebaseEditor」）。
+            (RewordInput::Open(buf), Some(entry)) => {
+                rebase_editor::render_reword(frame, area, &entry.oid, buf);
+            }
+            _ => rebase_editor::render(frame, area, onto, plan, *cursor),
+        },
     }
 }
 
@@ -92,9 +100,6 @@ pub const WIDTH: u16 = 60;
 
 /// 本文とキーの案内のあいだに空ける行数。
 const GAP_ROWS: u16 = 1;
-
-/// キーの案内に取る行数。高さの見積もりと `Layout` で同じものを使う。
-const HINT_ROWS: u16 = 1;
 
 /// 枠の内側の右に空ける桁数。
 ///
@@ -144,7 +149,8 @@ pub fn inner_width(area: Rect, want: u16, block: &Block<'_>) -> u16 {
 /// `body_rows` は本文が要求する行数。画面に収まらない分は [`centered`] が削る。
 ///
 /// **キーの案内は本文とは別に最下行へ描く。** 1 つの `Paragraph` にまとめると、
-/// 本文が伸びたときに案内だけが枠の外へ押し出される。
+/// 本文が伸びたときに案内だけが枠の外へ押し出される。**案内は改行で割った行数だけ
+/// 取る**（07 の「モーダルのキーの案内」）—— 1 行に収まらないキーを本文へ押し出さない。
 pub fn place(
     frame: &mut Frame,
     area: Rect,
@@ -155,9 +161,11 @@ pub fn place(
 ) -> Rect {
     let probe = probe(area, want);
     let border_rows = probe.height - block.inner(probe).height;
+    // 高さの見積もりと `Layout` で同じものを使う。
+    let hint_rows = u16::try_from(hint.lines().count()).unwrap_or(u16::MAX);
 
     // 本文 + 空行 + キーの案内 + 枠。
-    let height = body_rows.saturating_add(GAP_ROWS + HINT_ROWS + border_rows);
+    let height = body_rows.saturating_add(GAP_ROWS + hint_rows + border_rows);
     let area = centered(area, probe.width, height);
     let inner = block.inner(area);
 
@@ -166,8 +174,8 @@ pub fn place(
     frame.render_widget(block, area);
 
     let [body, hint_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(HINT_ROWS)]).areas(inner);
-    frame.render_widget(Paragraph::new(Line::from(hint)), hint_area);
+        Layout::vertical([Constraint::Min(0), Constraint::Length(hint_rows)]).areas(inner);
+    frame.render_widget(Paragraph::new(Text::from(hint)), hint_area);
     body
 }
 

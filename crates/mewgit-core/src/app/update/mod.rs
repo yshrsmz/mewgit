@@ -18,7 +18,7 @@ use crate::git_exec::{GitOp, PullMode};
 
 use super::{
     AppState, Cmd, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
-    PrField, TextBuffer,
+    PrField, RewordInput, TextBuffer,
 };
 use account::{account_resolved, accounts_listed, open_account, repo_info_loaded, target_resolved};
 use branches::{branches_key, branches_loaded};
@@ -34,6 +34,7 @@ use prs::{
     open_pr_finished, pr_created, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key,
     rate_limit_seen,
 };
+use rebase::commit_message_loaded;
 use remote::{fetch, push};
 use stash::{stash_key, stashes_loaded};
 use worktree::{head_message_loaded, status_loaded, worktree_key};
@@ -160,6 +161,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::CommitDetailLoaded { oid, result } => commit_detail_loaded(state, oid, *result),
         Msg::CommitFilesLoaded { oid, result } => commit_files_loaded(state, oid, *result),
         Msg::HeadMessageLoaded(result) => head_message_loaded(state, result),
+        Msg::CommitMessageLoaded { oid, result } => commit_message_loaded(state, oid, *result),
         Msg::RepoInfoLoaded(result) => repo_info_loaded(state, *result),
 
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
@@ -323,6 +325,12 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
             // （01 の「PR 作成（`N`）」—— 推定を人の目に通す欄なので打たせない）。
             PrField::Head | PrField::Draft => {}
         },
+        // **reword の入力が開いているときだけ受ける**（01 の「interactive rebase の
+        // 開始（`i`）」）。一覧のあいだは行き先が無い。
+        Some(Modal::RebaseEditor {
+            reword: RewordInput::Open(buf),
+            ..
+        }) => buf.insert_text(text),
         // **`_` にしない。** ここを受け皿にしていたせいで、`Modal::PrCreate` を
         // 足した回に**貼り付けだけが黙って無反応**になっていた（#63 の
         // 「無反応よりまし」で止めない、の手前の形）。網羅にすると、次に編集できる
@@ -334,7 +342,10 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
             | Modal::NoticeLog { .. }
             | Modal::ProgressMenu { .. }
             | Modal::MainlinePicker { .. }
-            | Modal::RebaseEditor { .. }
+            | Modal::RebaseEditor {
+                reword: RewordInput::Closed | RewordInput::Loading(_),
+                ..
+            }
             | Modal::Help { .. },
         )
         | None => {}
@@ -419,6 +430,31 @@ fn edit_key(buf: &mut TextBuffer, key: Key) -> bool {
     true
 }
 
+/// [`multiline_input_key`] が振り分けた結果。
+enum InputKey {
+    /// `Esc`。何を捨てるか（モーダルを閉じるか、一覧へ戻るか）はモーダルの側。
+    Cancel,
+    /// 修飾なしの `Enter`。
+    Submit,
+    /// それ以外。バッファに当てた。
+    Edited,
+}
+
+/// 複数行の入力欄のキーの振り分け（`CommitMessage` と RebaseEditor の reword）。
+/// **修飾なしの `Enter` だけが確定**で、修飾付きは改行に落ちる（01 の「コミット
+/// メッセージの編集」）。**振り分けを 1 本にする** —— 入力欄ごとに写すと、`Enter` の
+/// 意味が欄で割れる。
+fn multiline_input_key(buf: &mut TextBuffer, key: Key) -> InputKey {
+    if key == Key::new(KeyCode::Esc) {
+        return InputKey::Cancel;
+    }
+    if key == Key::new(KeyCode::Enter) {
+        return InputKey::Submit;
+    }
+    multiline_edit_key(buf, key);
+    InputKey::Edited
+}
+
 /// 複数行を編集できる欄のキー。改行と行移動を受け、残りは [`edit_key`] に落とす。
 ///
 /// **2 人目（[`Modal::PrCreate`] の body 欄）が出た時点で `commit_message_key` から
@@ -427,7 +463,9 @@ fn edit_key(buf: &mut TextBuffer, key: Key) -> bool {
 /// 片方だけ古くなり、**どちらのテストも通る**（それぞれ自分の経路しか踏まない）。
 ///
 /// **確定は受けない。** 修飾なしの `Enter` をどう扱うかはモーダルごとの判断で、
-/// ここに入れると「確定して何をするか」まで共有することになる。
+/// ここに入れると「確定して何をするか」まで共有することになる。1 つの欄だけの入力は
+/// [`multiline_input_key`] が `Enter` を `Submit` に振り分けるところまでを持ち、
+/// 何をするかは返さない（`PrCreate` は欄で `Enter` の意味が変わるので使わない）。
 fn multiline_edit_key(buf: &mut TextBuffer, key: Key) {
     // `Ctrl-J` はどの端末でも届く改行。raw mode では `\n` が `Ctrl+j` として来る。
     if key == Key::ctrl('j') {

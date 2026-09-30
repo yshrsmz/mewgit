@@ -48,6 +48,14 @@ pub enum Cmd {
     /// した時点で古い。古い初期値は「1 つ前のコミットのメッセージで HEAD を上書き
     /// する」になる（01 の「commit」）。
     LoadHeadMessage,
+    /// RebaseEditor の reword の初期値にする、そのコミットのメッセージ全文
+    /// （01 の「interactive rebase の開始（`i`）」）。
+    ///
+    /// **[`Cmd::LoadCommitDetail`] に相乗りしない。** あちらの返事はグラフの選択と
+    /// 突き合わせて「違えば頼み直す」ので、エディタの行の Oid を渡すとグラフの詳細の
+    /// 追いつきが回る。`JobKind` も種別単位なので、グラフの詳細が走っているあいだは
+    /// こちらが落とされる。
+    LoadCommitMessage(Oid),
     LoadStatus,
     LoadDiff(DiffTarget),
     /// リモート・HEAD・ref の索引を読む。起動時と、ref が変わったあと（M3）。
@@ -212,6 +220,7 @@ impl Cmd {
             Cmd::LoadCommitDetail(_) => Some((JobKind::LoadCommitDetail, "commit")),
             Cmd::LoadCommitFiles(_) => Some((JobKind::LoadCommitFiles, "files")),
             Cmd::LoadHeadMessage => Some((JobKind::LoadHeadMessage, "head")),
+            Cmd::LoadCommitMessage(_) => Some((JobKind::LoadCommitMessage, "message")),
             Cmd::LoadStatus => Some((JobKind::LoadStatus, "status")),
             Cmd::LoadRepoInfo => Some((JobKind::LoadRepoInfo, "repo")),
             Cmd::LoadBranches => Some((JobKind::LoadBranches, "branches")),

@@ -327,14 +327,16 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       増えない。`Runner` とサブコマンドを別々に入れると、片方だけでは plan が git に届かず
       確かめようが無いので 1 本にした。**2 つのエディタはどのコマンドにも載せる**（止まった
       rebase を `m` から continue しても reword が効く。03 の「Interactive rebase の実装」）
-- [ ] `Modal::RebaseEditor` と Graph の `i`（07 の「RebaseEditor」）。上の経路に乗せる。
+- [x] `Modal::RebaseEditor` と Graph の `i`（07 の「RebaseEditor」）。上の経路に乗せる。
       **reword は下の別タスクに割った**（2026-09-30 にユーザーと決めた）—— こちらは
       pick / edit / squash / fixup / drop と並べ替え。範囲・断る形は 01 の
       「interactive rebase の開始（`i`）」。sequence editor が plan を組んだ HEAD と git の
       `orig-head` を比べる（03）のもここ
-- [ ] RebaseEditor の `r`（reword のメッセージ入力）。複数行の入力を開いて RebaseEditor に
-      戻る形が要り、`modal` は 1 枠なので戻し方（`Modal` の中にモードを持つか、入力の
-      intent に plan を運ぶか）を決める（01 の「interactive rebase の開始（`i`）」）
+- [x] RebaseEditor の `r`（reword のメッセージ入力）。**戻し方は `Modal::RebaseEditor` の
+      中にモード（`reword: RewordInput`）を持つ形**、初期値はメッセージ全文を
+      `Cmd::LoadCommitMessage` で読む（01 の「interactive rebase の開始（`i`）」）。
+      **エディタの凡例をやめてキーの案内を 2 行に折り、箱を 76 に広げた**（2026-09-30 に
+      ユーザーと決めた。07 の「モーダルのキーの案内」）
 - [ ] plan を組んだあとに HEAD が動いて sequence editor が断ったときの案内。いまはステータス
       バーの要約が汎用の「git の実行に失敗しました」で、理由（`EditorError::HeadMoved`）は
       `L` の履歴の stderr にしか出ない（#135 の pty で確認）。**塞ぐには `ExecErrorKind` に

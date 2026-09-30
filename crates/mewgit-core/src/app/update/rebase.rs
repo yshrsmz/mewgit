@@ -7,11 +7,13 @@ use std::collections::HashMap;
 
 use super::graph::picked_commit;
 use super::modal::picker_key;
-use super::{confirm, submit_exec};
+use super::{confirm, multiline_input_key, submit_exec, InputKey};
 use crate::app::state::stepped_index;
-use crate::app::{AppState, Cmd, Key, KeyCode, Modal, NoticeLevel};
+use crate::app::{
+    AppState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, RewordInput, TextBuffer,
+};
 use crate::git_exec::{GitOp, RebaseAction, RebaseEntry, RebasePlan};
-use crate::git_read::{short_oid, Commit, HeadInfo, Oid};
+use crate::git_read::{short_oid, Commit, GitReadError, HeadInfo, Oid};
 
 /// `i`。カーソルの指すコミットから HEAD までを [`Modal::RebaseEditor`] に並べる。
 ///
@@ -43,6 +45,7 @@ pub(super) fn open_rebase_editor(state: &mut AppState) -> Cmd {
         head,
         plan,
         cursor: 0,
+        reword: RewordInput::Closed,
     });
     Cmd::None
 }
@@ -110,12 +113,28 @@ fn rebase_op(onto: Oid, head: Oid, plan: RebasePlan) -> GitOp {
 
 /// [`Modal::RebaseEditor`] のキー処理（07 の「RebaseEditor」）。`J` / `K` と動作のキーを
 /// 受け、残り（`j` / `k` / `Enter` / `Esc`）は `picker_key` に委ねる（`account_key` と
-/// 同じ形）。
+/// 同じ形）。**reword の入力が開いているあいだは、キーはすべて入力が受ける。**
 pub(super) fn rebase_editor_key(state: &mut AppState, key: Key) -> Cmd {
+    if let Some(Modal::RebaseEditor {
+        reword: RewordInput::Open(buf),
+        ..
+    }) = state.modal.as_mut()
+    {
+        // 振り分けは `CommitMessage` と同じ（`update::multiline_input_key`）。
+        return match multiline_input_key(buf, key) {
+            // **閉じずに一覧へ戻る**（ほかのモーダルの `Esc` と違う。01）。
+            InputKey::Cancel => {
+                close_reword(state);
+                Cmd::None
+            }
+            InputKey::Submit => reword_submit(state),
+            InputKey::Edited => Cmd::None,
+        };
+    }
     let action = match key.code() {
         KeyCode::Char('J') => return swap(state, 1),
         KeyCode::Char('K') => return swap(state, -1),
-        // `r`（reword）はまだ無い（`docs/plan.md` の M5 で次のタスクに割った）。
+        KeyCode::Char('r') => return start_reword(state),
         KeyCode::Char('p') => RebaseAction::Pick,
         KeyCode::Char('e') => RebaseAction::Edit,
         KeyCode::Char('s') => RebaseAction::Squash,
@@ -128,6 +147,112 @@ pub(super) fn rebase_editor_key(state: &mut AppState, key: Key) -> Cmd {
             entry.action = action;
         }
     }
+    Cmd::None
+}
+
+/// `r`。カーソルの行の reword のメッセージを打つ入力を開く（01 の「interactive rebase の
+/// 開始（`i`）」）。
+///
+/// **初期値はメッセージ全文**で、読んでから開く（[`commit_message_loaded`]）。グラフの行が
+/// 持つのは件名だけで、件名から始めると本文が黙って消える。**既に `Reword` の行は
+/// 読まない** —— 打ってあるメッセージから始める。**読んでいるあいだの `r` は何もしない**
+/// （1 回目の行が開く）。
+fn start_reword(state: &mut AppState) -> Cmd {
+    let Some(Modal::RebaseEditor {
+        plan,
+        cursor,
+        reword: reword @ RewordInput::Closed,
+        ..
+    }) = state.modal.as_mut()
+    else {
+        return Cmd::None;
+    };
+    let Some(entry) = plan.entries.get(*cursor) else {
+        return Cmd::None;
+    };
+    if let RebaseAction::Reword { message } = &entry.action {
+        *reword = RewordInput::Open(TextBuffer::from_text(message));
+        return Cmd::None;
+    }
+    *reword = RewordInput::Loading(entry.oid);
+    Cmd::LoadCommitMessage(entry.oid)
+}
+
+/// reword の初期値が届いた。**採るのは `RewordInput::Loading` の Oid と一致したときだけ**
+/// （01）。エディタを閉じれば待ちごと消えるので、閉じたあとの返事は失敗も含めて黙って
+/// 捨てる。採るときはカーソルをその行へ移してから開く —— 待っているあいだに `j` / `k` を
+/// 打たれても、`r` を押した行を打つ。**Oid の中身は変わらない**ので世代は見ない
+/// （`JobKind::region()` が `None`）。
+pub(super) fn commit_message_loaded(
+    state: &mut AppState,
+    oid: Oid,
+    result: Result<String, GitReadError>,
+) -> Cmd {
+    state.jobs.finish(JobKind::LoadCommitMessage);
+    let Some(Modal::RebaseEditor {
+        plan,
+        cursor,
+        reword,
+        ..
+    }) = state.modal.as_mut()
+    else {
+        return Cmd::None;
+    };
+    let RewordInput::Loading(waiting) = *reword else {
+        return Cmd::None;
+    };
+    if waiting != oid {
+        // 続きを頼む: 前のエディタで頼んだ読みが走っているあいだに、開き直したエディタで
+        // `r` を押した。そちらの `Cmd` は種別単位で落とされているので、待ちが残り続ける。
+        return Cmd::LoadCommitMessage(waiting);
+    }
+    match result {
+        Ok(message) => {
+            if let Some(row) = plan.entries.iter().position(|entry| entry.oid == oid) {
+                *cursor = row;
+            }
+            *reword = RewordInput::Open(TextBuffer::from_text(&message));
+        }
+        Err(err) => {
+            *reword = RewordInput::Closed;
+            state.push_notice(NoticeLevel::Error, err.to_string(), None);
+        }
+    }
+    Cmd::None
+}
+
+fn close_reword(state: &mut AppState) {
+    if let Some(Modal::RebaseEditor { reword, .. }) = state.modal.as_mut() {
+        *reword = RewordInput::Closed;
+    }
+}
+
+/// reword のメッセージを決めて一覧へ戻る。**空は入力のまま断る**（`commit_submit` と
+/// 同じ）—— `RebasePlan::validate()` の `EmptyMessage` に任せると、空の `Reword` を一度
+/// plan に置くことになる。
+fn reword_submit(state: &mut AppState) -> Cmd {
+    let Some(Modal::RebaseEditor {
+        plan,
+        cursor,
+        reword: RewordInput::Open(buf),
+        ..
+    }) = state.modal.as_mut()
+    else {
+        return Cmd::None;
+    };
+    if buf.is_blank() {
+        state.push_notice(
+            NoticeLevel::Warn,
+            "reword のメッセージが空です".to_string(),
+            None,
+        );
+        return Cmd::None;
+    }
+    let message = buf.text();
+    if let Some(entry) = plan.entries.get_mut(*cursor) {
+        entry.action = RebaseAction::Reword { message };
+    }
+    close_reword(state);
     Cmd::None
 }
 
@@ -146,11 +271,20 @@ fn swap(state: &mut AppState, delta: isize) -> Cmd {
 /// 通らなければ閉じずに理由を通知に出す。**全部 `drop` は確認を挟む**（03）。
 fn submit(state: &mut AppState) -> Cmd {
     let Some(Modal::RebaseEditor {
-        onto, head, plan, ..
+        onto,
+        head,
+        plan,
+        reword,
+        ..
     }) = &state.modal
     else {
         return Cmd::None;
     };
+    // **reword の読みを待っているあいだは何もしない**（01）。通すと、`r` を押した行を
+    // reword にしないまま実行する（`/code-review` が拾った）。
+    if matches!(reword, RewordInput::Loading(_)) {
+        return Cmd::None;
+    }
     if let Err(err) = plan.validate() {
         state.push_notice(NoticeLevel::Warn, err.to_string(), None);
         return Cmd::None;
@@ -179,11 +313,13 @@ fn submit(state: &mut AppState) -> Cmd {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{open_confirm, press, press_code, state_with_commits};
+    use super::super::test_support::{
+        enter_with, open_confirm, press, press_code, state_with_commits, type_text, ALT,
+    };
     use super::*;
-    use crate::app::Msg;
+    use crate::app::{update, Msg};
     use crate::git_read::{InProgressOp, WorktreeSnapshot};
-    use crate::test_util::{fake_oid, fake_snapshot, reply};
+    use crate::test_util::{fake_oid, fake_snapshot, reply, reword};
 
     /// `n` 件の 1 列の履歴（`commit i` の親は `commit i+1`、最後が root）。HEAD は
     /// `commit 0` のブランチで、作業ツリーは鮮度のある空の snapshot。
@@ -487,5 +623,242 @@ mod tests {
         assert_eq!(press_code(&mut state, KeyCode::Esc), Cmd::None);
 
         assert_eq!(state.modal, None);
+    }
+
+    /// reword の入力が開いていれば、打っているメッセージ。
+    fn reword_text(state: &AppState) -> Option<String> {
+        match &state.modal {
+            Some(Modal::RebaseEditor {
+                reword: RewordInput::Open(buf),
+                ..
+            }) => Some(buf.text()),
+            Some(Modal::RebaseEditor { .. }) => None,
+            other => panic!("RebaseEditor が開いていません: {other:?}"),
+        }
+    }
+
+    fn message_loaded(state: &mut AppState, oid: Oid, message: &str) -> Cmd {
+        reply(
+            state,
+            Cmd::LoadCommitMessage(oid),
+            Msg::CommitMessageLoaded {
+                oid,
+                result: Box::new(Ok(message.to_string())),
+            },
+        )
+    }
+
+    /// `commit 1` から HEAD までのエディタで、先頭（`commit 1`）の reword の入力を
+    /// `message` で開いた状態。
+    fn rewording(message: &str) -> AppState {
+        let mut state = linear(3);
+        let _ = press_i_on(&mut state, 1);
+        assert_eq!(press(&mut state, 'r'), Cmd::LoadCommitMessage(fake_oid(1)));
+        let _ = message_loaded(&mut state, fake_oid(1), message);
+        state
+    }
+
+    #[test]
+    fn r_reads_the_full_message_and_opens_the_input_on_the_row_it_was_pressed_on() {
+        let mut state = linear(3);
+        let _ = press_i_on(&mut state, 1);
+
+        // **件名だけでは始めない** —— 本文が黙って消える（01）。全文を読みに行く。
+        assert_eq!(press(&mut state, 'r'), Cmd::LoadCommitMessage(fake_oid(1)));
+        // 待っているあいだに動いても、`r` を押した行を打つ。
+        let _ = press(&mut state, 'j');
+        assert_eq!(reword_text(&state), None);
+        let _ = message_loaded(&mut state, fake_oid(1), "件名\n\n本文");
+
+        assert_eq!(reword_text(&state).as_deref(), Some("件名\n\n本文"));
+        assert_eq!(editor(&state).2, 0);
+    }
+
+    #[test]
+    fn the_input_takes_every_key_and_enter_rewords_the_row_back_in_the_list() {
+        let mut state = rewording("件名");
+
+        // `j` / `d` / `r` は入力の文字になる（カーソルも動作も変えない）。
+        type_text(&mut state, "jdr");
+        let _ = update(&mut state, enter_with(ALT));
+        let _ = press(&mut state, 'x');
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+
+        assert_eq!(reword_text(&state), None);
+        let (_, plan, cursor) = editor(&state);
+        assert_eq!(cursor, 0);
+        assert_eq!(plan.entries[0].action, reword("件名jdr\nx"));
+        assert_eq!(plan.entries[1].action, RebaseAction::Pick);
+
+        // 一覧に戻った `Enter` は実行で、reword を載せた plan を運ぶ。
+        let plan = plan.clone();
+        let cmd = press_code(&mut state, KeyCode::Enter);
+        assert_eq!(
+            cmd,
+            Cmd::Exec(GitOp::RebaseInteractive {
+                onto: fake_oid(2).to_string(),
+                head: fake_oid(0),
+                plan,
+            })
+        );
+    }
+
+    #[test]
+    fn esc_in_the_input_goes_back_to_the_list_without_touching_the_row() {
+        let mut state = rewording("件名");
+        let _ = press(&mut state, 'x');
+
+        assert_eq!(press_code(&mut state, KeyCode::Esc), Cmd::None);
+
+        // **エディタは閉じない**（ほかのモーダルの `Esc` と違う。01）。
+        assert_eq!(reword_text(&state), None);
+        assert_eq!(editor(&state).1.entries[0].action, RebaseAction::Pick);
+    }
+
+    #[test]
+    fn a_blank_message_is_refused_and_the_input_stays_open() {
+        let mut state = rewording(" \n ");
+
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+
+        assert_eq!(reword_text(&state).as_deref(), Some(" \n "));
+        assert_eq!(editor(&state).1.entries[0].action, RebaseAction::Pick);
+        let notice = state.shown_notice().expect("通知が出ていません");
+        assert_eq!(notice.level, NoticeLevel::Warn);
+        assert!(notice.message.contains("空"), "{}", notice.message);
+    }
+
+    #[test]
+    fn r_on_a_reworded_row_starts_from_the_typed_message_without_reading() {
+        let mut state = rewording("件名");
+        let _ = press(&mut state, 'x');
+        let _ = press_code(&mut state, KeyCode::Enter);
+
+        assert_eq!(press(&mut state, 'r'), Cmd::None);
+
+        assert_eq!(reword_text(&state).as_deref(), Some("件名x"));
+    }
+
+    #[test]
+    fn an_action_key_overwrites_a_reworded_row() {
+        let mut state = rewording("件名");
+        let _ = press_code(&mut state, KeyCode::Enter);
+
+        let _ = press(&mut state, 'p');
+
+        assert_eq!(editor(&state).1.entries[0].action, RebaseAction::Pick);
+    }
+
+    #[test]
+    fn a_message_nobody_is_waiting_for_is_dropped() {
+        // **同じ範囲で開き直したエディタ**に、閉じる前の `r` の返事が届く。plan には
+        // 同じ Oid があるが、開き直してからは誰も `r` を押していない（`/simplify` が拾った）。
+        let mut state = linear(3);
+        let _ = press_i_on(&mut state, 1);
+        assert_eq!(press(&mut state, 'r'), Cmd::LoadCommitMessage(fake_oid(1)));
+        let _ = press_code(&mut state, KeyCode::Esc);
+        let _ = press(&mut state, 'i');
+        let _ = update(
+            &mut state,
+            Msg::CommitMessageLoaded {
+                oid: fake_oid(1),
+                result: Box::new(Ok("件名".to_string())),
+            },
+        );
+        assert_eq!(reword_text(&state), None);
+
+        // 入力がもう開いているとき（打った文字を上書きしない）。
+        let mut state = rewording("件名");
+        let _ = press(&mut state, 'x');
+        let _ = message_loaded(&mut state, fake_oid(1), "別の本文");
+        assert_eq!(reword_text(&state).as_deref(), Some("件名x"));
+    }
+
+    #[test]
+    fn an_older_reply_asks_again_for_the_row_being_waited_on() {
+        // 閉じる前の `r`（commit 1）の読みが走っているあいだに、開き直したエディタで
+        // 別の行（commit 0）に `r`。後者の `Cmd` は種別単位で落とされる。
+        let mut state = linear(3);
+        let _ = press_i_on(&mut state, 1);
+        assert_eq!(press(&mut state, 'r'), Cmd::LoadCommitMessage(fake_oid(1)));
+        let _ = press_code(&mut state, KeyCode::Esc);
+        let _ = press(&mut state, 'i');
+        let _ = press(&mut state, 'j');
+        // 出口の `issue` が落とす（commit 1 の読みが走っている）。
+        assert_eq!(press(&mut state, 'r'), Cmd::None);
+
+        let cmd = update(
+            &mut state,
+            Msg::CommitMessageLoaded {
+                oid: fake_oid(1),
+                result: Box::new(Ok("前の件名".to_string())),
+            },
+        );
+
+        assert_eq!(cmd, Cmd::LoadCommitMessage(fake_oid(0)));
+        assert_eq!(reword_text(&state), None);
+        let _ = message_loaded(&mut state, fake_oid(0), "いまの件名");
+        assert_eq!(reword_text(&state).as_deref(), Some("いまの件名"));
+    }
+
+    #[test]
+    fn enter_while_the_message_is_being_read_does_not_run_the_plan() {
+        let mut state = linear(3);
+        let _ = press_i_on(&mut state, 1);
+        let _ = press(&mut state, 'r');
+
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+
+        let _ = message_loaded(&mut state, fake_oid(1), "件名");
+        assert_eq!(reword_text(&state).as_deref(), Some("件名"));
+    }
+
+    #[test]
+    fn r_while_the_message_is_being_read_does_nothing() {
+        let mut state = linear(3);
+        let _ = press_i_on(&mut state, 1);
+        let _ = press(&mut state, 'r');
+        let _ = press(&mut state, 'j');
+
+        assert_eq!(press(&mut state, 'r'), Cmd::None);
+
+        let _ = message_loaded(&mut state, fake_oid(1), "件名");
+        assert_eq!(editor(&state).2, 0);
+        assert_eq!(reword_text(&state).as_deref(), Some("件名"));
+    }
+
+    #[test]
+    fn a_failed_read_says_why_and_leaves_the_list_open() {
+        let mut state = linear(3);
+        let _ = press_i_on(&mut state, 1);
+        let cmd = press(&mut state, 'r');
+
+        let _ = reply(
+            &mut state,
+            cmd,
+            Msg::CommitMessageLoaded {
+                oid: fake_oid(1),
+                result: Box::new(Err(GitReadError::NonUtf8Head)),
+            },
+        );
+
+        assert_eq!(reword_text(&state), None);
+        let notice = state.shown_notice().expect("通知が出ていません");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        // 失敗の返事でジョブが畳まれ、次の `r` が落とされない。
+        assert_eq!(press(&mut state, 'r'), Cmd::LoadCommitMessage(fake_oid(1)));
+    }
+
+    #[test]
+    fn a_paste_goes_into_the_input_but_not_into_the_list() {
+        let mut state = linear(3);
+        let _ = press_i_on(&mut state, 1);
+        let before = state.modal.clone();
+        let _ = update(&mut state, Msg::Paste("dd".to_string()));
+        assert_eq!(state.modal, before);
+
+        let mut state = rewording("件名");
+        let _ = update(&mut state, Msg::Paste(": 追記\n本文".to_string()));
+        assert_eq!(reword_text(&state).as_deref(), Some("件名: 追記\n本文"));
     }
 }

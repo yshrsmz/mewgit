@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
+use crate::modals;
 use crate::modals::picker::{self, Picker};
 use crate::ui::{self, theme};
 
@@ -33,6 +34,7 @@ pub fn render(frame: &mut Frame, area: Rect, pane: Pane, cursor: usize) {
         area,
         Picker {
             title: TITLE,
+            width: modals::WIDTH,
             body: "".into(),
             rows: rows.into_iter().map(|row| line(row, key_cells)).collect(),
             cursor,

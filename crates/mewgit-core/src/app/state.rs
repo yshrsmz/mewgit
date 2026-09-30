@@ -213,6 +213,7 @@ impl AppState {
             | JobKind::LoadCommitDetail
             | JobKind::LoadCommitFiles
             | JobKind::LoadHeadMessage
+            | JobKind::LoadCommitMessage
             | JobKind::LoadRepoInfo
             | JobKind::LoadStatus
             | JobKind::LoadBranches
@@ -2359,6 +2360,7 @@ pub enum JobKind {
     LoadCommitDetail,
     LoadCommitFiles,
     LoadHeadMessage,
+    LoadCommitMessage,
     LoadRepoInfo,
     LoadStatus,
     LoadBranches,
@@ -2417,6 +2419,7 @@ impl JobKind {
             | JobKind::Exec
             | JobKind::LoadCommitDetail
             | JobKind::LoadCommitFiles
+            | JobKind::LoadCommitMessage
             // `ssh -G` はリポジトリの ref を読まない。読むのは `.git/config` の
             // リモート URL と `~/.ssh/config` で、どちらも git の書き込みで動かない。
             | JobKind::ResolveTarget
@@ -2487,11 +2490,16 @@ pub enum Modal {
     /// plan を組んだ時点の HEAD（`GitOp::RebaseInteractive` の `head`）。
     /// **検証の結果は持たない** —— 描く側も `Enter` も `RebasePlan::validate()` を
     /// その場で呼ぶ。持つと、行を動かすたびに更新を忘れる形が生まれる。
+    ///
+    /// **`reword` は `r` の入力**（[`RewordInput`]。01）。別のモーダルにしないのは、戻る
+    /// ときに plan を丸ごと運ぶことになるため（`PrCreate` の `field` と同じく、1 つの
+    /// モーダルの中でモードを切る）。
     RebaseEditor {
         onto: Oid,
         head: Oid,
         plan: RebasePlan,
         cursor: usize,
+        reword: RewordInput,
     },
     /// PR を作る（01 の「PR 作成（`N`）」）。`N` で開く。
     ///
@@ -2956,6 +2964,22 @@ impl InputIntent {
             InputIntent::StashPush { .. } => false,
         }
     }
+}
+
+/// [`Modal::RebaseEditor`] の reword の入力（01 の「interactive rebase の開始（`i`）」）。
+///
+/// **読んでいるあいだを状態に持つ。** 持たないと、返事が届いたときに「誰が頼んだか」を
+/// エディタの形（開いているか、plan にその Oid があるか）から推し量ることになり、`r` →
+/// エディタを閉じる → 同じ範囲で `i` と打つと頼んでいない入力が開く（`/simplify` が拾った）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RewordInput {
+    /// 一覧を出している。
+    #[default]
+    Closed,
+    /// `r` を押し、そのコミットのメッセージ全文を読んでいる。返事はこの Oid のものだけを採る。
+    Loading(Oid),
+    /// カーソルの行のメッセージを打っている。キーはすべて入力が受ける。
+    Open(TextBuffer),
 }
 
 /// 複数行の編集バッファ。

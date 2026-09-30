@@ -9,6 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
+use crate::modals;
 use crate::modals::picker::{self, Picker};
 
 /// キーの案内。`update::picker_key` と `update::progress::progress_picked` が受けるキーと揃える。
@@ -24,6 +25,7 @@ pub fn render(frame: &mut Frame, area: Rect, menu: &ProgressMenu, cursor: usize)
         area,
         Picker {
             title: &menu.title,
+            width: modals::WIDTH,
             body: menu.body.into(),
             rows: menu.items.iter().map(row).collect(),
             cursor,

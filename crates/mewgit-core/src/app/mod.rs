@@ -22,6 +22,6 @@ pub use state::{
     DiffSource, DiffState, DiffView, GithubBlock, GraphLine, GraphSelection, GraphState,
     InputIntent, Job, JobKind, JobTracker, ListLoad, Modal, Motion, Notice, NoticeLevel, Pane,
     ParentChoice, PrField, PrHead, PrHeads, PrLoad, PrState, PushRejection, Region, Repick,
-    RepoInfo, RightTab, StashState, TargetState, TermSize, TextBuffer, WorktreeState,
+    RepoInfo, RewordInput, RightTab, StashState, TargetState, TermSize, TextBuffer, WorktreeState,
 };
 pub use update::{init, progress_menu, update, MenuItem, ProgressMenu};

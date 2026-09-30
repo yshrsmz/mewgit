@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::Frame;
 
+use crate::modals;
 use crate::modals::picker::{self, Picker};
 
 /// 枠のタイトル。**選ぶのは残す側**だと言う —— git の `--mainline` は「本流」の番号で、
@@ -39,6 +40,7 @@ pub fn render(
         area,
         Picker {
             title: TITLE,
+            width: modals::WIDTH,
             body: body.into(),
             rows: parents
                 .iter()

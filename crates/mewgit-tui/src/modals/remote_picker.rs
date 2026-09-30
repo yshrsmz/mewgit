@@ -8,6 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::Frame;
 
+use crate::modals;
 use crate::modals::picker::{self, Picker};
 
 /// 枠のタイトル。**何を選ぶのかを出す** —— 「リモート」だけだと、fetch なのか
@@ -24,6 +25,7 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], c
         area,
         Picker {
             title: TITLE,
+            width: modals::WIDTH,
             // 1 行目は**なぜ選ばされているか**。これが無いと、毎回出るのか設定が
             // 壊れているのかが判らない（07）。
             body: reason.into(),

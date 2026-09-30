@@ -241,6 +241,19 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
+            Cmd::LoadCommitMessage(oid) => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = reader.commit_detail(oid).await.map(|detail| detail.message);
+                    let _ = tx.send(Msg::CommitMessageLoaded {
+                        oid,
+                        result: Box::new(result),
+                    });
+                });
+                ControlFlow::Continue(())
+            }
+
             Cmd::LoadCommitDetail(oid) => {
                 let reader = self.reader.clone();
                 let tx = self.tx.clone();

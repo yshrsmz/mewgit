@@ -237,7 +237,9 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 - **unmerged のパスがあれば、全体でも部分でも断る**（2026-09-30 にユーザーと決めた）。
   進行中操作の門（`progress::refusal`）は `stash pop` のコンフリクトを拾わない ——
   あれは進行中操作ではない（continue が無い）。git の理由は stdout にしか出ず、
-  stderr の `could not write index` からは読めない
+  stderr の `could not write index` からは読めない。**門が見るのは mewgit の snapshot** なので、
+  外で作った unmerged を読む前は git まで届き、理由の無い通知になる（`classify` で
+  `needs merge` を分ける案を `docs/plan.md` の M6 に送った）
 - **部分 stash は index 全体を記録する**（git の仕様）。ほかに staged のファイルがあると、
   それも stash の中身に入り（作業ツリーでは staged のまま残る）、後で `apply` すると
   そのファイルの変更も戻る（上の表の最後の行を `reset --hard` してから `apply` すると

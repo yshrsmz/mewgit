@@ -3,7 +3,7 @@
 //! `ui` はここにある値を描画するだけで、更新は [`update`](crate::app::update) が行う。
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::auth::url::RemoteUrl;
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
@@ -145,7 +145,8 @@ impl AppState {
         }
     }
 
-    /// `op` の前提（進行中操作が無い・持っている値が新しい）が崩れていて断るなら、
+    /// `op` の前提（進行中操作が無い・持っている値が新しい・stash できる中身がある）が
+    /// 崩れていて断るなら、
     /// 理由を通知に積んで代わりに出す `Cmd` を返す。[`refusal`](Self::refusal) のうち
     /// **git が走っているか以外の全部**。
     ///
@@ -157,7 +158,8 @@ impl AppState {
             // 続きを頼む: 進行中操作で断った書き込みの代わりの status の読み直し。
             return Some(Cmd::LoadStatus);
         }
-        // 持っている値の鮮度に頼る書き込み（stash の index、push の守り）。
+        // 持っている値の鮮度と中身に頼る書き込み（stash の index、push の守り、
+        // unmerged / rename の断り）。
         self.refuse_stash(op)
     }
 
@@ -1279,6 +1281,16 @@ impl WorktreeState {
             .iter()
             .map(|&section| self.snapshot.section(section).len())
             .sum()
+    }
+
+    /// `path` の行を [`SECTIONS`](Self::SECTIONS) の順に全区画から拾う。staged と
+    /// unstaged の両方に出るファイルは 2 つ返る。**パス単位の書き込み**（部分 stash）が
+    /// 「そのパスに何があるか」を問うためのもの。
+    pub fn entries_at<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = &'a FileEntry> {
+        Self::SECTIONS
+            .iter()
+            .flat_map(|&section| self.snapshot.section(section))
+            .filter(move |entry| entry.path == path)
     }
 
     pub fn is_empty(&self) -> bool {

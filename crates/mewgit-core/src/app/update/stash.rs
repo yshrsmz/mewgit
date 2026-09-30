@@ -1,6 +1,6 @@
 //! Stash ペインのキー処理と一覧の受け取り（01 の「Stash ペイン」）。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::git_exec::GitOp;
 use crate::git_read::{FileEntry, FileStatus, GitReadError, StashEntry};
@@ -8,7 +8,6 @@ use crate::git_read::{FileEntry, FileStatus, GitReadError, StashEntry};
 use super::{confirm, focus, input};
 use crate::app::{
     AppState, Cmd, DiffSource, InputIntent, JobKind, Key, KeyCode, NoticeLevel, Pane, TextBuffer,
-    WorktreeState,
 };
 
 /// Stash ペインのキー処理。
@@ -36,13 +35,7 @@ pub(super) fn stash_key(state: &mut AppState, key: Key) -> Cmd {
 /// `z`（Worktree と Stash）。メッセージを聞く入力モーダルを開く（01 の「stash の
 /// 書き込み」）。**一覧が空でも開く** —— 退避する相手は作業ツリーで、カーソル行ではない。
 pub(super) fn open_stash_push(state: &mut AppState) -> Cmd {
-    input(
-        state,
-        "stash（untracked を含む）".to_string(),
-        STASH_PROMPT.to_string(),
-        TextBuffer::default(),
-        InputIntent::StashPush { path: None },
-    )
+    open_push(state, "stash（untracked を含む）".to_string(), None)
 }
 
 /// `Z`（Worktree）。カーソルの 1 ファイルを退避する入力モーダルを開く（01 の「stash の
@@ -53,16 +46,18 @@ pub(super) fn open_stash_file(state: &mut AppState) -> Cmd {
         return Cmd::None;
     };
     let path = entry.path.clone();
-    input(
-        state,
-        format!("stash（{}）", path.display()),
-        STASH_PROMPT.to_string(),
-        TextBuffer::default(),
-        InputIntent::StashPush { path: Some(path) },
-    )
+    open_push(state, format!("stash（{}）", path.display()), Some(path))
 }
 
-const STASH_PROMPT: &str = "メッセージ（空なら git の既定）";
+fn open_push(state: &mut AppState, title: String, path: Option<PathBuf>) -> Cmd {
+    input(
+        state,
+        title,
+        "メッセージ（空なら git の既定）".to_string(),
+        TextBuffer::default(),
+        InputIntent::StashPush { path },
+    )
+}
 
 /// `a` / `Z`。カーソル行の stash を `op` で書き込む。**鮮度は `issue` が問う**
 /// （[`AppState::refuse_stash`]）。一覧が空なら何もしない（`Enter` と同じ）。
@@ -99,8 +94,8 @@ fn drop_stash(state: &mut AppState) -> Cmd {
 }
 
 impl AppState {
-    /// stash の書き込みを、持っている値が古いか退避するものが無くて断るなら、理由を
-    /// 通知に積んで代わりに出す `Cmd` を返す（01 の「stash の書き込み」）。
+    /// stash の書き込みを、持っている値が古いか、退避するものの中身が git に渡せなくて
+    /// 断るなら、理由を通知に積んで代わりに出す `Cmd` を返す（01 の「stash の書き込み」）。
     ///
     /// - **push は鮮度のある snapshot でしか通さない。** 解消済みの cherry-pick / merge の
     ///   途中の `stash push` は git が受けて `*_HEAD` を消す（03 の表）。進行中操作の
@@ -110,6 +105,9 @@ impl AppState {
     /// - **apply / pop / drop は鮮度のある一覧でしか通さない。** 渡すのは
     ///   `stash@{index}` で、古い一覧の index は別の stash を指す（oid は drop / pop が
     ///   受けない。`is not a stash reference`）
+    /// - **push は中身でも断る。** unmerged が 1 つでもあれば全体も部分も git が
+    ///   `could not write index` で断り、1 ファイルの rename はどう渡しても中途半端に
+    ///   なる（03 の「stash push のパス指定」）
     ///
     /// 網羅 `match` にしているのは、`GitOp` に変種を足したときに、持っている値の鮮度に
     /// 頼る書き込みかを選ばせるため。
@@ -122,10 +120,10 @@ impl AppState {
             // unmerged のパスが 1 つでもあると、全体でも別のファイルだけでも git は
             // `could not write index` で断る（理由は stdout の `needs merge` にしか出ない）。
             GitOp::StashPush { .. } if !self.worktree.snapshot.conflicted.is_empty() => {
-                ("コンフリクトを解消してから stash して", Cmd::None)
+                (UNMERGED, Cmd::None)
             }
             // `-u` を付けるので untracked も数える。
-            GitOp::StashPush { paths, .. } if nothing_to_stash(self, paths.as_deref()) => {
+            GitOp::StashPush { paths, .. } if self.nothing_to_stash(paths.as_deref()) => {
                 ("退避する変更がありません", Cmd::None)
             }
             // **rename は 1 ファイルでは退避できない。** 新しいパスだけ渡すと元のパスの
@@ -133,10 +131,9 @@ impl AppState {
             // 戻さない（03 の「stash push のパス指定」）。
             GitOp::StashPush {
                 paths: Some(paths), ..
-            } if renamed_among(self, paths) => (
-                "rename は 1 ファイルでは stash できません。z で全体を",
-                Cmd::None,
-            ),
+            } if self.any_entry_at(paths, |entry| entry.status == FileStatus::Renamed) => {
+                (RENAME, Cmd::None)
+            }
             GitOp::StashApply(_) | GitOp::StashPop(_) | GitOp::StashDrop(_)
                 if !self.stashes_are_current() =>
             {
@@ -188,30 +185,28 @@ impl AppState {
     }
 }
 
-/// 退避する変更が無いか。`paths` が `None` なら作業ツリー全体（4 区画の合計）、`Some` なら
-/// そのパスのどれもどの区画にも無い（読み直したら消えていた）。
-fn nothing_to_stash(state: &AppState, paths: Option<&[PathBuf]>) -> bool {
-    match paths {
-        None => state.worktree.is_empty(),
-        Some(paths) => paths
-            .iter()
-            .all(|path| entries_at(state, path).next().is_none()),
+/// unmerged があるときの push の断り。
+pub(super) const UNMERGED: &str = "コンフリクトを解消してから stash して";
+
+/// 1 ファイルの rename の push の断り。
+pub(super) const RENAME: &str = "rename は 1 ファイルでは stash できません。z で全体を";
+
+impl AppState {
+    /// 退避する変更が無いか。`paths` が `None` なら作業ツリー全体、`Some` ならそのパスの
+    /// どれもどの区画にも無い（読み直したら消えていた）。
+    fn nothing_to_stash(&self, paths: Option<&[PathBuf]>) -> bool {
+        paths.map_or_else(
+            || self.worktree.is_empty(),
+            |paths| !self.any_entry_at(paths, |_| true),
+        )
     }
-}
 
-/// `paths` のどれかが rename の行か（staged でも、ワークツリー上の rename でも）。
-fn renamed_among(state: &AppState, paths: &[PathBuf]) -> bool {
-    paths
-        .iter()
-        .any(|path| entries_at(state, path).any(|entry| entry.status == FileStatus::Renamed))
-}
-
-/// `path` の行を全区画から拾う。staged と unstaged の両方に出るファイルは 2 つ返る。
-fn entries_at<'a>(state: &'a AppState, path: &'a Path) -> impl Iterator<Item = &'a FileEntry> {
-    WorktreeState::SECTIONS
-        .iter()
-        .flat_map(|&section| state.worktree.snapshot.section(section))
-        .filter(move |entry| entry.path == path)
+    /// `paths` のどれかの行が `pred` を満たすか。
+    fn any_entry_at(&self, paths: &[PathBuf], pred: impl Fn(&FileEntry) -> bool) -> bool {
+        paths
+            .iter()
+            .any(|path| self.worktree.entries_at(path).any(&pred))
+    }
 }
 
 /// `Enter`。カーソルの指す stash の diff を左に出す（07 の「Diff ペイン」）。
@@ -266,7 +261,7 @@ mod tests {
     use super::*;
     use crate::app::{update, ListLoad, Modal, Msg, NoticeLevel, Region};
     use crate::git_exec::{ExecErrorKind, PullMode};
-    use crate::git_read::{DiffTarget, WorktreeSection};
+    use crate::git_read::{DiffTarget, WorktreeSection, WorktreeSnapshot};
     use crate::test_util::{fake_entry, fake_snapshot, fake_stash};
 
     #[test]
@@ -505,11 +500,12 @@ mod tests {
         state.shown_notice().map(|notice| notice.message.as_str())
     }
 
-    fn stash_push_op(message: Option<&str>) -> GitOp {
+    /// `z` / `Z` の確定で出る push。`path` が `None` なら全体。
+    fn stash_push_op(message: Option<&str>, path: Option<&str>) -> GitOp {
         GitOp::StashPush {
             message: message.map(str::to_string),
             include_untracked: true,
-            paths: None,
+            paths: path.map(|path| vec![path.into()]),
         }
     }
 
@@ -523,7 +519,7 @@ mod tests {
         assert_eq!(*open_input(&state).3, InputIntent::StashPush { path: None });
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(stash_push_op(None)));
+        assert_eq!(cmd, Cmd::Exec(stash_push_op(None, None)));
         assert_eq!(state.modal, None);
     }
 
@@ -536,7 +532,7 @@ mod tests {
         type_text(&mut state, "wip");
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(stash_push_op(Some("wip"))));
+        assert_eq!(cmd, Cmd::Exec(stash_push_op(Some("wip"), None)));
     }
 
     #[test]
@@ -595,18 +591,10 @@ mod tests {
         let cmd = press_code(&mut state, KeyCode::Enter);
 
         assert!(
-            !issued(&cmd, &Cmd::Exec(stash_push_op(Some("wip")))),
+            !issued(&cmd, &Cmd::Exec(stash_push_op(Some("wip"), None))),
             "{cmd:?}"
         );
         assert_eq!(open_input(&state).2.text(), "wip");
-    }
-
-    fn stash_file_op(path: &str) -> GitOp {
-        GitOp::StashPush {
-            message: None,
-            include_untracked: true,
-            paths: Some(vec![path.into()]),
-        }
     }
 
     #[test]
@@ -628,7 +616,7 @@ mod tests {
         assert_eq!(open_input(&state).0, "stash（new.txt）");
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(stash_file_op("new.txt")));
+        assert_eq!(cmd, Cmd::Exec(stash_push_op(None, Some("new.txt"))));
     }
 
     #[test]
@@ -643,7 +631,7 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(stash_file_op("a.txt")));
+        assert_eq!(cmd, Cmd::Exec(stash_push_op(None, Some("a.txt"))));
     }
 
     #[test]
@@ -659,23 +647,30 @@ mod tests {
     fn capital_z_on_a_rename_is_refused_before_the_input_opens() {
         // 新しいパスだけでは元のパスの削除が残り、両方では stash を作ってから exit 1
         // （03 の「stash push のパス指定」）。どちらの区画の rename でも断る。
-        for section in [WorktreeSection::Staged, WorktreeSection::Unstaged] {
-            let mut state = worktree_state(fake_snapshot(&["a.txt"], &["a.txt"], &[]), section);
-            let entries = match section {
-                WorktreeSection::Staged => &mut state.worktree.snapshot.staged,
-                _ => &mut state.worktree.snapshot.unstaged,
-            };
-            entries[0].status = FileStatus::Renamed;
+        let renamed = || vec![fake_entry("a.txt", FileStatus::Renamed)];
+        for (section, snapshot) in [
+            (
+                WorktreeSection::Staged,
+                WorktreeSnapshot {
+                    staged: renamed(),
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                WorktreeSection::Unstaged,
+                WorktreeSnapshot {
+                    unstaged: renamed(),
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+        ] {
+            let mut state = worktree_state(snapshot, section);
 
             let cmd = press(&mut state, 'Z');
 
             assert_eq!(cmd, Cmd::None, "{section:?}");
             assert_eq!(state.modal, None, "{section:?}");
-            assert_eq!(
-                message(&state),
-                Some("rename は 1 ファイルでは stash できません。z で全体を"),
-                "{section:?}"
-            );
+            assert_eq!(message(&state), Some(RENAME), "{section:?}");
         }
     }
 
@@ -707,11 +702,7 @@ mod tests {
 
             assert_eq!(cmd, Cmd::None, "{key}");
             assert_eq!(state.modal, None, "{key}");
-            assert_eq!(
-                message(&state),
-                Some("コンフリクトを解消してから stash して"),
-                "{key}"
-            );
+            assert_eq!(message(&state), Some(UNMERGED), "{key}");
         }
     }
 
@@ -728,7 +719,10 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert!(!issued(&cmd, &Cmd::Exec(stash_file_op("a.txt"))), "{cmd:?}");
+        assert!(
+            !issued(&cmd, &Cmd::Exec(stash_push_op(None, Some("a.txt")))),
+            "{cmd:?}"
+        );
         assert_eq!(message(&state), Some("退避する変更がありません"));
     }
 
@@ -804,7 +798,7 @@ mod tests {
         // push は先頭に 1 つ足すので、届く前の一覧の `stash@{1}` は別の stash を指す。
         let mut state = ready(2, dirty());
         let _ = press(&mut state, 'j');
-        finish_exec(&mut state, stash_push_op(None), Ok(fake_output()));
+        finish_exec(&mut state, stash_push_op(None, None), Ok(fake_output()));
 
         for key in ['a', 'Z', 'd'] {
             let cmd = press(&mut state, key);

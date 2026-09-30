@@ -385,7 +385,12 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       複数の revert が空で止まった形など。03 の「revert の開始」）は、通知にも `L` の
       履歴にも argv しか出ない。**塞ぐには `Failed` に stdout を足し、stderr が空なら
       stdout の結びの行を `detail` と要約に使う**（01 の「失敗の案内文」）。1 本だけの
-      revert は `NoChanges` の案内で先に塞いである
+      revert は `NoChanges` の案内で先に塞いである。**stderr が空でない形は別に要る** ——
+      外（端末の `stash pop` など）で作った unmerged を snapshot が知らないまま `z` / `Z` が
+      git に届くと、理由は stdout の `needs merge` にだけ出て、stderr は
+      `could not write index` だけ（03 の「stash push のパス指定」）。塞ぐには
+      `classify` で `needs merge` を種別に分けて案内する（`refuse_stash` の門は mewgit の
+      snapshot が見えている範囲でしか効かない）
 - [x] ステータスバーのキーヒント。**M4 の残りより先にやる**（2026-09-19 に決めた）。
       フッターを **2 行**にして 1 行目を通知、2 行目をフォーカス中のペインのキーにする。
       **キーの一覧は `app` に置く唯一の表**で、`Modal::Help`（M5 に前倒しした）と `config.keymap` が

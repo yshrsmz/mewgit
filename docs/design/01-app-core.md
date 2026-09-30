@@ -540,7 +540,7 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 | | 出す `Cmd` | 例 |
 |---|---|---|
 | `Nothing` | `LoadStatus` | stage / unstage / discard |
-| `Stashes` | `+ LoadStashes`（`Stash` を進める） | stash の push / apply / pop / drop |
+| `Stashes` | `+ LoadStashes`（`Stash` を進める） | stash の push / apply / pop / drop、merge の abort |
 | `Refs` | `+ LoadRepoInfo` `+ LoadBranches` | checkout、branch 作成 / リネーム、非 force push |
 | `RefsAndLog` | `+ LoadLog { restart }` | commit、fetch / pull、force push、branch 削除、rebase / cherry-pick / revert |
 
@@ -1166,6 +1166,13 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
 - **pop / apply のコンフリクトは `Warn` で案内する**（「失敗の案内文」）。git は
   `CONFLICT` を stdout に出して exit 1 で、stderr は空（実測、git 2.55.0）。
   **進行中操作にはならない**（continue が無い）ので `m` は案内しない
+- **stash の書き込みでなくても `refs/stash` は動く**（上の「Stash ペイン」の autostash）。
+  **`merge --abort` も積む** —— `merge.autoStash` で始めた merge（`pull --no-rebase`）が
+  コンフリクトし、作業ツリーを触ってから abort すると、autostash を戻すところで
+  コンフリクトして **exit 0 のまま `stash@{0}: autostash` を積む**（実測、git 2.55.0。
+  既存の stash は `stash@{1}` にずれる）。HEAD は動かないので `RefsAndLog` ではなく
+  `Reload::Stashes`（`/code-review` が拾った。最初の版は `Nothing` で、鮮度の門が
+  古い一覧を通し、`d` が autostash —— ユーザーの未コミットの変更 —— を消していた）
 - **進行中操作の途中の apply / pop は断ったまま**（`progress::refusal`）。未解消なら
   git も `could not write index` で断る。解消済みなら git は受けて `*_HEAD` も
   消さないが、**解消の途中に無関係な変更を混ぜる**（03 の表）

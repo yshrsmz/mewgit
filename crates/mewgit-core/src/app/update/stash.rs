@@ -668,4 +668,23 @@ mod tests {
         assert!(state.stashes_are_current());
         assert_eq!(press(&mut state, 'a'), Cmd::Exec(GitOp::StashApply(0)));
     }
+
+    #[test]
+    fn a_merge_abort_reads_the_list_again_for_an_autostash() {
+        // `merge.autoStash` の merge を abort すると、exit 0 のまま `stash@{0}: autostash`
+        // を積むことがある（01 の「stash の書き込み」に実測）。一覧を古いと判じないと、
+        // `d` の確認に出した `stash@{0}` とは別の stash（autostash）を消す。
+        let mut state = ready(1, dirty());
+        let _ = state.issue(Cmd::Exec(GitOp::MergeAbort));
+
+        let cmd = update(
+            &mut state,
+            exec_done_of(GitOp::MergeAbort, Ok(fake_output())),
+        );
+
+        assert!(issued(&cmd, &Cmd::LoadStashes), "{cmd:?}");
+        assert!(!state.stashes_are_current());
+        assert!(!matches!(press(&mut state, 'd'), Cmd::Exec(_)));
+        assert_eq!(state.modal, None);
+    }
 }

@@ -166,9 +166,13 @@ impl Reload {
             | GitOp::DiscardUntracked(_)
             | GitOp::DiscardAdded(_) => Reload::Nothing,
 
-            // **ブランチに居たまま index とワークツリーを戻すだけ**で、HEAD の ref は
-            // 動かない（`MERGE_HEAD` はグラフが walk に押す ref ではない）。
-            GitOp::MergeAbort => Reload::Nothing,
+            // **ブランチに居たまま index とワークツリーを戻す**ので、HEAD の ref は
+            // 動かない（`MERGE_HEAD` はグラフが walk に押す ref ではない）。**ただし
+            // `refs/stash` は動きうる** —— `merge.autoStash` で始めた merge を、作業ツリーを
+            // 触ってから abort すると、autostash を戻すところでコンフリクトし、exit 0 の
+            // まま `stash@{0}: autostash` を積む（git 2.55.0 で実測）。一覧を読み直さないと
+            // 古い index が別の stash を指す（01 の「stash の書き込み」）。
+            GitOp::MergeAbort => Reload::Stashes,
 
             // **ラベルと HEAD は動くが、行は動かない。** グラフのラベルは行に焼き込まず
             // `GraphState.refs` から引く（07）ので、`Cmd::LoadRepoInfo` だけで足りる。
@@ -1106,6 +1110,8 @@ mod tests {
         // 一覧は読み直す（Stash ペイン）が、ラベルとログは読み直さない。
         assert_eq!(Reload::after(&GitOp::StashPop(0), true), Reload::Stashes);
         assert_eq!(Reload::after(&GitOp::StashPop(0), false), Reload::Stashes);
+        // autostash を戻すところでコンフリクトすると `refs/stash` に積む。
+        assert_eq!(Reload::after(&GitOp::MergeAbort, true), Reload::Stashes);
     }
 
     #[test]

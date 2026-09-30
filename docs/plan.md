@@ -370,7 +370,7 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 - [x] stash の push（全体）/ apply / pop / drop。**`z`（Worktree / Stash）と Stash の
       `a` / `Z` / `d`**（2026-09-30 にユーザーと決めた。01 の「stash の書き込み」）。push は
       常に `--include-untracked` で、`Modal::Input` でメッセージを聞く（空なら git の既定）。
-      書き込みのあとは `Reload::Stashes`（`Refs` を進めて一覧を読み直す）。**push は古い
+      書き込みのあとは `Reload::Stashes`（`Region::Stash` を進めて一覧を読み直す。merge の abort も autostash を積むのでここ）。**push は古い
       snapshot でも断る**（解消済みの途中を git が受けて `*_HEAD` を消す。03 の表）、
       **apply / pop / drop は古い一覧で断る**（index がずれて別の stash に当たる）
 - [ ] 部分 stash。**Worktree のカーソルの 1 ファイル**（2026-09-30 にユーザーと決めた）。

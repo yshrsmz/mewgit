@@ -271,11 +271,20 @@ fn swap(state: &mut AppState, delta: isize) -> Cmd {
 /// 通らなければ閉じずに理由を通知に出す。**全部 `drop` は確認を挟む**（03）。
 fn submit(state: &mut AppState) -> Cmd {
     let Some(Modal::RebaseEditor {
-        onto, head, plan, ..
+        onto,
+        head,
+        plan,
+        reword,
+        ..
     }) = &state.modal
     else {
         return Cmd::None;
     };
+    // **reword の読みを待っているあいだは何もしない**（01）。通すと、`r` を押した行を
+    // reword にしないまま実行する（`/code-review` が拾った）。
+    if matches!(reword, RewordInput::Loading(_)) {
+        return Cmd::None;
+    }
     if let Err(err) = plan.validate() {
         state.push_notice(NoticeLevel::Warn, err.to_string(), None);
         return Cmd::None;
@@ -790,6 +799,18 @@ mod tests {
         assert_eq!(reword_text(&state), None);
         let _ = message_loaded(&mut state, fake_oid(0), "いまの件名");
         assert_eq!(reword_text(&state).as_deref(), Some("いまの件名"));
+    }
+
+    #[test]
+    fn enter_while_the_message_is_being_read_does_not_run_the_plan() {
+        let mut state = linear(3);
+        let _ = press_i_on(&mut state, 1);
+        let _ = press(&mut state, 'r');
+
+        assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
+
+        let _ = message_loaded(&mut state, fake_oid(1), "件名");
+        assert_eq!(reword_text(&state).as_deref(), Some("件名"));
     }
 
     #[test]

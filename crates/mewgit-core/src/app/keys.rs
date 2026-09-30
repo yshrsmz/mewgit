@@ -94,9 +94,13 @@ const GRAPH: &[KeyHint] = &[
     // 行き先は選択で変わる（Working tree かコミット詳細）ので、どちらでも嘘に
     // ならない語にする。
     hint(&[Key::new(KeyCode::Enter)], "右へ"),
-    hint(&[Key::char('n')], "ブランチ作成"),
+    // **git の語のまま**（`y:cherry-pick` と同じ）。「ブランチ作成」だと `i` を足したときに
+    // 80 桁を 1 セル超えた（07 の「Help モーダル」の実測）。
+    hint(&[Key::char('n')], "branch"),
     hint(&[Key::char('y')], "cherry-pick"),
     hint(&[Key::char('v')], "revert"),
+    // 何をするか（interactive）はエディタの枠のタイトルが言う。
+    hint(&[Key::char('i')], "rebase"),
 ];
 
 const BRANCHES: &[KeyHint] = &[

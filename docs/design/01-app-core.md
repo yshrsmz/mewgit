@@ -11,6 +11,7 @@ ratatui / crossterm には依存しない（不変ルール 6）。`ui` は下�
 | 節 | モジュール |
 |---|---|
 | 「グラフの行」とその `###`（追加ページ / ログの読み直しの発行 / コミット詳細 / ファイル一覧 / cherry-pick の開始 / revert の開始） | `update/graph.rs` |
+| 「interactive rebase の開始（`i`）」 | `update/rebase.rs`（`i` の腕は `update/graph.rs`） |
 | 「ワーキングツリー」「書き込みのあとの status」「失敗の記憶」 | `update/worktree.rs` |
 | 「diff の遅延取得」「diff のキャッシュと鮮度」 | `update/diff.rs` |
 | 「ブランチ一覧」 | `update/branches.rs` |
@@ -156,7 +157,7 @@ pub enum Modal {
     Confirm { title: String, body: String, on_yes: Cmd },
     Input { title: String, prompt: String, buf: TextBuffer, intent: InputIntent },
     CommitMessage { buf: TextBuffer, amend: bool },
-    RebaseEditor { plan: RebasePlan, cursor: usize },
+    RebaseEditor { onto: Oid, plan: RebasePlan, cursor: usize }, // 下の「interactive rebase の開始（`i`）」
     PrCreate { title: TextBuffer, body: TextBuffer, base: TextBuffer, draft: bool, field: PrField },
     AccountPicker { view: AccountView, cursor: usize },
     RemotePicker { reason: String, remotes: Vec<String>, cursor: usize },
@@ -751,6 +752,64 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 - **空で断られた continue / skip は「変更が空で止まった。m から skip」を `Warn` で出す**
   （下の「失敗の案内文」）。開始の「取り消し済み」とは分ける —— 同じ `NoChanges` でも、
   こちらは進行中操作が残っている
+
+### interactive rebase の開始（`i`）
+
+**Graph の `i` で、カーソルの指すコミットから HEAD までを `Modal::RebaseEditor` に
+並べる。** 選択コミットも範囲に入る（07 の「選択コミットまで」）—— `onto` は選択
+コミットの第 1 親で、`git rebase -i <選択>^` と同じ範囲になる。
+
+```rust
+Modal::RebaseEditor { onto: Oid, plan: RebasePlan, cursor: usize }
+```
+
+- **plan は読み込み済みのグラフを HEAD から第 1 親で辿って組む。** 表示行の並びでは
+  切らない —— 行はレーンをまたいだ topo-order なので、HEAD の行と選択の行のあいだに
+  ある行が HEAD の祖先とは限らない。**読み足さない**（`MainlinePicker` と同じ）。
+  辿れなかったら断る（下の表）
+- **HEAD は `RepoInfo.head`**（`Branch` の `oid` か `Detached`）。mewgit の書き込みの
+  あとは `Reload::Refs` で読み直される（上の「ログの読み直し」）が、**端末で積んだ
+  コミットには追いつかない**（M6 の外部変更の検知まで）。**追いつかない HEAD で組んだ
+  plan は git に渡った時点で断られる** —— sequence editor が git の既定の todo と
+  plan のコミットを突き合わせる（03 の「Interactive rebase の実装」）。突き合わせが
+  無いと、plan に載らなかったコミットは git が黙って落とす
+  （`rebase.missingCommitsCheck` の既定は `ignore`）
+- **断るのは開く前。** エディタで並べ替えた plan は、閉じたあとで断ると失われる
+  （`y` / `v` の「確認は打った文字を持たない」の裏返し）。進行中操作と作業ツリーの
+  断りは `AppState::refuse_write` の 1 本に置き、**確定（`Enter`）のときの `issue`
+  にも同じものが効く**
+
+| 断る形 | 理由 |
+|---|---|
+| WIP 行 | 並べるコミットが無い（`y` / `v` と同じ） |
+| HEAD が無い（`Unborn`）か、まだ読めていない | 辿る起点が無い |
+| 選択が root コミット | `onto` が無い。`GitOp::RebaseInteractive` は `--root` を表せない |
+| HEAD から第 1 親で辿って選択に届かない | HEAD の祖先でない / まだ読み込んでいないページにいる。どちらでも範囲が決まらない |
+| 範囲に merge コミットがある | git は既定の todo で merge を落とし、**topic 側のコミットを混ぜて 1 列に並べる**（下の実測）。第 1 親だけの plan を渡すと topic 側のコミットが消える。線形化を mewgit に写さない |
+| 進行中操作がある | `refuse_in_progress` が断る（`RebaseInteractive` は HEAD を動かす） |
+| tracked のファイルに変更がある（staged / unstaged / conflicted） | git が `cannot rebase: You have unstaged changes` で断る。untracked だけなら git は通す（下の実測）。鮮度の無い snapshot では status を読み直して「もう一度押して」（stash の push と同じ） |
+
+- **`rebase.autoStash=true` の人にも断る。** git なら通るが、mewgit はユーザーの
+  git 設定を読んでいない。断りの文言が「commit か stash して」と出口を言うので、
+  失うものは無い
+- **`Enter` は `RebasePlan::validate()` を門にする**（07 の「RebaseEditor」）。通らなければ
+  閉じず、理由をエディタの中に赤で出す —— 描く側も同じ関数を読み、判定を 2 本書かない。
+  **全部 `drop` だけは確認を挟む**（ブランチが `onto` まで戻る。03 が「確認は UI」と
+  している）
+- **`Esc` は確認なしで閉じる**（`CommitMessage` と同じ。01 の「コミットメッセージの編集」）
+- **reword（`r`）はまだ無い。** メッセージを打つ複数行の入力を開いて RebaseEditor に
+  戻る形が要り、`modal` は 1 枠なので戻し方が独立した設計判断になる。`docs/plan.md` の
+  M5 で次のタスクに割った（2026-09-30 にユーザーと決めた）。値の無い `Reword` は
+  型として作れないので、`r` が無いだけで plan は壊れない
+
+実測（git 2.55.0、2026-09-30）:
+
+| 形 | 結果 |
+|---|---|
+| tracked のファイルを変えたまま `rebase -i` | exit 1、`error: cannot rebase: You have unstaged changes.` |
+| 同じ形で `-c rebase.autoStash=true` | exit 0（`Applied autostash.`） |
+| untracked のファイルだけ | exit 0 |
+| 範囲に merge コミット（`main` の B, C と topic の T を merge した M、その上の D）で `rebase -i HEAD~4` の既定の todo | `pick B` / `pick C` / `pick T` / `pick D`。**M は落ち、T が 1 列に混ざる** |
 
 ## ワーキングツリー
 

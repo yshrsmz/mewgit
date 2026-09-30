@@ -327,7 +327,14 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       増えない。`Runner` とサブコマンドを別々に入れると、片方だけでは plan が git に届かず
       確かめようが無いので 1 本にした。**2 つのエディタはどのコマンドにも載せる**（止まった
       rebase を `m` から continue しても reword が効く。03 の「Interactive rebase の実装」）
-- [ ] `Modal::RebaseEditor` と Graph の `i`（07 の「RebaseEditor」）。上の経路に乗せる
+- [ ] `Modal::RebaseEditor` と Graph の `i`（07 の「RebaseEditor」）。上の経路に乗せる。
+      **reword は下の別タスクに割った**（2026-09-30 にユーザーと決めた）—— こちらは
+      pick / edit / squash / fixup / drop と並べ替え。範囲・断る形は 01 の
+      「interactive rebase の開始（`i`）」。sequence editor が既定の todo と plan の
+      コミットを突き合わせる（03）のもここ
+- [ ] RebaseEditor の `r`（reword のメッセージ入力）。複数行の入力を開いて RebaseEditor に
+      戻る形が要り、`modal` は 1 枠なので戻し方（`Modal` の中にモードを持つか、入力の
+      intent に plan を運ぶか）を決める（01 の「interactive rebase の開始（`i`）」）
 - [x] 進行中操作があるときの書き込み `GitOp` 拒否。**continue / abort より先に入れる**
       （2026-09-27 に順序を入れ替えた）。**断るのは HEAD か作業ツリー全体を動かすもの
       だけ**（03 の「進行中に通す書き込み」）

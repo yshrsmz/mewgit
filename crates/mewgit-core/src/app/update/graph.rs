@@ -11,6 +11,7 @@ use crate::git_read::{
 
 use super::branches::open_branch_create;
 use super::diff::{load_diff, open_diff};
+use super::rebase::open_rebase_editor;
 use super::{confirm, focus};
 use crate::app::{
     AppState, Cmd, CommitFiles, GraphLine, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane,
@@ -37,6 +38,7 @@ pub(super) fn graph_key(state: &mut AppState, key: Key) -> Cmd {
         }
         KeyCode::Char('y') => cherry_pick(state),
         KeyCode::Char('v') => revert(state),
+        KeyCode::Char('i') => open_rebase_editor(state),
         _ => Cmd::None,
     }
 }
@@ -131,10 +133,10 @@ pub(super) fn mainline_picked(state: &mut AppState) -> Cmd {
     confirm_revert(state, target, &summary, Some(keep))
 }
 
-/// `y` / `v` が積む相手。**WIP 行では断る**（積むコミットも取り消すコミットも無い）。
+/// `y` / `v` / `i` の相手。**WIP 行では断る**（積むコミットも取り消すコミットも無い）。
 ///
 /// **写しを返す**のは、呼び出し側が続けて `state` を書き換える（通知・モーダル）ため。
-fn picked_commit(state: &mut AppState, verb: &str) -> Option<Commit> {
+pub(super) fn picked_commit(state: &mut AppState, verb: &str) -> Option<Commit> {
     let commit = state.graph.cursor_commit().cloned();
     if commit.is_none() {
         state.push_notice(

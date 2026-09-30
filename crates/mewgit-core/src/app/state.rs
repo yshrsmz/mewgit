@@ -160,7 +160,12 @@ impl AppState {
         }
         // 持っている値の鮮度と中身に頼る書き込み（stash の index、push の守り、
         // unmerged / rename の断り）。
-        self.refuse_stash(op)
+        if let Some(instead) = self.refuse_stash(op) {
+            return Some(instead);
+        }
+        // 作業ツリーに変更があるときの interactive rebase（01 の「interactive rebase の
+        // 開始（`i`）」）。
+        self.refuse_rebase(op)
     }
 
     /// `cmd` を [`issue`](Self::issue) が断るなら、理由を通知に積んで**代わりに出す
@@ -2470,7 +2475,14 @@ pub enum Modal {
         buf: TextBuffer,
         amend: bool,
     },
+    /// interactive rebase の plan を編む（01 の「interactive rebase の開始（`i`）」、07 の
+    /// 「RebaseEditor」）。Graph の `i` で開く。
+    ///
+    /// **`plan` は古い順**（git の todo と同じ）。`onto` は選択コミットの第 1 親。
+    /// **検証の結果は持たない** —— 描く側も `Enter` も `RebasePlan::validate()` を
+    /// その場で呼ぶ。持つと、行を動かすたびに更新を忘れる形が生まれる。
     RebaseEditor {
+        onto: Oid,
         plan: RebasePlan,
         cursor: usize,
     },
@@ -2585,8 +2597,6 @@ impl AppState {
     ///
     /// **`Modal` ではなく `AppState` に置く。** [`Modal::NoticeLog`] の一覧は
     /// [`AppState::notices`] で、モーダル自身は中身を知らない。
-    ///
-    /// [`Modal::RebaseEditor`] が入るときは、ここに腕を足す。
     pub(super) fn move_modal_cursor(&mut self, delta: isize) {
         // 一覧を読むので、`modal` を可変で借りる前に行き先を決めておく。
         let notice_to = |selected: u64| {
@@ -2613,6 +2623,9 @@ impl AppState {
             Some(Modal::MainlinePicker {
                 parents, cursor, ..
             }) => *cursor = stepped_index(*cursor, parents.len(), delta),
+            Some(Modal::RebaseEditor { plan, cursor, .. }) => {
+                *cursor = stepped_index(*cursor, plan.entries.len(), delta);
+            }
             Some(Modal::Help { pane, cursor }) => {
                 *cursor = stepped_index(*cursor, keys::help(*pane).len(), delta);
             }
@@ -2626,7 +2639,6 @@ impl AppState {
                 Modal::Confirm { .. }
                 | Modal::Input { .. }
                 | Modal::CommitMessage { .. }
-                | Modal::RebaseEditor { .. }
                 | Modal::PrCreate { .. },
             )
             | None => {}

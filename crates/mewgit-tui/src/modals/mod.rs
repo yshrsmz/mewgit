@@ -12,6 +12,7 @@ pub mod notice_log;
 pub mod picker;
 pub mod pr_create;
 pub mod progress_menu;
+pub mod rebase_editor;
 pub mod remote_picker;
 
 use mewgit_core::app::{AppState, Modal, TextBuffer};
@@ -74,8 +75,9 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
             cursor,
         } => mainline_picker::render(frame, area, target, summary, parents, *cursor),
         Modal::Help { pane, cursor } => help::render(frame, area, *pane, *cursor),
-        // 描画はそれぞれのモーダルのタスクで足す。キー処理も同じタスクで入る。
-        Modal::RebaseEditor { .. } => {}
+        Modal::RebaseEditor { onto, plan, cursor } => {
+            rebase_editor::render(frame, area, onto, plan, *cursor);
+        }
     }
 }
 

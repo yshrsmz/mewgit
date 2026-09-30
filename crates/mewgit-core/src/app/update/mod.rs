@@ -46,6 +46,7 @@ mod graph;
 mod modal;
 mod progress;
 mod prs;
+mod rebase;
 mod remote;
 mod stash;
 #[cfg(test)]

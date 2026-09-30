@@ -321,7 +321,7 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       **検出表は実測で作り直した**（02）—— `-i` の有無は区別できない
       ので `Rebase.interactive` を消し、`git am`（同じ `rebase-apply/`）を `Am` に分け、
       `sequencer/` だけが残る形を拾う。バッジに止まった理由（`(edit)`）は出さない（07）
-- [ ] `--sequence-editor` / `--commit-editor` 隠しサブコマンドと `RebasePlan::to_todo` /
+- [x] `--sequence-editor` / `--commit-editor` 隠しサブコマンドと `RebasePlan::to_todo` /
       `validate`、`Runner` の `RebaseInteractive` の拒否を外す。**interactive rebase は 2 本に
       割った**（2026-09-30）—— こちらは git に plan を渡す経路だけで、CLI で触れるものは
       増えない。`Runner` とサブコマンドを別々に入れると、片方だけでは plan が git に届かず
@@ -385,6 +385,12 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       （03 の「stash push のパス指定」に実測の表）
 
 ## M6: 仕上げ
+
+- [ ] **git の最低版を決める。** いまは書いていない。interactive rebase の reword は
+      `core.commentString`（git 2.45 以降）に頼っており、古い git では行頭の `#` が消える
+      形に黙って戻るはず（03 の「Interactive rebase の実装」。確かめていない）。
+      最低版を決めて、起動時に `git --version` を見て案内するか、古い版では reword の
+      メッセージの行頭の `#` を断るかを選ぶ
 
 - [ ] **起動中に mewgit のバイナリが消えたときのエディタ。** `GIT_EDITOR` /
       `GIT_SEQUENCE_EDITOR` は `current_exe()` を指すので、パッケージの更新などで

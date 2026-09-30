@@ -593,7 +593,10 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   書くコメント（squash の `# This is a combination…`）も同じ印で書かれて消えるので、
   揃ったまま `#` だけが本文に残る。**continue にも要る**のでエディタと同じくどのコマンドにも
   載せ、argv の `-c` ではなく `GIT_CONFIG_COUNT` / `KEY_n` / `VALUE_n` で渡す（`L` の履歴と
-  argv の表に毎回載せない）。ユーザーが `GIT_CONFIG_COUNT` を使っていれば後ろに足す
+  argv の表に毎回載せない）。ユーザーが `GIT_CONFIG_COUNT` を使っていれば後ろに足す。
+  **`core.commentString` を読むのは git 2.45 以降**（リリースノートより。手元は 2.55 だけで
+  測った）で、それより古い git は未知のキーを黙って無視するので `#` の行が消える形に
+  戻るはず。**確かめていない**（mewgit はまだ git の最低版を決めていない。M6）
 - **エディタが自バイナリになったので、起動中に mewgit のバイナリが消えると、エディタを
   起こす git（revert / cherry-pick の continue など）が落ちる**はず（以前の `true` では
   起きない）。パッケージの更新で起きうるが、**確かめていない**

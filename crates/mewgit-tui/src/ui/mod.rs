@@ -742,6 +742,8 @@ fn push_key(out: &mut String, key: &Key) {
         // **`Ctrl` と組む文字は大文字で書く**（`Ctrl-C`）。端末の慣習で、小文字だと
         // `c` のキーと見分けにくい。
         KeyCode::Char(c) if mods.ctrl => out.push(c.to_ascii_uppercase()),
+        // 空白のままだと案内の区切りと見分けられない。
+        KeyCode::Char(' ') => out.push_str("Space"),
         KeyCode::Char(c) => out.push(c),
         KeyCode::Enter => out.push_str("Enter"),
         KeyCode::Esc => out.push_str("Esc"),
@@ -1462,21 +1464,29 @@ mod tests {
     }
 
     #[test]
-    fn every_pane_but_worktree_shows_all_of_its_keys_at_80() {
-        // 80 桁でペインのキーが全部出ることを見張る（落ちる側は Worktree。07 の実測）。
-        for pane in [
-            Pane::Graph,
-            Pane::Branches,
-            Pane::Prs,
-            Pane::CommitDetail,
-            Pane::Diff,
-        ] {
+    fn every_pane_but_worktree_and_graph_shows_all_of_its_keys_at_80() {
+        // 80 桁でペインのキーが全部出ることを見張る（落ちる側は Worktree と Graph。07 の実測）。
+        for pane in [Pane::Branches, Pane::Prs, Pane::CommitDetail, Pane::Diff] {
             assert_eq!(
                 hint_text(keys::pane(pane), 80),
                 hint_text(keys::pane(pane), u16::MAX),
                 "{pane:?} が 80 桁で落ちています"
             );
         }
+    }
+
+    #[test]
+    fn the_graph_drops_only_its_mark_keys_at_80() {
+        // `Space` / `Esc` は末尾に置き、80 桁で落ちるのを受けた（2026-10-01 にユーザーと
+        // 決めた。07 の「Help モーダル」）。落ちるのはその 2 つだけで、`i` までは残る。
+        let hints = hint_bar_of(Pane::Graph, 80);
+        assert!(
+            hints.contains("i:rebase  ?:help q:quit"),
+            "hints: {hints:?}"
+        );
+        assert!(!hints.contains("Space:mark"), "hints: {hints:?}");
+        let wide = hint_bar_of(Pane::Graph, u16::MAX);
+        assert!(wide.contains("Space:mark Esc:unmark"), "hints: {wide:?}");
     }
 
     #[test]

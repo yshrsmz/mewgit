@@ -101,6 +101,10 @@ const GRAPH: &[KeyHint] = &[
     hint(&[Key::char('v')], "revert"),
     // 何をするか（interactive）はエディタの枠のタイトルが言う。
     hint(&[Key::char('i')], "rebase"),
+    // **末尾に置き、80 桁では落ちるのを受けた**（2026-10-01 にユーザーと決めた。07 の
+    // 「Help モーダル」）—— 落ちるのはこの 2 つだけで、`?` の一覧には出る。
+    hint(&[Key::char(' ')], "mark"),
+    hint(&[Key::new(KeyCode::Esc)], "unmark"),
 ];
 
 const BRANCHES: &[KeyHint] = &[

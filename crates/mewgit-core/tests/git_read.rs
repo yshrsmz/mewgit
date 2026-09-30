@@ -1114,6 +1114,32 @@ fn a_stopped_revert_reports_the_commit() {
 }
 
 #[test]
+fn a_revert_sequence_stopped_on_an_empty_one_is_still_in_progress() {
+    // 複数の revert は途中が空だと `REVERT_HEAD` を残さず、`sequencer/` だけで止まる
+    // （03 の「複数のコミットの cherry-pick / revert」）。`m` の skip が届くには、これを
+    // `Revert` と読む必要がある。
+    let repo = TestRepo::init();
+    repo.commit_file("base", "base");
+    let undone = repo.commit_file("h", "hx");
+    repo.git(&["revert", "--no-edit", &undone.to_string()]);
+    let later = repo.commit_file("k", "ky");
+
+    assert!(!repo.try_git(&[
+        "revert",
+        "--no-edit",
+        &later.to_string(),
+        &undone.to_string(),
+    ]));
+
+    // 狙った理由（途中が空）で止まったかを見る。コンフリクトなら `REVERT_HEAD` が残る。
+    assert!(!repo.path().join(".git/REVERT_HEAD").exists());
+    assert_eq!(
+        progress_of(repo.path()),
+        Some(InProgressOp::Revert { oid: None })
+    );
+}
+
+#[test]
 fn a_stopped_merge_reports_the_merged_commit() {
     let (repo, _, second) = TestRepo::diverged();
     assert!(!repo.try_git(&["merge", "side"]));

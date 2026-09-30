@@ -213,6 +213,7 @@ impl AppState {
             | JobKind::LoadCommitDetail
             | JobKind::LoadCommitFiles
             | JobKind::LoadHeadMessage
+            | JobKind::LoadCommitMessage
             | JobKind::LoadRepoInfo
             | JobKind::LoadStatus
             | JobKind::LoadBranches
@@ -2359,6 +2360,7 @@ pub enum JobKind {
     LoadCommitDetail,
     LoadCommitFiles,
     LoadHeadMessage,
+    LoadCommitMessage,
     LoadRepoInfo,
     LoadStatus,
     LoadBranches,
@@ -2417,6 +2419,7 @@ impl JobKind {
             | JobKind::Exec
             | JobKind::LoadCommitDetail
             | JobKind::LoadCommitFiles
+            | JobKind::LoadCommitMessage
             // `ssh -G` はリポジトリの ref を読まない。読むのは `.git/config` の
             // リモート URL と `~/.ssh/config` で、どちらも git の書き込みで動かない。
             | JobKind::ResolveTarget
@@ -2487,11 +2490,16 @@ pub enum Modal {
     /// plan を組んだ時点の HEAD（`GitOp::RebaseInteractive` の `head`）。
     /// **検証の結果は持たない** —— 描く側も `Enter` も `RebasePlan::validate()` を
     /// その場で呼ぶ。持つと、行を動かすたびに更新を忘れる形が生まれる。
+    ///
+    /// **`reword` が `Some` のあいだは、カーソルの行の reword のメッセージを打っている**
+    /// （`r`。01）。別のモーダルにしないのは、戻るときに plan を丸ごと運ぶことになるため
+    /// （`PrCreate` の `field` と同じく、1 つのモーダルの中でモードを切る）。
     RebaseEditor {
         onto: Oid,
         head: Oid,
         plan: RebasePlan,
         cursor: usize,
+        reword: Option<TextBuffer>,
     },
     /// PR を作る（01 の「PR 作成（`N`）」）。`N` で開く。
     ///

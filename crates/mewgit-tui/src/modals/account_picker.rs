@@ -13,6 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
 use ratatui::Frame;
 
+use crate::modals;
 use crate::modals::picker::{self, Picker};
 
 /// 選ばせるときの枠のタイトル。
@@ -62,6 +63,7 @@ pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize) 
         area,
         Picker {
             title: title(view),
+            width: modals::WIDTH,
             body: body(view),
             rows: candidates.iter().map(candidate_line).collect(),
             cursor,

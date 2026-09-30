@@ -157,7 +157,7 @@ pub enum Modal {
     Confirm { title: String, body: String, on_yes: Cmd },
     Input { title: String, prompt: String, buf: TextBuffer, intent: InputIntent },
     CommitMessage { buf: TextBuffer, amend: bool },
-    RebaseEditor { onto: Oid, head: Oid, plan: RebasePlan, cursor: usize }, // 下の「interactive rebase の開始（`i`）」
+    RebaseEditor { onto: Oid, head: Oid, plan: RebasePlan, cursor: usize, reword: Option<TextBuffer> }, // 下の「interactive rebase の開始（`i`）」
     PrCreate { title: TextBuffer, body: TextBuffer, base: TextBuffer, draft: bool, field: PrField },
     AccountPicker { view: AccountView, cursor: usize },
     RemotePicker { reason: String, remotes: Vec<String>, cursor: usize },
@@ -760,7 +760,10 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 コミットの第 1 親で、`git rebase -i <選択>^` と同じ範囲になる。
 
 ```rust
-Modal::RebaseEditor { onto: Oid, head: Oid, plan: RebasePlan, cursor: usize }
+Modal::RebaseEditor {
+    onto: Oid, head: Oid, plan: RebasePlan, cursor: usize,
+    reword: Option<TextBuffer>,   // Some のあいだはカーソルの行の reword のメッセージを打っている
+}
 ```
 
 - **plan は読み込み済みのグラフを HEAD から第 1 親で辿って組む。** 表示行の並びでは
@@ -797,12 +800,45 @@ Modal::RebaseEditor { onto: Oid, head: Oid, plan: RebasePlan, cursor: usize }
   閉じず、理由をエディタの中に赤で出す —— 描く側も同じ関数を読み、判定を 2 本書かない。
   **全部 `drop` だけは確認を挟む**（ブランチが `onto` まで戻る。03 が「確認は UI」と
   している）
-- **`Esc` は確認なしで閉じる**（`CommitMessage` と同じ。01 の「コミットメッセージの編集」）
-- **reword（`r`）はまだ無い。** メッセージを打つ複数行の入力を開いて RebaseEditor に
-  戻る形が要り、`modal` は 1 枠なので戻し方が独立した設計判断になる。`docs/plan.md` の
-  M5 で次のタスクに割った（2026-09-30 にユーザーと決めた）。値の無い `Reword` は
-  型として作れないので、`r` が無いだけで plan は壊れない
+- **一覧の `Esc` は確認なしで閉じる**（`CommitMessage` と同じ。上の「コミットメッセージの編集」）。
+  reword の入力の `Esc` は閉じずに一覧へ戻る（下）
+- **`r`（reword）はエディタの中で入力のモードに入る。** `modal` は 1 枠なので、
+  メッセージを打つ入力を別のモーダルとして開くと、戻るときに `onto` / `head` / `plan` /
+  `cursor` を丸ごと運んで組み直すことになる。**1 つのモーダルの中でモードを切る先例は
+  `PrCreate` の `field`** で、逆に「別のモーダルを開いて前のモーダルへ戻る」先例は無い
+  （`MainlinePicker` → `Confirm` も前へ進むだけ）。`reword` が `Some` のあいだ、打って
+  いるのはカーソルの行のメッセージで、キーは入力が受ける（カーソルは動かない）
 
+| キー（`reword` が `Some`） | 動作 |
+|---|---|
+| 文字 / 改行 / 削除 / 移動 | `CommitMessage` と同じ（`update::multiline_edit_key`） |
+| `Enter`（修飾なし） | カーソルの行を `RebaseAction::Reword { message }` にして一覧へ戻る |
+| `Esc` | 行を変えずに一覧へ戻る（**エディタは閉じない**） |
+
+- **初期値はコミットのメッセージ全文**（件名 + 本文）。git の reword もエディタに全文を
+  出す。**件名だけで始めると、件名の typo を直しただけで本文が黙って消える**
+  （グラフの行が持つのは `Commit.summary` だけ）。全文は `Cmd::LoadCommitMessage(Oid)` で
+  読み、返事（`Msg::CommitMessageLoaded { oid, result }`）で入力を開く。**既に `Reword` の
+  行は読まない** —— 打ってあるメッセージをそのまま初期値にする
+- **`Cmd::LoadCommitDetail` に相乗りしない。** あちらの返事はグラフの選択と突き合わせて
+  「違えば頼み直す」（上の「コミット詳細の遅延取得」）ので、エディタの行の Oid を渡すと
+  グラフの詳細の追いつきが回る。`JobKind` も種別単位なので、グラフの詳細が走っている
+  あいだは reword の読みが落とされる
+- **返事は Oid で行を探して採る。** 届いた時点で `modal` が `RebaseEditor` でない
+  （`Esc` で閉じた、`Enter` で実行した）か、入力がもう開いているか、plan にその Oid が
+  無い（閉じて `i` で開き直した）なら捨てる。採るときはカーソルをその行へ移してから
+  開く —— 待っているあいだに `j` / `k` を打たれても、`r` を押した行を打つ。
+  **Oid の中身は変わらない**ので世代は見ない（`JobKind::region()` は `None`。
+  `LoadCommitDetail` と同じ）。**待っているあいだの 2 回目の `r` は種別単位で落とされ**、
+  1 回目の行が開く（落とした通知は出さない。読みは一瞬で、出すと 1 回目が開いた直後に
+  古い案内が残る）
+- **空のメッセージは入力のまま断る**（`commit_submit` と同じ。空白だけも同じ）。
+  `RebasePlan::validate()` の `EmptyMessage` に任せると、空の `Reword` を一度 plan に
+  置くことになる。`validate()` 側は手で組んだ plan への守りとして残す
+- **貼り付けは入力が開いているときだけ受ける**（`CommitMessage` と同じ `insert_text`）。
+  一覧のあいだは捨てる —— 行き先が無い
+- **`p` / `e` / `s` / `f` / `d` は `Reword` の行も上書きする**（打ったメッセージは消える）。
+  git の todo で語を書き換えるのと同じで、確認は挟まない
 実測（git 2.55.0、2026-09-30）:
 
 | 形 | 結果 |
@@ -2826,6 +2862,7 @@ pub enum Msg {
     CommitDetailLoaded { oid: Oid, result: Box<Result<CommitDetail, GitReadError>> },
     CommitFilesLoaded { oid: Oid, result: Box<Result<Vec<FileEntry>, GitReadError>> },
     HeadMessageLoaded(Result<Option<String>, GitReadError>),  // amend の初期値。None は unborn
+    CommitMessageLoaded { oid: Oid, result: Box<Result<String, GitReadError>> },  // reword の初期値
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
     BranchesLoaded(Box<Result<Vec<Branch>, GitReadError>>),   // ローカルブランチの一覧
@@ -2925,6 +2962,7 @@ pub enum Cmd {
     LoadCommitDetail(Oid),             // 選択コミットのメッセージ全文など（02）
     LoadCommitFiles(Oid),              // 同じコミットのファイル一覧（02）。詳細より重いので別
     LoadHeadMessage,                   // amend の初期値。HEAD の解決ごとリーダーで行う
+    LoadCommitMessage(Oid),            // RebaseEditor の reword の初期値（上の「interactive rebase の開始」）
     LoadStatus, LoadDiff(DiffTarget),
     LoadRepoInfo,                      // remotes / head / refs。起動時と ref 変更後（M3）
     LoadBranches,                      // ローカルブランチ一覧。RepoInfo とは別（02）

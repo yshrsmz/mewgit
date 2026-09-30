@@ -83,6 +83,13 @@ pub enum Msg {
     /// 無い（unborn HEAD）。「読めなかった」と「amend する相手がいない」で案内が
     /// 違うので、`Err` に畳まない。
     HeadMessageLoaded(Result<Option<String>, GitReadError>),
+    /// RebaseEditor の reword の初期値にするメッセージ全文（01 の「interactive rebase の
+    /// 開始（`i`）」）。`oid` は**要求したコミット**で、受け取り側はこれで plan の行を
+    /// 探す（`CommitDetailLoaded` と同じく、要求した内容を返信に載せる）。
+    CommitMessageLoaded {
+        oid: Oid,
+        result: Box<Result<String, GitReadError>>,
+    },
     /// リポジトリの概要。起動時と、ref が変わったあと（M3）に読む。
     ///
     /// 3 つを 1 通にまとめるのは、どれもリポジトリの ref から導かれる値で、

@@ -23,6 +23,8 @@ const LIST_GAP_ROWS: u16 = 1;
 pub struct Picker<'a> {
     /// 枠のタイトル。**何を選ぶのかを出す。**
     pub title: &'a str,
+    /// 箱の幅。ほかと揃えるなら `modals::WIDTH`。
+    pub width: u16,
     /// なぜこの画面が出ているか。**折り返す**ので長くてよい。**空なら行も区切りも
     /// 取らない**（`Help` は本文を持たない。一覧が 2 行ぶん広く使える）。
     ///
@@ -42,7 +44,7 @@ pub fn render(frame: &mut Frame, area: Rect, picker: Picker<'_>) {
     let block = modals::block(picker.title);
     // **本文は折り返しうる。** 桁数を幅で割る見積もりだと単語境界で折れて増えたぶんを
     // 数え落とし、末尾が黙って切れる（`Confirm` と同じ理由。07）。
-    let width = modals::inner_width(area, modals::WIDTH, &block);
+    let width = modals::inner_width(area, picker.width, &block);
     let no_body = picker.body.width() == 0;
     let (body_text, body_rows) = ui::wrapped(picker.body, width);
     let (body_rows, gap) = if no_body {
@@ -62,7 +64,7 @@ pub fn render(frame: &mut Frame, area: Rect, picker: Picker<'_>) {
         frame,
         area,
         block,
-        modals::WIDTH,
+        picker.width,
         body_rows.saturating_add(list_rows),
         picker.hint,
     );

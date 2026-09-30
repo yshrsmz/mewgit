@@ -34,6 +34,7 @@ use prs::{
     open_pr_finished, pr_created, pr_detail_loaded, pr_details_finished, pr_list_loaded, prs_key,
     rate_limit_seen,
 };
+use rebase::commit_message_loaded;
 use remote::{fetch, push};
 use stash::{stash_key, stashes_loaded};
 use worktree::{head_message_loaded, status_loaded, worktree_key};
@@ -160,6 +161,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         Msg::CommitDetailLoaded { oid, result } => commit_detail_loaded(state, oid, *result),
         Msg::CommitFilesLoaded { oid, result } => commit_files_loaded(state, oid, *result),
         Msg::HeadMessageLoaded(result) => head_message_loaded(state, result),
+        Msg::CommitMessageLoaded { oid, result } => commit_message_loaded(state, oid, *result),
         Msg::RepoInfoLoaded(result) => repo_info_loaded(state, *result),
 
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
@@ -323,6 +325,11 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
             // （01 の「PR 作成（`N`）」—— 推定を人の目に通す欄なので打たせない）。
             PrField::Head | PrField::Draft => {}
         },
+        // **reword の入力が開いているときだけ受ける**（01 の「interactive rebase の
+        // 開始（`i`）」）。一覧のあいだは行き先が無い。
+        Some(Modal::RebaseEditor {
+            reword: Some(buf), ..
+        }) => buf.insert_text(text),
         // **`_` にしない。** ここを受け皿にしていたせいで、`Modal::PrCreate` を
         // 足した回に**貼り付けだけが黙って無反応**になっていた（#63 の
         // 「無反応よりまし」で止めない、の手前の形）。網羅にすると、次に編集できる
@@ -334,7 +341,7 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
             | Modal::NoticeLog { .. }
             | Modal::ProgressMenu { .. }
             | Modal::MainlinePicker { .. }
-            | Modal::RebaseEditor { .. }
+            | Modal::RebaseEditor { reword: None, .. }
             | Modal::Help { .. },
         )
         | None => {}

@@ -19,7 +19,7 @@ const HINT: &str = "[Enter] コミット   [Shift+Enter / Ctrl-J] 改行   [Esc]
 ///
 /// `Confirm` より広く取るのは、git のコミットメッセージが本文を 72 桁で折る慣習だから。
 /// そこが見えない箱だと折る位置を目で測れない。
-const WIDTH: u16 = 76;
+pub const WIDTH: u16 = 76;
 
 /// コミットメッセージの編集を描く。
 pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool) {

@@ -58,46 +58,39 @@ fn toggle_mark(state: &mut AppState) -> Cmd {
     Cmd::None
 }
 
-/// 印から組んだ `y` / `v` の相手。
-enum Marked {
-    /// 印が 1 つ以下。1 本の経路に進む。
-    Few,
-    /// 印に merge コミットがあって断った（通知は積んである）。
-    Refused,
-    /// 2 本以上。git に渡す順に並べてある。
-    Many(Vec<Oid>),
+/// `y` / `v` の相手。
+enum Targets {
+    /// 印が 1 つならそのコミット、無ければカーソルの指すコミット。**1 つだけの印は
+    /// カーソルの 1 本と同じ経路に通す**（01 の「複数のコミットの cherry-pick / revert（印）」）。
+    One(Commit),
+    /// 2 本以上の印。**グラフの並び（新しい順）** —— git に渡す向きは op で逆なので、
+    /// 並べ直すのは呼び手（03 の「複数のコミットの cherry-pick / revert」）。
+    Many(Vec<Commit>),
 }
 
-/// `y` / `v` の相手を印から組む。**`newest_first` が偽なら古い順**（cherry-pick）。
-///
-/// **印のどれかが merge コミットなら断る** —— git はその手前まで積んでから exit 128 で
-/// 止まり、`sequencer/` だけが残る（03 の「複数のコミットの cherry-pick / revert」）。
-fn marked_commits(state: &mut AppState, verb: &str, newest_first: bool) -> Marked {
-    let lines = state.graph.marked_lines();
-    if lines.len() < 2 {
-        return Marked::Few;
+impl Targets {
+    fn commits(&self) -> &[Commit] {
+        match self {
+            Targets::One(commit) => std::slice::from_ref(commit),
+            Targets::Many(commits) => commits,
+        }
     }
-    if lines.iter().any(|line| line.commit.parents.len() > 1) {
-        state.push_notice(
-            NoticeLevel::Warn,
-            format!("印に merge コミットがあります。複数の {verb} には入れられません"),
-            None,
-        );
-        return Marked::Refused;
-    }
-    let mut oids: Vec<Oid> = lines.iter().map(|line| line.commit.oid).collect();
-    if !newest_first {
-        oids.reverse();
-    }
-    Marked::Many(oids)
 }
 
-/// 印が 1 つだけならそのコミット、無ければカーソルの指すコミット（WIP 行なら断る）。
-/// **1 つだけの印はカーソルの 1 本と同じ経路に通す**（01）。
-fn single_commit(state: &mut AppState, verb: &str) -> Option<Commit> {
-    match state.graph.marked_lines().first() {
-        Some(line) => Some(line.commit.clone()),
-        None => picked_commit(state, verb),
+/// `y` / `v` の相手を印とカーソルから決める。WIP 行で印も無ければ断る（[`picked_commit`]）。
+/// **merge を受けるかは呼び手が決める**（cherry-pick は 1 本でも断り、revert は 1 本なら
+/// 親を選ばせる）。
+fn targets(state: &mut AppState, verb: &str) -> Option<Targets> {
+    let mut marked: Vec<Commit> = state
+        .graph
+        .marked_lines()
+        .into_iter()
+        .map(|line| line.commit.clone())
+        .collect();
+    match marked.len() {
+        0 => picked_commit(state, verb).map(Targets::One),
+        1 => marked.pop().map(Targets::One),
+        _ => Some(Targets::Many(marked)),
     }
 }
 
@@ -116,25 +109,16 @@ fn short_oids(oids: &[Oid]) -> String {
 /// **進行中操作は手前で見ない。** 断るのは確定のあとの `AppState::issue`（ブランチの
 /// 削除と同じ。01 の「進行中操作があるときの書き込み」）。
 fn cherry_pick(state: &mut AppState) -> Cmd {
-    match marked_commits(state, "cherry-pick", false) {
-        Marked::Many(oids) => {
-            let body = format!(
-                "{} 本のコミットを {} に古い順に積みます: {}",
-                oids.len(),
-                head_name(state),
-                short_oids(&oids)
-            );
-            return confirm(state, "cherry-pick", body, GitOp::CherryPick(oids));
-        }
-        Marked::Refused => return Cmd::None,
-        Marked::Few => {}
-    }
-    let Some(commit) = single_commit(state, "cherry-pick") else {
+    let Some(targets) = targets(state, "cherry-pick") else {
         return Cmd::None;
     };
-    // **merge コミットは手前で断る。** git は `-m` が無いと exit 128 で断り
-    // （03 の実測）、`GitOp::CherryPick` は mainline を運ばない。
-    if commit.parents.len() > 1 {
+    // **merge コミットは手前で断る。** git は `-m` が無いと exit 128 で断り、複数なら
+    // その手前まで積んでから止まる（03 の実測）。`GitOp::CherryPick` は mainline を運ばない。
+    if targets
+        .commits()
+        .iter()
+        .any(|commit| commit.parents.len() > 1)
+    {
         state.push_notice(
             NoticeLevel::Warn,
             "merge コミットは cherry-pick できません".to_string(),
@@ -142,47 +126,42 @@ fn cherry_pick(state: &mut AppState) -> Cmd {
         );
         return Cmd::None;
     }
-    let body = format!(
-        "{} {} を {} に積みます。",
-        short_oid(&commit.oid),
-        commit.summary,
-        head_name(state)
-    );
-    confirm(
-        state,
-        "cherry-pick",
-        body,
-        GitOp::CherryPick(vec![commit.oid]),
-    )
+    let (body, oids) = match targets {
+        Targets::One(commit) => (
+            format!(
+                "{} {} を {} に積みます。",
+                short_oid(&commit.oid),
+                commit.summary,
+                head_name(state)
+            ),
+            vec![commit.oid],
+        ),
+        Targets::Many(commits) => {
+            // git は渡した順に積むので、グラフの並びを逆にして古い順に渡す。
+            let oids: Vec<Oid> = commits.iter().rev().map(|commit| commit.oid).collect();
+            let body = format!(
+                "{} 本のコミットを {} に古い順に積みます: {}",
+                oids.len(),
+                head_name(state),
+                short_oids(&oids)
+            );
+            (body, oids)
+        }
+    };
+    confirm(state, "cherry-pick", body, GitOp::CherryPick(oids))
 }
 
 /// `v`。カーソルの指すコミットを取り消すコミットを HEAD に積む（01 の「revert の開始（`v`）」）。
-/// **印があれば印の全部を新しい順に**取り消す —— 古い順だと、後のコミットが同じ箇所を
-/// 変えていれば 1 本目でコンフリクトする（03 の実測）。
+/// **印があれば印の全部を新しい順に**取り消す（[`revert_many`]）。
 ///
 /// **確認モーダルを挟む**のも、**進行中操作を手前で見ない**のも `y` と同じ理由。
 /// **merge コミットは残す側の親を選ばせてから確認へ進む**（[`Modal::MainlinePicker`]）。
 /// git は `-m` が無いと exit 128 で断る（03 の「revert の開始」）。
 fn revert(state: &mut AppState) -> Cmd {
-    match marked_commits(state, "revert", true) {
-        Marked::Many(oids) => {
-            let body = format!(
-                "{} 本のコミットを取り消すコミットを {} に新しい順に積みます: {}",
-                oids.len(),
-                head_name(state),
-                short_oids(&oids)
-            );
-            let op = GitOp::Revert {
-                oids,
-                mainline: None,
-            };
-            return confirm(state, "revert", body, op);
-        }
-        Marked::Refused => return Cmd::None,
-        Marked::Few => {}
-    }
-    let Some(commit) = single_commit(state, "revert") else {
-        return Cmd::None;
+    let commit = match targets(state, "revert") {
+        None => return Cmd::None,
+        Some(Targets::One(commit)) => commit,
+        Some(Targets::Many(commits)) => return revert_many(state, &commits),
     };
     if commit.parents.len() <= 1 {
         return confirm_revert(state, commit.oid, &commit.summary, None);
@@ -208,6 +187,34 @@ fn revert(state: &mut AppState) -> Cmd {
         cursor: 0,
     });
     Cmd::None
+}
+
+/// 2 本以上の印の revert。**グラフの並び（新しい順）のまま渡す** —— 古い順だと、後の
+/// コミットが同じ箇所を変えていれば 1 本目でコンフリクトする（03 の実測）。
+///
+/// **印に merge があれば断る。** `--mainline N` は全部の merge に同じ N が効くので親を
+/// 選ばせられず、`-m` が無いと git はその手前まで積んでから止まる（03）。
+fn revert_many(state: &mut AppState, commits: &[Commit]) -> Cmd {
+    if commits.iter().any(|commit| commit.parents.len() > 1) {
+        state.push_notice(
+            NoticeLevel::Warn,
+            "印に merge コミットがあります。複数の revert には入れられません".to_string(),
+            None,
+        );
+        return Cmd::None;
+    }
+    let oids: Vec<Oid> = commits.iter().map(|commit| commit.oid).collect();
+    let body = format!(
+        "{} 本のコミットを取り消すコミットを {} に新しい順に積みます: {}",
+        oids.len(),
+        head_name(state),
+        short_oids(&oids)
+    );
+    let op = GitOp::Revert {
+        oids,
+        mainline: None,
+    };
+    confirm(state, "revert", body, op)
 }
 
 /// [`Modal::MainlinePicker`] の `Enter`。選んだ親を残す側として確認へ進む。

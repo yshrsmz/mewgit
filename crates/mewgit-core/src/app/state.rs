@@ -1046,9 +1046,9 @@ pub struct GraphState {
     /// 読み直しを出してしまう。次の読み込みはユーザーの操作から始める
     /// （01 の「追加ページの読み込み」）。
     pub load_failed: bool,
-    /// `Space` で印を付けたコミット（付けた順）。印があると `y` / `v` は印の全部を相手に
-    /// する（01 の「複数のコミットの cherry-pick / revert（印）」）。**並べ直すのは
-    /// [`GraphState::marked_lines`]** —— 向きは op で逆なので、ここでは持たない。
+    /// `Space` で印を付けたコミット。印があると `y` / `v` は印の全部を相手にする
+    /// （01 の「複数のコミットの cherry-pick / revert（印）」）。**並びに意味は無い** ——
+    /// git に渡す順は [`GraphState::marked_lines`] がグラフの並びから決める。
     pub marks: Vec<Oid>,
 }
 

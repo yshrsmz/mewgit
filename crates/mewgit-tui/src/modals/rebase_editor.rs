@@ -29,7 +29,8 @@ const HINT: &str = "[p] pick   [r] reword   [e] edit   [s] squash   [f] fixup   
 /// 切り替えても幅が変わらない。
 const WIDTH: u16 = commit_message::WIDTH;
 
-/// reword の入力のキーの案内。`update::rebase::reword_key` が受けるキーと揃える。
+/// reword の入力のキーの案内。`update::rebase::rebase_editor_key` が入力のあいだ
+/// `update::multiline_input_key` に振り分けるキーと揃える。
 ///
 /// **`Esc` は「一覧へ戻る」と書く**（ほかのモーダルの `Esc` は閉じる。01）。改行の
 /// キーを 2 つ出す理由は `commit_message::HINT` と同じ。

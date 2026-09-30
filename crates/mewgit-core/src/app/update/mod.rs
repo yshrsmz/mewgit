@@ -430,15 +430,6 @@ fn edit_key(buf: &mut TextBuffer, key: Key) -> bool {
     true
 }
 
-/// 複数行を編集できる欄のキー。改行と行移動を受け、残りは [`edit_key`] に落とす。
-///
-/// **2 人目（[`Modal::PrCreate`] の body 欄）が出た時点で `commit_message_key` から
-/// 割った。** 写すと、端末ごとの改行キー（`Shift+Enter` は区別して送れる端末だけ、
-/// `Ctrl-J` はどの端末でも届く。01 の「コミットメッセージの編集」）を直したときに
-/// 片方だけ古くなり、**どちらのテストも通る**（それぞれ自分の経路しか踏まない）。
-///
-/// **確定は受けない。** 修飾なしの `Enter` をどう扱うかはモーダルごとの判断で、
-/// ここに入れると「確定して何をするか」まで共有することになる。
 /// [`multiline_input_key`] が振り分けた結果。
 enum InputKey {
     /// `Esc`。何を捨てるか（モーダルを閉じるか、一覧へ戻るか）はモーダルの側。
@@ -464,6 +455,17 @@ fn multiline_input_key(buf: &mut TextBuffer, key: Key) -> InputKey {
     InputKey::Edited
 }
 
+/// 複数行を編集できる欄のキー。改行と行移動を受け、残りは [`edit_key`] に落とす。
+///
+/// **2 人目（[`Modal::PrCreate`] の body 欄）が出た時点で `commit_message_key` から
+/// 割った。** 写すと、端末ごとの改行キー（`Shift+Enter` は区別して送れる端末だけ、
+/// `Ctrl-J` はどの端末でも届く。01 の「コミットメッセージの編集」）を直したときに
+/// 片方だけ古くなり、**どちらのテストも通る**（それぞれ自分の経路しか踏まない）。
+///
+/// **確定は受けない。** 修飾なしの `Enter` をどう扱うかはモーダルごとの判断で、
+/// ここに入れると「確定して何をするか」まで共有することになる。1 つの欄だけの入力は
+/// [`multiline_input_key`] が `Enter` を `Submit` に振り分けるところまでを持ち、
+/// 何をするかは返さない（`PrCreate` は欄で `Enter` の意味が変わるので使わない）。
 fn multiline_edit_key(buf: &mut TextBuffer, key: Key) {
     // `Ctrl-J` はどの端末でも届く改行。raw mode では `\n` が `Ctrl+j` として来る。
     if key == Key::ctrl('j') {

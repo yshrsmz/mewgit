@@ -2966,10 +2966,6 @@ impl InputIntent {
     }
 }
 
-/// 複数行の編集バッファ。
-///
-/// ratatui のウィジェットや `tui-textarea` は状態に持たない（core が UI に依存するため）。
-/// 編集操作は M2 の commit タスクで実装する。
 /// [`Modal::RebaseEditor`] の reword の入力（01 の「interactive rebase の開始（`i`）」）。
 ///
 /// **読んでいるあいだを状態に持つ。** 持たないと、返事が届いたときに「誰が頼んだか」を
@@ -2986,6 +2982,10 @@ pub enum RewordInput {
     Open(TextBuffer),
 }
 
+/// 複数行の編集バッファ。
+///
+/// ratatui のウィジェットや `tui-textarea` は状態に持たない（core が UI に依存するため）。
+/// 編集操作は M2 の commit タスクで実装する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextBuffer {
     pub lines: Vec<String>,

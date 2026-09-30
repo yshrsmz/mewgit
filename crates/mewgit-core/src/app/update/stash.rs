@@ -1,9 +1,9 @@
 //! Stash ペインのキー処理と一覧の受け取り（01 の「Stash ペイン」）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::git_exec::GitOp;
-use crate::git_read::{FileEntry, FileStatus, GitReadError, StashEntry};
+use crate::git_read::{FileStatus, GitReadError, StashEntry, WorktreeSection};
 
 use super::{confirm, focus, input};
 use crate::app::{
@@ -106,8 +106,8 @@ impl AppState {
     ///   `stash@{index}` で、古い一覧の index は別の stash を指す（oid は drop / pop が
     ///   受けない。`is not a stash reference`）
     /// - **push は中身でも断る。** unmerged が 1 つでもあれば全体も部分も git が
-    ///   `could not write index` で断り、1 ファイルの rename はどう渡しても中途半端に
-    ///   なる（03 の「stash push のパス指定」）
+    ///   `could not write index` で断り、1 ファイルの rename や staged の削除は
+    ///   git が割ってしまう（[`splits_alone`](Self::splits_alone)）
     ///
     /// 網羅 `match` にしているのは、`GitOp` に変種を足したときに、持っている値の鮮度に
     /// 頼る書き込みかを選ばせるため。
@@ -126,14 +126,10 @@ impl AppState {
             GitOp::StashPush { paths, .. } if self.nothing_to_stash(paths.as_deref()) => {
                 ("退避する変更がありません", Cmd::None)
             }
-            // **rename は 1 ファイルでは退避できない。** 新しいパスだけ渡すと元のパスの
-            // 削除が staged のまま残り、両方渡すと stash を作ってから exit 1 で作業ツリーも
-            // 戻さない（03 の「stash push のパス指定」）。
+            // **git が 1 ファイルでは割ってしまう形は断る**（[`AppState::splits_alone`]）。
             GitOp::StashPush {
                 paths: Some(paths), ..
-            } if self.any_entry_at(paths, |entry| entry.status == FileStatus::Renamed) => {
-                (RENAME, Cmd::None)
-            }
+            } if paths.iter().any(|path| self.splits_alone(path)) => (SPLITS, Cmd::None),
             GitOp::StashApply(_) | GitOp::StashPop(_) | GitOp::StashDrop(_)
                 if !self.stashes_are_current() =>
             {
@@ -188,8 +184,8 @@ impl AppState {
 /// unmerged があるときの push の断り。
 pub(super) const UNMERGED: &str = "コンフリクトを解消してから stash して";
 
-/// 1 ファイルの rename の push の断り。
-pub(super) const RENAME: &str = "rename は 1 ファイルでは stash できません。z で全体を";
+/// 1 ファイルでは git が割ってしまう変更の push の断り。
+pub(super) const SPLITS: &str = "この変更は 1 ファイルでは stash できません。z で全体を";
 
 impl AppState {
     /// 退避する変更が無いか。`paths` が `None` なら作業ツリー全体、`Some` ならそのパスの
@@ -197,15 +193,36 @@ impl AppState {
     fn nothing_to_stash(&self, paths: Option<&[PathBuf]>) -> bool {
         paths.map_or_else(
             || self.worktree.is_empty(),
-            |paths| !self.any_entry_at(paths, |_| true),
+            |paths| {
+                paths
+                    .iter()
+                    .all(|path| self.worktree.entries_at(path).next().is_none())
+            },
         )
     }
 
-    /// `paths` のどれかの行が `pred` を満たすか。
-    fn any_entry_at(&self, paths: &[PathBuf], pred: impl Fn(&FileEntry) -> bool) -> bool {
-        paths
-            .iter()
-            .any(|path| self.worktree.entries_at(path).any(&pred))
+    /// `stash push -u -- <path>` が作業ツリーを中途半端に残すか、stash を作ってから
+    /// exit 1 で終わる形か（03 の「stash push のパス指定」の実測）。
+    ///
+    /// - **rename**（新しいパスでも元のパスでも）—— どう渡しても rename が割れる
+    /// - **staged の削除**（`git rm`、`rm --cached`）—— stash を作ってから `pathspec did
+    ///   not match` か `No valid patches in input` で exit 1。同じパスの untracked の中身
+    ///   次第で exit 0 にもなり、当てにできない
+    /// - **`AD`**（staged の追加を作業ツリーから消した）—— 同じく `No valid patches`
+    ///
+    /// unstaged の削除・`MD`・typechange は exit 0 で済む（同じ表）。
+    fn splits_alone(&self, path: &Path) -> bool {
+        let has = |section, status| {
+            self.worktree
+                .entries_at(path)
+                .any(|(at, entry)| at == section && entry.status == status)
+        };
+        self.worktree
+            .entries_at(path)
+            .any(|(_, entry)| entry.status == FileStatus::Renamed)
+            || has(WorktreeSection::Staged, FileStatus::Deleted)
+            || (has(WorktreeSection::Staged, FileStatus::Added)
+                && has(WorktreeSection::Unstaged, FileStatus::Deleted))
     }
 }
 
@@ -261,7 +278,7 @@ mod tests {
     use super::*;
     use crate::app::{update, ListLoad, Modal, Msg, NoticeLevel, Region};
     use crate::git_exec::{ExecErrorKind, PullMode};
-    use crate::git_read::{DiffTarget, WorktreeSection, WorktreeSnapshot};
+    use crate::git_read::{DiffTarget, FileEntry, WorktreeSnapshot};
     use crate::test_util::{fake_entry, fake_snapshot, fake_stash};
 
     #[test]
@@ -670,7 +687,101 @@ mod tests {
 
             assert_eq!(cmd, Cmd::None, "{section:?}");
             assert_eq!(state.modal, None, "{section:?}");
-            assert_eq!(message(&state), Some(RENAME), "{section:?}");
+            assert_eq!(message(&state), Some(SPLITS), "{section:?}");
+        }
+    }
+
+    #[test]
+    fn capital_z_on_a_file_git_would_split_is_refused() {
+        // どれも git が stash を作ってから exit 1 か、rename を割る（03 の「stash push の
+        // パス指定」）。カーソルは `a` の行に置く。
+        let entry = fake_entry;
+        let cases = [
+            (
+                "staged の削除",
+                WorktreeSection::Staged,
+                WorktreeSnapshot {
+                    staged: vec![entry("a", FileStatus::Deleted)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                "rm --cached（staged の削除と同じパスの untracked）",
+                WorktreeSection::Untracked,
+                WorktreeSnapshot {
+                    staged: vec![entry("a", FileStatus::Deleted)],
+                    untracked: vec![entry("a", FileStatus::Untracked)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                "AD",
+                WorktreeSection::Unstaged,
+                WorktreeSnapshot {
+                    staged: vec![entry("a", FileStatus::Added)],
+                    unstaged: vec![entry("a", FileStatus::Deleted)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                "rename の元のパスに置いた新しいファイル",
+                WorktreeSection::Untracked,
+                WorktreeSnapshot {
+                    staged: vec![FileEntry {
+                        old_path: Some("a".into()),
+                        ..entry("a2", FileStatus::Renamed)
+                    }],
+                    untracked: vec![entry("a", FileStatus::Untracked)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+        ];
+        for (name, section, snapshot) in cases {
+            let mut state = worktree_state(snapshot, section);
+            assert_eq!(
+                state
+                    .worktree
+                    .selected()
+                    .map(|(_, entry)| entry.path.clone()),
+                Some("a".into()),
+                "{name}"
+            );
+
+            let cmd = press(&mut state, 'Z');
+
+            assert_eq!(cmd, Cmd::None, "{name}");
+            assert_eq!(state.modal, None, "{name}");
+            assert_eq!(message(&state), Some(SPLITS), "{name}");
+        }
+    }
+
+    #[test]
+    fn capital_z_on_changes_git_stashes_cleanly_opens_the_input() {
+        // `MD`・unstaged の削除・staged の追加だけは git が exit 0 で済ませる（03 の表）。
+        // 「削除だから」「追加だから」で断らない —— 断るのは `AD` の組だけ。
+        let cases = [
+            (
+                "MD",
+                WorktreeSnapshot {
+                    staged: vec![fake_entry("a", FileStatus::Modified)],
+                    unstaged: vec![fake_entry("a", FileStatus::Deleted)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                "A",
+                WorktreeSnapshot {
+                    staged: vec![fake_entry("a", FileStatus::Added)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+        ];
+        for (name, snapshot) in cases {
+            let mut state = worktree_state(snapshot, WorktreeSection::Staged);
+
+            let _ = press(&mut state, 'Z');
+
+            assert!(matches!(state.modal, Some(Modal::Input { .. })), "{name}");
         }
     }
 

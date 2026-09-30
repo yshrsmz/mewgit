@@ -1283,14 +1283,24 @@ impl WorktreeState {
             .sum()
     }
 
-    /// `path` の行を [`SECTIONS`](Self::SECTIONS) の順に全区画から拾う。staged と
-    /// unstaged の両方に出るファイルは 2 つ返る。**パス単位の書き込み**（部分 stash）が
-    /// 「そのパスに何があるか」を問うためのもの。
-    pub fn entries_at<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = &'a FileEntry> {
+    /// `path` に触れる行を、区画と一緒に [`SECTIONS`](Self::SECTIONS) の順で拾う。
+    /// staged と unstaged の両方に出るファイルは 2 つ返る。**rename は元のパスでも当たる**
+    /// —— `git mv a a2` のあとに作った `?? a` を退避すると、git は rename を割る（03 の
+    /// 「stash push のパス指定」）。**パス単位の書き込み**（部分 stash）が「そのパスに
+    /// 何があるか」を問うためのもの。
+    pub fn entries_at<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> impl Iterator<Item = (WorktreeSection, &'a FileEntry)> {
         Self::SECTIONS
             .iter()
-            .flat_map(|&section| self.snapshot.section(section))
-            .filter(move |entry| entry.path == path)
+            .flat_map(|&section| {
+                self.snapshot
+                    .section(section)
+                    .iter()
+                    .map(move |entry| (section, entry))
+            })
+            .filter(move |(_, entry)| entry.path == path || entry.old_path.as_deref() == Some(path))
     }
 
     pub fn is_empty(&self) -> bool {

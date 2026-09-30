@@ -1138,9 +1138,10 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
 - **部分 stash にも `--include-untracked` を付ける** —— 無いと untracked のパスは
   `pathspec did not match` で落ち、付けてもパスで絞ればほかの untracked は退避されない
   （03 の「stash push のパス指定」）
-- **rename の行は断る**（「rename は 1 ファイルでは stash できません。z で全体を」）。
-  新しいパスだけ渡すと元のパスの削除が staged のまま残り、両方渡すと stash を作ってから
-  exit 1 で作業ツリーも戻さない（03 の表）
+- **git が 1 ファイルでは割ってしまう形は断る**（「この変更は 1 ファイルでは stash
+  できません。z で全体を」）。rename（新しいパスでも元のパスでも）、staged の削除、`AD`。
+  どれも stash を作ってから exit 1 で終わるか、rename が割れて作業ツリーに片側が残る
+  （03 の「stash push のパス指定」。判定は `AppState::splits_alone`）
 - **鮮度のある snapshot にそのパスが無ければ「退避する変更がありません」で断る**（全体の
   「空なら断る」と同じ門）。開いたあとに端末で commit した形
 - **unmerged のファイルがあれば、全体・部分とも断る**（「コンフリクトを解消してから stash
@@ -1177,7 +1178,7 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
   断って `LoadStashes` を出す。**oid では渡せない** —— `git stash drop <oid>` / `pop
   <oid>` は `is not a stash reference` で断られる（実測、git 2.55.0。apply だけは通る）
 - **判定は `AppState::refusal` に置く**（`AppState::refuse_stash`。順は「古い →
-  unmerged がある → 退避する行が無い → rename」。進行中操作の門と
+  unmerged がある → 退避する行が無い → 1 ファイルでは割れる」。進行中操作の門と
   並べて `AppState::refuse_write` が束ねる）。キー・確認の `y`・入力の確定のどれから
   来ても同じ門を通る。**入力を開く前も `refuse_write` を問う**（`update::input`）——
   打ち終えてから断られない。開く前の判定を別に並べると、片方にだけ足した門で本文が消える

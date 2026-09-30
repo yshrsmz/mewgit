@@ -375,7 +375,8 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       **apply / pop / drop は古い一覧で断る**（index がずれて別の stash に当たる）
 - [x] 部分 stash。**Worktree のカーソルの 1 ファイル、キーは `Z`**（2026-09-30 にユーザーと
       決めた。01 の「stash の書き込み」）。常に `-u`（untracked のパスは無いと `pathspec did
-      not match`）。**rename の行と、unmerged があるあいだの push（全体も）は断る**
+      not match`）。**rename・staged の削除・`AD` の行と、unmerged があるあいだの push
+      （全体も）は断る**
       （03 の「stash push のパス指定」に実測の表）
 
 ## M6: 仕上げ

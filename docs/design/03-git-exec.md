@@ -215,7 +215,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 
 部分 stash（Worktree の `Z`。01 の「stash の書き込み」）は `StashPush { paths: Some([1 つ]) }`
 で、**常に `--include-untracked` を付ける**。パスで絞ればほかの untracked は退避されない
-ので、付けて困る形が無い。**実測（git 2.55.0、2026-09-30）** —— `a` / `b` / `c` を
+ので、付けて困る形が無い。**実測（git 2.55.0、2026-09-30。削除と rename の元のパスの行は `/code-review` の指摘で測り直した）** —— `a` / `b` / `c` を
 コミットした一時リポジトリで、状態ごとに作り直して `stash push [-u] -- <path>` を叩いた:
 
 | 状態 | 渡したパス | 結果 |
@@ -224,16 +224,28 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | staged だけ / staged と unstaged の両方 | `-u -- a` | exit 0。両方の区画ぶんが 1 つの stash に入る |
 | untracked（ほかに untracked `v`） | `-u -- u` | exit 0。stash は `A u` だけ、`v` は残る |
 | untracked | `-- u`（`-u` 無し） | **exit 1**、`pathspec ':(prefix:0)u' did not match any file(s) known to git` |
-| staged の追加 / 削除 | `-u -- n` / `-u -- b` | exit 0 |
+| staged の追加（`A`）/ `AM` / unstaged の削除（` D`）/ `MD` / `MM` / staged・unstaged の typechange | `-u -- <path>` | exit 0 |
+| staged の削除（`git rm b`） | `-u -- b` | **stash を作ってから exit 1**（`fatal: pathspec ':(prefix:0)b' did not match any files`）。作業ツリーは `D  b` のまま —— 同じ変更が 2 箇所に残る |
+| `rm --cached b`（`D  b` と中身が同じ `?? b`） | `-u -- b` | **stash を作り作業ツリーも片付けてから exit 1**（`error: No valid patches in input (allow with "--allow-empty")`） |
+| `git rm b` のあと中身の違う `b` を置く（`D  b` と `?? b`） | `-u -- b` | exit 0 —— 上と同じ形が中身次第で割れる |
+| `AD`（staged の追加を作業ツリーから消す） | `-u -- n` | **stash を作り作業ツリーも片付けてから exit 1**（`No valid patches in input`） |
 | staged の rename `a → a2` | `-u -- a2` | exit 0。stash は `R100 a a2` だが、**作業ツリーに `D  a` が staged のまま残る** |
-| 同上 | `-u -- a a2` | **stash を作ってから exit 1**（`fatal: pathspec ':(prefix:0)a' did not match any files`）。作業ツリーは `R  a -> a2` のまま —— 同じ変更が 2 箇所に残る |
-| 同上 | `-u -- a` | exit 1（`pathspec … did not match`）。stash は作られない |
+| 同上 | `-u -- a a2` | **stash を作ってから exit 1**（`fatal: pathspec ':(prefix:0)a' did not match any files`）。作業ツリーは `R  a -> a2` のまま |
+| 同上 | `-u -- a` | **stash を作ってから exit 1**（同じ `pathspec … did not match`）。作業ツリーは `R  a -> a2` のまま |
+| staged の rename のあと元のパスに新しい `a` を置く（`R  a -> a2` と `?? a`） | `-u -- a` | exit 0 だが **rename が割れて `A  a2` が残る**。できた stash は `stash show --include-untracked` が `duplicate entries: a` で exit 128、`pop` は `could not restore untracked files` で exit 1 |
 | `a` が `UU`（`stash pop` のコンフリクト）| `-u -- a`、`-u -- b`、パス無し | **どれも exit 1**、stdout に `a: needs merge`、stderr に `error: could not write index` |
 | `a` を staged、`b` を unstaged で変更 | `-u -- b` | exit 0。**stash には `M a` も入る**（下） |
 
 - **rename は 1 ファイルでは退避させない**（2026-09-30 にユーザーと決めた）。どう渡しても
-  中途半端になる（上の 3 行）。ワークツリー上の rename（`status` が対にした削除と
-  untracked）も同じ `FileStatus::Renamed` で断る
+  中途半端になる（上の rename の 4 行）。ワークツリー上の rename（`status` が対にした
+  削除と untracked）も同じ `FileStatus::Renamed` で断る。**元のパスの行でも断る** ——
+  `WorktreeState::entries_at` は `old_path` でも当たる
+- **staged の削除と `AD` も 1 ファイルでは退避させない**（rename を断ると決めたのと同じ
+  理由。`/code-review` が拾った —— 最初の表は unstaged の削除（`rm b`）しか測って
+  おらず、「削除は exit 0」と書いていた）。stash を作ってから exit 1 で終わり、
+  失敗の通知の裏で stash が 1 つ増える。`D  b` と `?? b` の組は中身次第で exit 0 にも
+  なるので、staged の削除があれば区別せず断る。**`MD` と unstaged の削除と `A` だけは
+  通す**（exit 0 で片付く）。判定は `AppState::splits_alone`
 - **unmerged のパスがあれば、全体でも部分でも断る**（2026-09-30 にユーザーと決めた）。
   進行中操作の門（`progress::refusal`）は `stash pop` のコンフリクトを拾わない ——
   あれは進行中操作ではない（continue が無い）。git の理由は stdout にしか出ず、

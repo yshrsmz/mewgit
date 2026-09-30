@@ -198,8 +198,8 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
             };
             argv.extend([remote.clone(), refspec]);
         }
-        // `plan` は argv に載らない。`Runner` が一時ファイルに書いて sequence editor に
-        // 渡す（03）。**`--no-update-refs` は todo を丸ごと書き換えるため** ——
+        // `plan` は argv に載らない。JSON にして標準入力に流し、git から継いだ
+        // sequence editor が読む（03）。**`--no-update-refs` は todo を丸ごと書き換えるため** ——
         // `rebase.updateRefs` が足す `update-ref` の行が黙って消えるより、効かないことを
         // argv に書いておく。
         GitOp::RebaseInteractive { onto, plan } => {
@@ -210,6 +210,7 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
                 "--no-update-refs".into(),
                 onto.clone(),
             ]);
+            stdin = Some(serde_json::to_vec(plan).expect("文字列だけの値は必ず直列化できる"));
         }
         GitOp::RebaseContinue => argv.extend(["rebase".into(), "--continue".into()]),
         GitOp::RebaseSkip => argv.extend(["rebase".into(), "--skip".into()]),
@@ -906,12 +907,15 @@ mod tests {
     }
 
     #[test]
-    fn only_hunk_ops_use_stdin() {
+    fn only_hunk_ops_and_the_rebase_plan_use_stdin() {
         for (op, _) in all_cases() {
             let commands = to_commands(&op).expect("argv を組めませんでした");
             let expects_stdin = matches!(
                 op,
-                GitOp::StageHunk { .. } | GitOp::UnstageHunk { .. } | GitOp::DiscardHunk { .. }
+                GitOp::StageHunk { .. }
+                    | GitOp::UnstageHunk { .. }
+                    | GitOp::DiscardHunk { .. }
+                    | GitOp::RebaseInteractive { .. }
             );
             for command in commands {
                 assert_eq!(command.stdin.is_some(), expects_stdin, "{op:?}");

@@ -1,7 +1,7 @@
 //! mewgit エントリポイント。
 //!
-//! 隠しサブコマンド `--sequence-editor <plan> <todo>` は interactive rebase 用。git が
-//! `GIT_SEQUENCE_EDITOR` として起こす（`docs/design/03-git-exec.md` の
+//! 隠しサブコマンド `--sequence-editor <todo>` は interactive rebase 用。git が
+//! `GIT_SEQUENCE_EDITOR` として起こし、plan は git から継いだ標準入力で届く（`docs/design/03-git-exec.md` の
 //! 「Interactive rebase の実装」）。本体は `mewgit_core::git_exec::write_todo`。
 //!
 //! ここは配線だけで、実端末が必要なためテストを書かない（`.claude/rules/testing.md` の例外）。
@@ -39,16 +39,16 @@ fn main() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `--sequence-editor <plan> <todo>`。git は todo のパスを末尾に足す。
+/// `--sequence-editor <todo>`。git は todo のパスを末尾に足す。plan は標準入力。
 ///
 /// 失敗は stderr に書いて非 0 で返す。git が `there was a problem with the editor` と
 /// 並べて自分の stderr に出し、rebase を始めずに終わる（03 の実測）。
 fn sequence_editor(args: &[OsString]) -> ExitCode {
-    let [plan, todo] = args else {
-        eprintln!("mewgit: --sequence-editor には <plan> <todo> の 2 つを渡します");
+    let [todo] = args else {
+        eprintln!("mewgit: --sequence-editor には todo のパスを 1 つ渡します");
         return ExitCode::FAILURE;
     };
-    match mewgit_core::git_exec::write_todo(plan.as_ref(), todo.as_ref()) {
+    match mewgit_core::git_exec::write_todo(std::io::stdin().lock(), todo.as_ref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("mewgit: {err}");

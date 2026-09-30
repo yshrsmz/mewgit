@@ -28,10 +28,15 @@ pub struct Runner {
     /// 引く。絶対パスも書ける）から渡す。引数にしているのは、設定を読んだのに
     /// 渡し忘れる経路を作らないため。
     git_bin: PathBuf,
-    /// interactive rebase の sequence editor として起こす自バイナリ（03 の
-    /// 「Interactive rebase の実装」）。core は自分がどのバイナリに入っているかを
-    /// 知らないので、`git_bin` と同じく引数で受ける。
-    mewgit_bin: PathBuf,
+    /// `GIT_SEQUENCE_EDITOR` に入れる値。自バイナリを引用して `--sequence-editor` を
+    /// 足したもの（03 の「Interactive rebase の実装」）。
+    ///
+    /// **`RebaseInteractive` に限らず、どのコマンドにも載せる。** mewgit の書き込みで
+    /// sequence editor を起こすのはあれだけで（`pull` はモードを必ず argv で渡すので
+    /// `pull.rebase=interactive` でも起きない。03 の実測）、ほかで起きたら plan が無い
+    /// ので editor が非 0 で断る —— `GIT_EDITOR=true` に落ちて既定の todo を黙って
+    /// 採るより閉じた側に倒れる。
+    sequence_editor: OsString,
     /// 実行時に重ねる環境変数。テストの隔離に使う。
     env: Vec<(OsString, OsString)>,
     /// `GIT_SSH_COMMAND` に入れる値。**生の設定値ではなく、実効 ssh に
@@ -56,7 +61,11 @@ impl Runner {
         Self {
             repo_root: repo_root.into(),
             git_bin: git_bin.into(),
-            mewgit_bin: mewgit_bin.into(),
+            sequence_editor: {
+                let mut editor = sh_quote(mewgit_bin.into().as_os_str());
+                editor.push(" --sequence-editor");
+                editor
+            },
             env: Vec::new(),
             git_ssh_command: match ssh {
                 SshCommand::Shell(command) => Some(command + BATCH_MODE),
@@ -91,9 +100,7 @@ impl Runner {
 
     /// `git` を実行し、`cancel` が届いたらプロセスグループごと中断する。
     ///
-    /// `git` を起動しないまま失敗する経路が 2 つある（argv を組めなかったときと、
-    /// `RebaseInteractive` の plan を一時ファイルに書けなかったとき）。どちらも
-    /// [`ExecError::NoResult`] で返す。
+    /// argv を組めなかったときは `git` を起動せずに [`ExecError::NoResult`] で返す。
     ///
     /// **中断は「殺して忘れる」ではなく、殺してから終了を待つ。** 待たずに future を
     /// 捨てると、`git` の後始末（lock ファイルの削除）が済む前に呼び出し側が次の
@@ -108,20 +115,6 @@ impl Runner {
             reason: err.to_string(),
         })?;
 
-        // **plan のファイルは git が終わるまで持つ。** sequence editor は git の起動
-        // 直後に読むが、`_plan` を先に落とすと読む前に消える。
-        let (runner, _plan) = match op {
-            GitOp::RebaseInteractive { plan, .. } => {
-                let argv = commands.first().map(|c| c.argv.clone()).unwrap_or_default();
-                let (editor, file) = self
-                    .sequence_editor(plan)
-                    .map_err(|reason| ExecError::NoResult { argv, reason })?;
-                let runner = self.clone().with_env([("GIT_SEQUENCE_EDITOR", editor)]);
-                (std::borrow::Cow::Owned(runner), Some(file))
-            }
-            _ => (std::borrow::Cow::Borrowed(self), None),
-        };
-
         // **列を先頭から順に叩き、非 0 で止まる**（03 の「複数の手順を持つ書き込み」）。
         // 1 本の変種では 1 周で抜けるので、ここまでの形と変わらない。
         let mut cancel = CancelSignal::Waiting(cancel);
@@ -132,45 +125,13 @@ impl Runner {
             if index > 0 && cancel.arrived() {
                 return Err(ExecError::Canceled { argv: command.argv });
             }
-            last = Some(runner.run_one(command, &mut cancel).await?);
+            last = Some(self.run_one(command, &mut cancel).await?);
         }
         // `to_commands` は空の列を返さない。
         last.ok_or_else(|| ExecError::NoResult {
             argv: Vec::new(),
             reason: "git の呼び出しが 1 つもありません".to_string(),
         })
-    }
-
-    /// plan を一時ファイルに書き、`GIT_SEQUENCE_EDITOR` の値と一緒に返す。
-    ///
-    /// git は値を `sh -c` で起こし、todo のパスを末尾に足す（03 の実測）。空白を
-    /// 含むパスを 1 語で渡すために引用する。**非 UTF-8 のパスは断る** —— 引用しても
-    /// 環境変数の値として `String` に載せられない。
-    fn sequence_editor(
-        &self,
-        plan: &super::RebasePlan,
-    ) -> Result<(String, tempfile::NamedTempFile), String> {
-        let mut file = tempfile::Builder::new()
-            .prefix("mewgit-rebase-")
-            .suffix(".json")
-            .tempfile()
-            .map_err(|err| format!("rebase の plan を一時ファイルに書けませんでした: {err}"))?;
-        std::io::Write::write_all(&mut file, plan.to_json().as_bytes())
-            .map_err(|err| format!("rebase の plan を一時ファイルに書けませんでした: {err}"))?;
-        let utf8 = |path: &std::path::Path| {
-            path.to_str().map(sh_quote).ok_or_else(|| {
-                format!(
-                    "パスが UTF-8 ではないため sequence editor に渡せません: {}",
-                    path.display()
-                )
-            })
-        };
-        let editor = format!(
-            "{} --sequence-editor {}",
-            utf8(&self.mewgit_bin)?,
-            utf8(file.path())?
-        );
-        Ok((editor, file))
     }
 
     /// 1 本の `git` を実行し、中断の合図が届いたらプロセスグループごと止める。
@@ -274,6 +235,7 @@ impl Runner {
             .env("LC_ALL", "C")
             // 意図しないエディタ起動を防ぐ。
             .env("GIT_EDITOR", "true")
+            .env("GIT_SEQUENCE_EDITOR", &self.sequence_editor)
             .stdin(if command.stdin.is_some() {
                 Stdio::piped()
             } else {

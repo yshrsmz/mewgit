@@ -4,28 +4,11 @@
 //! パッケージの統合テストにしか渡らない）ので、ここに置く。設計は
 //! `docs/design/03-git-exec.md` の「Interactive rebase の実装」。
 
-use mewgit_core::git_exec::{
-    ExecError, ExecErrorKind, GitOp, RebaseAction, RebaseEntry, RebasePlan, Runner,
-};
-use mewgit_core::git_read::Oid;
-use mewgit_core::test_util::TestRepo;
+use mewgit_core::git_exec::{ExecError, ExecErrorKind, GitOp, RebaseAction, RebasePlan, Runner};
+use mewgit_core::test_util::{rebase_entry as entry, reword, TestRepo};
 
 fn runner(repo: &TestRepo) -> Runner {
     repo.runner_with_mewgit(env!("CARGO_BIN_EXE_mewgit"))
-}
-
-fn entry(action: RebaseAction, oid: Oid, summary: &str) -> RebaseEntry {
-    RebaseEntry {
-        action,
-        oid,
-        summary: summary.into(),
-    }
-}
-
-fn reword(message: &str) -> RebaseAction {
-    RebaseAction::Reword {
-        message: message.into(),
-    }
 }
 
 /// `onto..HEAD` の完全なメッセージ。新しい順。
@@ -74,14 +57,8 @@ async fn a_reword_after_a_conflict_survives_continue() {
     // **`exec` の行で渡す理由そのもの。** continue は `GIT_EDITOR=true` の通常の
     // 経路で走るので、エディタで渡す形だと停止点より後ろの reword は元のメッセージの
     // まま通る（03）。
-    let repo = TestRepo::init();
-    repo.commit("base");
-    repo.git(&["switch", "-q", "-c", "topic"]);
-    let t1 = repo.commit("topic");
-    let t2 = repo.commit_file("g.txt", "t2");
-    repo.git(&["switch", "-q", "main"]);
-    repo.commit("main");
-    repo.git(&["switch", "-q", "topic"]);
+    let (repo, first, second) = TestRepo::diverged();
+    repo.git(&["switch", "-q", "side"]);
     let runner = runner(&repo);
 
     let err = runner
@@ -89,13 +66,13 @@ async fn a_reword_after_a_conflict_survives_continue() {
             onto: "main".into(),
             plan: RebasePlan {
                 entries: vec![
-                    entry(RebaseAction::Pick, t1, "topic"),
-                    entry(reword("t2 new"), t2, "t2"),
+                    entry(RebaseAction::Pick, first, "side"),
+                    entry(reword("side2 new"), second, "side2"),
                 ],
             },
         })
         .await
-        .expect_err("t1 が main とコンフリクトするはずです");
+        .expect_err("side の 1 つ目が main とコンフリクトするはずです");
     assert!(
         matches!(
             err,
@@ -107,13 +84,13 @@ async fn a_reword_after_a_conflict_survives_continue() {
         "{err:?}"
     );
 
-    repo.write_worktree_file("file.txt", b"resolved\n");
-    repo.git(&["add", "file.txt"]);
+    repo.write_worktree_file("f", b"resolved\n");
+    repo.git(&["add", "f"]);
     runner
         .run(&GitOp::RebaseContinue)
         .await
         .expect("解消したので最後まで通るはずです");
 
-    assert_eq!(messages(&repo, "main"), ["t2 new", "topic"]);
+    assert_eq!(messages(&repo, "main"), ["side2 new", "side"]);
     assert!(!repo.path().join(".git/rebase-merge").exists());
 }

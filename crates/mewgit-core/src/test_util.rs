@@ -76,6 +76,7 @@ use crate::auth::{
     GhLogin, LoginState, ProbeAttempt, RepoTarget,
 };
 use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Runner};
+use crate::git_exec::{RebaseAction, RebaseEntry};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
     LineOrigin, Oid, Remote, Signature, StashEntry, Timestamp, Upstream, WorktreeSnapshot,
@@ -869,6 +870,22 @@ pub fn fake_detail(index: u8, message: &str) -> CommitDetail {
         author_time: when,
         committer: fake_signature(),
         committer_time: when,
+    }
+}
+
+/// interactive rebase の 1 行。
+pub fn rebase_entry(action: RebaseAction, oid: Oid, summary: &str) -> RebaseEntry {
+    RebaseEntry {
+        action,
+        oid,
+        summary: summary.into(),
+    }
+}
+
+/// `message` に書き換える reword。
+pub fn reword(message: &str) -> RebaseAction {
+    RebaseAction::Reword {
+        message: message.into(),
     }
 }
 

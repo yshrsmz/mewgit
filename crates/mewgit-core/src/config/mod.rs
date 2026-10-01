@@ -92,6 +92,9 @@ pub struct General {
     pub git_bin: String,
     pub gh_bin: String,
     pub editor_fallback: bool,
+    /// status を定期的に読み直す間隔（秒）。外でファイルを編集したのを拾う（08 の
+    /// `general.refresh_interval`）。**0 で止める。**
+    pub refresh_interval: u64,
 }
 
 /// `[graph]`
@@ -137,6 +140,8 @@ impl Default for General {
             git_bin: "git".to_string(),
             gh_bin: "gh".to_string(),
             editor_fallback: false,
+            // lazygit の `refresher.refreshInterval` と同じ（01 の「外部の変更の検知」）。
+            refresh_interval: 10,
         }
     }
 }
@@ -340,6 +345,7 @@ mod tests {
         assert_eq!(config.general.git_bin, "git");
         assert_eq!(config.general.gh_bin, "gh");
         assert!(!config.general.editor_fallback);
+        assert_eq!(config.general.refresh_interval, 10);
 
         assert!(!config.graph.ascii);
         assert_eq!(config.graph.page_size, 300);
@@ -368,6 +374,7 @@ mod tests {
             git_bin = "/usr/bin/git"
             gh_bin = "/opt/gh"
             editor_fallback = true
+            refresh_interval = 0
 
             [graph]
             ascii = true
@@ -398,6 +405,7 @@ mod tests {
         assert_eq!(config.general.git_bin, "/usr/bin/git");
         assert_eq!(config.general.gh_bin, "/opt/gh");
         assert!(config.general.editor_fallback);
+        assert_eq!(config.general.refresh_interval, 0);
         assert!(config.graph.ascii);
         assert_eq!(config.graph.page_size, 50);
         assert_eq!(config.graph.colors, ["red", "blue"]);

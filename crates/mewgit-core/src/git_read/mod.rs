@@ -13,8 +13,9 @@ mod progress;
 mod repo;
 mod status;
 mod thread;
+mod watch;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 pub use git2::Oid;
@@ -22,6 +23,7 @@ pub use log::LogSession;
 pub use progress::in_progress;
 pub use repo::RepoReader;
 pub use thread::ReaderHandle;
+pub use watch::{FileStamp, RepoFingerprint};
 
 /// 短縮 Oid の桁数。`git log --oneline` と同じ 7 桁。
 pub const SHORT_OID: usize = 7;
@@ -430,6 +432,14 @@ pub struct WorktreeSnapshot {
     /// すると、`conflicted` と進行中操作が別々の時点の値になる。鮮度は
     /// `WorktreeState::snapshot_epoch` の 1 本で判る（01）。
     pub progress: Option<InProgressOp>,
+    /// 一覧に出たファイルのワークツリー側の `(mtime, len)`。ワークツリーに無いパスは
+    /// 入らない（02 の「ステータス」）。
+    ///
+    /// **外の変更を拾うための値。** 既に `M` のファイルを外で書き換えても区画も
+    /// [`FileStatus`] も変わらないので、一覧を比べるだけでは拾えない（01 の「外部の
+    /// 変更の検知 › 定期の status」）。[`FileEntry`] に載せないのは、あちらがコミットの
+    /// ファイル一覧と共用で、そちらでは常に空になるため。
+    pub stamps: BTreeMap<PathBuf, FileStamp>,
 }
 
 /// ワーキングツリーのどの区画か。[`WorktreeSnapshot`] の区画のフィールドと 1 対 1。
@@ -455,6 +465,7 @@ impl WorktreeSnapshot {
             untracked,
             conflicted,
             progress: _,
+            stamps: _,
         } = self;
         for section in [staged, unstaged, untracked, conflicted] {
             section.sort_by(|a, b| a.path.cmp(&b.path));

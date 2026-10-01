@@ -4,7 +4,7 @@ use crate::auth::{Account, AuthError, DegradedReason, GhLogin, ResolvedTarget};
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, LogPage, Oid,
-    RefIndex, Remote, StashEntry, Timestamp, WorktreeSnapshot,
+    RefIndex, Remote, RepoFingerprint, StashEntry, Timestamp, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 
@@ -47,6 +47,12 @@ pub enum Msg {
     /// **時計を読むのはランタイムで、ここで運ぶ**（01 の「通知」）。`update` の中で
     /// 時計を読むと、同じ入力から違う状態ができて遷移をテストできなくなる。
     Tick(Timestamp),
+    /// 端末が前面に戻った（DECSET 1004 のフォーカス報告）。外の変更を読み直す
+    /// （01 の「外部の変更の検知 › 間隔とフォーカス」）。
+    ///
+    /// **来ない端末がある**（tmux は `focus-events` が既定で off、GNU screen は 1004 を
+    /// 捨てる）ので、これが来なくても成り立つ形にしてある。報告を有効にするのは `main.rs`。
+    FocusGained,
 
     // git_read
     /// ログの 1 ページ。`Result` にしているのは、失敗しても必ずここに来るようにするため。
@@ -100,6 +106,9 @@ pub enum Msg {
     /// `Cmd::LoadStatus` が黙って落ちる。書き込みのたびに `ExecFinished` が
     /// `LoadStatus` を出すので、詰まると「stage したのに一覧が変わらない」になる。
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
+    /// 外の変更を見張る指紋（01 の「外部の変更の検知」）。`StatusLoaded` と同じ理由で
+    /// `Result` を運ぶ。
+    FingerprintLoaded(Box<Result<RepoFingerprint, GitReadError>>),
     /// ローカルブランチの一覧。`StatusLoaded` と同じ理由で `Result` を運ぶ。失敗の
     /// 通り道が無いと `JobKind::LoadBranches` が走ったまま残り、以後の
     /// `Cmd::LoadBranches` が黙って落ちる。

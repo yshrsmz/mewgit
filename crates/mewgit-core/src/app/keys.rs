@@ -71,6 +71,8 @@ pub const COMMON: &[KeyHint] = &[
     hint(&[Key::char('A')], "account"),
     hint(&[Key::char('L')], "通知"),
     hint(&[Key::char('m')], "進行中操作のメニュー"),
+    // 外の変更の検知が外れたときの逃げ道（01 の「外部の変更の検知 › `R`」）。
+    hint(&[Key::char('R')], "読み直し"),
     hint(
         &[Key::new(KeyCode::Tab), Key::new(KeyCode::BackTab)],
         "ペイン移動",

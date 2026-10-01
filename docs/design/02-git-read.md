@@ -34,6 +34,7 @@ impl RepoReader {
     pub fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
     pub fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
     pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;  // 下の「stash 一覧」
+    pub fn fingerprint(&self) -> Result<RepoFingerprint, GitReadError>;  // 下の「指紋」
 }
 ```
 
@@ -430,6 +431,8 @@ pub struct WorktreeSnapshot {
     pub untracked: Vec<FileEntry>,
     pub conflicted: Vec<FileEntry>,
     pub progress: Option<InProgressOp>,   // 区画ではない。下の「進行中操作の検出」
+    /// 一覧に出たファイルのワークツリー側の `(mtime, len)`。ワークツリーに無いパスは入らない。
+    pub stamps: BTreeMap<PathBuf, FileStamp>,
 }
 
 pub struct FileEntry {
@@ -439,6 +442,15 @@ pub struct FileEntry {
     pub status: FileStatus,
 }
 ```
+
+- **`stamps` は外の変更を拾うための値**（01 の「外部の変更の検知 › 定期の status」）。
+  既に `M` のファイルを外で書き換えても区画も `FileStatus` も変わらないので、一覧を
+  比べるだけでは拾えない。**stat は変更のあるファイルの数だけ**（git2 の status が
+  返したエントリごとに `std::fs::symlink_metadata`）で、ワークツリー全体は走査しない。
+  `symlink_metadata` なのは、git がシンボリックリンクをリンクそのものとして扱うため
+- **`FileEntry` に載せない。** `FileEntry` はコミットのファイル一覧（`commit_files`）と
+  共用で、そちらでは常に空のフィールドになる。snapshot に横に持てば、`PartialEq` で
+  一覧と一緒に比べられる
 
 - `StatusOptions` で untracked を含め、`recurse_untracked_dirs` を有効化する。無効だと
   新しいディレクトリが 1 行にまとまり、中のファイルを個別に stage できない。ignored は含めない
@@ -652,6 +664,25 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 - ファイルが読めない・中身が壊れているときは、その行を「無い」と読んで次の判定へ進む。
   **戻り値が `Option` で `Result` でないのはこのため**（上の「API」）
 
+## 指紋
+
+外の変更を見張るための値（`RepoFingerprint`。型と、差から何を読み直すかは 01 の
+「外部の変更の検知」）。**git を起動しない** —— 2 秒ごとに呼ばれるので、git2 と stat だけで組む。
+
+- **ref は `references()` で全部列挙し、名前と指す先をハッシュに畳む。** HEAD は
+  `symbolic_target()`（ブランチ名）と解決した oid の両方を入れる —— 同じコミットを指す
+  別のブランチへ `switch` しても ref の値は動かないので、名前を入れないと拾えない。
+  **`refs/stash` だけは別に持つ**（`Reload::Stashes` で済むものを `RefsAndLog` にしない）。
+  **mtime ではなく列挙にしたのは、入れ子の ref の作成を mtime では拾えないから**
+  （実測の表とコストは 01）。reftable 形式のリポジトリも git2 が吸収する（確かめていない）
+- **`config` は commondir（`Repository::commondir()`）の、`index` と gitdir はワークツリーごとの
+  gitdir（`Repository::path()`）の mtime。** 進行中操作の印（`MERGE_HEAD`、`rebase-merge/`
+  など）はワークツリーごとの gitdir にできるので、gitdir のディレクトリの mtime が動く
+  （01 の「進行中操作があるときの書き込み」の実測）。読めなければ `None` で、`Err` にしない
+  （無い `index` は空のリポジトリで普通に起きる）
+- **`Hash` は `std::collections::hash_map::DefaultHasher`。** 同じプロセスの中で比べる
+  だけなので、版をまたいで安定している必要は無い
+
 ## エラー
 
 ```rust
@@ -692,6 +723,7 @@ impl ReaderHandle {
     pub async fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;
     pub async fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
     pub async fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
+    pub async fn fingerprint(&self) -> Result<RepoFingerprint, GitReadError>;
 }
 ```
 

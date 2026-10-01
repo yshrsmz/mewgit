@@ -312,6 +312,15 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
+            Cmd::Probe => {
+                let reader = self.reader.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::FingerprintLoaded(Box::new(reader.fingerprint().await)));
+                });
+                ControlFlow::Continue(())
+            }
+
             Cmd::Exec(op) => {
                 let runner = self.runner.clone();
                 let tx = self.tx.clone();
@@ -776,7 +785,7 @@ mod tests {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
         let events = vec![
-            Ok(Event::FocusGained),
+            Ok(Event::FocusLost),
             key(KeyCode::CapsLock),
             key(KeyCode::Char('q')),
         ];

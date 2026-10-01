@@ -10,7 +10,7 @@ use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarg
 use crate::git_exec::{GitOp, RebasePlan};
 use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, Oid, RefIndex, Remote,
-    StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
+    RepoFingerprint, StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 use crate::graph::{GraphRow, LaneState};
@@ -47,6 +47,8 @@ pub struct AppState {
     pub right_tab: RightTab,
     pub modal: Option<Modal>,
     pub jobs: JobTracker,
+    /// 外の変更の見張り（01 の「外部の変更の検知」）。
+    pub watch: WatchState,
     /// エラー・情報のトースト。積むのは [`AppState::push_notice`]。
     pub notices: VecDeque<Notice>,
     pub term: TermSize,
@@ -68,6 +70,42 @@ pub struct AppState {
     pub now: Timestamp,
     /// 起動時に確定した設定。実行中は再読込しない（08）。
     pub config: Config,
+}
+
+/// 外の変更の見張り（01 の「外部の変更の検知」）。
+///
+/// **期限は `update` が [`Msg::Tick`] の時刻で決める。** ランタイムに別のタイマーを
+/// 持たせると、期限の判断がテストできない側に出る。
+///
+/// [`Msg::Tick`]: crate::app::Msg::Tick
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchState {
+    /// 比べる基準の指紋。**`None` は「次の返りを基準にするだけで、比べない」** ——
+    /// 起動直後と、mewgit の書き込みのあと（書き込みで指紋は必ず変わるので、比べると
+    /// 自分の書き込みを外の変更と読む）。
+    pub fingerprint: Option<RepoFingerprint>,
+    /// probe が失敗したまま、まだ成功していない。通知を最初の 1 回に抑える
+    /// （01 の「失敗の記憶」の形）。
+    pub failed: bool,
+    /// 次に probe を出す時刻（Unix 秒）。既定の 0 は「次の `Tick` で出す」。
+    pub next_probe: i64,
+    /// 次に定期の status を出す時刻（Unix 秒）。
+    pub next_status: i64,
+}
+
+impl WatchState {
+    /// 起動時の期限。**どちらも 1 周期先から数える** —— 起動時は `init` が status と
+    /// probe を自分で頼むので、最初の `Tick` で同じものをもう一度頼まない。
+    fn starting_at(now: Timestamp, config: &Config) -> Self {
+        let interval = i64::try_from(config.general.refresh_interval).unwrap_or(i64::MAX);
+        Self {
+            next_probe: now
+                .seconds
+                .saturating_add(crate::app::update::PROBE_INTERVAL),
+            next_status: now.seconds.saturating_add(interval),
+            ..Self::default()
+        }
+    }
 }
 
 /// push が non-fast-forward で断られたこと（01 の「force push」）。
@@ -110,6 +148,7 @@ impl AppState {
             right_tab: RightTab::default(),
             modal: None,
             jobs: JobTracker::default(),
+            watch: WatchState::starting_at(now, &config),
             notices: VecDeque::new(),
             term: TermSize::default(),
             tick: 0,
@@ -223,7 +262,8 @@ impl AppState {
             | JobKind::ResolveAccount
             | JobKind::ListAccounts
             | JobKind::FetchPrList
-            | JobKind::FetchPrDetails => return,
+            | JobKind::FetchPrDetails
+            | JobKind::Probe => return,
             // **黙って落とさない。** 落とすと `Modal::PrCreate` が閉じないまま
             // 何も起きず（`update::submit` は `Cmd` が落ちるなら閉じない）、
             // 打った本文を抱えた箱が無反応に見える。
@@ -2217,6 +2257,16 @@ pub enum Region {
     /// などの `Refs` の書き込み（一覧を読み直さない）のあとは、一覧が古いと判じられて
     /// 最初の apply / pop / drop が必ず 1 回断られる（01 の「stash の書き込み」）。
     Stash,
+    /// **mewgit の書き込みそのもの。** 値ではなく「書き込みを挟んだか」だけを数える。
+    /// [`JobKind::Probe`] の指紋は、書き込みより前に頼んだものなら比べてはいけない
+    /// （01 の「外部の変更の検知 › mewgit 自身の書き込みと分ける」）。
+    ///
+    /// **`Worktree` で代えない。** 外の変更の検知も `Worktree` を進める（外で編集した
+    /// ファイルの diff を古くするため）ので、そちらで判じると、外で commit したときに
+    /// status の返りが先に `Worktree` を進め、飛んでいた probe が「書き込みより前」として
+    /// 捨てられて ref の差を取りこぼす。**`Account`（`.git/config` の 1 行）も進める** ——
+    /// どの値の領域も古くしないが、指紋の `config` は動かす。
+    Write,
 }
 
 impl Region {
@@ -2225,7 +2275,13 @@ impl Region {
     ///
     /// 腕を足してここに足し忘れると添字が範囲外になるので、`region_all_lists_every_arm`
     /// が網羅 `match` でコンパイルエラーにする。
-    pub const ALL: [Region; 4] = [Region::Worktree, Region::Refs, Region::Log, Region::Stash];
+    pub const ALL: [Region; 5] = [
+        Region::Worktree,
+        Region::Refs,
+        Region::Log,
+        Region::Stash,
+        Region::Write,
+    ];
 }
 
 /// 実行中の非同期タスク。スピナー表示と `Cmd` の重複発行防止に使う。
@@ -2405,9 +2461,43 @@ pub enum JobKind {
     FetchPrDetails,
     CreatePr,
     OpenPr,
+    /// 外の変更を見張る指紋（01 の「外部の変更の検知」）。
+    Probe,
 }
 
 impl JobKind {
+    /// ヘッダのスピナーに出すか。
+    ///
+    /// **probe だけは出さない。** 2 秒ごとに走って 1ms 未満で終わる（ref 192 本で
+    /// 0.25ms。01）ので、出すと 2 秒ごとに 1 フレームだけ説明が描かれ、`[api: …]` が
+    /// その幅を譲って消える（07 の「ヘッダ」）。定期の status は出す —— 大きな
+    /// リポジトリでは目に見える時間走るので、何かが走っていることは見えてよい。
+    ///
+    /// 網羅 `match` にしているのは、種別を足したときに出すかどうかを選ばせるため。
+    pub fn spins(self) -> bool {
+        match self {
+            JobKind::Probe => false,
+            JobKind::LoadLog
+            | JobKind::LoadCommitDetail
+            | JobKind::LoadCommitFiles
+            | JobKind::LoadHeadMessage
+            | JobKind::LoadCommitMessage
+            | JobKind::LoadRepoInfo
+            | JobKind::LoadStatus
+            | JobKind::LoadBranches
+            | JobKind::LoadStashes
+            | JobKind::LoadDiff
+            | JobKind::Exec
+            | JobKind::ResolveTarget
+            | JobKind::ResolveAccount
+            | JobKind::ListAccounts
+            | JobKind::FetchPrList
+            | JobKind::FetchPrDetails
+            | JobKind::CreatePr
+            | JobKind::OpenPr => true,
+        }
+    }
+
     /// この種別が読む値が、どの領域の世代で古くなるか。
     ///
     /// `None` は「書き込みでは古くならない」か、**値そのものが鍵を持っていて世代より
@@ -2420,6 +2510,9 @@ impl JobKind {
         match self {
             // index とワークツリー。どの書き込みでも古くなる。
             JobKind::LoadStatus | JobKind::LoadDiff => Some(Region::Worktree),
+            // **指紋は書き込みより前の値なら比べてはいけない**（01 の「外部の変更の検知 ›
+            // mewgit 自身の書き込みと分ける」）。
+            JobKind::Probe => Some(Region::Write),
             // ref から導かれる値。`LoadHeadMessage` もここ —— commit / amend が
             // 走っているあいだに `C` を押すと、書き込み前の本文で amend の入力欄が
             // 埋まる。
@@ -3819,6 +3912,7 @@ mod tests {
                 Region::Refs => "refs",
                 Region::Log => "log",
                 Region::Stash => "stash",
+                Region::Write => "write",
             };
             !name.is_empty()
         }

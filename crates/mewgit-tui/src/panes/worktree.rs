@@ -108,7 +108,7 @@ mod tests {
             unstaged: vec![fake_entry("unstaged.txt", FileStatus::Modified)],
             untracked: vec![fake_entry("new.txt", FileStatus::Untracked)],
             conflicted: Vec::new(),
-            progress: None,
+            ..WorktreeSnapshot::default()
         });
 
         let text = draw(&state, SIZE).join("\n");

@@ -800,6 +800,7 @@ pub fn fake_snapshot(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> 
         untracked: entries(untracked),
         conflicted: Vec::new(),
         progress: None,
+        stamps: Default::default(),
     }
 }
 

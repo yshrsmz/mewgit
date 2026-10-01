@@ -516,7 +516,9 @@ const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// 増えていない** —— ジョブが 1 つ増えるたびに案内かヒントが末尾から削られるので、
 /// 空いているヘッダへ移した。
 fn spinner_line(state: &AppState) -> Option<Line<'static>> {
-    if state.jobs.is_empty() {
+    // **出さない種別がある**（`JobKind::spins`。2 秒ごとの probe）。それしか走って
+    // いなければ駒も出さない —— 出すと 2 秒ごとに 1 フレームだけ駒が光る。
+    if !state.jobs.iter().any(|job| job.kind.spins()) {
         return None;
     }
     // 駒は `Tick` の回数で選ぶ。`jobs` の中身では選ばない —— 走っているものが
@@ -525,7 +527,7 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
     // 説明は `&'static str` なので、組むのは `Vec<Span>` 1 本だけ。描画は入力が
     // 無くても `Tick` で回る（1 秒に 4 回）ので、中間の `String` を作らない。
     let mut spans = vec![Span::raw(frame)];
-    for job in state.jobs.iter() {
+    for job in state.jobs.iter().filter(|job| job.kind.spins()) {
         spans.push(Span::raw(" "));
         spans.push(Span::raw(job.label));
     }

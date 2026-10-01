@@ -487,8 +487,8 @@ pub(super) fn load_more(state: &AppState) -> Cmd {
 
 /// 先頭から読み直す。
 ///
-/// 出すかどうかはここでは決めない。呼び出し元は 2 つあり、どちらも出すと決めた
-/// あとで呼ぶ（`exec_finished` と、落とされたぶんを頼み直す `log_loaded`）。
+/// 出すかどうかはここでは決めない。呼び出し元はどれも出すと決めたあとで呼ぶ
+/// （`exec::reload` —— 書き込みと外の変更 —— と、落とされたぶんを頼み直す `log_loaded`）。
 /// 判断を置くと、テストで踏めない偽の腕が残る。
 pub(super) fn reload_log(state: &AppState) -> Cmd {
     Cmd::LoadLog {

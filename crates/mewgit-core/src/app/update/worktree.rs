@@ -16,7 +16,7 @@ use super::diff::open_diff;
 use super::stash::{open_stash_file, open_stash_push};
 use super::{confirm, exec_busy, focus, multiline_input_key, submit_exec, InputKey};
 use crate::app::{
-    AppState, Cmd, DiffOrigin, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
+    AppState, Cmd, DiffOrigin, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, Region, TextBuffer,
 };
 
 /// ワーキングツリーペインのキー処理。
@@ -489,13 +489,29 @@ pub(super) fn status_loaded(
 ) -> Cmd {
     let asked = state.jobs.finish(JobKind::LoadStatus);
 
+    // 判じるのは**届いた返信の刻印**で、外の変更で世代を進める前に読む。
+    let fresh = state.jobs.is_fresh(JobKind::LoadStatus, asked);
+
     match result {
         Ok(snapshot) => {
+            // **外の変更**（01 の「外部の変更の検知 › 定期の status」）—— 持っている一覧と
+            // 届いた一覧のあいだに mewgit の書き込みが無く（同じ世代）、中身が違う。
+            // 既に `M` のファイルを外で書き換えたのは `stamps` の差で出る。
+            let external = fresh
+                && state.worktree.snapshot_epoch == asked
+                && state.worktree.snapshot != snapshot;
             state.worktree.snapshot = snapshot;
             // **いつの一覧かを値に添える。** 以後、空の一覧は「変更が無い」と読んで
             // よくなり（`None` = まだ読めていない）、書き込みより前のものかも同じ
             // 1 本から判る（01 の「実行中ジョブ › 世代」）。
             state.worktree.snapshot_epoch = asked;
+            if external {
+                // 持っている diff を古くする（01 の「diff のキャッシュと鮮度」）。届いた
+                // 一覧は変更より後に読んだものなので、**刻印も進めたあとの世代にする** ——
+                // 古いまま置くと、下の追いつきが同じ status をもう一度頼む。
+                state.jobs.advance(Region::Worktree);
+                state.worktree.snapshot_epoch = Some(state.jobs.epoch(Region::Worktree));
+            }
             // 選んでいたファイルは別の区画へ移る（stage / unstage）か消えている
             // （discard）。選べる行へ寄せ直す。
             state.worktree.clamp();
@@ -508,11 +524,7 @@ pub(super) fn status_loaded(
     // 書き込みの直後に頼んだぶんが落とされていたら、ここで頼み直す。**見るのは
     // 届いた返信の刻印**（`snapshot_epoch` ではない）。失敗した返信は一覧を入れ替えて
     // いないので、持っている値で判じると「古い → 頼み直す → 失敗」を回す。
-    let again = if state.jobs.is_fresh(JobKind::LoadStatus, asked) {
-        Cmd::None
-    } else {
-        Cmd::LoadStatus
-    };
+    let again = if fresh { Cmd::None } else { Cmd::LoadStatus };
 
     // **`clamp` のあとに見る**（01 の「diff の遅延取得」）。
     //

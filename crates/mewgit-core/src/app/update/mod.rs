@@ -37,6 +37,8 @@ use prs::{
 use rebase::commit_message_loaded;
 use remote::{fetch, push};
 use stash::{stash_key, stashes_loaded};
+pub(crate) use watch::PROBE_INTERVAL;
+use watch::{fingerprint_loaded, focus_gained, reload_all};
 use worktree::{head_message_loaded, status_loaded, worktree_key};
 
 mod account;
@@ -52,6 +54,7 @@ mod remote;
 mod stash;
 #[cfg(test)]
 mod test_support;
+mod watch;
 mod worktree;
 
 /// 起動直後に実行してほしい副作用。
@@ -69,6 +72,8 @@ pub fn init(state: &mut AppState) -> Cmd {
         Cmd::LoadStatus,
         Cmd::LoadBranches,
         Cmd::LoadStashes,
+        // 外の変更を比べる基準（01 の「外部の変更の検知」）。次の probe は 2 秒後。
+        Cmd::Probe,
     ]);
     state.issue(cmd)
 }
@@ -149,13 +154,15 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
             state.dismiss_notice();
             paste(state, &text)
         }
-        // スピナーの駒を進めるだけ。読み直しは引かない（`Tick` は 250ms ごとに
-        // 来るので、ここから `Cmd` を出すと git を 1 秒に 4 回叩くことになる）。
+        // スピナーの駒を進め、外の変更を見張る期限を見る。**`Cmd` を出すのは期限を
+        // 過ぎたときだけ**（`Tick` は 250ms ごとに来るので、毎回出すと 1 秒に 4 回
+        // ref を列挙することになる。01 の「外部の変更の検知 › 間隔とフォーカス」）。
         Msg::Tick(now) => {
             state.tick = state.tick.wrapping_add(1);
             state.now = now;
-            Cmd::None
+            watch::tick(state)
         }
+        Msg::FocusGained => focus_gained(state),
 
         Msg::LogLoaded { restart, result } => log_loaded(state, restart, result),
         Msg::CommitDetailLoaded { oid, result } => commit_detail_loaded(state, oid, *result),
@@ -167,6 +174,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         // 以下は対応するマイルストーンのタスクで実装する。ここで `_` を使わないのは、
         // `Msg` に変種を足したときに実装漏れをコンパイルエラーにするため。
         Msg::StatusLoaded(result) => status_loaded(state, *result),
+        Msg::FingerprintLoaded(result) => fingerprint_loaded(state, *result),
         Msg::BranchesLoaded(result) => branches_loaded(state, *result),
         Msg::StashesLoaded(result) => stashes_loaded(state, *result),
         Msg::DiffLoaded { target, result } => diff_loaded(state, target, *result),
@@ -265,6 +273,11 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
     // ペインに居るかは決まっていない（01 の「進行中操作のメニュー（`m`）」）。
     if key == Key::char('m') {
         return open_progress_menu(state);
+    }
+    // **読み直しも共通キー。** 外の変更の検知が外れたときの逃げ道で、どのペインに
+    // 居るかと関係が無い（01 の「外部の変更の検知 › `R`」）。
+    if key == Key::char('R') {
+        return reload_all(state);
     }
     // **キーの一覧も共通キー**（07 の「Help モーダル」）。
     if key == Key::char('?') {
@@ -850,6 +863,8 @@ mod tests {
                 Cmd::LoadStatus,
                 Cmd::LoadBranches,
                 Cmd::LoadStashes,
+                // 外の変更を比べる基準（01 の「外部の変更の検知」）。
+                Cmd::Probe,
             ])
         );
         assert!(state.jobs.is_running(JobKind::LoadLog));

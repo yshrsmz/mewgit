@@ -65,8 +65,25 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         state.push_rejected = push_rejection(state, &done.result, src, upgradable);
     }
 
-    let reload = Reload::after(&done.op, ref_may_have_moved(&done.result));
+    // **書き込みで指紋は必ず変わる。** 持っている指紋と比べると自分の書き込みを外の
+    // 変更と読むので、次の probe の返りを基準にし直す（01 の「外部の変更の検知 ›
+    // mewgit 自身の書き込みと分ける」）。
+    state.watch.fingerprint = None;
+    // 飛んでいる probe はこの書き込みより前の値を読んでいる（`Region::Write`）。
+    state.jobs.advance(Region::Write);
 
+    reload(
+        state,
+        Reload::after(&done.op, ref_may_have_moved(&done.result)),
+    )
+}
+
+/// `reload` の領域を古くして、読み直しを出す。
+///
+/// **書き込みの後始末と、外の変更の検知（`watch`）の 2 つが通る。** 外の変更も
+/// 「持っている値が古くなった」で、書き込みが 1 つ終わったのと同じ形で読み直す
+/// （01 の「外部の変更の検知」）。
+pub(super) fn reload(state: &mut AppState, reload: Reload) -> Cmd {
     // **持っている値と、走っている読み取りが、ここで古くなる。** 走っている読み取りは
     // この書き込みより前に頼まれたものなので、届いても採ってはいけない。世代を進めて
     // おくと、下で出す `Cmd` は `issue` で新しい世代で刻まれ、古い返信とは刻印で
@@ -113,7 +130,7 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
 /// 網羅 `match` にしているのは、`GitOp` に変種を足したときにどれなのかを選ばせるため
 /// （`to_command` と同じ）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Reload {
+pub(super) enum Reload {
     /// index / ワークツリーだけ。`Cmd::LoadStatus` のほかには何も足さない。
     Nothing,
     /// ref の索引（ラベルと HEAD）。**walk に入るコミットの集合は変わらない**ので、

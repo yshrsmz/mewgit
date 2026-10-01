@@ -2,7 +2,9 @@
 
 use git2::StatusOptions;
 
-use super::{file_entry, in_progress, FileStatus, GitReadError, RepoReader, WorktreeSnapshot};
+use super::{
+    file_entry, in_progress, FileStamp, FileStatus, GitReadError, RepoReader, WorktreeSnapshot,
+};
 
 impl RepoReader {
     /// staged / unstaged / untracked / conflicted に分けたワーキングツリーの状態。
@@ -56,6 +58,23 @@ impl RepoReader {
 
         snapshot.sort_sections();
         snapshot.progress = in_progress(self.git_dir());
+        // **stat するのは一覧に出たファイルだけ**（02 の「ステータス」）。ワークツリー
+        // 全体は走査しない。staged だけのファイルも入れる —— 外で書き換えれば unstaged に
+        // 移るので一覧の差でも拾えるが、どの区画のものかで分けると規則が 2 本になる。
+        let paths: Vec<_> = [
+            &snapshot.staged,
+            &snapshot.unstaged,
+            &snapshot.untracked,
+            &snapshot.conflicted,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.path.clone())
+        .collect();
+        snapshot.stamps = paths
+            .into_iter()
+            .filter_map(|path| Some((path.clone(), FileStamp::of(&self.workdir().join(&path))?)))
+            .collect();
         Ok(snapshot)
     }
 }

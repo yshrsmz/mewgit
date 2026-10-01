@@ -634,9 +634,10 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       理由は 01 の「外部の変更の検知 › 定期の status」—— 2 本目の守りは diff のキャッシュに
       手を入れる別の関心事で、比べる `(mtime, len)` はこちらが載せる）。**決めた形**（理由と
       他クライアントの調べは 01 の同じ節）—— 2 秒ごとの probe（git2 で ref を列挙した指紋と、
-      `config` / `index` / gitdir の mtime）で変わった領域だけを `Reload` で読み直し、
-      10 秒ごと（`general.refresh_interval`）に status を読み直して `FileEntry` の
-      `(mtime, len)`（`WorktreeSnapshot.stamps`）が変わっていれば diff を古くする。`FocusGained` で両方をすぐ、`R` で
+      `config` / `index` / gitdir の mtime）で ref 側が変われば `Reload` で読み直し（ワーク
+      ツリー側の mtime は status を読むきっかけだけ）、10 秒ごと（`general.refresh_interval`）に
+      status を読み直してファイルの `(mtime, len)`（`WorktreeSnapshot.stamps`）が diff を採った時点（`DiffView::stamp`）と
+      違えば diff を読み直す。`FocusGained` で両方をすぐ、`R` で
       指紋を見ずに全部。**ファイルの監視（`notify`）は採らなかった**。
       **これで #120 が残した「外で終えた直後の 1 回目は断られる」が狭まる** —— 見張りは
       「外で `rebase --abort` / `merge --abort` したあと、probe が届けば 1 回目の `Enter` が通る」
@@ -647,8 +648,10 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       外で `two-B` に書き換えて `s` を押すと、**index に `two-A`（HEAD にもワーキングツリーにも
       無い内容）が入り** `MM` になる。通知は出ない。`x` は `git apply --reverse` がコンテキスト
       不一致で断り、ワーキングツリーは無傷（赤の通知が出る）。**塞ぐ形は、ハンク操作の直前に
-      対象のファイルの `(mtime, len)` が diff を読んだ時点と同じかを確かめること**
-      （1/2 が `WorktreeSnapshot.stamps` に載せる）。どこで stat するか（`update` は I/O をしないので、`GitOp` に
+      対象のファイルの `(mtime, len)` が diff を読んだ時点と同じかを確かめること**。
+      **1/2 の `DiffView::stamp` は「diff を採った時点の status の stamp」で、diff を読んだ
+      時点とはずれうる**（01 の「外部の変更の検知 › 定期の status」）。diff の読み取りが
+      自分で stat する形に変えるかをこのタスクで決める。どこで stat するか（`update` は I/O をしないので、`GitOp` に
       期待値を載せて実行側で比べるか）はこのタスクで決める
 - [ ] テストで status を届ける 3 行（`reply(state, Cmd::LoadStatus, Msg::StatusLoaded(..))`）を
       `test_support` のヘルパ 1 本に寄せ、`worktree_state` もそれを呼ぶ形にする。いまは

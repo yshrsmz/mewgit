@@ -679,7 +679,9 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
   gitdir（`Repository::path()`）の mtime。** 進行中操作の印（`MERGE_HEAD`、`rebase-merge/`
   など）はワークツリーごとの gitdir にできるので、gitdir のディレクトリの mtime が動く
   （01 の「進行中操作があるときの書き込み」の実測）。読めなければ `None` で、`Err` にしない
-  （無い `index` は空のリポジトリで普通に起きる）
+  （無い `index` は空のリポジトリで普通に起きる）。**この 2 つは status を読むきっかけに
+  すぎない** —— 外の変更の無い `git status` 1 回でも両方動く（実測は 01 の「指紋」）ので、
+  `app` は差を見ても世代を進めず、status を読んで比べる
 - **`Hash` は `std::collections::hash_map::DefaultHasher`。** 同じプロセスの中で比べる
   だけなので、版をまたいで安定している必要は無い
 

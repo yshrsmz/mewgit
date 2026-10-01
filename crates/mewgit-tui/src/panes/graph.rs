@@ -23,6 +23,17 @@ fn block(focused: bool) -> Block<'static> {
     ui::pane_block("Graph", focused)
 }
 
+/// 描くときの枠。**印があればタイトルに本数を出す**（`Graph (印 3)`。07）—— 画面外の
+/// 印も数えるので、スクロールで印の行が見えなくなっても付いていることが判る。
+/// 内側の大きさは [`block`] と変わらないので、[`area`] は印を見ない。
+fn titled_block(state: &AppState) -> Block<'static> {
+    let focused = state.focus == Pane::Graph;
+    match state.graph.marks.len() {
+        0 => block(focused),
+        marks => ui::pane_block(format!("Graph (印 {marks})"), focused),
+    }
+}
+
 /// 行を描ける領域。`ui::graph_rows` が行数を出すのに使う。
 ///
 /// **枠の内側そのまま。** 高さは端末サイズだけで決まる（07 の「CommitDetail ペイン」）。
@@ -32,7 +43,7 @@ pub fn area(area: Rect) -> Rect {
 
 /// グラフペインを描く。
 pub fn render(frame: &mut Frame, outer: Rect, state: &AppState) {
-    let block = block(state.focus == Pane::Graph);
+    let block = titled_block(state);
     // `block()` はタイトルを確保するので 1 フレームに 1 回だけ作る。
     let rows = block.inner(outer);
     frame.render_widget(block, outer);
@@ -149,7 +160,14 @@ impl<'a> View<'a> {
         );
         spans.reserve(3 + labels.len() * 4);
 
-        spans.push(Span::styled(short_oid(&line.commit.oid), theme::muted()));
+        // **印は oid の見た目だけで出し、桁を足さない**（07）—— 印の桁を足すと、印の
+        // 有無で summary の桁がずれる。
+        let oid_style = if state.graph.is_marked(line.commit.oid) {
+            theme::marked()
+        } else {
+            theme::muted()
+        };
+        spans.push(Span::styled(short_oid(&line.commit.oid), oid_style));
         spans.push(Span::raw(" "));
 
         for label in labels {
@@ -404,6 +422,47 @@ mod tests {
         assert!(buffer[(1, FIRST_ROW as u16)]
             .modifier
             .contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn a_marked_commit_underlines_its_oid_without_moving_the_summary() {
+        // 07 の「Graph ペイン」—— 印は oid の見た目だけで出し、桁は足さない。
+        let mut state = state_with_commits(&["first", "second"]);
+        let marked = state.graph.lines[0].commit.oid;
+        state.graph.toggle_mark(marked);
+
+        let terminal = terminal_with(&state, TermSize::default());
+        let buffer = terminal.backend().buffer();
+
+        let oid = |row: usize| {
+            let text = state.graph.lines[row - FIRST_ROW].commit.oid.to_string();
+            let y = row as u16;
+            let x = column_of(buffer, y, &text[..1]).expect("oid が描かれていません");
+            &buffer[(x, y)]
+        };
+        assert!(oid(FIRST_ROW).modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(oid(FIRST_ROW).fg, theme::marked().fg.unwrap());
+        assert!(!oid(FIRST_ROW + 1).modifier.contains(Modifier::UNDERLINED));
+        let lines = draw(&state, TermSize::default());
+        assert_eq!(
+            lines[FIRST_ROW].find("first"),
+            lines[FIRST_ROW + 1].find("second"),
+            "印の有無で summary の桁がずれています"
+        );
+    }
+
+    #[test]
+    fn the_title_counts_the_marks() {
+        let mut state = state_with_commits(&["first", "second"]);
+        let title = |state: &AppState| draw(state, TermSize::default())[WIP_ROW - 1].clone();
+        assert!(!title(&state).contains("印"), "{}", title(&state));
+
+        for line in 0..2 {
+            let oid = state.graph.lines[line].commit.oid;
+            state.graph.toggle_mark(oid);
+        }
+
+        assert!(title(&state).contains("Graph (印 2)"), "{}", title(&state));
     }
 
     #[test]

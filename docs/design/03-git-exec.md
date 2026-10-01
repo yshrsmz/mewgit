@@ -501,7 +501,12 @@ op で分けている。**#49 の「分類の読み手が増えたら偽陽性�
 コンフリクトのとき `CONFLICT (content): ...` と `Automatic merge failed` を **stdout** に
 出し、stderr には何も書かない。stderr だけで分類すると `Other` に落ちる
 （git 2.55 で確認）。cherry-pick / rebase は `CONFLICT` が stdout、
-`error: could not apply` が stderr と分かれる。
+`error: could not apply` が stderr と分かれる。**コンフリクトの印は行頭で見る** ——
+複数の cherry-pick は積んだぶんの `[main <oid>] <件名>` を stdout に並べるので、件名に
+`CONFLICT` を含むコミットを積んでから空に当たると、行のどこでも拾う形では `Empty` を
+`Conflict` と取り違え、continue を案内する（`/code-review` が踏んだ）。行頭の形は
+cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で同じ
+（git 2.56.0、2026-10-01 に実測）。
 
 | パターン | kind |
 |---|---|
@@ -509,7 +514,7 @@ op で分けている。**#49 の「分類の読み手が増えたら偽陽性�
 | `SAML SSO` / `organization has enabled or enforced SAML` | `SamlSsoRequired` |
 | `Permission denied (publickey)` | `SshAuthFailed` |
 | `Authentication failed` | `HttpsAuthFailed` |
-| `CONFLICT` / `could not apply` | `Conflict` |
+| 行頭の `CONFLICT (` / `error: could not apply` | `Conflict` |
 | `is now empty` | `Empty` |
 | `nothing to commit` / `nothing added to commit` / `no changes added to commit` | `NoChanges` |
 | `non-fast-forward` / `fetch first` / `stale info` / `Not possible to fast-forward` | `NonFastForward` |
@@ -781,8 +786,8 @@ rebase の reword 以外では何もしないので、同じ結果になる（�
 
 ### cherry-pick の開始
 
-**`GitOp::CherryPick` は 1 本だけの形で使う**（01 の「cherry-pick の開始（`y`）」。複数は
-`docs/plan.md` で別の行に割った）。一時リポジトリを作り直して叩いた（git 2.55.0、
+**`GitOp::CherryPick` は印が無ければカーソルの 1 本で使う**（01 の「cherry-pick の開始（`y`）」。
+複数は下の「複数のコミットの cherry-pick / revert」）。一時リポジトリを作り直して叩いた（git 2.55.0、
 `GIT_EDITOR=true LC_ALL=C`、2026-09-29）。
 
 | 選んだコミット・状態 | exit | stdout / stderr | 残るもの | 分類 |
@@ -811,7 +816,7 @@ rebase の reword 以外では何もしないので、同じ結果になる（�
 
 ### revert の開始
 
-**`GitOp::Revert` は 1 本だけの形で使う**（01 の「revert の開始（`v`）」）。一時リポジトリを
+**`GitOp::Revert` は印が無ければカーソルの 1 本で使う**（01 の「revert の開始（`v`）」）。一時リポジトリを
 作り直して叩いた（git 2.55.0、`GIT_EDITOR=true LC_ALL=C`、2026-09-29）。fixture は
 `c1`（`a`）→ `c2`（`b`）→ `c3`（`a` を書き換え）の main に、`c1` から分けた topic（`t`）を
 `--no-ff` で merge した形。
@@ -833,8 +838,8 @@ rebase の reword 以外では何もしないので、同じ結果になる（�
 | コンフリクトのあと `revert --skip` | 0 | 何も出さない | 無し（HEAD は元のまま） | 成功 |
 | コンフリクトを **HEAD 側の内容で解いて** `revert --continue` | 1 | stdout `You are currently reverting commit …` + `nothing to commit`、**stderr 空** | **`REVERT_HEAD`**（進行中のまま） | `NoChanges` |
 | ↑ のあと `revert --skip` | 0 | 何も出さない | 無し（HEAD は元のまま） | 成功 |
-| （参考）複数の revert で skip した先が空 | 1 | stdout `nothing to commit`、stderr 空 | **`sequencer/` だけ**（`todo` の先頭行は `revert …`） | `NoChanges` |
-| （参考）複数の revert で途中が空 | 1 | stdout `Revert currently in progress.` + 上の 3 つの結びのどれか | **`sequencer/` だけ**（`REVERT_HEAD` は無い） | `NoChanges` |
+| 複数の revert で skip した先が空 | 1 | stdout `nothing to commit`、stderr 空 | **`sequencer/` だけ**（`todo` の先頭行は `revert …`） | `NoChanges` |
+| 複数の revert で途中が空 | 1 | stdout `Revert currently in progress.` + 上の 3 つの結びのどれか | **`sequencer/` だけ**（`REVERT_HEAD` は無い） | `NoChanges` |
 
 - **どの失敗でも HEAD は動かない**（1 本だけのとき）。cherry-pick と同じく、成功したときだけ
   ログまで読み直す（01 の「ログの読み直し」）
@@ -847,8 +852,38 @@ rebase の reword 以外では何もしないので、同じ結果になる（�
   言わない**ので、案内は op で分ける（開始なら「取り消し済み」、continue / skip なら
   「m から skip」。01 の「失敗の案内文」）。skip の先が空でも `sequencer/` が残って止まり、
   `todo` の先頭行が `revert` なので 02 の検出が `Revert` と読む（`m` の skip が届く）
-- **複数の revert で途中が空だと止まる**（参考行）。`sequencer/` だけが残る形で、
-  `REVERT_HEAD` が無いので skip で抜ける。これを拾うのは複数の revert のタスク ——
-  02 の検出表は `sequencer/` だけの形を `sequencer/todo` の先頭行で見るので、そこで
-  `Revert` と読めるかも一緒に確かめる
+- **複数の revert で途中が空だと止まる**（表の最後の行）。`sequencer/` だけが残る形で、
+  `REVERT_HEAD` が無い。02 の検出は `sequencer/todo` の先頭行（`revert …`）で `Revert` と
+  読む（`tests/git_read.rs` の fixture で固定）。抜け方は下の「複数のコミットの
+  cherry-pick / revert」
+
+### 複数のコミットの cherry-pick / revert
+
+**印を付けた複数のコミットは 1 回の `cherry-pick <oid>…` / `revert <oid>…` に渡す**
+（01 の「複数のコミットの cherry-pick / revert（印）」）。`GitOp::CherryPick(Vec<Oid>)` /
+`GitOp::Revert { oids, .. }` は最初から複数を運べる形で、argv は oid を渡された順に並べる。
+一時リポジトリで叩いた（git 2.56.0、`GIT_EDITOR=true LC_ALL=C`、2026-10-01）。
+
+| 渡したもの・状態 | exit | stdout / stderr | 残るもの | 分類 |
+|---|---|---|---|---|
+| cherry-pick `t3 t1 t2`（topic の 3 本を順不同で） | 0 | — | 無し。**積まれた順は `t3` → `t1` → `t2`**（渡した順） | 成功 |
+| cherry-pick `t1^..t3`（範囲） | 0 | — | 無し。古い順に積む | 成功 |
+| cherry-pick `t2 t1 t3`、`t1` は HEAD に取り込み済み | 1 | stdout `[main …] t2` + `nothing to commit`、stderr `The previous cherry-pick is now empty` | `CHERRY_PICK_HEAD` + `sequencer/`（`todo` は `pick t1` / `pick t3`）。`t2` は積まれている | `Empty` |
+| cherry-pick `o1 <merge>`（`-m` 無し） | 128 | stderr `commit … is a merge but no -m option was given.` | **`sequencer/` だけ**。**`o1` は積まれている** | `Other` |
+| cherry-pick `-m 1 o1 <merge>` | 0 | — | 無し | 成功 |
+| revert `m1 m2 m3`（同じファイルを順に書き換えた 3 本を古い順に） | 1 | stdout `CONFLICT (modify/delete)`、stderr `could not revert … m1` | `REVERT_HEAD` + `sequencer/` | `Conflict` |
+| revert `m1^..m3`（範囲） | 0 | — | 無し。**新しい順（`m3` → `m1`）に積む** | 成功 |
+| revert `ky hx m3`、`hx` は取り消し済み | 1 | stdout `[main …] Revert "ky"` + `Revert currently in progress.` + `nothing to commit`、stderr 空 | **`sequencer/` だけ**（`todo` の先頭行 `revert … hx`） | `NoChanges` |
+| ↑ から `revert --continue` | 0 | — | 無し。**空の `hx` を落として `m3` まで積む** | 成功 |
+| revert `zz hx ky`（`hx` は取り消し済み）で止まったところから `revert --skip` | 0 | stdout `[main …] Revert "ky"`（残りの `ky` を積む） | 無し | 成功 |
+
+- **並べる向きは `app` が決める**（git は渡した順に積む）。cherry-pick は古い順、revert は
+  新しい順（表の 1 行目と 6・7 行目）
+- **merge が混ざると途中まで積んで止まる**（表の 4 行目）ので、`app` が手前で断る
+- **複数では途中まで積んでから止まる**ので、成否を見ずにログを読み直す（上の「cherry-pick の
+  開始」の「どの失敗でも HEAD は動かない」は 1 本だけのとき。01 の「ログの読み直し」）
+- **途中が空の revert は continue でも skip でも抜けられる**（表の最後の 2 行）。1 本だけの
+  continue が空で断られる形（上の「revert の開始」）と違い、`REVERT_HEAD` が無いので
+  continue が空のコミットを作ろうとしない。案内は 1 本だけの形と同じ「m から skip」に
+  揃える（01 の「失敗の案内文」）
 

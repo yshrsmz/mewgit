@@ -1046,6 +1046,10 @@ pub struct GraphState {
     /// 読み直しを出してしまう。次の読み込みはユーザーの操作から始める
     /// （01 の「追加ページの読み込み」）。
     pub load_failed: bool,
+    /// `Space` で印を付けたコミット。印があると `y` / `v` は印の全部を相手にする
+    /// （01 の「複数のコミットの cherry-pick / revert（印）」）。**並びに意味は無い** ——
+    /// git に渡す順は [`GraphState::marked_lines`] がグラフの並びから決める。
+    pub marks: Vec<Oid>,
 }
 
 impl GraphState {
@@ -1066,6 +1070,33 @@ impl GraphState {
         self.cursor = 0;
         self.scroll = 0;
         self.loaded_all = false;
+        // 並べ直すには印のコミットが `lines` に居る必要がある（01）。
+        self.marks.clear();
+    }
+
+    /// `oid` の印を付け外しする。
+    pub fn toggle_mark(&mut self, oid: Oid) {
+        match self.marks.iter().position(|mark| *mark == oid) {
+            Some(at) => {
+                self.marks.remove(at);
+            }
+            None => self.marks.push(oid),
+        }
+    }
+
+    /// `oid` に印が付いているか。
+    pub fn is_marked(&self, oid: Oid) -> bool {
+        self.marks.contains(&oid)
+    }
+
+    /// 印の付いた行を**グラフの並び（新しい順）**で返す。cherry-pick は逆にして古い順に
+    /// 使う（03 の「複数のコミットの cherry-pick / revert」）。鍵が日付でなく行の並びなのは、
+    /// 日付が rebase / amend で並びと食い違うから。
+    pub fn marked_lines(&self) -> Vec<&GraphLine> {
+        self.lines
+            .iter()
+            .filter(|line| self.is_marked(line.commit.oid))
+            .collect()
     }
 
     /// 表示行の数。先頭の WIP 行を含むので必ず 1 以上。

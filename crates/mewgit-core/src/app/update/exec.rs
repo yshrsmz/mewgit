@@ -467,9 +467,10 @@ fn empty_advice(op: &GitOp) -> Option<&'static str> {
 ///
 /// **同じ文言で、進行中操作が残るかが op で割れる。** 1 本だけの revert の開始では何も
 /// 残らない（「取り消し済み」）。continue / skip では `REVERT_HEAD` か `sequencer/` が残り、
-/// continue は同じ理由で断られるので出口は skip。**複数の revert の開始も `sequencer/` を
-/// 残して止まる**が、mewgit から始める経路がまだ無いので案内しない（複数の revert の
-/// タスク）。**commit も同じ文言を出す**が、あちらは `Display` のまま。
+/// continue は同じ理由で断られるので出口は skip。**複数の revert の開始も途中が空だと
+/// `sequencer/` を残して止まる**（continue でも skip でも抜けられるが、案内は skip に
+/// 揃える。03 の「複数のコミットの cherry-pick / revert」）。**commit も同じ文言を出す**が、
+/// あちらは `Display` のまま。
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由。
 fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
@@ -477,10 +478,12 @@ fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
         GitOp::Revert { oids, .. } if oids.len() == 1 => {
             Some("取り消す変更がありません（取り消し済み）")
         }
-        // 解消した結果が空で、continue が断られた（`REVERT_HEAD` は残る）。
-        GitOp::RevertContinue | GitOp::RevertSkip => Some("変更が空で止まった。m から skip"),
-        GitOp::Revert { .. }
-        | GitOp::Stage(_)
+        // 解消した結果が空で continue が断られた（`REVERT_HEAD` は残る）か、複数の途中が
+        // 空で止まった（`sequencer/` だけが残る）。
+        GitOp::Revert { .. } | GitOp::RevertContinue | GitOp::RevertSkip => {
+            Some("変更が空で止まった。m から skip")
+        }
+        GitOp::Stage(_)
         | GitOp::Unstage(_)
         | GitOp::StageHunk { .. }
         | GitOp::UnstageHunk { .. }
@@ -715,12 +718,18 @@ mod tests {
         .map(|op| (op, ExecErrorKind::Conflict, "m から continue"));
         let empty = [
             GitOp::CherryPick(vec![fake_oid(1)]),
+            GitOp::CherryPick(vec![fake_oid(1), fake_oid(2)]),
             GitOp::CherryPickContinue,
             GitOp::CherryPickSkip,
         ]
         .map(|op| (op, ExecErrorKind::Empty, "m から skip"));
         // revert は空で止まっても stderr が空で、`NoChanges` に落ちる（03 の「revert の開始」）。
-        let no_changes = [GitOp::RevertContinue, GitOp::RevertSkip]
+        // 複数の開始は途中が空だと `sequencer/` を残して止まる。
+        let several = GitOp::Revert {
+            oids: vec![fake_oid(1), fake_oid(2)],
+            mainline: None,
+        };
+        let no_changes = [GitOp::RevertContinue, GitOp::RevertSkip, several]
             .map(|op| (op, ExecErrorKind::NoChanges, "m から skip"));
         for (op, kind, way) in conflict.into_iter().chain(empty).chain(no_changes) {
             let mut state = state();
@@ -803,9 +812,9 @@ mod tests {
     }
 
     #[test]
-    fn several_reverts_with_nothing_to_undo_are_not_told_it_was_undone() {
-        // 複数の revert は途中が空だと `sequencer/` を残して止まる（03 の「revert の開始」）。
-        // 「取り消し済み」と言うと進行中の操作を隠す。
+    fn several_reverts_stopped_on_an_empty_one_are_not_told_it_was_undone() {
+        // 複数の revert は途中が空だと `sequencer/` を残して止まる（03 の「複数のコミットの
+        // cherry-pick / revert」）。「取り消し済み」と言うと進行中の操作を隠す。
         let mut state = state();
         let op = GitOp::Revert {
             oids: vec![fake_oid(1), fake_oid(2)],
@@ -814,7 +823,6 @@ mod tests {
         finish_exec(&mut state, op, Err(failed_with(ExecErrorKind::NoChanges)));
 
         let notice = state.notices.back().expect("通知がありません");
-        assert_eq!(notice.level, NoticeLevel::Error);
         assert!(
             !notice.message.contains("取り消し済み"),
             "{}",

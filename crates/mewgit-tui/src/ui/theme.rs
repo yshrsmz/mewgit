@@ -58,6 +58,15 @@ pub fn in_progress() -> Style {
     warn().add_modifier(Modifier::REVERSED | Modifier::BOLD)
 }
 
+/// Graph で印を付けたコミットの短縮 oid（07 の「Graph ペイン」）。
+///
+/// **色と下線を足す。** 太字だけだと描かない端末で差が出ない（07 の「ペインと
+/// フォーカス」）。カーソル行の反転は行全体に掛かるので、印の行にカーソルが乗っても
+/// 両方が見える。
+pub fn marked() -> Style {
+    warn().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+}
+
 /// 見出しなど、本文より弱く出すもの。
 pub fn muted() -> Style {
     Style::default().add_modifier(Modifier::DIM)

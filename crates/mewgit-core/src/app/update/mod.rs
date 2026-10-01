@@ -742,7 +742,13 @@ mod tests {
         // 2 件以上ないと `j` と `k` の両方を踏めない。
         let files = &["a.txt", "b.txt", "c.txt"];
         match pane {
-            Pane::Graph => on_first_commit(3),
+            Pane::Graph => {
+                let mut state = on_first_commit(3);
+                // 印が無いと `Esc`（印を全部外す）が正しく無反応になる。
+                let oid = state.graph.lines[1].commit.oid;
+                state.graph.toggle_mark(oid);
+                state
+            }
             Pane::Branches => {
                 let mut state =
                     state_on_branches(&[("main", true), ("topic", false), ("x", false)]);

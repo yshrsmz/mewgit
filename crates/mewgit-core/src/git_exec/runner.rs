@@ -425,6 +425,12 @@ fn lossy(bytes: Vec<u8>) -> String {
 /// `push_rejection` は `GitOp::Push` で門番している（01 の「force push」）。
 fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
     let has = |needle: &str| stderr.contains(needle) || stdout.contains(needle);
+    let starts_a_line = |prefix: &str| {
+        stdout
+            .lines()
+            .chain(stderr.lines())
+            .any(|line| line.starts_with(prefix))
+    };
 
     // **印は stderr の行頭でだけ見る。** git はコミットの件名を自分の出力に写す
     // （`error: could not apply <oid>... <件名>`）ので、`has` で探すと件名が
@@ -441,7 +447,12 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
         ExecErrorKind::SshAuthFailed
     } else if has("Authentication failed") {
         ExecErrorKind::HttpsAuthFailed
-    } else if has("CONFLICT") || has("could not apply") {
+    } else if starts_a_line("CONFLICT (") || starts_a_line("error: could not apply") {
+        // **コンフリクトの印も行頭で見る。** 複数の cherry-pick は積んだぶんの
+        // `[main <oid>] <件名>` を stdout に並べるので、件名が `CONFLICT` を含むコミットの
+        // あとで空に当たると、行のどこでも拾う形では `Empty` を取り違える（`/code-review`
+        // が踏んだ）。行頭の形は cherry-pick / revert / merge / rebase / pull で同じ
+        // （git 2.56.0 で実測）。
         ExecErrorKind::Conflict
     } else if has("is now empty") {
         ExecErrorKind::Empty
@@ -551,6 +562,16 @@ mod tests {
     fn an_empty_cherry_pick_stays_empty_though_its_status_says_nothing_to_commit() {
         // git 2.55.0 で実測した出力そのまま。
         let stdout = "On branch main\nYou are currently cherry-picking commit 5ac5991.\n  (all conflicts fixed: run \"git cherry-pick --continue\")\n  (use \"git cherry-pick --skip\" to skip this patch)\n  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)\n\nnothing to commit, working tree clean\n";
+        let stderr =
+            "The previous cherry-pick is now empty, possibly due to conflict resolution.\n";
+        assert_eq!(classify(stdout, stderr), ExecErrorKind::Empty);
+    }
+
+    #[test]
+    fn an_empty_stop_after_a_commit_whose_subject_says_conflict_is_still_empty() {
+        // 複数の cherry-pick が 1 本目を積んでから空に当たった形（git 2.56.0 で実測した
+        // 出力そのまま）。積んだコミットの件名が stdout に写る。
+        let stdout = "[main 68dd71f] fix CONFLICT marker parsing\n Date: Thu Oct 1 01:23:53 2026 +0900\n 1 file changed, 1 insertion(+)\nOn branch main\nYou are currently cherry-picking commit 7a0213e.\n  (all conflicts fixed: run \"git cherry-pick --continue\")\n\nnothing to commit, working tree clean\n";
         let stderr =
             "The previous cherry-pick is now empty, possibly due to conflict resolution.\n";
         assert_eq!(classify(stdout, stderr), ExecErrorKind::Empty);

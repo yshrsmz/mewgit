@@ -10,7 +10,7 @@ ratatui / crossterm には依存しない（不変ルール 6）。`ui` は下�
 
 | 節 | モジュール |
 |---|---|
-| 「グラフの行」とその `###`（追加ページ / ログの読み直しの発行 / コミット詳細 / ファイル一覧 / cherry-pick の開始 / revert の開始） | `update/graph.rs` |
+| 「グラフの行」とその `###`（追加ページ / ログの読み直しの発行 / コミット詳細 / ファイル一覧 / cherry-pick の開始 / revert の開始 / 複数（印）） | `update/graph.rs` |
 | 「interactive rebase の開始（`i`）」 | `update/rebase.rs`（`i` の腕は `update/graph.rs`） |
 | 「ワーキングツリー」「書き込みのあとの status」「失敗の記憶」 | `update/worktree.rs` |
 | 「diff の遅延取得」「diff のキャッシュと鮮度」 | `update/diff.rs` |
@@ -695,7 +695,7 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 
 ### cherry-pick の開始（`y`）
 
-**Graph の `y` で、カーソルの指すコミットを HEAD に cherry-pick する**（1 本だけ）。
+**Graph の `y` で、カーソルの指すコミットを HEAD に cherry-pick する**。
 
 - **確認モーダルを挟む**（2026-09-29 にユーザーと決めた）。`CLAUDE.md` の確認対象
   （force push、`branch -D`、discard、abort 系）には入らないが、積んだコミットを戻す手
@@ -716,13 +716,12 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   ので、判定を mewgit に写さない
 - **1 本だけの pick は、失敗したらログを読み直さない**（上の「ログの読み直し」）
 
-**複数のコミットは別のタスクに割った**（`docs/plan.md` の M5）。グラフに印を付ける仕組み
-（どのキーで付けるか、描き方、古い順に並べ直すこと）が要り、**同じ仕組みを revert の開始も
-使う**。revert の開始が入る前に決めると、共有の形を cherry-pick 側だけから選ぶことになる。
+**印を付けたコミットがあれば、`y` はカーソルではなく印の全部を積む**（下の「複数のコミットの
+cherry-pick / revert（印）」）。
 
 ### revert の開始（`v`）
 
-**Graph の `v` で、カーソルの指すコミットを取り消すコミットを HEAD に積む**（1 本だけ）。
+**Graph の `v` で、カーソルの指すコミットを取り消すコミットを HEAD に積む**（印があれば印の全部。下の「複数のコミットの cherry-pick / revert（印）」）。
 確認を挟むこと、WIP 行で断ること、進行中操作を手前で見ないこと、失敗でログを読み直さない
 ことは `y`（上）と同じ。確認の本文は「`abc1234 <summary>` を取り消すコミットを `<ブランチ>`
 に積みます。」。
@@ -752,6 +751,50 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 - **空で断られた continue / skip は「変更が空で止まった。m から skip」を `Warn` で出す**
   （下の「失敗の案内文」）。開始の「取り消し済み」とは分ける —— 同じ `NoChanges` でも、
   こちらは進行中操作が残っている
+
+### 複数のコミットの cherry-pick / revert（印）
+
+**Graph の `Space` でカーソルの指すコミットに印を付け外しし、印があるときの `y` / `v` は
+印の全部を 1 回の `git cherry-pick` / `git revert` に渡す**（2026-10-01 にユーザーと決めた）。
+印は飛び飛びに付けられる（トグル式。GitKraken の Ctrl+クリックに近い）。連続範囲
+（起点からカーソルまで）にしなかったのは、Graph の行がレーンをまたいだ topo-order で、
+範囲の中身が HEAD の祖先の列とは限らないから —— 範囲は「表示で隣り合う行」しか表せない。
+
+```rust
+pub struct GraphState {
+    // ...
+    pub marks: Vec<Oid>,   // 付けた順。並べ直しは y / v のとき
+}
+```
+
+- **印が無ければいままでどおりカーソルの 1 本。** 印が 1 つなら、その 1 本をカーソルの
+  1 本と同じ経路に通す（merge の cherry-pick は断り、merge の revert は `MainlinePicker`
+  を開く）—— 1 つだけの印で挙動が変わると、印の有無が 2 つの意味を持つ
+- **並べる向きは op で逆**（03 の「複数のコミットの cherry-pick / revert」の実測）。**git は
+  個別に渡した oid を argv の順に積む**ので、順序の責任は全部 mewgit にある。
+  **cherry-pick は古い順、revert は新しい順** —— revert を古い順に渡すと、後のコミットが
+  同じ箇所を変えていれば 1 本目でコンフリクトする（git 自身も `A^..B` の revert は新しい順に
+  積む）。**鍵は日付ではなく読み込み済みのグラフの行の並び**（topo-order、新しい順）。
+  日付は rebase / amend で並びが崩れる
+- **印のどれかが merge コミットなら、確認を開く前に断る**（cherry-pick でも revert でも）。
+  git は `-m` の無い merge に当たるとその手前まで積んでから exit 128 で止まり、
+  **`sequencer/` だけが残る半端な形**になる（03 の表）。`--mainline N` は全部の merge に
+  同じ N が効くので、merge ごとに `MainlinePicker` を回す形も取れない
+- **WIP 行の `Space` は断る**（通知で行を選ぶよう言う。`y` / `v` と同じ）
+- **`Esc` で印を全部外す。** 印が無ければ何もしない
+- **印はログの読み直し（`GraphState::restart`）で消える。** 複数の pick / revert は成否を
+  見ずにログを読み直す（上の「ログの読み直し」）ので、発行したあとの印は自然に消える。
+  1 本（印 1 つ）の pick / revert が失敗したときはログを読み直さないので、印は残る ——
+  カーソルが残るのと同じで、同じ印のまま直してやり直せる。読み直しをまたいで持たないのは、
+  印のコミットが読み込み済みの行に居ないと並べられないから（`restart` はカーソルも先頭に戻す）
+- **確認の本文は本数と積む先と、並べたとおりの短縮 oid**（「3 本のコミットを `main` に古い順に
+  積みます: `abc1234` `def5678` `0123abc`」。revert は「3 本のコミットを取り消すコミットを
+  `main` に新しい順に積みます: …」）。summary は並べない —— 本数に上限が無く、確認の箱に入らない
+- **描き方**は 07 の「Graph ペイン」（印の付いた行の短縮 oid を `theme::marked` で描き、
+  枠のタイトルに本数を出す）
+- **途中で止まった形**は、コンフリクトなら `Conflict`、cherry-pick が空なら `Empty` の案内
+  （1 本だけのときと同じ）。**revert が途中で空に当たると `NoChanges` で、進行中のまま止まる**
+  ので「m から skip」を出す（下の「失敗の案内文」）
 
 ### interactive rebase の開始（`i`）
 
@@ -2436,7 +2479,7 @@ pub struct PushRejection {
 | `Conflict` + rebase / cherry-pick / revert（開始・continue・skip）/ `pull --rebase` | 解消して `git add` したら `m` で continue する（**`Warn`**） |
 | `Empty` + cherry-pick（開始・continue・skip） | `m` から skip する（**`Warn`**） |
 | `NoChanges` + revert（開始、1 本だけ） | 取り消す変更が無い（**`Warn`**） |
-| `NoChanges` + revert（continue・skip） | `m` から skip する（**`Warn`**） |
+| `NoChanges` + revert（continue・skip・複数の開始） | `m` から skip する（**`Warn`**） |
 | `HeadMoved` + `RebaseInteractive` | 組んだあとに履歴が動いた。`i` から開き直す（**`Warn`**、48 セル） |
 | それ以外 | 無し（`Display` に落とす） |
 
@@ -2488,7 +2531,9 @@ pub struct PushRejection {
   無いと argv だけの赤い通知になり、理由が見えない。文は「取り消す変更がありません
   （取り消し済み）」。**開始の 1 本だけの revert に限る** —— continue / skip と複数の
   revert は同じ文言で**進行中のまま**止まる（03）ので、「取り消し済み」と言うと進行中の
-  操作を隠す。continue / skip には `Empty` と同じ「変更が空で止まった。m から skip」を出す。**`git commit` も同じ文言を出すが、あちらは `Display` のまま**。**stderr が
+  操作を隠す。continue / skip と複数の開始には `Empty` と同じ「変更が空で止まった。m から skip」を
+  出す（複数の途中が空の形は `sequencer/` だけが残り、continue でも skip でも抜けられる。
+  案内は skip に揃える）。**`git commit` も同じ文言を出すが、あちらは `Display` のまま**。**stderr が
   空の失敗は理由が画面に出ない**（`ExecError` が stdout を運ばない。`docs/plan.md` の M6）
 - **`Conflict` は `Warn` で出す。** continue / skip のあとに次のコミットでまた止まった
   形で（03 の「continue / skip / abort の終わり方」）、進行中操作は残ってバッジの数が

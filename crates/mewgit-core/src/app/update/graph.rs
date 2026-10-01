@@ -36,6 +36,12 @@ pub(super) fn graph_key(state: &mut AppState, key: Key) -> Cmd {
             let start = state.graph.cursor_commit().map(|commit| commit.oid);
             open_branch_create(state, start)
         }
+        KeyCode::Char(' ') => toggle_mark(state),
+        // 印が無ければ何もしない（`Esc` は Graph のほかの何にも使っていない）。
+        KeyCode::Esc => {
+            state.graph.marks.clear();
+            Cmd::None
+        }
         KeyCode::Char('y') => cherry_pick(state),
         KeyCode::Char('v') => revert(state),
         KeyCode::Char('i') => open_rebase_editor(state),
@@ -43,7 +49,59 @@ pub(super) fn graph_key(state: &mut AppState, key: Key) -> Cmd {
     }
 }
 
+/// `Space`。カーソルの指すコミットの印を付け外しする（01 の「複数のコミットの
+/// cherry-pick / revert（印）」）。
+fn toggle_mark(state: &mut AppState) -> Cmd {
+    if let Some(commit) = picked_commit(state, "mark") {
+        state.graph.toggle_mark(commit.oid);
+    }
+    Cmd::None
+}
+
+/// `y` / `v` の相手。
+enum Targets {
+    /// 印が 1 つならそのコミット、無ければカーソルの指すコミット。**1 つだけの印は
+    /// カーソルの 1 本と同じ経路に通す**（01 の「複数のコミットの cherry-pick / revert（印）」）。
+    One(Commit),
+    /// 2 本以上の印。**グラフの並び（新しい順）** —— git に渡す向きは op で逆なので、
+    /// 並べ直すのは呼び手（03 の「複数のコミットの cherry-pick / revert」）。
+    Many(Vec<Commit>),
+}
+
+impl Targets {
+    fn commits(&self) -> &[Commit] {
+        match self {
+            Targets::One(commit) => std::slice::from_ref(commit),
+            Targets::Many(commits) => commits,
+        }
+    }
+}
+
+/// `y` / `v` の相手を印とカーソルから決める。WIP 行で印も無ければ断る（[`picked_commit`]）。
+/// **merge を受けるかは呼び手が決める**（cherry-pick は 1 本でも断り、revert は 1 本なら
+/// 親を選ばせる）。
+fn targets(state: &mut AppState, verb: &str) -> Option<Targets> {
+    let mut marked: Vec<Commit> = state
+        .graph
+        .marked_lines()
+        .into_iter()
+        .map(|line| line.commit.clone())
+        .collect();
+    match marked.len() {
+        0 => picked_commit(state, verb).map(Targets::One),
+        1 => marked.pop().map(Targets::One),
+        _ => Some(Targets::Many(marked)),
+    }
+}
+
+/// 複数の確認の本文の末尾 —— 並べたとおりの短縮 oid。summary は並べない（本数に上限が
+/// 無く、確認の箱に入らない。01）。
+fn short_oids(oids: &[Oid]) -> String {
+    oids.iter().map(short_oid).collect::<Vec<_>>().join(" ")
+}
+
 /// `y`。カーソルの指すコミットを HEAD に cherry-pick する（01 の「cherry-pick の開始（`y`）」）。
+/// **印があれば印の全部を古い順に**積む（01 の「複数のコミットの cherry-pick / revert（印）」）。
 ///
 /// **確認モーダルを挟む**（2026-09-29 にユーザーと決めた）。破壊的ではないが、積んだ
 /// コミットを戻す手が mewgit に無く、どのコミットをどこへ積むかを押す前に見せる。
@@ -51,12 +109,16 @@ pub(super) fn graph_key(state: &mut AppState, key: Key) -> Cmd {
 /// **進行中操作は手前で見ない。** 断るのは確定のあとの `AppState::issue`（ブランチの
 /// 削除と同じ。01 の「進行中操作があるときの書き込み」）。
 fn cherry_pick(state: &mut AppState) -> Cmd {
-    let Some(commit) = picked_commit(state, "cherry-pick") else {
+    let Some(targets) = targets(state, "cherry-pick") else {
         return Cmd::None;
     };
-    // **merge コミットは手前で断る。** git は `-m` が無いと exit 128 で断り
-    // （03 の実測）、`GitOp::CherryPick` は mainline を運ばない。
-    if commit.parents.len() > 1 {
+    // **merge コミットは手前で断る。** git は `-m` が無いと exit 128 で断り、複数なら
+    // その手前まで積んでから止まる（03 の実測）。`GitOp::CherryPick` は mainline を運ばない。
+    if targets
+        .commits()
+        .iter()
+        .any(|commit| commit.parents.len() > 1)
+    {
         state.push_notice(
             NoticeLevel::Warn,
             "merge コミットは cherry-pick できません".to_string(),
@@ -64,28 +126,42 @@ fn cherry_pick(state: &mut AppState) -> Cmd {
         );
         return Cmd::None;
     }
-    let body = format!(
-        "{} {} を {} に積みます。",
-        short_oid(&commit.oid),
-        commit.summary,
-        head_name(state)
-    );
-    confirm(
-        state,
-        "cherry-pick",
-        body,
-        GitOp::CherryPick(vec![commit.oid]),
-    )
+    let (body, oids) = match targets {
+        Targets::One(commit) => (
+            format!(
+                "{} {} を {} に積みます。",
+                short_oid(&commit.oid),
+                commit.summary,
+                head_name(state)
+            ),
+            vec![commit.oid],
+        ),
+        Targets::Many(commits) => {
+            // git は渡した順に積むので、グラフの並びを逆にして古い順に渡す。
+            let oids: Vec<Oid> = commits.iter().rev().map(|commit| commit.oid).collect();
+            let body = format!(
+                "{} 本のコミットを {} に古い順に積みます: {}",
+                oids.len(),
+                head_name(state),
+                short_oids(&oids)
+            );
+            (body, oids)
+        }
+    };
+    confirm(state, "cherry-pick", body, GitOp::CherryPick(oids))
 }
 
 /// `v`。カーソルの指すコミットを取り消すコミットを HEAD に積む（01 の「revert の開始（`v`）」）。
+/// **印があれば印の全部を新しい順に**取り消す（[`revert_many`]）。
 ///
 /// **確認モーダルを挟む**のも、**進行中操作を手前で見ない**のも `y` と同じ理由。
 /// **merge コミットは残す側の親を選ばせてから確認へ進む**（[`Modal::MainlinePicker`]）。
 /// git は `-m` が無いと exit 128 で断る（03 の「revert の開始」）。
 fn revert(state: &mut AppState) -> Cmd {
-    let Some(commit) = picked_commit(state, "revert") else {
-        return Cmd::None;
+    let commit = match targets(state, "revert") {
+        None => return Cmd::None,
+        Some(Targets::One(commit)) => commit,
+        Some(Targets::Many(commits)) => return revert_many(state, &commits),
     };
     if commit.parents.len() <= 1 {
         return confirm_revert(state, commit.oid, &commit.summary, None);
@@ -111,6 +187,34 @@ fn revert(state: &mut AppState) -> Cmd {
         cursor: 0,
     });
     Cmd::None
+}
+
+/// 2 本以上の印の revert。**グラフの並び（新しい順）のまま渡す** —— 古い順だと、後の
+/// コミットが同じ箇所を変えていれば 1 本目でコンフリクトする（03 の実測）。
+///
+/// **印に merge があれば断る。** `--mainline N` は全部の merge に同じ N が効くので親を
+/// 選ばせられず、`-m` が無いと git はその手前まで積んでから止まる（03）。
+fn revert_many(state: &mut AppState, commits: &[Commit]) -> Cmd {
+    if commits.iter().any(|commit| commit.parents.len() > 1) {
+        state.push_notice(
+            NoticeLevel::Warn,
+            "印に merge コミットがあります。複数の revert には入れられません".to_string(),
+            None,
+        );
+        return Cmd::None;
+    }
+    let oids: Vec<Oid> = commits.iter().map(|commit| commit.oid).collect();
+    let body = format!(
+        "{} 本のコミットを取り消すコミットを {} に新しい順に積みます: {}",
+        oids.len(),
+        head_name(state),
+        short_oids(&oids)
+    );
+    let op = GitOp::Revert {
+        oids,
+        mainline: None,
+    };
+    confirm(state, "revert", body, op)
 }
 
 /// [`Modal::MainlinePicker`] の `Enter`。選んだ親を残す側として確認へ進む。
@@ -458,9 +562,9 @@ pub(super) fn log_loaded(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        commit, commit_loads, cursor, detail_ok, diff_ok, fake_diff, files_loaded, files_of, more,
-        on_first_commit, open_confirm, page_loaded, press, press_code, reload, state,
-        state_with_commits, state_with_page, tick, ROWS,
+        cells, commit, commit_loads, cursor, detail_ok, diff_ok, fake_diff, files_loaded, files_of,
+        more, on_first_commit, open_confirm, page_loaded, press, press_code, reload, state,
+        state_with_commits, state_with_page, tick, NOTICE_CELLS, ROWS,
     };
     use super::super::worktree::COMMIT_DIFF;
     use super::super::{init, update};
@@ -1416,5 +1520,155 @@ mod tests {
         assert_eq!(press_code(&mut state, KeyCode::Esc), Cmd::None);
 
         assert_eq!(state.modal, None);
+    }
+
+    /// 表示行 `row`（1 始まりのコミット行）へカーソルを移して印を付ける。
+    fn mark_row(state: &mut AppState, row: usize) -> Oid {
+        state.graph.cursor = row;
+        assert_eq!(press(state, ' '), Cmd::None);
+        cursor(state)
+    }
+
+    #[test]
+    fn space_marks_and_unmarks_the_cursor_commit() {
+        let mut state = state_with_commits(3);
+        let oid = mark_row(&mut state, 2);
+        assert_eq!(state.graph.marks, vec![oid]);
+
+        let _ = press(&mut state, ' ');
+
+        assert!(state.graph.marks.is_empty());
+    }
+
+    #[test]
+    fn space_on_the_wip_row_marks_nothing() {
+        let mut state = state_with_commits(3);
+
+        assert_eq!(press(&mut state, ' '), Cmd::None);
+
+        assert!(state.graph.marks.is_empty());
+        let notice = state.shown_notice().expect("通知が出ていません");
+        // `picked_commit` は `{verb} する…` と組むので、動詞は `y` / `v` と同じ git の語の形。
+        assert!(
+            notice.message.contains("mark するコミットの行"),
+            "{}",
+            notice.message
+        );
+    }
+
+    #[test]
+    fn esc_in_the_graph_takes_every_mark_off() {
+        let mut state = state_with_commits(3);
+        let _ = mark_row(&mut state, 1);
+        let _ = mark_row(&mut state, 3);
+
+        assert_eq!(press_code(&mut state, KeyCode::Esc), Cmd::None);
+
+        assert!(state.graph.marks.is_empty());
+        // Graph に居たまま（Esc は戻る先を持たない）。
+        assert_eq!(state.focus, Pane::Graph);
+    }
+
+    #[test]
+    fn y_with_marks_picks_all_of_them_oldest_first() {
+        // git は渡した順に積む（03 の実測）。付けた順（新しい → 古い）ではなく、
+        // グラフの並びを逆にして古い順に渡す。
+        let mut state = state_with_commits(3);
+        on_main(&mut state);
+        let newest = mark_row(&mut state, 1);
+        let oldest = mark_row(&mut state, 3);
+        // カーソルの行（commit 1）は印が無いので入らない。
+        state.graph.cursor = 2;
+
+        assert_eq!(press(&mut state, 'y'), Cmd::None);
+
+        let (body, on_yes) = open_confirm(&state);
+        assert!(body.contains("2 本"), "{body}");
+        assert!(body.contains("main"), "{body}");
+        assert!(
+            body.contains(&format!("{} {}", short_oid(&oldest), short_oid(&newest))),
+            "{body}"
+        );
+        assert_eq!(on_yes, &Cmd::Exec(GitOp::CherryPick(vec![oldest, newest])));
+    }
+
+    #[test]
+    fn v_with_marks_reverts_all_of_them_newest_first() {
+        // 古い順に取り消すと、後のコミットが同じ箇所を変えていれば 1 本目で
+        // コンフリクトする（03 の実測）。付けた順に関わらず新しい順に渡す。
+        let mut state = state_with_commits(3);
+        on_main(&mut state);
+        let oldest = mark_row(&mut state, 3);
+        let newest = mark_row(&mut state, 1);
+
+        assert_eq!(press(&mut state, 'v'), Cmd::None);
+
+        let (body, on_yes) = open_confirm(&state);
+        assert!(body.contains("2 本"), "{body}");
+        assert!(
+            body.contains(&format!("{} {}", short_oid(&newest), short_oid(&oldest))),
+            "{body}"
+        );
+        let expected = Cmd::Exec(GitOp::Revert {
+            oids: vec![newest, oldest],
+            mainline: None,
+        });
+        assert_eq!(on_yes, &expected);
+    }
+
+    #[test]
+    fn marks_with_a_merge_commit_are_refused_before_git_runs() {
+        // git は merge の手前まで積んでから exit 128 で止まり、`sequencer/` だけが残る
+        // （03 の「複数のコミットの cherry-pick / revert」）。
+        for key in ['y', 'v'] {
+            let mut state = state_with_commits(3);
+            state.graph.lines[1].commit.parents = vec![fake_oid(1), fake_oid(2)];
+            let _ = mark_row(&mut state, 1);
+            let _ = mark_row(&mut state, 2);
+
+            assert_eq!(press(&mut state, key), Cmd::None);
+
+            assert_eq!(state.modal, None, "{key}");
+            let notice = state.shown_notice().expect("通知が出ていません");
+            assert_eq!(notice.level, NoticeLevel::Warn);
+            assert!(
+                notice.message.contains("merge コミット"),
+                "{}",
+                notice.message
+            );
+            assert!(
+                cells(&notice.message) <= NOTICE_CELLS,
+                "{} セル: {}",
+                cells(&notice.message),
+                notice.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_mark_takes_the_place_of_the_cursor() {
+        // 1 つだけの印はカーソルの 1 本と同じ経路（01）—— merge なら親を選ばせる。
+        let mut state = state_with_commits(3);
+        state.graph.lines[2].commit.parents = vec![fake_oid(1), fake_oid(2)];
+        let marked = mark_row(&mut state, 3);
+        state.graph.cursor = 0;
+
+        assert_eq!(press(&mut state, 'v'), Cmd::None);
+
+        let Some(Modal::MainlinePicker { target, .. }) = &state.modal else {
+            panic!("親を選ぶモーダルが開いていません: {:?}", state.modal);
+        };
+        assert_eq!(*target, marked);
+    }
+
+    #[test]
+    fn reloading_the_log_takes_the_marks_off() {
+        // 並べ直すには印のコミットが読み込み済みの行に居る必要がある（01）。
+        let mut state = state_with_commits(3);
+        let _ = mark_row(&mut state, 1);
+
+        state.graph.restart();
+
+        assert!(state.graph.marks.is_empty());
     }
 }

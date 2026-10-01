@@ -615,6 +615,7 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 | `git cherry-pick A B` でコンフリクト | `CHERRY_PICK_HEAD` + `sequencer/`（`todo` は `pick …` の 2 行） | — |
 | ↑ を解いて `git commit` した直後 | **`sequencer/` だけ**（`CHERRY_PICK_HEAD` は消える） | Cherry-pick currently in progress |
 | `git revert` でコンフリクト | `REVERT_HEAD` | — |
+| `git revert A B C` で途中の `B` が取り消し済み（git 2.56.0、2026-10-01） | **`sequencer/` だけ**（`todo` の先頭行 `revert …`、`REVERT_HEAD` は無い） | Revert currently in progress |
 | `git merge` でコンフリクト / `--no-commit` | `MERGE_HEAD`（1 行） | — |
 | linked worktree で `git merge` でコンフリクト | `MERGE_HEAD` は `.git/worktrees/<name>/` に在る | — |
 

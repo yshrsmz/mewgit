@@ -648,7 +648,8 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
       外で `two-B` に書き換えて `s` を押すと、**index に `two-A`（HEAD にもワーキングツリーにも
       無い内容）が入り** `MM` になる。通知は出ない。`x` は `git apply --reverse` がコンテキスト
       不一致で断り、ワーキングツリーは無傷（赤の通知が出る）。**塞ぐ形は、ハンク操作の直前に
-      対象のファイルの `(mtime, len)` が diff を読んだ時点と同じかを確かめること**。
+      対象のファイルの指紋（ワークツリーの `(mtime, len)` と index の blob。`PathStamp`）が
+      diff を読んだ時点と同じかを確かめること**。
       **1/2 の `DiffView::stamp` は「diff を採った時点の status の stamp」で、diff を読んだ
       時点とはずれうる**（01 の「外部の変更の検知 › 定期の status」）。diff の読み取りが
       自分で stat する形に変えるかをこのタスクで決める。どこで stat するか（`update` は I/O をしないので、`GitOp` に

@@ -3114,8 +3114,8 @@ off、GNU screen は 1004 を捨てる）ので、`FocusGained` は来なくて�
 pub struct RepoFingerprint {
     /// HEAD（symbolic なら ref 名も）と、`refs/stash` を除く全 ref の名前と指す先のハッシュ。
     pub refs: u64,
-    /// `refs/stash` の指す先。
-    pub stash: Option<Oid>,
+    /// `refs/stash` の指す先と、reflog（stash の一覧）の件数。
+    pub stash: (Option<Oid>, usize),
     /// commondir の `config` の mtime（追跡設定・リモート一覧）。
     pub config: Option<SystemTime>,
     /// ワークツリーごとの gitdir の `index` と、gitdir そのものの mtime（進行中操作の印）。
@@ -3148,6 +3148,11 @@ status と diff の読み直しが 2 秒ごとに走り、diff の世代が進�
 「外で `git add` した」を区別できない**ので、ワークツリー側の差は status を読む
 きっかけにだけ使う（下の表の最後の行）。
 
+**stash は指す先だけでは足りない** —— 上以外の stash を外で drop / pop しても
+`refs/stash` は動かない（実測 2026-10-01、git 2.56.0。3 つ積んで `git stash drop stash@{1}`
+の前後で同じ oid、一覧は 3 → 2 件）。読み直さないと、mewgit の `d` / `a` / `Z` が
+`stash@{n}` で別の stash に効く（`/code-review` が拾った）。reflog の件数を一緒に持つ。
+
 **列挙のコスト**（release、git2 0.21.0、2 回目以降）: ref 1 万本（loose 5000 を
 `refs/heads/feat/g*/` に入れ子 + packed 5000）で **70ms**、手元でいちばん ref の多い
 リポジトリ（192 本）で **0.25ms**。`git for-each-ref` は 1 万本で 225ms。リーダー
@@ -3160,7 +3165,7 @@ status と diff の読み直しが 2 秒ごとに走り、diff の世代が進�
 |---|---|
 | `refs`（HEAD を含む） | `Reload::RefsAndLog`（ref が動けば walk に入るコミットが変わりうる。`Stash` も含む） |
 | `config` だけ | `Reload::Refs`（`RepoInfo` のリモート一覧と、ブランチ一覧の追跡設定） |
-| `stash` だけ | `Reload::Stashes` |
+| `stash` だけ（指す先か件数） | `Reload::Stashes` |
 | `worktree` だけ | **`Cmd::LoadStatus` だけ**（世代を進めない。進行中操作は status に載る。02） |
 
 複数が同時に変わったら、全部を覆う腕を選ぶ（`config` と `stash` なら `RefsAndLog`）。
@@ -3180,6 +3185,10 @@ status と diff の読み直しが 2 秒ごとに走り、diff の世代が進�
   **probe をその場で頼まない** —— `exec_finished` の返す `Cmd` は書き込みごとに読み直しの
   組を決めており（上の「ログの読み直し」）、そこに probe を混ぜると読み直しの表と
   関係の無い 1 本が全部の腕に付く
+- **書き込みの実行中に届いた probe の返りは比べない。** probe がリーダースレッドで重い
+  読み取りの後ろに並ぶと、出すときには走っていなかった書き込みの最中に返ることがあり、
+  そのときはまだ刻印で見分けられない（世代を進めるのは `exec_finished`）。基準は
+  `exec_finished` が捨てるので、次の probe が取り直す（`/code-review` が拾った順序）
 - **書き込みより前に頼んだ probe の返りは捨てて頼み直す**（`status_loaded` の追いつきと
   同じ形）。**`JobKind::Probe` の領域は `Region::Worktree`** —— `Worktree` を進めるのは
   書き込みと外の ref の変化だけなので、刻印で書き込みを挟んだかが判る。**status の差は
@@ -3205,15 +3214,18 @@ status と diff の読み直しが 2 秒ごとに走り、diff の世代が進�
 - **diff は `DiffView::stamp` で比べる。** diff を採った時点の `snapshot.stamps[path]` を
   view に添え、`AppState::diff_is_current` が今の snapshot の stamp と比べる。届いた
   status の stamp が違えば `status_loaded` の出口の `load_diff` が読み直す。比べるのは
-  ワークツリーを読む対象（`IndexVsWorktree`）だけ
+  ワークツリーか index を読む対象（`IndexVsWorktree` / `HeadVsIndex`）
+- **stamp はワークツリーの `(mtime, len)` と index の blob の組**（`PathStamp`）。unstaged の
+  diff は index にも依存するので、外で `git add -p` すると、ワークツリーのファイルは動かない
+  まま diff だけが変わる（`/code-review` が拾った。最初の版はワークツリー側しか見ず、
+  古い diff の `x` が index に残ったハンクの逆変更をワークツリーに入れうった）。index 側の
+  blob は status の delta が既に持っているので、index を別に読まない
 - **世代は進めない。** 進めると、外で 1 ファイル保存しただけで status まで古い扱いになり、
   届いた値の刻印を書き換える特例が要った（最初の版。`/simplify` の altitude が拾った）。
   **10 秒ごとに無条件に古くする形も採らない** —— そのたびに diff を読み直し、届くまで
   ハンク単位の `s` / `u` / `x` が「最新の差分をまだ読めていません」で断られる
 - **どの経路の status でも、定期の期限を数え直す**（`status_loaded`）。数え直さないと、
   書き込みや外の変更のあとの読み直しの直後に、定期のぶんが同じものをもう一度読む
-- **外で `git add -p` した staged の diff（`HeadVsIndex`）は拾わない。** ワークツリーの
-  ファイルは動かず、一覧も `MM` のままなら変わらない。`R` で読み直せる
 
 **読み直す前に押せる窓は残る**（外で書き換えてから最大 10 秒）。ハンク単位の `s` が
 古いハンクを stage する形（実測は `docs/plan.md` の外部変更検知の行）は、
@@ -3241,6 +3253,9 @@ status の stamp」で、diff を読んだ時点のファイルとはずれう�
   `try_init` は有効にしない）。終了時に `DisableFocusChange` を送る。**パニックの経路では
   送らない**（`EnableBracketedPaste` と同じ扱い。ratatui のパニックフックは raw mode と
   代替画面しか戻さない）
+- **時計が後ろへ跳んだら期限を引き戻す**（`WatchState::clamp_to`）。期限は壁時計の秒
+  （`Timestamp::now`）なので、NTP の補正や VM の復帰で戻ると、跳んだぶんだけ見張りが
+  止まる（`/code-review` が拾った）。`Tick` ごとに「今から 1 周期先」を上限にする
 - **probe の失敗は最初の 1 回だけ通知する**（`WatchState.failed`。成功で落とす）。
   2 秒ごとに積むと通知の履歴が埋まる。上の「失敗の記憶」の形
 - **ヘッダのスピナーは `Tick` を 1 つまたいで走っているジョブだけを描く**（`Job::since`。

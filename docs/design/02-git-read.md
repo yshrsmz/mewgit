@@ -431,8 +431,8 @@ pub struct WorktreeSnapshot {
     pub untracked: Vec<FileEntry>,
     pub conflicted: Vec<FileEntry>,
     pub progress: Option<InProgressOp>,   // 区画ではない。下の「進行中操作の検出」
-    /// 一覧に出たファイルのワークツリー側の `(mtime, len)`。ワークツリーに無いパスは入らない。
-    pub stamps: BTreeMap<PathBuf, FileStamp>,
+    /// 一覧に出たファイルのワークツリー側の `(mtime, len)` と index 側の blob。
+    pub stamps: BTreeMap<PathBuf, PathStamp>,
 }
 
 pub struct FileEntry {
@@ -448,6 +448,9 @@ pub struct FileEntry {
   比べるだけでは拾えない。**stat は変更のあるファイルの数だけ**（git2 の status が
   返したエントリごとに `std::fs::symlink_metadata`）で、ワークツリー全体は走査しない。
   `symlink_metadata` なのは、git がシンボリックリンクをリンクそのものとして扱うため
+- **index 側の blob は delta から取る**（staged は `head_to_index` の新しい側、unstaged は
+  `index_to_workdir` の古い側）。外で `git add -p` すると、ワークツリーは動かず index
+  だけが動く。ゼロの oid（untracked）は `None`
 - **`FileEntry` に載せない。** `FileEntry` はコミットのファイル一覧（`commit_files`）と
   共用で、そちらでは常に空のフィールドになる。snapshot に横に持てば、`PartialEq` で
   一覧と一緒に比べられる

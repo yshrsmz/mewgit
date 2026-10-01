@@ -489,6 +489,11 @@ pub(super) fn status_loaded(
 ) -> Cmd {
     let asked = state.jobs.finish(JobKind::LoadStatus);
 
+    // **定期の status の期限を数え直す**（01 の「外部の変更の検知 › 間隔とフォーカス」）。
+    // どの経路の status でも、届いた時点のワークツリーは読めている。数え直さないと、
+    // 書き込みや外の変更のあとの読み直しの直後に、定期のぶんがもう一度同じものを読む。
+    state.watch.restart_status(state.now, &state.config);
+
     match result {
         Ok(snapshot) => {
             state.worktree.snapshot = snapshot;

@@ -65,12 +65,17 @@ pub const PINNED: &[KeyHint] = &[HELP, QUIT];
 /// どのペインでも効くキーのうち、**フッターには出さないもの**（`Modal::Help` だけが読む。
 /// 07 の「ステータスバー」）。`update_key` がペインの `match` より先に受ける。
 pub const COMMON: &[KeyHint] = &[
-    hint(&[Key::char('f')], "fetch"),
-    hint(&[Key::char('p')], "pull"),
-    hint(&[Key::char('P')], "push"),
+    // **1 行に束ねる。** 分けると `R` を足した時点で `?` の一覧が 80x24 に収まらない
+    // （07 の「Help モーダル」。Worktree の `z/Z` と同じ理由）。
+    hint(
+        &[Key::char('f'), Key::char('p'), Key::char('P')],
+        "fetch / pull / push",
+    ),
     hint(&[Key::char('A')], "account"),
     hint(&[Key::char('L')], "通知"),
     hint(&[Key::char('m')], "進行中操作のメニュー"),
+    // 外の変更の検知が外れたときの逃げ道（01 の「外部の変更の検知 › `R`」）。
+    hint(&[Key::char('R')], "読み直し"),
     hint(
         &[Key::new(KeyCode::Tab), Key::new(KeyCode::BackTab)],
         "ペイン移動",

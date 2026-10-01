@@ -25,8 +25,9 @@ use mewgit_core::app::NoticeLevel;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec;
 use ratatui::crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, EventStream, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
+    EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 
@@ -89,9 +90,14 @@ async fn tui(repo: PathBuf) -> Result<()> {
     // ペインのキーとして解釈される（`x` で discard の確認が開き、あとから来た `y` が
     // それを実行する）。
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    // **端末が前面に戻ったことを受け取る**（DECSET 1004）。外の変更を読み直す（01 の
+    // 「外部の変更の検知」）。送らない端末（tmux の既定、GNU screen）は黙って捨てる
+    // ので、来なくても定期の読み直しが拾う。ratatui の `try_init` は有効にしない。
+    let _ = execute!(std::io::stdout(), EnableFocusChange);
 
     let result = runtime::run(&mut terminal, EventStream::new(), &mut state, reader).await;
 
+    let _ = execute!(std::io::stdout(), DisableFocusChange);
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     // restore は () を返すので、ループのエラーを後始末のエラーで踏み潰さない。

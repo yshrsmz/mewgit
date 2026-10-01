@@ -16,7 +16,8 @@ use ratatui::crossterm::event::{
 
 /// 端末イベントを [`Msg`] にする。対応する `Msg` が無いイベントは `None`。
 ///
-/// マウスとフォーカスは今のところ使わないので落とす。
+/// マウスは使わないので落とす。フォーカスは戻ったほうだけを使う（外の変更を読み直す。
+/// 01 の「外部の変更の検知」）。
 pub fn event_to_msg(event: Event) -> Option<Msg> {
     match event {
         Event::Key(key) => key_event_to_key(key).map(Msg::Key),
@@ -26,7 +27,8 @@ pub fn event_to_msg(event: Event) -> Option<Msg> {
         Event::Resize(width, height) => Some(Msg::Resize {
             term: TermSize { width, height },
         }),
-        Event::FocusGained | Event::FocusLost | Event::Mouse(_) => None,
+        Event::FocusGained => Some(Msg::FocusGained),
+        Event::FocusLost | Event::Mouse(_) => None,
     }
 }
 
@@ -149,8 +151,15 @@ mod tests {
 
     #[test]
     fn events_without_a_msg_are_dropped() {
-        assert!(event_to_msg(Event::FocusGained).is_none());
         assert!(event_to_msg(Event::FocusLost).is_none());
+    }
+
+    #[test]
+    fn regaining_focus_becomes_a_msg() {
+        assert!(matches!(
+            event_to_msg(Event::FocusGained),
+            Some(Msg::FocusGained)
+        ));
     }
 
     #[test]

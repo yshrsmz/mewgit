@@ -19,6 +19,7 @@ macOS でも XDG のパスを使う。`directories` クレートの `config_dir(
 git_bin = "git"          # PATH から探す。絶対パス指定可
 gh_bin = "gh"
 editor_fallback = false  # true なら reword 等で $EDITOR を使う
+refresh_interval = 10    # 秒。この間隔で status を読み直す（外での編集を拾う）。0 で止める
 
 [graph]
 ascii = false
@@ -61,6 +62,14 @@ pr_closed = "red"
 並びに残す**。飛ばすと `ColorId % colors.len()` の周期が設定の見た目と変わり、
 「6 色書いたのに 5 色で回る」理由をユーザーが追えない。色名の解釈は
 `ui::theme::color` を共有する。
+
+### `general.refresh_interval`
+
+外でファイルを編集したのを拾うための、status の定期的な読み直しの間隔（01 の「外部の
+変更の検知」）。既定の 10 は lazygit の `refresher.refreshInterval` と同じ。**0 で止める**
+（大きなリポジトリで status が重いとき）。止めても、端末が前面に戻ったときと `R` では
+読み直す。**ref と進行中操作の見張り（2 秒の probe）はこの値に関わらず走る** —— git を
+起動せず、列挙のコストは ref 1 万本で 70ms（01）
 
 ### `github.enabled`
 

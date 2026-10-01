@@ -690,7 +690,7 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   問わず出す `LoadStatus` の返り（`WorktreeSnapshot.progress`。02）で入れ替わる
   （`GitOp::SetAccount` / `UnsetAccount`（`.git/config` の 1 行だけを書く）は出さない —— 進行中操作は動かない）。
   **以前は「実行結果と 1 通に束ねる」と決めていた**（別々の `Msg` に割ると受け取る順序に
-  依存するため）が、束ねると起動時・書き込みのあと・M6 の外部変更の検知で入口が 3 本に
+  依存するため）が、束ねると起動時・書き込みのあと・外部の変更の検知（01）で入口が 3 本に
   なり、それぞれに到着順の議論が要った。status に載せれば、古い返りを捨てるのは既存の
   世代の 1 本で済む（01 の「起動時の読み込み」）。**代わりにバッジは status が届くまで
   1 往復遅れる**が、そのあいだは `conflicted` の一覧も同じだけ遅れており、世代の門が

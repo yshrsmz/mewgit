@@ -9,8 +9,8 @@ use crate::auth::url::RemoteUrl;
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
 use crate::git_exec::{GitOp, RebasePlan};
 use crate::git_read::{
-    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, Oid, RefIndex, Remote,
-    StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
+    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, Oid, PathStamp,
+    RefIndex, Remote, RepoFingerprint, StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 use crate::graph::{GraphRow, LaneState};
@@ -47,6 +47,8 @@ pub struct AppState {
     pub right_tab: RightTab,
     pub modal: Option<Modal>,
     pub jobs: JobTracker,
+    /// 外の変更の見張り（01 の「外部の変更の検知」）。
+    pub watch: WatchState,
     /// エラー・情報のトースト。積むのは [`AppState::push_notice`]。
     pub notices: VecDeque<Notice>,
     pub term: TermSize,
@@ -68,6 +70,71 @@ pub struct AppState {
     pub now: Timestamp,
     /// 起動時に確定した設定。実行中は再読込しない（08）。
     pub config: Config,
+}
+
+/// 外の変更の見張り（01 の「外部の変更の検知」）。
+///
+/// **期限は `update` が [`Msg::Tick`] の時刻で決める。** ランタイムに別のタイマーを
+/// 持たせると、期限の判断がテストできない側に出る。
+///
+/// [`Msg::Tick`]: crate::app::Msg::Tick
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchState {
+    /// 比べる基準の指紋。**`None` は「次の返りを基準にするだけで、比べない」** ——
+    /// 起動直後と、mewgit の書き込みのあと（書き込みで指紋は必ず変わるので、比べると
+    /// 自分の書き込みを外の変更と読む）。
+    pub fingerprint: Option<RepoFingerprint>,
+    /// probe が失敗したまま、まだ成功していない。通知を最初の 1 回に抑える
+    /// （01 の「失敗の記憶」の形）。
+    pub failed: bool,
+    /// 次に probe を出す時刻（Unix 秒）。
+    pub next_probe: i64,
+    /// 次に定期の status を出す時刻（Unix 秒）。
+    pub next_status: i64,
+}
+
+impl WatchState {
+    /// probe の間隔（秒）。lazygit の `externalChangeCheckInterval` と同じ（01）。
+    pub const PROBE_INTERVAL: i64 = 2;
+
+    /// 起動時の期限。**どちらも 1 周期先から数える** —— 起動時は `init` が status と
+    /// probe を自分で頼むので、最初の `Tick` で同じものをもう一度頼まない。
+    fn starting_at(now: Timestamp, config: &Config) -> Self {
+        let mut watch = Self::default();
+        watch.restart_probe(now);
+        watch.restart_status(now, config);
+        watch
+    }
+
+    /// 定期の status の間隔（秒）。`general.refresh_interval` が 0 なら止める（08）。
+    pub(crate) fn status_interval(config: &Config) -> Option<i64> {
+        match config.general.refresh_interval {
+            0 => None,
+            seconds => Some(i64::try_from(seconds).unwrap_or(i64::MAX)),
+        }
+    }
+
+    /// 次の probe を `now` から 1 周期先にする。
+    pub(crate) fn restart_probe(&mut self, now: Timestamp) {
+        self.next_probe = now.seconds.saturating_add(Self::PROBE_INTERVAL);
+    }
+
+    /// 期限が `now` から 1 周期より先にあれば、1 周期先へ引き戻す。**時計が後ろへ
+    /// 跳んだとき**、期限が跳んだぶんだけ先に残って見張りが止まるのを塞ぐ。
+    pub(crate) fn clamp_to(&mut self, now: Timestamp, config: &Config) {
+        let probe = now.seconds.saturating_add(Self::PROBE_INTERVAL);
+        self.next_probe = self.next_probe.min(probe);
+        if let Some(interval) = Self::status_interval(config) {
+            self.next_status = self.next_status.min(now.seconds.saturating_add(interval));
+        }
+    }
+
+    /// 次の定期の status を `now` から 1 周期先にする。止めてあれば何もしない。
+    pub(crate) fn restart_status(&mut self, now: Timestamp, config: &Config) {
+        if let Some(interval) = Self::status_interval(config) {
+            self.next_status = now.seconds.saturating_add(interval);
+        }
+    }
 }
 
 /// push が non-fast-forward で断られたこと（01 の「force push」）。
@@ -110,6 +177,7 @@ impl AppState {
             right_tab: RightTab::default(),
             modal: None,
             jobs: JobTracker::default(),
+            watch: WatchState::starting_at(now, &config),
             notices: VecDeque::new(),
             term: TermSize::default(),
             tick: 0,
@@ -137,7 +205,7 @@ impl AppState {
                 None => {
                     if let Some((kind, label)) = cmd.job() {
                         // 走っていないことは `refusal` が確かめた。
-                        let _ = self.jobs.start(Job::new(kind, label));
+                        let _ = self.jobs.start(Job::new(kind, label, self.tick));
                     }
                     cmd
                 }
@@ -223,7 +291,8 @@ impl AppState {
             | JobKind::ResolveAccount
             | JobKind::ListAccounts
             | JobKind::FetchPrList
-            | JobKind::FetchPrDetails => return,
+            | JobKind::FetchPrDetails
+            | JobKind::Probe => return,
             // **黙って落とさない。** 落とすと `Modal::PrCreate` が閉じないまま
             // 何も起きず（`update::submit` は `Cmd` が落ちるなら閉じない）、
             // 打った本文を抱えた箱が無反応に見える。
@@ -596,11 +665,34 @@ impl AppState {
     ///
     /// **対象では絞らない** —— [`DiffTarget::Commit`] の中身は書き込みで変わらないので
     /// 1 通ぶん無駄に読むが、単位ごとに例外を作るとその表を保つことになる（01）。
+    ///
+    /// **世代に加えて、ファイルの `(mtime, len)` も比べる**（[`DiffView::stamp`]）。
+    /// 外の編集は世代を進めないので、刻印だけでは古い diff を最新と読む。
     pub fn diff_is_current(&self) -> bool {
         let wanted = self.wanted_diff();
-        self.diff
-            .fresh_view(wanted.as_ref())
-            .is_some_and(|view| self.jobs.is_fresh(JobKind::LoadDiff, Some(view.epoch)))
+        self.diff.fresh_view(wanted.as_ref()).is_some_and(|view| {
+            self.jobs.is_fresh(JobKind::LoadDiff, Some(view.epoch))
+                && view.stamp == self.diff_stamp(&view.target)
+        })
+    }
+
+    /// `target` が読むファイルの、持っている snapshot の指紋（`WorktreeSnapshot.stamps`）。
+    ///
+    /// **ワークツリーか index を読む対象だけ。** コミットと stash の中身はオブジェクトで、
+    /// 外の編集では変わらない。`HeadVsIndex` はワークツリーを読まないが、指紋を丸ごと
+    /// 比べる —— ワークツリーだけの編集で 1 回余分に読み直すが、index 側だけを比べる
+    /// 関数を別に持つより安い。
+    pub fn diff_stamp(&self, target: &DiffTarget) -> Option<PathStamp> {
+        match target {
+            DiffTarget::IndexVsWorktree(Some(path)) | DiffTarget::HeadVsIndex(Some(path)) => {
+                self.worktree.snapshot.stamps.get(path).copied()
+            }
+            DiffTarget::IndexVsWorktree(None)
+            | DiffTarget::HeadVsIndex(None)
+            | DiffTarget::Commit { .. }
+            | DiffTarget::Range { .. }
+            | DiffTarget::Stash(_) => None,
+        }
     }
 
     /// 持っている worktree の一覧を**直近の書き込みより後に**読めているか。
@@ -1502,6 +1594,11 @@ pub struct DiffView {
     /// `IndexVsWorktree(a.txt)` のまま中身が減る。対象では鮮度を判じられないので、
     /// 読めた世代を値に添える。[`DiffState::is_current`] が判定に使う。
     pub epoch: u64,
+    /// 採った時点の、対象のファイルの指紋（ワークツリーの `(mtime, len)` と index の
+    /// blob。[`AppState::diff_stamp`]）。**外でファイルや index を書き換えたのを拾うため**
+    /// （01 の「外部の変更の検知 › 定期の status」）。世代は mewgit の書き込みでしか
+    /// 進まないので、外の編集では刻印が最新のまま残る。
+    pub stamp: Option<PathStamp>,
 }
 
 impl DiffView {
@@ -2353,6 +2450,11 @@ pub struct Job {
     /// [`Cmd::job`] が種別と一緒に返す（`Exec` は `fetch` / `push` のように
     /// 走らせるサブコマンド）。
     pub label: &'static str,
+    /// 発行した時点の [`AppState::tick`]。**スピナーは `Tick` を 1 つまたいで走っている
+    /// ジョブだけを描く**（07 の「ヘッダ」）—— 1 フレームで終わるもの（2 秒ごとの probe、
+    /// 小さなリポジトリの status）まで描くと、そのたびに駒が 1 フレームだけ光り、
+    /// `[api: …]` がその幅を譲って消える。
+    pub since: u64,
     /// 走らせた時点の、この種別の領域の世代。
     ///
     /// **非公開で、[`JobTracker::start`] だけが入れる。** 組み立てる側に持たせると、
@@ -2369,10 +2471,11 @@ pub struct Job {
 
 impl Job {
     /// スピナーの説明を添えて組む。世代は [`JobTracker::start`] が刻む。
-    pub fn new(kind: JobKind, label: &'static str) -> Self {
+    pub fn new(kind: JobKind, label: &'static str, since: u64) -> Self {
         Self {
             kind,
             label,
+            since,
             epoch: None,
             canceling: false,
         }
@@ -2405,6 +2508,8 @@ pub enum JobKind {
     FetchPrDetails,
     CreatePr,
     OpenPr,
+    /// 外の変更を見張る指紋（01 の「外部の変更の検知」）。
+    Probe,
 }
 
 impl JobKind {
@@ -2420,6 +2525,12 @@ impl JobKind {
         match self {
             // index とワークツリー。どの書き込みでも古くなる。
             JobKind::LoadStatus | JobKind::LoadDiff => Some(Region::Worktree),
+            // **指紋は書き込みより前の値なら比べてはいけない**（01 の「外部の変更の検知 ›
+            // mewgit 自身の書き込みと分ける」）。`Worktree` を進めるのは書き込みと、外の
+            // ref の変化（`watch`）だけなので、ここで書き込みを挟んだかが判る。**例外は
+            // `Account`**（`.git/config` の 1 行。どの領域も進めない）で、そのときは
+            // 次の probe が `config` の差として `Refs` を 1 回余分に読み直す。
+            JobKind::Probe => Some(Region::Worktree),
             // ref から導かれる値。`LoadHeadMessage` もここ —— commit / amend が
             // 走っているあいだに `C` を押すと、書き込み前の本文で amend の入力欄が
             // 埋まる。
@@ -3773,7 +3884,7 @@ mod tests {
     }
 
     fn job(kind: JobKind) -> Job {
-        Job::new(kind, "test")
+        Job::new(kind, "test", 0)
     }
 
     #[test]

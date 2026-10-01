@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, LogPage,
-    LogSession, Oid, RefIndex, Remote, RepoReader, StashEntry, WorktreeSnapshot,
+    LogSession, Oid, RefIndex, Remote, RepoFingerprint, RepoReader, StashEntry, WorktreeSnapshot,
 };
 
 /// リーダースレッドへの窓口。
@@ -55,6 +55,7 @@ enum Request {
     HeadMessage(Reply<Option<String>>),
     Remotes(Reply<Vec<Remote>>),
     Status(Reply<WorktreeSnapshot>),
+    Fingerprint(Reply<RepoFingerprint>),
     Diff {
         target: DiffTarget,
         reply: Reply<Vec<FileDiff>>,
@@ -191,6 +192,11 @@ impl ReaderHandle {
         self.request(Request::Status).await
     }
 
+    /// 外の変更を見張る指紋（02 の「指紋」）。`status` と同じく drop してよい。
+    pub async fn fingerprint(&self) -> Result<RepoFingerprint, GitReadError> {
+        self.request(Request::Fingerprint).await
+    }
+
     /// 対象の diff。`status` と同じく drop してよい。
     pub async fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError> {
         self.request(|reply| Request::Diff { target, reply }).await
@@ -276,6 +282,9 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
             }
             Request::Status(reply) => {
                 let _ = reply.send(reader.status());
+            }
+            Request::Fingerprint(reply) => {
+                let _ = reply.send(reader.fingerprint());
             }
             Request::Diff { target, reply } => {
                 let _ = reply.send(reader.diff(target));

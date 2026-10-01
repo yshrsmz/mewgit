@@ -21,6 +21,7 @@ ratatui / crossterm には依存しない（不変ルール 6）。`ui` は下�
 | 「Pane と Modal」とその `###`（コミットメッセージの編集 / 1 行入力） | `update/modal.rs`（骨格）と、確定して何をするかは各モジュール |
 | 「ログの読み直し」の**適用側**、「失敗の案内文」 | `update/exec.rs` |
 | 「進行中操作があるときの書き込み」とその `###`（メニュー） | `update/progress.rs`（落とす場所は `state.rs` の `AppState::issue`） |
+| 「外部の変更の検知」 | `update/watch.rs`（指紋の差から何を読むかは `Changed::between`、読み直しの適用は `update/exec.rs` の `reload`、diff の stamp の比較は `state.rs` の `diff_is_current`） |
 | 「キー入力」「起動時の読み込み」「update の原則」 | `update/mod.rs` |
 
 **「ログの読み直し」だけ 2 つに割れている。** 頼む側（どこまで積んだか、追いつき）は
@@ -43,6 +44,7 @@ pub struct AppState {
     pub right_tab: RightTab,          // 右列の上に出すタブ（下の「右上のタブ」）
     pub modal: Option<Modal>,
     pub jobs: JobTracker,             // 実行中の非同期タスク（表示用）
+    pub watch: WatchState,            // 外の変更の見張り。基準の指紋と期限（下の「外部の変更の検知」）
     pub notices: VecDeque<Notice>,    // エラー・情報のトースト
     pub term: TermSize,               // 端末サイズ。レイアウト分岐に使う
     pub tick: u64,                    // Msg::Tick が来た回数。スピナーの駒を選ぶ
@@ -820,8 +822,8 @@ pub enum RewordInput {
   ある行が HEAD の祖先とは限らない。**読み足さない**（`MainlinePicker` と同じ）。
   辿れなかったら断る（下の表）
 - **HEAD は `RepoInfo.head`**（`Branch` の `oid` か `Detached`）。mewgit の書き込みの
-  あとは `Reload::Refs` で読み直される（上の「ログの読み直し」）が、**端末で積んだ
-  コミットには追いつかない**（M6 の外部変更の検知まで）。**追いつかない HEAD で組んだ
+  あとは `Reload::Refs` で読み直される（上の「ログの読み直し」）。**端末で積んだ
+  コミットには probe（下の「外部の変更の検知」）が拾うまで最大 2 秒追いつかない**。**追いつかない HEAD で組んだ
   plan は git に渡った時点で断られる** —— `Modal::RebaseEditor` が plan を組んだ HEAD を
   持ち、`GitOp::RebaseInteractive` で運ぶ。sequence editor が git の `orig-head` と比べる
   （03 の「Interactive rebase の実装」）。比べないと、plan に載らなかったコミットは git が
@@ -1085,6 +1087,9 @@ untracked の中身を出すようにしてあるので、これで新規ファ�
   どの diff を変えるかを表にするより、1 回余分に読むほうが安い
 - **採るのは「対象が合っている」かつ「刻印が最新」の返信だけ。** 対象を見ないと正しく
   出ている画面が別のファイルの diff に化け、刻印を見ないと書き込み前の中身に戻る
+- **外の編集は世代ではなく `DiffView::stamp` で拾う**（下の「外部の変更の検知 › 定期の
+  status」）。世代を進めるのは mewgit の書き込みと外の ref の変化だけで、エディタで
+  保存しただけでは進まない。判定は同じ `diff_is_current` の 1 本
 - **描くときは刻印を見ない**（`fresh_view` は対象だけで濾す）。古い diff を消して回ると
   読み直しが届くまで「読み込み中…」が挟まる。**見るのは、キャッシュを短絡してよいかと
   ハンクからパッチを組んでよいかの 2 つ**で、どちらも同じ「いまの世代か」を問う
@@ -1216,9 +1221,8 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
   （`/code-review` が拾った。最初の版は「`refs/stash` を動かすのは stash の書き込み
   だけ」と書いて起動時しか読んでいなかった）。**autostash の起きうる op に絞らない**
   —— 払うのは reflog 1 本の読み取りで、`RefsAndLog` はそれより重いログの読み直しを
-  既に払っている。**端末で作った stash は、次に `RefsAndLog` の書き込みをするか
-  再起動するまで出ない**（Branches で外のブランチ作成が出ないのと同じ。外部変更の
-  検知は M6）。**stash の書き込みのあとは `Reload::Stashes`**（下）
+  既に払っている。**端末で作った stash は probe が `refs/stash` の差として拾う**（下の
+  「外部の変更の検知」。最大 2 秒）。**stash の書き込みのあとは `Reload::Stashes`**（下）
 - **`JobKind::LoadStashes` の領域は `Region::Stash`**（下の「実行中ジョブ › 世代」）。
   進めるのは stash の書き込み（`Reload::Stashes`）と `RefsAndLog`（autostash）で、
   読み込みの最中に pull が終われば返りは捨てられて頼み直される。**`Region::Refs` に
@@ -1318,7 +1322,7 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
   git に任せるが、**解消済みの cherry-pick / merge の途中の `stash push` は git が
   受けて `CHERRY_PICK_HEAD` / `MERGE_HEAD` を消す**（03 の表）。書き込みの直後の
   status 待ちの窓でそれを踏ませない。**外で始めた操作を mewgit が見ていない窓は
-  塞がらない**（世代を進めるのは mewgit の書き込みだけ。外部変更の検知は M6）
+  狭まるが塞がらない**（probe が gitdir の差として拾うまで最大 2 秒。下の「外部の変更の検知」）
 - **鮮度のある snapshot が空なら「退避する変更がありません」で断る**（`c` の
   「stage された変更がありません」と同じ門）。git に渡すと上の `No local changes to
   save` で、何も起きないように見える。`-u` を付けるので、untracked だけでも空ではない
@@ -2052,7 +2056,7 @@ conventional_remote = リモートが 1 本ならそれ → origin → 決まら
 キーも Remotes ペインも無く、`P` も同じ `conventional_remote` を通るので `-u` の
 提案すら出ない（実機で確認）。外で `git branch --set-upstream-to=…` しても、
 ブランチ一覧を読み直すのは ref を動かす書き込みのあとだけなので**再起動するまで
-効かない**（`.git/HEAD` の監視は M6）。`.claude/rules/rust-coding.md` の「案内にキーを書いたら、その案内が
+効かなかった**（いまは probe が `config` の差として拾う。下の「外部の変更の検知」）。`.claude/rules/rust-coding.md` の「案内にキーを書いたら、その案内が
 出ている画面でそのキーが効くかを数える」の一般形 —— **案内が求める操作を自分が
 持っているかを数える** —— を踏み外していた。
 
@@ -2073,7 +2077,8 @@ conventional_remote = リモートが 1 本ならそれ → origin → 決まら
   外で消えても、`f` はそれを出し続ける。#53 の「状態を消すのが『その状態を根拠に
   断つキー』の先にあるなら、断つ前に消し方を数える」と同じ形になる。**煩わしさは
   リモートが複数あって `origin` が無いリポジトリにしか出ない**ので、消し方を決める
-  コストのほうが先に立つ。決めるなら M6（外部変更検知と同じタスク）
+  コストのほうが先に立つ。**外部の変更の検知（下の節）で消し方の材料（`config` の差）は
+  できたが、そのタスク（2026-10-01）では扱っていない** —— 煩わしさが出る形の狭さは変わらない
 - **`P` の行き止まりは塞がない。** push の行き先を人に選ばせるのは不変ルール 5 の
   手前の判断で、fetch と同じ扱いにはできない（fetch は読むだけ）。**残っている穴として
   M6 の「`-u` の提案を git の push の規則に揃える」へ送る。** ただし
@@ -2592,7 +2597,8 @@ snapshot でも断る**（上の「stash の書き込み」）。apply / pop は
 必ず外で始まる**ので普通に踏む。
 断ると git を起動しないぶん読み直しも起きず、断り続ける（`/code-review` が拾い、pty で
 再現した）。**断ったら代わりに `Cmd::LoadStatus` を出す** —— 1 回目は断られるが、外で
-終わっていれば 2 回目は通る。1 回目も消すには外部の変更の検知（M6。`docs/plan.md` の行）が要る。
+終わっていれば 2 回目は通る。**1 回目も通るのは、押す前に probe が拾ったとき**（gitdir と
+`index` の差。最大 2 秒。下の「外部の変更の検知」）。
 **監視は `.git/HEAD` だけでは足りない**（実測 2026-09-27、git 2.55.0。コンフリクトで止めて
 から外で終え、前後の mtime を比べた）——
 
@@ -2784,10 +2790,10 @@ impl JobKind {
   辿り直す。02）を払う。**どの書き込みがどこを古くするかは `update::Reload` が既に
   持っている**ので、その値を領域の集合に写す。どれも `Worktree` を含む（書き込みは
   必ず index / ワークツリーを古くする。`Account` だけは何も含まない）。**`Stash` は
-  `refs/stash` の一覧だけ**で、`Refs` とは別に持つ（上の「Stash ペイン」）
+  `refs/stash` の一覧だけ**で、`Refs` とは別に持つ（上の「Stash ペイン」）。
 - **刻むのは `JobTracker::start`**（= `AppState::issue` の中）。`Job.epoch` は非公開で、
   組み立てる側は入れられない。入れられる形にすると、刻む場所が `start` の外に増える
-- **進めるのは `exec_finished`。`Cmd` を返す前に進める。** `issue` は `update` の出口
+- **進めるのは `exec_finished` と外部の変更の検知（下の節）。`Cmd` を返す前に進める。** `issue` は `update` の出口
   なので、返してからでは遅い。逆にすると書き込みの直後に頼んだ読み直しまで「古い要求」
   になり、届いた時点で捨てて頼み直す往復を延々と繰り返す
 - **失敗した書き込みでも進める。** `git apply` が途中で落ちても index は動いている
@@ -2928,6 +2934,7 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
 ```rust
 pub enum Msg {
     Key(Key), Resize { term: TermSize }, Layout { graph_rows: usize }, Tick(Timestamp),
+    FocusGained,                       // 端末が前面に戻った（下の「外部の変更の検知」）
     // git_read
     Paste(String),                     // bracketed paste。編集中のモーダルだけが受ける
     LogLoaded { restart: bool, result: Result<LogPage, GitReadError> },
@@ -2937,6 +2944,7 @@ pub enum Msg {
     CommitMessageLoaded { oid: Oid, result: Box<Result<String, GitReadError>> },  // reword の初期値
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
+    FingerprintLoaded(Box<Result<RepoFingerprint, GitReadError>>),  // 下の「外部の変更の検知」
     BranchesLoaded(Box<Result<Vec<Branch>, GitReadError>>),   // ローカルブランチの一覧
     DiffLoaded { target: DiffTarget, result: Box<Result<Vec<FileDiff>, GitReadError>> },
     // git_exec
@@ -3038,6 +3046,7 @@ pub enum Cmd {
     LoadStatus, LoadDiff(DiffTarget),
     LoadRepoInfo,                      // remotes / head / refs。起動時と ref 変更後（M3）
     LoadBranches,                      // ローカルブランチ一覧。RepoInfo とは別（02）
+    Probe,                             // 外の変更を見張る指紋（下の「外部の変更の検知」）
     Exec(GitOp),                       // git CLI 実行（03 参照）
     CancelExec,                        // 走っている Exec を中断する（上の「キャンセル」）
     ResolveTarget(RemoteUrl),          // 既定リモートの URL → RepoTarget（上の「RepoInfo.target を埋める」）
@@ -3068,6 +3077,204 @@ pub enum Cmd {
 通して `AccountState` を作り直すもので、こちらは一覧を引くだけ。畳むと、選び直しの
 モーダルを開くたびにアカウントが `Resolving` に戻る。
 
+## 外部の変更の検知
+
+**外で起きた変更（端末での commit / fetch / abort、エディタでの保存）を拾う。** 拾い方は
+2 通り ——
+
+- **ref・追跡設定・stash の変化は、mewgit の書き込みが 1 つ終わったのと同じ形で読み直す。**
+  世代（上の「実行中ジョブ › 世代」）を進め、`Reload`（上の「ログの読み直し」）の腕と
+  同じ読み直しを出す
+- **ワークツリーの変化は status を読むだけで、世代を進めない。** 古くなったかは、届いた
+  status を持っている値と比べて決める（下の「定期の status」）。ワークツリー側の mtime は
+  外の `git status` 1 回でも動く（下の表）ので、世代を進める根拠にならない
+
+**決めたこと**（2026-10-01 にユーザーと決めた）——
+
+| 入口 | 間隔 | 何を読むか | 変わっていたら |
+|---|---|---|---|
+| probe | 2 秒（固定） | 指紋（下の `RepoFingerprint`） | 変わった領域だけを `Reload` で |
+| 定期の status | 10 秒（`general.refresh_interval`。0 で止める。08） | `LoadStatus` | 一覧を入れ替え、diff の stamp が違えば diff を読み直す |
+| `FocusGained` | 端末が前面に戻ったとき | probe と `LoadStatus` を両方すぐ | 上の 2 行と同じ |
+| `R` | 押したとき | 指紋を見ずに全部（`Reload::RefsAndLog`） | — |
+
+**ファイルの監視（`notify`）は採らない。** lazygit は fsnotify を外し（#2865。「file
+handle を使いすぎる」）、gitui は notify を既定から外した（#1657。「大きなリポジトリで
+問題になる」）。`.gitignore` を見る除外が無く `target/` まで見張り、Linux では inotify の
+上限に当たる。**いまの lazygit の既定も上の表と同じ形**（フォーカス復帰で全体、2 秒ごとに
+ref の指紋、10 秒ごとに files。`pkg/gui/background.go`、2026-09-30 の ff375b1）。
+**フォーカスの報告（DECSET 1004）を送らない端末がある**（tmux は `focus-events` が既定で
+off、GNU screen は 1004 を捨てる）ので、`FocusGained` は来なくても成り立つ形にする ——
+来なければ 10 秒の status と 2 秒の probe が拾う。
+
+### 指紋
+
+```rust
+/// 外の変更を見張る指紋。リーダースレッドが git2 と stat で組む（git を起動しない）。
+pub struct RepoFingerprint {
+    /// HEAD（symbolic なら ref 名も）と、`refs/stash` を除く全 ref の名前と指す先のハッシュ。
+    pub refs: u64,
+    /// `refs/stash` の指す先と、reflog（stash の一覧）の件数。
+    pub stash: (Option<Oid>, usize),
+    /// commondir の `config` の mtime（追跡設定・リモート一覧）。
+    pub config: Option<SystemTime>,
+    /// ワークツリーごとの gitdir の `index` と、gitdir そのものの mtime（進行中操作の印）。
+    pub worktree: (Option<SystemTime>, Option<SystemTime>),
+}
+```
+
+**ref は stat ではなく git2 で列挙する。** 決まったファイルの mtime を見る形（tig の
+`src/watch.c`）は、**入れ子のブランチを外で作ったのを取りこぼす** —— 実測（2026-10-01、
+git 2.56.0、一時リポジトリ。外での操作ごとに gitdir の各所の mtime を比べた）:
+
+| 外での操作 | mtime が動くもの |
+|---|---|
+| ファイルの編集（未変更 → `M`、`M` → `M`） | **無し** |
+| `git add` | `index`、gitdir |
+| commit / `reset --hard` | `index`、gitdir、`refs/heads`、`logs/HEAD` |
+| ブランチ作成 `x` | `refs/heads` |
+| **ブランチ作成 `feat/y`** | **`refs/heads/feat` だけ**（gitdir も `refs/heads` も動かない） |
+| `git fetch` | gitdir、`refs/remotes/origin`、`FETCH_HEAD` |
+| stash push / drop | gitdir、`refs`、`refs/stash` ほか |
+| `git branch --set-upstream-to` | gitdir（`config` の書き換え） |
+| **変更の無い `git status`**（2 回とも） | **`index`、gitdir**（`index.lock` を作って消す） |
+| `M` がある状態の `git status`（2 回目） | gitdir |
+| `git --no-optional-locks status` | 無し |
+
+**下の 3 行は `/simplify` の efficiency が拾った**（最初の版は gitdir と `index` の mtime の差を
+`Reload::Nothing` に写していた）。シェルのプロンプトや IDE が `git status` を叩くたびに
+status と diff の読み直しが 2 秒ごとに走り、diff の世代が進むたびにハンク単位の
+`s` / `u` / `x` が断られる窓が開いていた。**mtime からは「外で `git status` を叩いた」と
+「外で `git add` した」を区別できない**ので、ワークツリー側の差は status を読む
+きっかけにだけ使う（下の表の最後の行）。
+
+**stash は指す先だけでは足りない** —— 上以外の stash を外で drop / pop しても
+`refs/stash` は動かない（実測 2026-10-01、git 2.56.0。3 つ積んで `git stash drop stash@{1}`
+の前後で同じ oid、一覧は 3 → 2 件）。読み直さないと、mewgit の `d` / `a` / `Z` が
+`stash@{n}` で別の stash に効く（`/code-review` が拾った）。reflog の件数を一緒に持つ。
+
+**列挙のコスト**（release、git2 0.21.0、2 回目以降）: ref 1 万本（loose 5000 を
+`refs/heads/feat/g*/` に入れ子 + packed 5000）で **70ms**、手元でいちばん ref の多い
+リポジトリ（192 本）で **0.25ms**。`git for-each-ref` は 1 万本で 225ms。リーダー
+スレッドは直列なので、1 万本のリポジトリでは 2 秒ごとに `LoadLog` を最大 70ms 待たせる。
+
+**指紋の差から何を読み直すかを選ぶ**（`update::watch::Changed::between`。`Reload` は
+`app` の型なので `git_read` の `RepoFingerprint` には置けない）——
+
+| 変わったもの | 出すもの |
+|---|---|
+| `refs`（HEAD を含む） | `Reload::RefsAndLog`（ref が動けば walk に入るコミットが変わりうる。`Stash` も含む） |
+| `config` だけ | `Reload::Refs`（`RepoInfo` のリモート一覧と、ブランチ一覧の追跡設定） |
+| `stash` だけ（指す先か件数） | `Reload::Stashes` |
+| `worktree` だけ | **`Cmd::LoadStatus` だけ**（世代を進めない。進行中操作は status に載る。02） |
+
+複数が同時に変わったら、全部を覆う腕を選ぶ（`config` と `stash` なら `RefsAndLog`）。
+**`RefsAndLog` はグラフの位置を先頭へ戻す**（`GraphState::restart`）が、mewgit の `f` も
+同じ腕なので、外の fetch と見え方が揃う。**何も変わっていなければ何も出さない** ——
+フォーカス復帰のたびにカーソルが飛ぶ形にしない。
+
+### mewgit 自身の書き込みと分ける
+
+書き込みのあとは指紋が必ず変わる。それを外の変更と読むと、読み直しが 2 周する。
+
+- **書き込みの実行中は probe も定期の status も出さない**（lazygit の
+  `PauseBackgroundRefreshes` と同じ）。書き込みの途中の値を外の変更と読む形を塞ぐ
+- **`exec_finished` は持っている指紋を捨てる。** 次の probe（最大 2 秒後）の返りは
+  基準にするだけで、比べない（比べる相手が無い）。書き込みの終わりから次の probe が
+  読むまでのあいだに外で起きた変更は拾わない（受け入れた穴。次の変更で拾う）。
+  **probe をその場で頼まない** —— `exec_finished` の返す `Cmd` は書き込みごとに読み直しの
+  組を決めており（上の「ログの読み直し」）、そこに probe を混ぜると読み直しの表と
+  関係の無い 1 本が全部の腕に付く
+- **書き込みの実行中に届いた probe の返りは比べない。** probe がリーダースレッドで重い
+  読み取りの後ろに並ぶと、出すときには走っていなかった書き込みの最中に返ることがあり、
+  そのときはまだ刻印で見分けられない（世代を進めるのは `exec_finished`）。基準は
+  `exec_finished` が捨てるので、次の probe が取り直す（`/code-review` が拾った順序）
+- **書き込みより前に頼んだ probe の返りは捨てて頼み直す**（`status_loaded` の追いつきと
+  同じ形）。**`JobKind::Probe` の領域は `Region::Worktree`** —— `Worktree` を進めるのは
+  書き込みと外の ref の変化だけなので、刻印で書き込みを挟んだかが判る。**status の差は
+  世代を進めない**（下の「定期の status」）ので、外で commit したときに status の返りが先に
+  届いても、飛んでいる probe は捨てられない（`an_external_edit_seen_by_the_status_first_does_not_hide_the_refs`）。
+  **例外は `Account`**（`.git/config` の 1 行。どの領域も進めない）で、その書き込みと同時に
+  飛んでいた probe は古いまま基準になり、次の probe が `config` の差として `Refs` を
+  1 回余分に読み直す（害は読み直し 1 回）。
+  **最初の版は `Region::Write`（書き込みだけを数える領域）を足していた** —— status の差で
+  `Worktree` を進める形だったので、それに巻き込まれないための特例だった。`/simplify` の
+  altitude が拾い、status の差を世代の外（`DiffView::stamp`）で扱う形にして消した
+
+### 定期の status
+
+**status の一覧だけでは、既に `M` のファイルを外で書き換えたのを拾えない**（一覧は
+`M` のまま変わらない。上の表の 1 行目）。そのため **snapshot にワークツリー側の
+`(mtime, len)` を載せ**（`WorktreeSnapshot.stamps`。02 の「ステータス」）、届いた snapshot を持っている snapshot と
+比べる。
+
+- **コンフリクト中のファイルを保存しただけでは拾わないのが正しい**（実測 2026-09-27、
+  git 2.55.0 —— 保存では `index` も gitdir も mtime が動かず、git 自身も `UU` のまま）。
+  解消は `git add` が index を動かすので probe が拾う。`stamps` の差で diff は読み直す
+- **diff は `DiffView::stamp` で比べる。** diff を採った時点の `snapshot.stamps[path]` を
+  view に添え、`AppState::diff_is_current` が今の snapshot の stamp と比べる。届いた
+  status の stamp が違えば `status_loaded` の出口の `load_diff` が読み直す。比べるのは
+  ワークツリーか index を読む対象（`IndexVsWorktree` / `HeadVsIndex`）
+- **stamp はワークツリーの `(mtime, len)` と index の blob の組**（`PathStamp`）。unstaged の
+  diff は index にも依存するので、外で `git add -p` すると、ワークツリーのファイルは動かない
+  まま diff だけが変わる（`/code-review` が拾った。最初の版はワークツリー側しか見ず、
+  古い diff の `x` が index に残ったハンクの逆変更をワークツリーに入れうる形だった）。index 側の
+  blob は status の delta が既に持っているので、index を別に読まない
+- **世代は進めない。** 進めると、外で 1 ファイル保存しただけで status まで古い扱いになり、
+  届いた値の刻印を書き換える特例が要った（最初の版。`/simplify` の altitude が拾った）。
+  **10 秒ごとに無条件に古くする形も採らない** —— そのたびに diff を読み直し、届くまで
+  ハンク単位の `s` / `u` / `x` が「最新の差分をまだ読めていません」で断られる
+- **どの経路の status でも、定期の期限を数え直す**（`status_loaded`）。数え直さないと、
+  書き込みや外の変更のあとの読み直しの直後に、定期のぶんが同じものをもう一度読む
+
+**読み直す前に押せる窓は残る**（外で書き換えてから最大 10 秒）。ハンク単位の `s` が
+古いハンクを stage する形（実測は `docs/plan.md` の外部変更検知の行）は、
+**別の PR で守りを足す**（`docs/plan.md`。ハンク操作の直前に、対象のファイルの
+`(mtime, len)` が diff を読んだ時点と同じかを確かめる）。割った理由は、守りが diff の
+キャッシュ（上の「diff のキャッシュと鮮度」）に手を入れる別の関心事だから。
+**比べる値の時点は 2 本目で決める** —— 1 本目の `DiffView::stamp` は「diff を採った時点の
+status の stamp」で、diff を読んだ時点のファイルとはずれうる（status のあとに書き換えて
+から diff を読むと、view は新しい中身を古い stamp で持つ）。守りが要るのは「見えている
+ハンクを読んだ時点」なので、diff の読み取りが自分で stat する形に変えるかを 2 本目で決める
+（`/simplify` の altitude が拾った）。
+
+### 間隔とフォーカス
+
+- **間隔は `update` が `Msg::Tick` の時刻で決める**（`WatchState` に次の期限を持つ）。
+  ランタイムに別のタイマーを持たせない —— 期限の判断がテストできる側に残る
+- **`Tick` から `Cmd` を出すのは期限を過ぎたときだけ**（2 秒・10 秒）。毎回は出さない
+  （250ms ごとに git2 で ref を列挙することになる）
+- **`FocusGained` は probe と `LoadStatus` を出し、両方の期限を今から数え直す**（status の
+  期限は返りの `status_loaded` が数え直す）。
+  `FocusLost` は捨てる。**有効にした直後に今のフォーカスを送ってくる端末がある**
+  （lazygit の `pkg/gocui/gui.go` が状態の変化だけを見ている理由）が、指紋が変わって
+  いなければ何も読み直さないので、起動直後の 1 回は害が無い
+- **フォーカスの報告は `main.rs` が有効にする**（`EnableFocusChange`。ratatui の
+  `try_init` は有効にしない）。終了時に `DisableFocusChange` を送る。**パニックの経路では
+  送らない**（`EnableBracketedPaste` と同じ扱い。ratatui のパニックフックは raw mode と
+  代替画面しか戻さない）
+- **時計が後ろへ跳んだら期限を引き戻す**（`WatchState::clamp_to`）。期限は壁時計の秒
+  （`Timestamp::now`）なので、NTP の補正や VM の復帰で戻ると、跳んだぶんだけ見張りが
+  止まる（`/code-review` が拾った）。`Tick` ごとに「今から 1 周期先」を上限にする
+- **probe の失敗は最初の 1 回だけ通知する**（`WatchState.failed`。成功で落とす）。
+  2 秒ごとに積むと通知の履歴が埋まる。上の「失敗の記憶」の形
+- **ヘッダのスピナーは `Tick` を 1 つまたいで走っているジョブだけを描く**（`Job::since`。
+  07 の「ヘッダ」）。probe（1ms 未満）と小さなリポジトリの status が 2 秒・10 秒ごとに
+  1 フレームだけ駒を光らせないため。最初の版は probe だけを種別で外していた（`JobKind::spins`）
+  が、status のちらつきが残っていた（`/simplify` の altitude が拾った）
+
+### `R`
+
+**指紋を見ずに `Reload::RefsAndLog` と同じ読み直しを出す**（世代も進める）。書き込みの
+実行中も通す（押した人が頼んだ読み直しで、一緒に頼む probe が書き込みより前の値を読めば
+刻印で捨てる）。
+検知が外れる形（NFS、指紋に入れていない場所の変更）からの逃げ道なので、比べる
+処理を挟まない。**グラフの位置は先頭へ戻る**（押した人が頼んだ読み直し）。
+共通キーで、フッターには出ない（07 の「ステータスバー」。共通キーは `?` の一覧だけ）。
+
+**拾わないもの**: `.git/config` の `mewgit.user`（アカウントの指定）を外で書き換えても
+解決し直さない（`config` の差は `Refs` に写すだけ）。`A` で選び直せる。
+
 ## 起動時の読み込み
 
 ```rust
@@ -3085,7 +3292,7 @@ pub fn init(state: &mut AppState) -> Cmd;
 
 **進行中操作は `LoadStatus` の返りに載ってくる**（`WorktreeSnapshot.progress`。02 の
 「進行中操作の検出」）。起動時の専用の読み取りは持たない —— 起動時・書き込みのあと・
-（M6 の）外部変更の検知が同じ `LoadStatus` を通るので、**古い返りを捨てるのは
+外部の変更の検知（上の節）が同じ `LoadStatus` を通るので、**古い返りを捨てるのは
 `Region::Worktree` の世代の 1 本**で済む（上の「実行中ジョブ › 世代」）。`conflicted` の
 一覧と進行中操作が同じ時点の値になり、書き込みの拒否（上の「進行中操作があるときの書き込み」）も `c` と同じ
 「鮮度のある snapshot だけを信じる」（`WorktreeState::snapshot_epoch`）で判じられる。
@@ -3099,8 +3306,8 @@ pub fn init(state: &mut AppState) -> Cmd;
   ペインが `Cmd` を組み立てるのは `update` の中だけで、`ui` からは呼ばない
 - `ExecFinished` は成功・失敗・中断を問わず `LoadStatus` を発行する。**例外は
   `GitOp::SetAccount` / `UnsetAccount`（`.git/config` の 1 行だけを書く）は出さない —— 進行中操作は動かない**（`update::exec` の `Reload::Account`）。進行中操作は
-  その返りで入れ替わる（03 の「進行中操作との整合」）。M6 の `.git/HEAD` 監視も、
-  専用の `Msg` を足さずに `LoadStatus` を出す
+  その返りで入れ替わる（03 の「進行中操作との整合」）。外部の変更の検知（上の節）も、
+  進行中操作のための専用の `Msg` を足さずに `LoadStatus` を出す
 - 同種の `Cmd` が実行中なら重複発行しない（`JobTracker` で管理）
 
 ## ランタイム
@@ -3182,9 +3389,9 @@ loop {
   （`x` で確認したファイルの区画が、先に走っている `pull` で変わっている）。
   中断が入ったので「終わるまで待つ」から抜ける手もある
 - `Tick` は 250ms。**ランタイムが読んだ時刻を載せる**（`update` は時計を読まない。
-  上の「通知」）。`AppState.tick` を進めてスピナーを回すのと、外部変更検知
-  （`.git/HEAD` の mtime 監視）に使う。**`Tick` から `Cmd` は出さない** —— 1 秒に 4 回
-  git を叩くことになる
+  上の「通知」）。`AppState.tick` を進めてスピナーを回すのと、外部の変更の検知の期限（上の「外部の
+  変更の検知 › 間隔とフォーカス」）に使う。**`Tick` から `Cmd` を出すのは期限を過ぎた
+  ときだけ** —— 毎回出すと 1 秒に 4 回 git2 で ref を列挙することになる
 - `Cmd::Exec` のタスクには中断の受け口（`oneshot`）を渡し、送り手はランタイムが持つ。
   `Cmd::CancelExec` はそれを撃つだけで、`Msg` を返すのはタスク自身（上の「キャンセル」）
 

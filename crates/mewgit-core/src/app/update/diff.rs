@@ -147,11 +147,16 @@ pub(super) fn diff_loaded(
                     .as_ref()
                     .filter(|view| view.target == target)
                     .map_or_else(DiffCursor::default, |view| view.cursor);
+                // **採った時点の snapshot の stamp を添える**（`DiffView::stamp`）。diff を
+                // 読んだあとに status が新しい stamp を運べば、`diff_is_current` が偽に
+                // なって読み直す。
+                let stamp = state.diff_stamp(&target);
                 let mut view = DiffView {
                     target,
                     files,
                     cursor,
                     epoch: read_at,
+                    stamp,
                 };
                 // 読み直しでハンクが減っていることがある。選べる位置へ寄せ直す。
                 view.move_cursor(0);
@@ -737,7 +742,7 @@ mod tests {
         // `Cmd::LoadDiff` は `issue` に落とされる。飛んでいた返信は書き込みより前の
         // ものなので、それを採ったまま黙って終わると古い diff が残る（01）。
         let mut state = diff_state(&["a.txt"], 2);
-        assert!(state.jobs.start(Job::new(JobKind::LoadDiff, "diff",)));
+        assert!(state.jobs.start(Job::new(JobKind::LoadDiff, "diff", 0)));
 
         let _ = update(&mut state, exec_done(Ok(fake_output())));
         let dropped = update(

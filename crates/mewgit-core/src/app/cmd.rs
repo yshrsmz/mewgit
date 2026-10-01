@@ -79,6 +79,11 @@ pub enum Cmd {
     /// の pull / rebase は autostash で動かしうる（01 の「Stash ペイン」）。出すのは
     /// 起動時と `RefsAndLog` のあと。
     LoadStashes,
+    /// 外の変更を見張る指紋を読む（01 の「外部の変更の検知」、02 の「指紋」）。
+    ///
+    /// **どこで出すかは `update::watch` に置いてある**（ここに一覧を書かない）。書き込みの
+    /// 途中の値を外の変更と読まない守りは、出す側ではなく受ける側（返りの刻印）にある。
+    Probe,
     /// git CLI の実行（03 参照）。
     Exec(GitOp),
     /// 走っている [`Cmd::Exec`] を中断する（01 の「実行中ジョブのキャンセル」）。
@@ -225,6 +230,7 @@ impl Cmd {
             Cmd::LoadRepoInfo => Some((JobKind::LoadRepoInfo, "repo")),
             Cmd::LoadBranches => Some((JobKind::LoadBranches, "branches")),
             Cmd::LoadStashes => Some((JobKind::LoadStashes, "stashes")),
+            Cmd::Probe => Some((JobKind::Probe, "probe")),
             Cmd::LoadDiff(_) => Some((JobKind::LoadDiff, "diff")),
             // **`Exec` だけは走らせる `GitOp` で説明が変わる**（`fetch` / `push`）。
             // `verb()` は `to_command` の `argv[0]` と同じ語を返す（03）。

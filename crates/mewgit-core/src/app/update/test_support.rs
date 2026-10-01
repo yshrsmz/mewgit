@@ -160,6 +160,17 @@ pub(super) fn reload(state: &AppState) -> Cmd {
     }
 }
 
+/// `Reload::RefsAndLog` が出す読み直し（書き込みのあとと、外の ref の変化のあと）。
+pub(super) fn refs_and_log(state: &AppState) -> Cmd {
+    Cmd::Batch(vec![
+        Cmd::LoadStatus,
+        Cmd::LoadRepoInfo,
+        Cmd::LoadBranches,
+        Cmd::LoadStashes,
+        reload(state),
+    ])
+}
+
 pub(super) fn press(state: &mut AppState, c: char) -> Cmd {
     update(state, Msg::Key(Key::char(c)))
 }

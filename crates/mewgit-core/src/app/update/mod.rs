@@ -37,7 +37,6 @@ use prs::{
 use rebase::commit_message_loaded;
 use remote::{fetch, push};
 use stash::{stash_key, stashes_loaded};
-pub(crate) use watch::PROBE_INTERVAL;
 use watch::{fingerprint_loaded, focus_gained, reload_all};
 use worktree::{head_message_loaded, status_loaded, worktree_key};
 

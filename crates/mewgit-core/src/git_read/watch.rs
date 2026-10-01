@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::SystemTime;
 
-use super::{GitReadError, Oid, RepoReader};
+use super::{GitReadError, Oid, RepoReader, STASH_REF};
 
 /// ワークツリーのファイル 1 つの `(mtime, len)`。
 ///
@@ -47,9 +47,6 @@ pub struct RepoFingerprint {
     /// ワークツリーごとの gitdir の `index` と、gitdir そのものの mtime（進行中操作の印）。
     pub worktree: (Option<SystemTime>, Option<SystemTime>),
 }
-
-/// `refs/stash` の完全な名前。
-const STASH_REF: &str = "refs/stash";
 
 impl RepoReader {
     /// いまの指紋。

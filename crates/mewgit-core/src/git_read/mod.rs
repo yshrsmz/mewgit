@@ -25,6 +25,9 @@ pub use repo::RepoReader;
 pub use thread::ReaderHandle;
 pub use watch::{FileStamp, RepoFingerprint};
 
+/// stash の ref の完全な名前。一覧（reflog）と外の変更の指紋が読む。
+pub(crate) const STASH_REF: &str = "refs/stash";
+
 /// 短縮 Oid の桁数。`git log --oneline` と同じ 7 桁。
 pub const SHORT_OID: usize = 7;
 
@@ -470,6 +473,22 @@ impl WorktreeSnapshot {
         for section in [staged, unstaged, untracked, conflicted] {
             section.sort_by(|a, b| a.path.cmp(&b.path));
         }
+    }
+
+    /// 全区画のエントリ。分解束縛なので、区画を足したら漏れがコンパイルエラーになる
+    /// （[`sort_sections`](Self::sort_sections) と同じ狙い）。
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &FileEntry> {
+        let Self {
+            staged,
+            unstaged,
+            untracked,
+            conflicted,
+            progress: _,
+            stamps: _,
+        } = self;
+        [staged, unstaged, untracked, conflicted]
+            .into_iter()
+            .flatten()
     }
 
     /// 区画の中身。網羅 `match` なので、区画を足したら実装漏れがコンパイルエラーになる。

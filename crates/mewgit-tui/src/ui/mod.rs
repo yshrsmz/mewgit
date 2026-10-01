@@ -516,20 +516,25 @@ const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// 増えていない** —— ジョブが 1 つ増えるたびに案内かヒントが末尾から削られるので、
 /// 空いているヘッダへ移した。
 fn spinner_line(state: &AppState) -> Option<Line<'static>> {
-    // **出さない種別がある**（`JobKind::spins`。2 秒ごとの probe）。それしか走って
-    // いなければ駒も出さない —— 出すと 2 秒ごとに 1 フレームだけ駒が光る。
-    if !state.jobs.iter().any(|job| job.kind.spins()) {
-        return None;
-    }
+    // **`Tick` を 1 つまたいで走っているジョブだけを描く**（`Job::since`。07 の
+    // 「ヘッダ」）。1 フレームで終わるもの（2 秒ごとの probe、小さなリポジトリの
+    // status）まで描くと、そのたびに駒が 1 フレームだけ光る。
+    let mut labels = state
+        .jobs
+        .iter()
+        .filter(|job| job.since < state.tick)
+        .map(|job| job.label)
+        .peekable();
+    labels.peek()?;
     // 駒は `Tick` の回数で選ぶ。`jobs` の中身では選ばない —— 走っているものが
     // 変わらないあいだ止まって見える。
     let frame = SPINNER[(state.tick % SPINNER.len() as u64) as usize];
     // 説明は `&'static str` なので、組むのは `Vec<Span>` 1 本だけ。描画は入力が
     // 無くても `Tick` で回る（1 秒に 4 回）ので、中間の `String` を作らない。
     let mut spans = vec![Span::raw(frame)];
-    for job in state.jobs.iter().filter(|job| job.kind.spins()) {
+    for label in labels {
         spans.push(Span::raw(" "));
-        spans.push(Span::raw(job.label));
+        spans.push(Span::raw(label));
     }
     Some(Line::from(spans))
 }
@@ -1166,6 +1171,9 @@ mod tests {
         // 要るのは「扇形が走っている」ことだけ —— スピナーが `pr checks` になる。
         let ask = fetch_pr_details(&state, &[(1, "sha", Err(GithubError::NotFound))]);
         let _ = state.issue(ask);
+        // `Tick` を 1 つまたぐ。またがないジョブはスピナーに出ない（`Job::since`）。
+        // 1 周（駒の数）進めるので、描かれる駒は `tick` が 0 のときと同じ。
+        state.tick += super::SPINNER.len() as u64;
         state
     }
 
@@ -1294,13 +1302,16 @@ mod tests {
     }
 
     /// ジョブを 1 つ走らせた状態で描いたヘッダ。
+    ///
+    /// **`tick` の 1 周あとで描く** —— `Tick` をまたがないジョブはスピナーに出ない
+    /// （`Job::since`）。1 周ずらしても駒は `tick` のときと同じ。
     fn header_while_fetching(tick: u64) -> String {
         let mut state = state_at("/repo");
         let _ = state.issue(Cmd::Exec(GitOp::Fetch {
             remote: None,
             prune: false,
         }));
-        state.tick = tick;
+        state.tick = tick + super::SPINNER.len() as u64;
         header(&state, TermSize::default())
     }
 
@@ -1320,19 +1331,21 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_does_not_spin() {
-        // 2 秒ごとに 1ms 未満で終わる。出すと 2 秒ごとに 1 フレームだけ駒が光る
-        // （`JobKind::spins`。01 の「外部の変更の検知」）。
+    fn a_job_spins_only_after_it_outlives_a_tick() {
+        // 1 フレームで終わるもの（2 秒ごとの probe、小さなリポジトリの status）を描くと、
+        // そのたびに駒が 1 フレームだけ光る（`Job::since`。07 の「ヘッダ」）。
         let mut state = state_at("/repo");
         let _ = state.issue(Cmd::Probe);
-        let alone = header(&state, TermSize::default());
-        assert!(!alone.contains('⠋'), "header: {alone:?}");
+        let fresh = header(&state, TermSize::default());
+        assert!(!fresh.contains("probe"), "header: {fresh:?}");
 
-        // ほかと一緒に走っていても説明に混ぜない。肯定側も同じ状態で見る。
+        // 同じジョブが `Tick` をまたいだら出す。肯定側も同じ状態で見る。後から
+        // 発行したものは、まだ出ない。
+        state.tick += 1;
         let _ = state.issue(Cmd::LoadStatus);
-        let both = header(&state, TermSize::default());
-        assert!(both.contains("⠋ status"), "header: {both:?}");
-        assert!(!both.contains("probe"), "header: {both:?}");
+        let later = header(&state, TermSize::default());
+        assert!(later.contains(" probe"), "header: {later:?}");
+        assert!(!later.contains("status"), "header: {later:?}");
     }
 
     #[test]

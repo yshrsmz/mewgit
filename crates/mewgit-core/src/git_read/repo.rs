@@ -7,7 +7,7 @@ use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
     lossy, signature, Branch, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex, RefLabel,
-    Remote, StashEntry, Upstream, UpstreamConfig,
+    Remote, StashEntry, Upstream, UpstreamConfig, STASH_REF,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -254,7 +254,7 @@ impl RepoReader {
     /// stash が 1 つも無い（`refs/stash` が無い）ときは空の `Vec`。libgit2 は reflog の
     /// ファイルが無ければ空の reflog を返す。
     pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError> {
-        let reflog = self.repo.reflog("refs/stash")?;
+        let reflog = self.repo.reflog(STASH_REF)?;
         Ok(reflog
             .iter()
             .enumerate()

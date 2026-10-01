@@ -69,8 +69,6 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     // 変更と読むので、次の probe の返りを基準にし直す（01 の「外部の変更の検知 ›
     // mewgit 自身の書き込みと分ける」）。
     state.watch.fingerprint = None;
-    // 飛んでいる probe はこの書き込みより前の値を読んでいる（`Region::Write`）。
-    state.jobs.advance(Region::Write);
 
     reload(
         state,
@@ -85,7 +83,7 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
 /// （01 の「外部の変更の検知」）。
 pub(super) fn reload(state: &mut AppState, reload: Reload) -> Cmd {
     // **持っている値と、走っている読み取りが、ここで古くなる。** 走っている読み取りは
-    // この書き込みより前に頼まれたものなので、届いても採ってはいけない。世代を進めて
+    // この書き込み（または外の変更）より前に頼まれたものなので、届いても採ってはいけない。世代を進めて
     // おくと、下で出す `Cmd` は `issue` で新しい世代で刻まれ、古い返信とは刻印で
     // 見分けが付く（01 の「実行中ジョブ › 世代」）。
     //
@@ -584,9 +582,9 @@ fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
 mod tests {
     use super::super::test_support::{
         cells, commit, commit_op, exec_done, exec_done_of, failed_with, fake_output, finish_exec,
-        forced_push_op, issued, page_loaded, press, push_op, reject_non_fast_forward, reload,
-        repo_snapshot, state, state_for_push, state_with_commits, state_with_page, tracked_head,
-        with_branches, worktree_state, BESIDE_BADGE_CELLS, HEADS_MAIN, NOTICE_CELLS,
+        forced_push_op, issued, page_loaded, press, push_op, refs_and_log, reject_non_fast_forward,
+        reload, repo_snapshot, state, state_for_push, state_with_commits, state_with_page,
+        tracked_head, with_branches, worktree_state, BESIDE_BADGE_CELLS, HEADS_MAIN, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -1041,16 +1039,7 @@ mod tests {
 
         // **ブランチ一覧も読み直す。** commit は `refs/heads/<現在>` を動かすので、
         // 外すと Branches ペインが commit 前の ahead を出したまま残る。
-        assert_eq!(
-            cmd,
-            Cmd::batch([
-                Cmd::LoadStatus,
-                Cmd::LoadRepoInfo,
-                Cmd::LoadBranches,
-                Cmd::LoadStashes,
-                reload(&state)
-            ])
-        );
+        assert_eq!(cmd, refs_and_log(&state));
     }
 
     #[test]

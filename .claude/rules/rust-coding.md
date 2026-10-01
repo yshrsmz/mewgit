@@ -204,6 +204,13 @@ paths:
   `pub(super)` へ広げると**分割の目的と逆を向く** —— リンクを外してコードスパンにする。
   #75 ではこの罠を説明する文の中で自分も踏んだ（`cargo doc --document-private-items`
   の `unresolved link` が唯一の検出手段で、`cargo clippy` では出ない）
+- **git の出力を文字列で分類するときは、行頭の形で見る。** git はコミットの件名を
+  自分の出力に写す（`[main <oid>] <件名>`、`error: could not apply <oid>... <件名>`）ので、
+  行のどこでも拾う照合は件名で取り違える。#137 では件名が `[head-moved] …` のコミットの
+  コンフリクトを `HeadMoved` と読み、#139 では件名に `CONFLICT` を含むコミットを積んだ
+  あとの空の停止を `Conflict` と読んで continue を案内した（どちらも `/code-review` が
+  踏んだ）。**語を足すときは、その語が件名の位置に来た出力を 1 本テストに入れる**
+  （`runner::classify` のテスト）。行頭の形は op ごとに一時リポジトリで叩いて確かめる
 - **同じ判定を 2 箇所に書かない。** 「持っている詳細がカーソルのものか」は
   `GraphState::fresh_detail`、「カーソルが何を指しているか」は
   `GraphState::selection` の 1 つずつ。core（次に何を読むか）と ui（何を描くか）が

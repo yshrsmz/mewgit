@@ -150,7 +150,7 @@ pub(super) fn diff_loaded(
                 // **採った時点の snapshot の stamp を添える**（`DiffView::stamp`）。diff を
                 // 読んだあとに status が新しい stamp を運べば、`diff_is_current` が偽に
                 // なって読み直す。
-                let stamp = state.worktree_stamp(&target);
+                let stamp = state.diff_stamp(&target);
                 let mut view = DiffView {
                     target,
                     files,

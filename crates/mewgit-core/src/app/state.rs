@@ -9,7 +9,7 @@ use crate::auth::url::RemoteUrl;
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
 use crate::git_exec::{GitOp, RebasePlan};
 use crate::git_read::{
-    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, FileStamp, HeadInfo, Oid,
+    Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, Oid, PathStamp,
     RefIndex, Remote, RepoFingerprint, StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
@@ -117,6 +117,16 @@ impl WatchState {
     /// 次の probe を `now` から 1 周期先にする。
     pub(crate) fn restart_probe(&mut self, now: Timestamp) {
         self.next_probe = now.seconds.saturating_add(Self::PROBE_INTERVAL);
+    }
+
+    /// 期限が `now` から 1 周期より先にあれば、1 周期先へ引き戻す。**時計が後ろへ
+    /// 跳んだとき**、期限が跳んだぶんだけ先に残って見張りが止まるのを塞ぐ。
+    pub(crate) fn clamp_to(&mut self, now: Timestamp, config: &Config) {
+        let probe = now.seconds.saturating_add(Self::PROBE_INTERVAL);
+        self.next_probe = self.next_probe.min(probe);
+        if let Some(interval) = Self::status_interval(config) {
+            self.next_status = self.next_status.min(now.seconds.saturating_add(interval));
+        }
     }
 
     /// 次の定期の status を `now` から 1 周期先にする。止めてあれば何もしない。
@@ -662,22 +672,23 @@ impl AppState {
         let wanted = self.wanted_diff();
         self.diff.fresh_view(wanted.as_ref()).is_some_and(|view| {
             self.jobs.is_fresh(JobKind::LoadDiff, Some(view.epoch))
-                && view.stamp == self.worktree_stamp(&view.target)
+                && view.stamp == self.diff_stamp(&view.target)
         })
     }
 
-    /// `target` が読むワークツリーのファイルの、持っている snapshot の `(mtime, len)`。
+    /// `target` が読むファイルの、持っている snapshot の指紋（`WorktreeSnapshot.stamps`）。
     ///
-    /// **ワークツリーを読む対象（`IndexVsWorktree`）だけ。** ほかの対象の中身は
-    /// ワークツリーのファイルを書き換えても変わらない（`HeadVsIndex` は index、
-    /// コミットと stash はオブジェクト）。
-    pub fn worktree_stamp(&self, target: &DiffTarget) -> Option<FileStamp> {
+    /// **ワークツリーか index を読む対象だけ。** コミットと stash の中身はオブジェクトで、
+    /// 外の編集では変わらない。`HeadVsIndex` はワークツリーを読まないが、指紋を丸ごと
+    /// 比べる —— ワークツリーだけの編集で 1 回余分に読み直すが、index 側だけを比べる
+    /// 関数を別に持つより安い。
+    pub fn diff_stamp(&self, target: &DiffTarget) -> Option<PathStamp> {
         match target {
-            DiffTarget::IndexVsWorktree(Some(path)) => {
+            DiffTarget::IndexVsWorktree(Some(path)) | DiffTarget::HeadVsIndex(Some(path)) => {
                 self.worktree.snapshot.stamps.get(path).copied()
             }
             DiffTarget::IndexVsWorktree(None)
-            | DiffTarget::HeadVsIndex(_)
+            | DiffTarget::HeadVsIndex(None)
             | DiffTarget::Commit { .. }
             | DiffTarget::Range { .. }
             | DiffTarget::Stash(_) => None,
@@ -1583,11 +1594,11 @@ pub struct DiffView {
     /// `IndexVsWorktree(a.txt)` のまま中身が減る。対象では鮮度を判じられないので、
     /// 読めた世代を値に添える。[`DiffState::is_current`] が判定に使う。
     pub epoch: u64,
-    /// 採った時点の、対象のファイルのワークツリー側の `(mtime, len)`
-    /// （[`AppState::worktree_stamp`]）。**外でファイルを書き換えたのを拾うため**
+    /// 採った時点の、対象のファイルの指紋（ワークツリーの `(mtime, len)` と index の
+    /// blob。[`AppState::diff_stamp`]）。**外でファイルや index を書き換えたのを拾うため**
     /// （01 の「外部の変更の検知 › 定期の status」）。世代は mewgit の書き込みでしか
     /// 進まないので、外の編集では刻印が最新のまま残る。
-    pub stamp: Option<FileStamp>,
+    pub stamp: Option<PathStamp>,
 }
 
 impl DiffView {

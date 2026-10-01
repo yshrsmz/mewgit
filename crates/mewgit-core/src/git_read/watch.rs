@@ -32,6 +32,19 @@ impl FileStamp {
     }
 }
 
+/// 一覧に出たファイル 1 つの、ワークツリー側と index 側の指紋（`WorktreeSnapshot.stamps`）。
+///
+/// **index 側も要る。** unstaged の diff（`IndexVsWorktree`）は index にも依存するので、
+/// 外で `git add -p` すると、ワークツリーのファイルは動かないまま diff だけが変わる
+/// （`/code-review` が拾った）。index 側の blob は status の delta が既に持っている。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathStamp {
+    /// ワークツリーに無ければ `None`。
+    pub worktree: Option<FileStamp>,
+    /// index の blob。index に無ければ（untracked）`None`。
+    pub index: Option<Oid>,
+}
+
 /// 外の変更を見張る指紋。git を起動せず、git2 と stat だけで組む（02 の「指紋」）。
 ///
 /// どの差から何を読み直すかは `app` が決める（01 の「外部の変更の検知 › 指紋」）。
@@ -40,8 +53,13 @@ pub struct RepoFingerprint {
     /// HEAD（symbolic なら ref 名も）と、`refs/stash` を除く全 ref の名前と指す先の
     /// ハッシュ。
     pub refs: u64,
-    /// `refs/stash` の指す先。
-    pub stash: Option<Oid>,
+    /// `refs/stash` の指す先と、reflog（stash の一覧）の件数。
+    ///
+    /// **件数も要る。** 上以外の stash を外で drop / pop しても `refs/stash` は動かない
+    /// （`git stash drop stash@{1}` の前後で同じ oid。実測）ので、指す先だけでは一覧が
+    /// 読み直されず、mewgit の `d` / `a` / `Z` が `stash@{n}` で別の stash に効く
+    /// （`/code-review` が拾った）。
+    pub stash: (Option<Oid>, usize),
     /// commondir の `config` の mtime（追跡設定・リモート一覧）。
     pub config: Option<SystemTime>,
     /// ワークツリーごとの gitdir の `index` と、gitdir そのものの mtime（進行中操作の印）。
@@ -67,14 +85,14 @@ impl RepoReader {
                 .hash(&mut hasher);
         }
 
-        let mut stash = None;
+        let mut top = None;
         for reference in self.repo.references()? {
             let reference = reference?;
             let name = reference.name_bytes();
             // **`refs/stash` は別に持つ。** 混ぜると stash の書き込みが `RefsAndLog`
             // （グラフの位置を先頭に戻す）に化ける。
             if name == STASH_REF.as_bytes() {
-                stash = reference.target();
+                top = reference.target();
                 continue;
             }
             name.hash(&mut hasher);
@@ -84,9 +102,11 @@ impl RepoReader {
 
         let mtime = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
         let git_dir = self.git_dir();
+        // 無い reflog は空で返る（libgit2。`stashes` と同じ）。
+        let stashes = self.repo.reflog(STASH_REF)?.len();
         Ok(RepoFingerprint {
             refs: hasher.finish(),
-            stash,
+            stash: (top, stashes),
             config: mtime(&self.repo.commondir().join("config")),
             worktree: (mtime(&git_dir.join("index")), mtime(git_dir)),
         })
@@ -147,8 +167,27 @@ mod tests {
         repo.git(&["stash", "push", "-q"]);
         let after = fingerprint(&repo);
 
-        assert!(after.stash.is_some());
+        assert!(after.stash.0.is_some());
         assert_eq!(before.refs, after.refs, "stash が ref の差に混ざっています");
+    }
+
+    #[test]
+    fn dropping_a_stash_below_the_top_moves_the_stash() {
+        // `refs/stash` は動かない（実測）。件数で拾う。
+        let repo = committed();
+        for n in 1..=3 {
+            repo.write_worktree_file("file.txt", format!("{n}\n").as_bytes());
+            repo.git(&["stash", "push", "-q"]);
+        }
+        let before = fingerprint(&repo);
+        repo.git(&["stash", "drop", "-q", "stash@{1}"]);
+        let after = fingerprint(&repo);
+
+        assert_eq!(
+            before.stash.0, after.stash.0,
+            "上の stash が動いています（前提）"
+        );
+        assert_ne!(before.stash, after.stash);
     }
 
     #[test]
@@ -167,7 +206,25 @@ mod tests {
     }
 
     #[test]
-    fn a_deleted_file_has_no_stamp() {
+    fn staging_outside_changes_only_the_index_side_of_the_stamp() {
+        // 外で `git add` しても、ワークツリーのファイルは動かない。unstaged の diff は
+        // index にも依存するので、index 側の blob で拾う。
+        let repo = committed();
+        let reader = RepoReader::open(repo.path()).expect("開けません");
+        repo.write_worktree_file("file.txt", b"two-A\n");
+        let before = reader.status().expect("status を読めません");
+        repo.git(&["add", "file.txt"]);
+        let after = reader.status().expect("status を読めません");
+
+        let path = Path::new("file.txt");
+        let (before, after) = (before.stamps[path], after.stamps[path]);
+        assert_eq!(before.worktree, after.worktree);
+        assert_ne!(before.index, after.index);
+        assert!(after.index.is_some());
+    }
+
+    #[test]
+    fn a_deleted_file_has_no_worktree_side() {
         let repo = committed();
         std::fs::remove_file(repo.path().join("file.txt")).expect("消せません");
         let snapshot = RepoReader::open(repo.path())
@@ -176,7 +233,9 @@ mod tests {
             .expect("status を読めません");
 
         assert_eq!(snapshot.unstaged.len(), 1);
-        assert!(snapshot.stamps.is_empty());
+        let stamp = snapshot.stamps[Path::new("file.txt")];
+        assert_eq!(stamp.worktree, None);
+        assert!(stamp.index.is_some());
     }
 
     #[test]

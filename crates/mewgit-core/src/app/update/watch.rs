@@ -19,6 +19,9 @@ pub(super) fn tick(state: &mut AppState) -> Cmd {
         return Cmd::None;
     }
     let now = state.now;
+    // **時計が後ろへ跳んだら期限を引き戻す**（NTP の補正、VM の復帰）。期限は壁時計の
+    // 秒なので、引き戻さないと跳んだぶんだけ見張りが止まる（`/code-review` が拾った）。
+    state.watch.clamp_to(now, &state.config);
 
     let probe = if now.seconds >= state.watch.next_probe {
         state.watch.restart_probe(now);
@@ -87,8 +90,14 @@ pub(super) fn fingerprint_loaded(
     };
     state.watch.failed = false;
 
-    // **書き込みより前に頼んだ返りは基準にもしない**（01 の「mewgit 自身の書き込みと
-    // 分ける」）。書き込みの途中の値かもしれない。基準は `exec_finished` が捨てている。
+    // **書き込みの実行中に届いた返りは比べない**（01 の「mewgit 自身の書き込みと
+    // 分ける」）。書き込みの途中の値かもしれず、刻印ではまだ見分けられない（世代を
+    // 進めるのは `exec_finished`）。基準は `exec_finished` が捨て、次の probe が取り直す。
+    if state.jobs.is_running(JobKind::Exec) {
+        return Cmd::None;
+    }
+    // **書き込みより前に頼んだ返りは基準にもしない。** 基準は `exec_finished` が
+    // 捨てている。
     //
     // 続きを頼む: 書き込みより前に頼んだ probe の頼み直し。
     if !state.jobs.is_fresh(JobKind::Probe, asked) {
@@ -157,7 +166,7 @@ mod tests {
     use super::*;
     use crate::app::{Msg, Region};
     use crate::git_exec::GitOp;
-    use crate::git_read::{FileStamp, Timestamp, WorktreeSnapshot};
+    use crate::git_read::{FileStamp, PathStamp, Timestamp, WorktreeSnapshot};
     use crate::test_util::{fake_oid, fake_snapshot, reply, FAKE_NOW};
 
     const PROBE: i64 = WatchState::PROBE_INTERVAL;
@@ -173,7 +182,7 @@ mod tests {
     fn print(refs: u64) -> RepoFingerprint {
         RepoFingerprint {
             refs,
-            stash: None,
+            stash: (None, 0),
             config: None,
             worktree: (None, None),
         }
@@ -303,12 +312,12 @@ mod tests {
             ..base.clone()
         };
         let stash = RepoFingerprint {
-            stash: Some(fake_oid(7)),
+            stash: (Some(fake_oid(7)), 1),
             ..base.clone()
         };
         let both = RepoFingerprint {
             config: Some(at),
-            stash: Some(fake_oid(7)),
+            stash: (Some(fake_oid(7)), 1),
             ..base.clone()
         };
         let all = RepoFingerprint {
@@ -427,38 +436,90 @@ mod tests {
         assert_eq!(state.watch.fingerprint, None);
     }
 
+    /// 指紋（ワークツリーの mtime が `worktree` 秒、index の blob が `index`）の付いた status。
+    fn stamped(staged: &[&str], unstaged: &[&str], worktree: u64, index: u8) -> Msg {
+        let mut snapshot = fake_snapshot(staged, unstaged, &[]);
+        snapshot.stamps.insert(
+            PathBuf::from("a.txt"),
+            PathStamp {
+                worktree: Some(FileStamp {
+                    mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(worktree),
+                    len: 6,
+                }),
+                index: Some(fake_oid(index)),
+            },
+        );
+        Msg::StatusLoaded(Box::new(Ok(snapshot)))
+    }
+
     #[test]
     fn an_edit_of_an_already_modified_file_reloads_the_diff() {
         // 一覧は ` M` のまま変わらない（01 の実測）。`stamps` の差で拾う。
         let mut state = diff_state(&["a.txt"], 1);
-        let edited = |secs| {
-            let mut snapshot = fake_snapshot(&[], &["a.txt"], &[]);
-            snapshot.stamps.insert(
-                PathBuf::from("a.txt"),
-                FileStamp {
-                    mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
-                    len: 6,
-                },
-            );
-            Msg::StatusLoaded(Box::new(Ok(snapshot)))
-        };
         let target = state.wanted_diff().expect("対象がありません");
         // stamp の無い snapshot から stamp のあるものへ変わったので読み直す（前提）。
         assert_eq!(
-            reply(&mut state, Cmd::LoadStatus, edited(1)),
+            reply(&mut state, Cmd::LoadStatus, stamped(&[], &["a.txt"], 1, 1)),
             Cmd::LoadDiff(target.clone())
         );
         let _ = update(&mut state, diff_ok(target.clone(), Vec::new()));
         assert!(state.diff_is_current());
 
         // 同じ stamp なら何も読み直さない。
-        assert_eq!(reply(&mut state, Cmd::LoadStatus, edited(1)), Cmd::None);
+        let same = reply(&mut state, Cmd::LoadStatus, stamped(&[], &["a.txt"], 1, 1));
+        assert_eq!(same, Cmd::None);
         assert!(state.diff_is_current());
 
         // 外で書き換えた。status は頼み直さず、diff だけを読み直す。
-        let cmd = reply(&mut state, Cmd::LoadStatus, edited(2));
-        assert_eq!(cmd, Cmd::LoadDiff(target));
+        let edited = reply(&mut state, Cmd::LoadStatus, stamped(&[], &["a.txt"], 2, 1));
+        assert_eq!(edited, Cmd::LoadDiff(target));
         assert!(!state.diff_is_current());
         assert!(state.worktree_is_current());
+    }
+
+    #[test]
+    fn staging_outside_reloads_the_unstaged_diff() {
+        // 外で `git add -p` した。ワークツリーのファイルは動かず、index だけが動く
+        // （`/code-review` が拾った形）。
+        let mut state = diff_state(&["a.txt"], 2);
+        let target = state.wanted_diff().expect("対象がありません");
+        let _ = reply(&mut state, Cmd::LoadStatus, stamped(&[], &["a.txt"], 1, 1));
+        let _ = update(&mut state, diff_ok(target.clone(), Vec::new()));
+        assert!(state.diff_is_current());
+
+        let staged = reply(
+            &mut state,
+            Cmd::LoadStatus,
+            stamped(&["a.txt"], &["a.txt"], 1, 2),
+        );
+
+        assert_eq!(staged, Cmd::LoadDiff(target));
+    }
+
+    #[test]
+    fn a_probe_arriving_while_a_write_runs_is_not_compared() {
+        // 書き込みの途中の値かもしれず、刻印ではまだ見分けられない（`/code-review` が
+        // 拾った順序。probe がリーダースレッドで後ろに並び、書き込みの最中に返る）。
+        let mut state = watching(print(1));
+        let _ = state.issue(Cmd::Probe);
+        let _ = state.issue(Cmd::Exec(stage()));
+
+        assert_eq!(update(&mut state, probed(print(2))), Cmd::None);
+        assert_eq!(state.watch.fingerprint, Some(print(1)));
+    }
+
+    #[test]
+    fn a_clock_jumping_back_does_not_stop_the_watch() {
+        let mut state = state();
+        // 1 時間先から戻ってきた（NTP の補正）。期限は 1 時間先に残っている。
+        state.watch.restart_probe(Timestamp {
+            seconds: FAKE_NOW.seconds + 3600,
+            ..FAKE_NOW
+        });
+
+        // 最初の `Tick` で今から 1 周期先へ引き戻し、その周期が来たら出す。引き戻さないと
+        // 1 時間止まる。
+        assert_eq!(update(&mut state, tick_after(PROBE)), Cmd::None);
+        assert_eq!(update(&mut state, tick_after(2 * PROBE)), Cmd::Probe);
     }
 }

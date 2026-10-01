@@ -23,7 +23,7 @@ pub use log::LogSession;
 pub use progress::in_progress;
 pub use repo::RepoReader;
 pub use thread::ReaderHandle;
-pub use watch::{FileStamp, RepoFingerprint};
+pub use watch::{FileStamp, PathStamp, RepoFingerprint};
 
 /// stash の ref の完全な名前。一覧（reflog）と外の変更の指紋が読む。
 pub(crate) const STASH_REF: &str = "refs/stash";
@@ -435,14 +435,14 @@ pub struct WorktreeSnapshot {
     /// すると、`conflicted` と進行中操作が別々の時点の値になる。鮮度は
     /// `WorktreeState::snapshot_epoch` の 1 本で判る（01）。
     pub progress: Option<InProgressOp>,
-    /// 一覧に出たファイルのワークツリー側の `(mtime, len)`。ワークツリーに無いパスは
-    /// 入らない（02 の「ステータス」）。
+    /// 一覧に出たファイルのワークツリー側の `(mtime, len)` と index 側の blob
+    /// （02 の「ステータス」）。
     ///
     /// **外の変更を拾うための値。** 既に `M` のファイルを外で書き換えても区画も
     /// [`FileStatus`] も変わらないので、一覧を比べるだけでは拾えない（01 の「外部の
     /// 変更の検知 › 定期の status」）。[`FileEntry`] に載せないのは、あちらがコミットの
     /// ファイル一覧と共用で、そちらでは常に空になるため。
-    pub stamps: BTreeMap<PathBuf, FileStamp>,
+    pub stamps: BTreeMap<PathBuf, PathStamp>,
 }
 
 /// ワーキングツリーのどの区画か。[`WorktreeSnapshot`] の区画のフィールドと 1 対 1。

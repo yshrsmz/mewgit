@@ -1320,6 +1320,22 @@ mod tests {
     }
 
     #[test]
+    fn the_probe_does_not_spin() {
+        // 2 秒ごとに 1ms 未満で終わる。出すと 2 秒ごとに 1 フレームだけ駒が光る
+        // （`JobKind::spins`。01 の「外部の変更の検知」）。
+        let mut state = state_at("/repo");
+        let _ = state.issue(Cmd::Probe);
+        let alone = header(&state, TermSize::default());
+        assert!(!alone.contains('⠋'), "header: {alone:?}");
+
+        // ほかと一緒に走っていても説明に混ぜない。肯定側も同じ状態で見る。
+        let _ = state.issue(Cmd::LoadStatus);
+        let both = header(&state, TermSize::default());
+        assert!(both.contains("⠋ status"), "header: {both:?}");
+        assert!(!both.contains("probe"), "header: {both:?}");
+    }
+
+    #[test]
     fn the_spinner_frame_follows_the_tick() {
         // `Tick` ごとに駒が変わること。変わらないと「止まっている」と読める。
         assert_ne!(header_while_fetching(0), header_while_fetching(1));

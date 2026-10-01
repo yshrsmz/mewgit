@@ -155,6 +155,34 @@ mod tests {
     }
 
     #[test]
+    fn rewriting_an_already_modified_file_changes_only_the_stamps() {
+        // 一覧は ` M` のまま（01 の実測の 1 行目）。`stamps` でしか拾えない。
+        let repo = committed();
+        let reader = RepoReader::open(repo.path()).expect("開けません");
+        repo.write_worktree_file("file.txt", b"two-A\n");
+        let before = reader.status().expect("status を読めません");
+        repo.write_worktree_file("file.txt", b"two-BB\n");
+        let after = reader.status().expect("status を読めません");
+
+        assert_eq!(before.unstaged, after.unstaged);
+        assert_ne!(before.stamps, after.stamps);
+        assert!(after.stamps.contains_key(Path::new("file.txt")));
+    }
+
+    #[test]
+    fn a_deleted_file_has_no_stamp() {
+        let repo = committed();
+        std::fs::remove_file(repo.path().join("file.txt")).expect("消せません");
+        let snapshot = RepoReader::open(repo.path())
+            .expect("開けません")
+            .status()
+            .expect("status を読めません");
+
+        assert_eq!(snapshot.unstaged.len(), 1);
+        assert!(snapshot.stamps.is_empty());
+    }
+
+    #[test]
     fn the_stamp_of_a_missing_file_is_none() {
         let repo = committed();
         assert!(FileStamp::of(&repo.path().join("nope")).is_none());

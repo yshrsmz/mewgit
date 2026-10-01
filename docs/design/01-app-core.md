@@ -44,6 +44,7 @@ pub struct AppState {
     pub right_tab: RightTab,          // 右列の上に出すタブ（下の「右上のタブ」）
     pub modal: Option<Modal>,
     pub jobs: JobTracker,             // 実行中の非同期タスク（表示用）
+    pub watch: WatchState,            // 外の変更の見張り。基準の指紋と期限（下の「外部の変更の検知」）
     pub notices: VecDeque<Notice>,    // エラー・情報のトースト
     pub term: TermSize,               // 端末サイズ。レイアウト分岐に使う
     pub tick: u64,                    // Msg::Tick が来た回数。スピナーの駒を選ぶ
@@ -2759,7 +2760,7 @@ impl AppState {
 届いた返信が書き込みより前に頼まれたものかは、刻印を比べれば判る。
 
 ```rust
-pub enum Region { Worktree, Refs, Log, Stash }
+pub enum Region { Worktree, Refs, Log, Stash, Write }
 
 pub struct JobTracker {
     running: Vec<Job>,
@@ -2788,7 +2789,10 @@ impl JobKind {
   辿り直す。02）を払う。**どの書き込みがどこを古くするかは `update::Reload` が既に
   持っている**ので、その値を領域の集合に写す。どれも `Worktree` を含む（書き込みは
   必ず index / ワークツリーを古くする。`Account` だけは何も含まない）。**`Stash` は
-  `refs/stash` の一覧だけ**で、`Refs` とは別に持つ（上の「Stash ペイン」）
+  `refs/stash` の一覧だけ**で、`Refs` とは別に持つ（上の「Stash ペイン」）。**`Write` は
+  値の領域ではない** —— 書き込みを挟んだかだけを数え、読むのは probe だけ（下の「外部の
+  変更の検知 › mewgit 自身の書き込みと分ける」）。`Reload` の集合には入れず、
+  `exec_finished` が書き込みごとに進める
 - **刻むのは `JobTracker::start`**（= `AppState::issue` の中）。`Job.epoch` は非公開で、
   組み立てる側は入れられない。入れられる形にすると、刻む場所が `start` の外に増える
 - **進めるのは `exec_finished` と外部の変更の検知（下の節）。`Cmd` を返す前に進める。** `issue` は `update` の出口
@@ -2932,6 +2936,7 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
 ```rust
 pub enum Msg {
     Key(Key), Resize { term: TermSize }, Layout { graph_rows: usize }, Tick(Timestamp),
+    FocusGained,                       // 端末が前面に戻った（下の「外部の変更の検知」）
     // git_read
     Paste(String),                     // bracketed paste。編集中のモーダルだけが受ける
     LogLoaded { restart: bool, result: Result<LogPage, GitReadError> },
@@ -2941,6 +2946,7 @@ pub enum Msg {
     CommitMessageLoaded { oid: Oid, result: Box<Result<String, GitReadError>> },  // reword の初期値
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
+    FingerprintLoaded(Box<Result<RepoFingerprint, GitReadError>>),  // 下の「外部の変更の検知」
     BranchesLoaded(Box<Result<Vec<Branch>, GitReadError>>),   // ローカルブランチの一覧
     DiffLoaded { target: DiffTarget, result: Box<Result<Vec<FileDiff>, GitReadError>> },
     // git_exec
@@ -3042,6 +3048,7 @@ pub enum Cmd {
     LoadStatus, LoadDiff(DiffTarget),
     LoadRepoInfo,                      // remotes / head / refs。起動時と ref 変更後（M3）
     LoadBranches,                      // ローカルブランチ一覧。RepoInfo とは別（02）
+    Probe,                             // 外の変更を見張る指紋（下の「外部の変更の検知」）
     Exec(GitOp),                       // git CLI 実行（03 参照）
     CancelExec,                        // 走っている Exec を中断する（上の「キャンセル」）
     ResolveTarget(RemoteUrl),          // 既定リモートの URL → RepoTarget（上の「RepoInfo.target を埋める」）
@@ -3133,7 +3140,8 @@ git 2.56.0、一時リポジトリ。外での操作ごとに gitdir の各所�
 リポジトリ（192 本）で **0.25ms**。`git for-each-ref` は 1 万本で 225ms。リーダー
 スレッドは直列なので、1 万本のリポジトリでは 2 秒ごとに `LoadLog` を最大 70ms 待たせる。
 
-**指紋の差から `Reload` を選ぶ**（`RepoFingerprint::reload_for`）——
+**指紋の差から `Reload` を選ぶ**（`update::watch::reload_for`。`Reload` は `app` の型なので
+`git_read` の `RepoFingerprint` には置けない）——
 
 | 変わったもの | `Reload` |
 |---|---|
@@ -3159,11 +3167,13 @@ git 2.56.0、一時リポジトリ。外での操作ごとに gitdir の各所�
   **probe をその場で頼まない** —— `exec_finished` の返す `Cmd` は書き込みごとに読み直しの
   組を決めており（上の「ログの読み直し」）、そこに probe を混ぜると読み直しの表と
   関係の無い 1 本が全部の腕に付く
-- **書き込みより前に頼んだ probe の返りは捨てて頼み直す**（`JobKind::Probe` の領域は
-  `Region::Worktree`。`Account` 以外の書き込みは必ずここを進める）。`status_loaded` の
-  追いつきと同じ形。**`Account`（`.git/config` の 1 行）だけはどの領域も進めない**ので、
-  その書き込みと同時に飛んでいた probe は古いまま基準になり、次の probe で `config` の
-  差として 1 回余分に `Refs` を読み直す（害は読み直し 1 回）
+- **書き込みより前に頼んだ probe の返りは捨てて頼み直す**（`status_loaded` の追いつきと
+  同じ形）。**`JobKind::Probe` の領域は `Region::Write`** —— 値ではなく「mewgit の書き込みを
+  挟んだか」だけを数える領域で、`exec_finished` が書き込みごとに進める（`Account` も）。
+  **`Region::Worktree` で代えない** —— 外の変更の検知も `Worktree` を進める（下の「定期の
+  status」）ので、外で commit したときに status の返りが先に `Worktree` を進め、飛んでいた
+  probe が「書き込みより前」として捨てられて ref の差を取りこぼす（変異で確かめた。
+  `an_external_edit_seen_by_the_status_first_does_not_hide_the_refs`）
 
 ### 定期の status
 

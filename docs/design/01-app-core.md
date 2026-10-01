@@ -3218,7 +3218,7 @@ status と diff の読み直しが 2 秒ごとに走り、diff の世代が進�
 - **stamp はワークツリーの `(mtime, len)` と index の blob の組**（`PathStamp`）。unstaged の
   diff は index にも依存するので、外で `git add -p` すると、ワークツリーのファイルは動かない
   まま diff だけが変わる（`/code-review` が拾った。最初の版はワークツリー側しか見ず、
-  古い diff の `x` が index に残ったハンクの逆変更をワークツリーに入れうった）。index 側の
+  古い diff の `x` が index に残ったハンクの逆変更をワークツリーに入れうる形だった）。index 側の
   blob は status の delta が既に持っているので、index を別に読まない
 - **世代は進めない。** 進めると、外で 1 ファイル保存しただけで status まで古い扱いになり、
   届いた値の刻印を書き換える特例が要った（最初の版。`/simplify` の altitude が拾った）。

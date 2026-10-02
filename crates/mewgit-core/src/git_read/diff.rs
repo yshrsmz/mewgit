@@ -6,7 +6,7 @@ use git2::{DiffFindOptions, DiffLineType, DiffOptions, ErrorCode, Patch, Tree};
 
 use super::{
     file_entry, lossy, DiffTarget, FileDiff, FileEntry, GitReadError, Hunk, HunkLine, LineOrigin,
-    Oid, RepoReader,
+    Oid, PathStamp, RepoReader,
 };
 
 impl RepoReader {
@@ -20,6 +20,14 @@ impl RepoReader {
         // rename が「全行追加の `Added`」になる。そのパッチを `git apply --cached` に
         // 戻すと、rename ではなくファイルの新規追加を index に適用してしまう（02）。
         let mut opts = DiffOptions::new();
+
+        // **ハンクを読む前に採る**（`FileDiff::stamp`）。後で採ると、読んでいる最中に
+        // 外で書き換えられたとき、古いハンクに新しい指紋が付いて守りを素通りする。
+        // 前に採っておけば、ずれは「一致しない → 断る」側に倒れる。
+        let stamp = target
+            .live_path()
+            .map(|path| self.path_stamp(path))
+            .transpose()?;
 
         let mut diff = match &target {
             DiffTarget::IndexVsWorktree(_) => {
@@ -49,7 +57,7 @@ impl RepoReader {
 
         // `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの delta には効かない。
         diff.find_similar(Some(&mut find_options()))?;
-        file_diffs(&diff, target.path())
+        file_diffs(&diff, target.path(), stamp)
     }
 
     /// コミットが変更したファイルの一覧。中身（ハンク）は組まない（02）。
@@ -125,7 +133,7 @@ impl RepoReader {
     }
 
     /// HEAD のツリー。コミットが 1 つも無ければ `None`（空ツリーと比べる）。
-    fn head_tree(&self) -> Result<Option<Tree<'_>>, GitReadError> {
+    pub(super) fn head_tree(&self) -> Result<Option<Tree<'_>>, GitReadError> {
         match self.repo.head() {
             Ok(head) => Ok(Some(head.peel_to_tree()?)),
             Err(err) if err.code() == ErrorCode::UnbornBranch => Ok(None),
@@ -153,7 +161,11 @@ fn find_options() -> DiffFindOptions {
 }
 
 /// diff をファイル単位の値型に落とす。`path` があればそのファイルだけ残す。
-fn file_diffs(diff: &git2::Diff<'_>, path: Option<&Path>) -> Result<Vec<FileDiff>, GitReadError> {
+fn file_diffs(
+    diff: &git2::Diff<'_>,
+    path: Option<&Path>,
+    stamp: Option<PathStamp>,
+) -> Result<Vec<FileDiff>, GitReadError> {
     let mut files = Vec::new();
 
     for index in 0..diff.deltas().len() {
@@ -199,6 +211,7 @@ fn file_diffs(diff: &git2::Diff<'_>, path: Option<&Path>) -> Result<Vec<FileDiff
             status,
             binary: delta.flags().is_binary(),
             hunks: read_hunks(&patch)?,
+            stamp,
         });
     }
 

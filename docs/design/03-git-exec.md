@@ -9,7 +9,7 @@
 ```rust
 pub enum GitOp {
     Stage(Vec<PathBuf>), Unstage(Vec<PathBuf>),
-    StageHunk { path, patch: Vec<u8> }, UnstageHunk { .. }, DiscardHunk { .. },
+    StageHunk(Box<HunkApply>), UnstageHunk(Box<HunkApply>), DiscardHunk(Box<HunkApply>),
     Discard(Vec<PathBuf>), DiscardUntracked(Vec<PathBuf>), DiscardAdded(Vec<PathBuf>),
     Commit { message: String, amend: bool },
     BranchCreate { name, start: Option<String>, switch: bool },
@@ -32,6 +32,13 @@ pub enum GitOp {
 - **`patch` は `Vec<u8>`。** `git apply --cached` に戻す入力なので、lossy 変換すると
   非 UTF-8 のファイルをステージした結果が元のファイルと変わる（02 の「ハンクの持ち方」と
   同じ理由）
+- **ハンクの 3 操作は同じ `HunkApply { path, patch, expect }` を箱に入れて持つ。**
+  `expect` はハンクを読んだ時点の指紋（02 の `FileDiff::stamp`）で、argv には載らず、
+  `Runner` が git を起こす前に照合する（下の「古いハンクの守り」）。3 変種にフィールドを
+  並べると、足すたびに 3 箇所を揃えることになり、しかも `GitOp` が 96 から 104 バイトに
+  伸びて `Cmd` の大きさの規則（01 の「`Cmd`」）が数え直しになる（実測 2026-10-03、64bit）。
+  最初の版は `expect` だけを箱に入れていた（`/simplify` の simplification と altitude が
+  独立に拾った）
 - **ハンクの 3 操作は `--whitespace=nowarn` を必ず付ける。** 既定はユーザーの
   `apply.whitespace` を読む。`fix`（よく勧められる設定）だと git が行末の空白を
   落としてから index に入れるので、**画面に出したハンクと index の中身が静かに
@@ -330,6 +337,8 @@ pub enum ExecError {
     NoResult { argv: Vec<String>, reason: String },
     /// ユーザーが中断した（下の「キャンセル」）。
     Canceled { argv: Vec<String> },
+    /// ハンクを読んだあとに対象が変わっていた。git は起動していない（下の「古いハンクの守り」）。
+    Stale { argv: Vec<String>, path: PathBuf },
     /// git が非 0 で終わった。
     Failed { argv: Vec<String>, code: Option<i32>, stderr: String, kind: ExecErrorKind },
 }
@@ -346,7 +355,8 @@ pub enum ExecError {
   struct にすると「起動していないときは `code` が `None`、`stderr` に git ではない文言、
   `kind` は分類表に載らない値」という約束を、読む側が毎回思い出すことになる。
   `Canceled` も同じ理由で 3 つ目にした（中断した git の `code` と `stderr` は
-  signal の言い換えでしかない）
+  signal の言い換えでしかない）。`Stale` も同じで、git を起こしていないので `code` も
+  `stderr` も無く、代わりに古くなったパスを持つ
 - 環境変数: `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`（エラー文の検出を安定させる）、`GIT_EDITOR='<mewgit_bin>' --commit-editor` と `GIT_SEQUENCE_EDITOR='<mewgit_bin>' --sequence-editor`（端末のエディタを起こさない）、`GIT_CONFIG_*` で `core.commentString=#mewgit#`（**3 つともどのコマンドにも載せる**。下の「Interactive rebase の実装」）。`with_env` の指定はこの後に重ねるので、テストは上書きできる
 - **`GIT_TERMINAL_PROMPT=0` では ssh のパスフレーズ入力を止められない。** `ssh` は
   stdin ではなく `/dev/tty` を直接読むので、agent に載っていない鍵だと止まる
@@ -356,6 +366,57 @@ pub enum ExecError {
   `stat` が `T`、同じグループなら `S+` で入力待ちになることを実測）。**プロンプトが
   出ないまま止まる**ので、押した本人にはなお何が起きているか判らない。
   **実効 ssh の後ろに `-o BatchMode=yes` を重ねて塞ぐ**（下の「BatchMode の重ね方」）
+
+### 古いハンクの守り
+
+**ハンクの 3 操作は、git を起こす前に対象のファイルの指紋を採り直し、`expect` と
+違えば起こさずに `ExecError::Stale` で返す**（`GitOp::stale_at`）。どこで比べるかと
+なぜ 2 つの指紋を持つかは 01 の「外部の変更の検知 › 古いハンクの守り」。
+
+守りが無いときの実測（2026-10-03、git 2.56.0。一時リポジトリで `line2 → two-A` の
+差分を `git diff` で採り、ワークツリーを `two-B` に書き換えてから当てた。2026-09-27 の
+git 2.55.0 の pty の実測も同じ結果）:
+
+| 操作 | 結果 |
+|---|---|
+| stage（`git apply --cached`） | **exit 0。index に `two-A`（HEAD にもワークツリーにも無い）が入り `MM`** |
+| discard（`git apply --reverse`） | exit 1（`patch does not apply`）。ワークツリーは無傷 |
+
+- **指紋はワークツリーの `(mtime, len)`、index の blob、HEAD のツリーの blob**（02 の `PathStamp`）。採るのは `git_read` の
+  `RepoReader::path_stamp` で、diff の側と同じ 1 本（00 のレイヤーの例外）。git2 は同期
+  なので `spawn_blocking` に載せ、**ハンク操作のたびにリポジトリを開く**。コスト
+  （2026-10-03、release、macOS、200 回の平均。`/simplify` の efficiency が測った）:
+
+  | リポジトリ | index | 開いて採る（いまの形） | 開いたままの reader で採る | git を 1 本起こす |
+  |---|---|---|---|---|
+  | mewgit | 13 KB | 333 µs | 12 µs | 3.3 ms |
+  | 中規模（Android アプリ） | 184 KB | 856 µs | 15 µs | 3.3 ms |
+  | 合成した 5 万ファイル | 3.6 MB | 11.2 ms | 62 µs | 3.4 ms |
+
+  キーを 1 回押すたびに 1 回なので払う。リーダースレッドの reader を使い回せば安いが、
+  `LoadLog` の後ろに並ぶ（照合から実行までが開く）うえ、`Runner` に `ReaderHandle` を
+  持たせることになる
+- **比べるのは、パッチの基準と当てる先だけ**（`GitOp::stale_at`）——
+
+  | 操作 | パッチ | 比べる側 | 比べない側 |
+  |---|---|---|---|
+  | stage / discard | index → ワークツリー（`IndexVsWorktree`） | ワークツリー、index | HEAD（外の commit でもパッチは変わらない） |
+  | unstage | HEAD → index（`HeadVsIndex`）、当てる先は index | index、HEAD | ワークツリー（編集を続けながら staged なハンクを外す形を断らない） |
+
+  **unstage は HEAD も見る。** 外の `git commit` は index もワークツリーも動かさず HEAD
+  だけを動かすので、最初の版（index だけを比べていた）は、commit のあとの古い staged な
+  ハンクの `u` を通し、**exit 0 で index に `line2`（HEAD にもワークツリーにも無い）を
+  入れた**（`/code-review` が拾った。git 2.56.0 で再現 —— `two-A` を stage して
+  `git diff --cached` を採り、commit してから `git apply --cached --reverse` で `MM`）
+- **discard も守る。** 上の実測で git が断ったのは、書き換えがハンクのコンテキストに
+  掛かった形だけ。古いパッチは、内容の同じハンクが 2 つあるファイルでオフセット追従に
+  拾われて別のハンクに当たりうる（01 の「diff のキャッシュと鮮度」。#24）ので、git が
+  断ることを守りの根拠にしない。3 操作を同じ規則で通す
+- **受け入れた穴が 2 つ。** (1) 照合してから git がファイルを読むまでの隙間（ミリ秒）。
+  (2) **同じ長さで mtime も同じ**書き換え（git 自身の racy-git と同じ形）。APFS と ext4 は
+  mtime をナノ秒で持つので、同じ刻みに 2 回書かない限り起きない。秒単位のファイル
+  システムでは 1 秒の中の書き換えを取りこぼす
+- 断ったあとの読み直しと通知の出し方は 01（`Warn`、要約行にパスを入れない）
 
 ### キャンセル
 
@@ -467,10 +528,12 @@ GIT_SSH_COMMAND = "<実効> -o BatchMode=yes"
 - stdout / stderr は表示専用なので lossy で `String` にする
 - タイムアウトは設けない（fetch の長さは予測不能）。代わりに UI から中断できるようにする
   （下の「キャンセル」）
-終了状態を得られない経路は 3 つ（`to_commands` の失敗、起動の失敗、終了待ちの失敗）。どれも `ExecError::NoResult` で返し、`reason` には git の
+終了状態を得られない経路（`to_commands` の失敗、古いハンクの守りが指紋を採れなかった、
+起動の失敗、終了待ちの失敗）は、どれも `ExecError::NoResult` で返し、`reason` には git の
 stderr ではなく mewgit の説明文を入れる。**中断はここに入れない** —— 終了状態は
 得られており（signal で落ちた）、区別したいのは「失敗か、止めたか」だから
-（`ExecError::Canceled`。上の「キャンセル」）。
+（`ExecError::Canceled`。上の「キャンセル」）。**守りが断ったのも入れない**
+（`ExecError::Stale`）—— 確かめられなかったのではなく、確かめて古かった。
 
 ## エラー分類（ExecErrorKind）
 

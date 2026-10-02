@@ -447,6 +447,7 @@ mod tests {
                     len: 6,
                 }),
                 index: Some(fake_oid(index)),
+                head: None,
             },
         );
         Msg::StatusLoaded(Box::new(Ok(snapshot)))

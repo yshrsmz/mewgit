@@ -28,9 +28,10 @@ impl RepoReader {
             .renames_index_to_workdir(true);
 
         let mut snapshot = WorktreeSnapshot::default();
-        // パスごとの index 側の blob（`PathStamp::index`）。delta が既に持っているので、
-        // index を別に読まない。
+        // パスごとの index 側と HEAD 側の blob（`PathStamp::index` / `head`）。delta が既に
+        // 持っているので、index も HEAD のツリーも別に読まない。
         let mut index = HashMap::new();
+        let mut head = HashMap::new();
         for entry in self.repo.statuses(Some(&mut opts))?.iter() {
             // CONFLICTED は index 側・ワークツリー側のビットと同時に立つ。解消するまで
             // stage も unstage もできないので、conflicted だけに入れて他の区画には出さない。
@@ -50,6 +51,7 @@ impl RepoReader {
             if let Some(delta) = entry.head_to_index() {
                 if let Some(file) = file_entry(&delta) {
                     index.insert(file.path.clone(), delta.new_file().id());
+                    head.insert(file.path.clone(), delta.old_file().id());
                     snapshot.staged.push(file);
                 }
             }
@@ -58,6 +60,10 @@ impl RepoReader {
             if let Some(file) = to_workdir.as_ref().and_then(file_entry) {
                 if let Some(delta) = &to_workdir {
                     index.insert(file.path.clone(), delta.old_file().id());
+                    // staged な変更が無ければ HEAD と index は同じ blob。あれば上の
+                    // `head_to_index` が入れた値を残す。
+                    head.entry(file.path.clone())
+                        .or_insert_with(|| delta.old_file().id());
                 }
                 // untracked は「まだ index に無い」だけで unstaged とは操作が違う
                 // （stage はできるが unstage / discard の意味が変わる）ので分ける。
@@ -83,6 +89,7 @@ impl RepoReader {
                 worktree: FileStamp::of(&self.workdir().join(&entry.path)),
                 // **ゼロの oid は「index に無い」**（untracked と、index から消したもの）。
                 index: index.get(&entry.path).copied().filter(|oid| !oid.is_zero()),
+                head: head.get(&entry.path).copied().filter(|oid| !oid.is_zero()),
             };
             stamps.insert(entry.path.clone(), stamp);
         }

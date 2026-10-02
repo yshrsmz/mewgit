@@ -435,7 +435,7 @@ pub struct WorktreeSnapshot {
     /// すると、`conflicted` と進行中操作が別々の時点の値になる。鮮度は
     /// `WorktreeState::snapshot_epoch` の 1 本で判る（01）。
     pub progress: Option<InProgressOp>,
-    /// 一覧に出たファイルのワークツリー側の `(mtime, len)` と index 側の blob
+    /// 一覧に出たファイルのワークツリー側の `(mtime, len)` と index 側・HEAD 側の blob
     /// （02 の「ステータス」）。
     ///
     /// **外の変更を拾うための値。** 既に `M` のファイルを外で書き換えても区画も
@@ -570,6 +570,19 @@ impl DiffTarget {
             DiffTarget::Stash(_) => None,
         }
     }
+
+    /// ワークツリーか index を読む対象で、パスを絞っているときのそのパス。
+    ///
+    /// **外の編集で中身が変わりうる対象はこれだけ** —— コミットと stash の中身は
+    /// オブジェクトで、外の編集では変わらない。指紋（`PathStamp`）を付けるかを決める
+    /// 規則で、`diff` が付ける側（`FileDiff::stamp`）と `app` が比べる側
+    /// （`AppState::diff_stamp`）の両方がここを見る。
+    pub fn live_path(&self) -> Option<&Path> {
+        match self {
+            DiffTarget::IndexVsWorktree(path) | DiffTarget::HeadVsIndex(path) => path.as_deref(),
+            DiffTarget::Commit { .. } | DiffTarget::Range { .. } | DiffTarget::Stash(_) => None,
+        }
+    }
 }
 
 /// 1 ファイル分の diff。
@@ -588,6 +601,19 @@ pub struct FileDiff {
     /// 「mode だけの変更」も `hunks` が空になるので、区別はこのフラグで付ける。
     pub binary: bool,
     pub hunks: Vec<Hunk>,
+    /// このハンクを読む**前**に採った、対象のファイルの指紋
+    /// （[`RepoReader::path_stamp`]）。ハンク操作が `HunkApply` の `expect` に載せ、
+    /// `git apply` の直前に採り直した値と比べる（01 の「外部の変更の検知 › 古いハンクの守り」）。
+    ///
+    /// **ワークツリーか index を読む対象（`IndexVsWorktree` / `HeadVsIndex`）で、
+    /// パスを絞ったときだけ `Some`。** コミットと stash の中身はオブジェクトで、外の
+    /// 編集では変わらない。
+    ///
+    /// **`DiffView::stamp`（status の stamp）とは別の値。** あちらは「読み直すか」を
+    /// 決めるために status と比べる値で、こちらは「見えているハンクがいまのファイルと
+    /// 合っているか」を確かめる値。片方に寄せると、status が diff より古いときに
+    /// 「違う → 読み直す → また違う」が次の status まで回る。
+    pub stamp: Option<PathStamp>,
 }
 
 /// diff のハンク 1 つ。`git_exec` がパッチとして再構成できる形で持つ。

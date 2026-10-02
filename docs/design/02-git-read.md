@@ -35,6 +35,7 @@ impl RepoReader {
     pub fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;
     pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;  // 下の「stash 一覧」
     pub fn fingerprint(&self) -> Result<RepoFingerprint, GitReadError>;  // 下の「指紋」
+    pub fn path_stamp(&self, path: &Path) -> Result<PathStamp, GitReadError>;  // 下の「ハンクの指紋」
 }
 ```
 
@@ -431,7 +432,7 @@ pub struct WorktreeSnapshot {
     pub untracked: Vec<FileEntry>,
     pub conflicted: Vec<FileEntry>,
     pub progress: Option<InProgressOp>,   // 区画ではない。下の「進行中操作の検出」
-    /// 一覧に出たファイルのワークツリー側の `(mtime, len)` と index 側の blob。
+    /// 一覧に出たファイルのワークツリー側の `(mtime, len)` と index 側・HEAD 側の blob。
     pub stamps: BTreeMap<PathBuf, PathStamp>,
 }
 
@@ -507,6 +508,9 @@ pub struct FileDiff {
     /// バイナリと判定された。`hunks` は空になる。
     pub binary: bool,
     pub hunks: Vec<Hunk>,
+    /// ハンクを組む前に採った対象の指紋（下の「ハンクの指紋」）。ワークツリーか index を
+    /// 読む対象でパスを絞ったときだけ `Some`。
+    pub stamp: Option<PathStamp>,
 }
 
 pub struct Hunk { pub header: String, pub lines: Vec<HunkLine> }
@@ -666,6 +670,30 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 - `MERGE_HEAD` は octopus では複数行になる。`Merge` が持つのは先頭行だけ
 - ファイルが読めない・中身が壊れているときは、その行を「無い」と読んで次の判定へ進む。
   **戻り値が `Option` で `Result` でないのはこのため**（上の「API」）
+
+## ハンクの指紋
+
+ハンク操作の守り（01 の「外部の変更の検知 › 古いハンクの守り」、03 の「古いハンクの
+守り」）が比べる値。`path_stamp` が `PathStamp`（ワークツリーの `(mtime, len)`、index の
+stage 0 の blob、HEAD のツリーにある blob）を組む。HEAD 側は staged なハンクのパッチの
+基準で、外の commit はそこだけを動かす（03 の「古いハンクの守り」）。
+
+- **`diff` は `IndexVsWorktree` / `HeadVsIndex` でパスを絞ったとき、ハンクを組む前に
+  `path_stamp` を採り、返す `FileDiff` の全部に載せる。** 後で採ると、読んでいる最中に
+  外で書き換えられたとき、古いハンクに新しい指紋が付いて守りを素通りする。前に採れば、
+  ずれは「一致しない → 断る」側に倒れる。絞らない形（`path: None`）は `None` ——
+  Worktree の diff は必ずパスを絞る（01 の `wanted_diff`）。**どの対象に付けるかは
+  `DiffTarget::live_path` の 1 本**で、status の stamp を引く `app` の `diff_stamp` も
+  同じものを見る（`/simplify` の reuse が、2 箇所に同じ網羅 `match` があるのを拾った）
+- **index は読み直してから引く**（`Index::read(false)`）。libgit2 の `Index` はリポジトリに
+  貼り付いた写しで、外の `git add` を自分からは読み直さない。リーダースレッドは同じ
+  `Repository` を使い続けるので、読み直さないと外の `git add` を取りこぼす（`diff` 自身は
+  libgit2 の `diff_load_index` が読み直す）
+- **`git_exec` の `Runner` もこれを呼ぶ**（00 のレイヤーの例外）。組み方が diff の側と
+  割れると照合がずれるので、組むのはここ 1 本
+- **status の `stamps`（上の「ステータス」）とは組み方が違う** —— あちらは index 側を
+  delta から取る（index を別に読まない）。比べる相手は常に同じ組み方の値（status は
+  status と、`FileDiff::stamp` は `path_stamp` と）なので、ずれても照合は狂わない
 
 ## 指紋
 

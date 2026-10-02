@@ -683,16 +683,11 @@ impl AppState {
     /// 比べる —— ワークツリーだけの編集で 1 回余分に読み直すが、index 側だけを比べる
     /// 関数を別に持つより安い。
     pub fn diff_stamp(&self, target: &DiffTarget) -> Option<PathStamp> {
-        match target {
-            DiffTarget::IndexVsWorktree(Some(path)) | DiffTarget::HeadVsIndex(Some(path)) => {
-                self.worktree.snapshot.stamps.get(path).copied()
-            }
-            DiffTarget::IndexVsWorktree(None)
-            | DiffTarget::HeadVsIndex(None)
-            | DiffTarget::Commit { .. }
-            | DiffTarget::Range { .. }
-            | DiffTarget::Stash(_) => None,
-        }
+        self.worktree
+            .snapshot
+            .stamps
+            .get(target.live_path()?)
+            .copied()
     }
 
     /// 持っている worktree の一覧を**直近の書き込みより後に**読めているか。
@@ -1594,7 +1589,7 @@ pub struct DiffView {
     /// `IndexVsWorktree(a.txt)` のまま中身が減る。対象では鮮度を判じられないので、
     /// 読めた世代を値に添える。[`DiffState::is_current`] が判定に使う。
     pub epoch: u64,
-    /// 採った時点の、対象のファイルの指紋（ワークツリーの `(mtime, len)` と index の
+    /// 採った時点の、対象のファイルの指紋（ワークツリーの `(mtime, len)` と index・HEAD の
     /// blob。[`AppState::diff_stamp`]）。**外でファイルや index を書き換えたのを拾うため**
     /// （01 の「外部の変更の検知 › 定期の status」）。世代は mewgit の書き込みでしか
     /// 進まないので、外の編集では刻印が最新のまま残る。

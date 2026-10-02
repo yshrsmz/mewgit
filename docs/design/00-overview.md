@@ -22,7 +22,10 @@
 同じ段にある `graph` / `git_read` / `git_exec` / `github` の間では、**`git_read` の値型
 （`Oid`、`InProgressOp`、`Hunk` など）だけは他の 3 つから参照してよい**。git の概念を
 表す語彙を 4 回定義し直さないため。逆向き（`git_read` が他の 3 つを使う）と、
-`graph` / `git_exec` / `github` の相互参照はしない。進行中操作の**検出**は `git_read`
+`graph` / `git_exec` / `github` の相互参照はしない。**例外は 1 つ** —— `git_exec` の
+`Runner` は、ハンク操作の前提を確かめるために `git_read` の `RepoReader::open` と `path_stamp` を
+呼ぶ（03 の「古いハンクの守り」）。指紋の組み方を diff の側と 1 本にするためで、向きは
+`git_exec` → `git_read` だけなので循環しない。進行中操作の**検出**は `git_read`
 の責務で、`status()` が同じ読み取りの中で検出して `WorktreeSnapshot` に載せる
 （02・03 参照）。
 

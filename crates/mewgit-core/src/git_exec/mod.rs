@@ -10,7 +10,7 @@ mod runner;
 
 use std::path::PathBuf;
 
-use crate::git_read::Oid;
+use crate::git_read::{Oid, PathStamp};
 
 pub use argv::{push_remote_ref, to_commands, ArgvError, GitCommand};
 pub use patch::{hunk_patch, supports_hunk_patch};
@@ -25,20 +25,11 @@ pub use runner::Runner;
 pub enum GitOp {
     Stage(Vec<PathBuf>),
     Unstage(Vec<PathBuf>),
-    /// ハンク単位の stage。`patch` は `git apply --cached` に渡すパッチそのもの。
-    ///
-    /// `path` は argv に載らない（パッチのファイルヘッダが対象を持つ）。UI が
-    /// 「どのファイルを stage したか」を通知に出すために持つ。
-    StageHunk {
-        path: PathBuf,
-        /// **`String` ではなく `Vec<u8>`。** lossy 変換すると、非 UTF-8 のファイルを
-        /// ステージした結果が元のファイルと変わる（02 の「ハンクの持ち方」）。
-        patch: Vec<u8>,
-    },
-    UnstageHunk {
-        path: PathBuf,
-        patch: Vec<u8>,
-    },
+    /// ハンク単位の stage（`git apply --cached`）。
+    StageHunk(Box<HunkApply>),
+    /// ハンク単位の unstage（`git apply --cached --reverse`）。**守りは index 側と HEAD 側を
+    /// 比べる**（[`GitOp::stale_at`]）。
+    UnstageHunk(Box<HunkApply>),
     /// ハンク単位の discard。**ワークツリーだけを書き換える**（`--cached` は付かない）。
     ///
     /// index とワークツリーの両方に当てる変種は作らない。`git apply --index` は
@@ -46,10 +37,7 @@ pub enum GitOp {
     /// `does not match index` で落ちる。2 回に割ると片方だけ通った中途半端な状態が
     /// 残るので、staged なハンクの discard は UI が「先に unstage してください」と
     /// 断る（03）。
-    DiscardHunk {
-        path: PathBuf,
-        patch: Vec<u8>,
-    },
+    DiscardHunk(Box<HunkApply>),
     /// tracked なファイルの変更を HEAD の内容に戻す。
     ///
     /// untracked なファイルは `git restore` では消せないので
@@ -308,6 +296,21 @@ pub enum ExecError {
         /// 中断した argv。`git` 自身は含まない。
         argv: Vec<String>,
     },
+    /// ハンクを読んだあとに、対象のファイルか index が変わっていた
+    /// （[`GitOp::stale_at`]）。**`git` は起動していない。**
+    ///
+    /// 古いハンクを当てると、`s` は HEAD にもワークツリーにも無い内容を index に
+    /// 入れる（03 の「古いハンクの守り」）。`Failed` と分けるのは、何も壊れておらず、
+    /// 読み直した差分でもう一度押せば済むから（通知は `Warn`）。
+    ///
+    /// **要約行にパスを入れない。** 長さに上限が無く、通知の予算（01 の「失敗の案内文」）を
+    /// 食って案内の側を押し出す。パスは通知の詳細に出す（`app` の `exec_detail`）。
+    #[error("外で変更されていました。読み直した差分で押し直してください")]
+    Stale {
+        /// 起こすはずだった argv。`git` 自身は含まない。
+        argv: Vec<String>,
+        path: PathBuf,
+    },
     /// `git` が非 0 で終わった。
     #[error("git の実行に失敗しました: git {}", .argv.join(" "))]
     Failed {
@@ -325,6 +328,7 @@ impl ExecError {
         match self {
             ExecError::NoResult { argv, .. }
             | ExecError::Canceled { argv }
+            | ExecError::Stale { argv, .. }
             | ExecError::Failed { argv, .. } => argv,
         }
     }
@@ -335,6 +339,96 @@ impl ExecError {
     /// 付ける／付けないが箇所ごとにずれる。
     pub fn command_line(&self) -> String {
         format!("git {}", self.argv().join(" "))
+    }
+}
+
+/// ハンク操作 1 つぶんの中身（[`GitOp::StageHunk`] / [`GitOp::UnstageHunk`] /
+/// [`GitOp::DiscardHunk`]）。
+///
+/// **3 変種で同じものを持つので 1 つにまとめ、丸ごと箱に入れる。** 裸で並べると
+/// `GitOp` が 96 から 104 バイトに伸び、`Cmd` の大きさの規則（01 の「`Cmd`」。
+/// `cmd_stays_small`）が数え直しになる（実測 2026-10-03）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HunkApply {
+    /// argv に載らない（パッチのファイルヘッダが対象を持つ）。UI が「どのファイルか」を
+    /// 通知に出すのと、守りが指紋を採り直すのに使う。
+    pub path: PathBuf,
+    /// `git apply` に渡すパッチそのもの。**`String` ではなく `Vec<u8>`。** lossy 変換すると、
+    /// 非 UTF-8 のファイルをステージした結果が元のファイルと変わる（02 の「ハンクの持ち方」）。
+    pub patch: Vec<u8>,
+    /// パッチを読んだ時点の `path` の指紋（`FileDiff::stamp`）。[`Runner`] が `git apply` を
+    /// 起こす直前に採り直し、違えば起こさずに [`ExecError::Stale`] で断る（03 の
+    /// 「古いハンクの守り」）。argv には載らない。
+    pub expect: PathStamp,
+}
+
+impl GitOp {
+    /// ハンク操作の中身。ハンク操作でなければ `None`。
+    ///
+    /// 網羅 `match` にしているのは、パッチを当てる変種を足したときに、古いハンクの守り
+    /// （03）を通すかどうかを選ばせるため。
+    pub fn hunk(&self) -> Option<&HunkApply> {
+        match self {
+            GitOp::StageHunk(hunk) | GitOp::UnstageHunk(hunk) | GitOp::DiscardHunk(hunk) => {
+                Some(hunk)
+            }
+            GitOp::Stage(_)
+            | GitOp::Unstage(_)
+            | GitOp::Discard(_)
+            | GitOp::DiscardUntracked(_)
+            | GitOp::DiscardAdded(_)
+            | GitOp::Commit { .. }
+            | GitOp::BranchCreate { .. }
+            | GitOp::Switch(_)
+            | GitOp::BranchDelete { .. }
+            | GitOp::BranchRename { .. }
+            | GitOp::Fetch { .. }
+            | GitOp::Pull { .. }
+            | GitOp::Push { .. }
+            | GitOp::RebaseInteractive { .. }
+            | GitOp::RebaseContinue
+            | GitOp::RebaseSkip
+            | GitOp::RebaseAbort
+            | GitOp::CherryPick(_)
+            | GitOp::CherryPickContinue
+            | GitOp::CherryPickSkip
+            | GitOp::CherryPickAbort
+            | GitOp::Revert { .. }
+            | GitOp::RevertContinue
+            | GitOp::RevertSkip
+            | GitOp::RevertAbort
+            | GitOp::MergeAbort
+            | GitOp::StashPush { .. }
+            | GitOp::StashApply(_)
+            | GitOp::StashPop(_)
+            | GitOp::StashDrop(_)
+            | GitOp::SetAccount { .. }
+            | GitOp::UnsetAccount
+            | GitOp::CheckoutPr(_) => None,
+        }
+    }
+
+    /// `now`（いまの指紋）が、この操作が前提にした指紋から外れているか。前提の無い
+    /// 操作では偽。
+    ///
+    /// **比べるのは、パッチの基準と当てる先だけ**（03 の「古いハンクの守り」）。
+    /// - stage / discard: パッチは index → ワークツリー（`IndexVsWorktree`）。ワークツリーと
+    ///   index。HEAD は見ない —— 外で commit しても、このパッチは変わらない
+    /// - unstage: パッチは HEAD → index（`HeadVsIndex`）で、当てる先は index。index と HEAD。
+    ///   ワークツリーは見ない —— エディタで編集を続けながら staged なハンクを外す形を、
+    ///   毎回断らないため。**HEAD を見ないと、外で commit したあとの古いハンクが exit 0 で
+    ///   通る**（`/code-review` が拾った）
+    pub fn stale_at(&self, now: &PathStamp) -> bool {
+        let Some(hunk) = self.hunk() else {
+            return false;
+        };
+        let (expect, now) = (&hunk.expect, now);
+        let worktree_side = (expect.worktree, expect.index) != (now.worktree, now.index);
+        let head_side = (expect.index, expect.head) != (now.index, now.head);
+        match self {
+            GitOp::UnstageHunk(_) => head_side,
+            _ => worktree_side,
+        }
     }
 }
 

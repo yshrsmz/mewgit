@@ -11,8 +11,8 @@ use mewgit_core::auth::ssh::SshCommand;
 use mewgit_core::auth::{resolve, DegradedReason};
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::{
-    ExecError, ExecErrorKind, GitOp, LocalBranch, PrSource, RebaseAction, RebaseEntry, RebasePlan,
-    Runner,
+    ExecError, ExecErrorKind, GitOp, HunkApply, LocalBranch, PrSource, RebaseAction, RebaseEntry,
+    RebasePlan, Runner,
 };
 use mewgit_core::git_read::Oid;
 use mewgit_core::test_util::{
@@ -96,6 +96,7 @@ fn failure_kind(err: &ExecError) -> ExecErrorKind {
         ExecError::Failed { kind, .. } => *kind,
         ExecError::NoResult { reason, .. } => panic!("git が走っていません: {reason}"),
         ExecError::Canceled { argv } => panic!("中断していません: git {}", argv.join(" ")),
+        ExecError::Stale { path, .. } => panic!("git が走っていません: {} が古い", path.display()),
     }
 }
 
@@ -323,20 +324,22 @@ async fn stage_hunk_sends_the_patch_on_stdin() {
 
     let runner = repo.runner();
     runner
-        .run(&GitOp::StageHunk {
+        .run(&GitOp::StageHunk(Box::new(HunkApply {
             path: "file.txt".into(),
             patch: patch.clone(),
-        })
+            expect: repo.path_stamp("file.txt"),
+        })))
         .await
         .expect("ハンクを stage できませんでした");
     assert_eq!(repo.porcelain(), "M  file.txt");
 
     // 同じパッチを逆に当てると index が元に戻る。
     runner
-        .run(&GitOp::UnstageHunk {
+        .run(&GitOp::UnstageHunk(Box::new(HunkApply {
             path: "file.txt".into(),
             patch,
-        })
+            expect: repo.path_stamp("file.txt"),
+        })))
         .await
         .expect("ハンクを unstage できませんでした");
     assert_eq!(repo.porcelain(), " M file.txt");

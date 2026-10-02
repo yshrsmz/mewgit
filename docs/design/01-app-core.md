@@ -2851,7 +2851,7 @@ crossterm の `KeyEvent` は core に入れられないので、core 側に等�
 `crossterm::event::KeyEvent → app::Key` の変換は `mewgit-tui` 側で行う。
 
 フィールドは非公開にし、コンストラクタを唯一の入口にする。同じ打鍵が 1 通りの表現に
-なるよう正規化するため。正規化しないと `Key` の `Eq` / `Hash` が壊れ、`keymap`（08、M6）
+なるよう正規化するため。正規化しないと `Key` の `Eq` / `Hash` が壊れ、`keymap`（08、MVP 後）
 の引き当てが静かに外れる。
 
 - `Char` は shift 適用後の値が入るので `shift` を落とす（crossterm は `P` に `SHIFT` を立てて渡す）

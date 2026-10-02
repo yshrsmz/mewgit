@@ -215,7 +215,7 @@ notice として表示したうえで既定値で継続する。
 
 - `config` は `keymap` を `HashMap<String, String>` のまま保持する。解析結果の型は
   crossterm の `KeyEvent` ではなく core の `app::Key`（01）。パーサをどこに置くかは
-  M6 のキーマップタスクで決める
+  キーマップのタスク（MVP 後。`docs/plan.md` の「MVP 後」）で決める
 - `keymap` の値は `app::Key` に変換（`"ctrl-d"`, `"shift-tab"`, `"P"` などを解析）
 - **上書きは `app::keys` の表と dispatch の両方に効かせる**（01 の「案内に出すキーの
   表」）。片方だけだと、**ヒントが既定の字を出したまま別のキーが効く**

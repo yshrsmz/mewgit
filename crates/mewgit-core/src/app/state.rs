@@ -1589,7 +1589,7 @@ pub struct DiffView {
     /// `IndexVsWorktree(a.txt)` のまま中身が減る。対象では鮮度を判じられないので、
     /// 読めた世代を値に添える。[`DiffState::is_current`] が判定に使う。
     pub epoch: u64,
-    /// 採った時点の、対象のファイルの指紋（ワークツリーの `(mtime, len)` と index の
+    /// 採った時点の、対象のファイルの指紋（ワークツリーの `(mtime, len)` と index・HEAD の
     /// blob。[`AppState::diff_stamp`]）。**外でファイルや index を書き換えたのを拾うため**
     /// （01 の「外部の変更の検知 › 定期の status」）。世代は mewgit の書き込みでしか
     /// 進まないので、外の編集では刻印が最新のまま残る。

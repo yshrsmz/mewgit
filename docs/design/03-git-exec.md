@@ -382,7 +382,7 @@ git 2.55.0 の pty の実測も同じ結果）:
 | stage（`git apply --cached`） | **exit 0。index に `two-A`（HEAD にもワークツリーにも無い）が入り `MM`** |
 | discard（`git apply --reverse`） | exit 1（`patch does not apply`）。ワークツリーは無傷 |
 
-- **指紋は `(mtime, len)` と index の blob**（02 の `PathStamp`）。採るのは `git_read` の
+- **指紋はワークツリーの `(mtime, len)`、index の blob、HEAD のツリーの blob**（02 の `PathStamp`）。採るのは `git_read` の
   `RepoReader::path_stamp` で、diff の側と同じ 1 本（00 のレイヤーの例外）。git2 は同期
   なので `spawn_blocking` に載せ、**ハンク操作のたびにリポジトリを開く**。コスト
   （2026-10-03、release、macOS、200 回の平均。`/simplify` の efficiency が測った）:
@@ -396,10 +396,18 @@ git 2.55.0 の pty の実測も同じ結果）:
   キーを 1 回押すたびに 1 回なので払う。リーダースレッドの reader を使い回せば安いが、
   `LoadLog` の後ろに並ぶ（照合から実行までが開く）うえ、`Runner` に `ReaderHandle` を
   持たせることになる
-- **unstage は index 側だけを比べる。** `git apply --cached --reverse` は index にしか
-  当たらず、パッチ（`HeadVsIndex`）もワークツリーを読まない。エディタで編集を続けながら
-  staged なハンクを外す形を毎回断らないため。**stage と discard は両方** —— パッチは
-  ワークツリーから読んだ中身で、当てる先か基準が index
+- **比べるのは、パッチの基準と当てる先だけ**（`GitOp::stale_at`）——
+
+  | 操作 | パッチ | 比べる側 | 比べない側 |
+  |---|---|---|---|
+  | stage / discard | index → ワークツリー（`IndexVsWorktree`） | ワークツリー、index | HEAD（外の commit でもパッチは変わらない） |
+  | unstage | HEAD → index（`HeadVsIndex`）、当てる先は index | index、HEAD | ワークツリー（編集を続けながら staged なハンクを外す形を断らない） |
+
+  **unstage は HEAD も見る。** 外の `git commit` は index もワークツリーも動かさず HEAD
+  だけを動かすので、最初の版（index だけを比べていた）は、commit のあとの古い staged な
+  ハンクの `u` を通し、**exit 0 で index に `line2`（HEAD にもワークツリーにも無い）を
+  入れた**（`/code-review` が拾った。git 2.56.0 で再現 —— `two-A` を stage して
+  `git diff --cached` を採り、commit してから `git apply --cached --reverse` で `MM`）
 - **discard も守る。** 上の実測で git が断ったのは、書き換えがハンクのコンテキストに
   掛かった形だけ。古いパッチは、内容の同じハンクが 2 つあるファイルでオフセット追従に
   拾われて別のハンクに当たりうる（01 の「diff のキャッシュと鮮度」。#24）ので、git が

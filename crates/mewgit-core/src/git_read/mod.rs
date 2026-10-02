@@ -435,7 +435,7 @@ pub struct WorktreeSnapshot {
     /// すると、`conflicted` と進行中操作が別々の時点の値になる。鮮度は
     /// `WorktreeState::snapshot_epoch` の 1 本で判る（01）。
     pub progress: Option<InProgressOp>,
-    /// 一覧に出たファイルのワークツリー側の `(mtime, len)` と index 側の blob
+    /// 一覧に出たファイルのワークツリー側の `(mtime, len)` と index 側・HEAD 側の blob
     /// （02 の「ステータス」）。
     ///
     /// **外の変更を拾うための値。** 既に `M` のファイルを外で書き換えても区画も

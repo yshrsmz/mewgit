@@ -281,7 +281,7 @@ async fn paths_with_a_space_or_non_ascii_apply_to_the_right_file() {
 
 // ---- 古いハンクの守り（03 の「古いハンクの守り」） ----
 //
-// 外で書き換えるときは**長さも変える。** 守りが比べるのは `(mtime, len)` と index の
+// 外で書き換えるときは**長さも変える。** 守りが比べるのは `(mtime, len)` と index・HEAD の
 // blob で、同じ長さだと mtime の分解能に頼ることになる（ナノ秒の APFS / ext4 では
 // 拾えるが、テストをそこに依存させない）。
 
@@ -377,9 +377,9 @@ async fn a_hunk_read_before_an_outside_edit_is_not_discarded() {
 }
 
 #[tokio::test]
-async fn unstaging_a_hunk_looks_only_at_the_index() {
-    // **ワークツリーの編集では断らない。** unstage はパッチも当てる先も index だけ
-    // （`GitOp::stale_at`）。エディタで編集を続けながら staged なハンクを外す形。
+async fn unstaging_a_hunk_ignores_the_worktree_but_not_the_index() {
+    // **ワークツリーの編集では断らない。** unstage のパッチは HEAD → index で、当てる先も
+    // index（`GitOp::stale_at`）。エディタで編集を続けながら staged なハンクを外す形。
     let repo = one_hunk_repo();
     repo.git(&["add", "f.txt"]);
     let file = one_file(&repo, DiffTarget::HeadVsIndex(Some("f.txt".into())));
@@ -432,4 +432,59 @@ fn the_stamp_is_read_only_for_the_worktree_and_the_index() {
         },
     );
     assert_eq!(commit.stamp, None);
+}
+
+#[tokio::test]
+async fn unstaging_a_hunk_read_before_an_outside_commit_is_refused() {
+    // **外の commit は index もワークツリーも動かさず、HEAD だけを動かす。** unstage の
+    // パッチの基準は HEAD なので、守りが HEAD を見ないと `git apply --cached --reverse` が
+    // exit 0 で通り、index に `line2`（HEAD にもワークツリーにも無い）が入る
+    // （`/code-review` が拾った。git 2.56.0 で再現）。
+    let repo = one_hunk_repo();
+    repo.git(&["add", "f.txt"]);
+    let file = one_file(&repo, DiffTarget::HeadVsIndex(Some("f.txt".into())));
+    repo.git(&["commit", "-q", "-m", "outside"]);
+
+    let result = repo
+        .runner()
+        .run(&GitOp::UnstageHunk(Box::new(HunkApply {
+            path: "f.txt".into(),
+            patch: patch_of(&file, 0),
+            expect: stamp_of(&file),
+        })))
+        .await;
+
+    assert_eq!(stale_path(result), Path::new("f.txt"));
+    assert_eq!(staged(&repo, "f.txt"), b"line1\ntwo-A\nline3\n");
+    assert_eq!(repo.porcelain(), "");
+}
+
+#[tokio::test]
+async fn staging_a_hunk_does_not_look_at_head() {
+    // stage のパッチは index → ワークツリーで、HEAD を基準にしない。`two-A` を stage した
+    // うえで `two-BB` に編集し、その unstaged なハンクを読んでから外で commit する ——
+    // `f.txt` の HEAD 側の blob だけが動き、index もワークツリーも動かない。断らずに当てる。
+    let repo = one_hunk_repo();
+    repo.git(&["add", "f.txt"]);
+    repo.write_worktree_file("f.txt", b"line1\ntwo-BB\nline3\n");
+    let file = one_file(&repo, DiffTarget::IndexVsWorktree(Some("f.txt".into())));
+    let before = stamp_of(&file);
+    repo.git(&["commit", "-q", "-m", "outside"]);
+    let after = repo.path_stamp("f.txt");
+    // 前提: 動いたのは HEAD 側だけ。
+    assert_ne!(before.head, after.head);
+    assert_eq!(
+        (before.worktree, before.index),
+        (after.worktree, after.index)
+    );
+
+    repo.runner()
+        .run(&GitOp::StageHunk(Box::new(HunkApply {
+            path: "f.txt".into(),
+            patch: patch_of(&file, 0),
+            expect: before,
+        })))
+        .await
+        .expect("HEAD が動いただけで stage が断られました");
+    assert_eq!(staged(&repo, "f.txt"), b"line1\ntwo-BB\nline3\n");
 }

@@ -836,6 +836,7 @@ pub fn fake_stamp() -> PathStamp {
     PathStamp {
         worktree: None,
         index: Some(fake_oid(0xab)),
+        head: Some(fake_oid(0xac)),
     }
 }
 

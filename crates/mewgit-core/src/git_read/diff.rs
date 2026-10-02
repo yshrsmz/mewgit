@@ -133,7 +133,7 @@ impl RepoReader {
     }
 
     /// HEAD のツリー。コミットが 1 つも無ければ `None`（空ツリーと比べる）。
-    fn head_tree(&self) -> Result<Option<Tree<'_>>, GitReadError> {
+    pub(super) fn head_tree(&self) -> Result<Option<Tree<'_>>, GitReadError> {
         match self.repo.head() {
             Ok(head) => Ok(Some(head.peel_to_tree()?)),
             Err(err) if err.code() == ErrorCode::UnbornBranch => Ok(None),

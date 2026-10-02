@@ -43,6 +43,13 @@ pub struct PathStamp {
     pub worktree: Option<FileStamp>,
     /// index の blob。index に無ければ（untracked）`None`。
     pub index: Option<Oid>,
+    /// HEAD のツリーにある blob。HEAD に無ければ（追加したばかり、untracked、unborn）`None`。
+    ///
+    /// **staged の diff（`HeadVsIndex`）の基準は HEAD。** 外で `git commit` すると index も
+    /// ワークツリーも動かないまま HEAD だけが動き、古い staged なハンクの unstage が
+    /// exit 0 で通って index に HEAD にもワークツリーにも無い内容を入れる（`/code-review` が
+    /// 拾った。03 の「古いハンクの守り」）。
+    pub head: Option<Oid>,
 }
 
 /// 外の変更を見張る指紋。git を起動せず、git2 と stat だけで組む（02 の「指紋」）。
@@ -125,11 +132,16 @@ impl RepoReader {
     pub fn path_stamp(&self, path: &Path) -> Result<PathStamp, GitReadError> {
         let mut index = self.repo.index()?;
         index.read(false)?;
+        let head = match self.head_tree()? {
+            Some(tree) => tree.get_path(path).ok().map(|entry| entry.id()),
+            None => None,
+        };
         Ok(PathStamp {
             worktree: FileStamp::of(&self.workdir().join(path)),
             // コンフリクト中のファイルは stage 0 が無いので `None`（ハンク操作の対象に
             // ならない）。
             index: index.get_path(path, 0).map(|entry| entry.id),
+            head,
         })
     }
 }

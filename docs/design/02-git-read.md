@@ -432,7 +432,7 @@ pub struct WorktreeSnapshot {
     pub untracked: Vec<FileEntry>,
     pub conflicted: Vec<FileEntry>,
     pub progress: Option<InProgressOp>,   // 区画ではない。下の「進行中操作の検出」
-    /// 一覧に出たファイルのワークツリー側の `(mtime, len)` と index 側の blob。
+    /// 一覧に出たファイルのワークツリー側の `(mtime, len)` と index 側・HEAD 側の blob。
     pub stamps: BTreeMap<PathBuf, PathStamp>,
 }
 
@@ -674,8 +674,9 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 ## ハンクの指紋
 
 ハンク操作の守り（01 の「外部の変更の検知 › 古いハンクの守り」、03 の「古いハンクの
-守り」）が比べる値。`path_stamp` が `PathStamp`（ワークツリーの `(mtime, len)` と、index の
-stage 0 の blob）を組む。
+守り」）が比べる値。`path_stamp` が `PathStamp`（ワークツリーの `(mtime, len)`、index の
+stage 0 の blob、HEAD のツリーにある blob）を組む。HEAD 側は staged なハンクのパッチの
+基準で、外の commit はそこだけを動かす（03 の「古いハンクの守り」）。
 
 - **`diff` は `IndexVsWorktree` / `HeadVsIndex` でパスを絞ったとき、ハンクを組む前に
   `path_stamp` を採り、返す `FileDiff` の全部に載せる。** 後で採ると、読んでいる最中に

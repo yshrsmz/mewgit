@@ -27,7 +27,7 @@ pub enum GitOp {
     Unstage(Vec<PathBuf>),
     /// ハンク単位の stage（`git apply --cached`）。
     StageHunk(Box<HunkApply>),
-    /// ハンク単位の unstage（`git apply --cached --reverse`）。**守りは index 側だけを
+    /// ハンク単位の unstage（`git apply --cached --reverse`）。**守りは index 側と HEAD 側を
     /// 比べる**（[`GitOp::stale_at`]）。
     UnstageHunk(Box<HunkApply>),
     /// ハンク単位の discard。**ワークツリーだけを書き換える**（`--cached` は付かない）。
@@ -411,18 +411,23 @@ impl GitOp {
     /// `now`（いまの指紋）が、この操作が前提にした指紋から外れているか。前提の無い
     /// 操作では偽。
     ///
-    /// **unstage は index 側だけを比べる。** `git apply --cached --reverse` は index にしか
-    /// 当たらず、パッチ（`HeadVsIndex`）もワークツリーを読まない。エディタで編集を
-    /// 続けながら staged なハンクを外す形を、毎回断らないため。stage と discard は
-    /// 両方 —— パッチがワークツリーから読んだ中身で、当てる先か基準が index。
+    /// **比べるのは、パッチの基準と当てる先だけ**（03 の「古いハンクの守り」）。
+    /// - stage / discard: パッチは index → ワークツリー（`IndexVsWorktree`）。ワークツリーと
+    ///   index。HEAD は見ない —— 外で commit しても、このパッチは変わらない
+    /// - unstage: パッチは HEAD → index（`HeadVsIndex`）で、当てる先は index。index と HEAD。
+    ///   ワークツリーは見ない —— エディタで編集を続けながら staged なハンクを外す形を、
+    ///   毎回断らないため。**HEAD を見ないと、外で commit したあとの古いハンクが exit 0 で
+    ///   通る**（`/code-review` が拾った）
     pub fn stale_at(&self, now: &PathStamp) -> bool {
         let Some(hunk) = self.hunk() else {
             return false;
         };
-        if matches!(self, GitOp::UnstageHunk(_)) {
-            hunk.expect.index != now.index
-        } else {
-            hunk.expect != *now
+        let (expect, now) = (&hunk.expect, now);
+        let worktree_side = (expect.worktree, expect.index) != (now.worktree, now.index);
+        let head_side = (expect.index, expect.head) != (now.index, now.head);
+        match self {
+            GitOp::UnstageHunk(_) => head_side,
+            _ => worktree_side,
         }
     }
 }

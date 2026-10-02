@@ -181,9 +181,9 @@ impl Reload {
             // index / ワークツリーだけ。ref も HEAD も動かない。
             GitOp::Stage(_)
             | GitOp::Unstage(_)
-            | GitOp::StageHunk { .. }
-            | GitOp::UnstageHunk { .. }
-            | GitOp::DiscardHunk { .. }
+            | GitOp::StageHunk(_)
+            | GitOp::UnstageHunk(_)
+            | GitOp::DiscardHunk(_)
             | GitOp::Discard(_)
             | GitOp::DiscardUntracked(_)
             | GitOp::DiscardAdded(_) => Reload::Nothing,
@@ -418,9 +418,9 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
         }
         | GitOp::Stage(_)
         | GitOp::Unstage(_)
-        | GitOp::StageHunk { .. }
-        | GitOp::UnstageHunk { .. }
-        | GitOp::DiscardHunk { .. }
+        | GitOp::StageHunk(_)
+        | GitOp::UnstageHunk(_)
+        | GitOp::DiscardHunk(_)
         | GitOp::Discard(_)
         | GitOp::DiscardUntracked(_)
         | GitOp::DiscardAdded(_)
@@ -459,9 +459,9 @@ fn empty_advice(op: &GitOp) -> Option<&'static str> {
         }
         GitOp::Stage(_)
         | GitOp::Unstage(_)
-        | GitOp::StageHunk { .. }
-        | GitOp::UnstageHunk { .. }
-        | GitOp::DiscardHunk { .. }
+        | GitOp::StageHunk(_)
+        | GitOp::UnstageHunk(_)
+        | GitOp::DiscardHunk(_)
         | GitOp::Discard(_)
         | GitOp::DiscardUntracked(_)
         | GitOp::DiscardAdded(_)
@@ -515,9 +515,9 @@ fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
         }
         GitOp::Stage(_)
         | GitOp::Unstage(_)
-        | GitOp::StageHunk { .. }
-        | GitOp::UnstageHunk { .. }
-        | GitOp::DiscardHunk { .. }
+        | GitOp::StageHunk(_)
+        | GitOp::UnstageHunk(_)
+        | GitOp::DiscardHunk(_)
         | GitOp::Discard(_)
         | GitOp::DiscardUntracked(_)
         | GitOp::DiscardAdded(_)
@@ -605,7 +605,7 @@ mod tests {
     use super::*;
     use crate::app::Msg;
 
-    use crate::git_exec::{ExecErrorKind, LocalBranch, PrSource, PullMode, RebasePlan};
+    use crate::git_exec::{ExecErrorKind, HunkApply, LocalBranch, PrSource, PullMode, RebasePlan};
     use crate::git_read::{GitReadError, LogPage, WorktreeSection};
     use crate::test_util::fake_pr_checkout;
 
@@ -662,11 +662,11 @@ mod tests {
         // （上限が無く、案内を押し出す）。読み直しは他の失敗と同じく出る ——
         // 届いた status と diff で押し直せる。
         let mut state = state();
-        let op = GitOp::StageHunk {
+        let op = GitOp::StageHunk(Box::new(HunkApply {
             path: "dir/a.txt".into(),
             patch: Vec::new(),
-            expect: Box::new(fake_stamp()),
-        };
+            expect: fake_stamp(),
+        }));
         let _ = state.issue(Cmd::Exec(op.clone()));
 
         let cmd = update(
@@ -1200,11 +1200,11 @@ mod tests {
         );
         assert_eq!(
             Reload::after(
-                &GitOp::StageHunk {
+                &GitOp::StageHunk(Box::new(HunkApply {
                     path: "a.txt".into(),
                     patch: Vec::new(),
-                    expect: Box::new(fake_stamp()),
-                },
+                    expect: fake_stamp(),
+                })),
                 true
             ),
             Reload::Nothing

@@ -9,7 +9,7 @@
 ```rust
 pub enum GitOp {
     Stage(Vec<PathBuf>), Unstage(Vec<PathBuf>),
-    StageHunk { path, patch: Vec<u8>, expect: Box<PathStamp> }, UnstageHunk { .. }, DiscardHunk { .. },
+    StageHunk(Box<HunkApply>), UnstageHunk(Box<HunkApply>), DiscardHunk(Box<HunkApply>),
     Discard(Vec<PathBuf>), DiscardUntracked(Vec<PathBuf>), DiscardAdded(Vec<PathBuf>),
     Commit { message: String, amend: bool },
     BranchCreate { name, start: Option<String>, switch: bool },
@@ -32,10 +32,13 @@ pub enum GitOp {
 - **`patch` は `Vec<u8>`。** `git apply --cached` に戻す入力なので、lossy 変換すると
   非 UTF-8 のファイルをステージした結果が元のファイルと変わる（02 の「ハンクの持ち方」と
   同じ理由）
-- **`expect` はハンクを読んだ時点の指紋**（02 の `FileDiff::stamp`）。argv には載らず、
-  `Runner` が git を起こす前に照合する（下の「古いハンクの守り」）。**箱に入れる** ——
-  裸だと `GitOp` が 96 から 104 バイトに伸び、`Cmd` の大きさの規則（01 の「`Cmd`」）が
-  数え直しになる（実測 2026-10-03、64bit）
+- **ハンクの 3 操作は同じ `HunkApply { path, patch, expect }` を箱に入れて持つ。**
+  `expect` はハンクを読んだ時点の指紋（02 の `FileDiff::stamp`）で、argv には載らず、
+  `Runner` が git を起こす前に照合する（下の「古いハンクの守り」）。3 変種にフィールドを
+  並べると、足すたびに 3 箇所を揃えることになり、しかも `GitOp` が 96 から 104 バイトに
+  伸びて `Cmd` の大きさの規則（01 の「`Cmd`」）が数え直しになる（実測 2026-10-03、64bit）。
+  最初の版は `expect` だけを箱に入れていた（`/simplify` の simplification と altitude が
+  独立に拾った）
 - **ハンクの 3 操作は `--whitespace=nowarn` を必ず付ける。** 既定はユーザーの
   `apply.whitespace` を読む。`fix`（よく勧められる設定）だと git が行末の空白を
   落としてから index に入れるので、**画面に出したハンクと index の中身が静かに
@@ -381,7 +384,18 @@ git 2.55.0 の pty の実測も同じ結果）:
 
 - **指紋は `(mtime, len)` と index の blob**（02 の `PathStamp`）。採るのは `git_read` の
   `RepoReader::path_stamp` で、diff の側と同じ 1 本（00 のレイヤーの例外）。git2 は同期
-  なので `spawn_blocking` に載せ、ハンク操作のたびにリポジトリを開く
+  なので `spawn_blocking` に載せ、**ハンク操作のたびにリポジトリを開く**。コスト
+  （2026-10-03、release、macOS、200 回の平均。`/simplify` の efficiency が測った）:
+
+  | リポジトリ | index | 開いて採る（いまの形） | 開いたままの reader で採る | git を 1 本起こす |
+  |---|---|---|---|---|
+  | mewgit | 13 KB | 333 µs | 12 µs | 3.3 ms |
+  | 中規模（Android アプリ） | 184 KB | 856 µs | 15 µs | 3.3 ms |
+  | 合成した 5 万ファイル | 3.6 MB | 11.2 ms | 62 µs | 3.4 ms |
+
+  キーを 1 回押すたびに 1 回なので払う。リーダースレッドの reader を使い回せば安いが、
+  `LoadLog` の後ろに並ぶ（照合から実行までが開く）うえ、`Runner` に `ReaderHandle` を
+  持たせることになる
 - **unstage は index 側だけを比べる。** `git apply --cached --reverse` は index にしか
   当たらず、パッチ（`HeadVsIndex`）もワークツリーを読まない。エディタで編集を続けながら
   staged なハンクを外す形を毎回断らないため。**stage と discard は両方** —— パッチは

@@ -3248,7 +3248,7 @@ status と diff の読み直しが 2 秒ごとに走り、diff の世代が進�
   片方に寄せると、status が diff より古いときに「違う → 読み直す → また違う」が次の
   status まで回る（1 本目の `/simplify` の altitude が時点のずれを拾い、2 本目で決めた）
 - **比べるのは `git_exec` の `Runner`**（2026-10-02 にユーザーと決めた）。`update` は
-  I/O をしないので、指紋を `GitOp` の `expect` に載せ、`Runner` が git を起こす直前に
+  I/O をしないので、指紋を `GitOp` の中身（`HunkApply`）の `expect` に載せ、`Runner` が git を起こす直前に
   採り直す。**reader 経由の往復**（`Cmd` → `Msg` で採り直してから `Exec` を出す）は
   採らなかった —— `AppState` に返事待ちのハンク操作が増え、リーダーが `LoadLog` の
   後ろに並ぶと照合から実行までの隙間が広がる。`x` は確認モーダルを挟むので、押してから

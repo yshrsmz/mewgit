@@ -570,6 +570,19 @@ impl DiffTarget {
             DiffTarget::Stash(_) => None,
         }
     }
+
+    /// ワークツリーか index を読む対象で、パスを絞っているときのそのパス。
+    ///
+    /// **外の編集で中身が変わりうる対象はこれだけ** —— コミットと stash の中身は
+    /// オブジェクトで、外の編集では変わらない。指紋（`PathStamp`）を付けるかを決める
+    /// 規則で、`diff` が付ける側（`FileDiff::stamp`）と `app` が比べる側
+    /// （`AppState::diff_stamp`）の両方がここを見る。
+    pub fn live_path(&self) -> Option<&Path> {
+        match self {
+            DiffTarget::IndexVsWorktree(path) | DiffTarget::HeadVsIndex(path) => path.as_deref(),
+            DiffTarget::Commit { .. } | DiffTarget::Range { .. } | DiffTarget::Stash(_) => None,
+        }
+    }
 }
 
 /// 1 ファイル分の diff。
@@ -589,7 +602,7 @@ pub struct FileDiff {
     pub binary: bool,
     pub hunks: Vec<Hunk>,
     /// このハンクを読む**前**に採った、対象のファイルの指紋
-    /// （[`RepoReader::path_stamp`]）。ハンク操作が `GitOp` の `expect` に載せ、
+    /// （[`RepoReader::path_stamp`]）。ハンク操作が `HunkApply` の `expect` に載せ、
     /// `git apply` の直前に採り直した値と比べる（01 の「外部の変更の検知 › 古いハンクの守り」）。
     ///
     /// **ワークツリーか index を読む対象（`IndexVsWorktree` / `HeadVsIndex`）で、

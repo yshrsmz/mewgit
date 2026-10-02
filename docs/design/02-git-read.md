@@ -681,7 +681,9 @@ stage 0 の blob）を組む。
   `path_stamp` を採り、返す `FileDiff` の全部に載せる。** 後で採ると、読んでいる最中に
   外で書き換えられたとき、古いハンクに新しい指紋が付いて守りを素通りする。前に採れば、
   ずれは「一致しない → 断る」側に倒れる。絞らない形（`path: None`）は `None` ——
-  Worktree の diff は必ずパスを絞る（01 の `wanted_diff`）
+  Worktree の diff は必ずパスを絞る（01 の `wanted_diff`）。**どの対象に付けるかは
+  `DiffTarget::live_path` の 1 本**で、status の stamp を引く `app` の `diff_stamp` も
+  同じものを見る（`/simplify` の reuse が、2 箇所に同じ網羅 `match` があるのを拾った）
 - **index は読み直してから引く**（`Index::read(false)`）。libgit2 の `Index` はリポジトリに
   貼り付いた写しで、外の `git add` を自分からは読み直さない。リーダースレッドは同じ
   `Repository` を使い続けるので、読み直さないと外の `git add` を取りこぼす（`diff` 自身は

@@ -683,16 +683,11 @@ impl AppState {
     /// 比べる —— ワークツリーだけの編集で 1 回余分に読み直すが、index 側だけを比べる
     /// 関数を別に持つより安い。
     pub fn diff_stamp(&self, target: &DiffTarget) -> Option<PathStamp> {
-        match target {
-            DiffTarget::IndexVsWorktree(Some(path)) | DiffTarget::HeadVsIndex(Some(path)) => {
-                self.worktree.snapshot.stamps.get(path).copied()
-            }
-            DiffTarget::IndexVsWorktree(None)
-            | DiffTarget::HeadVsIndex(None)
-            | DiffTarget::Commit { .. }
-            | DiffTarget::Range { .. }
-            | DiffTarget::Stash(_) => None,
-        }
+        self.worktree
+            .snapshot
+            .stamps
+            .get(target.live_path()?)
+            .copied()
     }
 
     /// 持っている worktree の一覧を**直近の書き込みより後に**読めているか。

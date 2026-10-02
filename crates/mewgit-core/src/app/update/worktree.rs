@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::git_exec::{hunk_patch, supports_hunk_patch, GitOp};
+use crate::git_exec::{hunk_patch, supports_hunk_patch, GitOp, HunkApply};
 use crate::git_read::{
     FileEntry, FileStatus, GitReadError, Hunk, PathStamp, WorktreeSection, WorktreeSnapshot,
 };
@@ -244,7 +244,7 @@ enum Scope<'a> {
     Hunk {
         path: &'a Path,
         hunk: &'a Hunk,
-        /// ハンクを読んだ時点の指紋（`FileDiff::stamp`）。`GitOp` の `expect` に写す。
+        /// ハンクを読んだ時点の指紋（`FileDiff::stamp`）。`HunkApply` の `expect` に写す。
         stamp: Option<PathStamp>,
     },
 }
@@ -350,22 +350,22 @@ fn plan(action: Action, section: WorktreeSection, scope: Scope<'_>) -> Result<Pl
         (Action::Stage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
             Ok(Plan::Exec(match scope {
                 Scope::File { paths, .. } => GitOp::Stage(paths),
-                Scope::Hunk { path, hunk, stamp } => GitOp::StageHunk {
+                Scope::Hunk { path, hunk, stamp } => GitOp::StageHunk(Box::new(HunkApply {
                     path: path.to_path_buf(),
                     patch: patch_of(path, hunk)?,
                     expect: expect_of(stamp)?,
-                },
+                })),
             }))
         }
         (Action::Stage, WorktreeSection::Staged) => Err("すでに stage されています".to_string()),
 
         (Action::Unstage, WorktreeSection::Staged) => Ok(Plan::Exec(match scope {
             Scope::File { paths, .. } => GitOp::Unstage(paths),
-            Scope::Hunk { path, hunk, stamp } => GitOp::UnstageHunk {
+            Scope::Hunk { path, hunk, stamp } => GitOp::UnstageHunk(Box::new(HunkApply {
                 path: path.to_path_buf(),
                 patch: patch_of(path, hunk)?,
                 expect: expect_of(stamp)?,
-            },
+            })),
         })),
         (Action::Unstage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
             Err("stage されていません".to_string())
@@ -385,8 +385,8 @@ fn patch_of(path: &Path, hunk: &Hunk) -> Result<Vec<u8>, String> {
 /// **`None` はワークツリーか index を読む diff では起きない**（`FileDiff::stamp` は
 /// パスを絞った `IndexVsWorktree` / `HeadVsIndex` で必ず埋まり、Worktree の diff は
 /// 必ずパスを絞る）。守りを外して当てるより断るほうに倒す。
-fn expect_of(stamp: Option<PathStamp>) -> Result<Box<PathStamp>, String> {
-    stamp.map(Box::new).ok_or_else(|| NOT_LATEST.to_string())
+fn expect_of(stamp: Option<PathStamp>) -> Result<PathStamp, String> {
+    stamp.ok_or_else(|| NOT_LATEST.to_string())
 }
 
 /// discard の `GitOp` を選ぶ。**変種の選び方が単位ごとに違うのでここだけ分かれる。**
@@ -417,11 +417,11 @@ fn discard(section: WorktreeSection, scope: Scope<'_>) -> Result<Plan, String> {
                 path.display(),
                 hunk.header
             ),
-            op: GitOp::DiscardHunk {
+            op: GitOp::DiscardHunk(Box::new(HunkApply {
                 path: path.to_path_buf(),
                 patch: patch_of(path, hunk)?,
                 expect: expect_of(stamp)?,
-            },
+            })),
         }),
 
         Scope::File { status, paths } => {

@@ -6,7 +6,7 @@ use git2::{DiffFindOptions, DiffLineType, DiffOptions, ErrorCode, Patch, Tree};
 
 use super::{
     file_entry, lossy, DiffTarget, FileDiff, FileEntry, GitReadError, Hunk, HunkLine, LineOrigin,
-    Oid, RepoReader,
+    Oid, PathStamp, RepoReader,
 };
 
 impl RepoReader {
@@ -24,16 +24,10 @@ impl RepoReader {
         // **ハンクを読む前に採る**（`FileDiff::stamp`）。後で採ると、読んでいる最中に
         // 外で書き換えられたとき、古いハンクに新しい指紋が付いて守りを素通りする。
         // 前に採っておけば、ずれは「一致しない → 断る」側に倒れる。
-        let stamp = match &target {
-            DiffTarget::IndexVsWorktree(Some(path)) | DiffTarget::HeadVsIndex(Some(path)) => {
-                Some(self.path_stamp(path)?)
-            }
-            DiffTarget::IndexVsWorktree(None)
-            | DiffTarget::HeadVsIndex(None)
-            | DiffTarget::Commit { .. }
-            | DiffTarget::Range { .. }
-            | DiffTarget::Stash(_) => None,
-        };
+        let stamp = target
+            .live_path()
+            .map(|path| self.path_stamp(path))
+            .transpose()?;
 
         let mut diff = match &target {
             DiffTarget::IndexVsWorktree(_) => {
@@ -63,11 +57,7 @@ impl RepoReader {
 
         // `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの delta には効かない。
         diff.find_similar(Some(&mut find_options()))?;
-        let mut files = file_diffs(&diff, target.path())?;
-        for file in &mut files {
-            file.stamp = stamp;
-        }
-        Ok(files)
+        file_diffs(&diff, target.path(), stamp)
     }
 
     /// コミットが変更したファイルの一覧。中身（ハンク）は組まない（02）。
@@ -171,7 +161,11 @@ fn find_options() -> DiffFindOptions {
 }
 
 /// diff をファイル単位の値型に落とす。`path` があればそのファイルだけ残す。
-fn file_diffs(diff: &git2::Diff<'_>, path: Option<&Path>) -> Result<Vec<FileDiff>, GitReadError> {
+fn file_diffs(
+    diff: &git2::Diff<'_>,
+    path: Option<&Path>,
+    stamp: Option<PathStamp>,
+) -> Result<Vec<FileDiff>, GitReadError> {
     let mut files = Vec::new();
 
     for index in 0..diff.deltas().len() {
@@ -217,8 +211,7 @@ fn file_diffs(diff: &git2::Diff<'_>, path: Option<&Path>) -> Result<Vec<FileDiff
             status,
             binary: delta.flags().is_binary(),
             hunks: read_hunks(&patch)?,
-            // 対象を知っている `diff` が埋める。
-            stamp: None,
+            stamp,
         });
     }
 

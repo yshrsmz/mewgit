@@ -54,9 +54,9 @@ fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<String> {
     let passes = match op {
         GitOp::Stage(_)
         | GitOp::Unstage(_)
-        | GitOp::StageHunk { .. }
-        | GitOp::UnstageHunk { .. }
-        | GitOp::DiscardHunk { .. }
+        | GitOp::StageHunk(_)
+        | GitOp::UnstageHunk(_)
+        | GitOp::DiscardHunk(_)
         | GitOp::Discard(_)
         | GitOp::DiscardUntracked(_)
         | GitOp::DiscardAdded(_)

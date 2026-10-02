@@ -5,16 +5,16 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use mewgit_core::auth::ssh::SshCommand;
 use mewgit_core::auth::{resolve, DegradedReason};
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::{
-    ExecError, ExecErrorKind, GitOp, LocalBranch, PrSource, RebaseAction, RebaseEntry, RebasePlan,
-    Runner,
+    ExecError, ExecErrorKind, GitOp, HunkApply, LocalBranch, PrSource, RebaseAction, RebaseEntry,
+    RebasePlan, Runner,
 };
-use mewgit_core::git_read::{Oid, PathStamp, RepoReader};
+use mewgit_core::git_read::Oid;
 use mewgit_core::test_util::{
     fake_fork_source, fake_pr_checkout, fake_target, wait_for_pid, wait_until_gone, BareRepo, Fake,
     TestRepo, FAKE_FORK_URL,
@@ -88,14 +88,6 @@ fn ssh_dump(repo: &TestRepo) -> (String, PathBuf) {
     // 置く実装ではこのスクリプト自体が起動されず、重ねる順序が逆の実装では
     // この印より前に `-o` が並ぶ。
     (format!("sh {} {SSH_MARKER}", script.display()), log)
-}
-
-/// `path` のいまの指紋。ハンク操作の `expect` に渡す（古いハンクの守りを素通りさせる）。
-fn stamp_now(repo: &TestRepo, path: &str) -> PathStamp {
-    RepoReader::open(repo.path())
-        .expect("リポジトリを開けませんでした")
-        .path_stamp(Path::new(path))
-        .expect("指紋を採れませんでした")
 }
 
 /// `git` が非 0 で終わったときの分類。それ以外の失敗なら panic する。
@@ -332,22 +324,22 @@ async fn stage_hunk_sends_the_patch_on_stdin() {
 
     let runner = repo.runner();
     runner
-        .run(&GitOp::StageHunk {
+        .run(&GitOp::StageHunk(Box::new(HunkApply {
             path: "file.txt".into(),
             patch: patch.clone(),
-            expect: Box::new(stamp_now(&repo, "file.txt")),
-        })
+            expect: repo.path_stamp("file.txt"),
+        })))
         .await
         .expect("ハンクを stage できませんでした");
     assert_eq!(repo.porcelain(), "M  file.txt");
 
     // 同じパッチを逆に当てると index が元に戻る。
     runner
-        .run(&GitOp::UnstageHunk {
+        .run(&GitOp::UnstageHunk(Box::new(HunkApply {
             path: "file.txt".into(),
             patch,
-            expect: Box::new(stamp_now(&repo, "file.txt")),
-        })
+            expect: repo.path_stamp("file.txt"),
+        })))
         .await
         .expect("ハンクを unstage できませんでした");
     assert_eq!(repo.porcelain(), " M file.txt");

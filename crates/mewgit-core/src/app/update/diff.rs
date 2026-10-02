@@ -186,7 +186,7 @@ mod tests {
     use super::*;
     use crate::app::{Job, Msg, Pane};
 
-    use crate::git_exec::{hunk_patch, GitOp};
+    use crate::git_exec::{hunk_patch, GitOp, HunkApply};
     use crate::git_read::{FileStatus, Hunk, LineOrigin, WorktreeSection, WorktreeSnapshot};
 
     use crate::test_util::{
@@ -478,11 +478,11 @@ mod tests {
 
         assert_eq!(
             cmd,
-            Cmd::Exec(GitOp::StageHunk {
+            Cmd::Exec(GitOp::StageHunk(Box::new(HunkApply {
                 path: "a.txt".into(),
                 patch: patch_of("a.txt", &hunks[1]),
-                expect: Box::new(fake_stamp()),
-            })
+                expect: fake_stamp(),
+            })))
         );
     }
 
@@ -499,11 +499,11 @@ mod tests {
 
         assert_eq!(
             cmd,
-            Cmd::Exec(GitOp::UnstageHunk {
+            Cmd::Exec(GitOp::UnstageHunk(Box::new(HunkApply {
                 path: "a.txt".into(),
                 patch: patch_of("a.txt", &hunks[0]),
-                expect: Box::new(fake_stamp()),
-            })
+                expect: fake_stamp(),
+            })))
         );
     }
 
@@ -528,11 +528,11 @@ mod tests {
         );
         assert_eq!(
             on_yes,
-            &Cmd::Exec(GitOp::DiscardHunk {
+            &Cmd::Exec(GitOp::DiscardHunk(Box::new(HunkApply {
                 path: "a.txt".into(),
                 patch: patch_of("a.txt", &hunks[0]),
-                expect: Box::new(fake_stamp()),
-            })
+                expect: fake_stamp(),
+            })))
         );
     }
 
@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn a_hunk_without_a_stamp_is_refused_instead_of_falling_back() {
-        // `FileDiff::stamp` が無いと守り（`GitOp` の `expect`）を組めない。ファイル単位に
+        // `FileDiff::stamp` が無いと守り（`HunkApply` の `expect`）を組めない。ファイル単位に
         // 落とすとハンク 1 つのつもりでファイル全体を stage するので、断る。
         // **同じ 1 本で、指紋があれば通ることも見る**（`fake_file_diff` は指紋を持つ）。
         let unstamped = FileDiff {
@@ -628,7 +628,7 @@ mod tests {
         );
         assert!(matches!(
             press(&mut state, 's'),
-            Cmd::Exec(GitOp::StageHunk { .. })
+            Cmd::Exec(GitOp::StageHunk(_))
         ));
     }
 

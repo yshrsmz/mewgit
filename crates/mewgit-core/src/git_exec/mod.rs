@@ -8,7 +8,7 @@ mod patch;
 mod rebase;
 mod runner;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::git_read::{Oid, PathStamp};
 
@@ -25,30 +25,11 @@ pub use runner::Runner;
 pub enum GitOp {
     Stage(Vec<PathBuf>),
     Unstage(Vec<PathBuf>),
-    /// ハンク単位の stage。`patch` は `git apply --cached` に渡すパッチそのもの。
-    ///
-    /// `path` は argv に載らない（パッチのファイルヘッダが対象を持つ）。UI が
-    /// 「どのファイルを stage したか」を通知に出すために持つ。
-    StageHunk {
-        path: PathBuf,
-        /// **`String` ではなく `Vec<u8>`。** lossy 変換すると、非 UTF-8 のファイルを
-        /// ステージした結果が元のファイルと変わる（02 の「ハンクの持ち方」）。
-        patch: Vec<u8>,
-        /// パッチを読んだ時点の `path` の指紋（`FileDiff::stamp`）。[`Runner`] が
-        /// `git apply` を起こす直前に採り直し、違えば起こさずに
-        /// [`ExecError::Stale`] で断る（03 の「古いハンクの守り」）。argv には載らない。
-        ///
-        /// **箱に入れる。** 裸で載せると `GitOp` が 96 から 104 バイトに伸び、`Cmd` の
-        /// 大きさの規則（01 の「`Cmd`」。`cmd_stays_small`）が数え直しになる（実測 2026-10-03）。
-        expect: Box<PathStamp>,
-    },
-    UnstageHunk {
-        path: PathBuf,
-        patch: Vec<u8>,
-        /// [`GitOp::StageHunk::expect`] と同じ。**比べるのは index 側だけ**
-        /// （[`GitOp::stale_at`]）。
-        expect: Box<PathStamp>,
-    },
+    /// ハンク単位の stage（`git apply --cached`）。
+    StageHunk(Box<HunkApply>),
+    /// ハンク単位の unstage（`git apply --cached --reverse`）。**守りは index 側だけを
+    /// 比べる**（[`GitOp::stale_at`]）。
+    UnstageHunk(Box<HunkApply>),
     /// ハンク単位の discard。**ワークツリーだけを書き換える**（`--cached` は付かない）。
     ///
     /// index とワークツリーの両方に当てる変種は作らない。`git apply --index` は
@@ -56,12 +37,7 @@ pub enum GitOp {
     /// `does not match index` で落ちる。2 回に割ると片方だけ通った中途半端な状態が
     /// 残るので、staged なハンクの discard は UI が「先に unstage してください」と
     /// 断る（03）。
-    DiscardHunk {
-        path: PathBuf,
-        patch: Vec<u8>,
-        /// [`GitOp::StageHunk::expect`] と同じ。
-        expect: Box<PathStamp>,
-    },
+    DiscardHunk(Box<HunkApply>),
     /// tracked なファイルの変更を HEAD の内容に戻す。
     ///
     /// untracked なファイルは `git restore` では消せないので
@@ -366,16 +342,36 @@ impl ExecError {
     }
 }
 
+/// ハンク操作 1 つぶんの中身（[`GitOp::StageHunk`] / [`GitOp::UnstageHunk`] /
+/// [`GitOp::DiscardHunk`]）。
+///
+/// **3 変種で同じものを持つので 1 つにまとめ、丸ごと箱に入れる。** 裸で並べると
+/// `GitOp` が 96 から 104 バイトに伸び、`Cmd` の大きさの規則（01 の「`Cmd`」。
+/// `cmd_stays_small`）が数え直しになる（実測 2026-10-03）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HunkApply {
+    /// argv に載らない（パッチのファイルヘッダが対象を持つ）。UI が「どのファイルか」を
+    /// 通知に出すのと、守りが指紋を採り直すのに使う。
+    pub path: PathBuf,
+    /// `git apply` に渡すパッチそのもの。**`String` ではなく `Vec<u8>`。** lossy 変換すると、
+    /// 非 UTF-8 のファイルをステージした結果が元のファイルと変わる（02 の「ハンクの持ち方」）。
+    pub patch: Vec<u8>,
+    /// パッチを読んだ時点の `path` の指紋（`FileDiff::stamp`）。[`Runner`] が `git apply` を
+    /// 起こす直前に採り直し、違えば起こさずに [`ExecError::Stale`] で断る（03 の
+    /// 「古いハンクの守り」）。argv には載らない。
+    pub expect: PathStamp,
+}
+
 impl GitOp {
-    /// 実行の前に確かめる指紋。`(対象のパス, ハンクを読んだ時点の指紋)`。
+    /// ハンク操作の中身。ハンク操作でなければ `None`。
     ///
-    /// ハンク操作だけが持つ（03 の「古いハンクの守り」）。網羅 `match` にしているのは、
-    /// パッチを持つ変種を足したときに守るかどうかを選ばせるため。
-    pub fn expected_stamp(&self) -> Option<(&Path, &PathStamp)> {
+    /// 網羅 `match` にしているのは、パッチを当てる変種を足したときに、古いハンクの守り
+    /// （03）を通すかどうかを選ばせるため。
+    pub fn hunk(&self) -> Option<&HunkApply> {
         match self {
-            GitOp::StageHunk { path, expect, .. }
-            | GitOp::UnstageHunk { path, expect, .. }
-            | GitOp::DiscardHunk { path, expect, .. } => Some((path, &**expect)),
+            GitOp::StageHunk(hunk) | GitOp::UnstageHunk(hunk) | GitOp::DiscardHunk(hunk) => {
+                Some(hunk)
+            }
             GitOp::Stage(_)
             | GitOp::Unstage(_)
             | GitOp::Discard(_)
@@ -420,10 +416,13 @@ impl GitOp {
     /// 続けながら staged なハンクを外す形を、毎回断らないため。stage と discard は
     /// 両方 —— パッチがワークツリーから読んだ中身で、当てる先か基準が index。
     pub fn stale_at(&self, now: &PathStamp) -> bool {
-        match (self, self.expected_stamp()) {
-            (GitOp::UnstageHunk { .. }, Some((_, expect))) => expect.index != now.index,
-            (_, Some((_, expect))) => expect != now,
-            (_, None) => false,
+        let Some(hunk) = self.hunk() else {
+            return false;
+        };
+        if matches!(self, GitOp::UnstageHunk(_)) {
+            hunk.expect.index != now.index
+        } else {
+            hunk.expect != *now
         }
     }
 }

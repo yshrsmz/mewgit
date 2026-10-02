@@ -65,18 +65,18 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
             push_paths(&mut argv, paths)?;
         }
         // `path` は argv に載せない。対象はパッチのファイルヘッダが持つ。
-        GitOp::StageHunk { patch, .. } => {
+        GitOp::StageHunk(hunk) => {
             argv.extend(apply_hunk(&["--cached"]));
-            stdin = Some(patch.clone());
+            stdin = Some(hunk.patch.clone());
         }
-        GitOp::UnstageHunk { patch, .. } => {
+        GitOp::UnstageHunk(hunk) => {
             argv.extend(apply_hunk(&["--cached", "--reverse"]));
-            stdin = Some(patch.clone());
+            stdin = Some(hunk.patch.clone());
         }
         // **`--cached` を付けない。** 当たるのはワークツリーだけ（03）。
-        GitOp::DiscardHunk { patch, .. } => {
+        GitOp::DiscardHunk(hunk) => {
             argv.extend(apply_hunk(&["--reverse"]));
-            stdin = Some(patch.clone());
+            stdin = Some(hunk.patch.clone());
         }
         GitOp::Discard(paths) => {
             argv.extend([
@@ -448,9 +448,7 @@ impl GitOp {
         match self {
             GitOp::Stage(_) => "add",
             GitOp::Unstage(_) => "reset",
-            GitOp::StageHunk { .. } | GitOp::UnstageHunk { .. } | GitOp::DiscardHunk { .. } => {
-                "apply"
-            }
+            GitOp::StageHunk(_) | GitOp::UnstageHunk(_) | GitOp::DiscardHunk(_) => "apply",
             GitOp::Discard(_) => "restore",
             GitOp::DiscardUntracked(_) => "clean",
             GitOp::DiscardAdded(_) => "rm",
@@ -492,7 +490,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::git_exec::{RebaseAction, RebaseEntry, RebasePlan};
+    use crate::git_exec::{HunkApply, RebaseAction, RebaseEntry, RebasePlan};
     use crate::test_util::{
         fake_fork_source, fake_oid, fake_pr_checkout, fake_stamp, FAKE_FORK_URL,
     };
@@ -504,9 +502,9 @@ mod tests {
         match op {
             GitOp::Stage(_) => "Stage",
             GitOp::Unstage(_) => "Unstage",
-            GitOp::StageHunk { .. } => "StageHunk",
-            GitOp::UnstageHunk { .. } => "UnstageHunk",
-            GitOp::DiscardHunk { .. } => "DiscardHunk",
+            GitOp::StageHunk(_) => "StageHunk",
+            GitOp::UnstageHunk(_) => "UnstageHunk",
+            GitOp::DiscardHunk(_) => "DiscardHunk",
             GitOp::Discard(_) => "Discard",
             GitOp::DiscardUntracked(_) => "DiscardUntracked",
             GitOp::DiscardAdded(_) => "DiscardAdded",
@@ -558,27 +556,27 @@ mod tests {
                 vec!["reset", "--quiet", "--", "a.txt"],
             ),
             (
-                GitOp::StageHunk {
+                GitOp::StageHunk(Box::new(HunkApply {
                     path: "a.txt".into(),
                     patch: b"@@ -1 +1 @@\n".to_vec(),
-                    expect: Box::new(fake_stamp()),
-                },
+                    expect: fake_stamp(),
+                })),
                 vec!["apply", "--cached", "--whitespace=nowarn", "-"],
             ),
             (
-                GitOp::UnstageHunk {
+                GitOp::UnstageHunk(Box::new(HunkApply {
                     path: "a.txt".into(),
                     patch: b"@@ -1 +1 @@\n".to_vec(),
-                    expect: Box::new(fake_stamp()),
-                },
+                    expect: fake_stamp(),
+                })),
                 vec!["apply", "--cached", "--reverse", "--whitespace=nowarn", "-"],
             ),
             (
-                GitOp::DiscardHunk {
+                GitOp::DiscardHunk(Box::new(HunkApply {
                     path: "a.txt".into(),
                     patch: b"@@ -1 +1 @@\n".to_vec(),
-                    expect: Box::new(fake_stamp()),
-                },
+                    expect: fake_stamp(),
+                })),
                 // `--cached` が無い。付くと index を戻してワークツリーが残る。
                 vec!["apply", "--reverse", "--whitespace=nowarn", "-"],
             ),
@@ -923,9 +921,9 @@ mod tests {
             let commands = to_commands(&op).expect("argv を組めませんでした");
             let expects_stdin = matches!(
                 op,
-                GitOp::StageHunk { .. }
-                    | GitOp::UnstageHunk { .. }
-                    | GitOp::DiscardHunk { .. }
+                GitOp::StageHunk(_)
+                    | GitOp::UnstageHunk(_)
+                    | GitOp::DiscardHunk(_)
                     | GitOp::RebaseInteractive { .. }
             );
             for command in commands {
@@ -939,11 +937,11 @@ mod tests {
         // 非 UTF-8 のバイト列が lossy にならないこと。ここが崩れると、ステージ
         // した結果が元のファイルと変わる。
         let patch = b"@@ -1 +1 @@\n-\xff\xfe\n+\xff\xfd\n".to_vec();
-        let command = to_command(&GitOp::StageHunk {
+        let command = to_command(&GitOp::StageHunk(Box::new(HunkApply {
             path: "a.bin".into(),
             patch: patch.clone(),
-            expect: Box::new(fake_stamp()),
-        })
+            expect: fake_stamp(),
+        })))
         .expect("argv を組めませんでした");
         assert_eq!(command.stdin, Some(patch));
     }

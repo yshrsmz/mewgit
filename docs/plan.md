@@ -644,7 +644,7 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 - [x] 外部変更検知（2/2）— 古いハンクの守り。**決めた形**（理由は 01 の「外部の変更の検知 ›
       古いハンクの守り」、実測と比べ方は 03 の「古いハンクの守り」）—— diff の読み取りが
       ハンクを組む前に対象の指紋（`PathStamp`）を採って `FileDiff::stamp` に載せ、ハンク操作は
-      それを `GitOp` の `expect` に写す。`Runner` が `git apply` を起こす直前に採り直し、違えば
+      それを `HunkApply` の `expect` に写す。`Runner` が `git apply` を起こす直前に採り直し、違えば
       起こさずに `ExecError::Stale`（`Warn`）で断る。unstage は index 側だけを比べる。
       **比べる場所は `Runner`、指紋を組むのは `git_read::path_stamp` の 1 本**（2026-10-02 に
       ユーザーと決めた。00 のレイヤーに例外を 1 つ足した）

@@ -79,7 +79,7 @@ use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Ru
 use crate::git_exec::{RebaseAction, RebaseEntry};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
-    LineOrigin, Oid, PathStamp, Remote, Signature, StashEntry, Timestamp, Upstream,
+    LineOrigin, Oid, PathStamp, Remote, RepoReader, Signature, StashEntry, Timestamp, Upstream,
     WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PrStatus, PullRequest, RateLimit, RefSpec, RepoRef};
@@ -428,6 +428,14 @@ impl TestRepo {
     pub fn rev_parse(&self, rev: &str) -> Oid {
         let out = self.git(&["rev-parse", rev]);
         Oid::from_str(&out).unwrap_or_else(|err| panic!("{rev} の Oid を読めませんでした: {err}"))
+    }
+
+    /// `path` のいまの指紋（`RepoReader::path_stamp`）。ハンク操作の `expect` に渡す。
+    pub fn path_stamp(&self, path: &str) -> PathStamp {
+        RepoReader::open(self.path())
+            .expect("リポジトリを開けませんでした")
+            .path_stamp(Path::new(path))
+            .expect("指紋を採れませんでした")
     }
 }
 
@@ -817,7 +825,7 @@ pub fn fake_file_diff(path: &str, hunks: Vec<Hunk>) -> FileDiff {
         status: FileStatus::Modified,
         binary: false,
         hunks,
-        // ワークツリーの diff として組む。ハンク操作が `GitOp` の `expect` に写す。
+        // ワークツリーの diff として組む。ハンク操作が `HunkApply` の `expect` に写す。
         stamp: Some(fake_stamp()),
     }
 }

@@ -40,6 +40,8 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         // interactive rebase も**始まっておらず、`i` から開き直せば済む。
         let level = match err {
             ExecError::Canceled { .. } => NoticeLevel::Info,
+            // git を起こしていない。読み直した差分で押し直せば済む。
+            ExecError::Stale { .. } => NoticeLevel::Warn,
             ExecError::Failed {
                 kind:
                     ExecErrorKind::Conflict
@@ -300,19 +302,32 @@ fn ref_may_have_moved(result: &Result<ExecOutput, ExecError>) -> bool {
     match result {
         Ok(_) | Err(ExecError::Canceled { .. }) => true,
         // 起動していない / git が自分で断った。どちらも ref は元のまま。
-        Err(ExecError::NoResult { .. } | ExecError::Failed { .. }) => false,
+        Err(ExecError::NoResult { .. } | ExecError::Stale { .. } | ExecError::Failed { .. }) => {
+            false
+        }
     }
 }
 
 /// 通知に添える詳細。実行した argv と stderr を握りつぶさない（不変ルール 4）。
 fn exec_detail(err: &ExecError) -> String {
     let mut detail = err.command_line();
-    if let ExecError::Failed { stderr, .. } = err {
-        let stderr = stderr.trim_end();
-        if !stderr.is_empty() {
-            detail.push('\n');
-            detail.push_str(stderr);
+    match err {
+        ExecError::Failed { stderr, .. } => {
+            let stderr = stderr.trim_end();
+            if !stderr.is_empty() {
+                detail.push('\n');
+                detail.push_str(stderr);
+            }
         }
+        // **どのファイルかは argv に無い**（パッチは標準入力）。要約行にも入れていない。
+        ExecError::Stale { path, .. } => {
+            detail.push('\n');
+            detail.push_str(&format!(
+                "{}: ハンクを読んだあとに、ファイルか index が変わっていました（git は起動していません）",
+                path.display()
+            ));
+        }
+        ExecError::NoResult { .. } | ExecError::Canceled { .. } => {}
     }
     detail
 }
@@ -594,7 +609,7 @@ mod tests {
     use crate::git_read::{GitReadError, LogPage, WorktreeSection};
     use crate::test_util::fake_pr_checkout;
 
-    use crate::test_util::{fake_branch, fake_detail, fake_oid, fake_snapshot};
+    use crate::test_util::{fake_branch, fake_detail, fake_oid, fake_snapshot, fake_stamp};
 
     #[test]
     fn exec_finished_reloads_the_status() {
@@ -639,6 +654,40 @@ mod tests {
             "message: {}",
             notice.message
         );
+    }
+
+    #[test]
+    fn a_stale_hunk_warns_with_the_path_in_the_detail_and_reloads() {
+        // git は起動していない。何も壊れていないので `Warn`。**パスは要約行に入れない**
+        // （上限が無く、案内を押し出す）。読み直しは他の失敗と同じく出る ——
+        // 届いた status と diff で押し直せる。
+        let mut state = state();
+        let op = GitOp::StageHunk {
+            path: "dir/a.txt".into(),
+            patch: Vec::new(),
+            expect: Box::new(fake_stamp()),
+        };
+        let _ = state.issue(Cmd::Exec(op.clone()));
+
+        let cmd = update(
+            &mut state,
+            Msg::ExecFinished(Box::new(ExecDone {
+                op,
+                result: Err(ExecError::Stale {
+                    argv: vec!["apply".into(), "--cached".into()],
+                    path: "dir/a.txt".into(),
+                }),
+            })),
+        );
+
+        assert_eq!(cmd, Cmd::LoadStatus);
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Warn);
+        assert!(notice.message.contains("押し直して"), "{}", notice.message);
+        assert!(!notice.message.contains("dir/a.txt"), "{}", notice.message);
+        let detail = notice.detail.as_deref().expect("detail がありません");
+        assert!(detail.contains("git apply --cached"), "detail: {detail}");
+        assert!(detail.contains("dir/a.txt"), "detail: {detail}");
     }
 
     #[test]
@@ -1154,6 +1203,7 @@ mod tests {
                 &GitOp::StageHunk {
                     path: "a.txt".into(),
                     patch: Vec::new(),
+                    expect: Box::new(fake_stamp()),
                 },
                 true
             ),

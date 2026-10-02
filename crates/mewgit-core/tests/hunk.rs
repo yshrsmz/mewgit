@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use mewgit_core::git_exec::{hunk_patch, GitOp};
-use mewgit_core::git_read::{DiffTarget, FileDiff, Hunk, RepoReader};
+use mewgit_core::git_exec::{hunk_patch, ExecError, GitOp};
+use mewgit_core::git_read::{DiffTarget, FileDiff, Hunk, PathStamp, RepoReader};
 use mewgit_core::test_util::TestRepo;
 
 /// `target` の diff を 1 ファイルぶん読む。
@@ -26,6 +26,11 @@ fn patch_of(file: &FileDiff, index: usize) -> Vec<u8> {
         .get(index)
         .unwrap_or_else(|| panic!("ハンクが足りません: {:?}", file.hunks));
     hunk_patch(&file.path, hunk).expect("パッチを組めませんでした")
+}
+
+/// `file` を読んだ時点の指紋（`GitOp` の `expect`）。
+fn stamp_of(file: &FileDiff) -> PathStamp {
+    file.stamp.expect("ワークツリーの diff に指紋がありません")
 }
 
 /// ワークツリーの中身。
@@ -78,6 +83,7 @@ async fn staging_only_the_second_hunk_leaves_the_first_unstaged() {
         .run(&GitOp::StageHunk {
             path: "a.txt".into(),
             patch: patch_of(&file, 1),
+            expect: Box::new(stamp_of(&file)),
         })
         .await
         .expect("stage できませんでした");
@@ -105,6 +111,7 @@ async fn unstaging_only_the_second_hunk_leaves_the_first_staged() {
         .run(&GitOp::UnstageHunk {
             path: "a.txt".into(),
             patch: patch_of(&file, 1),
+            expect: Box::new(stamp_of(&file)),
         })
         .await
         .expect("unstage できませんでした");
@@ -124,14 +131,12 @@ async fn unstaging_only_the_second_hunk_leaves_the_first_staged() {
 async fn discarding_only_the_second_hunk_keeps_the_first_and_the_index() {
     let repo = two_hunk_repo();
     // 3 行目だけを stage しておく。`--cached` が付いていると、ここが巻き添えになる。
-    let staged_hunk = {
-        let file = one_file(&repo, DiffTarget::IndexVsWorktree(Some("a.txt".into())));
-        patch_of(&file, 0)
-    };
+    let staged_file = one_file(&repo, DiffTarget::IndexVsWorktree(Some("a.txt".into())));
     repo.runner()
         .run(&GitOp::StageHunk {
             path: "a.txt".into(),
-            patch: staged_hunk,
+            patch: patch_of(&staged_file, 0),
+            expect: Box::new(stamp_of(&staged_file)),
         })
         .await
         .expect("stage できませんでした");
@@ -142,6 +147,7 @@ async fn discarding_only_the_second_hunk_keeps_the_first_and_the_index() {
         .run(&GitOp::DiscardHunk {
             path: "a.txt".into(),
             patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
         })
         .await
         .expect("discard できませんでした");
@@ -165,6 +171,7 @@ async fn a_file_without_a_trailing_newline_keeps_its_missing_newline() {
         .run(&GitOp::StageHunk {
             path: "n.txt".into(),
             patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
         })
         .await
         .expect("stage できませんでした");
@@ -184,6 +191,7 @@ async fn crlf_lines_survive_the_round_trip() {
         .run(&GitOp::StageHunk {
             path: "crlf.txt".into(),
             patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
         })
         .await
         .expect("stage できませんでした");
@@ -205,6 +213,7 @@ async fn non_utf8_lines_survive_the_round_trip() {
         .run(&GitOp::StageHunk {
             path: "bin.txt".into(),
             patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
         })
         .await
         .expect("stage できませんでした");
@@ -228,6 +237,7 @@ async fn the_users_apply_whitespace_setting_does_not_change_what_gets_staged() {
         .run(&GitOp::StageHunk {
             path: "f.txt".into(),
             patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
         })
         .await
         .expect("stage できませんでした");
@@ -254,6 +264,7 @@ async fn paths_with_a_space_or_non_ascii_apply_to_the_right_file() {
             .run(&GitOp::StageHunk {
                 path: path.into(),
                 patch: patch_of(&file, 0),
+                expect: Box::new(stamp_of(&file)),
             })
             .await
             .expect("stage できませんでした");
@@ -266,4 +277,164 @@ async fn paths_with_a_space_or_non_ascii_apply_to_the_right_file() {
         repo.porcelain(),
         "M  \"sp ace.txt\"\nM  \"\\346\\227\\245\\346\\234\\254\\350\\252\\236.txt\""
     );
+}
+
+// ---- 古いハンクの守り（03 の「古いハンクの守り」） ----
+//
+// 外で書き換えるときは**長さも変える。** 守りが比べるのは `(mtime, len)` と index の
+// blob で、同じ長さだと mtime の分解能に頼ることになる（ナノ秒の APFS / ext4 では
+// 拾えるが、テストをそこに依存させない）。
+
+/// 1 行目だけを変えた 3 行のファイルを持つリポジトリ。
+fn one_hunk_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_bytes("f.txt", b"line1\nline2\nline3\n", "first");
+    repo.write_worktree_file("f.txt", b"line1\ntwo-A\nline3\n");
+    repo
+}
+
+/// 守りに断られたことを確かめ、断ったパスを返す。
+fn stale_path(result: Result<mewgit_core::git_exec::ExecOutput, ExecError>) -> std::path::PathBuf {
+    match result {
+        Err(ExecError::Stale { path, .. }) => path,
+        other => panic!("守りに断られていません: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_hunk_read_before_an_outside_edit_is_not_staged() {
+    // plan.md の実測（git 2.56.0 でも同じ）—— 守りが無いと `git apply --cached` は
+    // exit 0 で通り、index に `two-A`（HEAD にもワークツリーにも無い内容）が入る。
+    let repo = one_hunk_repo();
+    let file = one_file(&repo, DiffTarget::IndexVsWorktree(Some("f.txt".into())));
+    repo.write_worktree_file("f.txt", b"line1\ntwo-BB\nline3\n");
+
+    let result = repo
+        .runner()
+        .run(&GitOp::StageHunk {
+            path: "f.txt".into(),
+            patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
+        })
+        .await;
+
+    assert_eq!(stale_path(result), Path::new("f.txt"));
+    assert_eq!(staged(&repo, "f.txt"), b"line1\nline2\nline3\n");
+    assert_eq!(repo.porcelain(), " M f.txt");
+
+    // **読み直せば通る**（守りが常に断る形ではないことを、同じ 1 本で見る）。
+    let file = one_file(&repo, DiffTarget::IndexVsWorktree(Some("f.txt".into())));
+    repo.runner()
+        .run(&GitOp::StageHunk {
+            path: "f.txt".into(),
+            patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
+        })
+        .await
+        .expect("読み直したハンクを stage できませんでした");
+    assert_eq!(staged(&repo, "f.txt"), b"line1\ntwo-BB\nline3\n");
+}
+
+#[tokio::test]
+async fn a_hunk_read_before_an_outside_add_is_not_staged() {
+    // ワークツリーは動かず index だけが動く形（外で `git add -p` した）。パッチの
+    // 基準（index）が変わっている。
+    let repo = TestRepo::init();
+    repo.commit_bytes("a.txt", twenty_lines().concat().as_bytes(), "first");
+    repo.write_worktree_file("a.txt", &twenty_lines_edited());
+    let file = one_file(&repo, DiffTarget::IndexVsWorktree(Some("a.txt".into())));
+    repo.git(&["add", "a.txt"]);
+
+    let result = repo
+        .runner()
+        .run(&GitOp::StageHunk {
+            path: "a.txt".into(),
+            patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
+        })
+        .await;
+
+    assert_eq!(stale_path(result), Path::new("a.txt"));
+}
+
+#[tokio::test]
+async fn a_hunk_read_before_an_outside_edit_is_not_discarded() {
+    let repo = one_hunk_repo();
+    let file = one_file(&repo, DiffTarget::IndexVsWorktree(Some("f.txt".into())));
+    repo.write_worktree_file("f.txt", b"line1\ntwo-BB\nline3\n");
+
+    let result = repo
+        .runner()
+        .run(&GitOp::DiscardHunk {
+            path: "f.txt".into(),
+            patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
+        })
+        .await;
+
+    assert_eq!(stale_path(result), Path::new("f.txt"));
+    assert_eq!(worktree(&repo, "f.txt"), b"line1\ntwo-BB\nline3\n");
+}
+
+#[tokio::test]
+async fn unstaging_a_hunk_looks_only_at_the_index() {
+    // **ワークツリーの編集では断らない。** unstage はパッチも当てる先も index だけ
+    // （`GitOp::stale_at`）。エディタで編集を続けながら staged なハンクを外す形。
+    let repo = one_hunk_repo();
+    repo.git(&["add", "f.txt"]);
+    let file = one_file(&repo, DiffTarget::HeadVsIndex(Some("f.txt".into())));
+    repo.write_worktree_file("f.txt", b"line1\ntwo-BB\nline3\n");
+
+    repo.runner()
+        .run(&GitOp::UnstageHunk {
+            path: "f.txt".into(),
+            patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
+        })
+        .await
+        .expect("ワークツリーの編集で unstage が断られました");
+    assert_eq!(staged(&repo, "f.txt"), b"line1\nline2\nline3\n");
+
+    // **index が外で動いていれば断る。** 読み直した staged なハンクのあとで、外で
+    // 別の中身を stage し直す。
+    repo.git(&["add", "f.txt"]);
+    let file = one_file(&repo, DiffTarget::HeadVsIndex(Some("f.txt".into())));
+    repo.write_worktree_file("f.txt", b"line1\ntwo-CCC\nline3\n");
+    repo.git(&["add", "f.txt"]);
+
+    let result = repo
+        .runner()
+        .run(&GitOp::UnstageHunk {
+            path: "f.txt".into(),
+            patch: patch_of(&file, 0),
+            expect: Box::new(stamp_of(&file)),
+        })
+        .await;
+    assert_eq!(stale_path(result), Path::new("f.txt"));
+    assert_eq!(staged(&repo, "f.txt"), b"line1\ntwo-CCC\nline3\n");
+}
+
+#[test]
+fn the_stamp_is_read_only_for_the_worktree_and_the_index() {
+    let repo = one_hunk_repo();
+    let reader = RepoReader::open(repo.path()).expect("リポジトリを開けませんでした");
+    let now = reader
+        .path_stamp(Path::new("f.txt"))
+        .expect("指紋を採れませんでした");
+
+    let unstaged = one_file(&repo, DiffTarget::IndexVsWorktree(Some("f.txt".into())));
+    assert_eq!(unstaged.stamp, Some(now));
+    assert!(now.worktree.is_some() && now.index.is_some(), "{now:?}");
+
+    // コミットの中身はオブジェクトで、外の編集では変わらない。
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let oid = mewgit_core::git_read::Oid::from_str(head.trim()).expect("oid ではありません");
+    let commit = one_file(
+        &repo,
+        DiffTarget::Commit {
+            oid,
+            path: Some("f.txt".into()),
+        },
+    );
+    assert_eq!(commit.stamp, None);
 }

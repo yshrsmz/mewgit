@@ -65,16 +65,16 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
             push_paths(&mut argv, paths)?;
         }
         // `path` は argv に載せない。対象はパッチのファイルヘッダが持つ。
-        GitOp::StageHunk { path: _, patch } => {
+        GitOp::StageHunk { patch, .. } => {
             argv.extend(apply_hunk(&["--cached"]));
             stdin = Some(patch.clone());
         }
-        GitOp::UnstageHunk { path: _, patch } => {
+        GitOp::UnstageHunk { patch, .. } => {
             argv.extend(apply_hunk(&["--cached", "--reverse"]));
             stdin = Some(patch.clone());
         }
         // **`--cached` を付けない。** 当たるのはワークツリーだけ（03）。
-        GitOp::DiscardHunk { path: _, patch } => {
+        GitOp::DiscardHunk { patch, .. } => {
             argv.extend(apply_hunk(&["--reverse"]));
             stdin = Some(patch.clone());
         }
@@ -493,7 +493,9 @@ mod tests {
 
     use super::*;
     use crate::git_exec::{RebaseAction, RebaseEntry, RebasePlan};
-    use crate::test_util::{fake_fork_source, fake_oid, fake_pr_checkout, FAKE_FORK_URL};
+    use crate::test_util::{
+        fake_fork_source, fake_oid, fake_pr_checkout, fake_stamp, FAKE_FORK_URL,
+    };
 
     /// 変種の名前。**網羅 `match` なので、`GitOp` に変種を足すとここが
     /// コンパイルエラーになる。** そのとき [`VARIANTS`] と [`cases`] にも足す
@@ -559,6 +561,7 @@ mod tests {
                 GitOp::StageHunk {
                     path: "a.txt".into(),
                     patch: b"@@ -1 +1 @@\n".to_vec(),
+                    expect: Box::new(fake_stamp()),
                 },
                 vec!["apply", "--cached", "--whitespace=nowarn", "-"],
             ),
@@ -566,6 +569,7 @@ mod tests {
                 GitOp::UnstageHunk {
                     path: "a.txt".into(),
                     patch: b"@@ -1 +1 @@\n".to_vec(),
+                    expect: Box::new(fake_stamp()),
                 },
                 vec!["apply", "--cached", "--reverse", "--whitespace=nowarn", "-"],
             ),
@@ -573,6 +577,7 @@ mod tests {
                 GitOp::DiscardHunk {
                     path: "a.txt".into(),
                     patch: b"@@ -1 +1 @@\n".to_vec(),
+                    expect: Box::new(fake_stamp()),
                 },
                 // `--cached` が無い。付くと index を戻してワークツリーが残る。
                 vec!["apply", "--reverse", "--whitespace=nowarn", "-"],
@@ -937,6 +942,7 @@ mod tests {
         let command = to_command(&GitOp::StageHunk {
             path: "a.bin".into(),
             patch: patch.clone(),
+            expect: Box::new(fake_stamp()),
         })
         .expect("argv を組めませんでした");
         assert_eq!(command.stdin, Some(patch));

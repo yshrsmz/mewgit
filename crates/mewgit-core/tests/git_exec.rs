@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mewgit_core::auth::ssh::SshCommand;
 use mewgit_core::auth::{resolve, DegradedReason};
@@ -14,7 +14,7 @@ use mewgit_core::git_exec::{
     ExecError, ExecErrorKind, GitOp, LocalBranch, PrSource, RebaseAction, RebaseEntry, RebasePlan,
     Runner,
 };
-use mewgit_core::git_read::Oid;
+use mewgit_core::git_read::{Oid, PathStamp, RepoReader};
 use mewgit_core::test_util::{
     fake_fork_source, fake_pr_checkout, fake_target, wait_for_pid, wait_until_gone, BareRepo, Fake,
     TestRepo, FAKE_FORK_URL,
@@ -90,12 +90,21 @@ fn ssh_dump(repo: &TestRepo) -> (String, PathBuf) {
     (format!("sh {} {SSH_MARKER}", script.display()), log)
 }
 
+/// `path` のいまの指紋。ハンク操作の `expect` に渡す（古いハンクの守りを素通りさせる）。
+fn stamp_now(repo: &TestRepo, path: &str) -> PathStamp {
+    RepoReader::open(repo.path())
+        .expect("リポジトリを開けませんでした")
+        .path_stamp(Path::new(path))
+        .expect("指紋を採れませんでした")
+}
+
 /// `git` が非 0 で終わったときの分類。それ以外の失敗なら panic する。
 fn failure_kind(err: &ExecError) -> ExecErrorKind {
     match err {
         ExecError::Failed { kind, .. } => *kind,
         ExecError::NoResult { reason, .. } => panic!("git が走っていません: {reason}"),
         ExecError::Canceled { argv } => panic!("中断していません: git {}", argv.join(" ")),
+        ExecError::Stale { path, .. } => panic!("git が走っていません: {} が古い", path.display()),
     }
 }
 
@@ -326,6 +335,7 @@ async fn stage_hunk_sends_the_patch_on_stdin() {
         .run(&GitOp::StageHunk {
             path: "file.txt".into(),
             patch: patch.clone(),
+            expect: Box::new(stamp_now(&repo, "file.txt")),
         })
         .await
         .expect("ハンクを stage できませんでした");
@@ -336,6 +346,7 @@ async fn stage_hunk_sends_the_patch_on_stdin() {
         .run(&GitOp::UnstageHunk {
             path: "file.txt".into(),
             patch,
+            expect: Box::new(stamp_now(&repo, "file.txt")),
         })
         .await
         .expect("ハンクを unstage できませんでした");

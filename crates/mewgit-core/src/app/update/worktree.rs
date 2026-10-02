@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::git_exec::{hunk_patch, supports_hunk_patch, GitOp};
 use crate::git_read::{
-    FileEntry, FileStatus, GitReadError, Hunk, WorktreeSection, WorktreeSnapshot,
+    FileEntry, FileStatus, GitReadError, Hunk, PathStamp, WorktreeSection, WorktreeSnapshot,
 };
 
 use super::diff::load_diff;
@@ -244,6 +244,8 @@ enum Scope<'a> {
     Hunk {
         path: &'a Path,
         hunk: &'a Hunk,
+        /// ハンクを読んだ時点の指紋（`FileDiff::stamp`）。`GitOp` の `expect` に写す。
+        stamp: Option<PathStamp>,
     },
 }
 
@@ -348,9 +350,10 @@ fn plan(action: Action, section: WorktreeSection, scope: Scope<'_>) -> Result<Pl
         (Action::Stage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
             Ok(Plan::Exec(match scope {
                 Scope::File { paths, .. } => GitOp::Stage(paths),
-                Scope::Hunk { path, hunk } => GitOp::StageHunk {
+                Scope::Hunk { path, hunk, stamp } => GitOp::StageHunk {
                     path: path.to_path_buf(),
                     patch: patch_of(path, hunk)?,
+                    expect: expect_of(stamp)?,
                 },
             }))
         }
@@ -358,9 +361,10 @@ fn plan(action: Action, section: WorktreeSection, scope: Scope<'_>) -> Result<Pl
 
         (Action::Unstage, WorktreeSection::Staged) => Ok(Plan::Exec(match scope {
             Scope::File { paths, .. } => GitOp::Unstage(paths),
-            Scope::Hunk { path, hunk } => GitOp::UnstageHunk {
+            Scope::Hunk { path, hunk, stamp } => GitOp::UnstageHunk {
                 path: path.to_path_buf(),
                 patch: patch_of(path, hunk)?,
+                expect: expect_of(stamp)?,
             },
         })),
         (Action::Unstage, WorktreeSection::Unstaged | WorktreeSection::Untracked) => {
@@ -374,6 +378,15 @@ fn plan(action: Action, section: WorktreeSection, scope: Scope<'_>) -> Result<Pl
 /// ハンクを `git apply` に渡すパッチに戻す。載せられない名前はその理由。
 fn patch_of(path: &Path, hunk: &Hunk) -> Result<Vec<u8>, String> {
     hunk_patch(path, hunk).map_err(|err| err.to_string())
+}
+
+/// ハンクを読んだ時点の指紋。無ければ断る。
+///
+/// **`None` はワークツリーか index を読む diff では起きない**（`FileDiff::stamp` は
+/// パスを絞った `IndexVsWorktree` / `HeadVsIndex` で必ず埋まり、Worktree の diff は
+/// 必ずパスを絞る）。守りを外して当てるより断るほうに倒す。
+fn expect_of(stamp: Option<PathStamp>) -> Result<Box<PathStamp>, String> {
+    stamp.map(Box::new).ok_or_else(|| NOT_LATEST.to_string())
 }
 
 /// discard の `GitOp` を選ぶ。**変種の選び方が単位ごとに違うのでここだけ分かれる。**
@@ -397,7 +410,7 @@ fn discard(section: WorktreeSection, scope: Scope<'_>) -> Result<Plan, String> {
         }
         // 確認モーダルにはハンクの見出しも出す。ファイル名だけだとファイル単位の
         // discard と同じ本文になり、どちらを押したのか画面から判らない。
-        Scope::Hunk { path, hunk } => Ok(Plan::Confirm {
+        Scope::Hunk { path, hunk, stamp } => Ok(Plan::Confirm {
             title: "ハンクを破棄",
             body: format!(
                 "{} の {} をワークツリーから取り消します。元に戻せません。",
@@ -407,6 +420,7 @@ fn discard(section: WorktreeSection, scope: Scope<'_>) -> Result<Plan, String> {
             op: GitOp::DiscardHunk {
                 path: path.to_path_buf(),
                 patch: patch_of(path, hunk)?,
+                expect: expect_of(stamp)?,
             },
         }),
 
@@ -459,6 +473,7 @@ fn hunk_scope(state: &AppState) -> Option<Scope<'_>> {
     Some(Scope::Hunk {
         path: &file.path,
         hunk: file.hunks.get(view.cursor.hunk)?,
+        stamp: file.stamp,
     })
 }
 

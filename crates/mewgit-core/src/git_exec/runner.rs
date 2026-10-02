@@ -12,6 +12,7 @@ use tokio::sync::oneshot::{self, error::TryRecvError};
 use super::rebase::{sh_quote, EDITOR_STDERR_PREFIX, HEAD_MOVED_MARKER};
 use super::{to_commands, ExecError, ExecErrorKind, ExecOutput, GitCommand, GitOp};
 use crate::auth::ssh::SshCommand;
+use crate::git_read::RepoReader;
 
 /// ssh がパスフレーズを訊きに `/dev/tty` を掴むのを止めるオプション。
 ///
@@ -119,6 +120,15 @@ impl Runner {
             reason: err.to_string(),
         })?;
 
+        // **古いハンクを当てない**（03 の「古いハンクの守り」）。git を起こす前に、
+        // ハンクを読んだ時点の指紋と比べる。
+        if let Some(path) = self.stale_path(op).await? {
+            return Err(ExecError::Stale {
+                argv: commands[0].argv.clone(),
+                path,
+            });
+        }
+
         // **列を先頭から順に叩き、非 0 で止まる**（03 の「複数の手順を持つ書き込み」）。
         // 1 本の変種では 1 周で抜けるので、ここまでの形と変わらない。
         let mut cancel = CancelSignal::Waiting(cancel);
@@ -136,6 +146,33 @@ impl Runner {
             argv: Vec::new(),
             reason: "git の呼び出しが 1 つもありません".to_string(),
         })
+    }
+
+    /// `op` が前提にした指紋（[`GitOp::expected_stamp`]）から、いまのファイルか index が
+    /// 外れていればそのパス。前提の無い操作では `None`。
+    ///
+    /// **指紋を組むのは `git_read` の [`RepoReader::path_stamp`]**（00 のレイヤーの例外）。
+    /// ここで組み直すと、diff の側と組み方が割れて、照合が常に一致か常に不一致に
+    /// ずれる。git2 は同期なので `spawn_blocking` に載せる。
+    ///
+    /// **比べてから git がファイルを読むまでの隙間は残る**（03。受け入れた穴）。
+    async fn stale_path(&self, op: &GitOp) -> Result<Option<PathBuf>, ExecError> {
+        let Some((path, _)) = op.expected_stamp() else {
+            return Ok(None);
+        };
+        let (root, path) = (self.repo_root.clone(), path.to_path_buf());
+        let unreadable = |reason: String| ExecError::NoResult {
+            argv: Vec::new(),
+            reason: format!("ハンクの対象を確かめられませんでした: {reason}"),
+        };
+        let (path, now) = tokio::task::spawn_blocking(move || {
+            let now = RepoReader::open(&root).and_then(|reader| reader.path_stamp(&path));
+            (path, now)
+        })
+        .await
+        .map_err(|err| unreadable(err.to_string()))?;
+        let now = now.map_err(|err| unreadable(err.to_string()))?;
+        Ok(op.stale_at(&now).then_some(path))
     }
 
     /// 1 本の `git` を実行し、中断の合図が届いたらプロセスグループごと止める。

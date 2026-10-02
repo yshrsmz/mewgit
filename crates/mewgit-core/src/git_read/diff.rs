@@ -21,6 +21,20 @@ impl RepoReader {
         // 戻すと、rename ではなくファイルの新規追加を index に適用してしまう（02）。
         let mut opts = DiffOptions::new();
 
+        // **ハンクを読む前に採る**（`FileDiff::stamp`）。後で採ると、読んでいる最中に
+        // 外で書き換えられたとき、古いハンクに新しい指紋が付いて守りを素通りする。
+        // 前に採っておけば、ずれは「一致しない → 断る」側に倒れる。
+        let stamp = match &target {
+            DiffTarget::IndexVsWorktree(Some(path)) | DiffTarget::HeadVsIndex(Some(path)) => {
+                Some(self.path_stamp(path)?)
+            }
+            DiffTarget::IndexVsWorktree(None)
+            | DiffTarget::HeadVsIndex(None)
+            | DiffTarget::Commit { .. }
+            | DiffTarget::Range { .. }
+            | DiffTarget::Stash(_) => None,
+        };
+
         let mut diff = match &target {
             DiffTarget::IndexVsWorktree(_) => {
                 // untracked の中身も出す。出さないと worktree ペインで untracked を
@@ -49,7 +63,11 @@ impl RepoReader {
 
         // `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの delta には効かない。
         diff.find_similar(Some(&mut find_options()))?;
-        file_diffs(&diff, target.path())
+        let mut files = file_diffs(&diff, target.path())?;
+        for file in &mut files {
+            file.stamp = stamp;
+        }
+        Ok(files)
     }
 
     /// コミットが変更したファイルの一覧。中身（ハンク）は組まない（02）。
@@ -199,6 +217,8 @@ fn file_diffs(diff: &git2::Diff<'_>, path: Option<&Path>) -> Result<Vec<FileDiff
             status,
             binary: delta.flags().is_binary(),
             hunks: read_hunks(&patch)?,
+            // 対象を知っている `diff` が埋める。
+            stamp: None,
         });
     }
 

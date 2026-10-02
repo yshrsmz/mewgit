@@ -189,7 +189,9 @@ mod tests {
     use crate::git_exec::{hunk_patch, GitOp};
     use crate::git_read::{FileStatus, Hunk, LineOrigin, WorktreeSection, WorktreeSnapshot};
 
-    use crate::test_util::{fake_entry, fake_file_diff, fake_hunk, fake_snapshot, reply};
+    use crate::test_util::{
+        fake_entry, fake_file_diff, fake_hunk, fake_snapshot, fake_stamp, reply,
+    };
 
     /// ワーキングツリー側の diff の対象。`assert_eq!` を短くするため。
     fn unstaged_diff(path: &str) -> DiffTarget {
@@ -479,6 +481,7 @@ mod tests {
             Cmd::Exec(GitOp::StageHunk {
                 path: "a.txt".into(),
                 patch: patch_of("a.txt", &hunks[1]),
+                expect: Box::new(fake_stamp()),
             })
         );
     }
@@ -499,6 +502,7 @@ mod tests {
             Cmd::Exec(GitOp::UnstageHunk {
                 path: "a.txt".into(),
                 patch: patch_of("a.txt", &hunks[0]),
+                expect: Box::new(fake_stamp()),
             })
         );
     }
@@ -527,6 +531,7 @@ mod tests {
             &Cmd::Exec(GitOp::DiscardHunk {
                 path: "a.txt".into(),
                 patch: patch_of("a.txt", &hunks[0]),
+                expect: Box::new(fake_stamp()),
             })
         );
     }
@@ -600,6 +605,31 @@ mod tests {
             state.notices.back().map(|notice| notice.level),
             Some(NoticeLevel::Warn)
         );
+    }
+
+    #[test]
+    fn a_hunk_without_a_stamp_is_refused_instead_of_falling_back() {
+        // `FileDiff::stamp` が無いと守り（`GitOp` の `expect`）を組めない。ファイル単位に
+        // 落とすとハンク 1 つのつもりでファイル全体を stage するので、断る。
+        // **同じ 1 本で、指紋があれば通ることも見る**（`fake_file_diff` は指紋を持つ）。
+        let unstamped = FileDiff {
+            stamp: None,
+            ..fake_file_diff("a.txt", vec![real_hunk(1)])
+        };
+        let mut state = diff_pane(WorktreeSection::Unstaged, &["a.txt"], vec![unstamped]);
+        assert_eq!(press(&mut state, 's'), Cmd::None);
+        let notice = state.notices.back().expect("通知が出ていません");
+        assert_eq!(notice.message, NOT_LATEST);
+
+        let mut state = diff_pane(
+            WorktreeSection::Unstaged,
+            &["a.txt"],
+            vec![fake_file_diff("a.txt", vec![real_hunk(1)])],
+        );
+        assert!(matches!(
+            press(&mut state, 's'),
+            Cmd::Exec(GitOp::StageHunk { .. })
+        ));
     }
 
     #[test]

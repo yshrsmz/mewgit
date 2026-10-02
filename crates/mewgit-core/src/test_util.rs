@@ -79,7 +79,8 @@ use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Ru
 use crate::git_exec::{RebaseAction, RebaseEntry};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
-    LineOrigin, Oid, Remote, Signature, StashEntry, Timestamp, Upstream, WorktreeSnapshot,
+    LineOrigin, Oid, PathStamp, Remote, Signature, StashEntry, Timestamp, Upstream,
+    WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PrStatus, PullRequest, RateLimit, RefSpec, RepoRef};
 use secrecy::SecretString;
@@ -816,6 +817,17 @@ pub fn fake_file_diff(path: &str, hunks: Vec<Hunk>) -> FileDiff {
         status: FileStatus::Modified,
         binary: false,
         hunks,
+        // ワークツリーの diff として組む。ハンク操作が `GitOp` の `expect` に写す。
+        stamp: Some(fake_stamp()),
+    }
+}
+
+/// ハンクを読んだ時点の指紋（`FileDiff::stamp`）。中身に意味は無く、`GitOp` の
+/// `expect` に写ったことを見分けられればよい。
+pub fn fake_stamp() -> PathStamp {
+    PathStamp {
+        worktree: None,
+        index: Some(fake_oid(0xab)),
     }
 }
 

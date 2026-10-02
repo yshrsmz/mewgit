@@ -111,6 +111,27 @@ impl RepoReader {
             worktree: (mtime(&git_dir.join("index")), mtime(git_dir)),
         })
     }
+
+    /// `path`（ワークツリーのルートからの相対）のいまの指紋。
+    ///
+    /// ハンク操作の守りが使う（01 の「外部の変更の検知 › 古いハンクの守り」）。diff を
+    /// 組む**前**に `diff` が採り、`git apply` を起こす直前に `git_exec::Runner` が
+    /// 採り直して比べる。**`git_exec` が呼んでよい読み取りは `open` とこれだけ**（00 の
+    /// レイヤーの例外）。
+    ///
+    /// **index は読み直してから引く。** libgit2 の `Index` はリポジトリに貼り付いた
+    /// 写しで、外で `git add` されても自分からは読み直さない（diff の側は
+    /// `diff_load_index` が読み直す）。
+    pub fn path_stamp(&self, path: &Path) -> Result<PathStamp, GitReadError> {
+        let mut index = self.repo.index()?;
+        index.read(false)?;
+        Ok(PathStamp {
+            worktree: FileStamp::of(&self.workdir().join(path)),
+            // コンフリクト中のファイルは stage 0 が無いので `None`（ハンク操作の対象に
+            // ならない）。
+            index: index.get_path(path, 0).map(|entry| entry.id),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -243,5 +264,27 @@ mod tests {
         let repo = committed();
         assert!(FileStamp::of(&repo.path().join("nope")).is_none());
         assert!(FileStamp::of(&repo.path().join("file.txt")).is_some());
+    }
+
+    #[test]
+    fn a_long_lived_reader_sees_an_outside_add_in_the_path_stamp() {
+        // リーダースレッドは同じ `RepoReader` を使い続ける。libgit2 の `Index` は
+        // 自分からは読み直さないので、外の `git add` が指紋に出ることを同じ reader で見る。
+        let repo = committed();
+        let reader = RepoReader::open(repo.path()).expect("開けません");
+        repo.write_worktree_file("file.txt", b"two-A\n");
+        let before = reader
+            .path_stamp(Path::new("file.txt"))
+            .expect("指紋を採れません");
+        repo.git(&["add", "file.txt"]);
+        let after = reader
+            .path_stamp(Path::new("file.txt"))
+            .expect("指紋を採れません");
+
+        assert_eq!(
+            before.worktree, after.worktree,
+            "ワークツリーは動いていない（前提）"
+        );
+        assert_ne!(before.index, after.index);
     }
 }

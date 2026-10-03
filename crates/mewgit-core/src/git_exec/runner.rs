@@ -306,9 +306,7 @@ impl Runner {
             // interactive rebase 以外では何もしないか断る（03）。
             .env("GIT_EDITOR", &self.commit_editor)
             .env("GIT_SEQUENCE_EDITOR", &self.sequence_editor)
-            .envs(comment_string_config(
-                std::env::var("GIT_CONFIG_COUNT").ok(),
-            ))
+            .envs(comment_char_config(std::env::var("GIT_CONFIG_COUNT").ok()))
             .stdin(if command.stdin.is_some() {
                 Stdio::piped()
             } else {
@@ -339,31 +337,38 @@ impl Runner {
     }
 }
 
-/// reword のメッセージの行頭の `#` を、git にコメントとして読ませないための印。
-const COMMENT_STRING: &str = "#mewgit#";
-
-/// `core.commentString` を [`COMMENT_STRING`] にする `GIT_CONFIG_*`。
+/// メッセージの行頭の `#` を、git にコメントとして読ませないためのコメント文字
+/// （US、`\x1f`）。メッセージの行頭にまず現れない制御文字を選んだ。
 ///
-/// **reword のメッセージは `--commit-editor` が書くので、git はエディタの出力として
-/// cleanup にかけ、コメント文字で始まる行を消す** —— `#123 is closed` が黙って消え、
-/// `#42` だけのメッセージは空として断られる（`/code-review` が拾った。03 の実測）。
-/// git 自身が書くコメント（squash の `# This is a combination…` など）も同じ印で
-/// 書かれて消えるので、揃ったまま `#` だけが本文に残る。`--cleanup` は reword に
-/// 効かない。
+/// **`core.commentString`（2.45 以降）ではなく `core.commentChar` に 1 文字で渡す。**
+/// 古い git は `commentString` を未知のキーとして読み飛ばし、`commentChar` の 2 文字以上は
+/// どのコマンドも断る（2.43.0 で実測）。1 文字なら 2.39.5 / 2.43.0 / 2.47.3 のどれでも
+/// `#` の行が残る（03 の「git の最低版」）。
+const COMMENT_CHAR: &str = "\x1f";
+
+/// `core.commentChar` を [`COMMENT_CHAR`] にする `GIT_CONFIG_*`。
+///
+/// **git はエディタを通したメッセージを cleanup にかけ、コメント文字で始まる行を消す。**
+/// reword のメッセージ（`--commit-editor` が書く）、squash でつなぐメッセージ、
+/// コンフリクトで止まった pick / cherry-pick を continue したときの元のメッセージが
+/// どれも通る —— 既定の `#` のままだと `#123 is closed` が黙って消え、`#42` だけの
+/// メッセージは空として断られる（`/code-review` が拾った。03 の実測）。git 自身が書く
+/// コメント（squash の `This is a combination…` など）も同じ文字で書かれて消えるので、
+/// 揃ったまま `#` だけが本文に残る。`--cleanup` は reword に効かない。
 ///
 /// **どのコマンドにも載せる。** エディタと同じで、止まった reword を continue したときも
 /// 要る。**`-c` を argv に足さない** —— `L` の履歴と argv の表に毎回ノイズが載る。
 /// ユーザーが `GIT_CONFIG_COUNT` を使っていれば、その後ろに足す（上書きしない）。
-fn comment_string_config(count: Option<String>) -> [(String, String); 3] {
+fn comment_char_config(count: Option<String>) -> [(String, String); 3] {
     let index = count.and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
     [
         (
             format!("GIT_CONFIG_KEY_{index}"),
-            "core.commentString".to_string(),
+            "core.commentChar".to_string(),
         ),
         (
             format!("GIT_CONFIG_VALUE_{index}"),
-            COMMENT_STRING.to_string(),
+            COMMENT_CHAR.to_string(),
         ),
         ("GIT_CONFIG_COUNT".to_string(), (index + 1).to_string()),
     ]
@@ -764,21 +769,21 @@ mod tests {
     }
 
     #[test]
-    fn the_comment_string_is_appended_after_the_users_config() {
+    fn the_comment_char_is_appended_after_the_users_config() {
         assert_eq!(
-            comment_string_config(None),
+            comment_char_config(None),
             [
                 (
                     "GIT_CONFIG_KEY_0".to_string(),
-                    "core.commentString".to_string()
+                    "core.commentChar".to_string()
                 ),
-                ("GIT_CONFIG_VALUE_0".to_string(), COMMENT_STRING.to_string()),
+                ("GIT_CONFIG_VALUE_0".to_string(), "\x1f".to_string()),
                 ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
             ]
         );
         // ユーザーの 0 番と 1 番を残して 2 番に足す。
         assert_eq!(
-            comment_string_config(Some("2".into()))[0].0,
+            comment_char_config(Some("2".into()))[0].0,
             "GIT_CONFIG_KEY_2"
         );
     }

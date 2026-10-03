@@ -368,7 +368,7 @@ pub enum ExecError {
   `Canceled` も同じ理由で 3 つ目にした（中断した git の `code` と `stderr` は
   signal の言い換えでしかない）。`Stale` も同じで、git を起こしていないので `code` も
   `stderr` も無く、代わりに古くなったパスを持つ
-- 環境変数: `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`（エラー文の検出を安定させる）、`GIT_EDITOR='<mewgit_bin>' --commit-editor` と `GIT_SEQUENCE_EDITOR='<mewgit_bin>' --sequence-editor`（端末のエディタを起こさない）、`GIT_CONFIG_*` で `core.commentString=#mewgit#`（**3 つともどのコマンドにも載せる**。下の「Interactive rebase の実装」）。`with_env` の指定はこの後に重ねるので、テストは上書きできる
+- 環境変数: `GIT_TERMINAL_PROMPT=0`、`LC_ALL=C`（エラー文の検出を安定させる）、`GIT_EDITOR='<mewgit_bin>' --commit-editor` と `GIT_SEQUENCE_EDITOR='<mewgit_bin>' --sequence-editor`（端末のエディタを起こさない）、`GIT_CONFIG_*` で `core.commentChar=\x1f`（**3 つともどのコマンドにも載せる**。下の「Interactive rebase の実装」）。`with_env` の指定はこの後に重ねるので、テストは上書きできる
 - **`GIT_TERMINAL_PROMPT=0` では ssh のパスフレーズ入力を止められない。** `ssh` は
   stdin ではなく `/dev/tty` を直接読むので、agent に載っていない鍵だと止まる
   （タイムアウトは設けない方針。抜けるのは下の「キャンセル」）。**画面は壊れない** ——
@@ -552,53 +552,33 @@ stderr ではなく mewgit の説明文を入れる。**中断はここに入れ
 ## git の最低版
 
 ```rust
-pub struct GitVersion(Version);   // Version は (major, minor, patch)。比較は外に出さない
-pub const KEEPS_COMMENT_LINES_SINCE: GitVersion;   // 2.45.0。案内の文に出す
-
-impl GitVersion {
-    /// `git --version` を読み、起動の床（2.38.0）を満たすときだけ返す。
-    /// 起動は `auth::probe::output`（`ssh -G` / `gh` と同じ読み取り専用の一発）。
-    pub async fn detect(git_bin: &Path) -> Result<GitVersion, VersionError>;
-    /// 1 行目を読み、床を確かめる（起動と分けて、古い版の腕をテストで踏む）。
-    pub fn parse(first_line: &str) -> Result<GitVersion, VersionError>;
-    /// reword / squash のメッセージで行頭のコメント文字を残せるか（2.45.0 以上）。
-    pub fn keeps_comment_lines(self) -> bool;
-}
+/// `<git_bin> --version` を叩き、床（2.38.0）を満たさなければ断る。
+/// 起動は `auth::probe::output`（`ssh -G` / `gh` と同じ読み取り専用の一発）。
+pub async fn require_minimum(git_bin: &Path) -> Result<(), VersionError>;
 ```
 
-**版は能力として問う**（2026-10-03 にユーザーと決めた）。版の数と比較（`Ord`）は
-`git_exec::version` の中に閉じ、外に出すのは名前の付いた能力（`keeps_comment_lines`）と、
-案内に出す `Display` だけにする。`app` には `>= 2.45` と書く手段が無いので、分岐は能力の
-名前でしか書けず、**版と能力の対応は `version.rs` の 1 箇所に集まる**。
-
-- **版ごとの実装（trait を版で差し替える形）は採らなかった。** 版で分かれるのはいま
-  reword / squash の 1 つで、しかも「git をどう呼ぶか」ではなく「UI がその操作を出すか」
-  （打たせる前に断る。01）なので、git を包む層に閉じ込めても `app` が問い合わせることに
-  変わりない。**将来 argv が版で変わる操作が出たら、`to_commands`（上の「argv への変換」）に
-  能力を渡して中で吸収する** —— 呼ぶ側は `GitOp` のままで済む。差し替えの層を考えるのは、
-  そういう操作が何本も出てからでよい
-- **文言の違いは版で分けない。** 照合を緩めて吸収する（下の「エラー分類」の `EditorGone`）
-
-**床は 2 段ある**（2026-10-03 にユーザーと決めた）。
-
-| 版 | 要るもの | 下回ったとき |
-|---|---|---|
-| **2.38.0**（起動） | `rebase --no-update-refs`（下の「Interactive rebase の実装」）。これより古い要求（`switch` / `restore` の 2.23、`GIT_CONFIG_COUNT` の 2.31）も覆う | **起動を断る**。端末に入る前に stderr へ理由と見つかった版を出して終了する |
-| **2.45.0**（reword / squash） | `core.commentString`（下の「Interactive rebase の実装」） | **RebaseEditor の `r` / `s` を断る**（01 の「interactive rebase の開始（`i`）」）。ほかは通す |
+**床は 2.38.0 の 1 つで、起動時に 1 回だけ見る**（2026-10-03 にユーザーと決めた）。
+`rebase --no-update-refs`（下の「Interactive rebase の実装」）が入った版で、これより古い
+要求（`switch` / `restore` の 2.23、`GIT_CONFIG_COUNT` の 2.31）も覆う。下回れば**端末に
+入る前に** stderr へ理由と見つかった版を出して終了する。
 
 - **2.38 未満で起動を断るのは、そこから下を叩いていないから。** 2.34.1 で `m` の rebase が
   `unknown option 'no-update-refs'` で落ちる（下の表）ことは見たが、ほかの操作が黙って
   違う動きをしないかは測っていない。gh の `GhTooOld`（04）のように degraded で続ける形を
   取らないのは、git が無いと何もできないため
-- **2.38〜2.44 で `r` / `s` だけを断るのは、そこだけが黙って壊れるから。** `core.commentString`
-  を知らない git は未知のキーとして読み飛ばし、reword の打ったメッセージからも squash で
-  つなぐ元のメッセージからも、行頭 `#` の行を exit 0 のまま消す（下の表）。fixup は
-  1 本目のメッセージをそのまま使うので消えない。**メッセージの中身は見ずに断る** ——
-  squash される側の本文はグラフに読み込んでおらず、古い git で効くコメント文字は
-  ユーザーの `core.commentChar`（`auto` なら git がメッセージを見て決める）なので、
-  「`#` で始まる行があれば」と書くと嘘になる
-- **Ubuntu 24.04 LTS の既定は 2.43.0** で、2 段目に掛かる。起動を 2.45 で断る案は
-  これを理由に採らなかった
+- **床の内側では版で振る舞いを分けない。** 2.45 未満の git は `core.commentString` を読まず、
+  reword・squash・コンフリクトで止まった pick / cherry-pick の continue で行頭 `#` の行を
+  exit 0 のまま消す（下の表）。これは版で断るのではなく、**どの版でも効く
+  `core.commentChar=\x1f`** で塞いだ（下の「Interactive rebase の実装」）。最初は 2.45 を
+  2 段目の床にして RebaseEditor の `r` / `s` を断る形で実装したが、`/code-review` が
+  continue でも消えることを踏み、断る範囲が広がる前に設定のほうで根を断った
+- **版で分けるものが出てきたら、能力として問う。** 版の数と比較（`Ord`）は
+  `git_exec::version` に閉じ、外へは名前の付いた能力（`keeps_x()` の形）だけを出す。
+  版ごとに実装を差し替える層（trait を版で選ぶ形）は、版で argv が変わる操作が何本も
+  出てから考える —— 1 本なら `to_commands`（上の「argv への変換」）に能力を渡して中で
+  吸収すれば、呼ぶ側は `GitOp` のままで済む（2026-10-03 にユーザーと話した）
+- **文言の違いも版で分けない。** 照合を緩めて吸収する（下の「エラー分類」の `EditorGone`）
+- **Ubuntu 24.04 LTS の既定は 2.43.0**、Debian 12 は 2.39.5 で、どちらも床の内側
 - **版を読むのは `general.git_bin`**（`Runner` が起こすのと同じバイナリ）。PATH の `git`
   ではない
 - **読み方**: `git version ` の後ろの 1 語を `.` で割り、**major と minor は数字を要求する。**
@@ -607,32 +587,32 @@ impl GitVersion {
   「最低版は gh 2.81.0」）と違って 4 つ目が続く形が実在する。後ろの括弧（Apple の
   `(Apple Git-157)`）も読まない。**読めなければ起動を断る**（gh と同じく、通す理由が無い）。
   案内には `git --version` の生の 1 行目を出す
-- `app` は検出した版を `AppState.git` に持つ（`AppState::new` の引数）。断るかどうかは
-  `keeps_comment_lines` の 1 本で、版の数を `app` に書かない
 
 実測（2026-10-03。Docker の各イメージに apt の git を入れ、`env -i` 相当の一時リポジトリで
-叩いた。reword のメッセージは `Fix bug` + 空行 + `#123 is closed`、`GIT_CONFIG_*` で
-`core.commentString=#mewgit#`。squash / fixup は元のメッセージに `#1 kept?` / `#2 kept?` の行を
-持つ 2 本を `GIT_EDITOR=true` でまとめた）:
+叩いた。reword のメッセージは `Fix bug` + 空行 + `#123 is closed`、squash / fixup は元の
+メッセージに `#1 kept?` / `#2 kept?` の行を持つ 2 本を `GIT_EDITOR=true` でまとめ、
+cherry-pick は `#7 kept?` を持つコミットをコンフリクトさせて解消し `--continue` した。
+設定は `GIT_CONFIG_*` で渡した）:
 
-| イメージ | git | reword の `#` 行 | squash の `#` 行 | fixup の `#` 行 | `rebase -i --no-update-refs` |
-|---|---|---|---|---|---|
-| `ubuntu:22.04` | 2.34.1 | 消える（exit 0） | — | — | `unknown option` で exit 129 |
-| `debian:bookworm` | 2.39.5 | 消える（exit 0） | — | — | 通る |
-| `ubuntu:24.04` | 2.43.0 | 消える（exit 0） | 消える（exit 0） | 残る | 通る |
-| `debian:trixie` | 2.47.3 | 残る | 残る（`commentString` 無しでは消える） | 残る | 通る |
-| macOS（手元） | 2.54.0 (Apple Git-157) / 2.56.0 | 残る | — | — | 通る |
+| イメージ | git | `core.commentString=#mewgit#` | `core.commentChar=\x1f` | `rebase -i --no-update-refs` |
+|---|---|---|---|---|
+| `ubuntu:22.04` | 2.34.1 | reword で消える（exit 0） | — | `unknown option` で exit 129 |
+| `debian:bookworm` | 2.39.5 | reword で消える（exit 0） | reword / squash / cherry-pick の continue で残る | 通る |
+| `ubuntu:24.04` | 2.43.0 | reword / squash / continue で消える、fixup は残る（exit 0） | reword / squash / cherry-pick の continue で残る | 通る |
+| `debian:trixie` | 2.47.3 | 残る（どちらの設定も無いと squash で消える） | reword / squash / cherry-pick の continue で残る | 通る |
+| macOS（手元） | 2.54.0 (Apple Git-157) / 2.56.0 | 残る | 残る（統合テスト） | 通る |
+
+`\x1f` はメッセージにも、rebase / cherry-pick のコンフリクトの stdout / stderr にも、
+`git status` の出力にも出なかった（2.56.0）。`core.commentChar` に 2 文字以上（`#mewgit#`）を
+入れる形は、2.43.0 以下で `core.commentChar should only be one … character` になり
+**どのコマンドも** exit 128 になる。
 
 **床の内側でほかに黙って壊れるものが無いか**は、`rust:1.98.1-bookworm`（git 2.39.5）で
-`cargo test --workspace` を流して見た（2026-10-03）。git が絡んで落ちたのは 7 本で、4 本は
-reword の `#` 行（消える / `#42` だけのメッセージが空として断られる）、3 本は文言の違い
-（`There was a problem with the editor` の大文字、`branch -d` の `The branch 'side' is not
-fully merged.`）。後者は理由の行が古い文で出るだけで、`EditorGone` の照合だけを緩めた。
-
-**2.38 と 2.45 そのものは叩いていない**（境目はリリースノートの値）。`core.commentChar` に
-`#mewgit#` を入れる形は、2.47.3 では `commentString` と同じに効き、2.43.0 以下は
-`core.commentChar should only be one … character` で**どのコマンドも** exit 128 になるので
-採らない。
+`cargo test --workspace` を流して見た（2026-10-03）。`commentString` のときに git が絡んで
+落ちたのは 7 本で、4 本は reword の `#` 行、3 本は文言の違い（`There was a problem with the
+editor` の大文字、`branch -d` の `The branch 'side' is not fully merged.`）。後者は理由の行が
+古い文で出るだけで、`EditorGone` の照合だけを緩めた。**2.38 そのものは叩いていない**
+（境目はリリースノートの値）。
 
 ## エラー分類（ExecErrorKind）
 
@@ -900,17 +880,19 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   HEAD を amend するので、**止まった reword の pick を skip すると別のコミットの
   メッセージを書き換える**（1 本前の pick、先頭なら `onto` の先端。下の表）。todo に
   `git` と直書きするので `general.git_bin` も効かない（どちらも `/code-review` が拾った）
-- **`core.commentString` を `#mewgit#` にする。** reword のメッセージは `--commit-editor`
+- **`core.commentChar` を `\x1f`（US）にする。** reword のメッセージは `--commit-editor`
   が書くので、git はエディタの出力として cleanup にかけ、コメント文字で始まる行を消す
   —— `#123 is closed` の行が黙って消え、`#42` だけのメッセージは空として断られ rebase が
-  止まる（`/code-review` が拾った。下の表）。`--cleanup` は reword に効かない。git 自身が
-  書くコメント（squash の `# This is a combination…`）も同じ印で書かれて消えるので、
-  揃ったまま `#` だけが本文に残る。**continue にも要る**のでエディタと同じくどのコマンドにも
+  止まる（`/code-review` が拾った。下の表）。squash でつなぐメッセージと、コンフリクトで
+  止まった pick / cherry-pick を continue したときの元のメッセージも同じ cleanup を通る。
+  `--cleanup` は reword に効かない。git 自身が書くコメント（squash の `This is a
+  combination…`）も同じ文字で書かれて消えるので、揃ったまま `#` だけが本文に残る。**continue にも要る**のでエディタと同じくどのコマンドにも
   載せ、argv の `-c` ではなく `GIT_CONFIG_COUNT` / `KEY_n` / `VALUE_n` で渡す（`L` の履歴と
   argv の表に毎回載せない）。ユーザーが `GIT_CONFIG_COUNT` を使っていれば後ろに足す。
-  **`core.commentString` を読むのは git 2.45 以降**（リリースノート）で、それより古い git は
-  未知のキーを黙って読み飛ばし、reword と squash で `#` の行を exit 0 のまま消す（2.43.0 と
-  2.39.5 で実測）。**2.45 未満では RebaseEditor の `r` / `s` を断る**（上の「git の最低版」）
+  **`core.commentString=#mewgit#`（最初の形）はやめた** —— 読むのは git 2.45 以降で、
+  それより古い git（Ubuntu 24.04 の 2.43.0）は未知のキーを読み飛ばして `#` の行を消す。
+  `commentChar` の 1 文字なら 2.39.5 から効く（上の「git の最低版」の表）。代償は行頭が
+  `\x1f` の行が消えることだけで、メッセージに書かれる字ではない
 - **消えた自バイナリ。** エディタが自バイナリなので、起動中に mewgit のバイナリが消えると、
   エディタを起こす git が落ちる（以前の `true` では起きない。**Linux では `/proc/<pid>/exe`
   を渡すので起きない** —— 下の 2 つ目）。**落ちるのは rebase の系統と
@@ -966,7 +948,7 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
      コミットを書き換える。断りは `HeadMoved` に分ける（上の「エラー分類」）
   2. `commit --amend`（メッセージを渡さない）。git がエディタを起こし、`--commit-editor` が
      `done` の最終行から `mewgit-reword-<X>` を差し込む —— **rebase の開始と同じ経路**なので、
-     cleanup も `core.commentString` も同じに効き、行頭の `#` が残る（統合テストで確認）。
+     cleanup も `core.commentChar` も同じに効き、行頭の `#` が残る（統合テストで確認）。
      メッセージを `--file -` で流し直す形（最初の版）は、同じメッセージを開始とやり直しで
      別の cleanup に通していた（`/simplify` の altitude が拾った）。**hook がまた断れば
      ここで止まり、rebase は止まったまま** —— 同じ形なので、hook を直して `m` から押し直せる。
@@ -1039,7 +1021,7 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
 | `pick A` / `exec git commit --amend -m NEW` / `pick B`、A がコンフリクト → `rebase --skip` | **exec が `onto` の先端を amend する**（先端の件名が NEW に化ける）。採らなかった形 |
 | commit-msg hook が reword を断る（git 2.56.0、2026-10-03。hook は `hook.<名前>.command` で置いた。以下 7 行も同じ） | exit 1、stderr に hook の出力と `You can amend the commit now`。pick は**元のメッセージでコミット済み**で、`done` の最終行は `reword <X>`、`git status` は `editing a commit`、gitdir に `MERGE_MSG` は無い。**`rebase-merge/amend` は pick が fast-forward した形（HEAD = X、reflog `rebase: fast-forward`）にしか無い** —— `--onto` で載せ直す形では HEAD が X と別の新しいコミット（reflog `rebase (reword): <件名>`）で、`amend` が無い |
 | ↑ の hook を外して continue | exit 0 だが**エディタは起こされず**、元のメッセージのまま進む |
-| ↑ で `commit --amend -F <mewgit-reword-<X>>` → continue（`core.commentString` の有無の両方） | 新しいメッセージが入り、`#123 kept` の行も残る。エディタは開始の 1 回しか起こされない |
+| ↑ で `commit --amend -F <mewgit-reword-<X>>` → continue（コメント文字の設定の有無の両方。測ったのは `core.commentString` のとき） | 新しいメッセージが入り、`#123 kept` の行も残る。エディタは開始の 1 回しか起こされない |
 | ↑ の amend を hook がまた断る | exit 1、stderr は hook の出力だけ。`rebase-merge/` はそのまま |
 | ↑ で `rebase --skip`（載せ直す形） | exit 0、**X は元のメッセージのまま残る**（捨てられない） |
 | reword の pick がコンフリクト → 解消して continue（hook は新しいメッセージを断るもの） | exit 0、**hook は走らず**新しいメッセージが入る。止まっているあいだは `MERGE_MSG` が在り（`git add` したあとも）、`amend` は無い。止まったまま `git reset --hard` すると `MERGE_MSG` が消え、HEAD は 1 本前のコミットのまま |
@@ -1047,8 +1029,8 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
 | `printf 'verify HEAD <oid>\n' \| git update-ref --stdin` | 一致なら exit 0 で、reflog も増えない。外れると exit 128、stderr `fatal: cannot lock ref 'HEAD': is at <いまの Oid> but expected <oid>` |
 | `rebase-merge/` に自分のファイルを置いたまま完了 / `rebase --abort` | どちらも `rebase-merge/` ごと消える |
 | `pick A` / `squash B`（`GIT_EDITOR=true`） | メッセージは `A の件名` + 空行 + `B の件名` |
-| reword のメッセージ `Fix bug` + 空行 + `#123 is closed`（`--commit-editor`） | `#123` の行が消える。`-c core.commentString=#mewgit#` を付けると残り、同じ rebase の squash のメッセージにもコメントの行は残らない |
-| `GIT_CONFIG_COUNT=2`（0 番はユーザーの設定、1 番が `core.commentString`）、reword 2 本の 1 本目がコンフリクト → 解消して continue | 2 本とも `#` の行が残る（`#42 only` だけのメッセージも通る）。0 番の設定も効いたまま |
+| reword のメッセージ `Fix bug` + 空行 + `#123 is closed`（`--commit-editor`） | `#123` の行が消える。`-c core.commentString=#mewgit#` を付けると残り（`core.commentChar=\x1f` に替えたあとも統合テストで同じ）、同じ rebase の squash のメッセージにもコメントの行は残らない |
+| `GIT_CONFIG_COUNT=2`（0 番はユーザーの設定、1 番がコメント文字。測ったのは `core.commentString` のとき）、reword 2 本の 1 本目がコンフリクト → 解消して continue | 2 本とも `#` の行が残る（`#42 only` だけのメッセージも通る）。0 番の設定も効いたまま |
 
 消えた自バイナリの実測（2026-10-03。macOS の git 2.56.0 と、Debian trixie のコンテナの
 git 2.47.3 で同じ結果。`LC_ALL=C`、stdin は `/dev/null`。エディタは「呼ばれたら印を残す」

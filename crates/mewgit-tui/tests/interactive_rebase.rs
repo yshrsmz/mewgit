@@ -54,6 +54,48 @@ async fn the_plan_replaces_the_todo() {
     assert!(!repo.path().join(".git/rebase-merge").exists());
 }
 
+#[tokio::test]
+async fn comment_lines_of_existing_messages_survive_squash_and_a_conflicted_continue() {
+    // **reword 以外でも git はメッセージを cleanup にかける**（03 の「git の最低版」）。
+    // squash でつなぐメッセージと、コンフリクトで止まった cherry-pick を continue した
+    // ときの元のメッセージ。どちらも `core.commentChar` が効かないと `#` の行が消える。
+    let repo = TestRepo::init();
+    repo.commit_file("base.txt", "base");
+    let a = repo.commit_bytes("a.txt", b"a\n", "a\n\n#1 kept");
+    let b = repo.commit_bytes("b.txt", b"b\n", "b\n\n#2 kept");
+    let runner = runner(&repo);
+    runner
+        .run(&GitOp::RebaseInteractive {
+            onto: "HEAD~2".into(),
+            head: b,
+            plan: RebasePlan {
+                entries: vec![
+                    entry(RebaseAction::Pick, a, "a"),
+                    entry(RebaseAction::Squash, b, "b"),
+                ],
+            },
+        })
+        .await
+        .expect("squash は最後まで通るはずです");
+    assert_eq!(messages(&repo, "HEAD~1"), ["a\n\n#1 kept\n\nb\n\n#2 kept"]);
+
+    repo.git(&["switch", "-q", "-c", "side", "HEAD~1"]);
+    let side = repo.commit_bytes("f", b"side\n", "side\n\n#7 kept");
+    repo.git(&["switch", "-q", "main"]);
+    repo.commit_bytes("f", b"main\n", "main");
+    runner
+        .run(&GitOp::CherryPick(vec![side]))
+        .await
+        .expect_err("f がコンフリクトするはずです");
+    repo.write_worktree_file("f", b"resolved\n");
+    repo.git(&["add", "f"]);
+    runner
+        .run(&GitOp::CherryPickContinue)
+        .await
+        .expect("解消したので通るはずです");
+    assert_eq!(messages(&repo, "HEAD~1"), ["side\n\n#7 kept"]);
+}
+
 /// `diverged` の side に居て、side の 2 本を reword する rebase を始める。1 本目が
 /// main とコンフリクトして止まる。
 async fn start_rewording_both(repo: &TestRepo, runner: &Runner, first: Oid, second: Oid) {
@@ -85,7 +127,7 @@ async fn start_rewording_both(repo: &TestRepo, runner: &Runner, first: Oid, seco
 
 #[tokio::test]
 async fn rewords_survive_continue() {
-    // **行頭の `#` も残る**（`core.commentString` を continue にも載せている。03）。
+    // **行頭の `#` も残る**（`core.commentChar` を continue にも載せている。03）。
     // continue は `RebaseInteractive` とは別の `GitOp` なので、`GIT_EDITOR` を
     // rebase の開始にだけ載せると、止まった reword も後ろの reword も元のメッセージの
     // まま通る（03）。
@@ -238,7 +280,7 @@ async fn a_reword_refused_by_a_hook_is_amended_before_continuing() {
             .await
             .expect("hook を外したので最後まで通るはずです");
 
-        // **行頭の `#` も残る**（amend も commit editor を通るので、`core.commentString` が効く）。
+        // **行頭の `#` も残る**（amend も commit editor を通るので、`core.commentChar` が効く）。
         assert_eq!(
             messages(&repo, &onto),
             ["b", NEW_MESSAGE],

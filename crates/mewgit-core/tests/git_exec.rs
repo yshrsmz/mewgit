@@ -997,7 +997,10 @@ async fn interactive_rebase_leaves_the_branch_alone_when_the_editor_fails() {
         &["rebase", "--interactive", "--no-update-refs", "HEAD~1"]
     );
     assert!(
-        stderr.contains("there was a problem with the editor"),
+        // git 2.39 / 2.43 は `There was …` と大文字で書く（03 の「git の最低版」）。
+        stderr
+            .to_ascii_lowercase()
+            .contains("there was a problem with the editor"),
         "{stderr}"
     );
     // 起動中にバイナリが消えた形と同じ（03 の「消えた自バイナリ」）。
@@ -1037,7 +1040,10 @@ async fn an_editor_that_is_there_but_refuses_is_not_a_vanished_binary() {
         panic!("git が走っていない: {err:?}");
     };
     assert!(
-        stderr.contains("there was a problem with the editor"),
+        // git 2.39 / 2.43 は `There was …` と大文字で書く（03 の「git の最低版」）。
+        stderr
+            .to_ascii_lowercase()
+            .contains("there was a problem with the editor"),
         "{stderr}"
     );
     assert_eq!(*kind, ExecErrorKind::Other);

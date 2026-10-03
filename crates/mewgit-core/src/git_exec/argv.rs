@@ -298,7 +298,7 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
 /// コミットのメッセージで別のコミットを amend することになるので、ここで止める。
 /// **amend にメッセージを渡さない。** `GIT_EDITOR` の commit editor が `done` の最終行から
 /// `mewgit-reword-<X>` を差し込む —— rebase の開始と同じ経路なので、cleanup も
-/// `core.commentString` も同じに効く。
+/// `core.commentChar` も同じに効く。
 fn continue_refused_reword(reword: &RefusedReword) -> Vec<GitCommand> {
     vec![
         GitCommand {

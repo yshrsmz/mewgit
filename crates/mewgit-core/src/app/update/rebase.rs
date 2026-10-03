@@ -12,7 +12,7 @@ use crate::app::state::stepped_index;
 use crate::app::{
     AppState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, RewordInput, TextBuffer,
 };
-use crate::git_exec::{GitOp, RebaseAction, RebaseEntry, RebasePlan, KEEPS_COMMENT_LINES_SINCE};
+use crate::git_exec::{GitOp, RebaseAction, RebaseEntry, RebasePlan};
 use crate::git_read::{short_oid, Commit, GitReadError, HeadInfo, Oid};
 
 /// `i`。カーソルの指すコミットから HEAD までを [`Modal::RebaseEditor`] に並べる。
@@ -134,16 +134,9 @@ pub(super) fn rebase_editor_key(state: &mut AppState, key: Key) -> Cmd {
     let action = match key.code() {
         KeyCode::Char('J') => return swap(state, 1),
         KeyCode::Char('K') => return swap(state, -1),
-        // 古い git は `#` の行を黙って消すので、押した時点で断る（下の `refuse_for_old_git`）。
-        KeyCode::Char('r') if !state.git.keeps_comment_lines() => {
-            return refuse_for_old_git(state, "reword")
-        }
         KeyCode::Char('r') => return start_reword(state),
         KeyCode::Char('p') => RebaseAction::Pick,
         KeyCode::Char('e') => RebaseAction::Edit,
-        KeyCode::Char('s') if !state.git.keeps_comment_lines() => {
-            return refuse_for_old_git(state, RebaseAction::Squash.keyword())
-        }
         KeyCode::Char('s') => RebaseAction::Squash,
         KeyCode::Char('f') => RebaseAction::Fixup,
         KeyCode::Char('d') => RebaseAction::Drop,
@@ -154,20 +147,6 @@ pub(super) fn rebase_editor_key(state: &mut AppState, key: Key) -> Cmd {
             entry.action = action;
         }
     }
-    Cmd::None
-}
-
-/// 古い git の `r` / `s`。**押した時点で断る**（打たせてから断ると打った文が失われる）。
-///
-/// 古い git は `core.commentString` を読まず、打ったメッセージや squash でつなぐ
-/// メッセージから行頭 `#` の行を黙って消す（01 の「interactive rebase の開始（`i`）」、
-/// 03 の「git の最低版」）。
-fn refuse_for_old_git(state: &mut AppState, action: &str) -> Cmd {
-    let message = format!(
-        "{action} には git {KEEPS_COMMENT_LINES_SINCE} 以上が要ります（見つかったのは {}）",
-        state.git
-    );
-    state.push_notice(NoticeLevel::Warn, message, None);
     Cmd::None
 }
 
@@ -339,7 +318,6 @@ mod tests {
     };
     use super::*;
     use crate::app::{update, Msg};
-    use crate::git_exec::GitVersion;
     use crate::git_read::{InProgressOp, WorktreeSnapshot};
     use crate::test_util::{fake_oid, fake_snapshot, reply, reword};
 
@@ -678,36 +656,6 @@ mod tests {
         assert_eq!(press(&mut state, 'r'), Cmd::LoadCommitMessage(fake_oid(1)));
         let _ = message_loaded(&mut state, fake_oid(1), message);
         state
-    }
-
-    #[test]
-    fn an_old_git_refuses_r_and_s_when_pressed_and_leaves_the_row_alone() {
-        let mut state = linear(3);
-        // Ubuntu 24.04 の既定。`core.commentString` を読まず `#` の行を消す（03）。
-        state.git = GitVersion::parse("git version 2.43.0").unwrap();
-        let _ = press_i_on(&mut state, 1);
-
-        for (key, action) in [('r', "reword"), ('s', "squash")] {
-            // **読みに行かない**（打たせてから断ると打った文が失われる。01）。
-            assert_eq!(press(&mut state, key), Cmd::None);
-            assert_eq!(reword_text(&state), None);
-            assert_eq!(actions(editor(&state).1)[0], ("pick", fake_oid(1)));
-            let notice = state.shown_notice().expect("通知が出ていません");
-            assert_eq!(notice.level, NoticeLevel::Warn);
-            assert_eq!(
-                notice.message,
-                format!("{action} には git 2.45.0 以上が要ります（見つかったのは 2.43.0）")
-            );
-        }
-        // 黙って壊れないほかの動作は通る。
-        let _ = press(&mut state, 'f');
-        assert_eq!(actions(editor(&state).1)[0], ("fixup", fake_oid(1)));
-
-        // 境目の版では同じキーが通る（断りが版で決まっていることの裏）。
-        state.git = GitVersion::parse("git version 2.45.0").unwrap();
-        let _ = press(&mut state, 's');
-        assert_eq!(actions(editor(&state).1)[0], ("squash", fake_oid(1)));
-        assert_eq!(press(&mut state, 'r'), Cmd::LoadCommitMessage(fake_oid(1)));
     }
 
     #[test]

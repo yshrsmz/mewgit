@@ -740,9 +740,9 @@ mod tests {
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
-        deliver_pr_details, fake_account, fake_branch, fake_git, fake_logins, fake_oid,
-        fake_pull_request, fake_rate_limit, fake_target, fetch_pr_details,
-        pr_list_loaded as list_msg, put_on_branch, reply, start_pr_details, FAKE_NOW,
+        deliver_pr_details, fake_account, fake_branch, fake_logins, fake_oid, fake_pull_request,
+        fake_rate_limit, fake_target, fetch_pr_details, pr_list_loaded as list_msg, put_on_branch,
+        reply, start_pr_details, FAKE_NOW,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -2864,12 +2864,7 @@ mod tests {
         let default_state = state();
         let mut config = Config::default();
         config.github.enabled = false;
-        let mut state = AppState::new(
-            crate::app::RepoInfo::default(),
-            config,
-            fake_git(),
-            FAKE_NOW,
-        );
+        let mut state = AppState::new(crate::app::RepoInfo::default(), config, FAKE_NOW);
         assert!(matches!(state.account, AccountState::Disabled));
         assert!(!state.focus_candidates().contains(&Pane::Prs));
 

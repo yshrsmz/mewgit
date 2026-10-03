@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::auth::url::RemoteUrl;
 use crate::auth::{AccountSource, AccountState, DegradedReason, GhLogin, RepoTarget};
-use crate::git_exec::{GitOp, GitVersion, RebasePlan};
+use crate::git_exec::{GitOp, RebasePlan};
 use crate::git_read::{
     Branch, Commit, CommitDetail, DiffTarget, FileDiff, FileEntry, HeadInfo, Oid, PathStamp,
     RefIndex, Remote, RepoFingerprint, StashEntry, Timestamp, WorktreeSection, WorktreeSnapshot,
@@ -70,8 +70,6 @@ pub struct AppState {
     pub now: Timestamp,
     /// 起動時に確定した設定。実行中は再読込しない（08）。
     pub config: Config,
-    /// 起動時に読んだ git の版。**能力としてしか問えない**（03 の「git の最低版」）。
-    pub git: GitVersion,
 }
 
 /// 外の変更の見張り（01 の「外部の変更の検知」）。
@@ -158,7 +156,7 @@ impl AppState {
     /// 開いたリポジトリと設定から初期状態を作る。
     /// **`now` を取るのは、最初の `Tick` より前にも通知が積まれるから**（`main.rs` の
     /// 設定の警告）。時計の無い状態を作れると、その通知だけが時刻を持たない。
-    pub fn new(repo: RepoInfo, config: Config, git: GitVersion, now: Timestamp) -> Self {
+    pub fn new(repo: RepoInfo, config: Config, now: Timestamp) -> Self {
         Self {
             repo,
             // **旗を読む場所はここ 1 つ**（01 の「GitHub 機能を切る」）。以後の読み手は
@@ -185,7 +183,6 @@ impl AppState {
             tick: 0,
             now,
             config,
-            git,
         }
     }
 
@@ -3305,7 +3302,7 @@ mod tests {
 
     use crate::app::Msg;
     use crate::git_read::LogPage;
-    use crate::test_util::{fake_branch, fake_git, fake_snapshot, FAKE_NOW};
+    use crate::test_util::{fake_branch, fake_snapshot, FAKE_NOW};
 
     /// 指定した区画にファイルを並べ、staged の先頭を選んだ状態。
     fn worktree(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> WorktreeState {
@@ -3557,7 +3554,7 @@ mod tests {
     /// `lane` も `cells` も実際には出てこない値になり、レーンや色を見るテストを
     /// 足した瞬間に「通るが現実と違う」状態になる。
     fn state_with_a_commit() -> AppState {
-        let mut state = AppState::new(RepoInfo::default(), Config::default(), fake_git(), FAKE_NOW);
+        let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
         let page = LogPage {
             commits: vec![crate::test_util::fake_commit(1, "summary")],
             done: true,
@@ -3580,7 +3577,7 @@ mod tests {
     #[test]
     fn tab_cycles_only_through_the_implemented_panes() {
         // 未実装のペインに移れると、キーを受ける先の無い画面に入り込む。
-        let mut state = AppState::new(RepoInfo::default(), Config::default(), fake_git(), FAKE_NOW);
+        let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
         let candidates = state.focus_candidates();
         for _ in 0..candidates.len() {
             assert!(candidates.contains(&state.focus), "{:?}", state.focus);
@@ -3817,7 +3814,7 @@ mod tests {
     #[test]
     fn an_empty_graph_still_has_the_wip_row() {
         // 行が 1 つも無くても WIP 行は選べる（07 の「Graph ペイン」）。
-        let mut state = AppState::new(RepoInfo::default(), Config::default(), fake_git(), FAKE_NOW);
+        let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
         assert_eq!(state.graph.rows(), 1);
 
         state.graph.move_cursor(3);
@@ -3828,7 +3825,7 @@ mod tests {
 
     #[test]
     fn push_notice_drops_the_oldest_beyond_the_cap() {
-        let mut state = AppState::new(RepoInfo::default(), Config::default(), fake_git(), FAKE_NOW);
+        let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
         for i in 0..MAX_NOTICES + 5 {
             state.push_notice(NoticeLevel::Info, format!("notice {i}"), None);
         }
@@ -3851,7 +3848,7 @@ mod tests {
 
     #[test]
     fn push_notice_keeps_level_and_detail() {
-        let mut state = AppState::new(RepoInfo::default(), Config::default(), fake_git(), FAKE_NOW);
+        let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
         state.push_notice(
             NoticeLevel::Error,
             "失敗".to_string(),

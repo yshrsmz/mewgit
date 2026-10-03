@@ -414,16 +414,16 @@ git の最低版。(2) README とリリースワークフローで 0.1 を切る
 status ヘルパ）**は単独の PR にせず、近くを触るタスクに相乗りさせる**。下の並びは
 書いた順のままで、この順序ではない
 
-- [x] **git の最低版を決める。** 床は 2 段（2026-10-03 にユーザーと決めた。03 の「git の
-      最低版」）—— **2.38.0 未満は起動を断る**（`rebase --no-update-refs` が落ちる。その下は
-      叩いていない）、**2.45.0 未満は RebaseEditor の `r` / `s` を押した時点で断る**
-      （`core.commentString` を読まず、reword と squash で行頭 `#` の行が exit 0 のまま
-      消える。Docker で 2.34.1 / 2.39.5 / 2.43.0 / 2.47.3 を実測。**着手前は reword だけと
-      見ていたが squash も消えた**）。Ubuntu 24.04 LTS の既定 2.43.0 が 2 段目に掛かるので、
-      起動を 2.45 で断る案は採らなかった。**版は能力として問う** —— 比較は
-      `git_exec::version` に閉じ、`app` は `keeps_comment_lines()` しか呼べない（版ごとに
-      実装を差し替える形は採らなかった。理由は 03）。git 2.39.5 で `cargo test` を流し、
-      ほかに落ちたのは文言の違いだけで、`EditorGone` の照合を大文字小文字無視にした
+- [x] **git の最低版を決める。** **床は 2.38.0 の 1 つで、下回れば端末に入る前に起動を断る**
+      （`rebase --no-update-refs` が落ちる。その下は叩いていない。03 の「git の最低版」）。
+      2.45 未満の git は `core.commentString` を読まず、reword・squash・コンフリクトで止まった
+      pick / cherry-pick の continue で行頭 `#` の行を exit 0 のまま消していた（Docker で
+      2.34.1 / 2.39.5 / 2.43.0 / 2.47.3 を実測）ので、**コメント文字を `core.commentChar=\x1f`
+      に替えて版を問わず塞いだ**（2026-10-03 にユーザーと決めた）。**最初は 2.45 を 2 段目の
+      床にして `r` / `s` を断る形で実装したが、`/code-review` が continue でも消えることを
+      踏んだ**ので、断る範囲を広げずに設定のほうで根を断った。Ubuntu 24.04 LTS（2.43.0）・
+      Debian 12（2.39.5）は床の内側。git 2.39.5 で `cargo test` を流し、残る失敗は文言の違い
+      だけで、`EditorGone` の照合を大文字小文字無視にした
 
 - [x] **起動中に mewgit のバイナリが消えたときのエディタ。** `GIT_EDITOR` /
       `GIT_SEQUENCE_EDITOR` は `current_exe()` を指す。**着手前は「revert / cherry-pick の

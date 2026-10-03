@@ -2560,6 +2560,9 @@ impl JobKind {
             // `ssh -G` はリポジトリの ref を読まない。読むのは `.git/config` の
             // リモート URL と `~/.ssh/config` で、どちらも git の書き込みで動かない。
             | JobKind::ResolveTarget
+            // **`.git/config` の `mewgit.user` は `GitOp::SetAccount` / `UnsetAccount` が
+            // 書く**が、世代は要らない —— その書き込みとは重ならず
+            // （`update::account::submit_account_write`）、終われば必ず頼み直す。
             | JobKind::ResolveAccount
             // `gh auth status` が読むのは gh 自身の設定で、git の書き込みで動かない。
             | JobKind::ListAccounts
@@ -2944,13 +2947,9 @@ pub enum AccountView {
 /// モーダル描画は `Modal` しか受け取らない（`modals::render`）ので、ここに無い値は
 /// 画面に出せない —— [`Modal::RemotePicker`] が `remotes` を写しているのと同じ形。
 ///
-/// **写しが古くなる瞬間は在る。** 「開いているあいだ [`AppState::account`] は
-/// 動かない」と書いていたが**嘘だった**（`/code-review` が拾った）——
-/// `update::submit_exec` は `git` を走らせる**前に**モーダルを閉じ、`A` には
-/// 実行中の断りが無いので、走っているあいだに**書き込み前の写しを持ったモーダルを
-/// 開き直せる**。そこで `update::account::resolve_again` が
-/// **`account` を動かすときに開いている `AccountPicker` を閉じる** ——
-/// 写しを禁じるのではなく、**写しの寿命を切る**（01 の「アカウントの選び直し」）。
+/// **写しが古くなる瞬間は在る**ので、`account` を `Resolving` に落とす 1 箇所
+/// （`update::account::leave_account`）が開いている `AccountPicker` を閉じる
+/// （01 の「写しの寿命」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repick {
     pub login: String,

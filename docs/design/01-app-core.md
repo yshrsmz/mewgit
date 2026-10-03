@@ -2197,10 +2197,7 @@ GitHub と関係のないリポジトリで degraded の理由が並ぶことは
   `message`）もそこから引ける。**`Vec<GhLogin>` を写さない** —— 写すと同じ候補が
   `state.account` と `state.modal` の 2 箇所にでき、`ui` と `update` がどちらを読むかで
   答えが割れうる（「導出できる値を引数に取らせない」）。**ここも写しが古くなりうる**
-  —— `Enter` で保存したあと、`git` が走っているあいだに `A` を押せば、消える運命の
-  `DegradedReason` を持ったモーダルが開き直せる（`Repick` と同じ経路）。下の
-  「写しの寿命」が同じ 1 箇所で両方を閉じる。**その開き直した画面では `r` も
-  押せる**ので、あちらは別に断る（下の「外で直したあとの再解決」）。**かつて「開いているあいだ
+  ので、`Repick` と同じ 1 箇所（下の「写しの寿命」）で閉じる。**かつて「開いているあいだ
   `state.account` は動かない」と書いていたが嘘で、`Repick` 側だけ直して
   ここに前提が生き残っていた**（独立したレビューが拾った。#54 の「節をまたぐと、
   直した節の隣で前提が生き残る」）
@@ -2272,25 +2269,26 @@ degraded なら `[r]`、`.git/config` 由来なら `[u]`、どちらも無けれ
 - **`submit_exec`（1 行入力と同じ確定の経路）を通す。** ほかの `git` が走って
   いるあいだは**モーダルを閉じない**（閉じてから `Cmd` が落とされると、選んだのに
   何も起きない）
-- **`account` を動かすときに、開いている `AccountPicker` を閉じる**（`resolve_again`）。
-  **「開いているあいだ `account` は動かない」は嘘だった**（`/code-review` が拾った）
-  —— `submit_exec` は `git` を走らせる**前に**モーダルを閉じ、`A` には実行中の
-  断りが無いので、走っているあいだに**書き込み前の写しを持ったモーダルを開き直せる**。
-  閉じないと、外した直後の画面が `[u] 指定を解除` を出したままになり、押すと既に
-  無いキーへ `git config --unset` が飛ぶ。**そのとき出るのは argv だけの赤い通知**
-  —— `exec_finished` は `Err` を必ず通知に積むが、`exec_advice` は
-  `ExecErrorKind::Other` に案内を持たず、**exit 5 は stderr が空**（03 の実測表）
-  なので、`ExecError::Failed` の `Display`（= 実行した argv）しか残らない。
-  **「通知が出ない」ではなく「理由が出ない」** —— 不変ルール 4 の経路は効いていて、
-  効いていないのは案内のほう。**写しを禁じるのではなく、写しの寿命を切る** ——
+- **写しの寿命。** `account` を `Resolving` に落とすのは 1 箇所（`leave_account`）で、
+  そこが開いている `AccountPicker` を閉じる。**`mewgit.user` の書き込みは、終わったとき
+  ではなく出した時点でそこを通す**（`submit_account_write`。`submit_exec` が断ったら
+  動かさない —— 落としてから `Cmd` が消えると、頼み直す相手がいないまま `Resolving` に
+  残る）。`Resolving` の `A` は通知に落ちるので、**書き込みのあいだ写しを持った
+  モーダルは開けない**。かつては終わったとき（`resolve_again`）に落としていて、
+  `submit_exec` が `git` を走らせる**前に**モーダルを閉じるので、走っているあいだに
+  `A` で**書き込み前の写しを持ったモーダルを開き直せた**（#78 で `/code-review` が
+  拾い、そのときは閉じる側で塞いだ）。開き直した画面が `[u] 指定を解除` を出したまま
+  残ると、押せば既に無いキーへ `git config --unset` が飛び、**argv だけの赤い通知**
+  が出る —— `exec_advice` は `ExecErrorKind::Other` に案内を持たず、**exit 5 は stderr
+  が空**（03 の実測表）。**写しを禁じるのではなく、写しの寿命を切る** ——
   `ui` のモーダル描画は `Modal` しか受け取らないので写し自体は要る
 - **一覧が 0 件で返ることがある。** `gh auth status` は 0 件を失敗にせず `Ok` で返し、
   空を `NotLoggedIn` に畳むのは `auth::resolve` の仕事なので、`Cmd::ListAccounts` は
   そこを通らない（起動後に外で `gh auth logout` すると踏める）。**保存先だけを出すと、
   選べる行が 1 つも無い画面が「選ぶと保存します」と言う**ので、`NotLoggedIn` の
   degraded と同じ案内（`gh auth login --hostname <host>`）に落とす
-- **書き込みのあとは結果に関わらず `Cmd::ResolveAccount` を出し、`account` を
-  `Resolving` に戻す。** 成功だけを見ない —— 中断（`ExecError::Canceled`）では
+- **書き込みのあとは結果に関わらず `Cmd::ResolveAccount` を出す**（`account` は
+  出した時点で `Resolving` に落ちている。上の「写しの寿命」）。成功だけを見ない —— 中断（`ExecError::Canceled`）では
   **書けたかどうか判らない**（#56 の「失敗なら ref は元のまま」が中断では成り立たない、と
   同じ形）。**`UnsetAccount` も同じ** —— 外そうとしたキーが既に無ければ
   `git config --unset` は **exit 5 を stderr 空**で返す（03 の実測表）ので、成否から
@@ -2326,19 +2324,21 @@ degraded なら `[r]`、`.git/config` 由来なら `[u]`、どちらも無けれ
   **効く条件とキーの案内は `AccountView` の 1 本の述語から出す**（#53。
   `is_unsettable` の隣）
 - **押したらモーダルを閉じる。** `resolve_again` をそのまま呼ぶ ——
-  **`account` を動かすときに開いている `AccountPicker` を閉じる 1 箇所を増やさない**。
-  開いたまま「解決しています」に差し替える形にすると、`Repick` で塞いだ
-  「書き込み前の写しを持ったモーダル」の罠（上の「写しの寿命」）を degraded 側に
-  開け直すことになる。閉じたあとの手掛かりはヘッダで、`Resolving` のあいだ
+  **`account` を `Resolving` に落とす 1 箇所（`leave_account`）が閉じる**ので、閉じる
+  場所を増やさない。開いたまま「解決しています」に差し替える形にすると、`Resolving` の
+  あいだも古い `DegradedReason` の写しが画面に残り、上の「写しの寿命」で切った罠を
+  degraded 側に開け直すことになる。閉じたあとの手掛かりはヘッダで、`Resolving` のあいだ
   `[gh: …]` が消え、決まると戻る（07）
-- **ほかの `git` が走っているあいだは断る**（`submit_exec` と同じ `exec_busy`。
-  **モーダルは閉じない**）。`r` は**書き込みの最中に `Cmd::ResolveAccount` を
-  飛ばせる初めての経路**で、断らないと `Ambiguous` で `Enter` →（`git config` が
-  走っているあいだに）`A` → `r` で**書き込み前の `.git/config` を読む解決**が先に
-  走る。`exec_finished` の `resolve_again` が出す 2 通目は `AppState::issue` が
-  同種として落とすので、**古い結果がそのまま最終になり、選んだ `mewgit.user` が
-  黙って無視される**。#51 の「どの順序なら拾えるか」と同じ形 ——
-  合図を出した順ではなく、**届く順**で決まる
+- **ほかの `git` が走っていても断らない。** 追い越すと困るのは `mewgit.user` を書く
+  `SetAccount` / `UnsetAccount` だけで（`.git/config` のその鍵を書く `GitOp` はこの 2 つ
+  しか無い）、そのあいだは `account` が `Resolving` なので**このモーダルが開かない**
+  （上の「写しの寿命」）。かつては書き込みの最中に `A` → `r` と押せて、**書き込み前の
+  `.git/config` を読む解決**が先に走り、`exec_finished` の `resolve_again` が出す
+  2 通目が `AppState::issue` に同種として落とされて、**選んだ `mewgit.user` が黙って
+  無視された**（#51 の「どの順序なら拾えるか」と同じ形 —— 合図を出した順ではなく、
+  **届く順**で決まる）。そのときは `exec_busy` で断っていたが、借りた通知が書き込み
+  向けの文言（「ほかの git 実行が終わるまで待ってください（Ctrl-C で中断）」）で、
+  読み取りの `r` にはずれていた
 - **`r` が読み直すのは `gh` と `.git/config` だけ。** mewgit の設定ファイルは起動時に
   固まる（08。`config` は `AppState` が持ち、`Cmd::ResolveAccount` はその写しを使う）
   ので、`general.gh_bin` と `[[repos]]` を外で直しても `r` では拾えない
@@ -2347,7 +2347,7 @@ degraded なら `[r]`、`.git/config` 由来なら `[u]`、どちらも無けれ
   案内することになる
 - **通知は出さない。** `Enter` / `u` のあとも通知なしで閉じて解決し直しており、
   degraded はヘッダに出る（`account_resolved` が「2 箇所で言わない」と決めたのと
-  同じ数え方）。断ったときだけ `exec_busy` が「ほかの git 実行が終わるまで」を出す
+  同じ数え方）
 
 ### push の行き先
 

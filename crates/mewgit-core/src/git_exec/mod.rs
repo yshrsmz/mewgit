@@ -167,7 +167,7 @@ pub enum GitOp {
     ///
     /// **CLI を通す理由に不変ルール 1 を引かない**（03）。あのルールの理由は hook が
     /// 走らないことで、`git config` は hook を 1 つも走らせない。ここで CLI なのは
-    /// 「読みは git2、書きは CLI」の分担と、失敗の argv と stderr が [`ExecError`] で
+    /// 「読みは git2、書きは CLI」の分担と、失敗の argv と git の出力が [`ExecError`] で
     /// UI まで届く経路（不変ルール 4）に乗せるため。**キーの名前は
     /// [`auth::MEWGIT_USER`] の 1 本**で、読む側（`auth::resolve` の git2）と
     /// 別々に書かない。
@@ -274,7 +274,7 @@ pub struct ExecOutput {
     pub stderr: String,
 }
 
-/// 失敗した `git` 実行。argv と stderr を握りつぶさない（不変ルール 4）。
+/// 失敗した `git` 実行。argv と git の出力を握りつぶさない（不変ルール 4）。
 ///
 /// **「git が走って非 0 で終わった」と「終了状態を得られなかった」を型で分ける。**
 /// 1 つの struct にまとめると、後者では `code` が常に `None`、`stderr` に git では
@@ -323,6 +323,9 @@ pub enum ExecError {
         /// 実行した argv。`git` 自身は含まない。
         argv: Vec<String>,
         code: Option<i32>,
+        /// **理由が stdout にだけ出る失敗がある**（何も stage していない `commit`、
+        /// 未解消の `rebase --continue`。03 の「エラー分類」）ので、分類のあとも捨てない。
+        stdout: String,
         stderr: String,
         kind: ExecErrorKind,
     },
@@ -460,6 +463,10 @@ pub enum ExecErrorKind {
     /// plan を組んだあとに HEAD が動き、sequence editor が断った（`EditorError::HeadMoved`）。
     /// git は rebase を始めず、進行中操作は残らない（03 の「Interactive rebase の実装」）。
     HeadMoved,
+    /// 未解消のファイルが残っている（stdout の `<path>: needs merge` か、stderr の
+    /// `Committing is not possible because you have unmerged files`）。何も書き込まれて
+    /// いない（03 の「エラー分類」）。
+    Unmerged,
     Other,
 }
 
@@ -472,6 +479,7 @@ mod tests {
         let err = ExecError::Failed {
             argv: vec!["add".to_string(), "--".to_string(), "a.txt".to_string()],
             code: Some(128),
+            stdout: String::new(),
             stderr: "fatal: pathspec".to_string(),
             kind: ExecErrorKind::Other,
         };

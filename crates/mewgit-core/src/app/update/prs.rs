@@ -682,7 +682,7 @@ pub(super) fn pr_details_finished(
             // `InvalidHost` はホスト名をそのまま持ち、**ホスト名に上限が無い**ので、
             // 予算をいくつにしても変わらない（`-bad` の 4 文字でちょうど 72 セル。
             // 実測 2026-09-18。当時の予算が 72 だったのは `q:quit` と同じ行だったため）。
-            // `exec_finished` が argv と stderr を `detail` に載せるのと同じ形で、
+            // `exec_finished` が argv と git の出力を `detail` に載せるのと同じ形で、
             // **読めるのは `L` の履歴**（01 の「通知」）。
             state.push_notice(
                 NoticeLevel::Warn,

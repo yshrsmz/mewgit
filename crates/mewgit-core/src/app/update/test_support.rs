@@ -415,6 +415,7 @@ pub(super) fn failed_with(kind: ExecErrorKind) -> ExecError {
     ExecError::Failed {
         argv: vec!["push".into(), "origin".into(), "main".into()],
         code: Some(1),
+        stdout: String::new(),
         stderr: "stderr の中身".to_string(),
         kind,
     }

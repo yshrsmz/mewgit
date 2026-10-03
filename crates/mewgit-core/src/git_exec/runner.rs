@@ -263,6 +263,7 @@ impl Runner {
                 argv: command.argv,
                 code: output.status.code(),
                 kind: classify(&stdout, &stderr),
+                stdout,
                 stderr,
             })
         }
@@ -508,6 +509,16 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
         // dirty。03 の「revert の開始」）。**`Empty` より後ろ** —— 空で止まった
         // cherry-pick の stdout にも status が出るので、先に見ると進行中を見落とす。
         ExecErrorKind::NoChanges
+    } else if stdout
+        .lines()
+        .any(|line| !line.starts_with('[') && line.ends_with(": needs merge"))
+        || has("Committing is not possible because you have unmerged files")
+    {
+        // **`[` で始まる行は見ない。** 複数の cherry-pick が積んだぶんの
+        // `[main <oid>] <件名>` を並べるので、件名が `…: needs merge` のコミットを積んで
+        // から別の理由で止まると取り違える。git が書くのは `<path>: needs merge`
+        // （03 の「エラー分類」）。
+        ExecErrorKind::Unmerged
     } else if has("non-fast-forward")
         || has("fetch first")
         || has("stale info")
@@ -674,6 +685,48 @@ mod tests {
         ] {
             assert_eq!(classify(stdout, ""), ExecErrorKind::NoChanges, "{stdout}");
         }
+    }
+
+    #[test]
+    fn unresolved_files_are_unmerged_whichever_stream_says_so() {
+        // 未解消のファイルを残したまま書き込んだ形（git 2.56.0 で実測。03 の「エラー分類」）。
+        // stash の 3 つは stdout に理由、stderr に `could not write index` だけ。
+        assert_eq!(
+            classify("b: needs merge\n", "error: could not write index\n"),
+            ExecErrorKind::Unmerged
+        );
+        assert_eq!(
+            classify(
+                "b: needs merge\nThe stash entry is kept in case you need it again.\n",
+                "error: could not write index\n"
+            ),
+            ExecErrorKind::Unmerged
+        );
+        // rebase の continue は stderr が空。
+        assert_eq!(
+            classify(
+                "a: needs merge\nYou must edit all merge conflicts and then\nmark them as resolved using git add\n",
+                ""
+            ),
+            ExecErrorKind::Unmerged
+        );
+        // cherry-pick / revert の continue と commit は stderr に理由。
+        assert_eq!(
+            classify(
+                "U\ta\n",
+                "error: Committing is not possible because you have unmerged files.\nhint: Fix them up in the work tree, and then use 'git add/rm <file>'\nhint: as appropriate to mark resolution and make a commit.\nfatal: Exiting because of an unresolved conflict.\n"
+            ),
+            ExecErrorKind::Unmerged
+        );
+    }
+
+    #[test]
+    fn a_subject_ending_in_needs_merge_is_not_unmerged() {
+        // 複数の cherry-pick が件名 `fix: needs merge` のコミットを積んでから、`-m` の無い
+        // merge で止まった形（stderr は 03 の「複数のコミットの cherry-pick / revert」の実測）。
+        let stdout = "[main 1a2b3c4] fix: needs merge\n 1 file changed, 1 insertion(+)\n";
+        let stderr = "error: commit 5d6e7f8 is a merge but no -m option was given.\nfatal: cherry-pick failed\n";
+        assert_eq!(classify(stdout, stderr), ExecErrorKind::Other);
     }
 
     #[test]

@@ -336,8 +336,9 @@ pub(super) fn account_resolved(
 /// `[u] 指定を解除` を出したままになり、押すと既に無いキーへ
 /// `git config --unset` が飛ぶ。**そのとき出るのは argv だけの赤い通知** ——
 /// `exec_finished` は `Err` を必ず通知に積むが、`exec_advice` は
-/// `ExecErrorKind::Other` に案内を持たず、**exit 5 は stderr が空**（03 の実測表）
-/// なので、`ExecError::Failed` の `Display`（= 実行した argv）しか残らない。
+/// `ExecErrorKind::Other` に案内を持たず、**exit 5 は stderr も stdout も空**（03 の実測表。
+/// stdout は git 2.56.0 で測った）なので、`ExecError::Failed` の `Display`（= 実行した
+/// argv）しか残らない。
 /// **「通知が出ない」ではなく「理由が出ない」**（独立したレビューが拾った）。
 /// `/code-review` が拾った。
 ///

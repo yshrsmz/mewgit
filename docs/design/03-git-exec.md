@@ -122,7 +122,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   引かない** —— あのルールの理由は **hook が走らないこと**で、名指しされているのは
   commit / checkout / rebase / stash。`git config --local` は hook を 1 つも走らせない
   ので、引くと「config の書き込みは `GitOp` でなければならない」と読めてしまう。
-  ここで CLI なのは**「読みは git2、書きは CLI」の分担**と、失敗の argv と stderr が
+  ここで CLI なのは**「読みは git2、書きは CLI」の分担**と、失敗の argv と git の出力が
   `ExecError` で UI まで届く経路（不変ルール 4）に乗せるため。
   **キーの名前は `auth::MEWGIT_USER` の 1 本**から取る —— 読む側
   （`auth::resolve` の git2）と別々に書くと、片方を直したときに黙って別のキーを
@@ -259,8 +259,8 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   進行中操作の門（`progress::refusal`）は `stash pop` のコンフリクトを拾わない ——
   あれは進行中操作ではない（continue が無い）。git の理由は stdout にしか出ず、
   stderr の `could not write index` からは読めない。**門が見るのは mewgit の snapshot** なので、
-  外で作った unmerged を読む前は git まで届き、理由の無い通知になる（`classify` で
-  `needs merge` を分ける案を `docs/plan.md` の M6 に送った）
+  外で作った unmerged を読む前は git まで届く。そのときは `classify` が `needs merge` を
+  `Unmerged` に分け、同じ断りの文を出す（下の「エラー分類」）
 - **部分 stash は index 全体を記録する**（git の仕様）。ほかに staged のファイルがあると、
   それも stash の中身に入り（作業ツリーでは staged のまま残る）、後で `apply` すると
   そのファイルの変更も戻る（上の表の最後の行を `reset --hard` してから `apply` すると
@@ -342,9 +342,15 @@ pub enum ExecError {
     /// ハンクを読んだあとに対象が変わっていた。git は起動していない（下の「古いハンクの守り」）。
     Stale { argv: Vec<String>, path: PathBuf },
     /// git が非 0 で終わった。
-    Failed { argv: Vec<String>, code: Option<i32>, stderr: String, kind: ExecErrorKind },
+    Failed { argv: Vec<String>, code: Option<i32>, stdout: String, stderr: String, kind: ExecErrorKind },
 }
 ```
+
+- **`Failed` は stdout も運ぶ。** git は失敗の理由を stdout にだけ書くことがある
+  （何も stage していない `commit`、未解消の `rebase --continue`、複数の revert が空で
+  止まった形。下の「エラー分類」）。分類（`classify`）だけが読んで捨てていたので、
+  通知には argv しか出なかった。`app` は stdout を `detail` に載せ、stderr が空なら
+  最後の行を要約にする（01 の「失敗の案内文」）
 
 - argv と stdin の組み立ては純粋関数 `to_commands()`（「argv への変換」）
 - `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
@@ -470,7 +476,7 @@ pub async fn run_cancelable(&self, op: &GitOp, cancel: oneshot::Receiver<()>)
 - **1 つの `GitOp` にまとめる理由は 05 の「一連の手順を 1 つの書き込みにする」。**
   `app` から見ると書き込みは 1 回で、`JobKind::Exec` も `Reload` も 1 回
 - **止まった手順が何だったかは `argv` で判る。** `ExecError` はどの変種も
-  `argv` を持っているので、通知の `detail` にはその 1 本の argv と stderr が出る
+  `argv` を持っているので、通知の `detail` にはその 1 本の argv と git の出力が出る
   （不変ルール 4）。**どこまで済んだかは運ばない** —— 済んだ手順の結果は
   リポジトリに残っており、読み直しがそれを拾う（`update::Reload` は
   `CheckoutPr` を `RefsAndLog` に置く）
@@ -586,6 +592,7 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
 | 行頭の `CONFLICT (` / `error: could not apply` | `Conflict` |
 | `is now empty` | `Empty` |
 | `nothing to commit` / `nothing added to commit` / `no changes added to commit` | `NoChanges` |
+| stdout の `[` で始まらない行の末尾の `: needs merge` / `Committing is not possible because you have unmerged files` | `Unmerged` |
 | `non-fast-forward` / `fetch first` / `stale info` / `Not possible to fast-forward` | `NonFastForward` |
 | その他 | `Other` |
 
@@ -605,6 +612,27 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
 割れる同じ結び**（clean / untracked がある / tracked が dirty。下の「revert の開始」）。
 **`git commit` も同じ語を出す**（stage したものが無いとき）ので `Commit` の失敗も
 `NoChanges` になるが、案内は op で分けてあり、commit には出さない（01 の「失敗の案内文」）。
+
+**`Unmerged` は未解消のファイルが残っているのに書き込もうとした形**で、入口で文言が割れる
+（git 2.56.0、2026-10-03 に一時リポジトリで実測。UU / AA の状態で叩いた）。
+
+| 操作 | exit | stdout / stderr |
+|---|---|---|
+| `stash push`（全体・パス指定）/ `stash apply` | 128 | stdout `<path>: needs merge`、stderr `error: could not write index` |
+| `stash pop` | 128 | 同上に、stdout `The stash entry is kept in case you need it again.` |
+| `rebase --continue` | 1 | stdout `<path>: needs merge` / `You must edit all merge conflicts and then` / `mark them as resolved using git add`、**stderr 空** |
+| `cherry-pick --continue` / `revert --continue` / `commit` | 128 | stdout `U	<path>`、stderr `error: Committing is not possible because you have unmerged files.` + `hint:` + `fatal: Exiting because of an unresolved conflict.` |
+
+- **`needs merge` は行末で、`[` で始まる行を除いて見る。** 複数の cherry-pick は積んだぶんの
+  `[main <oid>] <件名>` を stdout に並べる（上のコンフリクトの印と同じ）ので、件名が
+  `fix: needs merge` のコミットを積んだあとで merge に当たって止まる形（下の「複数の
+  コミットの cherry-pick / revert」の `-m` 無し）を `Unmerged` に取り違える。git が書く
+  行は `<path>: needs merge` で、パスは行頭から始まる
+- **`NoChanges` の後ろ。** どちらの出力も相手の語を含まないので順は効かないが、
+  語が広いほうを後ろに置く（`NonFastForward` と同じ数え方）
+- **`switch` / `pull` / `rebase -i` の開始などは別の文言で断る**（`you need to resolve your
+  current index first` など。どれも stderr）ので `Unmerged` にしない —— 案内を出す op を
+  数えていない（01 の「失敗の案内文」）
 
 **案内文は 01 の「失敗の案内文」が持つ。** ここに文言まで並べると、同じ kind でも
 op で変わる分（非 FF は 4 通り）を表に書けないうえ、「次に何のキーを押すか」は
@@ -871,8 +899,8 @@ rebase の reword 以外では何もしないので、同じ結果になる（�
 | `edit` で止まったあと `rebase --continue` | 0 | 同上 | 成功 |
 | 解消して `rebase --continue` / `rebase --skip` → **次のコミットでまたコンフリクト** | 1 | stdout `CONFLICT (content)`、stderr `could not apply` | `Conflict` |
 | 解消して `cherry-pick --continue` → 次の pick でコンフリクト | 1 | 同上 | `Conflict` |
-| 解消せずに `rebase --continue` | 1 | stdout `a: needs merge` / `You must edit all merge conflicts` | `Other` |
-| 解消せずに `cherry-pick --continue` | 128 | stderr `Committing is not possible because you have unmerged files.` | `Other` |
+| 解消せずに `rebase --continue` | 1 | stdout `a: needs merge` / `You must edit all merge conflicts` | `Unmerged` |
+| 解消せずに `cherry-pick --continue` | 128 | stderr `Committing is not possible because you have unmerged files.` | `Unmerged` |
 | `rebase --abort` / `merge --abort` | 0 | 何も出さない | 成功 |
 | 変更が空で止まった pick のあと `cherry-pick --continue` | 1 | stderr `The previous cherry-pick is now empty`（止まったときと同じ文） | `Empty` |
 | 変更が空で止まった pick のあと `cherry-pick --skip` / `--abort` | 0 | 何も出さない | 成功 |
@@ -886,8 +914,10 @@ rebase の reword 以外では何もしないので、同じ結果になる（�
 
 **`Conflict` は失敗ではなく「次で止まった」** —— 進行中操作は残り、バッジの数が進む。
 そこで赤を出すと壊れたように読めるので、`app` は `Warn` で次の手を案内する（01 の
-「失敗の案内文」）。**解消していない `Other` は赤のまま** —— git の文言（`needs merge`）が
-そのまま理由になる。
+「失敗の案内文」）。**解消していないまま continue した形も `Warn`**（`Unmerged`。上の
+「エラー分類」）—— 当初は「git の文言（`needs merge`）がそのまま理由になる」として赤の
+`Other` に残したが、rebase はその文言を **stdout にだけ**書くので、通知には argv しか
+出ていなかった（2026-10-03）。
 
 ### cherry-pick の開始
 
@@ -951,7 +981,8 @@ rebase の reword 以外では何もしないので、同じ結果になる（�
 - **`--mainline N` は N 番目の親を残す。** `-m 1` と `-m 2` で消えるファイルが逆になる
   （表の 2 行）。画面では「残す側の親」と言う（01、07）
 - **取り消す変更が無い形は `NoChanges` に分ける**（上の「エラー分類」）。stderr が空なので、
-  `Other` のままだと argv だけの赤い通知になる
+  案内が無いと要約行は stdout の結び（英語の `nothing to commit …`）になり、進行中操作が
+  残ったかを言えない（01 の「失敗の案内文」）
 - **1 本だけでも continue で空になる。** コンフリクトを HEAD 側の内容で解くと、開始と
   同じ文言で断られるが **`REVERT_HEAD` が残る**。**`NoChanges` は進行中操作が残ったかを
   言わない**ので、案内は op で分ける（開始なら「取り消し済み」、continue / skip なら

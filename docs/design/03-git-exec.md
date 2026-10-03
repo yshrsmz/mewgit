@@ -671,30 +671,45 @@ git の出力の形の問いで、写されたコミットの行（`echoes_a_com
    空で止まった形）。stdout は status の一覧 → 結びの順に並ぶ
 2. **push の ` ! [` の行**（`! [remote rejected] main -> main (pre-receive hook declined)`）
 3. **締めではない最初の `error:` / `fatal:` の行**から接頭辞を剥いだもの
-4. **接頭辞も `hint:` / `warning:` も無い最初の行** —— ssh の層の失敗（`ssh: Could not
-   resolve hostname …`、`ssh: connect to host … Connection refused`）、リモートが書く文言
-   （GitHub の `ERROR: Repository not found.`）、stderr に書く hook、`Aborting commit due to
-   empty commit message.`。**最後ではない** —— ssh の失敗は最後が案内文（`and the
-   repository exists.`）。**`warning:` は大文字小文字を問わず飛ばす** —— 初めて繋ぐ
-   ホストでは ssh が `Warning: Permanently added …` を先頭に書く（理由ではない）
-5. **stdout の最後の行。** stdout に書く pre-push hook の文言（stderr は締めの行だけ）
-6. **締めの行**そのもの。どこにも理由が無ければ、argv よりは何が起きたかを言う
+
+どれも選べなければ `None`。**git の形をしていない行は選ばない**（2026-10-03 にユーザーと
+決めた）—— hook の文言、ssh の行（`ssh: Could not resolve hostname …`）、リモートが書く
+文言（GitHub の `ERROR: Repository not found.`）。`app` は出力があれば固定の文言で `L` を
+案内し、出力が空なら `Display` に落とす（01 の「失敗の案内文」）。
+
+- **hook の出力は形で選べない。** lefthook 2.1.15 で pre-commit の 1 command を失敗させる
+  と、出力は**1 行目が枠**（`╭──…╮`、色付き）・見出し・各 command の出力・**最後が所要
+  時間**（`🥊 lint (0.00 seconds)`）で、理由（`src/a.rs:1:1: error: unused variable x`）は
+  真ん中にある（実測。行頭は `src/…` なので 3 にも当たらない）。最初の行も最後の行も
+  理由にならない。他の TUI も選んでいない（2026-10-03 に実測。lazygit 0.65.1 は commit
+  なら固定の文言 `Git command failed. Check command log for details`、push なら stderr の
+  全文、gitui 0.28.1 は全文のポップアップ、tig 2.6.1 は端末に生で流す）
+- **「締めの手前の最後の行」も採らなかった。** ssh の行と stderr に書く hook は拾えるが、
+  締めの行を**区切り**に使うので、git が文言を変えて照合が外れると手前の行を取り違える
+  （ssh なら案内文の `and the repository exists.`）。いまの形では、締めの行は**選ばない
+  ため**だけに照合するので、外れても締めの行（薄いが事実の行）が要約に出るだけ
+- pre-commit の hook の出力は stdout に書いても git が stderr に合流させる。pre-push では
+  合流させない（lefthook は自分の出力をすべて stdout に書く）
 
 **締めの行**（`runner::WRAP_UPS`）は、git が理由のあとに足す「何が」を言わない行 ——
 `failed to push some refs`（push。どの ref がなぜかは ` ! [` の行か hook の文言）、
 `Could not read from remote repository.`（fetch / pull / push。何がは前の行）、
-`cherry-pick failed` / `revert failed`（どのファイルかは前の `error:`）。**「最初の
-`error:`」だけでは避けられない** —— ssh の行と hook の文言は接頭辞を持たないので、
-締めの行のほうが最初の `error:` / `fatal:` になる（`/code-review` が踏んだ）。
+`cherry-pick failed` / `revert failed`（どのファイルかは前の `error:`）。ssh の失敗と
+pre-push の hook では、`error:` / `fatal:` の行が締めの行だけになる（`/code-review` が
+踏んだ）ので、飛ばさないとそれが要約に出る。
 
-どれも選べなければ `None`（`app` は `Display` に落とす）。**stderr に理由の行があれば
-stdout は見ない**（3 か 4 で決まる）—— 下の表の形では、stdout は進捗や status の一覧
+**stderr があれば stdout は見ない** —— 下の表の形では、stdout は進捗や status の一覧
 だった（`pull` の `Updating …`、stash の apply の status）。例外の `needs merge`
 （stderr は `could not write index` だけ）は `Unmerged` の案内が先に拾う。
 **2 と 3 は trim する前の行頭で見る** —— `would be overwritten` の下のファイル一覧は
 タブで字下げされるので、trim してから見ると `error: ` や `! [` で始まるパスを
-取り違える。**4 の「最初」は、複数行を書く hook では確かめていない**（hook の文言は
-1 行の形しか測っていない）。
+取り違える。
+
+**失敗の出力は端末の制御シーケンスを剥いで運ぶ**（`runner::strip_escapes`。`Failed` を
+組むとき）。hook は端末でなくても色を付け（lefthook は truecolor の枠）、描く側の ratatui
+（`ratatui-core` 0.1.2 の `Buffer::set_stringn`）は ESC の 1 文字しか落とさないので、
+要約にも `L` の履歴にも `[38;2;56;56;56m` が残る。gitui 0.28.1 は剥がさずに描いて画面が
+崩れた（実測）。成功の出力は剥がない（読む側が無い）。
 
 **`Other` に落ちる失敗の stderr**（git 2.56.0、`LC_ALL=C`、2026-10-03 に一時リポジトリで
 実測）。
@@ -726,7 +741,7 @@ stdout は見ない**（3 か 4 で決まる）—— 下の表の形では、st
 
 - **太字が締めの行。** cherry-pick / revert と fetch は理由のあとに情報の薄い `fatal:` を
   足し、push の `error:` はどの ref がなぜ断られたかを言わない
-- **hook の文言は 1 行の形しか測っていない**（上の 4。commit-msg の hook は `hook.<名前>.command` の
+- **素の hook の行は 1 行の形で測った**（commit-msg の hook は `hook.<名前>.command` の
   後ろにメッセージファイルのパスが足されるので、`exit 1` だけのコマンドは
   `exit: too many arguments` を 2 行目に書いた。hook の書き方の都合で、git の文言ではない）
 - 非 FF の push（`(fetch first)` / `(non-fast-forward)`）と `pull --ff-only` の

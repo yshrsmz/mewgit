@@ -259,6 +259,11 @@ impl Runner {
                 stderr,
             })
         } else {
+            // **失敗の出力は端末の制御シーケンスを剥いでから運ぶ。** hook（lefthook など）は
+            // 端末でなくても色を付ける。描く側（ratatui）は ESC の 1 文字しか落とさないので、
+            // 要約にも `L` の履歴にも `[38;2;56;56;56m` が残る（03 の「理由の行」）。
+            let stdout = strip_escapes(stdout);
+            let stderr = strip_escapes(stderr);
             Err(ExecError::Failed {
                 argv: command.argv,
                 code: output.status.code(),
@@ -444,6 +449,42 @@ fn lossy(bytes: Vec<u8>) -> String {
         .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
 }
 
+/// 端末の制御シーケンス（CSI `ESC [ … <終端>`、OSC `ESC ] … BEL` か `ESC \`、その他の
+/// `ESC <1 文字>`）を落とす。含まないとき（ふつうの場合）は複製しない。
+fn strip_escapes(text: String) -> String {
+    if !text.contains('\x1b') {
+        return text;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // 引数と中間の文字のあと、`@`〜`~` の 1 文字で終わる。
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // BEL か `ESC \` で終わる。
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// 出力のパターンからエラー種別を決める。**上から順に見て、先に当たったものを採る。**
 ///
 /// stdout も見るのは、`git merge`（`pull --no-rebase` の経路）がコンフリクトを
@@ -537,7 +578,9 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
 
 /// git が理由のあとに足す締めの行（接頭辞を剥いだ形）。どれも「何が」を言わない ——
 /// push の失敗はどの ref がなぜか、リモートの失敗は ssh の何が、cherry-pick / revert の
-/// 失敗はどのファイルが、を前の行（か stdout）に書く（03 の「理由の行」）。
+/// 失敗はどのファイルが、を前の行（か stdout）に書く（03 の「理由の行」）。**選ばない
+/// ためだけに照合する** —— git が文言を変えて外れても、この行が理由に選ばれるだけで、
+/// 別の行を取り違えはしない。
 const WRAP_UPS: [&str; 4] = [
     "failed to push some refs",
     "Could not read from remote repository.",
@@ -548,51 +591,33 @@ const WRAP_UPS: [&str; 4] = [
 /// 失敗の理由の行（03 の「エラー分類」の「理由の行」。[`ExecError::reason`]）。
 ///
 /// stderr が空なら stdout の最後の行（[`classify`] と同じく、git が写したコミットの行は
-/// 除く）。stderr があれば ` ! [` の行 → 締めではない最初の `error:` / `fatal:` の行 →
-/// 接頭辞も `hint:` / `warning:` も無い最初の行 → stdout の最後の行 → 締めの行（[`WRAP_UPS`]）。
-/// **行頭は trim する前に見る** —— ファイルの一覧はタブで字下げされるので、trim してから
-/// 見ると `error: ` や `! [` で始まるパスを取り違える。
+/// 除く）。stderr があれば ` ! [` の行 → 締め（[`WRAP_UPS`]）ではない最初の `error:` /
+/// `fatal:` の行。**git の形をしていない行（hook の文言、ssh の行）は選ばない** ——
+/// hook の出力は枠や所要時間の行を持ち、どの行が理由かを形で決められない（lefthook は
+/// 1 行目が枠、最後が所要時間）。**行頭は trim する前に見る** —— ファイルの一覧はタブで
+/// 字下げされるので、trim してから見ると `error: ` や `! [` で始まるパスを取り違える。
 pub(super) fn reason<'a>(stdout: &'a str, stderr: &'a str) -> Option<&'a str> {
-    let from_stdout = || {
-        stdout
+    if stderr.trim().is_empty() {
+        return stdout
             .lines()
             .map(str::trim)
-            .rfind(|line| !line.is_empty() && !echoes_a_commit(line))
-    };
-    if stderr.trim().is_empty() {
-        return from_stdout();
+            .rfind(|line| !line.is_empty() && !echoes_a_commit(line));
     }
-    let prefixed = |line: &'a str| {
-        line.strip_prefix("error: ")
-            .or_else(|| line.strip_prefix("fatal: "))
-            .map(str::trim)
-            .filter(|rest| !rest.is_empty())
-    };
-    let wraps_up = |rest: &str| WRAP_UPS.iter().any(|wrap_up| rest.starts_with(wrap_up));
     stderr
         .lines()
         .find(|line| line.starts_with(" ! ["))
         .map(str::trim)
         .or_else(|| {
-            stderr
-                .lines()
-                .filter_map(prefixed)
-                .find(|rest| !wraps_up(rest))
-        })
-        .or_else(|| {
-            stderr.lines().map(str::trim).find(|line| {
-                !line.is_empty()
-                    && !line.starts_with("hint:")
-                    && !line.starts_with("error:")
-                    && !line.starts_with("fatal:")
-                    // ssh の `Warning: Permanently added …` と git の `warning:`。
-                    && !line
-                        .get(..8)
-                        .is_some_and(|head| head.eq_ignore_ascii_case("warning:"))
+            stderr.lines().find_map(|line| {
+                line.strip_prefix("error: ")
+                    .or_else(|| line.strip_prefix("fatal: "))
+                    .map(str::trim)
+                    .filter(|rest| {
+                        !rest.is_empty()
+                            && !WRAP_UPS.iter().any(|wrap_up| rest.starts_with(wrap_up))
+                    })
             })
         })
-        .or_else(from_stdout)
-        .or_else(|| stderr.lines().find_map(prefixed))
 }
 
 /// git がコミットを積んだときに stdout に写す行か（`[main 1a2b3c4] <件名>`、
@@ -616,7 +641,7 @@ mod tests {
     fn the_reason_is_picked_from_stderr_by_the_shape_of_the_line() {
         // 03 の「エラー分類」の「理由の行」。stderr は git 2.56.0（`LC_ALL=C`）の出力を
         // そのまま写した（同じ節の `Other` の表）。
-        let cases: [(&str, &str); 10] = [
+        let cases: [(&str, &str); 5] = [
             // 最初の `error:` の行。下のパスの字下げはタブ。
             (
                 "error: Your local changes to the following files would be overwritten by checkout:\n\t! [x].txt\nPlease commit your changes or stash them before you switch branches.\nAborting\n",
@@ -627,7 +652,7 @@ mod tests {
                 "error: the branch 'side' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D side'\nhint: Disable this message with \"git config set advice.forceDeleteBranch false\"\n",
                 "the branch 'side' is not fully merged",
             ),
-            // **最後ではなく最初。** 最後は `cherry-pick failed` / `Could not read from remote`。
+            // **最後ではなく最初。** 最後は締めの `cherry-pick failed` / `Could not read from remote`。
             (
                 "error: The following untracked working tree files would be overwritten by merge:\n\tg\nPlease move or remove them before you merge.\nAborting\nfatal: cherry-pick failed\n",
                 "The following untracked working tree files would be overwritten by merge:",
@@ -641,33 +666,33 @@ mod tests {
                 "remote: protected branch        \nTo /tmp/o.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to '/tmp/o.git'\n",
                 "! [remote rejected] main -> main (pre-receive hook declined)",
             ),
-            // ssh の層の失敗。締めの `fatal:` より、接頭辞の無い ssh の行。
-            (
-                "ssh: Could not resolve hostname nonexistent.invalid: nodename nor servname provided, or not known\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
-                "ssh: Could not resolve hostname nonexistent.invalid: nodename nor servname provided, or not known",
-            ),
-            // 初めて繋ぐホストの ssh の `Warning:` は理由ではない（GitHub の文言を採る）。
-            (
-                "Warning: Permanently added 'github.com' (ED25519) to the list of known hosts.\nERROR: Repository not found.\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
-                "ERROR: Repository not found.",
-            ),
-            // stderr に書く pre-push hook。締めの `error:` より hook の文言。
-            (
-                "lint failed (stderr)\nerror: failed to push some refs to '/tmp/o.git'\n",
-                "lint failed (stderr)",
-            ),
-            // `error:` も `fatal:` も無ければ `hint:` 以外の最初の行（hook の文言）。
-            ("lint failed: f\n", "lint failed: f"),
-            (
-                "Aborting commit due to empty commit message.\n",
-                "Aborting commit due to empty commit message.",
-            ),
         ];
         for (stderr, expected) in cases {
             assert_eq!(reason("", stderr), Some(expected), "stderr: {stderr}");
         }
-        // `hint:` しか無ければ選べない。
-        assert_eq!(reason("", "hint: 何か\n"), None);
+    }
+
+    #[test]
+    fn a_line_that_is_not_shaped_like_git_is_never_the_reason() {
+        // hook の文言と ssh の行は選ばない（03 の「理由の行」）。締めの行も選ばない。
+        // stdout があっても、stderr があれば見ない。
+        let cases = [
+            // ssh の層の失敗。理由の行に接頭辞が無く、`fatal:` は締めの行だけ。
+            "ssh: Could not resolve hostname nonexistent.invalid: nodename nor servname provided, or not known\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+            "Warning: Permanently added 'github.com' (ED25519) to the list of known hosts.\nERROR: Repository not found.\nfatal: Could not read from remote repository.\n",
+            // pre-push hook に断られた push（hook の文言は stdout 側）。
+            "error: failed to push some refs to '/tmp/o.git'\n",
+            // lefthook の pre-commit（剥いだあと。1 行目が枠、最後が所要時間）。
+            "╭──────╮\n│ 🥊 lefthook v2.1.15 hook: pre-commit │\n╰──────╯\n┃  lint ❯\nsrc/a.rs:1:1: error: unused variable x\n2 errors found\n\nexit status 1\nsummary: (done in 0.02 seconds)\n🥊 lint (0.00 seconds)\n",
+            "hint: 何か\n",
+        ];
+        for stderr in cases {
+            assert_eq!(
+                reason("lint failed (stdout)\n", stderr),
+                None,
+                "stderr: {stderr}"
+            );
+        }
     }
 
     #[test]
@@ -680,35 +705,16 @@ mod tests {
         );
         // git が写したコミットの行は理由ではない（`classify` と同じく除く）。
         assert_eq!(reason("[main 1a2b3c4] fix\n", ""), None);
-        // stderr に理由の行が無ければ（`hint:` だけ）stdout へ降りる。
-        assert_eq!(
-            reason(stdout, "hint: 何か\n"),
-            Some("no changes added to commit (use \"git add\" and/or \"git commit -a\")")
-        );
     }
 
     #[test]
-    fn a_wrap_up_line_is_the_reason_only_when_nothing_else_says_why() {
-        // stdout に書く pre-push hook（git 2.56.0）。stderr は締めの `error:` だけで、
-        // 理由は stdout にしか無い。
-        let wrap_up = "error: failed to push some refs to '/tmp/o.git'\n";
+    fn escapes_are_stripped_and_plain_text_is_kept_as_is() {
+        // lefthook の枠（truecolor）と、OSC のハイパーリンク。
         assert_eq!(
-            reason("lint failed (stdout)\n", wrap_up),
-            Some("lint failed (stdout)")
+            strip_escapes("\x1b[38;2;56;56;56m╭──╮\x1b[m\n\x1b[1mpre-commit\x1b[0m \x1b]8;;https://x\x07link\x1b]8;;\x1b\\\n".to_string()),
+            "╭──╮\npre-commit link\n"
         );
-        // どこにも無ければ締めの行そのもの（`Display` の argv よりは何が起きたかを言う）。
-        assert_eq!(
-            reason("", wrap_up),
-            Some("failed to push some refs to '/tmp/o.git'")
-        );
-        // stderr に理由の行があれば stdout は見ない（`pull` の `Updating …` を理由と読まない）。
-        assert_eq!(
-            reason(
-                "Updating 1a2b3c4..5d6e7f8\n",
-                "error: Your local changes to the following files would be overwritten by merge:\n\tf\nAborting\n"
-            ),
-            Some("Your local changes to the following files would be overwritten by merge:")
-        );
+        assert_eq!(strip_escapes("plain\n".to_string()), "plain\n");
     }
 
     #[test]

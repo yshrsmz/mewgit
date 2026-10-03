@@ -344,20 +344,53 @@ fn exec_detail(err: &ExecError) -> String {
 
 /// 案内文の無い失敗の要約行（01 の「失敗の案内文」）。
 ///
-/// **stderr が空なら stdout の最後の行。** git は理由を stdout にだけ書くことがあり
-/// （何も stage していない `commit` など）、`Display` に落とすと argv だけの通知になって
-/// 理由が画面に出ない。git の stdout は status の一覧 → 結びの順に並ぶので最後の行を採る。
-/// **stderr があるときは使わない** —— stderr の最後の行は `hint:` のことが多く、理由の行を
-/// 選べない（そちらは `L` の履歴で読む。07）。
+/// stderr があれば [`stderr_reason`]、**stderr が空なら stdout の最後の行。** git は理由を
+/// stdout にだけ書くことがあり（何も stage していない `commit` など）、`Display` に落とすと
+/// argv だけの通知になって理由が画面に出ない。git の stdout は status の一覧 → 結びの順に
+/// 並ぶので最後の行を採る。どちらからも選べなければ `Display`。
 fn exec_summary(err: &ExecError) -> String {
-    match err {
-        ExecError::Failed { stdout, stderr, .. } if stderr.trim().is_empty() => stdout
-            .lines()
-            .map(str::trim)
-            .rfind(|line| !line.is_empty())
-            .map_or_else(|| err.to_string(), str::to_string),
-        _ => err.to_string(),
-    }
+    let ExecError::Failed { stdout, stderr, .. } = err else {
+        return err.to_string();
+    };
+    let reason = if stderr.trim().is_empty() {
+        stdout.lines().map(str::trim).rfind(|line| !line.is_empty())
+    } else {
+        stderr_reason(stderr)
+    };
+    reason.map_or_else(|| err.to_string(), str::to_string)
+}
+
+/// stderr から理由の行を選ぶ（01 の「失敗の案内文」。op ごとの実測は 03 の「エラー分類」）。
+///
+/// 1. **push の ` ! [` の行**（`! [remote rejected] main -> main (pre-receive hook declined)`）。
+///    push の `error:` は後ろの `failed to push some refs` で、どの ref がなぜかが無い
+/// 2. **最初の `error:` / `fatal:` の行**から接頭辞を剥いだもの。最後ではないのは、
+///    cherry-pick / revert が理由のあとに `fatal: cherry-pick failed` を、fetch が
+///    `fatal: Could not read from remote repository.` を足すから。接頭辞は通知の赤と
+///    重なるので剥ぐ（`would be overwritten by checkout` が 71 セルに入るかの差）
+/// 3. **`hint:` 以外の最後の行**（hook が自分で書いた文言、`Aborting commit due to empty
+///    commit message.`）。`hint:` は `advice.*` で消える行で、理由ではない
+///
+/// **1 と 2 は trim する前の行頭で見る。** git はファイルの一覧をタブで字下げして
+/// 並べる（`would be overwritten` の下）ので、trim してから見ると `error: ` や `! [` で
+/// 始まるパスを理由の行と取り違える。
+fn stderr_reason(stderr: &str) -> Option<&str> {
+    stderr
+        .lines()
+        .find(|line| line.starts_with(" ! ["))
+        .or_else(|| {
+            stderr.lines().find_map(|line| {
+                line.strip_prefix("error: ")
+                    .or_else(|| line.strip_prefix("fatal: "))
+            })
+        })
+        .or_else(|| {
+            stderr
+                .lines()
+                .rfind(|line| !line.trim().is_empty() && !line.starts_with("hint:"))
+        })
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
 }
 
 /// 通知の要約行。失敗の種別から「次に何をすればよいか」を出す（01 の「失敗の案内文」）。
@@ -735,12 +768,8 @@ mod tests {
             detail.contains("did not match any files"),
             "detail: {detail}"
         );
-        // 案内の無い kind では要約行が `Display` のまま（01 の「失敗の案内文」）。
-        assert!(
-            notice.message.contains("git add -- a.txt"),
-            "message: {}",
-            notice.message
-        );
+        // 案内の無い kind では、要約行は stderr の理由の行（01 の「失敗の案内文」）。
+        assert_eq!(notice.message, "pathspec 'a.txt' did not match any files");
     }
 
     #[test]
@@ -1110,10 +1139,65 @@ mod tests {
         );
         assert_eq!(notice.level, NoticeLevel::Error);
 
-        // **stderr があれば使わない**（最後の行が `hint:` のことが多い）。
+        // **stderr があれば stdout は使わない。** `hint:` しか無ければ `Display` に落ちる。
         finish_exec(&mut state, commit, Err(failed("hint: 何か\n")));
         let notice = state.notices.back().expect("通知がありません");
         assert_eq!(notice.message, "git の実行に失敗しました: git commit -m m");
+    }
+
+    #[test]
+    fn a_failure_with_a_reason_only_on_stderr_is_summed_up_by_that_reason() {
+        // 01 の「失敗の案内文」。stderr は git 2.56.0（`LC_ALL=C`）の出力をそのまま写した
+        // （03 の「エラー分類」）。
+        let cases: [(&str, &str); 7] = [
+            // 最初の `error:` の行。下のパスの字下げはタブ。
+            (
+                "error: Your local changes to the following files would be overwritten by checkout:\n\t! [x].txt\nPlease commit your changes or stash them before you switch branches.\nAborting\n",
+                "Your local changes to the following files would be overwritten by checkout:",
+            ),
+            // `hint:` は飛ばす。
+            (
+                "error: the branch 'side' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D side'\nhint: Disable this message with \"git config set advice.forceDeleteBranch false\"\n",
+                "the branch 'side' is not fully merged",
+            ),
+            // **最後ではなく最初。** 最後は `cherry-pick failed` / `Could not read from remote`。
+            (
+                "error: The following untracked working tree files would be overwritten by merge:\n\tg\nPlease move or remove them before you merge.\nAborting\nfatal: cherry-pick failed\n",
+                "The following untracked working tree files would be overwritten by merge:",
+            ),
+            (
+                "fatal: 'nope' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+                "'nope' does not appear to be a git repository",
+            ),
+            // push は ` ! [` の行。`error:` の `failed to push some refs` はどの ref がなぜかを言わない。
+            (
+                "remote: protected branch        \nTo /tmp/o.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to '/tmp/o.git'\n",
+                "! [remote rejected] main -> main (pre-receive hook declined)",
+            ),
+            // `error:` も `fatal:` も無ければ `hint:` 以外の最後の行（hook の文言）。
+            ("lint failed: f\n", "lint failed: f"),
+            (
+                "Aborting commit due to empty commit message.\n",
+                "Aborting commit due to empty commit message.",
+            ),
+        ];
+        let mut state = state();
+        for (stderr, expected) in cases {
+            finish_exec(
+                &mut state,
+                GitOp::Switch("side".to_string()),
+                Err(ExecError::Failed {
+                    argv: vec!["switch".into(), "side".into()],
+                    code: Some(1),
+                    stdout: String::new(),
+                    stderr: stderr.to_string(),
+                    kind: ExecErrorKind::Other,
+                }),
+            );
+            let notice = state.notices.back().expect("通知がありません");
+            assert_eq!(notice.message, expected, "stderr: {stderr}");
+            assert_eq!(notice.level, NoticeLevel::Error);
+        }
     }
 
     #[test]

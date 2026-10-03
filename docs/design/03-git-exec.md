@@ -350,7 +350,7 @@ pub enum ExecError {
   （何も stage していない `commit`、未解消の `rebase --continue`、複数の revert が空で
   止まった形。下の「エラー分類」）。分類（`classify`）だけが読んで捨てていたので、
   通知には argv しか出なかった。`app` は stdout を `detail` に載せ、stderr が空なら
-  最後の行を要約にする（01 の「失敗の案内文」）
+  最後の行を要約にする（stderr があればそこから理由の行を選ぶ。01 の「失敗の案内文」）
 
 - argv と stdin の組み立ては純粋関数 `to_commands()`（「argv への変換」）
 - `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
@@ -637,6 +637,41 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
 - **`switch` / `pull` / `rebase -i` の開始などは別の文言で断る**（`you need to resolve your
   current index first` など。どれも stderr）ので `Unmerged` にしない —— 案内を出す op を
   数えていない（01 の「失敗の案内文」）
+
+**`Other` に落ちる失敗の stderr**（git 2.56.0、`LC_ALL=C`、2026-10-03 に一時リポジトリで
+実測）。案内の無い失敗の要約行はここから理由の行を選ぶ（01 の「失敗の案内文」）。
+
+| 操作 | exit | stderr（タブの字下げは `⇥`） |
+|---|---|---|
+| `switch`（ワークツリーの変更が上書きされる） | 1 | `error: Your local changes to the following files would be overwritten by checkout:` / `⇥f` / `Please commit …` / `Aborting` |
+| `switch`（無い ref）/ merge の途中の `switch` | 128 | `fatal: invalid reference: nope` / `fatal: cannot switch branch while merging` + 案内 1 行 |
+| `branch` / `switch --create` / `branch --move`（同名がある） | 128 | `fatal: a branch named 'side' already exists` |
+| `branch`（不正な名前） | 128 | `fatal: 'a..b' is not a valid branch name` + `hint:` 2 行 |
+| `branch --delete`（未マージ） | 1 | `error: the branch 'side' is not fully merged` + `hint:` 2 行（`-D` の案内と `advice.forceDeleteBranch`） |
+| `branch --delete`（worktree が使っている） | 1 | `error: cannot delete branch 'main' used by worktree at '<path>'` |
+| `add` / `rm`（無いパス） | 128 | `fatal: pathspec 'nope' did not match any files` |
+| `restore`（無いパス） | 1 | `error: pathspec 'nope' did not match any file(s) known to git` |
+| `apply --cached`（当たらないパッチ） | 1 | `error: patch failed: f:1` / `error: f: patch does not apply` |
+| `fetch`（無いリモート / 無いパス） | 128 | `fatal: '<remote>' does not appear to be a git repository` / **`fatal: Could not read from remote repository.`** / 空行 / 案内 2 行 |
+| `pull --ff-only`（上書きされる） | 1 | `error: Your local changes … would be overwritten by merge:` / `⇥f` / … / `Aborting`（stdout `Updating <a>..<b>`） |
+| `push`（hook / 保護ブランチが断った） | 1 | `remote: <hook の文言>` / `To <url>` / **` ! [remote rejected] main -> main (pre-receive hook declined)`** / `error: failed to push some refs to '<url>'` |
+| `cherry-pick` / `revert`（上書きされる） | 128 | `error: The following untracked working tree files would be overwritten by merge:`（tracked なら `Your local changes …`）/ `⇥g` / … / `Aborting` / **`fatal: cherry-pick failed`**（`revert failed`） |
+| `stash apply`（上書きされる） | 128 | `error: Your local changes … would be overwritten by merge:` / … / `Aborting`（stdout に status の一覧） |
+| `stash apply` / `drop`（無いエントリ） | 128 | `error: stash@{0} is not a valid reference` / `fatal: log for 'stash' only has 1 entries` |
+| `rebase --interactive`（ワークツリーが汚れている） | 1 | `error: cannot rebase: You have unstaged changes.` / `error: Please commit or stash them.` |
+| `rebase --abort` / `cherry-pick --abort` / `merge --abort`（何も無い） | 128 | `fatal: no rebase in progress` / `error: no cherry-pick or revert in progress` + `fatal: cherry-pick failed` / `fatal: There is no merge to abort (MERGE_HEAD missing).` |
+| `commit`（空のメッセージ） | 1 | `Aborting commit due to empty commit message.`（接頭辞が無い） |
+| `commit`（pre-commit / commit-msg の hook が断った） | 1 | **hook が書いた文言だけ**（git は何も足さない） |
+
+- **太字が「最後の行では駄目」の根拠。** cherry-pick / revert と fetch は理由のあとに
+  情報の薄い `fatal:` を足し、push の `error:` はどの ref がなぜ断られたかを言わない
+- **hook の文言は 1 行の形しか測っていない。** 複数行を書く hook で最後の行と最初の行の
+  どちらが理由に近いかは確かめていない（commit-msg の hook は `hook.<名前>.command` の
+  後ろにメッセージファイルのパスが足されるので、`exit 1` だけのコマンドは
+  `exit: too many arguments` を 2 行目に書いた。hook の書き方の都合で、git の文言ではない）
+- 非 FF の push（`(fetch first)` / `(non-fast-forward)`）と `pull --ff-only` の
+  `Not possible to fast-forward` は `NonFastForward` に分類されて案内が付くので、ここの
+  対象ではない
 
 **案内文は 01 の「失敗の案内文」が持つ。** ここに文言まで並べると、同じ kind でも
 op で変わる分（非 FF は 4 通り）を表に書けないうえ、「次に何のキーを押すか」は

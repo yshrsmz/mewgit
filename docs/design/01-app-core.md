@@ -2468,7 +2468,8 @@ pub struct PushRejection {
 
 `git` の失敗は `exec_finished` が通知に積む。**`message` は上から順に決める** ——
 (1) 案内文（`ExecErrorKind` と `GitOp` から決める純粋関数 `exec_advice`）、
-(2) 案内が無く **stderr が空なら stdout の最後の行**（空行を飛ばして trim したもの）、
+(2) 案内が無ければ git の出力から選んだ理由の行 —— stderr があれば**下の規則で選んだ行**、
+stderr が空なら **stdout の最後の行**（どちらも空行を飛ばして trim したもの）、
 (3) どちらも無ければ `ExecError` の `Display`（`git の実行に失敗しました: git <argv>`）。
 `detail` は argv、stderr、stdout の順に**全文**を並べる（空のものは飛ばす）。**stderr が
 stdout より前**なのは、履歴のモーダルが入りきらない `detail` を `…` で切る（07）ため ——
@@ -2498,7 +2499,7 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
 | `Unmerged` + `Commit` | 未解消のまま。`git add` してから commit（**`Warn`**、37 セル） |
 | `Unmerged` + `StashPush` | コンフリクトを解消してから stash（**`Warn`**。手前の断りと同じ文） |
 | `Unmerged` + `StashApply` / `StashPop` | コンフリクトを解消してから stash を戻す（**`Warn`**、41 セル） |
-| それ以外 | 無し（stderr が空なら stdout の最後の行、そうでなければ `Display`） |
+| それ以外 | 無し（git の出力から選んだ理由の行。選べなければ `Display`） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
   `stale info` で断られた形は fetch を勧める側（lease は fetch してからでないと通らない。
@@ -2591,11 +2592,35 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
   **最後の行**なのは、git の stdout が status の一覧 → 結びの順に並ぶから。
   英語のまま出す —— 訳すと文言の数だけ表が要り、表に無い文言では結局 argv に戻る。
   71 セルを超えれば `…` で切れるが、`detail` に全文がある。
-  **stderr があるときは使わない** —— stderr の最後の行は `hint:` のことが多く
-  （`advice.*` で消える行でもある）、理由の行を選べない。**非対称は残る**:
-  stderr にだけ理由が出る失敗（`would be overwritten` など）は今までどおり
-  `Display` で、理由は `L` で読む（07 の「Branches ペイン」）。stderr から理由の行を
-  選ぶ規則は op ごとの実測が要るので `docs/plan.md` の M6 に送った
+  **stderr があるときは stdout を使わない** —— 測った形では、stderr があれば理由は
+  そちらにあり、stdout は進捗や status の一覧だった（`pull` の `Updating …`、stash の
+  apply の status。03）。例外の `needs merge`（stderr は `could not write index` だけ）は
+  `Unmerged` の案内が先に拾う（下）。
+- **stderr にだけ理由がある失敗は、stderr から理由の行を 1 本選ぶ**（2026-10-03）。
+  いちばんよく出る赤い通知（`switch` の `would be overwritten`、`branch -d` の
+  `not fully merged`、`add` の `pathspec did not match`）が argv だけになり、理由は `L`
+  でしか読めなかった。**選び方は op ごとの実測から決めた**（03 の「エラー分類」の
+  `Other` の表）—— 上から順に
+  1. **push の ` ! [` の行**（`! [remote rejected] main -> main (pre-receive hook declined)`）。
+     push の `error:` は最後の `failed to push some refs` で、どの ref がなぜかを言わない
+  2. **最初の `error:` / `fatal:` の行**から接頭辞を剥いだもの。**最後ではない** ——
+     cherry-pick / revert は理由のあとに `fatal: cherry-pick failed` を、fetch は
+     `fatal: Could not read from remote repository.` を足す。**接頭辞を剥ぐ**のは、通知が
+     既に赤い（`Error`）うえ、`would be overwritten by checkout:` の行が接頭辞込みで
+     82 セル・剥いで 75 セルになるから（71 を超えるのはどちらも同じだが、剥ぐと
+     `by chec…` まで残る）
+  3. **`hint:` 以外の最後の行**。`error:` も `fatal:` も書かない失敗 —— hook が断った
+     commit（git は hook の文言しか出さない）と `Aborting commit due to empty commit
+     message.`。**hook の文言は 1 行の形しか測っていない**（03）。`hint:` は
+     `advice.*` で消える行で、理由ではない
+  4. 全部が `hint:` なら (3) の `Display`
+
+  **1 と 2 は trim する前の行頭で見る** —— `would be overwritten` の下のファイル一覧は
+  タブで字下げされるので、trim してから見ると `error: ` や `! [` で始まるパスを
+  理由と取り違える。**英語のまま出す**のは stdout と同じ理由。
+  **`L` でしか読めないものは残る**: `would be overwritten …:` の行は末尾が `:` で、
+  **どのファイルかは次の行**にある。`branch -d` の `-D` の案内も `hint:` なので要約に
+  出ない（07 の「Branches ペイン」）
 - **`Unmerged` は「解消してから」を案内する**（2026-10-03）。未解消のファイルがあると、
   stash の 3 つは stdout に `<path>: needs merge`・stderr に `could not write index` だけを
   書き、`rebase --continue` は stdout に `needs merge` と結びを書いて **stderr は空**、

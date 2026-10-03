@@ -671,10 +671,12 @@ git の出力の形の問いで、写されたコミットの行（`echoes_a_com
    空で止まった形）。stdout は status の一覧 → 結びの順に並ぶ
 2. **push の ` ! [` の行**（`! [remote rejected] main -> main (pre-receive hook declined)`）
 3. **締めではない最初の `error:` / `fatal:` の行**から接頭辞を剥いだもの
-4. **接頭辞も `hint:` も無い最初の行** —— ssh の層の失敗（`ssh: Could not resolve
-   hostname …`、`ssh: connect to host … Connection refused`）、stderr に書く hook、
-   `Aborting commit due to empty commit message.`。**最後ではない** —— ssh の失敗は
-   最後が案内文（`and the repository exists.`）
+4. **接頭辞も `hint:` / `warning:` も無い最初の行** —— ssh の層の失敗（`ssh: Could not
+   resolve hostname …`、`ssh: connect to host … Connection refused`）、リモートが書く文言
+   （GitHub の `ERROR: Repository not found.`）、stderr に書く hook、`Aborting commit due to
+   empty commit message.`。**最後ではない** —— ssh の失敗は最後が案内文（`and the
+   repository exists.`）。**`warning:` は大文字小文字を問わず飛ばす** —— 初めて繋ぐ
+   ホストでは ssh が `Warning: Permanently added …` を先頭に書く（理由ではない）
 5. **stdout の最後の行。** stdout に書く pre-push hook の文言（stderr は締めの行だけ）
 6. **締めの行**そのもの。どこにも理由が無ければ、argv よりは何が起きたかを言う
 
@@ -719,6 +721,7 @@ stdout は見ない**（3 か 4 で決まる）—— 下の表の形では、st
 | `commit`（空のメッセージ） | 1 | `Aborting commit due to empty commit message.`（接頭辞が無い） |
 | `commit`（pre-commit / commit-msg の hook が断った） | 1 | **hook が書いた文言だけ**（git は何も足さない） |
 | `push`（pre-push の hook が断った） | 1 | `error: failed to push some refs to '<url>'` だけ。**hook の文言は hook が書いた側**（stdout に書けば stdout、stderr に書けば締めの行の前） |
+| `fetch`（初めて繋ぐホストで、リモートが無い。github.com） | 128 | `Warning: Permanently added 'github.com' (ED25519) to the list of known hosts.` / `ERROR: Repository not found.` / **`fatal: Could not read from remote repository.`** / 空行 / 案内 2 行 |
 | `fetch`（ssh の名前解決 / 接続拒否） | 128 | `ssh: Could not resolve hostname …`（`ssh: connect to host … Connection refused`）/ **`fatal: Could not read from remote repository.`** / 空行 / 案内 2 行 |
 
 - **太字が締めの行。** cherry-pick / revert と fetch は理由のあとに情報の薄い `fatal:` を

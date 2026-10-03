@@ -549,7 +549,7 @@ const WRAP_UPS: [&str; 4] = [
 ///
 /// stderr が空なら stdout の最後の行（[`classify`] と同じく、git が写したコミットの行は
 /// 除く）。stderr があれば ` ! [` の行 → 締めではない最初の `error:` / `fatal:` の行 →
-/// 接頭辞も `hint:` も無い最初の行 → stdout の最後の行 → 締めの行（[`WRAP_UPS`]）。
+/// 接頭辞も `hint:` / `warning:` も無い最初の行 → stdout の最後の行 → 締めの行（[`WRAP_UPS`]）。
 /// **行頭は trim する前に見る** —— ファイルの一覧はタブで字下げされるので、trim してから
 /// 見ると `error: ` や `! [` で始まるパスを取り違える。
 pub(super) fn reason<'a>(stdout: &'a str, stderr: &'a str) -> Option<&'a str> {
@@ -585,6 +585,10 @@ pub(super) fn reason<'a>(stdout: &'a str, stderr: &'a str) -> Option<&'a str> {
                     && !line.starts_with("hint:")
                     && !line.starts_with("error:")
                     && !line.starts_with("fatal:")
+                    // ssh の `Warning: Permanently added …` と git の `warning:`。
+                    && !line
+                        .get(..8)
+                        .is_some_and(|head| head.eq_ignore_ascii_case("warning:"))
             })
         })
         .or_else(from_stdout)
@@ -612,7 +616,7 @@ mod tests {
     fn the_reason_is_picked_from_stderr_by_the_shape_of_the_line() {
         // 03 の「エラー分類」の「理由の行」。stderr は git 2.56.0（`LC_ALL=C`）の出力を
         // そのまま写した（同じ節の `Other` の表）。
-        let cases: [(&str, &str); 9] = [
+        let cases: [(&str, &str); 10] = [
             // 最初の `error:` の行。下のパスの字下げはタブ。
             (
                 "error: Your local changes to the following files would be overwritten by checkout:\n\t! [x].txt\nPlease commit your changes or stash them before you switch branches.\nAborting\n",
@@ -641,6 +645,11 @@ mod tests {
             (
                 "ssh: Could not resolve hostname nonexistent.invalid: nodename nor servname provided, or not known\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
                 "ssh: Could not resolve hostname nonexistent.invalid: nodename nor servname provided, or not known",
+            ),
+            // 初めて繋ぐホストの ssh の `Warning:` は理由ではない（GitHub の文言を採る）。
+            (
+                "Warning: Permanently added 'github.com' (ED25519) to the list of known hosts.\nERROR: Repository not found.\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+                "ERROR: Repository not found.",
             ),
             // stderr に書く pre-push hook。締めの `error:` より hook の文言。
             (

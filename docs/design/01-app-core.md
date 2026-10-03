@@ -2489,6 +2489,7 @@ pub struct PushRejection {
 | `NoChanges` + revert（開始、1 本だけ） | 取り消す変更が無い（**`Warn`**） |
 | `NoChanges` + revert（continue・skip・複数の開始） | `m` から skip する（**`Warn`**） |
 | `HeadMoved` + `RebaseInteractive` | 組んだあとに履歴が動いた。`i` から開き直す（**`Warn`**、48 セル） |
+| `HeadMoved` + `RebaseContinue { reword: Some }` | 止まったあとに HEAD が動いた。`m` から開き直す（**`Warn`**、48 セル） |
 | それ以外 | 無し（`Display` に落とす） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
@@ -2571,6 +2572,10 @@ pub struct PushRejection {
   **打った reword のメッセージは戻らない** —— エディタは確定で閉じており、開き直すと
   plan は読み直したグラフから組み直される（上の「interactive rebase の開始（`i`）」）。
   文は「組んだあとに履歴が動いた。i から開き直して」（43 セル）
+  **reword を持つ continue の照合が外れた形も同じ kind**（03 の「Interactive rebase の
+  実装」）。こちらは rebase が止まったままなので必ずバッジと並ぶ。失敗のあとの status が
+  見分け直すので、**開き直したメニューはいまの HEAD で組まれる**（端末で amend し直して
+  いれば素の continue）。文は「止まったあとに HEAD が動いた。m から開き直して」（46 セル）
 - **argv は画面から退く。** これまでステータスバーに出ていた `git <argv>` は
   `detail` の 1 行目に移り、`L` の履歴（上の「通知」）で読む。**1 行目を 2 つで分けない**
   —— 案内文は端末の幅いっぱいまで使う前提で書いてある（上）ので、argv を前に置くと
@@ -2648,7 +2653,7 @@ snapshot でも断る**（上の「stash の書き込み」）。apply / pop は
 
 | 進行中操作 | 項目 |
 |---|---|
-| `Rebase` | continue / skip / abort |
+| `Rebase` | continue / skip / abort（**hook が reword を断った形は説明と continue の中身が変わる**。下） |
 | `CherryPick` | continue / skip / abort |
 | `Revert` | continue / skip / abort |
 | `Merge` | abort（結ぶのは `c` の commit。03 の表） |
@@ -2664,6 +2669,14 @@ snapshot でも断る**（上の「stash の書き込み」）。apply / pop は
   確認対象（force push、`branch -D`、discard、abort 系）に入っておらず、lazygit も挟まない。
   確認するかは項目に持たせず `GitOp` から導く（`is_abort`。持たせると同じ判断が 2 つになる）
 - **確定は `submit_exec`**（1 行入力と同じ）。git が走っていれば閉じずに断る
+- **hook が reword を断って止まった rebase**（`Rebase.refused_reword` が `Some`。02 の
+  「断られた reword」）では、continue が `GitOp::RebaseContinue { reword: Some(..) }` を出し、
+  新しいメッセージを amend してから進める（03 の「Interactive rebase の実装」）。素の continue
+  では git が元のメッセージのまま進むので、**同じ「continue」の語で別の中身**になる。本文と
+  説明もこの形のときだけ変える —— 本文は「新しいメッセージが断られ、元のメッセージで
+  止まっています」、continue は「新しいメッセージを当て直して続ける」、skip は「元の
+  メッセージのまま続ける」。**skip はこの形では止まったコミットを捨てない**（pick は
+  コミット済み。03 の表）ので、いつもの「止まったコミットを捨てて続ける」は嘘になる
 - **開くときの snapshot の鮮度は問わない。** 古い snapshot の `Rebase` で開いて、実は
   終わっていれば git が `No rebase in progress?` で断り、`exec_finished` の `LoadStatus` が
   バッジを直す。**無いときに `LoadStatus` を返すのは、mewgit から始められない進行中操作が
@@ -2714,8 +2727,9 @@ impl AppState {
   （`GitOp::verb()`）、ほかは変種ごとの固定語。**1 つの網羅 `match` から出す** ——
   別々の関数に割ると、ペイロードで説明が変わる変種を足したときに説明の側だけ足りない形が
   組める（受け皿の `_` があるとコンパイルも通り、スピナーが静的な語のまま黙る）。
-  `verb()` は `to_commands` の最初の 1 本の `argv[0]` と同じ語を返す（見張りは `git_exec::argv` の
-  `verb_matches_the_argv`）—— スピナーに `git` とだけ出しても、何が走っているかは判らない
+  `verb()` は `to_commands` が返す列のうち時間を使う 1 本の `argv[0]` と同じ語を返す（見張りは
+  `git_exec::argv` の `verb_matches_the_argv`。03 の「複数の手順を持つ書き込み」）—— スピナーに
+  `git` とだけ出しても、何が走っているかは判らない
 - **ステータスバーではなくヘッダに出す。** 07 は当初こちらをステータスバーに置いて
   いたが、フッターの 1 行目は通知が幅いっぱい使い（下の「失敗の案内文」）、2 行目は
   キーヒントが埋める（07 の「ステータスバー」）。**2 行になっても譲る席は増えていない**

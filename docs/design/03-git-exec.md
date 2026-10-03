@@ -18,7 +18,8 @@ pub enum GitOp {
     Pull { mode: PullMode },
     Push { remote, src, dst: Option<String>, set_upstream, lease: Option<Oid> },
     RebaseInteractive { onto: String, plan: RebasePlan },
-    RebaseContinue, RebaseSkip, RebaseAbort,
+    RebaseContinue { reword: Option<RefusedReword> },   // 複数の手順になりうる（下の「複数の手順を持つ書き込み」）
+    RebaseSkip, RebaseAbort,
     CherryPick(Vec<Oid>), CherryPickContinue, CherryPickSkip, CherryPickAbort,
     Revert { oids: Vec<Oid>, mainline: Option<u32> }, RevertContinue, RevertAbort,
     MergeAbort,
@@ -74,8 +75,8 @@ pub struct GitCommand { pub argv: Vec<String>, pub stdin: Option<Vec<u8>> }
 pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError>;
 ```
 
-**返すのは呼び出しの列。** 下の表の変種は `CheckoutPr` を除いてどれも 1 本で、
-`CheckoutPr` だけが複数を返す（下の「複数の手順を持つ書き込み」）。
+**返すのは呼び出しの列。** 下の表の変種はほとんどが 1 本で、複数を返すのは `CheckoutPr` と
+`RebaseContinue { reword: Some }` だけ（下の「複数の手順を持つ書き込み」）。
 
 `argv` に `git` 自身は含めない（`Runner` が付ける）。`Result` なのは非 UTF-8 のパスを
 argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ごと落とすので実際には来ないが、
@@ -101,7 +102,8 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `Pull { mode }` | `pull --no-rebase` / `--rebase` / `--ff-only` |
 | `Push { .. }` | `push [--force-with-lease=<dst\|src>:<lease>] [--set-upstream] <remote> <src>[:<dst>]` |
 | `RebaseInteractive { onto, plan }` | `rebase --interactive --no-update-refs <onto>`（`plan` は JSON にして stdin へ。下の「Interactive rebase の実装」） |
-| `RebaseContinue` / `Skip` / `Abort` | `rebase --continue` / `--skip` / `--abort` |
+| `RebaseContinue { reword: None }` / `Skip` / `Abort` | `rebase --continue` / `--skip` / `--abort` |
+| `RebaseContinue { reword: Some }` | `update-ref --stdin`（stdin `verify HEAD <head>`）→ `commit --amend`（メッセージは commit editor が差し込む）→ `rebase --continue`（下の「Interactive rebase の実装」） |
 | `CherryPick(oids)` | `cherry-pick <oids>` |
 | `CherryPickContinue` / `Skip` / `Abort` | `cherry-pick --continue` / `--skip` / `--abort` |
 | `Revert { oids, mainline }` | `revert [--mainline <n>] <oids>` |
@@ -460,7 +462,8 @@ pub async fn run_cancelable(&self, op: &GitOp, cancel: oneshot::Receiver<()>)
 
 ### 複数の手順を持つ書き込み
 
-`GitOp::CheckoutPr` は git を続けて叩く（05 の「mewgit の手順」）。
+`GitOp::CheckoutPr`（05 の「mewgit の手順」）と、hook が断った reword を持つ
+`GitOp::RebaseContinue`（下の「Interactive rebase の実装」）は git を続けて叩く。
 **`Runner` が順に叩き、1 本でも非 0 で終わればそこで止めて、その 1 本の
 `ExecError` を返す**（残りは叩かない）。成功なら**最後の 1 本の `ExecOutput`** を返す。
 
@@ -478,9 +481,11 @@ pub async fn run_cancelable(&self, op: &GitOp, cancel: oneshot::Receiver<()>)
   1 本が合図より先に成功していた回（`canceled_by` が偽）に受け側を「もう来ない」と
   同じに畳むと、次の手順の前の確認が「届いていない」と答え、止めたはずの手順が
   走る（`/code-review` が拾った。`CancelSignal` の 3 状態）
-- **`verb()` は最初の 1 本の `argv[0]`**（`CheckoutPr` は `fetch`）。スピナーに
-  出る語で、時間のほとんどは fetch が使う。見張りは `verb_matches_the_argv`
-  （最初の 1 本と比べる）
+- **`verb()` は時間のほとんどを使う 1 本の `argv[0]`**（`CheckoutPr` は `fetch`、reword を
+  持つ `RebaseContinue` は `rebase`）。スピナーに出る語なので、**最初の 1 本とは限らない** ——
+  reword の照合（`update-ref`）は一瞬で、残りの時間は `rebase --continue` が使う。最初の 1 本に
+  揃えていたころは `CheckoutPr` でたまたま一致していた。見張りは `verb_matches_the_argv`
+  （複数の変種はどの 1 本かもテストに書く。「列のどれかと一致」では、語が別の手順へずれても通る）
 
 ### BatchMode の重ね方
 
@@ -574,6 +579,7 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
 | パターン | kind |
 |---|---|
 | stderr の行頭の `mewgit: [head-moved]`（mewgit の sequence editor が出す印） | `HeadMoved` |
+| stderr の行頭の `fatal: cannot lock ref 'HEAD': is at ` で、同じ行に ` but expected `（reword を持つ continue の照合。下の「Interactive rebase の実装」） | `HeadMoved` |
 | `SAML SSO` / `organization has enabled or enforced SAML` | `SamlSsoRequired` |
 | `Permission denied (publickey)` | `SshAuthFailed` |
 | `Authentication failed` | `HttpsAuthFailed` |
@@ -589,7 +595,9 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
 文言を直すたびに分類が外れる。**照合は stderr の行頭だけ** —— git はコミットの件名を出力に
 写す（`error: could not apply <oid>... <件名>`、rebase の stdout にも `# <件名>`。git 2.56.0 で
 実測）ので、行のどこでも拾うと件名が `[head-moved] …` のコミットのコンフリクトを取り違える
-（`/code-review` が踏んだ）。件名は行の途中にしか出ないので、行頭で合わせれば先頭に置いてよい。
+（`/code-review` が踏んだ）。件名は行の途中にしか出ないので、行頭で合わせれば先頭に置いてよい。**照合の断りは
+`cannot lock ref` だけで拾わない** —— 同じ語は lock ファイルの取り合いでも出る（そちらは
+「HEAD が動いた」ではない）。`is at … but expected` まで揃ったときだけ `HeadMoved` にする。
 
 **`NoChanges` は `Empty` より後ろ。** 空で止まった cherry-pick の stdout の末尾にも
 `nothing to commit, working tree clean` が出る（git 2.55.0 で実測）ので、先に見ると
@@ -684,9 +692,36 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   いるのは渡された `COMMIT_EDITMSG` のパスと `done` の最終行だけなので、置き場は
   その隣（linked worktree でも `COMMIT_EDITMSG` と `rebase-merge/` は同じ gitdir に並ぶ。
   下の表）、鍵は Oid になる。**`GIT_DIR` は editor に渡らない**（下の表）
-- **hook が reword を断ったあとの continue では、新しいメッセージが消える。** git は
-  continue でエディタを起こし直さず、元のメッセージのまま進む（下の表）。git 自身の
-  挙動で、reword の渡し方を変えても塞がらない。塞ぐ手は `docs/plan.md` の M6
+- **hook が reword を断って止まった rebase は、continue の前に新しいメッセージを amend する。**
+  git は pick を元のメッセージでコミットしてから reword のエディタを起こすので、commit-msg
+  hook が断ると**元のメッセージのコミットを残して止まり**、continue はエディタを起こし直さずに
+  そのまま進む（下の表）。git 自身の挙動で、reword の渡し方を変えても塞がらない。そこで
+  `status()` がこの形を見分けて `InProgressOp::Rebase.refused_reword` に載せ（02 の「断られた
+  reword」）、`m` の continue が `GitOp::RebaseContinue { reword: Some(..) }` を出す。手順は 3 本 ——
+  1. `update-ref --stdin` に `verify HEAD <見分けた時点の HEAD>` を流す。書き込みも reflog も
+     残さずに HEAD を照合し、外れれば exit 128 で止まる（下の表）。**snapshot が古いと別の
+     コミットを amend する** —— 端末で continue して次の停止に移っていても
+     `mewgit-reword-<Oid>` は残るので、照合が無いと止まったコミットのメッセージで別の
+     コミットを書き換える。断りは `HeadMoved` に分ける（上の「エラー分類」）
+  2. `commit --amend`（メッセージを渡さない）。git がエディタを起こし、`--commit-editor` が
+     `done` の最終行から `mewgit-reword-<X>` を差し込む —— **rebase の開始と同じ経路**なので、
+     cleanup も `core.commentString` も同じに効き、行頭の `#` が残る（統合テストで確認）。
+     メッセージを `--file -` で流し直す形（最初の版）は、同じメッセージを開始とやり直しで
+     別の cleanup に通していた（`/simplify` の altitude が拾った）。**hook がまた断れば
+     ここで止まり、rebase は止まったまま** —— 同じ形なので、hook を直して `m` から押し直せる。
+     案内は足さない（git は hook の出力しか書かないので、分ける手掛かりが無い。通知の
+     `detail` に hook の stderr が出る）
+  3. `rebase --continue`
+  - **照合を `Runner` に持たせなかった**（ハンクの指紋の形。上の「古いハンクの守り」）。
+    `Runner` が `git_read` を呼ぶ例外を 00 に 2 つ目として足すことになり、`to_commands` と
+    `Runner` の 2 箇所が「git に何を渡すか」を決める形にも戻る。`update-ref` の `verify` なら
+    照合も git に渡す argv の一部で、`L` の履歴にも載る
+  - **端末で別のメッセージに amend し直したら、素の continue に戻る。** 見分けは HEAD の
+    メッセージが元のメッセージと同じことを条件にしている（02）ので、amend した時点で
+    `refused_reword` は `None` になる
+  - **この形の skip は止まったコミットを捨てない。** pick はもうコミット済みなので、
+    元のメッセージのまま残る（下の表）。メニューの説明はこの形のときだけ変える（01 の
+    「進行中操作のメニュー（`m`）」）
 - **squash のメッセージは git が連結したものを使う。** `--commit-editor` は squash では
   何もしないので、squash した 2 本のメッセージを空行でつないだものがそのまま入る
   （下の表）。書き換えたいなら、あとから reword する。**`RebaseEntry` はメッセージを
@@ -741,7 +776,14 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
 | `pick A` / `reword B`、A がコンフリクト → 解消して continue（同上） | B に新しいメッセージが入る。**continue を `GIT_EDITOR=true` で打つと元のメッセージのまま** |
 | `reword A` / `pick B`、A がコンフリクト → `rebase --skip` | A が落ち、`onto` の先端はそのまま |
 | `pick A` / `exec git commit --amend -m NEW` / `pick B`、A がコンフリクト → `rebase --skip` | **exec が `onto` の先端を amend する**（先端の件名が NEW に化ける）。採らなかった形 |
-| commit-msg hook が reword を断る → hook を外して continue | 止まった時点で pick は**元のメッセージでコミット済み**（`rebase-merge/amend` が立ち、`git status` は `editing a commit`）。continue は exit 0 だが**エディタは起こされず**、元のメッセージのまま進む。continue の前に `commit --amend -F <mewgit-reword-<Oid>>` を通すと新しいメッセージが入る |
+| commit-msg hook が reword を断る（git 2.56.0、2026-10-03。hook は `hook.<名前>.command` で置いた。以下 7 行も同じ） | exit 1、stderr に hook の出力と `You can amend the commit now`。pick は**元のメッセージでコミット済み**で、`done` の最終行は `reword <X>`、`git status` は `editing a commit`、gitdir に `MERGE_MSG` は無い。**`rebase-merge/amend` は pick が fast-forward した形（HEAD = X、reflog `rebase: fast-forward`）にしか無い** —— `--onto` で載せ直す形では HEAD が X と別の新しいコミット（reflog `rebase (reword): <件名>`）で、`amend` が無い |
+| ↑ の hook を外して continue | exit 0 だが**エディタは起こされず**、元のメッセージのまま進む |
+| ↑ で `commit --amend -F <mewgit-reword-<X>>` → continue（`core.commentString` の有無の両方） | 新しいメッセージが入り、`#123 kept` の行も残る。エディタは開始の 1 回しか起こされない |
+| ↑ の amend を hook がまた断る | exit 1、stderr は hook の出力だけ。`rebase-merge/` はそのまま |
+| ↑ で `rebase --skip`（載せ直す形） | exit 0、**X は元のメッセージのまま残る**（捨てられない） |
+| reword の pick がコンフリクト → 解消して continue（hook は新しいメッセージを断るもの） | exit 0、**hook は走らず**新しいメッセージが入る。止まっているあいだは `MERGE_MSG` が在り（`git add` したあとも）、`amend` は無い。止まったまま `git reset --hard` すると `MERGE_MSG` が消え、HEAD は 1 本前のコミットのまま |
+| X を cherry-pick して中身だけ amend したコミット（メッセージも author の日時も X と同じ）を onto に積み、X を reword して載せ直す | X の pick がコンフリクトして止まり、HEAD はその双子。HEAD の reflog の先頭は `rebase (start): checkout <onto>`。解消して `git add` → `reset --hard` しても先頭は変わらない（`/code-review` が再現した形。2026-10-03） |
+| `printf 'verify HEAD <oid>\n' \| git update-ref --stdin` | 一致なら exit 0 で、reflog も増えない。外れると exit 128、stderr `fatal: cannot lock ref 'HEAD': is at <いまの Oid> but expected <oid>` |
 | `rebase-merge/` に自分のファイルを置いたまま完了 / `rebase --abort` | どちらも `rebase-merge/` ごと消える |
 | `pick A` / `squash B`（`GIT_EDITOR=true`） | メッセージは `A の件名` + 空行 + `B の件名` |
 | reword のメッセージ `Fix bug` + 空行 + `#123 is closed`（`--commit-editor`） | `#123` の行が消える。`-c core.commentString=#mewgit#` を付けると残り、同じ rebase の squash のメッセージにもコメントの行は残らない |

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::git_read::Oid;
+use crate::git_read::{last_done_reword, reword_message_path, Oid};
 
 /// interactive rebase の todo。[`write_todo`] が todo ファイルの内容にする。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,15 +182,6 @@ mod oid_hex {
     }
 }
 
-/// `oid` を reword したメッセージを置くファイル。`dir` は `rebase-merge/`。完了でも
-/// abort でも git がディレクトリごと消すので、後始末は要らない。
-///
-/// **Oid で引く。** commit editor が知っているのは `done` の最終行（`reword <Oid> …`）
-/// だけなので、何番目の行かでは引けない。
-fn reword_path(dir: &Path, oid: &str) -> PathBuf {
-    dir.join(format!("mewgit-reword-{oid}"))
-}
-
 /// sequence editor の本体。`plan` は git から継いだ標準入力（`to_commands` が流した
 /// JSON）、`todo` は git が渡した todo ファイル（`rebase-merge/git-rebase-todo`）。
 ///
@@ -223,7 +214,7 @@ pub fn write_todo(mut input: impl Read, todo: &Path) -> Result<(), EditorError> 
 
     for entry in &plan.entries {
         if let RebaseAction::Reword { message } = &entry.action {
-            let path = reword_path(dir, &entry.oid.to_string());
+            let path = reword_message_path(dir, &entry.oid.to_string());
             std::fs::write(&path, message).map_err(io(&path))?;
         }
     }
@@ -244,21 +235,10 @@ pub fn write_commit_message(file: &Path) -> Result<(), EditorError> {
     let Some(rebase_dir) = file.parent().map(|gitdir| gitdir.join("rebase-merge")) else {
         return Ok(());
     };
-    let done = match std::fs::read_to_string(rebase_dir.join("done")) {
-        Ok(done) => done,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(source) => return Err(io(&rebase_dir.join("done"))(source)),
-    };
-    let mut last = done
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .split_whitespace();
-    let (Some("reword"), Some(oid)) = (last.next(), last.next()) else {
+    let Some(oid) = last_done_reword(&rebase_dir).map_err(io(&rebase_dir.join("done")))? else {
         return Ok(());
     };
-    let path = reword_path(&rebase_dir, oid);
+    let path = reword_message_path(&rebase_dir, &oid);
     match std::fs::read(&path) {
         Ok(message) => std::fs::write(file, message).map_err(io(file)),
         // 端末で始めた rebase の reword など、mewgit がメッセージを置いていない。

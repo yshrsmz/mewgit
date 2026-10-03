@@ -478,6 +478,11 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
     if stderr.lines().any(|line| {
         line.strip_prefix(EDITOR_STDERR_PREFIX)
             .is_some_and(|rest| rest.starts_with(HEAD_MOVED_MARKER))
+            // 断られた reword を持つ continue の照合（`update-ref --stdin` の `verify`）。
+            // **`cannot lock ref` だけで拾わない** —— lock ファイルの取り合いでも出る。
+            || line
+                .strip_prefix("fatal: cannot lock ref 'HEAD': is at ")
+                .is_some_and(|rest| rest.contains(" but expected "))
     }) {
         ExecErrorKind::HeadMoved
     } else if has("SAML SSO") || has("organization has enabled or enforced SAML") {
@@ -614,6 +619,20 @@ mod tests {
         let stderr =
             "The previous cherry-pick is now empty, possibly due to conflict resolution.\n";
         assert_eq!(classify(stdout, stderr), ExecErrorKind::Empty);
+    }
+
+    #[test]
+    fn a_failed_head_check_before_amending_a_refused_reword_is_head_moved() {
+        // `update-ref --stdin` の `verify` が外れた 1 行（git 2.56.0 で実測した形）。
+        let stderr = "fatal: cannot lock ref 'HEAD': is at 224dc0f106d8df8393093a1636281b693bafeeba but expected b57753cc22b307408ee1039232da80d68d6354bb\n";
+        assert_eq!(classify("", stderr), ExecErrorKind::HeadMoved);
+        // **lock の取り合いは HEAD が動いたことではない**（同じ `cannot lock ref` で始まる）。
+        let contended =
+            "fatal: cannot lock ref 'HEAD': Unable to create '/r/.git/HEAD.lock': File exists.\n";
+        assert_eq!(classify("", contended), ExecErrorKind::Other);
+        // 件名に同じ字を含むコミットの出力は、行頭ではないので拾わない。
+        let subject = "error: could not apply abc1234... fatal: cannot lock ref 'HEAD': is at x but expected y\n";
+        assert_eq!(classify("", subject), ExecErrorKind::Conflict);
     }
 
     #[test]

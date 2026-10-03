@@ -4,7 +4,6 @@
 //! 「その argv を実際の git に渡すと意図した結果になるか」。
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use mewgit_core::auth::ssh::SshCommand;
@@ -236,10 +235,7 @@ async fn commit_runs_hooks() {
     // 不変ルール 1（書き込みは git CLI）の根拠。git2 で commit すると hook は走らない。
     let repo = TestRepo::init();
     repo.commit("first");
-    let hook = repo.path().join(".git/hooks/pre-commit");
-    fs::write(&hook, "#!/bin/sh\necho ran > hook-ran.txt\n").expect("hook を書けませんでした");
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
-        .expect("hook に実行権限を付けられませんでした");
+    repo.write_hook("pre-commit", "#!/bin/sh\necho ran > hook-ran.txt\n");
 
     repo.write_worktree_file("file.txt", b"second\n");
     let runner = repo.runner();

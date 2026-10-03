@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap};
 use git2::StatusOptions;
 
 use super::{
-    file_entry, in_progress, FileStamp, FileStatus, GitReadError, PathStamp, RepoReader,
-    WorktreeSnapshot,
+    file_entry, in_progress, FileStamp, FileStatus, GitReadError, InProgressOp, PathStamp,
+    RepoReader, WorktreeSnapshot,
 };
 
 impl RepoReader {
@@ -76,7 +76,12 @@ impl RepoReader {
         }
 
         snapshot.sort_sections();
-        snapshot.progress = in_progress(self.git_dir());
+        snapshot.progress = in_progress(self.git_dir()).map(|mut progress| {
+            if let InProgressOp::Rebase { refused_reword, .. } = &mut progress {
+                *refused_reword = self.refused_reword();
+            }
+            progress
+        });
         // **stat するのは一覧に出たファイルだけ**（02 の「ステータス」）。ワークツリー
         // 全体は走査しない。staged だけのファイルも入れる —— 区画で分けると規則が
         // 2 本になる。staged と unstaged の両方に出るファイルは 1 回だけ stat する。

@@ -10,7 +10,7 @@ mod runner;
 
 use std::path::PathBuf;
 
-use crate::git_read::{Oid, PathStamp};
+use crate::git_read::{Oid, PathStamp, RefusedReword};
 
 pub use argv::{push_remote_ref, to_commands, ArgvError, GitCommand};
 pub use patch::{hunk_patch, supports_hunk_patch};
@@ -126,7 +126,13 @@ pub enum GitOp {
         head: Oid,
         plan: RebasePlan,
     },
-    RebaseContinue,
+    /// `reword` が `Some` なのは、mewgit が渡した reword を hook が断って止まった形
+    /// （`InProgressOp::Rebase::refused_reword` を写したもの）。HEAD を照合し、新しい
+    /// メッセージを amend してから continue する 3 本になる（03 の「Interactive rebase の
+    /// 実装」）。`None` は素の `rebase --continue`。
+    RebaseContinue {
+        reword: Option<RefusedReword>,
+    },
     RebaseSkip,
     RebaseAbort,
     CherryPick(Vec<Oid>),
@@ -386,7 +392,7 @@ impl GitOp {
             | GitOp::Pull { .. }
             | GitOp::Push { .. }
             | GitOp::RebaseInteractive { .. }
-            | GitOp::RebaseContinue
+            | GitOp::RebaseContinue { .. }
             | GitOp::RebaseSkip
             | GitOp::RebaseAbort
             | GitOp::CherryPick(_)

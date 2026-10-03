@@ -427,14 +427,16 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       実際に落ちるかを叩き、落ちるなら起動時に同じパスが無いことを検知して案内するか、
       エディタを起こすときに exe の有無を見て `true` 相当に倒すかを決める
 
-- [ ] **hook が reword を断ったあとの continue で、新しいメッセージが消える。** git は
+- [x] **hook が reword を断ったあとの continue で、新しいメッセージが消える。** git は
       continue でエディタを起こし直さず、元のメッセージでコミットする（git 自身の挙動。
-      03 の「Interactive rebase の実装」に実測）。止まった時点で pick は元のメッセージで
-      コミット済み（`rebase-merge/amend` が立ち、`git status` は「editing a commit」）で、
-      **`git commit --amend -F rebase-merge/mewgit-reword-<Oid>` のあと continue すれば
-      新しいメッセージが入る**（実測）。塞ぐには、`m` の continue の前にこの形
-      （`done` の最終行が reword、`amend` と `mewgit-reword-<Oid>` がある）を見分けて amend を
-      先に通す。hook がまた断ったときの案内もそこで決める
+      03 の「Interactive rebase の実装」に実測）。**`status()` がこの形を見分けて
+      `Rebase.refused_reword` に載せ、`m` の continue が `update-ref --stdin`（HEAD の照合）→
+      `commit --amend`（メッセージは commit editor が差し込む）→ `rebase --continue` の 3 本を叩く**（02 の「断られた reword」、03）。
+      着手前は「`rebase-merge/amend` が立つ」で見分けるつもりだったが、**`amend` は pick が
+      fast-forward した形にしか無い**（`--onto` で載せ直す形では無い。実測 2026-10-03）ので、
+      HEAD がその reword の手順で作られた pick か（HEAD = X か、reflog の先頭が `rebase (reword)` でメッセージと author が X と同じか）で見分ける。hook がまた断ったときは案内を
+      足さず、hook の stderr が通知の `detail` に出る（rebase は止まったまま）。この形の
+      skip はコミットを捨てないので、メニューの説明も変えた（01）
 
 - [ ] **stderr が空の git の失敗に理由を出す。** `ExecError::Failed` は stdout を
       運ばないので、stdout にだけ理由を書く失敗（`git commit` で stage したものが無い、

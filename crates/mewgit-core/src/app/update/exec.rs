@@ -251,7 +251,7 @@ impl Reload {
             GitOp::Fetch { .. }
             | GitOp::Pull { .. }
             | GitOp::RebaseInteractive { .. }
-            | GitOp::RebaseContinue
+            | GitOp::RebaseContinue { .. }
             | GitOp::RebaseSkip
             | GitOp::RebaseAbort
             | GitOp::CherryPick(_)
@@ -373,8 +373,15 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
         // 印を出すのは sequence editor だけで、それを起こすのは `RebaseInteractive` の開始
         // だけ（continue / skip は起こさない。03 の実測）。**打った reword は戻らない**
         // —— 開き直すと plan は読み直したグラフから組み直される（01 の「失敗の案内文」）。
-        ExecErrorKind::HeadMoved => matches!(op, GitOp::RebaseInteractive { .. })
-            .then_some("組んだあとに履歴が動いた。i から開き直して"),
+        // もう 1 つの入口は断られた reword を持つ continue の照合で、失敗のあとの status が
+        // 見分け直すので、開き直したメニューはいまの HEAD で組まれる。
+        ExecErrorKind::HeadMoved => match op {
+            GitOp::RebaseInteractive { .. } => Some("組んだあとに履歴が動いた。i から開き直して"),
+            GitOp::RebaseContinue { reword: Some(_) } => {
+                Some("止まったあとに HEAD が動いた。m から開き直して")
+            }
+            _ => None,
+        },
         ExecErrorKind::Other => None,
     }
 }
@@ -392,7 +399,7 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
 fn conflict_advice(op: &GitOp) -> Option<&'static str> {
     match op {
         GitOp::RebaseInteractive { .. }
-        | GitOp::RebaseContinue
+        | GitOp::RebaseContinue { .. }
         | GitOp::RebaseSkip
         | GitOp::Pull {
             mode: PullMode::Rebase,
@@ -474,7 +481,7 @@ fn empty_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::Pull { .. }
         | GitOp::Push { .. }
         | GitOp::RebaseInteractive { .. }
-        | GitOp::RebaseContinue
+        | GitOp::RebaseContinue { .. }
         | GitOp::RebaseSkip
         | GitOp::RebaseAbort
         | GitOp::CherryPickAbort
@@ -530,7 +537,7 @@ fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::Pull { .. }
         | GitOp::Push { .. }
         | GitOp::RebaseInteractive { .. }
-        | GitOp::RebaseContinue
+        | GitOp::RebaseContinue { .. }
         | GitOp::RebaseSkip
         | GitOp::RebaseAbort
         | GitOp::CherryPick(_)
@@ -768,7 +775,7 @@ mod tests {
         // 壊れたように読める。**変更が空で止まった pick も同じ**で、continue は同じ理由で
         // 断られるので出口は skip。
         let conflict = [
-            GitOp::RebaseContinue,
+            GitOp::RebaseContinue { reword: None },
             GitOp::RebaseSkip,
             GitOp::CherryPickContinue,
             GitOp::CherryPickSkip,
@@ -819,12 +826,49 @@ mod tests {
         let mut state = state();
         finish_exec(
             &mut state,
-            GitOp::RebaseContinue,
+            GitOp::RebaseContinue { reword: None },
             Err(failed_with(ExecErrorKind::Empty)),
         );
         let notice = state.notices.back().expect("通知がありません");
         assert_eq!(notice.level, NoticeLevel::Error);
         assert!(!notice.message.contains("skip"), "{}", notice.message);
+    }
+
+    #[test]
+    fn a_moved_head_before_amending_a_refused_reword_is_a_warning_to_reopen_the_menu() {
+        // 照合（`update-ref --stdin` の `verify`）が外れた形。rebase は止まったままなので
+        // バッジと並ぶ（01 の「失敗の案内文」）。素の continue には出さない。
+        let reword = crate::git_read::RefusedReword { head: fake_oid(7) };
+        let mut plain = state();
+        let mut state = state();
+        finish_exec(
+            &mut state,
+            GitOp::RebaseContinue {
+                reword: Some(reword),
+            },
+            Err(failed_with(ExecErrorKind::HeadMoved)),
+        );
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.level, NoticeLevel::Warn);
+        assert!(
+            notice.message.contains("m から開き直して"),
+            "{}",
+            notice.message
+        );
+        assert!(
+            cells(&notice.message) <= BESIDE_BADGE_CELLS,
+            "{} セル: {}",
+            cells(&notice.message),
+            notice.message
+        );
+
+        finish_exec(
+            &mut plain,
+            GitOp::RebaseContinue { reword: None },
+            Err(failed_with(ExecErrorKind::HeadMoved)),
+        );
+        let notice = plain.notices.back().expect("通知がありません");
+        assert!(!notice.message.contains("開き直して"), "{}", notice.message);
     }
 
     #[test]
@@ -919,7 +963,7 @@ mod tests {
         let mut state = state();
         finish_exec(
             &mut state,
-            GitOp::RebaseContinue,
+            GitOp::RebaseContinue { reword: None },
             Err(failed_with(ExecErrorKind::Other)),
         );
 
@@ -1239,7 +1283,7 @@ mod tests {
             Reload::RefsAndLog
         );
         assert_eq!(
-            Reload::after(&GitOp::RebaseContinue, false),
+            Reload::after(&GitOp::RebaseContinue { reword: None }, false),
             Reload::RefsAndLog
         );
         assert_eq!(

@@ -585,7 +585,11 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
 pub fn in_progress(git_dir: &Path) -> Option<InProgressOp>;   // git2 を使わない自由関数
 
 pub enum InProgressOp {
-    Rebase { step: Option<Step>, branch: Option<String> },   // Step { current, total }
+    Rebase {
+        step: Option<Step>,                       // Step { current, total }
+        branch: Option<String>,
+        refused_reword: Option<RefusedReword>,    // 下の「断られた reword」
+    },
     Am { step: Option<Step> },
     CherryPick { oid: Option<Oid> },
     Revert { oid: Option<Oid> },
@@ -660,7 +664,9 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
   外で `git rebase -i` の todo を編集している最中など）。**進行中であることは落とさない**
 - **止まった理由（`edit` / コンフリクト / exec の失敗）は持たない。** `done` の最終行は
   理由を表さない —— `edit` にした pick がコンフリクトすると、最終行は `edit` なのに
-  止まったのはコンフリクトのため（実測）。07 のモックにあった `(edit)` はこの理由で出さない
+  止まったのはコンフリクトのため（実測）。07 のモックにあった `(edit)` はこの理由で出さない。
+  **例外は `refused_reword` の 1 つ**（下の「断られた reword」）—— あれはバッジに出す理由
+  ではなく、continue で git に何を渡すかを変える値で、`done` の最終行だけでは決めない
 - **`Rebase` は元のブランチ（`branch`）を持つ。** rebase 中の対象ブランチは git が
   改名（`is being rebased`）も削除（`used by worktree`）も断る（03 の表）ので、`app` が
   入力を開く前に断るのに要る。`head-name` は merge / apply の両 backend で
@@ -670,6 +676,61 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 - `MERGE_HEAD` は octopus では複数行になる。`Merge` が持つのは先頭行だけ
 - ファイルが読めない・中身が壊れているときは、その行を「無い」と読んで次の判定へ進む。
   **戻り値が `Option` で `Result` でないのはこのため**（上の「API」）
+
+### 断られた reword
+
+```rust
+pub struct RefusedReword {
+    pub head: Oid,   // 見分けた時点の HEAD
+}
+```
+
+mewgit が渡した reword を commit-msg hook が断ると、git は**元のメッセージでコミットした
+まま止まり**、continue はエディタを起こし直さずに元のメッセージのまま進む（03 の
+「Interactive rebase の実装」の表）。`m` の continue がこの形のときだけ新しいメッセージを
+amend してから進めるので（03）、`status()` がここで見分けて `Rebase` に載せる。
+
+| 条件 | 外すもの |
+|---|---|
+| `rebase-merge/done` の最終行が `reword <X>` | reword 以外の停止 |
+| `rebase-merge/mewgit-reword-<X>` が在る | 端末で始めた rebase の reword |
+| HEAD がこの reword の手順で作られた X の pick —— HEAD = X（pick が早送りした形）か、HEAD の reflog の先頭が `rebase (reword): …` で HEAD を指し、しかも HEAD のメッセージと author（名前・メール・日時）が X と同じ（載せ直した形） | reword の pick がコンフリクトして止まった形（HEAD は 1 本前のコミット）、そこから `git reset --hard` した形、端末で別のメッセージに amend した形 |
+
+- **新しいメッセージは持たない。** amend は commit editor が `mewgit-reword-<X>` を差し込む
+  経路（rebase の開始と同じ）で通す（03）ので、値として運ぶ必要が無い。最初の版は
+  メッセージを読んで `RefusedReword` に載せ、`commit --amend --file -` の stdin に流し直して
+  いた —— 同じメッセージが開始とやり直しで別の cleanup を通り、進行中の rebase では
+  status のたびにファイルを読んでいた（`/simplify` の altitude が拾った）
+- **`rebase-merge/amend` は使わない。** pick が fast-forward した形（HEAD = X）にしか
+  立たず、`--onto` で載せ直す形では無い（03 の表。git 2.56.0、2026-10-03）
+- **Oid だけでは載せ直した形を拾えない。** その HEAD は X とは別の新しいコミットなので、
+  HEAD = X で当たるのは fast-forward の形だけ
+- **メッセージと author だけでも足りない。** sequencer は pick で author を日時まで保つが、
+  **`cherry-pick` も保つ** —— X を cherry-pick して中身を変えたコミット（双子）が onto に
+  在ると、X の pick がそれとコンフリクトして止まった HEAD はメッセージも author も X と
+  揃う。取り違えると continue が onto 側のコミットを amend し、X が消える（`/code-review`
+  が一時リポジトリで再現。最初の版は「author の日時まで揃うのは X の pick だけ」と書いて
+  いた）。`MERGE_MSG` の有無で外すと、解消してから `reset --hard` した形が残る
+- **そこで HEAD を動かしたのがこの reword の手順であることを reflog で見る。** hook が
+  断った形では、載せ直す pick が `rebase (reword): <件名>` を HEAD の reflog に書く。
+  コンフリクトで止まった形の先頭は 1 本前の手順のもの（双子の形なら `rebase (start)`）で、
+  `reset --hard` は HEAD が動かないので何も足さない（03 の表）。**reflog だけでも足りない**
+  —— 1 本前の reword が通ってから X の pick がコンフリクトすると、先頭は
+  `rebase (reword): …` のまま。メッセージと author の比較はこちらを外す（統合テストで
+  両方を踏む）
+- **reflog が読めなければ「当たらない」**（素の continue になる）。外れる側は git 自身の
+  continue と同じ振る舞いで、新しいメッセージが入らないだけ
+- **`head` を持つのは、continue の時点で同じ停止かを git に照合させるため**（03 の
+  `update-ref --stdin` の `verify`）。snapshot のあとで端末から continue して別の停止に
+  移っていると、`mewgit-reword-<X>` は残ったまま HEAD だけが変わる
+- **`in_progress` は自由関数のまま**で、これだけは `RepoReader::refused_reword` が
+  見る（コミットのメッセージを読むので git2 が要る）。`status()` が `Rebase` に
+  書き足す。`rebase-apply/` の `Rebase` では常に `None`（mewgit の reword は merge
+  backend でしか走らない）
+- **`done` の最終行を読むのと、メッセージのファイル名を組むのはここの関数**
+  （`last_done_reword` / `reword_message_path`）で、`git_exec::rebase` の commit editor
+  （同じ 2 つを見て reword のメッセージを差し込む）もこれを呼ぶ。2 本にすると、片方だけ
+  名前の規則が変わったときに見分けが黙って外れる
 
 ## ハンクの指紋
 

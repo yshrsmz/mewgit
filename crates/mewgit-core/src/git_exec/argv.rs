@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::rebase::SequenceInput;
 use super::{GitOp, LocalBranch, PrCheckout, PrSource, PullMode, RebasePlanError};
+use crate::git_read::RefusedReword;
 use crate::git_read::{stash_ref as stash, Oid};
 
 /// `git` に渡す 1 回分の呼び出し。
@@ -43,8 +44,8 @@ pub enum ArgvError {
 
 /// [`GitOp`] を `git` の呼び出しの列に変換する。
 ///
-/// **[`GitOp::CheckoutPr`] を除いて列の長さは 1。** あれだけが git を続けて叩く
-/// （03 の「複数の手順を持つ書き込み」）。`Runner` は列を先頭から順に叩き、非 0 で
+/// **ほとんどの変種で列の長さは 1。** git を続けて叩くのは [`GitOp::CheckoutPr`] と、
+/// 断られた reword を持つ [`GitOp::RebaseContinue`] だけ（03 の「複数の手順を持つ書き込み」）。`Runner` は列を先頭から順に叩き、非 0 で
 /// 止まる。
 ///
 /// 網羅 `match` なので、`GitOp` に変種を足すとここがコンパイルエラーになる。
@@ -217,7 +218,12 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
             };
             stdin = Some(serde_json::to_vec(&input).expect("文字列だけの値は必ず直列化できる"));
         }
-        GitOp::RebaseContinue => argv.extend(["rebase".into(), "--continue".into()]),
+        GitOp::RebaseContinue { reword: None } => {
+            argv.extend(["rebase".into(), "--continue".into()]);
+        }
+        GitOp::RebaseContinue {
+            reword: Some(reword),
+        } => return Ok(continue_refused_reword(reword)),
         GitOp::RebaseSkip => argv.extend(["rebase".into(), "--skip".into()]),
         GitOp::RebaseAbort => argv.extend(["rebase".into(), "--abort".into()]),
         GitOp::CherryPick(oids) => {
@@ -283,6 +289,25 @@ pub fn to_commands(op: &GitOp) -> Result<Vec<GitCommand>, ArgvError> {
     }
 
     Ok(vec![GitCommand { argv, stdin }])
+}
+
+/// 断られた reword を amend してから進める continue（03 の「Interactive rebase の実装」）。
+///
+/// **1 本目は HEAD の照合で、何も書かない。** `verify` だけのトランザクションは ref も
+/// reflog も動かさない（03 の実測）。snapshot のあとで HEAD が動いていれば、止まった
+/// コミットのメッセージで別のコミットを amend することになるので、ここで止める。
+/// **amend にメッセージを渡さない。** `GIT_EDITOR` の commit editor が `done` の最終行から
+/// `mewgit-reword-<X>` を差し込む —— rebase の開始と同じ経路なので、cleanup も
+/// `core.commentString` も同じに効く。
+fn continue_refused_reword(reword: &RefusedReword) -> Vec<GitCommand> {
+    vec![
+        GitCommand {
+            stdin: Some(format!("verify HEAD {}\n", reword.head).into_bytes()),
+            ..call(&["update-ref", "--stdin"])
+        },
+        call(&["commit", "--amend"]),
+        call(&["rebase", "--continue"]),
+    ]
 }
 
 /// [`GitOp::CheckoutPr`] の手順（05 の「mewgit の手順」の表）。
@@ -438,8 +463,11 @@ impl GitOp {
     /// この操作が走らせる `git` のサブコマンド。スピナーの説明に出す
     /// （01 の「実行中ジョブ」）。
     ///
-    /// **[`to_commands`] の最初の 1 本の `argv[0]` と同じものを返す。** 別々に
-    /// 書いてもコンパイルは通るので、`verb_matches_the_argv` が全変種で突き合わせる。
+    /// **[`to_commands`] が返す列のうち、時間を使う 1 本の `argv[0]` と同じものを返す**
+    /// （スピナーの語。03 の「複数の手順を持つ書き込み」）。1 本の変種ではその 1 本、
+    /// `CheckoutPr` は最初の fetch、断られた reword を持つ continue は最後の
+    /// `rebase --continue`（照合と amend は一瞬）。別々に書いてもコンパイルは通るので、
+    /// `verb_matches_the_argv` が全変種で突き合わせる。
     /// `to_commands` から取らないのは、語を 1 つ得るためにハンクのパッチまで
     /// 組み直すことになるため（[`to_commands`] は `Result` でもある）。
     ///
@@ -462,7 +490,7 @@ impl GitOp {
             GitOp::Pull { .. } => "pull",
             GitOp::Push { .. } => "push",
             GitOp::RebaseInteractive { .. }
-            | GitOp::RebaseContinue
+            | GitOp::RebaseContinue { .. }
             | GitOp::RebaseSkip
             | GitOp::RebaseAbort => "rebase",
             GitOp::CherryPick(_)
@@ -517,7 +545,7 @@ mod tests {
             GitOp::Pull { .. } => "Pull",
             GitOp::Push { .. } => "Push",
             GitOp::RebaseInteractive { .. } => "RebaseInteractive",
-            GitOp::RebaseContinue => "RebaseContinue",
+            GitOp::RebaseContinue { .. } => "RebaseContinue",
             GitOp::RebaseSkip => "RebaseSkip",
             GitOp::RebaseAbort => "RebaseAbort",
             GitOp::CherryPick(_) => "CherryPick",
@@ -723,7 +751,10 @@ mod tests {
                 },
                 vec!["rebase", "--interactive", "--no-update-refs", "main"],
             ),
-            (GitOp::RebaseContinue, vec!["rebase", "--continue"]),
+            (
+                GitOp::RebaseContinue { reword: None },
+                vec!["rebase", "--continue"],
+            ),
             (GitOp::RebaseSkip, vec!["rebase", "--skip"]),
             (GitOp::RebaseAbort, vec!["rebase", "--abort"]),
             (
@@ -880,7 +911,40 @@ mod tests {
             .into_iter()
             .map(|(op, argv)| (op, vec![argv]))
             .chain(checkout_cases())
+            .chain([(
+                GitOp::RebaseContinue {
+                    reword: Some(refused_reword()),
+                },
+                vec![
+                    vec!["update-ref", "--stdin"],
+                    vec!["commit", "--amend"],
+                    vec!["rebase", "--continue"],
+                ],
+            )])
             .collect()
+    }
+
+    fn refused_reword() -> RefusedReword {
+        RefusedReword { head: fake_oid(7) }
+    }
+
+    #[test]
+    fn a_refused_reword_is_checked_against_head_before_it_is_amended() {
+        // 照合が先、amend、continue の順。stdin は照合の 1 本だけに載る —— amend の
+        // メッセージは commit editor が差し込む（03 の「Interactive rebase の実装」）。
+        let commands = to_commands(&GitOp::RebaseContinue {
+            reword: Some(refused_reword()),
+        })
+        .expect("argv を組めませんでした");
+        let stdin: Vec<Option<Vec<u8>>> = commands.into_iter().map(|c| c.stdin).collect();
+        assert_eq!(
+            stdin,
+            [
+                Some(format!("verify HEAD {}\n", fake_oid(7)).into_bytes()),
+                None,
+                None,
+            ]
+        );
     }
 
     #[test]
@@ -898,10 +962,20 @@ mod tests {
     #[test]
     fn verb_matches_the_argv() {
         // スピナーの説明と実際に走る git がずれないこと。`all_cases` は全変種を
-        // 覆っている（`covers_every_variant`）ので、ここも全変種を回る。
+        // 覆っている（`covers_every_variant`）ので、ここも全変種を回る。複数の手順は、
+        // 時間を使う 1 本の語（03 の「複数の手順を持つ書き込み」）—— どの 1 本かは
+        // ここにも書く（列のどれかと一致、では語が別の手順へずれても通る）。
         for (op, _) in all_cases() {
             let commands = to_commands(&op).expect("argv を組めませんでした");
-            assert_eq!(op.verb(), commands[0].argv[0], "{op:?}");
+            let spinning = match op {
+                GitOp::CheckoutPr(_) => commands.first(),
+                GitOp::RebaseContinue { reword: Some(_) } => commands.last(),
+                _ => {
+                    assert_eq!(commands.len(), 1, "{op:?}");
+                    commands.first()
+                }
+            };
+            assert_eq!(op.verb(), spinning.unwrap().argv[0], "{op:?}");
         }
     }
 
@@ -916,17 +990,18 @@ mod tests {
     }
 
     #[test]
-    fn only_hunk_ops_and_the_rebase_plan_use_stdin() {
+    fn only_hunk_ops_the_rebase_plan_and_the_head_check_use_stdin() {
         for (op, _) in all_cases() {
             let commands = to_commands(&op).expect("argv を組めませんでした");
-            let expects_stdin = matches!(
-                op,
-                GitOp::StageHunk(_)
-                    | GitOp::UnstageHunk(_)
-                    | GitOp::DiscardHunk(_)
-                    | GitOp::RebaseInteractive { .. }
-            );
             for command in commands {
+                // 断られた reword を持つ continue は、照合（`update-ref --stdin`）の 1 本だけ。
+                let expects_stdin = matches!(
+                    op,
+                    GitOp::StageHunk(_)
+                        | GitOp::UnstageHunk(_)
+                        | GitOp::DiscardHunk(_)
+                        | GitOp::RebaseInteractive { .. }
+                ) || command.argv[0] == "update-ref";
                 assert_eq!(command.stdin.is_some(), expects_stdin, "{op:?}");
             }
         }

@@ -74,7 +74,7 @@ impl RepoReader {
     }
 
     /// ワークツリーごとの gitdir。linked worktree では `.git/worktrees/<name>/` で、
-    /// 進行中操作のファイルはこちらに置かれる（[`in_progress`](super::in_progress)）。
+    /// 進行中操作のファイルはこちらに置かれる（`status()` が見る。02 の「進行中操作の検出」）。
     pub fn git_dir(&self) -> &Path {
         self.repo.path()
     }

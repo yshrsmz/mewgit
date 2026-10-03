@@ -39,6 +39,10 @@ pub(super) fn push(state: &mut AppState) -> Cmd {
 ///   あとから追跡設定が外で入ったときに、追跡していない push の拒否を根拠に force の腕が
 ///   立つ**
 ///
+/// - 追跡先ではない push 先への push（[`pushed_elsewhere`]）。lease が追跡先に対する
+///   値なので force に上げない。**憶えて断ると `P` が `Push` を出さなくなり**、push 先の
+///   ブランチが外で消えても先端が動くまで断り続ける（`/code-review` が拾った）
+///
 /// **それ以外の Push の完了はすべて忘れる**（成功した push、非 FF 以外の失敗）。
 ///
 /// **憶えるのは押したブランチ**（`GitOp::Push` の `src`）で、いまの HEAD ではない。
@@ -130,7 +134,7 @@ fn push_plan(state: &AppState) -> PushPlan {
             .as_ref()
             .is_none_or(|config| config.remote != remote)
         {
-            return push_elsewhere(head, remote, rejected(state, head));
+            return push_elsewhere(head, remote);
         }
     }
 
@@ -216,15 +220,9 @@ fn rejected(state: &AppState, head: &Branch) -> bool {
 /// `-u` も確認モーダルも付けない —— 行き先はユーザーが書いたもので、推測していない。
 ///
 /// **force には上げない。** lease（`Branch.upstream` の位置）と `ahead` は追跡先に
-/// 対する値で、行き先が違うと比べる相手がいない。断られた記憶はこの push でも立つ
-/// （`upgradable` は op の形で決まる）ので、立っていれば断って外の `git push` を案内する
-/// （追跡 ref が無いときの断りと同じく、先端が動けば記憶は外れる）。
-fn push_elsewhere(head: &Branch, remote: &str, rejected: bool) -> PushPlan {
-    if rejected {
-        return PushPlan::Refused(format!(
-            "{remote} へは force push できません。git push で送ってください"
-        ));
-    }
+/// 対する値で、行き先が違うと比べる相手がいない。断られた記憶もこの push では立てない
+/// （[`pushed_elsewhere`]）ので、ここで記憶を読む必要が無い。
+fn push_elsewhere(head: &Branch, remote: &str) -> PushPlan {
     PushPlan::Tracked(GitOp::Push {
         remote: remote.to_string(),
         src: head.name.clone(),
@@ -232,6 +230,37 @@ fn push_elsewhere(head: &Branch, remote: &str, rejected: bool) -> PushPlan {
         set_upstream: false,
         lease: None,
     })
+}
+
+/// 追跡先ではない push 先へ送った push か（[`push_elsewhere`] が組む形）。
+///
+/// **op だけでは見分けられない** —— 追跡設定に沿った push と同じく lease も `-u` も無い。
+/// 押したブランチ（`src`）の追跡先と行き先を比べる。完了時に読むのは
+/// [`push_rejection`] と同じく一覧の行で、push はローカルの ref も config も動かさない。
+pub(super) fn pushed_elsewhere(state: &AppState, op: &GitOp) -> bool {
+    let GitOp::Push {
+        remote,
+        src,
+        lease: None,
+        set_upstream: false,
+        ..
+    } = op
+    else {
+        return false;
+    };
+    state
+        .branches
+        .branches
+        .iter()
+        .find(|branch| &branch.name == src)
+        // **一覧に無いブランチは追跡先へ送ったものとして扱う**（従来の案内と記憶）。
+        // 追跡設定が無い行は push 先へ送ったもの（-u の push は上の形で外れている）。
+        .is_some_and(|branch| {
+            branch
+                .upstream_config
+                .as_ref()
+                .is_none_or(|config| &config.remote != remote)
+        })
 }
 
 /// `f`。既定リモートを決めて fetch する。
@@ -1258,7 +1287,9 @@ mod tests {
     #[test]
     fn a_rejected_push_to_the_push_remote_is_not_forced() {
         // lease と `ahead` は追跡先に対する値なので、別の行き先では force に上げない。
-        // 断られた記憶は立つ（`upgradable` は op の形で決まる）ので、次の `P` は断る。
+        // **記憶も立てない** —— 立てて断ると `P` が `Push` を出さなくなり、push 先の
+        // ブランチが外で消えても断り続ける（`.claude/rules/rust-coding.md` の「読まれない
+        // 状態を『断る』方向で直すと…」）。
         let mut state = state_for_push(
             &["origin", "fork"],
             Branch {
@@ -1268,13 +1299,35 @@ mod tests {
             },
         );
         reject_non_fast_forward(&mut state, push_op("fork", "e", false));
-        assert!(state.push_rejected.is_some(), "記憶が立っていません");
 
-        assert_eq!(press(&mut state, 'P'), Cmd::None);
-        assert_eq!(state.modal, None, "force の確認を出しています");
+        assert_eq!(state.push_rejected, None);
+        // **案内は追跡先向けのものではない**（`p` は追跡先から取り込み、`P` は force に
+        // 上がらないので、どちらも出口にならない）。
         let notice = state.notices.back().expect("通知が出ていません");
-        assert!(notice.message.contains("fork"), "{}", notice.message);
+        assert!(
+            !notice.message.contains("p で") && !notice.message.contains("もう一度"),
+            "{}",
+            notice.message
+        );
         assert!(cells(&notice.message) <= NOTICE_CELLS, "{}", notice.message);
+        // **`P` は押し直せる**（素の push のまま）。
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("fork", "e", false))
+        );
+        assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn a_rejected_push_to_the_tracked_remote_is_still_remembered() {
+        // 上の否定の対。`push_remote` が追跡先と同じなら、従来どおり記憶が立つ。
+        let mut state = state_for_push(
+            &["origin", "fork"],
+            pushing_to(tracking_branch("main", "origin", HEADS_MAIN), "origin"),
+        );
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
+
+        assert!(state.push_rejected.is_some(), "記憶が立っていません");
     }
 
     #[test]

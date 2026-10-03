@@ -14,7 +14,7 @@ use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput, GitOp, PullMode};
 
 use super::account::resolve_again;
 use super::graph::reload_log;
-use super::remote::push_rejection;
+use super::remote::{push_rejection, pushed_elsewhere};
 use crate::app::{AppState, Cmd, ExecDone, JobKind, NoticeLevel, Region};
 
 /// `git` の実行が終わった。
@@ -30,7 +30,16 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         // しか描かない（07）ので、そこを argv で埋めると案内が画面に出ない
         // （01 の「失敗の案内文」）。案内が無ければ [`exec_summary`] に落とす。
         let detail = exec_detail(err);
-        let advice = exec_advice(&done.op, err);
+        let advice = match err {
+            // **追跡先ではない push 先が進んでいた形。** 追跡設定の push 向けの案内（`p` で
+            // 取り込む / `P` で force）は、どちらもこの行き先には効かない（01 の「push の
+            // 行き先」の 2）。op だけでは見分けられないので `exec_advice` の外で選ぶ。
+            ExecError::Failed {
+                kind: ExecErrorKind::NonFastForward,
+                ..
+            } if pushed_elsewhere(state, &done.op) => Some(PUSH_REMOTE_AHEAD),
+            _ => exec_advice(&done.op, err),
+        };
         // **中断は失敗ではない。** 押した本人が止めたものを `Error` で出すと、
         // 頼んでいないことが壊れたように読める。**コンフリクトで止まったのも同じ** ——
         // continue のあとに次のコミットでまた止まるのは想定どおりの結末で、進行中操作は
@@ -65,7 +74,7 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         ..
     } = &done.op
     {
-        let upgradable = lease.is_none() && !set_upstream;
+        let upgradable = lease.is_none() && !set_upstream && !pushed_elsewhere(state, &done.op);
         state.push_rejected = push_rejection(state, &done.result, src, upgradable);
     }
 
@@ -637,6 +646,13 @@ fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::CheckoutPr(_) => None,
     }
 }
+
+/// 追跡先ではない push 先（`pushRemote` / `pushDefault`）が進んでいて断られたときの案内。
+///
+/// **mewgit に出口が無い。** `p` は追跡先から取り込み（push 先の分岐は解けない）、
+/// force は lease が追跡先に対する値なので撃たない（01 の「push の行き先」の 2）。
+const PUSH_REMOTE_AHEAD: &str =
+    "push 先が進んでいます。外の git で取り込んでから P を押してください";
 
 /// 非 FF で断られたときの案内。**押すキーが op で違う**（01 の「失敗の案内文」）。
 fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {

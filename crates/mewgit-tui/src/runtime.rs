@@ -18,7 +18,7 @@ use mewgit_core::auth::gh::GhCli;
 use mewgit_core::auth::AccountState;
 use mewgit_core::auth::Backend as _;
 use mewgit_core::config::Config;
-use mewgit_core::git_exec::Runner;
+use mewgit_core::git_exec::{GitVersion, Runner};
 use mewgit_core::git_read::{GitReadError, ReaderHandle, Timestamp};
 use mewgit_core::github::{AccountBackend, GithubClient, GithubError};
 use ratatui::backend::Backend;
@@ -65,14 +65,20 @@ pub struct Runtime {
 /// （端末を初期化する前に出す）。リモート・HEAD・ref は `Cmd::LoadRepoInfo` として
 /// ループの中で読む。ref の列挙は本数ぶんの object 読み出しになるので、待つと
 /// 最初の 1 フレームが出るまで画面が真っ黒になる。
-pub fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle), GitReadError> {
+///
+/// `git` は端末を初期化する前に `main` が読んだ版（03 の「git の最低版」）。
+pub fn open(
+    path: &Path,
+    config: Config,
+    git: GitVersion,
+) -> Result<(AppState, ReaderHandle), GitReadError> {
     let reader = ReaderHandle::spawn(path)?;
     let repo = RepoInfo {
         path: reader.workdir().to_path_buf(),
         ..RepoInfo::default()
     };
 
-    Ok((AppState::new(repo, config, Timestamp::now()), reader))
+    Ok((AppState::new(repo, config, git, Timestamp::now()), reader))
 }
 
 /// 描画 → 入力待ち → `update` → `dispatch` を回す。
@@ -652,7 +658,9 @@ mod tests {
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::{HeadInfo, InProgressOp};
-    use mewgit_core::test_util::{fake_account, fake_target, wait_for_pid, BareRepo, TestRepo};
+    use mewgit_core::test_util::{
+        fake_account, fake_git, fake_target, wait_for_pid, BareRepo, TestRepo,
+    };
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -675,7 +683,7 @@ mod tests {
 
     /// リポジトリを開いた状態とハンドル。
     fn opened(repo: &TestRepo) -> (AppState, ReaderHandle) {
-        open(repo.path(), offline_config()).expect("リポジトリを開けませんでした")
+        open(repo.path(), offline_config(), fake_git()).expect("リポジトリを開けませんでした")
     }
 
     /// テスト用のランタイム。`git` は隔離した環境で走らせる
@@ -763,7 +771,7 @@ mod tests {
     fn open_fails_on_a_repository_that_cannot_be_used() {
         let repo = BareRepo::init();
 
-        let err = open(repo.path(), Config::default()).unwrap_err();
+        let err = open(repo.path(), Config::default(), fake_git()).unwrap_err();
 
         assert!(
             matches!(err, GitReadError::BareRepository { .. }),

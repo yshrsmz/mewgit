@@ -23,7 +23,7 @@ use std::process::ExitCode;
 use anyhow::{bail, Result};
 use mewgit_core::app::NoticeLevel;
 use mewgit_core::config::Config;
-use mewgit_core::git_exec;
+use mewgit_core::git_exec::{self, GitVersion};
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
     EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -75,7 +75,10 @@ fn editor(
 #[tokio::main]
 async fn tui(repo: PathBuf) -> Result<()> {
     let (config, warnings) = Config::load();
-    let (mut state, reader) = runtime::open(&repo, config)?;
+    // **端末に入る前に読む。** 床を満たさない git では起動を断り、理由を stderr に出す
+    // （03 の「git の最低版」）。
+    let git = GitVersion::detect(Path::new(&config.general.git_bin)).await?;
+    let (mut state, reader) = runtime::open(&repo, config, git)?;
 
     // 設定の警告は起動時に見せる。読み込み自体は失敗しない（08 参照）。
     for warning in warnings {

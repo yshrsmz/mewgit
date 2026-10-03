@@ -218,7 +218,8 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 - **untracked の discard に `-d` は付けない。** `git_read::status` が
   `recurse_untracked_dirs(true)` で列挙するので、渡すのは常にファイル。ディレクトリごと
   消す余地を残さない
-- `switch` / `restore` を使うので git 2.23 以降が要る
+- `switch` / `restore` を使うので git 2.23 以降が要る（起動の床 2.38.0 が覆う。下の
+  「git の最低版」）
 
 ### stash push のパス指定
 
@@ -548,6 +549,87 @@ stderr ではなく mewgit の説明文を入れる。**中断はここに入れ
 （`ExecError::Canceled`。上の「キャンセル」）。**守りが断ったのも入れない**
 （`ExecError::Stale`）—— 確かめられなかったのではなく、確かめて古かった。
 
+## git の最低版
+
+```rust
+pub struct GitVersion { major: u32, minor: u32, patch: u32 }   // 比較は外に出さない
+
+impl GitVersion {
+    /// `git --version` を読み、起動の床（2.38.0）を満たすときだけ返す。
+    pub async fn detect(git_bin: &Path) -> Result<GitVersion, VersionError>;
+    /// reword / squash のメッセージで行頭のコメント文字を残せるか（2.45.0 以上）。
+    pub fn keeps_comment_lines(self) -> bool;
+}
+```
+
+**版は能力として問う**（2026-10-03 にユーザーと決めた）。版の数と比較（`Ord`）は
+`git_exec::version` の中に閉じ、外に出すのは名前の付いた能力（`keeps_comment_lines`）と、
+案内に出す `Display` だけにする。`app` には `>= 2.45` と書く手段が無いので、分岐は能力の
+名前でしか書けず、**版と能力の対応は `version.rs` の 1 箇所に集まる**。
+
+- **版ごとの実装（trait を版で差し替える形）は採らなかった。** 版で分かれるのはいま
+  reword / squash の 1 つで、しかも「git をどう呼ぶか」ではなく「UI がその操作を出すか」
+  （打たせる前に断る。01）なので、git を包む層に閉じ込めても `app` が問い合わせることに
+  変わりない。**将来 argv が版で変わる操作が出たら、`to_commands`（上の「argv への変換」）に
+  能力を渡して中で吸収する** —— 呼ぶ側は `GitOp` のままで済む。差し替えの層を考えるのは、
+  そういう操作が何本も出てからでよい
+- **文言の違いは版で分けない。** 照合を緩めて吸収する（下の「エラー分類」の `EditorGone`）
+
+**床は 2 段ある**（2026-10-03 にユーザーと決めた）。
+
+| 版 | 要るもの | 下回ったとき |
+|---|---|---|
+| **2.38.0**（起動） | `rebase --no-update-refs`（下の「Interactive rebase の実装」）。これより古い要求（`switch` / `restore` の 2.23、`GIT_CONFIG_COUNT` の 2.31）も覆う | **起動を断る**。端末に入る前に stderr へ理由と見つかった版を出して終了する |
+| **2.45.0**（reword / squash） | `core.commentString`（下の「Interactive rebase の実装」） | **RebaseEditor の `r` / `s` を断る**（01 の「interactive rebase の開始（`i`）」）。ほかは通す |
+
+- **2.38 未満で起動を断るのは、そこから下を叩いていないから。** 2.34.1 で `m` の rebase が
+  `unknown option 'no-update-refs'` で落ちる（下の表）ことは見たが、ほかの操作が黙って
+  違う動きをしないかは測っていない。gh の `GhTooOld`（04）のように degraded で続ける形を
+  取らないのは、git が無いと何もできないため
+- **2.38〜2.44 で `r` / `s` だけを断るのは、そこだけが黙って壊れるから。** `core.commentString`
+  を知らない git は未知のキーとして読み飛ばし、reword の打ったメッセージからも squash で
+  つなぐ元のメッセージからも、行頭 `#` の行を exit 0 のまま消す（下の表）。fixup は
+  1 本目のメッセージをそのまま使うので消えない。**メッセージの中身は見ずに断る** ——
+  squash される側の本文はグラフに読み込んでおらず、古い git で効くコメント文字は
+  ユーザーの `core.commentChar`（`auto` なら git がメッセージを見て決める）なので、
+  「`#` で始まる行があれば」と書くと嘘になる
+- **Ubuntu 24.04 LTS の既定は 2.43.0** で、2 段目に掛かる。起動を 2.45 で断る案は
+  これを理由に採らなかった
+- **版を読むのは `general.git_bin`**（`Runner` が起こすのと同じバイナリ）。PATH の `git`
+  ではない
+- **読み方**: `git version ` の後ろの 1 語を `.` で割り、**major と minor は数字を要求する。**
+  patch は先頭の数字だけを取り、無ければ 0（`2.47.0.rc1`）。4 つ目以降は読まない ——
+  Windows は `2.45.1.windows.1`、ソースから作ると `2.47.0.123.gabcdef` で、gh（04 の
+  「最低版は gh 2.81.0」）と違って 4 つ目が続く形が実在する。後ろの括弧（Apple の
+  `(Apple Git-157)`）も読まない。**読めなければ起動を断る**（gh と同じく、通す理由が無い）。
+  案内には `git --version` の生の 1 行目を出す
+- `app` は検出した版を `AppState.git` に持つ（`AppState::new` の引数）。断るかどうかは
+  `keeps_comment_lines` の 1 本で、版の数を `app` に書かない
+
+実測（2026-10-03。Docker の各イメージに apt の git を入れ、`env -i` 相当の一時リポジトリで
+叩いた。reword のメッセージは `Fix bug` + 空行 + `#123 is closed`、`GIT_CONFIG_*` で
+`core.commentString=#mewgit#`。squash / fixup は元のメッセージに `#1 kept?` / `#2 kept?` の行を
+持つ 2 本を `GIT_EDITOR=true` でまとめた）:
+
+| イメージ | git | reword の `#` 行 | squash の `#` 行 | fixup の `#` 行 | `rebase -i --no-update-refs` |
+|---|---|---|---|---|---|
+| `ubuntu:22.04` | 2.34.1 | 消える（exit 0） | — | — | `unknown option` で exit 129 |
+| `debian:bookworm` | 2.39.5 | 消える（exit 0） | — | — | 通る |
+| `ubuntu:24.04` | 2.43.0 | 消える（exit 0） | 消える（exit 0） | 残る | 通る |
+| `debian:trixie` | 2.47.3 | 残る | 残る（`commentString` 無しでは消える） | 残る | 通る |
+| macOS（手元） | 2.54.0 (Apple Git-157) / 2.56.0 | 残る | — | — | 通る |
+
+**床の内側でほかに黙って壊れるものが無いか**は、`rust:1.98.1-bookworm`（git 2.39.5）で
+`cargo test --workspace` を流して見た（2026-10-03）。git が絡んで落ちたのは 7 本で、4 本は
+reword の `#` 行（消える / `#42` だけのメッセージが空として断られる）、3 本は文言の違い
+（`There was a problem with the editor` の大文字、`branch -d` の `The branch 'side' is not
+fully merged.`）。後者は理由の行が古い文で出るだけで、`EditorGone` の照合だけを緩めた。
+
+**2.38 と 2.45 そのものは叩いていない**（境目はリリースノートの値）。`core.commentChar` に
+`#mewgit#` を入れる形は、2.47.3 では `commentString` と同じに効き、2.43.0 以下は
+`core.commentChar should only be one … character` で**どのコマンドも** exit 128 になるので
+採らない。
+
 ## エラー分類（ExecErrorKind）
 
 出力のパターンで分類し、UI が案内文を出せるようにする。**判定は上から順**で、
@@ -616,6 +698,8 @@ the commit now` も並ぶ）。見分けは 2 つ揃えたときだけ:
 
 - **`there was a problem with the editor` だけでは決めない。** 自バイナリのエディタが自分で
   断った形（HEAD の照合の `[head-moved]`、plan の無い `--sequence-editor`）も同じ行を書く
+- **大文字小文字を無視して照合する。** git 2.39.5 は `There was a problem with the editor`
+  と大文字で書く（2.47 以降は小文字。下の「git の最低版」の床の内側）
 - **shell の文言では照合しない。** 起こせなかったときの行は shell で割れる —— macOS の `sh` は
   `<path>: No such file or directory`、Debian の dash は `1: <path>: not found`（実測は下の表）
 - **パスを見るのは失敗のあとだけ。** op ごとに起こす前に見ると、エディタを起こさない大半の
@@ -820,9 +904,9 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   揃ったまま `#` だけが本文に残る。**continue にも要る**のでエディタと同じくどのコマンドにも
   載せ、argv の `-c` ではなく `GIT_CONFIG_COUNT` / `KEY_n` / `VALUE_n` で渡す（`L` の履歴と
   argv の表に毎回載せない）。ユーザーが `GIT_CONFIG_COUNT` を使っていれば後ろに足す。
-  **`core.commentString` を読むのは git 2.45 以降**（リリースノートより。手元は 2.55 だけで
-  測った）で、それより古い git は未知のキーを黙って無視するので `#` の行が消える形に
-  戻るはず。**確かめていない**（mewgit はまだ git の最低版を決めていない。M6）
+  **`core.commentString` を読むのは git 2.45 以降**（リリースノート）で、それより古い git は
+  未知のキーを黙って読み飛ばし、reword と squash で `#` の行を exit 0 のまま消す（2.43.0 と
+  2.39.5 で実測）。**2.45 未満では RebaseEditor の `r` / `s` を断る**（上の「git の最低版」）
 - **消えた自バイナリ。** エディタが自バイナリなので、起動中に mewgit のバイナリが消えると、
   エディタを起こす git が落ちる（以前の `true` では起きない。**Linux では `/proc/<pid>/exe`
   を渡すので起きない** —— 下の 2 つ目）。**落ちるのは rebase の系統と

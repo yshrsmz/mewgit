@@ -282,7 +282,12 @@ impl Runner {
     /// 失敗の分類。**エディタを起こせなかった失敗だけは、出力ではなく自バイナリの
     /// パスで決める**（理由は 03 の「エラー分類」の `EditorGone`）。
     fn kind_of_failure(&self, stdout: &str, stderr: &str) -> ExecErrorKind {
-        if stderr.contains("there was a problem with the editor") && !self.mewgit_bin.exists() {
+        // 大文字小文字は無視する。git 2.39 は `There was …` と書く（03）。
+        if stderr
+            .to_ascii_lowercase()
+            .contains("there was a problem with the editor")
+            && !self.mewgit_bin.exists()
+        {
             ExecErrorKind::EditorGone
         } else {
             classify(stdout, stderr)
@@ -885,6 +890,27 @@ mod tests {
             "{EDITOR_STDERR_PREFIX}{err}\nerror: there was a problem with the editor 'mewgit --sequence-editor'\n"
         );
         assert_eq!(classify("", &stderr), ExecErrorKind::HeadMoved);
+    }
+
+    #[test]
+    fn a_vanished_editor_is_recognized_in_either_case_git_writes_it() {
+        let runner = Runner::new(
+            "/nonexistent",
+            "git",
+            SshCommand::default(),
+            "/nonexistent/mewgit",
+        );
+        // 2.47 以降は小文字、2.39.5 は大文字で書く（03 の「git の最低版」）。
+        for stderr in [
+            "error: there was a problem with the editor ''/x/mewgit' --sequence-editor'\n",
+            "error: There was a problem with the editor ''/x/mewgit' --sequence-editor'.\n",
+        ] {
+            assert_eq!(
+                runner.kind_of_failure("", stderr),
+                ExecErrorKind::EditorGone,
+                "{stderr}"
+            );
+        }
     }
 
     #[test]

@@ -62,7 +62,7 @@ crates/
                 test_support.rs（`#[cfg(test)]`）
     graph/      lane.rs
     git_read/   repo.rs   log.rs  diff.rs  status.rs  thread.rs  progress.rs
-    git_exec/   argv.rs   runner.rs patch.rs  rebase.rs
+    git_exec/   argv.rs   runner.rs patch.rs  rebase.rs  version.rs
     github/     client.rs wire.rs  account.rs
     auth/       gh.rs     resolve.rs probe.rs  ssh.rs  url.rs
     config/     mod.rs

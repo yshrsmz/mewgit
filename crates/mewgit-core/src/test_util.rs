@@ -69,6 +69,12 @@ pub const FAKE_NOW: Timestamp = Timestamp {
     offset_minutes: 540,
 };
 
+/// テストの git の版。`AppState::new` に渡す。reword / squash を断らない版
+/// （03 の「git の最低版」）。古い版を踏むテストは `GitVersion::parse` で自分で作る。
+pub fn fake_git() -> GitVersion {
+    GitVersion::parse("git version 2.56.0").expect("床を満たす版")
+}
+
 use crate::app::{update, AppState, Cmd, Msg, TargetState};
 use crate::auth::ssh::SshCommand;
 use crate::auth::{
@@ -76,7 +82,7 @@ use crate::auth::{
     GhLogin, LoginState, ProbeAttempt, RepoTarget,
 };
 use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Runner};
-use crate::git_exec::{RebaseAction, RebaseEntry};
+use crate::git_exec::{GitVersion, RebaseAction, RebaseEntry};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
     LineOrigin, Oid, PathStamp, Remote, RepoReader, Signature, StashEntry, Timestamp, Upstream,

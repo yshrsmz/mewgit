@@ -18,8 +18,8 @@ use crate::git_read::{
     Oid, RefIndex, Remote, StashEntry, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
 };
 use crate::test_util::{
-    fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid,
-    fake_remote, fake_snapshot, fake_stash, fake_upstream, reply, FAKE_NOW,
+    fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_git, fake_hunk,
+    fake_oid, fake_remote, fake_snapshot, fake_stash, fake_upstream, reply, FAKE_NOW,
 };
 
 /// グラフに使える行数。`ui` が決めた値が [`Msg::Layout`] で来る想定。
@@ -31,7 +31,7 @@ use crate::test_util::{
 pub(super) const ROWS: usize = 20;
 
 pub(super) fn state() -> AppState {
-    let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
+    let mut state = AppState::new(RepoInfo::default(), Config::default(), fake_git(), FAKE_NOW);
     state.graph.viewport = ROWS;
     state
 }

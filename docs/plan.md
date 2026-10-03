@@ -434,7 +434,7 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       `commit --amend`（メッセージは commit editor が差し込む）→ `rebase --continue` の 3 本を叩く**（02 の「断られた reword」、03）。
       着手前は「`rebase-merge/amend` が立つ」で見分けるつもりだったが、**`amend` は pick が
       fast-forward した形にしか無い**（`--onto` で載せ直す形では無い。実測 2026-10-03）ので、
-      HEAD のメッセージと author が止まったコミットと同じか（= HEAD がその pick か）で見分ける。hook がまた断ったときは案内を
+      HEAD がその reword の手順で作られた pick か（HEAD = X か、reflog の先頭が `rebase (reword)` でメッセージと author が X と同じか）で見分ける。hook がまた断ったときは案内を
       足さず、hook の stderr が通知の `detail` に出る（rebase は止まったまま）。この形の
       skip はコミットを捨てないので、メニューの説明も変えた（01）
 

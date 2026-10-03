@@ -75,11 +75,13 @@ impl RepoReader {
     /// （02 の「断られた reword」）。当たらなければ `None`。
     ///
     /// 条件は 3 つ —— `done` の最終行が `reword <X>`、`mewgit-reword-<X>` が在る、HEAD が
-    /// X の pick である（メッセージと author が X と同じ。sequencer は author を日時まで
-    /// 保つ）。最後の条件が、reword の pick がコンフリクトして止まった形（HEAD は 1 本前の
-    /// コミット）、そこから `reset --hard` した形、端末で amend し直した形を外す。
-    /// **`rebase-merge/amend` は見ない** —— pick が fast-forward した形にしか立たない
-    /// （03 の実測）。読めないものは「当たらない」と読む（`in_progress` と同じ）。
+    /// **この reword の手順で作られた X の pick** である。最後の条件は、pick が早送りした
+    /// 形なら HEAD = X、載せ直した形なら HEAD の reflog の先頭が `rebase (reword): …` で
+    /// HEAD を指し、しかもメッセージと author が X と同じこと。これが、reword の pick が
+    /// コンフリクトして止まった形（HEAD は 1 本前のコミット）、そこから `reset --hard` した形、
+    /// 端末で amend し直した形を外す。**`rebase-merge/amend` は見ない** —— pick が
+    /// fast-forward した形にしか立たない（03 の実測）。読めないものは「当たらない」と読む
+    /// （`in_progress` と同じ）。
     pub fn refused_reword(&self) -> Option<RefusedReword> {
         let rebase_dir = self.git_dir().join("rebase-merge");
         let oid = last_done_reword(&rebase_dir).ok()??;
@@ -88,11 +90,29 @@ impl RepoReader {
         }
         let stopped = self.repo.find_commit(Oid::from_str(&oid).ok()?).ok()?;
         let head = self.repo.head().ok()?.peel_to_commit().ok()?;
-        // **メッセージだけでは足りない** —— 1 本前のコミットが同じメッセージだと、
-        // コンフリクトから `reset --hard` した形を取り違える（`MERGE_MSG` も消える）。
-        // `Signature` の `==` は名前・メール・日時をバイトで比べる。
-        let picked =
-            head.message_bytes() == stopped.message_bytes() && head.author() == stopped.author();
+        let picked = head.id() == stopped.id() || {
+            // **メッセージと author だけでは足りない** —— X を cherry-pick したコミット
+            // （author を日時ごと保つ）が onto に在ると、X の pick がコンフリクトして
+            // 止まった HEAD がどちらも揃える（`/code-review` が踏んだ。02）。HEAD を
+            // 動かしたのがこの reword の手順であることを reflog で見る。
+            let moved_by_reword = self
+                .repo
+                .reflog("HEAD")
+                .ok()
+                .and_then(|log| {
+                    let last = log.get(0)?;
+                    Some(
+                        last.id_new() == head.id()
+                            && last
+                                .message_bytes()
+                                .is_some_and(|m| m.starts_with(b"rebase (reword): ")),
+                    )
+                })
+                .unwrap_or(false);
+            moved_by_reword
+                && head.message_bytes() == stopped.message_bytes()
+                && head.author() == stopped.author()
+        };
         picked.then(|| RefusedReword { head: head.id() })
     }
 }

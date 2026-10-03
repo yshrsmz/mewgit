@@ -300,19 +300,47 @@ async fn a_head_moved_after_the_refusal_is_not_amended() {
 #[tokio::test]
 async fn a_reword_stopped_by_a_conflict_is_not_a_refused_one() {
     // `done` の最終行は reword で、mewgit のメッセージも置いてある。HEAD は 1 本前の
-    // コミットなので外れる（02 の「断られた reword」）。**1 本前のコミットを X と同じ
-    // メッセージにしてある** —— メッセージだけで比べると、`reset --hard` で `MERGE_MSG` が
-    // 消えた形を取り違える。外すのは author（日時まで）の比較。
+    // コミットなので外れる（02 の「断られた reword」）。**1 本前のコミットを X の双子に
+    // してある** —— main に X を cherry-pick して中身だけ変えたもので、メッセージも author
+    // （日時まで）も X と同じ。メッセージと author だけで比べると取り違え、continue が
+    // onto 側のコミットを amend して X が消える（`/code-review` が踏んだ）。
     let repo = TestRepo::init();
     repo.commit_file("f", "base");
     repo.git(&["switch", "-q", "-c", "side"]);
-    let first = repo.commit_bytes("f", b"side\n", "same");
-    let second = repo.commit_file("g", "side2");
+    let fix = repo.commit_bytes("f", b"side\n", "fix");
     repo.git(&["switch", "-q", "main"]);
-    repo.commit_bytes("f", b"main\n", "same");
-    let runner = runner(&repo);
-    start_rewording_both(&repo, &runner, first, second).await;
-    assert_eq!(repo.git(&["log", "-1", "--format=%s"]), "same");
+    repo.git(&["cherry-pick", &fix.to_string()]);
+    repo.write_worktree_file("f", b"main\n");
+    repo.git(&["commit", "-q", "-a", "--amend", "--no-edit"]);
+    let signature = |rev: &str| repo.git(&["log", "-1", "--format=%B%an%ae%ad", rev]);
+    assert_eq!(
+        signature("main"),
+        signature(&fix.to_string()),
+        "双子になっていない"
+    );
+
+    repo.git(&["switch", "-q", "side"]);
+    let err = runner(&repo)
+        .run(&GitOp::RebaseInteractive {
+            onto: "main".into(),
+            head: fix,
+            plan: RebasePlan {
+                entries: vec![entry(reword("fix new"), fix, "fix")],
+            },
+        })
+        .await
+        .expect_err("双子とコンフリクトするはずです");
+    assert!(
+        matches!(
+            err,
+            ExecError::Failed {
+                kind: ExecErrorKind::Conflict,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(signature("HEAD"), signature(&fix.to_string()));
     assert_eq!(refused_reword(&repo), None);
 
     repo.write_worktree_file("f", b"resolved\n");
@@ -322,4 +350,42 @@ async fn a_reword_stopped_by_a_conflict_is_not_a_refused_one() {
     repo.git(&["reset", "-q", "--hard"]);
     assert!(!repo.path().join(".git/MERGE_MSG").exists());
     assert_eq!(refused_reword(&repo), None, "reset --hard のあと");
+}
+
+#[tokio::test]
+async fn a_conflict_right_after_another_reword_is_not_a_refused_one() {
+    // 1 本前の reword が通ると、HEAD の reflog の先頭は `rebase (reword): …` のまま X の
+    // pick がコンフリクトして止まる。reflog だけで見ると取り違えるので、HEAD が X と
+    // 同じメッセージ・author であることも見る（02 の「断られた reword」）。
+    let (repo, first, second) = TestRepo::diverged();
+    repo.git(&["switch", "-q", "side"]);
+    let err = runner(&repo)
+        .run(&GitOp::RebaseInteractive {
+            onto: "main".into(),
+            head: second,
+            plan: RebasePlan {
+                entries: vec![
+                    entry(reword("side2 new"), second, "side2"),
+                    entry(reword("side new"), first, "side"),
+                ],
+            },
+        })
+        .await
+        .expect_err("side の 1 つ目が main とコンフリクトするはずです");
+    assert!(
+        matches!(
+            err,
+            ExecError::Failed {
+                kind: ExecErrorKind::Conflict,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        repo.git(&["reflog", "-1", "--format=%gs"])
+            .starts_with("rebase (reword): "),
+        "前提の形になっていない"
+    );
+    assert_eq!(refused_reword(&repo), None);
 }

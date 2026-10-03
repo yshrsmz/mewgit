@@ -776,12 +776,13 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
 | `pick A` / `reword B`、A がコンフリクト → 解消して continue（同上） | B に新しいメッセージが入る。**continue を `GIT_EDITOR=true` で打つと元のメッセージのまま** |
 | `reword A` / `pick B`、A がコンフリクト → `rebase --skip` | A が落ち、`onto` の先端はそのまま |
 | `pick A` / `exec git commit --amend -m NEW` / `pick B`、A がコンフリクト → `rebase --skip` | **exec が `onto` の先端を amend する**（先端の件名が NEW に化ける）。採らなかった形 |
-| commit-msg hook が reword を断る（git 2.56.0、2026-10-03。hook は `hook.<名前>.command` で置いた。以下 6 行も同じ） | exit 1、stderr に hook の出力と `You can amend the commit now`。pick は**元のメッセージでコミット済み**で、`done` の最終行は `reword <X>`、`git status` は `editing a commit`、gitdir に `MERGE_MSG` は無い。**`rebase-merge/amend` は pick が fast-forward した形（HEAD = X、reflog `rebase: fast-forward`）にしか無い** —— `--onto` で載せ直す形では HEAD が X と別の新しいコミット（reflog `rebase (reword): <件名>`）で、`amend` が無い |
+| commit-msg hook が reword を断る（git 2.56.0、2026-10-03。hook は `hook.<名前>.command` で置いた。以下 7 行も同じ） | exit 1、stderr に hook の出力と `You can amend the commit now`。pick は**元のメッセージでコミット済み**で、`done` の最終行は `reword <X>`、`git status` は `editing a commit`、gitdir に `MERGE_MSG` は無い。**`rebase-merge/amend` は pick が fast-forward した形（HEAD = X、reflog `rebase: fast-forward`）にしか無い** —— `--onto` で載せ直す形では HEAD が X と別の新しいコミット（reflog `rebase (reword): <件名>`）で、`amend` が無い |
 | ↑ の hook を外して continue | exit 0 だが**エディタは起こされず**、元のメッセージのまま進む |
 | ↑ で `commit --amend -F <mewgit-reword-<X>>` → continue（`core.commentString` の有無の両方） | 新しいメッセージが入り、`#123 kept` の行も残る。エディタは開始の 1 回しか起こされない |
 | ↑ の amend を hook がまた断る | exit 1、stderr は hook の出力だけ。`rebase-merge/` はそのまま |
 | ↑ で `rebase --skip`（載せ直す形） | exit 0、**X は元のメッセージのまま残る**（捨てられない） |
 | reword の pick がコンフリクト → 解消して continue（hook は新しいメッセージを断るもの） | exit 0、**hook は走らず**新しいメッセージが入る。止まっているあいだは `MERGE_MSG` が在り（`git add` したあとも）、`amend` は無い。止まったまま `git reset --hard` すると `MERGE_MSG` が消え、HEAD は 1 本前のコミットのまま |
+| X を cherry-pick して中身だけ amend したコミット（メッセージも author の日時も X と同じ）を onto に積み、X を reword して載せ直す | X の pick がコンフリクトして止まり、HEAD はその双子。HEAD の reflog の先頭は `rebase (start): checkout <onto>`。解消して `git add` → `reset --hard` しても先頭は変わらない（`/code-review` が再現した形。2026-10-03） |
 | `printf 'verify HEAD <oid>\n' \| git update-ref --stdin` | 一致なら exit 0 で、reflog も増えない。外れると exit 128、stderr `fatal: cannot lock ref 'HEAD': is at <いまの Oid> but expected <oid>` |
 | `rebase-merge/` に自分のファイルを置いたまま完了 / `rebase --abort` | どちらも `rebase-merge/` ごと消える |
 | `pick A` / `squash B`（`GIT_EDITOR=true`） | メッセージは `A の件名` + 空行 + `B の件名` |

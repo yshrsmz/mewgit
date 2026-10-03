@@ -694,7 +694,7 @@ amend してから進めるので（03）、`status()` がここで見分けて 
 |---|---|
 | `rebase-merge/done` の最終行が `reword <X>` | reword 以外の停止 |
 | `rebase-merge/mewgit-reword-<X>` が在る | 端末で始めた rebase の reword |
-| HEAD のメッセージと author（名前・メール・日時）が X と同じ（= HEAD が X の pick） | reword の pick がコンフリクトして止まった形（HEAD は 1 本前のコミット）、そこから `git reset --hard` した形、端末で別のメッセージに amend した形 |
+| HEAD がこの reword の手順で作られた X の pick —— HEAD = X（pick が早送りした形）か、HEAD の reflog の先頭が `rebase (reword): …` で HEAD を指し、しかも HEAD のメッセージと author（名前・メール・日時）が X と同じ（載せ直した形） | reword の pick がコンフリクトして止まった形（HEAD は 1 本前のコミット）、そこから `git reset --hard` した形、端末で別のメッセージに amend した形 |
 
 - **新しいメッセージは持たない。** amend は commit editor が `mewgit-reword-<X>` を差し込む
   経路（rebase の開始と同じ）で通す（03）ので、値として運ぶ必要が無い。最初の版は
@@ -703,13 +703,23 @@ amend してから進めるので（03）、`status()` がここで見分けて 
   status のたびにファイルを読んでいた（`/simplify` の altitude が拾った）
 - **`rebase-merge/amend` は使わない。** pick が fast-forward した形（HEAD = X）にしか
   立たず、`--onto` で載せ直す形では無い（03 の表。git 2.56.0、2026-10-03）
-- **HEAD を比べるのは X の Oid ではなくメッセージと author。** 載せ直す形の HEAD は X とは
-  別の新しいコミットなので、Oid では fast-forward の形しか拾えない。sequencer は pick で
-  author を日時まで保つので、hook が断った形では必ず揃う
-- **メッセージだけでは足りない。** 1 本前のコミットが X と同じメッセージだと、コンフリクト
-  から `reset --hard` した形を取り違える —— `reset` は `MERGE_MSG` も消すので、最初に
-  考えた「`MERGE_MSG` が無い」の条件でも外れない。author の日時まで揃うのは X の pick
-  だけなので、`MERGE_MSG` の条件は足さなかった（効く形が組めず、テストで踏めない）
+- **Oid だけでは載せ直した形を拾えない。** その HEAD は X とは別の新しいコミットなので、
+  HEAD = X で当たるのは fast-forward の形だけ
+- **メッセージと author だけでも足りない。** sequencer は pick で author を日時まで保つが、
+  **`cherry-pick` も保つ** —— X を cherry-pick して中身を変えたコミット（双子）が onto に
+  在ると、X の pick がそれとコンフリクトして止まった HEAD はメッセージも author も X と
+  揃う。取り違えると continue が onto 側のコミットを amend し、X が消える（`/code-review`
+  が一時リポジトリで再現。最初の版は「author の日時まで揃うのは X の pick だけ」と書いて
+  いた）。`MERGE_MSG` の有無で外すと、解消してから `reset --hard` した形が残る
+- **そこで HEAD を動かしたのがこの reword の手順であることを reflog で見る。** hook が
+  断った形では、載せ直す pick が `rebase (reword): <件名>` を HEAD の reflog に書く。
+  コンフリクトで止まった形の先頭は 1 本前の手順のもの（双子の形なら `rebase (start)`）で、
+  `reset --hard` は HEAD が動かないので何も足さない（03 の表）。**reflog だけでも足りない**
+  —— 1 本前の reword が通ってから X の pick がコンフリクトすると、先頭は
+  `rebase (reword): …` のまま。メッセージと author の比較はこちらを外す（統合テストで
+  両方を踏む）
+- **reflog が読めなければ「当たらない」**（素の continue になる）。外れる側は git 自身の
+  continue と同じ振る舞いで、新しいメッセージが入らないだけ
 - **`head` を持つのは、continue の時点で同じ停止かを git に照合させるため**（03 の
   `update-ref --stdin` の `verify`）。snapshot のあとで端末から continue して別の停止に
   移っていると、`mewgit-reword-<X>` は残ったまま HEAD だけが変わる

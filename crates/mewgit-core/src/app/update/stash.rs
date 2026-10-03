@@ -170,7 +170,7 @@ impl AppState {
             | GitOp::Pull { .. }
             | GitOp::Push { .. }
             | GitOp::RebaseInteractive { .. }
-            | GitOp::RebaseContinue
+            | GitOp::RebaseContinue { .. }
             | GitOp::RebaseSkip
             | GitOp::RebaseAbort
             | GitOp::CherryPick(_)

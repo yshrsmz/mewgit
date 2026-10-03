@@ -1653,6 +1653,7 @@ mod tests {
                 total: 7,
             }),
             branch: Some("topic".to_string()),
+            refused_reword: None,
         });
         state.push_notice(NoticeLevel::Error, "push に失敗しました".to_string(), None);
         let bar = notice_bar(&state, TermSize::default());
@@ -1697,13 +1698,18 @@ mod tests {
         });
         for (op, label) in [
             (
-                InProgressOp::Rebase { step, branch: None },
+                InProgressOp::Rebase {
+                    step,
+                    branch: None,
+                    refused_reword: None,
+                },
                 "REBASE 1/2".to_string(),
             ),
             (
                 InProgressOp::Rebase {
                     step: None,
                     branch: None,
+                    refused_reword: None,
                 },
                 "REBASE".to_string(),
             ),

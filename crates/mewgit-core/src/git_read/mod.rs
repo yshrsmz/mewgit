@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 pub use git2::Oid;
 pub use log::LogSession;
-pub use progress::in_progress;
+pub use progress::{in_progress, last_done_reword, reword_message_path};
 pub use repo::RepoReader;
 pub use thread::ReaderHandle;
 pub use watch::{FileStamp, PathStamp, RepoFingerprint};
@@ -723,6 +723,10 @@ pub enum InProgressOp {
         /// **このブランチは git が改名も削除も断る**（03 の表）ので、`app` が入力を
         /// 開く前に断るのに使う（01 の「進行中操作があるときの書き込み」）。
         branch: Option<String>,
+        /// mewgit が渡した reword を commit-msg hook などが断り、元のメッセージで
+        /// コミットしたまま止まった形（02 の「断られた reword」）。`m` の continue が
+        /// 新しいメッセージを amend してから進める（03）。
+        refused_reword: Option<RefusedReword>,
     },
     /// `git am`（`rebase-apply/applying`）。**mewgit からは始めない**が、外で始めた am の
     /// 途中で開いたときに「無い」と読まないために持つ。
@@ -741,6 +745,17 @@ pub enum InProgressOp {
     Merge {
         oid: Oid,
     },
+}
+
+/// 断られた reword（[`InProgressOp::Rebase::refused_reword`]）。見分け方は 02 の
+/// 「断られた reword」、continue で何を叩くかは 03 の「Interactive rebase の実装」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedReword {
+    /// 見分けた時点の HEAD。continue の前に git に照合させる（`update-ref --stdin` の
+    /// `verify`）—— snapshot が古いと別のコミットを amend するため。
+    pub head: Oid,
+    /// mewgit が `rebase-merge/` に置いた新しいメッセージ。
+    pub message: String,
 }
 
 /// rebase / am の進み具合。**git の数えた todo の行数**で、コミット数ではない

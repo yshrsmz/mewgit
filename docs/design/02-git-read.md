@@ -585,7 +585,11 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
 pub fn in_progress(git_dir: &Path) -> Option<InProgressOp>;   // git2 を使わない自由関数
 
 pub enum InProgressOp {
-    Rebase { step: Option<Step>, branch: Option<String> },   // Step { current, total }
+    Rebase {
+        step: Option<Step>,                       // Step { current, total }
+        branch: Option<String>,
+        refused_reword: Option<RefusedReword>,    // 下の「断られた reword」
+    },
     Am { step: Option<Step> },
     CherryPick { oid: Option<Oid> },
     Revert { oid: Option<Oid> },
@@ -660,7 +664,9 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
   外で `git rebase -i` の todo を編集している最中など）。**進行中であることは落とさない**
 - **止まった理由（`edit` / コンフリクト / exec の失敗）は持たない。** `done` の最終行は
   理由を表さない —— `edit` にした pick がコンフリクトすると、最終行は `edit` なのに
-  止まったのはコンフリクトのため（実測）。07 のモックにあった `(edit)` はこの理由で出さない
+  止まったのはコンフリクトのため（実測）。07 のモックにあった `(edit)` はこの理由で出さない。
+  **例外は `refused_reword` の 1 つ**（下の「断られた reword」）—— あれはバッジに出す理由
+  ではなく、continue で git に何を渡すかを変える値で、`done` の最終行だけでは決めない
 - **`Rebase` は元のブランチ（`branch`）を持つ。** rebase 中の対象ブランチは git が
   改名（`is being rebased`）も削除（`used by worktree`）も断る（03 の表）ので、`app` が
   入力を開く前に断るのに要る。`head-name` は merge / apply の両 backend で
@@ -670,6 +676,47 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 - `MERGE_HEAD` は octopus では複数行になる。`Merge` が持つのは先頭行だけ
 - ファイルが読めない・中身が壊れているときは、その行を「無い」と読んで次の判定へ進む。
   **戻り値が `Option` で `Result` でないのはこのため**（上の「API」）
+
+### 断られた reword
+
+```rust
+pub struct RefusedReword {
+    pub head: Oid,         // 見分けた時点の HEAD
+    pub message: String,   // mewgit が rebase-merge/ に置いた新しいメッセージ
+}
+```
+
+mewgit が渡した reword を commit-msg hook が断ると、git は**元のメッセージでコミットした
+まま止まり**、continue はエディタを起こし直さずに元のメッセージのまま進む（03 の
+「Interactive rebase の実装」の表）。`m` の continue がこの形のときだけ新しいメッセージを
+amend してから進めるので（03）、`status()` がここで見分けて `Rebase` に載せる。
+
+| 条件 | 外すもの |
+|---|---|
+| `rebase-merge/done` の最終行が `reword <X>` | reword 以外の停止 |
+| `rebase-merge/mewgit-reword-<X>` が在る（読めたものが `message`） | 端末で始めた rebase の reword |
+| HEAD のメッセージと author（名前・メール・日時）が X と同じ（= HEAD が X の pick） | reword の pick がコンフリクトして止まった形（HEAD は 1 本前のコミット）、そこから `git reset --hard` した形、端末で別のメッセージに amend した形 |
+
+- **`rebase-merge/amend` は使わない。** pick が fast-forward した形（HEAD = X）にしか
+  立たず、`--onto` で載せ直す形では無い（03 の表。git 2.56.0、2026-10-03）
+- **HEAD を比べるのは X の Oid ではなくメッセージと author。** 載せ直す形の HEAD は X とは
+  別の新しいコミットなので、Oid では fast-forward の形しか拾えない。sequencer は pick で
+  author を日時まで保つので、hook が断った形では必ず揃う
+- **メッセージだけでは足りない。** 1 本前のコミットが X と同じメッセージだと、コンフリクト
+  から `reset --hard` した形を取り違える —— `reset` は `MERGE_MSG` も消すので、最初に
+  考えた「`MERGE_MSG` が無い」の条件でも外れない。author の日時まで揃うのは X の pick
+  だけなので、`MERGE_MSG` の条件は足さなかった（効く形が組めず、テストで踏めない）
+- **`head` を持つのは、continue の時点で同じ停止かを git に照合させるため**（03 の
+  `update-ref --stdin` の `verify`）。snapshot のあとで端末から continue して別の停止に
+  移っていると、`mewgit-reword-<X>` は残ったまま HEAD だけが変わる
+- **`in_progress` は自由関数のまま**で、これだけは `RepoReader::refused_reword` が
+  見る（コミットのメッセージを読むので git2 が要る）。`status()` が `Rebase` に
+  書き足す。`rebase-apply/` の `Rebase` では常に `None`（mewgit の reword は merge
+  backend でしか走らない）
+- **`done` の最終行を読むのと、メッセージのファイル名を組むのはここの関数**
+  （`last_done_reword` / `reword_message_path`）で、`git_exec::rebase` の commit editor
+  （同じ 2 つを見て reword のメッセージを差し込む）もこれを呼ぶ。2 本にすると、片方だけ
+  名前の規則が変わったときに見分けが黙って外れる
 
 ## ハンクの指紋
 

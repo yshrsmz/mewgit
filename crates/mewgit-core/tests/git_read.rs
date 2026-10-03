@@ -1025,6 +1025,7 @@ fn a_stopped_rebase_reports_its_step() {
         Some(InProgressOp::Rebase {
             step: step(1, 2),
             branch: Some("side".to_string()),
+            refused_reword: None,
         })
     );
 }
@@ -1040,6 +1041,7 @@ fn a_stopped_apply_backend_rebase_is_a_rebase() {
         Some(InProgressOp::Rebase {
             step: step(1, 2),
             branch: Some("side".to_string()),
+            refused_reword: None,
         })
     );
 }

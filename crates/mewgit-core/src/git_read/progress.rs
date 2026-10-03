@@ -5,9 +5,10 @@
 //! （libgit2 1.9。02 の実測）。
 
 use std::fs;
-use std::path::Path;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
-use super::{InProgressOp, Oid, Step};
+use super::{InProgressOp, Oid, RefusedReword, RepoReader, Step};
 
 /// `git_dir` に残っている進行中操作。無ければ `None`。
 ///
@@ -25,6 +26,9 @@ pub fn in_progress(git_dir: &Path) -> Option<InProgressOp> {
         return Some(InProgressOp::Rebase {
             step: step(&merge, "msgnum", "end"),
             branch: head_name(&merge),
+            // 見るにはコミットのメッセージが要る（git2）ので、`status()` が
+            // [`RepoReader::refused_reword`] で書き足す。
+            refused_reword: None,
         });
     }
     let apply = git_dir.join("rebase-apply");
@@ -38,6 +42,8 @@ pub fn in_progress(git_dir: &Path) -> Option<InProgressOp> {
             InProgressOp::Rebase {
                 step,
                 branch: head_name(&apply),
+                // mewgit の reword は merge backend でしか走らない。
+                refused_reword: None,
             }
         });
     }
@@ -58,6 +64,74 @@ pub fn in_progress(git_dir: &Path) -> Option<InProgressOp> {
         "revert" => Some(InProgressOp::Revert { oid: None }),
         _ => None,
     }
+}
+
+impl RepoReader {
+    /// mewgit が渡した reword が断られ、元のメッセージでコミットしたまま止まった形
+    /// （02 の「断られた reword」）。当たらなければ `None`。
+    ///
+    /// 条件は 3 つ —— `done` の最終行が `reword <X>`、`mewgit-reword-<X>` が在る、HEAD が
+    /// X の pick である（メッセージと author が X と同じ。sequencer は author を日時まで
+    /// 保つ）。最後の条件が、reword の pick がコンフリクトして止まった形（HEAD は 1 本前の
+    /// コミット）、そこから `reset --hard` した形、端末で amend し直した形を外す。
+    /// **`rebase-merge/amend` は見ない** —— pick が fast-forward した形にしか立たない
+    /// （03 の実測）。読めないものは「当たらない」と読む（[`in_progress`] と同じ）。
+    pub fn refused_reword(&self) -> Option<RefusedReword> {
+        let rebase_dir = self.git_dir().join("rebase-merge");
+        let oid = last_done_reword(&rebase_dir).ok()??;
+        let message = fs::read_to_string(reword_message_path(&rebase_dir, &oid)).ok()?;
+        let stopped = self.repo.find_commit(Oid::from_str(&oid).ok()?).ok()?;
+        let head = self.repo.head().ok()?.peel_to_commit().ok()?;
+        // **メッセージだけでは足りない** —— 1 本前のコミットが同じメッセージだと、
+        // コンフリクトから `reset --hard` した形を取り違える（`MERGE_MSG` も消える）。
+        let author = |commit: &git2::Commit| {
+            let author = commit.author();
+            (
+                author.name_bytes().to_vec(),
+                author.email_bytes().to_vec(),
+                author.when(),
+            )
+        };
+        let picked =
+            head.message_bytes() == stopped.message_bytes() && author(&head) == author(&stopped);
+        picked.then(|| RefusedReword {
+            head: head.id(),
+            message,
+        })
+    }
+}
+
+/// `oid` を reword したメッセージを置くファイル。`rebase_dir` は `rebase-merge/`。完了でも
+/// abort でも git がディレクトリごと消すので、後始末は要らない。
+///
+/// **Oid で引く。** commit editor が知っているのは `done` の最終行（`reword <Oid> …`）
+/// だけなので、何番目の行かでは引けない。書くのは `git_exec::rebase` の sequence editor、
+/// 読むのは commit editor と [`RepoReader::refused_reword`] で、名前の規則はここ 1 本
+/// （02 の「断られた reword」）。
+pub fn reword_message_path(rebase_dir: &Path, oid: &str) -> PathBuf {
+    rebase_dir.join(format!("mewgit-reword-{oid}"))
+}
+
+/// `rebase_dir/done` の最終行が `reword <Oid> …` なら、その Oid の字。
+///
+/// `done` が無い（rebase の外、reword より前）ときは `Ok(None)`。ほかの読めない理由は
+/// `Err` で返す —— commit editor は git に非 0 で知らせ、見分けの側は「当たらない」と読む。
+pub fn last_done_reword(rebase_dir: &Path) -> std::io::Result<Option<String>> {
+    let done = match fs::read_to_string(rebase_dir.join("done")) {
+        Ok(done) => done,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let mut last = done
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .split_whitespace();
+    Ok(match (last.next(), last.next()) {
+        (Some("reword"), Some(oid)) => Some(oid.to_string()),
+        _ => None,
+    })
 }
 
 /// `dir/current` と `dir/total` の数。どちらかが読めなければ `None`。
@@ -118,7 +192,8 @@ mod tests {
             in_progress(dir.path()),
             Some(InProgressOp::Rebase {
                 step: None,
-                branch: None
+                branch: None,
+                refused_reword: None,
             })
         );
     }
@@ -134,7 +209,8 @@ mod tests {
             in_progress(dir.path()),
             Some(InProgressOp::Rebase {
                 step: None,
-                branch: None
+                branch: None,
+                refused_reword: None,
             })
         );
     }

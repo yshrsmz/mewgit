@@ -61,6 +61,7 @@ mod tests {
                 total: 2,
             }),
             branch: Some("topic".to_string()),
+            refused_reword: None,
         }
     }
 

@@ -84,7 +84,7 @@ fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<String> {
         | GitOp::StashApply(_)
         | GitOp::StashPop(_) => false,
         // 進行中の操作と種類が合うときだけ。
-        GitOp::RebaseContinue | GitOp::RebaseSkip | GitOp::RebaseAbort => {
+        GitOp::RebaseContinue { .. } | GitOp::RebaseSkip | GitOp::RebaseAbort => {
             matches!(progress, InProgressOp::Rebase { .. })
         }
         GitOp::CherryPickContinue | GitOp::CherryPickSkip | GitOp::CherryPickAbort => {
@@ -163,10 +163,37 @@ pub fn progress_menu(progress: &InProgressOp) -> Option<ProgressMenu> {
     let item = |word, about, op| MenuItem { word, about, op };
     const RESOLVE: &str = "コンフリクトは解消して git add してから continue してください";
     let (body, items) = match progress {
-        InProgressOp::Rebase { .. } => (
+        // **hook が reword を断って止まった形は、同じ語で中身が違う**（01 の「進行中操作の
+        // メニュー（`m`）」）。continue は新しいメッセージを amend してから進め、skip は
+        // コミット済みの pick を捨てない（03 の表）。
+        InProgressOp::Rebase {
+            refused_reword: Some(reword),
+            ..
+        } => (
+            "新しいメッセージが断られ、元のメッセージで止まっています",
+            vec![
+                item(
+                    "continue",
+                    "新しいメッセージを当て直して続ける",
+                    GitOp::RebaseContinue {
+                        reword: Some(reword.clone()),
+                    },
+                ),
+                item("skip", "元のメッセージのまま続ける", GitOp::RebaseSkip),
+                item("abort", "rebase を始める前に戻す", GitOp::RebaseAbort),
+            ],
+        ),
+        InProgressOp::Rebase {
+            refused_reword: None,
+            ..
+        } => (
             RESOLVE,
             vec![
-                item("continue", "解消した内容で続ける", GitOp::RebaseContinue),
+                item(
+                    "continue",
+                    "解消した内容で続ける",
+                    GitOp::RebaseContinue { reword: None },
+                ),
                 item("skip", "止まったコミットを捨てて続ける", GitOp::RebaseSkip),
                 item("abort", "rebase を始める前に戻す", GitOp::RebaseAbort),
             ],
@@ -275,7 +302,7 @@ mod tests {
     use super::*;
     use crate::app::{Cmd, KeyCode, Modal, Msg};
     use crate::git_exec::{LocalBranch, PrSource, PullMode};
-    use crate::git_read::{Step, WorktreeSection};
+    use crate::git_read::{RefusedReword, Step, WorktreeSection};
     use crate::test_util::{fake_oid, fake_pr_checkout, fake_snapshot, reply};
 
     fn rebase() -> InProgressOp {
@@ -285,6 +312,7 @@ mod tests {
                 total: 2,
             }),
             branch: Some("topic".to_string()),
+            refused_reword: None,
         }
     }
 
@@ -378,15 +406,22 @@ mod tests {
 
     #[test]
     fn continue_and_abort_pass_only_for_the_operation_in_progress() {
-        assert_eq!(refusal(&rebase(), &GitOp::RebaseContinue), None);
+        assert_eq!(
+            refusal(&rebase(), &GitOp::RebaseContinue { reword: None }),
+            None
+        );
         assert_eq!(refusal(&rebase(), &GitOp::RebaseSkip), None);
         assert_eq!(refusal(&cherry_pick(), &GitOp::CherryPickAbort), None);
         // cherry-pick の途中の `rebase --continue` は git が別の操作として扱う。
-        assert!(refusal(&cherry_pick(), &GitOp::RebaseContinue).is_some());
+        assert!(refusal(&cherry_pick(), &GitOp::RebaseContinue { reword: None }).is_some());
         assert!(refusal(&rebase(), &GitOp::RevertAbort).is_some());
         assert!(refusal(&rebase(), &GitOp::CherryPickSkip).is_some());
         // am には mewgit から打てる出口が無い。
-        assert!(refusal(&InProgressOp::Am { step: None }, &GitOp::RebaseContinue).is_some());
+        assert!(refusal(
+            &InProgressOp::Am { step: None },
+            &GitOp::RebaseContinue { reword: None }
+        )
+        .is_some());
     }
 
     #[test]
@@ -445,6 +480,7 @@ mod tests {
         let detached = InProgressOp::Rebase {
             step: None,
             branch: None,
+            refused_reword: None,
         };
         let topic = GitOp::BranchDelete {
             name: "topic".to_string(),
@@ -504,11 +540,49 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_reword_changes_what_continue_and_skip_do() {
+        // 同じ語で中身が違う（01 の「進行中操作のメニュー（`m`）」）。continue は amend して
+        // から進め、skip はコミット済みの pick を捨てないので説明を変える（03 の表）。
+        let reword = RefusedReword {
+            head: fake_oid(7),
+            message: "new".into(),
+        };
+        let refused = InProgressOp::Rebase {
+            step: None,
+            branch: None,
+            refused_reword: Some(reword.clone()),
+        };
+        let menu = progress_menu(&refused).expect("メニューがありません");
+        let ops: Vec<GitOp> = menu.items.iter().map(|item| item.op.clone()).collect();
+        assert_eq!(
+            ops,
+            [
+                GitOp::RebaseContinue {
+                    reword: Some(reword)
+                },
+                GitOp::RebaseSkip,
+                GitOp::RebaseAbort,
+            ]
+        );
+        let abouts: Vec<&str> = menu.items.iter().map(|item| item.about).collect();
+        assert!(!abouts[1].contains("捨て"), "{abouts:?}");
+        assert!(!menu.body.contains("コンフリクト"), "{}", menu.body);
+
+        // 素の rebase はいつもの説明のまま。
+        let plain = progress_menu(&rebase()).expect("メニューがありません");
+        assert!(plain.items[1].about.contains("捨て"));
+    }
+
+    #[test]
     fn m_lists_the_ways_out_of_what_is_in_progress() {
         let cases = [
             (
                 rebase(),
-                vec![GitOp::RebaseContinue, GitOp::RebaseSkip, GitOp::RebaseAbort],
+                vec![
+                    GitOp::RebaseContinue { reword: None },
+                    GitOp::RebaseSkip,
+                    GitOp::RebaseAbort,
+                ],
             ),
             (
                 cherry_pick(),
@@ -577,7 +651,7 @@ mod tests {
         );
         let _ = press(&mut state, 'm');
 
-        assert_eq!(menu_ops(&state)[0], GitOp::RebaseContinue);
+        assert_eq!(menu_ops(&state)[0], GitOp::RebaseContinue { reword: None });
     }
 
     #[test]
@@ -600,7 +674,7 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_eq!(cmd, Cmd::Exec(GitOp::RebaseContinue));
+        assert_eq!(cmd, Cmd::Exec(GitOp::RebaseContinue { reword: None }));
         assert_eq!(state.modal, None);
     }
 
@@ -657,7 +731,7 @@ mod tests {
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
-        assert_ne!(cmd, Cmd::Exec(GitOp::RebaseContinue));
+        assert_ne!(cmd, Cmd::Exec(GitOp::RebaseContinue { reword: None }));
         assert!(matches!(state.modal, Some(Modal::ProgressMenu { .. })));
     }
 

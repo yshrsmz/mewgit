@@ -412,6 +412,29 @@ impl TestRepo {
         (GitOp::Stage(vec!["slow.txt".into()]), pid_file)
     }
 
+    /// `needle` を含むコミットメッセージを断る commit-msg hook を置く。断るときは
+    /// `hook says no` を stderr に書いて非 0 で返る。[`allow_every_message`](Self::allow_every_message)
+    /// で外す。
+    ///
+    /// **`hook.<名前>.command` ではなく `.git/hooks/` に置く** —— 設定で置く hook は新しい
+    /// git の仕組みで（手元の 2.56.0 では効いた。いつ入ったかは確かめていない）、知らない
+    /// git は黙って無視するので、CI の git 次第で hook の無いテストになる。
+    pub fn refuse_messages_containing(&self, needle: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let hook = self.path().join(".git/hooks/commit-msg");
+        let script = format!(
+            "#!/bin/sh\ngrep -q '{needle}' \"$1\" && {{ echo 'hook says no' >&2; exit 1; }}\nexit 0\n"
+        );
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, script).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// [`refuse_messages_containing`](Self::refuse_messages_containing) で置いた hook を外す。
+    pub fn allow_every_message(&self) {
+        fs::remove_file(self.path().join(".git/hooks/commit-msg")).unwrap();
+    }
+
     /// `.git/index.lock` の場所。中断したあとに残っていないことを見る。
     pub fn index_lock(&self) -> PathBuf {
         self.path().join(".git/index.lock")

@@ -61,7 +61,8 @@ pub struct Runner {
 impl Runner {
     /// `ssh` は git が実際に使う ssh（`auth::ssh::effective_ssh_from_env`）。
     /// **`git_bin` と同じくコンストラクタの引数にしている**のは、決めたのに渡し忘れる
-    /// 経路を作らないため。`mewgit_bin` も同じ（`std::env::current_exe()`）。
+    /// 経路を作らないため。`mewgit_bin` も同じ（Linux では `/proc/<pid>/exe`、ほかは
+    /// `std::env::current_exe()`。`mewgit-tui` の `runtime::editor_bin`）。
     pub fn new(
         repo_root: impl Into<PathBuf>,
         git_bin: impl Into<PathBuf>,

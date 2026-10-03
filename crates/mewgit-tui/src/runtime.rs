@@ -172,14 +172,22 @@ where
 /// **Linux では `/proc/<pid>/exe` を渡す。** 走っているプロセスの実体を指すので、起動中に
 /// 実体が消えても、同じパスに新しい版が置かれても、**起動した版そのもの**が起きる。
 /// `self` ではなく pid で書くのは、エディタを起こすのが git の子の `sh` だから。読めなければ
-/// （`/proc` の無い環境）`current_exe()` に戻す。macOS には同じ仕組みが無く、消えた形は
+/// （`/proc` の無い環境）か自分を指していなければ `current_exe()` に戻す。macOS には同じ仕組みが無く、消えた形は
 /// `ExecErrorKind::EditorGone` の案内が拾う。
 fn editor_bin() -> std::io::Result<std::path::PathBuf> {
     #[cfg(target_os = "linux")]
     {
+        // **自分を指すときだけ採る。** PID 名前空間で `/proc` をマウントし直さずに起こされると、
+        // 名前空間の中の pid でホストの `/proc` を引き、別のプロセスの実体を指しうる
+        // （`/code-review` が拾った）。`self` は名前空間に関わらず自分を指す。
         let proc_exe = std::path::PathBuf::from(format!("/proc/{}/exe", std::process::id()));
-        if std::fs::read_link(&proc_exe).is_ok() {
-            return Ok(proc_exe);
+        if let (Ok(by_pid), Ok(by_self)) = (
+            std::fs::read_link(&proc_exe),
+            std::fs::read_link("/proc/self/exe"),
+        ) {
+            if by_pid == by_self {
+                return Ok(proc_exe);
+            }
         }
     }
     std::env::current_exe()

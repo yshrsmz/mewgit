@@ -843,7 +843,9 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
     rename で置くと**新しい版のエディタが古い TUI の plan を読む**（版ずれ）。
     `/proc/<pid>/exe` は走っているプロセスの実体を指すので、**どちらでも起動した版そのものが
     起きる**（下の表）。`self` ではなく pid で書くのは、エディタを起こすのが git の子の `sh`
-    だから。起動時に読めなければ（`/proc` の無い環境）`current_exe()` に戻す（`mewgit-tui` の
+    だから。起動時に読めなければ（`/proc` の無い環境）か、`/proc/self/exe` と別の実体を指せば（PID
+    名前空間で `/proc` をマウントし直していない形。`/code-review` が拾った）`current_exe()` に
+    戻す（`mewgit-tui` の
     `runtime::editor_bin`）。**stat もこのリンクを辿るので、実体が消えても `EditorGone` には
     ならない** —— エディタは起きるので、それで正しい
   - **macOS には同じ仕組みが無い。** `current_exe()` は `_NSGetExecutablePath` で、**起動に

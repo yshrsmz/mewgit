@@ -421,12 +421,10 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
     let typed = (title.text(), body.text(), base.text(), *draft);
     let chosen = heads.selected().cloned();
 
-    // **叩く先は開いたときではなく確定のときに取る**（[`github_ready`]）。いまは
-    // 開いてから材料が消える経路が無い —— `account` を `Resolving` に落とすのは
-    // `Modal::AccountPicker` を開いているあいだの `Enter` / `u` / `r` だけで、その間
-    // この箱は開いていない（01 の「写しの寿命」）。それでも取り直すのは、開いたときの
-    // 答えを箱に写すと、あとで落とす経路が増えたときに材料の無い `Cmd::CreatePr` が
-    // ランタイムへ出て、**打った本文が消える**から。
+    // **叩く先は確定のときに取る**（[`github_ready`]）。いまは開いてから材料が消える
+    // 経路が無い（`account` を落とすのは `Modal::AccountPicker` の中だけ。
+    // `update::account::leave_account`）が、開いたときの答えを箱に写すと、落とす
+    // 経路が増えたときに材料の無い `Cmd::CreatePr` が出て**打った本文が消える**。
     let Some(target) = github_ready(state) else {
         return Cmd::None;
     };
@@ -2745,7 +2743,7 @@ mod tests {
 
     #[test]
     fn resolving_again_drops_the_list_until_the_account_comes_back() {
-        // `A` → 選び直しの最中も同じ（`resolve_again`）。**戻ってきたら引き直す**ので、
+        // `A` → 選び直しの最中も同じ（`leave_account`。書き込みを出した時点と `r`）。**戻ってきたら引き直す**ので、
         // 落としたままにはならない。
         let mut state = state_on_branch("feat/x");
         deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);

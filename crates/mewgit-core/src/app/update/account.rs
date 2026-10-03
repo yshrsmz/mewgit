@@ -103,8 +103,6 @@ pub(super) fn account_picked(state: &mut AppState) -> Cmd {
     let Some(login) = view.candidates().get(cursor).map(|c| c.login.clone()) else {
         return Cmd::None;
     };
-    // **[`submit_exec`] を通す。** ほかの `git` が走っているあいだは閉じない
-    // —— 閉じてから `Cmd` が落とされると、選んだのに何も起きない。
     submit_account_write(state, GitOp::SetAccount { login })
 }
 
@@ -131,7 +129,15 @@ pub(super) fn account_unset(state: &mut AppState) -> Cmd {
 /// `A` で**書き込み前の写しを持ったモーダルが開き直せる**（[`submit_exec`] は
 /// `git` を走らせる前に閉じる）。`Resolving` の `A` は通知に落ちるので、写しが
 /// 書き込みより長生きする窓がここで消える。**断られたら動かさない** —— 落としてから
-/// `Cmd` が消えると、頼み直す相手がいないまま `Resolving` に残る。
+/// `Cmd` が消えると、頼み直す相手がいないまま `Resolving` に残る。ほかの `git` が
+/// 走っているあいだは [`submit_exec`] がモーダルを閉じずに断る（閉じてから `Cmd` が
+/// 落とされると、選んだのに何も起きない）。
+///
+/// **`mewgit.user` を書く `Cmd::Exec` はここからしか出さない。** `r` が書き込み中でも
+/// 断らないことと、`JobKind::ResolveAccount` が世代を持たないことは、この 1 本に
+/// 頼っている。入口を足すなら、呼び出し元ではなく op（`Reload::Account`）から導いて
+/// 受理の共通経路で落とす形に移す（`/simplify` の altitude が出した案。いまは
+/// 入口が 2 つとも同じファイルなので見送った）。
 fn submit_account_write(state: &mut AppState, op: GitOp) -> Cmd {
     let cmd = submit_exec(state, op);
     if matches!(cmd, Cmd::Exec(_)) {
@@ -144,9 +150,7 @@ fn submit_account_write(state: &mut AppState, op: GitOp) -> Cmd {
 ///
 /// 効く条件は [`AccountView::is_reresolvable`] の 1 本で、キーの案内
 /// （`[r] 解決し直す`）も同じものを読む（#53）。**ほかの `git` が走っていても
-/// 断らない** —— 追い越すと困る書き込み（`mewgit.user` を書く 2 つ）が走っている
-/// あいだは `account` が `Resolving` で、このモーダルが開かない
-/// （[`submit_account_write`]。01 の「外で直したあとの再解決」）。
+/// 断らない** —— `mewgit.user` の書き込みとは重ならない（[`submit_account_write`]）。
 pub(super) fn account_reresolve(state: &mut AppState) -> Cmd {
     let Some((view, _)) = account_picker(state) else {
         return Cmd::None;

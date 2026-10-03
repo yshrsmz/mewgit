@@ -449,8 +449,15 @@ fn lossy(bytes: Vec<u8>) -> String {
         .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
 }
 
-/// 端末の制御シーケンス（CSI `ESC [ … <終端>`、OSC `ESC ] … BEL` か `ESC \`、その他の
-/// `ESC <1 文字>`）を落とす。含まないとき（ふつうの場合）は複製しない。
+/// 端末の制御シーケンスを落とす。含まないとき（ふつうの場合）は複製しない。
+///
+/// - CSI（`ESC [`）: 引数と中間の文字のあと、`@`〜`~` の 1 文字で終わる
+/// - OSC（`ESC ]`）: BEL か `ESC \` で終わる。**改行でも打ち切る**（改行は残す）——
+///   終わらない OSC が出力の残りを、その後ろの git の `error:` 行ごと食べないように
+/// - それ以外（`ESC ( B` など）: 中間の文字（空白〜`/`）のあとの 1 文字で終わる。
+///   `tput sgr0` は `ESC ( B ESC [ m` を出す
+///
+/// **`ESC` の直後の制御文字（改行など）は食べない。** 行がつながる。
 fn strip_escapes(text: String) -> String {
     if !text.contains('\x1b') {
         return text;
@@ -462,24 +469,28 @@ fn strip_escapes(text: String) -> String {
             out.push(c);
             continue;
         }
-        match chars.next() {
-            // 引数と中間の文字のあと、`@`〜`~` の 1 文字で終わる。
+        match chars.peek() {
             Some('[') => {
-                for c in chars.by_ref() {
+                chars.next();
+                while let Some(c) = chars.next_if(|c| !c.is_control()) {
                     if ('@'..='~').contains(&c) {
                         break;
                     }
                 }
             }
-            // BEL か `ESC \` で終わる。
             Some(']') => {
-                while let Some(c) = chars.next() {
+                chars.next();
+                while let Some(c) = chars.next_if(|&c| c != '\n') {
                     if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
                         break;
                     }
                 }
             }
-            _ => {}
+            Some(_) => {
+                while chars.next_if(|c| (' '..='/').contains(c)).is_some() {}
+                chars.next_if(|c| !c.is_control());
+            }
+            None => {}
         }
     }
     out
@@ -715,6 +726,21 @@ mod tests {
             "╭──╮\npre-commit link\n"
         );
         assert_eq!(strip_escapes("plain\n".to_string()), "plain\n");
+        // `tput sgr0`（`ESC ( B ESC [ m`）。中間の文字のあとの 1 文字まで落とす。
+        assert_eq!(
+            strip_escapes("\x1b[31mfail\x1b(B\x1b[m\n".to_string()),
+            "fail\n"
+        );
+        // 終わらない OSC は改行で打ち切る。後ろの git の行を食べない。
+        assert_eq!(
+            strip_escapes("x\x1b]0;title\nerror: rest\n".to_string()),
+            "x\nerror: rest\n"
+        );
+        // `ESC` の直後の改行も、終わらない CSI の後ろの改行も残す（行がつながらない）。
+        assert_eq!(
+            strip_escapes("a\x1b\nb\x1b[3\nc\n".to_string()),
+            "a\nb\nc\n"
+        );
     }
 
     #[test]

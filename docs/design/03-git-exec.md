@@ -709,7 +709,9 @@ pre-push の hook では、`error:` / `fatal:` の行が締めの行だけにな
 組むとき）。hook は端末でなくても色を付け（lefthook は truecolor の枠）、描く側の ratatui
 （`ratatui-core` 0.1.2 の `Buffer::set_stringn`）は ESC の 1 文字しか落とさないので、
 要約にも `L` の履歴にも `[38;2;56;56;56m` が残る。gitui 0.28.1 は剥がさずに描いて画面が
-崩れた（実測）。成功の出力は剥がない（読む側が無い）。
+崩れた（実測）。成功の出力は剥がない（読む側が無い）。CSI / OSC のほかに `ESC ( B`
+（`tput sgr0` が出す）も剥ぐ。**終わらない OSC は改行で打ち切る** —— 出力の残りを、
+その後ろの git の `error:` 行ごと食べない（`/code-review` が踏んだ）。
 
 **`Other` に落ちる失敗の stderr**（git 2.56.0、`LC_ALL=C`、2026-10-03 に一時リポジトリで
 実測）。

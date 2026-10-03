@@ -2743,7 +2743,7 @@ mod tests {
 
     #[test]
     fn resolving_again_drops_the_list_until_the_account_comes_back() {
-        // `A` → 選び直しの最中も同じ（`leave_account`。書き込みを出した時点と `r`）。**戻ってきたら引き直す**ので、
+        // `r` → 解決し直しの最中も同じ（`resolve_again`）。**戻ってきたら引き直す**ので、
         // 落としたままにはならない。
         let mut state = state_on_branch("feat/x");
         deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
@@ -2757,6 +2757,28 @@ mod tests {
             issued(&again, &Cmd::FetchPrList),
             "引き直していない: {again:?}"
         );
+    }
+
+    #[test]
+    fn saving_another_account_drops_the_list_as_soon_as_the_write_is_issued() {
+        // **書き込みを出した時点で `Resolving` に落ちる**（`submit_account_write`）ので、
+        // 一覧もそこで落とす —— 終わるまで残すと、ヘッダから `[gh: …]` が消えたまま
+        // `*` / `R` の印だけが消えた前のアカウントの一覧が出る。
+        let mut state = state_on_branch("feat/x");
+        deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
+        let _ = press(&mut state, 'A');
+        let _ = update(
+            &mut state,
+            Msg::AccountsListed(Ok(fake_logins(&["hanako"]))),
+        );
+
+        let cmd = press_code(&mut state, KeyCode::Enter);
+
+        assert!(
+            matches!(cmd, Cmd::Exec(GitOp::SetAccount { .. })),
+            "{cmd:?}"
+        );
+        assert!(state.prs.list.is_empty(), "書き込みの最中に残っている");
     }
 
     #[test]

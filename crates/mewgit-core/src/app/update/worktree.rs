@@ -14,7 +14,7 @@ use crate::git_read::{
 use super::diff::load_diff;
 use super::diff::open_diff;
 use super::stash::{open_stash_file, open_stash_push};
-use super::{confirm, exec_busy, focus, multiline_input_key, submit_exec, InputKey};
+use super::{confirm, focus, multiline_input_key, submit_exec, InputKey};
 use crate::app::{
     AppState, Cmd, DiffOrigin, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
 };
@@ -129,6 +129,23 @@ fn amend(state: &mut AppState) -> Cmd {
         return Cmd::None;
     }
     Cmd::LoadHeadMessage
+}
+
+/// 書き込み（`Cmd::Exec`）が走っているか。走っていれば理由を通知に出す。
+///
+/// **「押したのに何も起きない」に見せない**（`AppState::notify_dropped`）。
+/// **キューには積まないと決めた**（01 の「ランタイム」）。案内を `issue` と同じ
+/// 関数から出すのは、次に押すキーが状態で変わるため（中断を頼んだあとの `Ctrl-C` は
+/// 終了）。2 本に割ると、こちらだけが古い案内を出す。
+///
+/// **利用者は `amend` だけ**なので `mod.rs` から移した（アカウントの `r` が
+/// 断らなくなった。01 の「外で直したあとの再解決」）。
+fn exec_busy(state: &mut AppState) -> bool {
+    if !state.jobs.is_running(JobKind::Exec) {
+        return false;
+    }
+    state.notify_dropped(JobKind::Exec);
+    true
 }
 
 /// amend の初期値が届いた。

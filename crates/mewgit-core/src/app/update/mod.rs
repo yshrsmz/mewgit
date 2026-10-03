@@ -4,7 +4,7 @@
 //! [`Cmd`] として返す。
 //!
 //! **ここにあるのは入口と、2 つ以上のモジュールが使う道具だけ** —— `focus` /
-//! `confirm` / `submit_exec` / `edit_key` / `exec_busy`（**利用者は
+//! `confirm` / `submit_exec` / `edit_key`（**利用者は
 //! `grep -rn "<名前>(" crates/mewgit-core/src/app/update/` で数える。ここに数を
 //! 書かない** —— `.claude/rules/rust-coding.md` の「離れた場所に『いま N ある』を書かない」）。
 //! ペインごとのキー処理はそれぞれのモジュールにある（01 の「この文書とコードの対応」）。
@@ -494,25 +494,6 @@ fn multiline_edit_key(buf: &mut TextBuffer, key: Key) {
             let _ = edit_key(buf, key);
         }
     }
-}
-
-/// その種別のジョブが走っているか。走っていれば理由を通知に出す。
-///
-/// **「押したのに何も起きない」に見せない**（`AppState::notify_dropped`）。
-/// **キューには積まないと決めた**（01 の「ランタイム」）。案内を `issue` と同じ
-/// 関数から出すのは、次に押すキーが状態で変わるため（中断を頼んだあとの `Ctrl-C` は
-/// 終了）。2 本に割ると、こちらだけが古い案内を出す。
-fn busy(state: &mut AppState, kind: JobKind) -> bool {
-    if !state.jobs.is_running(kind) {
-        return false;
-    }
-    state.notify_dropped(kind);
-    true
-}
-
-/// 書き込み（`Cmd::Exec`）が走っているか。
-fn exec_busy(state: &mut AppState) -> bool {
-    busy(state, JobKind::Exec)
 }
 
 /// 編集中のモーダルを確定して `Cmd::Exec` を返す。

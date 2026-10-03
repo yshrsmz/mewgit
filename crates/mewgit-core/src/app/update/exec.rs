@@ -1091,8 +1091,12 @@ mod tests {
         );
         assert_eq!(notice.level, NoticeLevel::Error);
 
-        // **stderr があれば stdout は使わない。** `hint:` しか無ければ `Display` に落ちる。
-        finish_exec(&mut state, commit, Err(failed("hint: 何か\n")));
+        // 選べる行がどこにも無ければ `Display`（argv）に落ちる。
+        let mut empty = failed("hint: 何か\n");
+        if let ExecError::Failed { stdout, .. } = &mut empty {
+            stdout.clear();
+        }
+        finish_exec(&mut state, commit, Err(empty));
         let notice = state.notices.back().expect("通知がありません");
         assert_eq!(notice.message, "git の実行に失敗しました: git commit -m m");
     }

@@ -349,8 +349,8 @@ pub enum ExecError {
 - **`Failed` は stdout も運ぶ。** git は失敗の理由を stdout にだけ書くことがある
   （何も stage していない `commit`、未解消の `rebase --continue`、複数の revert が空で
   止まった形。下の「エラー分類」）。分類（`classify`）だけが読んで捨てていたので、
-  通知には argv しか出なかった。`app` は stdout を `detail` に載せ、stderr が空なら
-  最後の行を要約にする（stderr があればそこから理由の行を選ぶ。下の「理由の行」）
+  通知には argv しか出なかった。`app` は stdout を `detail` に載せ、stderr と stdout から
+  選んだ理由の行を要約にする（下の「理由の行」）
 
 - argv と stdin の組み立ては純粋関数 `to_commands()`（「argv への変換」）
 - `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
@@ -669,22 +669,30 @@ git の出力の形の問いで、写されたコミットの行（`echoes_a_com
 1. **stderr が空なら stdout の最後の行。** git は理由を stdout にだけ書くことがある
    （何も stage していない `commit`、未解消のままの `rebase --continue`、複数の revert が
    空で止まった形）。stdout は status の一覧 → 結びの順に並ぶ
-2. **push の ` ! [` の行**（`! [remote rejected] main -> main (pre-receive hook declined)`）。
-   push の `error:` は後ろの `failed to push some refs` で、どの ref がなぜかを言わない
-3. **最初の `error:` / `fatal:` の行**から接頭辞を剥いだもの。最後ではないのは、
-   cherry-pick / revert が理由のあとに `fatal: cherry-pick failed` を、fetch が
-   `fatal: Could not read from remote repository.` を足すから（下の表の太字）
-4. **`hint:` 以外の最後の行。** `error:` も `fatal:` も書かない失敗 —— hook が断った
-   commit と `Aborting commit due to empty commit message.`。`hint:` は `advice.*` で
-   消える行で、理由ではない
+2. **push の ` ! [` の行**（`! [remote rejected] main -> main (pre-receive hook declined)`）
+3. **締めではない最初の `error:` / `fatal:` の行**から接頭辞を剥いだもの
+4. **接頭辞も `hint:` も無い最初の行** —— ssh の層の失敗（`ssh: Could not resolve
+   hostname …`、`ssh: connect to host … Connection refused`）、stderr に書く hook、
+   `Aborting commit due to empty commit message.`。**最後ではない** —— ssh の失敗は
+   最後が案内文（`and the repository exists.`）
+5. **stdout の最後の行。** stdout に書く pre-push hook の文言（stderr は締めの行だけ）
+6. **締めの行**そのもの。どこにも理由が無ければ、argv よりは何が起きたかを言う
 
-どれも選べなければ `None`（`app` は `Display` に落とす）。**stderr があれば stdout は
-見ない** —— 下の表の形では、stderr があれば理由はそちらにあり、stdout は進捗や status の
-一覧だった（`pull` の `Updating …`、stash の apply の status）。例外の `needs merge`
+**締めの行**（`runner::WRAP_UPS`）は、git が理由のあとに足す「何が」を言わない行 ——
+`failed to push some refs`（push。どの ref がなぜかは ` ! [` の行か hook の文言）、
+`Could not read from remote repository.`（fetch / pull / push。何がは前の行）、
+`cherry-pick failed` / `revert failed`（どのファイルかは前の `error:`）。**「最初の
+`error:`」だけでは避けられない** —— ssh の行と hook の文言は接頭辞を持たないので、
+締めの行のほうが最初の `error:` / `fatal:` になる（`/code-review` が踏んだ）。
+
+どれも選べなければ `None`（`app` は `Display` に落とす）。**stderr に理由の行があれば
+stdout は見ない**（3 か 4 で決まる）—— 下の表の形では、stdout は進捗や status の一覧
+だった（`pull` の `Updating …`、stash の apply の status）。例外の `needs merge`
 （stderr は `could not write index` だけ）は `Unmerged` の案内が先に拾う。
 **2 と 3 は trim する前の行頭で見る** —— `would be overwritten` の下のファイル一覧は
 タブで字下げされるので、trim してから見ると `error: ` や `! [` で始まるパスを
-取り違える。
+取り違える。**4 の「最初」は、複数行を書く hook では確かめていない**（hook の文言は
+1 行の形しか測っていない）。
 
 **`Other` に落ちる失敗の stderr**（git 2.56.0、`LC_ALL=C`、2026-10-03 に一時リポジトリで
 実測）。
@@ -710,11 +718,12 @@ git の出力の形の問いで、写されたコミットの行（`echoes_a_com
 | `rebase --abort` / `cherry-pick --abort` / `merge --abort`（何も無い） | 128 | `fatal: no rebase in progress` / `error: no cherry-pick or revert in progress` + `fatal: cherry-pick failed` / `fatal: There is no merge to abort (MERGE_HEAD missing).` |
 | `commit`（空のメッセージ） | 1 | `Aborting commit due to empty commit message.`（接頭辞が無い） |
 | `commit`（pre-commit / commit-msg の hook が断った） | 1 | **hook が書いた文言だけ**（git は何も足さない） |
+| `push`（pre-push の hook が断った） | 1 | `error: failed to push some refs to '<url>'` だけ。**hook の文言は hook が書いた側**（stdout に書けば stdout、stderr に書けば締めの行の前） |
+| `fetch`（ssh の名前解決 / 接続拒否） | 128 | `ssh: Could not resolve hostname …`（`ssh: connect to host … Connection refused`）/ **`fatal: Could not read from remote repository.`** / 空行 / 案内 2 行 |
 
-- **太字が「最後の行では駄目」の根拠。** cherry-pick / revert と fetch は理由のあとに
-  情報の薄い `fatal:` を足し、push の `error:` はどの ref がなぜ断られたかを言わない
-- **hook の文言は 1 行の形しか測っていない。** 複数行を書く hook で最後の行と最初の行の
-  どちらが理由に近いかは確かめていない（commit-msg の hook は `hook.<名前>.command` の
+- **太字が締めの行。** cherry-pick / revert と fetch は理由のあとに情報の薄い `fatal:` を
+  足し、push の `error:` はどの ref がなぜ断られたかを言わない
+- **hook の文言は 1 行の形しか測っていない**（上の 4。commit-msg の hook は `hook.<名前>.command` の
   後ろにメッセージファイルのパスが足されるので、`exit 1` だけのコマンドは
   `exit: too many arguments` を 2 行目に書いた。hook の書き方の都合で、git の文言ではない）
 - 非 FF の push（`(fetch first)` / `(non-fast-forward)`）と `pull --ff-only` の

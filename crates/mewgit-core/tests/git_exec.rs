@@ -542,6 +542,36 @@ async fn the_reason_of_a_failure_is_the_line_git_wrote_it_on() {
 }
 
 #[tokio::test]
+async fn a_push_refused_by_a_pre_push_hook_is_summed_up_by_what_the_hook_said() {
+    // stderr は締めの `error: failed to push some refs` だけで、hook の文言は hook が
+    // 書いた側に出る（03 の「理由の行」。git 2.56.0）。stdout に書く hook と stderr に
+    // 書く hook の両方で、締めの行ではなく hook の文言を選ぶ。
+    let remote = BareRepo::init();
+    let repo = clone_of(&remote);
+    repo.commit("first");
+    let runner = repo.runner();
+    for (script, expected) in [
+        (
+            "#!/bin/sh\necho 'lint failed (stdout)'\nexit 1\n",
+            "lint failed (stdout)",
+        ),
+        (
+            "#!/bin/sh\necho 'lint failed (stderr)' >&2\nexit 1\n",
+            "lint failed (stderr)",
+        ),
+    ] {
+        repo.write_hook("pre-push", script);
+        let err = runner
+            .run(&push(true))
+            .await
+            .expect_err("hook が断るはずです");
+        let (_, stderr) = failure_output(&err);
+        assert!(stderr.contains("failed to push some refs"), "{stderr}");
+        assert_eq!(err.reason(), Some(expected));
+    }
+}
+
+#[tokio::test]
 async fn stash_push_and_pop() {
     let repo = TestRepo::init();
     repo.commit_bytes("file.txt", b"original\n", "first");

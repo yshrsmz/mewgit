@@ -2469,7 +2469,7 @@ pub struct PushRejection {
 `git` の失敗は `exec_finished` が通知に積む。**`message` は上から順に決める** ——
 (1) 案内文（`ExecErrorKind` と `GitOp` から決める純粋関数 `exec_advice`）、
 (2) 案内が無ければ git の出力から選んだ理由の行（`ExecError::reason`。選び方は 03 の
-「エラー分類」の「理由の行」）—— stderr があればそこから選んだ行、stderr が空なら
+「エラー分類」の「理由の行」）—— stderr に理由の行があればそれ、無ければ
 **stdout の最後の行**、
 (3) どちらも無ければ `ExecError` の `Display`（`git の実行に失敗しました: git <argv>`）。
 `detail` は argv、stderr、stdout の順に**全文**を並べる（空のものは飛ばす）。**stderr が
@@ -2593,7 +2593,8 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
   **最後の行**なのは、git の stdout が status の一覧 → 結びの順に並ぶから。
   英語のまま出す —— 訳すと文言の数だけ表が要り、表に無い文言では結局 argv に戻る。
   71 セルを超えれば `…` で切れるが、`detail` に全文がある。
-  **stderr があるときは stdout を使わない**（理由は 03 の「理由の行」）。
+  **stderr に理由の行があれば stdout は使わない**（stdout は進捗や status の一覧。03 の
+  「理由の行」）。
 - **stderr にだけ理由がある失敗は、stderr から理由の行を 1 本選ぶ**（2026-10-03）。
   いちばんよく出る赤い通知（`switch` の `would be overwritten`、`branch -d` の
   `not fully merged`、`add` の `pathspec did not match`）が argv だけになり、理由は `L`

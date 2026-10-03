@@ -2083,12 +2083,11 @@ conventional_remote = リモートが 1 本ならそれ → origin → 決まら
   コストのほうが先に立つ。**外部の変更の検知（下の節）で消し方の材料（`config` の差）は
   できたが、そのタスク（2026-10-01）では扱っていない** —— 煩わしさが出る形の狭さは変わらない
 - **`P` の行き止まりは塞がない。** push の行き先を人に選ばせるのは不変ルール 5 の
-  手前の判断で、fetch と同じ扱いにはできない（fetch は読むだけ）。**残っている穴として
-  M6 の「`-u` の提案を git の push の規則に揃える」へ送る。** ただし
-  **`branch.<name>.pushRemote` を読めば決まる、とは言えない** —— この形の典型
-  （追跡設定がまったく無いブランチ）では `pushRemote` も未設定なので、読んでも決まらない。
-  `remote.pushDefault` が書いてあるリポジトリだけが救われる。**M6 でも残る穴として
-  数えておく**（`/simplify` が「確かめていない断定」として拾った）
+  手前の判断で、fetch と同じ扱いにはできない（fetch は読むだけ）。**M6 で `-u` の提案を
+  git の push の規則に揃えた**（下の「push の行き先」）が、**救われるのは
+  `branch.<name>.pushRemote` か `remote.pushDefault` を書いたリポジトリだけ** —— この形の
+  典型（追跡設定がまったく無いブランチ）では `pushRemote` も未設定なので、読んでも
+  決まらない。**残る穴として数えておく**（`/simplify` が「確かめていない断定」として拾った）
 - **理由をモーダルの本文に出す。** 「なぜ選ばされているか」が無いと、毎回出るのか
   設定が壊れているのかが判らない
 - **指示を足すのは、その操作を持たない側。** `NoRemote` が運ぶのは**診断だけ**で
@@ -2106,8 +2105,8 @@ conventional_remote = リモートが 1 本ならそれ → origin → 決まら
 **`-u` の提案（`propose_upstream`）は `default_remote` に畳まない。** git 自身が
 fetch と push で違う規則を持っているため。理由は 04 の「既定リモート」の末尾にある。
 ただし「1 本ならそれ、複数なら `origin`」の枝は共有する（`conventional_remote`）——
-同じ規則を 2 本書かないため、違うのは `branch.<name>.pushRemote` を将来足す先だけに
-する。
+同じ規則を 2 本書かないため。push の規則の前の 2 段（`Branch.push_remote`）は
+`push_plan` が先に見る（下の「push の行き先」の 2）。
 
 ### `RepoInfo.target` を埋める
 
@@ -2366,12 +2365,36 @@ degraded なら `[r]`、`.git/config` 由来なら `[u]`、どちらも無けれ
 同じバッチで出す）。
 
 1. HEAD のブランチが無い（detached / unborn）→ 通知して何も出さない
-2. `Branch.upstream_config`（`branch.<name>.remote` / `.merge`）があるなら、それが
+2. **`Branch.push_remote`（`pushRemote` / `pushDefault`）があり、追跡先と違うなら、
+   そこへ同名で送る**（下の表の A〜E、H、K）。`set_upstream: false` で**確認モーダルも
+   通さない** —— 素の `git push` と同じで、行き先はユーザーが書いたもの。追跡先と
+   同じなら 3 へ進む（`dst` と force は追跡設定から組む。`gh pr checkout` と PR の
+   取り出しは `remote` と `pushRemote` に同じ値を書くのでこちら）
+   - **追跡設定の経路へ進まない理由。** 進むと `checkout -b e origin/main` +
+     `pushRemote=fork` のブランチで **`git push origin e:main`** を確認なしに撃つ ——
+     git なら fork の `e` へ行く push が upstream の `main` へ流れ込む
+   - **`-u` を付けない。** 付けると `branch.<b>.remote` が push 先に書き換わり、
+     以後の `p` がそこから取り込む —— upstream から pull して fork へ push する運用の
+     意図を書き換える（2026-10-03 にユーザーと決めた。`/simplify` の altitude が拾った）
+   - **force には上げない。** lease（`Branch.upstream` の位置）と `ahead == 0` の判定は
+     追跡先に対する値で、行き先が違うと比べる相手がいない。**非 FF で断られても記憶を
+     立てない**（`update::remote::pushed_elsewhere`。op の形だけでは追跡設定の push と
+     見分けられないので、押したブランチの追跡先と行き先を比べる）。立てて `P` で断ると
+     `Push` が出なくなり、push 先のブランチが外で消えても断り続ける（`/code-review` が
+     拾った）。**案内も分ける** —— 追跡設定の push 向けの「`p` で取り込むか `P` を
+     もう一度」は、`p` が追跡先から取り込み `P` が force に上がらないので、どちらも
+     出口にならない。mewgit に出口が無いことを言い、外の git へ送る
+   - **値は名前でも URL でもそのまま渡す。`.` と一覧に無い名前は断る**（表の J / L / M。
+     `origin` へ落とさない —— ユーザーが書いた行き先とは別のリモートへ送る）。値は
+     **文字列のまま追跡先と比べる**ので、名前と URL で同じリポジトリを指していれば 2 の
+     経路になる（同名で送るので、`merge` と名前が違うときだけ 3 と行き先がずれる）
+   - **`.` の判定（3）より先に見る。** `remote = .` でも git は `pushRemote` へ送る
+3. `Branch.upstream_config`（`branch.<name>.remote` / `.merge`）があるなら、それが
    行き先。`set_upstream: false` で、**確認モーダルは通さない** —— 行き先はユーザーが
    書いたもので、推測していない
    - **`Branch.upstream`（短縮名）では決めない。** あちらは remote-tracking ref から
      作るので、`fetch --prune` で ref が消えただけのブランチも `None` になる。そこで
-     3 に落ちると、**`P` を押しただけで追跡先が別のリモートへ向け替わる**（02 の
+     4 に落ちると、**`P` を押しただけで追跡先が別のリモートへ向け替わる**（02 の
      「ブランチ一覧」がこの `None` の理由を 4 つ数えている）
    - **ローカル名と `merge` のブランチ名が違うときだけ `dst` を埋める**（argv は
      `<local>:<remote 側>`）。
@@ -2386,18 +2409,34 @@ degraded なら `[r]`、`.git/config` 由来なら `[u]`、どちらも無けれ
      出ないままローカルの `main` を早送りして exit 0 で返る**（git 2.55 で確認）。
      素の `git push` が `push.default = simple` で断る場面で、**こちらが組む refspec が
      その守りを外している** —— 「危ない引数を渡していないか」ではなく「危ない解釈を
-     される余地があるか」（04 と同じ数え方）。**3 の `-u` 提案にも落とさない。**
+     される余地があるか」（04 と同じ数え方）。**4 の `-u` 提案にも落とさない。**
      あちらは `branch.<name>.remote` を上書きするので、ユーザーが書いた `.` が黙って消える
-3. 追跡設定が無いなら `-u` を提案する。リモートは 1 本ならそれ、複数なら `origin`、
-   どちらでもなければ通知して断る。**`Modal::Confirm` に行き先を出してから実行する**
-   （不変ルール 5 が求める破壊的操作ではないが、行き先を推測しているのはこの経路だけ）
+4. 追跡設定も push 先も無いなら `-u` を提案する。リモートは 1 本ならそれ、複数なら
+   `origin`、どちらでもなければ通知して断る（git の push の規則の 3 段目 = fetch の規則。
+   `conventional_remote`）。**`Modal::Confirm` に行き先を出してから実行する**（不変
+   ルール 5 が求める破壊的操作ではないが、行き先を推測しているのはこの経路だけ）
 
-**3 だけは git の規則そのものではない。** git は `branch.<name>.pushRemote` と
-`remote.pushDefault` も見る。読むこと自体は `git_read` にならできる（`upstream_config`
-と同じ形）が、**上流と同じ判断だとは書かない**（`.claude/rules/rust-coding.md`）。食い違っても確認モーダルに
-出た行き先を見て `n` で止められるので、危ないのは「見ずに `y`」だけ。**読む判断は M6 へ送った**（plan.md）。fetch の
-[`default_remote`](#既定リモート) には畳まない —— **git 自身が fetch と push で違う規則を
-持っている**ので、畳むと fetch の既定へ push することになる（04 の「既定リモート」）。
+**git の push の規則は `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の
+規則**で、追跡設定があっても前の 2 つが勝つ。実測（2026-10-03、git 2.56.0、一時
+リポジトリにリモート `origin` / `fork` / `up`。`push.default` は既定の `simple`）:
+
+| | 設定 | `git push` が送った先 | `git push -u` が書く `branch.<b>.remote` |
+|---|---|---|---|
+| A | 追跡設定無し、`pushRemote=fork` | fork の `a` | `fork` |
+| B | 追跡設定無し、`pushDefault=up` | up の `b` | `up` |
+| C | `origin/c` を追跡、`pushRemote=fork` | **fork** の `c` | — |
+| D | `origin/d` を追跡、`pushDefault=up` | **up** の `d` | — |
+| E | `origin/main` を追跡（`checkout -b e origin/main`）、`pushRemote=fork` | **fork の `e`**（`main` ではない） | — |
+| H | 追跡設定無し、`pushRemote=fork` + `pushDefault=up` | fork（`pushRemote` が勝つ） | — |
+| J | 追跡設定無し、`pushRemote=.` | 何もしない（`Everything up-to-date`、exit 0） | — |
+| K | 追跡設定無し、`pushRemote=<URL>` | その URL | **URL**（`gh pr checkout` と同じ形） |
+| L / M | `pushRemote` / `pushDefault` が無い名前 | `fatal: 'nosuch' does not appear to be a git repository` | — |
+
+- **`push_remote` は `git_read` が前の 2 段を畳んで運ぶ**（理由は 02 の「ブランチ一覧」）。
+  3 段目（fetch の規則）は `conventional_remote` が持つ
+- fetch の [`default_remote`](#既定リモート) には畳まない —— **git 自身が fetch と push で
+  違う規則を持っている**ので、畳むと fetch の既定へ push することになる（04 の
+  「既定リモート」）
 
 **拒否の出口は `push_plan` の中に 1 本。** 「一覧がまだ届いていない」を呼び出し側の
 早期 return にすると、同じ「Warn を出して `Cmd::None`」が 2 箇所に割れる。

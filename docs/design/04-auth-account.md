@@ -284,8 +284,8 @@ git 自身も fetch でエラーにする。**URL のときは `conventional_rem
   `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則）。
   `default_remote` に畳むと、**fetch の既定へ push する**という git がしない挙動に
   なる。「規則が 2 本並ぶ」を避けたいのは *target* の規則が 2 本になることで、
-  fetch と push を 1 本にすることではない。push 側を git に揃えるのは M6 へ送る
-  （`Branch.pushRemote` の読み取りが要る。02）
+  fetch と push を 1 本にすることではない。push 側は M6 で git に揃えた
+  （`Branch.push_remote` を読む。実測の表は 01 の「push の行き先」、読み取りは 02）
 
 ## アカウント解決
 

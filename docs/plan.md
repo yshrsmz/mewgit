@@ -547,10 +547,13 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       **`Branch.upstream_config` を消せるかは別の問い** —— あちらの読み手は ahead /
       behind と追跡 ref も同じ行から取っており、出どころを混ぜると到着順の問いが
       戻るかを数えていない
-- [ ] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
+- [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。
-      `git_read` に `Branch.push_remote` の読み取りが要る（04 の「既定リモート」、02）
+      **追跡設定があっても前の 2 つが勝つ**と実測で判ったので、`-u` の提案だけでなく
+      `P` 全体を揃えた —— `Branch.push_remote`（02）があればそこへ同名で送る
+      （`-u` もモーダルも無し。force には上げない）。決めた形と実測の表は 01 の
+      「push の行き先」
 - [ ] 意図的な巻き戻しの force push（`reset --hard HEAD~1` してから `P`）。**いまは
       `ahead == 0` でまとめて断っている** —— `↓n` だけのブランチが `f` のあとに force で
       通ってしまう形と同じ見た目なので、区別するには「巻き戻すつもりだ」を別の入口で
@@ -655,6 +658,13 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       起こさずに `ExecError::Stale`（`Warn`）で断る。unstage は index と HEAD を比べる（外の commit は HEAD だけを動かす。`/code-review` が拾った）。
       **比べる場所は `Runner`、指紋を組むのは `git_read::path_stamp` の 1 本**（2026-10-02 に
       ユーザーと決めた。00 のレイヤーに例外を 1 つ足した）
+- [ ] 「リモート一覧がまだ届いていない」の守りを 1 本にする。**いま 3 通りの書き方が
+      ある** —— `update::default_remote` の `remotes.is_empty()`、`conventional_remote` の
+      `[]` の腕、`push_destination` の `Tracked::Missing` の腕（文言は `REMOTES_LOADING` で
+      共有済み）。塞ぐ形は `RepoInfo::tracked` の入口で未着を判じる（`Tracked` に未着の
+      腕を足す）か、`default_remote` と対になる push の解決関数を 1 本置くこと。**`f` 側の
+      判定も触る**ので #148 では見送った（`/simplify` の altitude が挙げた）。上の「HEAD の
+      追跡設定を 1 本にする」で `default_remote` のガードが消えるなら、そちらと一緒に数える
 - [ ] テストで status を届ける 3 行（`reply(state, Cmd::LoadStatus, Msg::StatusLoaded(..))`）を
       `test_support` のヘルパ 1 本に寄せ、`worktree_state` もそれを呼ぶ形にする。いまは
       diff / graph / exec / worktree / mod / progress の各テストにインラインで散っている

@@ -193,6 +193,12 @@ impl RepoReader {
         // 読むことになる（libgit2 は接頭辞のあるグロブでディレクトリの走査を絞る。
         // `refdb_fs.c` の `iter_load_optimize_prefix`）。`*` は `/` も跨ぐので
         // `feat/x` のような名前も入る（統合テストで確かめている）。
+        // `pushRemote` はブランチごとに読むので、snapshot を 1 回だけ取る（live の
+        // config で引くと 1 回ごとに config ファイルを stat し直す。libgit2 1.9.7 の
+        // `config_file_refresh`）。非 UTF-8 の値は `get_string` が `Err` にする。
+        let config = self.repo.config()?.snapshot()?;
+        let push_default = config.get_string("remote.pushDefault").ok();
+
         let mut branches = Vec::new();
         for reference in self.repo.references_glob("refs/heads/*")? {
             let reference = reference?;
@@ -215,6 +221,10 @@ impl RepoReader {
             // 無ければ引けないが、`branch.<name>.remote` / `.merge` は config に残って
             // いる。push の `-u` はこちらで決める（02 の「ブランチ一覧」）。
             let upstream_config = full.and_then(|full| self.upstream_config(full));
+            let push_remote = config
+                .get_string(&format!("branch.{name}.pushRemote"))
+                .ok()
+                .or_else(|| push_default.clone());
 
             let branch = git2::Branch::wrap(reference);
             // **upstream が引けないブランチも一覧に残す。** 未設定なら
@@ -232,6 +242,7 @@ impl RepoReader {
                 oid,
                 upstream: tracking.upstream,
                 upstream_config,
+                push_remote,
                 ahead: tracking.ahead,
                 behind: tracking.behind,
                 is_head,

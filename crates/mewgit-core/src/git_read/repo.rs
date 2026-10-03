@@ -193,10 +193,11 @@ impl RepoReader {
         // 読むことになる（libgit2 は接頭辞のあるグロブでディレクトリの走査を絞る。
         // `refdb_fs.c` の `iter_load_optimize_prefix`）。`*` は `/` も跨ぐので
         // `feat/x` のような名前も入る（統合テストで確かめている）。
-        // `pushRemote` / `pushDefault` はブランチごとに config を読むので、snapshot を
-        // 1 回だけ取る（`branch_upstream_remote` は呼ぶたびに取り直す。02）。
+        // `pushRemote` はブランチごとに読むので、snapshot を 1 回だけ取る（live の
+        // config で引くと 1 回ごとに config ファイルを stat し直す。libgit2 1.9.7 の
+        // `config_file_refresh`）。非 UTF-8 の値は `get_string` が `Err` にする。
         let config = self.repo.config()?.snapshot()?;
-        let push_default = config_str(&config, "remote.pushDefault");
+        let push_default = config.get_string("remote.pushDefault").ok();
 
         let mut branches = Vec::new();
         for reference in self.repo.references_glob("refs/heads/*")? {
@@ -220,7 +221,9 @@ impl RepoReader {
             // 無ければ引けないが、`branch.<name>.remote` / `.merge` は config に残って
             // いる。push の `-u` はこちらで決める（02 の「ブランチ一覧」）。
             let upstream_config = full.and_then(|full| self.upstream_config(full));
-            let push_remote = config_str(&config, &format!("branch.{name}.pushRemote"))
+            let push_remote = config
+                .get_string(&format!("branch.{name}.pushRemote"))
+                .ok()
                 .or_else(|| push_default.clone());
 
             let branch = git2::Branch::wrap(reference);
@@ -438,9 +441,4 @@ fn ref_label(reference: &Reference<'_>, head_target: Option<&str>) -> Option<Ref
     } else {
         None
     }
-}
-
-/// config の文字列値。無い・非 UTF-8 はどちらも `None`（argv に載せられない）。
-fn config_str(config: &git2::Config, key: &str) -> Option<String> {
-    config.get_string(key).ok()
 }

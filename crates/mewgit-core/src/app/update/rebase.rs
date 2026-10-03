@@ -131,18 +131,19 @@ pub(super) fn rebase_editor_key(state: &mut AppState, key: Key) -> Cmd {
             InputKey::Edited => Cmd::None,
         };
     }
-    if let KeyCode::Char(c @ ('r' | 's')) = key.code() {
-        if !state.git.keeps_comment_lines() {
-            refuse_for_old_git(state, if c == 'r' { "reword" } else { "squash" });
-            return Cmd::None;
-        }
-    }
     let action = match key.code() {
         KeyCode::Char('J') => return swap(state, 1),
         KeyCode::Char('K') => return swap(state, -1),
+        // 古い git は `#` の行を黙って消すので、押した時点で断る（下の `refuse_for_old_git`）。
+        KeyCode::Char('r') if !state.git.keeps_comment_lines() => {
+            return refuse_for_old_git(state, "reword")
+        }
         KeyCode::Char('r') => return start_reword(state),
         KeyCode::Char('p') => RebaseAction::Pick,
         KeyCode::Char('e') => RebaseAction::Edit,
+        KeyCode::Char('s') if !state.git.keeps_comment_lines() => {
+            return refuse_for_old_git(state, RebaseAction::Squash.keyword())
+        }
         KeyCode::Char('s') => RebaseAction::Squash,
         KeyCode::Char('f') => RebaseAction::Fixup,
         KeyCode::Char('d') => RebaseAction::Drop,
@@ -161,12 +162,13 @@ pub(super) fn rebase_editor_key(state: &mut AppState, key: Key) -> Cmd {
 /// 古い git は `core.commentString` を読まず、打ったメッセージや squash でつなぐ
 /// メッセージから行頭 `#` の行を黙って消す（01 の「interactive rebase の開始（`i`）」、
 /// 03 の「git の最低版」）。
-fn refuse_for_old_git(state: &mut AppState, action: &str) {
+fn refuse_for_old_git(state: &mut AppState, action: &str) -> Cmd {
     let message = format!(
         "{action} には git {KEEPS_COMMENT_LINES_SINCE} 以上が要ります（見つかったのは {}）",
         state.git
     );
     state.push_notice(NoticeLevel::Warn, message, None);
+    Cmd::None
 }
 
 /// `r`。カーソルの行の reword のメッセージを打つ入力を開く（01 の「interactive rebase の

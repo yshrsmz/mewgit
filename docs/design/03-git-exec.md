@@ -552,11 +552,15 @@ stderr ではなく mewgit の説明文を入れる。**中断はここに入れ
 ## git の最低版
 
 ```rust
-pub struct GitVersion { major: u32, minor: u32, patch: u32 }   // 比較は外に出さない
+pub struct GitVersion(Version);   // Version は (major, minor, patch)。比較は外に出さない
+pub const KEEPS_COMMENT_LINES_SINCE: GitVersion;   // 2.45.0。案内の文に出す
 
 impl GitVersion {
     /// `git --version` を読み、起動の床（2.38.0）を満たすときだけ返す。
+    /// 起動は `auth::probe::output`（`ssh -G` / `gh` と同じ読み取り専用の一発）。
     pub async fn detect(git_bin: &Path) -> Result<GitVersion, VersionError>;
+    /// 1 行目を読み、床を確かめる（起動と分けて、古い版の腕をテストで踏む）。
+    pub fn parse(first_line: &str) -> Result<GitVersion, VersionError>;
     /// reword / squash のメッセージで行頭のコメント文字を残せるか（2.45.0 以上）。
     pub fn keeps_comment_lines(self) -> bool;
 }

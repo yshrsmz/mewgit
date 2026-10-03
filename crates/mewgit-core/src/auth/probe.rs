@@ -1,4 +1,5 @@
-//! 読み取り専用の一発 probe。`ssh -G` と `gh` の起動に共通の土台。
+//! 読み取り専用の一発 probe。`ssh -G` と `gh`、起動時の `git --version`
+//! （`git_exec::version`）に共通の土台。
 //!
 //! **`ssh.rs` が「`GhCli` が 3 本目になったら数え直す」と送っていた宿題の答え。**
 //! 数え直すと 3 本ではなく「同形が 2 本 + 別物が 1 本」だった。
@@ -21,7 +22,7 @@ use tokio::process::Command;
 
 /// probe が失敗した理由。呼ぶ側が自分のエラー型に包み直す。
 #[derive(Debug)]
-pub(super) enum ProbeError {
+pub(crate) enum ProbeError {
     /// 起動できなかった。**`kind` を捨てない** —— 「PATH に無い」と
     /// 「あるが実行できない」を同じ案内にすると、権限の問題を探せなくなる。
     Spawn {
@@ -34,7 +35,7 @@ pub(super) enum ProbeError {
 
 impl ProbeError {
     /// 「なぜ失敗したか」を 1 行にする。呼ぶ側の案内文に埋める。
-    pub(super) fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self {
             ProbeError::Spawn { message, .. } => message.clone(),
             ProbeError::Failed { code, stderr } => {
@@ -55,7 +56,7 @@ impl ProbeError {
 /// `bin` を起動して stdout を返す。
 ///
 /// `LC_ALL=C` を先に置くので、`env` から上書きできる（テストの隔離のため）。
-pub(super) async fn output<I, S>(
+pub(crate) async fn output<I, S>(
     bin: &Path,
     args: I,
     env: &[(std::ffi::OsString, std::ffi::OsString)],

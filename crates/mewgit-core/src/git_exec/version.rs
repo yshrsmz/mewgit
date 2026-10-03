@@ -1,12 +1,16 @@
 //! git の版。設計は `docs/design/03-git-exec.md` の「git の最低版」。
 //!
 //! **版は能力として問う。** 版の数と比較はこのモジュールの中に閉じ、外に出すのは
-//! 名前の付いた能力（[`GitVersion::keeps_comment_lines`]）と、案内に出す `Display` と
-//! 文字列（[`KEEPS_COMMENT_LINES_SINCE`]）だけ。
+//! 名前の付いた能力（[`GitVersion::keeps_comment_lines`]）と、案内に出す `Display` だけ。
 //! 外から `>= 2.45` と書けないので、版と能力の対応はここの 1 箇所に集まる。
+//!
+//! **`Version` は `auth::gh` の同名の型と同じ形だが共有しない。** 版の読み方が意図して
+//! 違い（下の `parse_version`）、共有できるのは 3 つの数と `Display` だけで、置き場所の
+//! ために `auth` か新しい下段のモジュールへ版の概念を移すほどの量が無い。
 
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::path::Path;
+
+use crate::auth::probe::{self, ProbeError};
 
 /// 起動の床。`rebase --no-update-refs` が入った版（03）。
 const MINIMUM: Version = Version(2, 38, 0);
@@ -14,9 +18,9 @@ const MINIMUM: Version = Version(2, 38, 0);
 /// `core.commentString` を読む最初の版（03 の「Interactive rebase の実装」）。
 const COMMENT_STRING: Version = Version(2, 45, 0);
 
-/// [`GitVersion::keeps_comment_lines`] が真になる版。**案内の文にだけ使う**（比べられない
-/// ので、`app` が版で分岐する手段にはならない）。
-pub const KEEPS_COMMENT_LINES_SINCE: &str = "2.45.0";
+/// [`GitVersion::keeps_comment_lines`] が真になる版。案内の文に出す（`GitVersion` は
+/// 比べられないので、`app` が版で分岐する手段にはならない）。
+pub const KEEPS_COMMENT_LINES_SINCE: GitVersion = GitVersion(COMMENT_STRING);
 
 /// 起動の床を満たした git の版。
 ///
@@ -30,27 +34,19 @@ impl GitVersion {
     ///
     /// `git_bin` には `config.general.git_bin` を渡す（`Runner` が起こすのと同じ git）。
     pub async fn detect(git_bin: &Path) -> Result<Self, VersionError> {
-        let output = tokio::process::Command::new(git_bin)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|source| VersionError::Spawn {
-                bin: git_bin.to_path_buf(),
-                source,
-            })?;
-        if !output.status.success() {
-            return Err(VersionError::Failed {
-                bin: git_bin.to_path_buf(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            });
-        }
-        Self::parse(
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .next()
-                .unwrap_or(""),
-        )
+        let stdout =
+            probe::output(git_bin, ["--version"], &[])
+                .await
+                .map_err(|err| match &err {
+                    ProbeError::Spawn { .. } => VersionError::Unrunnable {
+                        message: err.describe(),
+                    },
+                    ProbeError::Failed { .. } => VersionError::Failed {
+                        bin: git_bin.display().to_string(),
+                        message: err.describe(),
+                    },
+                })?;
+        Self::parse(stdout.lines().next().unwrap_or(""))
     }
 
     /// `git --version` の 1 行目を読み、床を確かめる。
@@ -86,14 +82,11 @@ impl std::fmt::Display for GitVersion {
 /// 起動を断る理由。`main` が端末に入る前に stderr へ出す。
 #[derive(Debug, thiserror::Error)]
 pub enum VersionError {
-    // 理由（`source`）は文に混ぜない。`main` の anyhow が `Caused by:` で続けて出す。
-    #[error("git を起動できません（general.git_bin = {}）", .bin.display())]
-    Spawn {
-        bin: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("{} --version が失敗しました: {stderr}", .bin.display())]
-    Failed { bin: PathBuf, stderr: String },
+    /// 起動できなかった（`general.git_bin` が無い・実行できない）。
+    #[error("{message}（general.git_bin を確かめてください）")]
+    Unrunnable { message: String },
+    #[error("{bin} --version が失敗しました（{message}）")]
+    Failed { bin: String, message: String },
     #[error("mewgit には git {MINIMUM} 以上が要ります（見つかったのは {found}）")]
     TooOld { found: String },
 }
@@ -120,10 +113,11 @@ fn parse_version(line: &str) -> Option<Version> {
     let mut parts = number.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next().map_or(0, |patch| {
-        let digits = patch.len() - patch.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        patch[..digits].parse().unwrap_or(0)
-    });
+    let patch = parts
+        .next()
+        .and_then(|patch| patch.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(0);
     Some(Version(major, minor, patch))
 }
 
@@ -181,11 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn the_version_in_the_advice_is_the_one_compared() {
-        assert_eq!(COMMENT_STRING.to_string(), KEEPS_COMMENT_LINES_SINCE);
-    }
-
-    #[test]
     fn the_refusal_names_the_floor_and_what_was_found() {
         let err = GitVersion::parse("git version 2.34.1").unwrap_err();
         assert_eq!(
@@ -206,6 +195,6 @@ mod tests {
         let err = GitVersion::detect(Path::new("/nonexistent/mewgit-git"))
             .await
             .unwrap_err();
-        assert!(matches!(err, VersionError::Spawn { .. }), "{err:?}");
+        assert!(matches!(err, VersionError::Unrunnable { .. }), "{err:?}");
     }
 }

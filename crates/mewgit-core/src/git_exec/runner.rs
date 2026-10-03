@@ -464,15 +464,14 @@ fn lossy(bytes: Vec<u8>) -> String {
 /// 見るのは `fatal:` の側。**広げても force は arm されない** —— 憶える
 /// `push_rejection` は `GitOp::Push` で門番している（01 の「force push」）。
 ///
-/// **stdout から、git が写したコミットの行を先に除く。** 複数の cherry-pick / revert は
-/// 積んだぶんの `[main <oid>] <件名>` を stdout に並べるので、件名が `fix: nothing to
-/// commit` のようなコミットを積んでから別の理由で止まると、語ごとに取り違える（03 の
-/// 「エラー分類」）。git 自身が `[` で始めて書く stdout の行はこれだけなので、語ごとに
-/// 守らず入口で 1 度だけ除く。
+/// **stdout から、git が写したコミットの行を先に除く**（[`echoes_a_commit`]）。複数の
+/// cherry-pick / revert は積んだぶんの `[main <oid>] <件名>` を stdout に並べるので、件名が
+/// `fix: nothing to commit` のようなコミットを積んでから別の理由で止まると、語ごとに
+/// 取り違える（03 の「エラー分類」）。語ごとに守らず入口で 1 度だけ除く。
 fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
     let stdout = stdout
         .lines()
-        .filter(|line| !line.starts_with('['))
+        .filter(|line| !echoes_a_commit(line))
         .collect::<Vec<_>>()
         .join("\n");
     let stdout = stdout.as_str();
@@ -534,6 +533,19 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
     } else {
         ExecErrorKind::Other
     }
+}
+
+/// git がコミットを積んだときに stdout に写す行か（`[main 1a2b3c4] <件名>`、
+/// `[detached HEAD 1a2b3c4] …`、`[main (root-commit) 1a2b3c4] …`）。
+///
+/// **`[` で始まるだけでは決めない。** パスも `[` で始まりうる —— `[slug].txt` が未解消だと
+/// git は `[slug].txt: needs merge` と書く（git 2.56.0 で実測。`core.quotePath` でも
+/// 引用されない）。括弧の中の最後の語が oid（16 進）の形だけを写しと読む。
+fn echoes_a_commit(line: &str) -> bool {
+    line.strip_prefix('[')
+        .and_then(|rest| rest.split_once("] "))
+        .and_then(|(head, _)| head.rsplit_once(' '))
+        .is_some_and(|(_, oid)| oid.len() >= 4 && oid.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]
@@ -708,6 +720,14 @@ mod tests {
             ),
             ExecErrorKind::Unmerged
         );
+        // **パスが `[` で始まっても**写しの行と読まない（`/code-review` が踏んだ）。
+        assert_eq!(
+            classify(
+                "[slug].txt: needs merge\n",
+                "error: could not write index\n"
+            ),
+            ExecErrorKind::Unmerged
+        );
         // rebase の continue は stderr が空。
         assert_eq!(
             classify(
@@ -737,8 +757,18 @@ mod tests {
             "fix: nothing to commit",
             "x is now empty",
         ] {
-            let stdout = format!("[main 1a2b3c4] {subject}\n 1 file changed, 1 insertion(+)\n");
-            assert_eq!(classify(&stdout, stderr), ExecErrorKind::Other, "{subject}");
+            for head in [
+                "main 1a2b3c4",
+                "detached HEAD 93fb6f8",
+                "main (root-commit) 1a2b3c4",
+            ] {
+                let stdout = format!("[{head}] {subject}\n 1 file changed, 1 insertion(+)\n");
+                assert_eq!(
+                    classify(&stdout, stderr),
+                    ExecErrorKind::Other,
+                    "{head} {subject}"
+                );
+            }
         }
     }
 

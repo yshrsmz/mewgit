@@ -2495,7 +2495,7 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
 | `HeadMoved` + `RebaseInteractive` | 組んだあとに履歴が動いた。`i` から開き直す（**`Warn`**、48 セル） |
 | `HeadMoved` + `RebaseContinue { reword: Some }` | 止まったあとに HEAD が動いた。`m` から開き直す（**`Warn`**、48 セル） |
 | `Unmerged` + rebase / cherry-pick / revert の continue | 未解消のまま。`git add` したら `m` から continue（**`Warn`**、44 セル） |
-| `Unmerged` + `Commit` | 未解消のまま。`git add` してから commit（**`Warn`**、38 セル） |
+| `Unmerged` + `Commit` | 未解消のまま。`git add` してから commit（**`Warn`**、37 セル） |
 | `Unmerged` + `StashPush` | コンフリクトを解消してから stash（**`Warn`**。手前の断りと同じ文） |
 | `Unmerged` + `StashApply` / `StashPop` | コンフリクトを解消してから stash を戻す（**`Warn`**、41 セル） |
 | それ以外 | 無し（stderr が空なら stdout の最後の行、そうでなければ `Display`） |

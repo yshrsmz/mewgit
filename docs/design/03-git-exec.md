@@ -627,8 +627,10 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
   積んだぶんの `[main <oid>] <件名>` を stdout に並べる（上のコンフリクトの印と同じ）ので、
   件名が `fix: needs merge` や `fix: nothing to commit` のコミットを積んだあとで merge に
   当たって止まる形（下の「複数のコミットの cherry-pick / revert」の `-m` 無し）を、語ごとに
-  取り違える。**語ごとに守らず入口で 1 度だけ除く** —— git が `[` で始めて書く stdout の
-  行はこの写しだけ。stderr の写し（`could not apply <oid>... <件名>`）は行の途中なので、
+  取り違える。**語ごとに守らず入口で 1 度だけ除く。** 除くのは括弧の中の最後の語が oid の
+  行だけ —— **パスも `[` で始まりうる**（`[slug].txt` が未解消だと stdout は
+  `[slug].txt: needs merge`。git 2.56.0 で実測、`core.quotePath` でも引用されない。
+  `[` だけで除いた版は `/code-review` が踏んだ）。stderr の写し（`could not apply <oid>... <件名>`）は行の途中なので、
   行頭で見る印（`HeadMoved` / `Conflict`）だけが守られる
 - **`NoChanges` の後ろ。** どちらの出力も相手の語を含まないので順は効かないが、
   語が広いほうを後ろに置く（`NonFastForward` と同じ数え方）

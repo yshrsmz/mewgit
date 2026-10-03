@@ -442,7 +442,7 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
 - [x] **stderr が空の git の失敗に理由を出す。** `ExecError::Failed` は stdout を
       運ばなかったので、stdout にだけ理由を書く失敗（`git commit` で stage したものが無い、
       未解消の `rebase --continue` など）は、通知にも `L` の履歴にも argv しか出なかった。
-      **`Failed` に stdout を足し、`detail` は argv → stdout → stderr の全文、要約行は
+      **`Failed` に stdout を足し、`detail` は argv → stderr → stdout の全文、要約行は
       案内が無く stderr が空なら stdout の最後の行**にした（01 の「失敗の案内文」）。
       **stderr があっても理由が stdout にある形**（外で作った unmerged の `z` / `Z`、
       stash の apply / pop。stderr は `could not write index` だけ）は `classify` に

@@ -349,8 +349,8 @@ pub enum ExecError {
 - **`Failed` は stdout も運ぶ。** git は失敗の理由を stdout にだけ書くことがある
   （何も stage していない `commit`、未解消の `rebase --continue`、複数の revert が空で
   止まった形。下の「エラー分類」）。分類（`classify`）だけが読んで捨てていたので、
-  通知には argv しか出なかった。`app` は stdout を `detail` に載せ、stderr が空なら
-  最後の行を要約にする（01 の「失敗の案内文」）
+  通知には argv しか出なかった。`app` は stdout を `detail` に載せ、stderr と stdout から
+  選んだ理由の行を要約にする（下の「理由の行」）
 
 - argv と stdin の組み立ては純粋関数 `to_commands()`（「argv への変換」）
 - `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
@@ -658,6 +658,97 @@ git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSS
 
 分類するのは git の出力があるとき、つまり `ExecError::Failed` だけ。`NoResult` には
 `kind` が無い（分類関数を通らない）。
+
+### 理由の行（`ExecError::reason`）
+
+案内の無い失敗の要約行（01 の「失敗の案内文」）に出す 1 行を、git の出力から選ぶ。
+**置き場所は `git_exec`**（`runner::reason`、`classify` の隣）—— 「どの行が理由か」は
+git の出力の形の問いで、写されたコミットの行（`echoes_a_commit`）を除くのも `classify` と
+同じ。上から順に ——
+
+1. **stderr が空なら stdout の最後の行。** git は理由を stdout にだけ書くことがある
+   （何も stage していない `commit`、未解消のままの `rebase --continue`、複数の revert が
+   空で止まった形）。stdout は status の一覧 → 結びの順に並ぶ
+2. **push の ` ! [` の行**（`! [remote rejected] main -> main (pre-receive hook declined)`）
+3. **締めではない最初の `error:` / `fatal:` の行**から接頭辞を剥いだもの
+
+どれも選べなければ `None`。**git の形をしていない行は選ばない**（2026-10-03 にユーザーと
+決めた）—— hook の文言、ssh の行（`ssh: Could not resolve hostname …`）、リモートが書く
+文言（GitHub の `ERROR: Repository not found.`）。`app` は出力があれば固定の文言で `L` を
+案内し、出力が空なら `Display` に落とす（01 の「失敗の案内文」）。
+
+- **hook の出力は形で選べない。** lefthook 2.1.15 で pre-commit の 1 command を失敗させる
+  と、出力は**1 行目が枠**（`╭──…╮`、色付き）・見出し・各 command の出力・**最後が所要
+  時間**（`🥊 lint (0.00 seconds)`）で、理由（`src/a.rs:1:1: error: unused variable x`）は
+  真ん中にある（実測。行頭は `src/…` なので 3 にも当たらない）。最初の行も最後の行も
+  理由にならない。他の TUI も選んでいない（2026-10-03 に実測。lazygit 0.65.1 は commit
+  なら固定の文言 `Git command failed. Check command log for details`、push なら stderr の
+  全文、gitui 0.28.1 は全文のポップアップ、tig 2.6.1 は端末に生で流す）
+- **「締めの手前の最後の行」も採らなかった。** ssh の行と stderr に書く hook は拾えるが、
+  締めの行を**区切り**に使うので、git が文言を変えて照合が外れると手前の行を取り違える
+  （ssh なら案内文の `and the repository exists.`）。いまの形では、締めの行は**選ばない
+  ため**だけに照合するので、外れても締めの行（薄いが事実の行）が要約に出るだけ
+- pre-commit の hook の出力は stdout に書いても git が stderr に合流させる。pre-push では
+  合流させない（lefthook は自分の出力をすべて stdout に書く）
+
+**締めの行**（`runner::WRAP_UPS`）は、git が理由のあとに足す「何が」を言わない行 ——
+`failed to push some refs`（push。どの ref がなぜかは ` ! [` の行か hook の文言）、
+`Could not read from remote repository.`（fetch / pull / push。何がは前の行）、
+`cherry-pick failed` / `revert failed`（どのファイルかは前の `error:`）。ssh の失敗と
+pre-push の hook では、`error:` / `fatal:` の行が締めの行だけになる（`/code-review` が
+踏んだ）ので、飛ばさないとそれが要約に出る。
+
+**stderr があれば stdout は見ない** —— 下の表の形では、stdout は進捗や status の一覧
+だった（`pull` の `Updating …`、stash の apply の status）。例外の `needs merge`
+（stderr は `could not write index` だけ）は `Unmerged` の案内が先に拾う。
+**2 と 3 は trim する前の行頭で見る** —— `would be overwritten` の下のファイル一覧は
+タブで字下げされるので、trim してから見ると `error: ` や `! [` で始まるパスを
+取り違える。
+
+**失敗の出力は端末の制御シーケンスを剥いで運ぶ**（`runner::strip_escapes`。`Failed` を
+組むとき）。hook は端末でなくても色を付け（lefthook は truecolor の枠）、描く側の ratatui
+（`ratatui-core` 0.1.2 の `Buffer::set_stringn`）は ESC の 1 文字しか落とさないので、
+要約にも `L` の履歴にも `[38;2;56;56;56m` が残る。gitui 0.28.1 は剥がさずに描いて画面が
+崩れた（実測）。成功の出力は剥がない（読む側が無い）。CSI / OSC のほかに `ESC ( B`
+（`tput sgr0` が出す）も剥ぐ。**終わらない OSC は改行で打ち切る** —— 出力の残りを、
+その後ろの git の `error:` 行ごと食べない（`/code-review` が踏んだ）。
+
+**`Other` に落ちる失敗の stderr**（git 2.56.0、`LC_ALL=C`、2026-10-03 に一時リポジトリで
+実測）。
+
+| 操作 | exit | stderr（タブの字下げは `⇥`） |
+|---|---|---|
+| `switch`（ワークツリーの変更が上書きされる） | 1 | `error: Your local changes to the following files would be overwritten by checkout:` / `⇥f` / `Please commit …` / `Aborting` |
+| `switch`（無い ref）/ merge の途中の `switch` | 128 | `fatal: invalid reference: nope` / `fatal: cannot switch branch while merging` + 案内 1 行 |
+| `branch` / `switch --create` / `branch --move`（同名がある） | 128 | `fatal: a branch named 'side' already exists` |
+| `branch`（不正な名前） | 128 | `fatal: 'a..b' is not a valid branch name` + `hint:` 2 行 |
+| `branch --delete`（未マージ） | 1 | `error: the branch 'side' is not fully merged` + `hint:` 2 行（`-D` の案内と `advice.forceDeleteBranch`） |
+| `branch --delete`（worktree が使っている） | 1 | `error: cannot delete branch 'main' used by worktree at '<path>'` |
+| `add` / `rm`（無いパス） | 128 | `fatal: pathspec 'nope' did not match any files` |
+| `restore`（無いパス） | 1 | `error: pathspec 'nope' did not match any file(s) known to git` |
+| `apply --cached`（当たらないパッチ） | 1 | `error: patch failed: f:1` / `error: f: patch does not apply` |
+| `fetch`（無いリモート / 無いパス） | 128 | `fatal: '<remote>' does not appear to be a git repository` / **`fatal: Could not read from remote repository.`** / 空行 / 案内 2 行 |
+| `pull --ff-only`（上書きされる） | 1 | `error: Your local changes … would be overwritten by merge:` / `⇥f` / … / `Aborting`（stdout `Updating <a>..<b>`） |
+| `push`（hook / 保護ブランチが断った） | 1 | `remote: <hook の文言>` / `To <url>` / **` ! [remote rejected] main -> main (pre-receive hook declined)`** / `error: failed to push some refs to '<url>'` |
+| `cherry-pick` / `revert`（上書きされる） | 128 | `error: The following untracked working tree files would be overwritten by merge:`（tracked なら `Your local changes …`）/ `⇥g` / … / `Aborting` / **`fatal: cherry-pick failed`**（`revert failed`） |
+| `stash apply`（上書きされる） | 128 | `error: Your local changes … would be overwritten by merge:` / … / `Aborting`（stdout に status の一覧） |
+| `stash apply` / `drop`（無いエントリ） | 128 | `error: stash@{0} is not a valid reference` / `fatal: log for 'stash' only has 1 entries` |
+| `rebase --interactive`（ワークツリーが汚れている） | 1 | `error: cannot rebase: You have unstaged changes.` / `error: Please commit or stash them.` |
+| `rebase --abort` / `cherry-pick --abort` / `merge --abort`（何も無い） | 128 | `fatal: no rebase in progress` / `error: no cherry-pick or revert in progress` + `fatal: cherry-pick failed` / `fatal: There is no merge to abort (MERGE_HEAD missing).` |
+| `commit`（空のメッセージ） | 1 | `Aborting commit due to empty commit message.`（接頭辞が無い） |
+| `commit`（pre-commit / commit-msg の hook が断った） | 1 | **hook が書いた文言だけ**（git は何も足さない） |
+| `push`（pre-push の hook が断った） | 1 | `error: failed to push some refs to '<url>'` だけ。**hook の文言は hook が書いた側**（stdout に書けば stdout、stderr に書けば締めの行の前） |
+| `fetch`（初めて繋ぐホストで、リモートが無い。github.com） | 128 | `Warning: Permanently added 'github.com' (ED25519) to the list of known hosts.` / `ERROR: Repository not found.` / **`fatal: Could not read from remote repository.`** / 空行 / 案内 2 行 |
+| `fetch`（ssh の名前解決 / 接続拒否） | 128 | `ssh: Could not resolve hostname …`（`ssh: connect to host … Connection refused`）/ **`fatal: Could not read from remote repository.`** / 空行 / 案内 2 行 |
+
+- **太字が締めの行。** cherry-pick / revert と fetch は理由のあとに情報の薄い `fatal:` を
+  足し、push の `error:` はどの ref がなぜ断られたかを言わない
+- **素の hook の行は 1 行の形で測った**（commit-msg の hook は `hook.<名前>.command` の
+  後ろにメッセージファイルのパスが足されるので、`exit 1` だけのコマンドは
+  `exit: too many arguments` を 2 行目に書いた。hook の書き方の都合で、git の文言ではない）
+- 非 FF の push（`(fetch first)` / `(non-fast-forward)`）と `pull --ff-only` の
+  `Not possible to fast-forward` は `NonFastForward` に分類されて案内が付くので、ここの
+  対象ではない
 
 ## Interactive rebase の実装
 

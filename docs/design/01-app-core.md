@@ -2468,8 +2468,11 @@ pub struct PushRejection {
 
 `git` の失敗は `exec_finished` が通知に積む。**`message` は上から順に決める** ——
 (1) 案内文（`ExecErrorKind` と `GitOp` から決める純粋関数 `exec_advice`）、
-(2) 案内が無く **stderr が空なら stdout の最後の行**（空行を飛ばして trim したもの）、
-(3) どちらも無ければ `ExecError` の `Display`（`git の実行に失敗しました: git <argv>`）。
+(2) 案内が無ければ git の出力から選んだ理由の行（`ExecError::reason`。選び方は 03 の
+「エラー分類」の「理由の行」）—— stderr があれば git の形の行、stderr が空なら
+**stdout の最後の行**、
+(3) 選べなくても出力があれば固定の文言「git が断りました。理由は L の履歴で」、
+(4) 出力も無ければ `ExecError` の `Display`（`git の実行に失敗しました: git <argv>`）。
 `detail` は argv、stderr、stdout の順に**全文**を並べる（空のものは飛ばす）。**stderr が
 stdout より前**なのは、履歴のモーダルが入りきらない `detail` を `…` で切る（07）ため ——
 長くなりうる stdout（複数の cherry-pick が積んだ行、status の一覧）を前に置くと、stderr の
@@ -2498,7 +2501,7 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
 | `Unmerged` + `Commit` | 未解消のまま。`git add` してから commit（**`Warn`**、37 セル） |
 | `Unmerged` + `StashPush` | コンフリクトを解消してから stash（**`Warn`**。手前の断りと同じ文） |
 | `Unmerged` + `StashApply` / `StashPop` | コンフリクトを解消してから stash を戻す（**`Warn`**、41 セル） |
-| それ以外 | 無し（stderr が空なら stdout の最後の行、そうでなければ `Display`） |
+| それ以外 | 無し（git の出力から選んだ理由の行。選べなければ固定の文言か `Display`） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
   `stale info` で断られた形は fetch を勧める側（lease は fetch してからでないと通らない。
@@ -2591,11 +2594,29 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
   **最後の行**なのは、git の stdout が status の一覧 → 結びの順に並ぶから。
   英語のまま出す —— 訳すと文言の数だけ表が要り、表に無い文言では結局 argv に戻る。
   71 セルを超えれば `…` で切れるが、`detail` に全文がある。
-  **stderr があるときは使わない** —— stderr の最後の行は `hint:` のことが多く
-  （`advice.*` で消える行でもある）、理由の行を選べない。**非対称は残る**:
-  stderr にだけ理由が出る失敗（`would be overwritten` など）は今までどおり
-  `Display` で、理由は `L` で読む（07 の「Branches ペイン」）。stderr から理由の行を
-  選ぶ規則は op ごとの実測が要るので `docs/plan.md` の M6 に送った
+  **stderr があれば stdout は使わない**（stdout は進捗や status の一覧。03 の
+  「理由の行」）。
+- **stderr にだけ理由がある失敗は、stderr から理由の行を 1 本選ぶ**（2026-10-03）。
+  いちばんよく出る赤い通知（`switch` の `would be overwritten`、`branch -d` の
+  `not fully merged`、`add` の `pathspec did not match`）が argv だけになり、理由は `L`
+  でしか読めなかった。**選ぶのは `git_exec`**（`ExecError::reason`。規則と op ごとの
+  実測は 03 の「エラー分類」）—— 「どの行が理由か」は git の出力の形の問いで、
+  `classify` と同じ知識（行頭の形、写されたコミットの行）を使う。`app` が持つのは
+  「案内が無ければそれを要約にする」ことだけ。**`error:` / `fatal:` の接頭辞は剥ぐ** ——
+  通知は既に赤く（`Error`）、`would be overwritten by checkout:` の行は接頭辞込みで
+  82 セル・剥いで 75 セル（71 を超えるのはどちらも同じだが、剥ぐと `by chec…` まで残る）。
+  **英語のまま出す**のは stdout と同じ理由。
+  **`L` でしか読めないものは残る**: `would be overwritten …:` の行は末尾が `:` で、
+  **どのファイルかは次の行**にある。`branch -d` の `-D` の案内も `hint:` なので要約に
+  出ない（07 の「Branches ペイン」）
+- **git の形をしていない出力しか無い失敗は、行を選ばずに `L` を案内する**（2026-10-03 に
+  ユーザーと決めた）。hook の文言（lefthook の出力は 1 行目が枠、最後が所要時間）、
+  ssh の行、リモートの文言がここに来る。文は「git が断りました。理由は L の履歴で」
+  （35 セル）。lazygit の commit と同じ考え方（03 の「理由の行」に他の TUI の実測）。
+  **出力が空なら案内しない** —— `L` にも argv しか無いので、`Display` に落とす
+  （`git config --unset` の exit 5 など。上の「候補の取り直し」）。`L` はどのペインでも効く
+  共通キー（07 のキー表）。失敗の出力は端末の制御シーケンスを剥いで届く（03）ので、
+  `L` の履歴に色の残骸は出ない
 - **`Unmerged` は「解消してから」を案内する**（2026-10-03）。未解消のファイルがあると、
   stash の 3 つは stdout に `<path>: needs merge`・stderr に `could not write index` だけを
   書き、`rebase --continue` は stdout に `needs merge` と結びを書いて **stderr は空**、

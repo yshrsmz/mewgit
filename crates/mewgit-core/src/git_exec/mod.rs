@@ -349,6 +349,18 @@ impl ExecError {
     pub fn command_line(&self) -> String {
         format!("git {}", self.argv().join(" "))
     }
+
+    /// git の出力から選んだ失敗の理由の 1 行（`error:` / `fatal:` の接頭辞は剥ぐ）。
+    /// `Failed` 以外と、選べる行が無いときは `None`。選び方は 03 の「エラー分類」の
+    /// 「理由の行」。
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            ExecError::Failed { stdout, stderr, .. } => runner::reason(stdout, stderr),
+            ExecError::NoResult { .. } | ExecError::Canceled { .. } | ExecError::Stale { .. } => {
+                None
+            }
+        }
+    }
 }
 
 /// ハンク操作 1 つぶんの中身（[`GitOp::StageHunk`] / [`GitOp::UnstageHunk`] /

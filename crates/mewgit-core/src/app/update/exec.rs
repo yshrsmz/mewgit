@@ -342,20 +342,23 @@ fn exec_detail(err: &ExecError) -> String {
     detail
 }
 
-/// 案内文の無い失敗の要約行（01 の「失敗の案内文」）。
-///
-/// **stderr が空なら stdout の最後の行。** git は理由を stdout にだけ書くことがあり
-/// （何も stage していない `commit` など）、`Display` に落とすと argv だけの通知になって
-/// 理由が画面に出ない。git の stdout は status の一覧 → 結びの順に並ぶので最後の行を採る。
-/// **stderr があるときは使わない** —— stderr の最後の行は `hint:` のことが多く、理由の行を
-/// 選べない（そちらは `L` の履歴で読む。07）。
+/// git の出力はあるのに、理由の行を選べなかった失敗の要約行（01 の「失敗の案内文」）。
+/// hook の文言と ssh の行がここに来る。**`L` はどのペインでも効く**共通キー（07）。
+const UNSHAPED_FAILURE: &str = "git が断りました。理由は L の履歴で";
+
+/// 案内文の無い失敗の要約行。git の出力から選んだ理由の行（`ExecError::reason`）、
+/// 選べなければ固定の文言、**出力が空なら `Display`（argv）** —— 空のときに `L` を
+/// 案内しても、履歴には argv しか無い。
 fn exec_summary(err: &ExecError) -> String {
+    if let Some(reason) = err.reason() {
+        return reason.to_string();
+    }
     match err {
-        ExecError::Failed { stdout, stderr, .. } if stderr.trim().is_empty() => stdout
-            .lines()
-            .map(str::trim)
-            .rfind(|line| !line.is_empty())
-            .map_or_else(|| err.to_string(), str::to_string),
+        ExecError::Failed { stdout, stderr, .. }
+            if !stdout.trim().is_empty() || !stderr.trim().is_empty() =>
+        {
+            UNSHAPED_FAILURE.to_string()
+        }
         _ => err.to_string(),
     }
 }
@@ -735,12 +738,8 @@ mod tests {
             detail.contains("did not match any files"),
             "detail: {detail}"
         );
-        // 案内の無い kind では要約行が `Display` のまま（01 の「失敗の案内文」）。
-        assert!(
-            notice.message.contains("git add -- a.txt"),
-            "message: {}",
-            notice.message
-        );
+        // 案内の無い kind では、要約行は stderr の理由の行（01 の「失敗の案内文」）。
+        assert_eq!(notice.message, "pathspec 'a.txt' did not match any files");
     }
 
     #[test]
@@ -1110,10 +1109,43 @@ mod tests {
         );
         assert_eq!(notice.level, NoticeLevel::Error);
 
-        // **stderr があれば使わない**（最後の行が `hint:` のことが多い）。
-        finish_exec(&mut state, commit, Err(failed("hint: 何か\n")));
+        // **stderr があれば stdout は見ない。** 選べる行が無ければ固定の文言で `L` を案内する。
+        finish_exec(&mut state, commit.clone(), Err(failed("hint: 何か\n")));
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.message, UNSHAPED_FAILURE);
+
+        // 出力が両方とも空なら、`L` にも理由は無いので `Display`（argv）に落ちる。
+        let mut empty = failed("");
+        if let ExecError::Failed { stdout, .. } = &mut empty {
+            stdout.clear();
+        }
+        finish_exec(&mut state, commit, Err(empty));
         let notice = state.notices.back().expect("通知がありません");
         assert_eq!(notice.message, "git の実行に失敗しました: git commit -m m");
+    }
+
+    #[test]
+    fn a_failure_with_a_reason_only_on_stderr_is_summed_up_by_that_reason() {
+        // 案内の無い失敗は `ExecError::reason` の行（01 の「失敗の案内文」）。選び方の
+        // 見張りは `git_exec::runner` の `reason` のテスト。
+        let mut state = state();
+        finish_exec(
+            &mut state,
+            GitOp::BranchDelete {
+                name: "side".to_string(),
+                force: false,
+            },
+            Err(ExecError::Failed {
+                argv: vec!["branch".into(), "--delete".into(), "side".into()],
+                code: Some(1),
+                stdout: String::new(),
+                stderr: "error: the branch 'side' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D side'\n".to_string(),
+                kind: ExecErrorKind::Other,
+            }),
+        );
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.message, "the branch 'side' is not fully merged");
+        assert_eq!(notice.level, NoticeLevel::Error);
     }
 
     #[test]

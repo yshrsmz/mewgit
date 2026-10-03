@@ -451,16 +451,15 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       （rebase だけが案内付きになるのを避けるため。03 の「エラー分類」に実測、git 2.56.0）。
       stderr にだけ理由がある失敗（`would be overwritten` など）の要約は `Display` のまま
       （下の行へ送った）
-- [ ] **stderr にだけ理由がある失敗の要約行に、その理由を出す。** いまの要約は案内が
-      無ければ「stderr が空なら stdout の最後の行、そうでなければ argv」なので、いちばん
+- [x] **stderr にだけ理由がある失敗の要約行に、その理由を出す。** 要約は案内が
+      無ければ「stderr が空なら stdout の最後の行、そうでなければ argv」だったので、いちばん
       よく出る赤い通知（`switch` の `would be overwritten`、`branch -d` の `not fully merged`、
-      `add` の `pathspec did not match`）が argv だけになり、理由は `L` でしか読めない
-      （01 の「失敗の案内文」）。**選び方は op ごとに stderr を実測してから決める** ——
-      「最初の `error:` / `fatal:` 行」は素直に見えるが、hook に断られた push は
-      ` ! [remote rejected] … (pre-receive hook declined)` を先に、`error: failed to push
-      some refs` を後に書くので、情報の薄いほうを採る。`hint:` の行（`advice.*` で消える）は
-      飛ばす。決めたら 01 の「失敗の案内文」の (2) と、07 の「Branches ペイン」の非対称の
-      注記を直す（2026-10-03 にユーザーと決めて送った）
+      `add` の `pathspec did not match`）が argv だけになり、理由は `L` でしか読めなかった。
+      **op ごとに stderr を実測して**選び方を決め、`git_exec` の `ExecError::reason` に
+      置いた（規則と実測の表は 03 の「エラー分類」の「理由の行」、要約行での使い方は 01 の
+      「失敗の案内文」）。**git の形をしていない出力（hook の文言・ssh の行）は選ばず、固定の
+      文言で `L` を案内する**（他の TUI の実測を受けてユーザーと決めた。03）。失敗の出力の
+      色（hook が付ける ANSI）は剥いで運ぶ
 - [x] ステータスバーのキーヒント。**M4 の残りより先にやる**（2026-09-19 に決めた）。
       フッターを **2 行**にして 1 行目を通知、2 行目をフォーカス中のペインのキーにする。
       **キーの一覧は `app` に置く唯一の表**で、`Modal::Help`（M5 に前倒しした）と `config.keymap` が

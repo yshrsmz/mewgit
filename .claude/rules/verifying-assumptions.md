@@ -35,6 +35,7 @@
 | 依存クレートの挙動 | `~/.cargo/registry/src/*/<crate>-<version>/` のソースを読む。ドキュメントより実装が正しい |
 | ある操作が GitHub API を何往復するか | pty で流し、**1 つのプロセスの中で**ヘッダの `[api: N]` が**落ち着いた値**だけを録画から拾う。罠が 2 つ（下） |
 | 手元に無いプラットフォームでのビルド | 依存更新だけを積んだ draft PR を立てて CI を回す。手元は macOS しか無い |
+| hook が絡む git の振る舞い | 一時リポジトリでは `git config hook.<名前>.event <hook>` と `hook.<名前>.command 'sh <スクリプト>'` で置く。**chmod が要らない**（git 2.56.0 で確認）。Rust のテストは `TestRepo::write_hook` —— 設定で置く hook は知らない git が黙って無視するので、CI ではファイルで置く |
 
 - **`[api: N]` の罠は 2 つ。** #96 で「`r` 1 回の往復は 5」と書いて外した。
   **(1) 起動をまたいだ差では測れない** —— `auth::resolve` の probe は使い捨ての
@@ -97,6 +98,18 @@
   失敗すると todo に戻される」と書き、`/code-review` が叩き直して外れた。**止まった・
   失敗した、を見る実測では、止まった理由（`git status` の見出し、unmerged のファイル）も
   一緒に読む**
+- **rebase の実測は、pick が早送りする形と載せ直す形の両方で叩く。** 線形の fixture で
+  `rebase -i HEAD~N` を叩くと、親が変わらない pick は早送りになり、HEAD が元のコミット
+  そのもの・`rebase-merge/amend` が立つ・reflog が `rebase: fast-forward`、と**載せ直す形
+  （`--onto` / 別のブランチの先へ）と別のものが残る**。#145 では plan.md の「hook が reword を
+  断ると `amend` が立つ」が早送りの形だけで測られていて、載せ直す形では `amend` が無かった。
+  **止まった形を見分ける条件を決める実測は、2 つの形を並べて差を見る**
+- **「X だけが Y を満たす」と書く前に、同じ値を作れる別の操作を数える。** #145 では
+  「メッセージと author（日時まで）が揃うのは X の pick だけ」と書いたが、**`cherry-pick` と
+  `commit --amend --no-edit` も author を日時ごと保つ** —— X を cherry-pick して中身を変えた
+  コミットが onto に在ると、コンフリクトの停止を取り違えて onto 側を amend し、X が消えた
+  （`/code-review` が一時リポジトリで再現）。**値の等しさで同定するなら、その値を写す
+  操作（cherry-pick / amend / rebase）を数え、手順で同定できる手掛かり（reflog の先頭）を探す**
 - **「〜しない」と断定する前に、同じ操作の入口を全部数えて叩く。** 開始・continue・
   skip は同じ git の操作でも止まり方が違う。#126 では revert の**開始だけ**を測って
   「1 本だけの revert は空で止まらない」と書き、**それを根拠にユーザーが skip を見送る

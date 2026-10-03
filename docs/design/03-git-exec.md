@@ -891,8 +891,13 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   argv の表に毎回載せない）。ユーザーが `GIT_CONFIG_COUNT` を使っていれば後ろに足す。
   **`core.commentString=#mewgit#`（最初の形）はやめた** —— 読むのは git 2.45 以降で、
   それより古い git（Ubuntu 24.04 の 2.43.0）は未知のキーを読み飛ばして `#` の行を消す。
-  `commentChar` の 1 文字なら 2.39.5 から効く（上の「git の最低版」の表）。代償は行頭が
-  `\x1f` の行が消えることだけで、メッセージに書かれる字ではない
+  `commentChar` の 1 文字なら 2.39.5 から効く（上の「git の最低版」の表）。代償は 2 つ ——
+  行頭が `\x1f` の行が消えること（メッセージに書かれる字ではない）と、**commit-msg hook に
+  渡るファイルの git のコメント行が `\x1f` で始まる**こと（コンフリクト後の cherry-pick の
+  continue で `\x1f Conflicts:`。git 2.56.0 で hook にダンプして確認、squash では hook が
+  走らなかった）。`#` 始まりの行を決め打ちで捨てる hook はこの行を本文として読みうる。
+  hook の中で `git stripspace` などを叩く形は環境変数を継ぐので効く。最終のメッセージには
+  残らない。**決め打ちの hook がどう読むかは確かめていない**
 - **消えた自バイナリ。** エディタが自バイナリなので、起動中に mewgit のバイナリが消えると、
   エディタを起こす git が落ちる（以前の `true` では起きない。**Linux では `/proc/<pid>/exe`
   を渡すので起きない** —— 下の 2 つ目）。**落ちるのは rebase の系統と

@@ -228,7 +228,6 @@ async fn a_reword_refused_by_a_hook_is_amended_before_continuing() {
 
         let reword = refused_reword(&repo).expect("断られた reword を見分けていません");
         assert_eq!(reword.head, repo.head_oid());
-        assert_eq!(reword.message, NEW_MESSAGE);
 
         repo.allow_every_message();
         // 素の continue では git がエディタを起こし直さず、元のメッセージのまま進む。
@@ -239,7 +238,7 @@ async fn a_reword_refused_by_a_hook_is_amended_before_continuing() {
             .await
             .expect("hook を外したので最後まで通るはずです");
 
-        // **行頭の `#` も残る**（`--file -` の cleanup は whitespace）。
+        // **行頭の `#` も残る**（amend も commit editor を通るので、`core.commentString` が効く）。
         assert_eq!(
             messages(&repo, &onto),
             ["b", NEW_MESSAGE],

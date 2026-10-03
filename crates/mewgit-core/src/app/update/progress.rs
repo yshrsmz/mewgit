@@ -163,41 +163,32 @@ pub fn progress_menu(progress: &InProgressOp) -> Option<ProgressMenu> {
     let item = |word, about, op| MenuItem { word, about, op };
     const RESOLVE: &str = "コンフリクトは解消して git add してから continue してください";
     let (body, items) = match progress {
-        // **hook が reword を断って止まった形は、同じ語で中身が違う**（01 の「進行中操作の
-        // メニュー（`m`）」）。continue は新しいメッセージを amend してから進め、skip は
-        // コミット済みの pick を捨てない（03 の表）。
-        InProgressOp::Rebase {
-            refused_reword: Some(reword),
-            ..
-        } => (
-            "新しいメッセージが断られ、元のメッセージで止まっています",
-            vec![
-                item(
-                    "continue",
+        InProgressOp::Rebase { refused_reword, .. } => {
+            // **hook が reword を断って止まった形は、同じ語で中身が違う**（01 の「進行中操作の
+            // メニュー（`m`）」）。continue は新しいメッセージを amend してから進め、skip は
+            // コミット済みの pick を捨てない（03 の表）。
+            let (body, resume, skip) = match refused_reword {
+                Some(_) => (
+                    "新しいメッセージが断られ、元のメッセージで止まっています",
                     "新しいメッセージを当て直して続ける",
-                    GitOp::RebaseContinue {
-                        reword: Some(reword.clone()),
-                    },
+                    "元のメッセージのまま続ける",
                 ),
-                item("skip", "元のメッセージのまま続ける", GitOp::RebaseSkip),
-                item("abort", "rebase を始める前に戻す", GitOp::RebaseAbort),
-            ],
-        ),
-        InProgressOp::Rebase {
-            refused_reword: None,
-            ..
-        } => (
-            RESOLVE,
-            vec![
-                item(
-                    "continue",
+                None => (
+                    RESOLVE,
                     "解消した内容で続ける",
-                    GitOp::RebaseContinue { reword: None },
+                    "止まったコミットを捨てて続ける",
                 ),
-                item("skip", "止まったコミットを捨てて続ける", GitOp::RebaseSkip),
-                item("abort", "rebase を始める前に戻す", GitOp::RebaseAbort),
-            ],
-        ),
+            };
+            let reword = refused_reword.clone();
+            (
+                body,
+                vec![
+                    item("continue", resume, GitOp::RebaseContinue { reword }),
+                    item("skip", skip, GitOp::RebaseSkip),
+                    item("abort", "rebase を始める前に戻す", GitOp::RebaseAbort),
+                ],
+            )
+        }
         InProgressOp::CherryPick { .. } => (
             RESOLVE,
             vec![
@@ -543,10 +534,7 @@ mod tests {
     fn a_refused_reword_changes_what_continue_and_skip_do() {
         // 同じ語で中身が違う（01 の「進行中操作のメニュー（`m`）」）。continue は amend して
         // から進め、skip はコミット済みの pick を捨てないので説明を変える（03 の表）。
-        let reword = RefusedReword {
-            head: fake_oid(7),
-            message: "new".into(),
-        };
+        let reword = RefusedReword { head: fake_oid(7) };
         let refused = InProgressOp::Rebase {
             step: None,
             branch: None,

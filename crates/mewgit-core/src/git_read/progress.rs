@@ -20,7 +20,11 @@ use super::{InProgressOp, Oid, RefusedReword, RepoReader, Step};
 /// 打つのは rebase の continue / abort なので rebase を先に見る。02）。ファイルが
 /// 読めない・中身が壊れているときはその行を「無い」と読んで次へ進むので、`Result` は
 /// 返さない。
-pub fn in_progress(git_dir: &Path) -> Option<InProgressOp> {
+///
+/// **`status()` の外へ出さない。** `Rebase.refused_reword` は git2 でコミットを読まないと
+/// 決まらないので、ここでは常に `None` で、`status()` が [`RepoReader::refused_reword`] で
+/// 書き足す。公開すると、`status()` を通らずに呼んだ側では断られた reword が黙って消える。
+pub(super) fn in_progress(git_dir: &Path) -> Option<InProgressOp> {
     let merge = git_dir.join("rebase-merge");
     if merge.is_dir() {
         return Some(InProgressOp::Rebase {
@@ -75,29 +79,21 @@ impl RepoReader {
     /// 保つ）。最後の条件が、reword の pick がコンフリクトして止まった形（HEAD は 1 本前の
     /// コミット）、そこから `reset --hard` した形、端末で amend し直した形を外す。
     /// **`rebase-merge/amend` は見ない** —— pick が fast-forward した形にしか立たない
-    /// （03 の実測）。読めないものは「当たらない」と読む（[`in_progress`] と同じ）。
+    /// （03 の実測）。読めないものは「当たらない」と読む（`in_progress` と同じ）。
     pub fn refused_reword(&self) -> Option<RefusedReword> {
         let rebase_dir = self.git_dir().join("rebase-merge");
         let oid = last_done_reword(&rebase_dir).ok()??;
-        let message = fs::read_to_string(reword_message_path(&rebase_dir, &oid)).ok()?;
+        if !reword_message_path(&rebase_dir, &oid).exists() {
+            return None;
+        }
         let stopped = self.repo.find_commit(Oid::from_str(&oid).ok()?).ok()?;
         let head = self.repo.head().ok()?.peel_to_commit().ok()?;
         // **メッセージだけでは足りない** —— 1 本前のコミットが同じメッセージだと、
         // コンフリクトから `reset --hard` した形を取り違える（`MERGE_MSG` も消える）。
-        let author = |commit: &git2::Commit| {
-            let author = commit.author();
-            (
-                author.name_bytes().to_vec(),
-                author.email_bytes().to_vec(),
-                author.when(),
-            )
-        };
+        // `Signature` の `==` は名前・メール・日時をバイトで比べる。
         let picked =
-            head.message_bytes() == stopped.message_bytes() && author(&head) == author(&stopped);
-        picked.then(|| RefusedReword {
-            head: head.id(),
-            message,
-        })
+            head.message_bytes() == stopped.message_bytes() && head.author() == stopped.author();
+        picked.then(|| RefusedReword { head: head.id() })
     }
 }
 

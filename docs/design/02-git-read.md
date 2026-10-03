@@ -681,8 +681,7 @@ linked worktree では `MERGE_HEAD` も `rebase-merge/` も `.git/worktrees/<nam
 
 ```rust
 pub struct RefusedReword {
-    pub head: Oid,         // 見分けた時点の HEAD
-    pub message: String,   // mewgit が rebase-merge/ に置いた新しいメッセージ
+    pub head: Oid,   // 見分けた時点の HEAD
 }
 ```
 
@@ -694,9 +693,14 @@ amend してから進めるので（03）、`status()` がここで見分けて 
 | 条件 | 外すもの |
 |---|---|
 | `rebase-merge/done` の最終行が `reword <X>` | reword 以外の停止 |
-| `rebase-merge/mewgit-reword-<X>` が在る（読めたものが `message`） | 端末で始めた rebase の reword |
+| `rebase-merge/mewgit-reword-<X>` が在る | 端末で始めた rebase の reword |
 | HEAD のメッセージと author（名前・メール・日時）が X と同じ（= HEAD が X の pick） | reword の pick がコンフリクトして止まった形（HEAD は 1 本前のコミット）、そこから `git reset --hard` した形、端末で別のメッセージに amend した形 |
 
+- **新しいメッセージは持たない。** amend は commit editor が `mewgit-reword-<X>` を差し込む
+  経路（rebase の開始と同じ）で通す（03）ので、値として運ぶ必要が無い。最初の版は
+  メッセージを読んで `RefusedReword` に載せ、`commit --amend --file -` の stdin に流し直して
+  いた —— 同じメッセージが開始とやり直しで別の cleanup を通り、進行中の rebase では
+  status のたびにファイルを読んでいた（`/simplify` の altitude が拾った）
 - **`rebase-merge/amend` は使わない。** pick が fast-forward した形（HEAD = X）にしか
   立たず、`--onto` で載せ直す形では無い（03 の表。git 2.56.0、2026-10-03）
 - **HEAD を比べるのは X の Oid ではなくメッセージと author。** 載せ直す形の HEAD は X とは

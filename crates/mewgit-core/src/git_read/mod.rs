@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 
 pub use git2::Oid;
 pub use log::LogSession;
-pub use progress::{in_progress, last_done_reword, reword_message_path};
+use progress::in_progress;
+pub use progress::{last_done_reword, reword_message_path};
 pub use repo::RepoReader;
 pub use thread::ReaderHandle;
 pub use watch::{FileStamp, PathStamp, RepoFingerprint};
@@ -753,9 +754,10 @@ pub enum InProgressOp {
 pub struct RefusedReword {
     /// 見分けた時点の HEAD。continue の前に git に照合させる（`update-ref --stdin` の
     /// `verify`）—— snapshot が古いと別のコミットを amend するため。
+    ///
+    /// **新しいメッセージは持たない。** amend は `rebase-merge/mewgit-reword-<X>` を
+    /// commit editor が差し込む経路（開始と同じ）で通すので、値として運ぶ必要が無い。
     pub head: Oid,
-    /// mewgit が `rebase-merge/` に置いた新しいメッセージ。
-    pub message: String,
 }
 
 /// rebase / am の進み具合。**git の数えた todo の行数**で、コミット数ではない

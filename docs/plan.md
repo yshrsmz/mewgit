@@ -431,7 +431,7 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       continue でエディタを起こし直さず、元のメッセージでコミットする（git 自身の挙動。
       03 の「Interactive rebase の実装」に実測）。**`status()` がこの形を見分けて
       `Rebase.refused_reword` に載せ、`m` の continue が `update-ref --stdin`（HEAD の照合）→
-      `commit --amend --file -` → `rebase --continue` の 3 本を叩く**（02 の「断られた reword」、03）。
+      `commit --amend`（メッセージは commit editor が差し込む）→ `rebase --continue` の 3 本を叩く**（02 の「断られた reword」、03）。
       着手前は「`rebase-merge/amend` が立つ」で見分けるつもりだったが、**`amend` は pick が
       fast-forward した形にしか無い**（`--onto` で載せ直す形では無い。実測 2026-10-03）ので、
       HEAD のメッセージと author が止まったコミットと同じか（= HEAD がその pick か）で見分ける。hook がまた断ったときは案内を

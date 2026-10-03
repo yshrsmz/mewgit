@@ -103,7 +103,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
 | `Push { .. }` | `push [--force-with-lease=<dst\|src>:<lease>] [--set-upstream] <remote> <src>[:<dst>]` |
 | `RebaseInteractive { onto, plan }` | `rebase --interactive --no-update-refs <onto>`（`plan` は JSON にして stdin へ。下の「Interactive rebase の実装」） |
 | `RebaseContinue { reword: None }` / `Skip` / `Abort` | `rebase --continue` / `--skip` / `--abort` |
-| `RebaseContinue { reword: Some }` | `update-ref --stdin`（stdin `verify HEAD <head>`）→ `commit --amend --file -`（stdin はメッセージ）→ `rebase --continue`（下の「Interactive rebase の実装」） |
+| `RebaseContinue { reword: Some }` | `update-ref --stdin`（stdin `verify HEAD <head>`）→ `commit --amend`（メッセージは commit editor が差し込む）→ `rebase --continue`（下の「Interactive rebase の実装」） |
 | `CherryPick(oids)` | `cherry-pick <oids>` |
 | `CherryPickContinue` / `Skip` / `Abort` | `cherry-pick --continue` / `--skip` / `--abort` |
 | `Revert { oids, mainline }` | `revert [--mainline <n>] <oids>` |
@@ -485,7 +485,7 @@ pub async fn run_cancelable(&self, op: &GitOp, cancel: oneshot::Receiver<()>)
   持つ `RebaseContinue` は `rebase`）。スピナーに出る語なので、**最初の 1 本とは限らない** ——
   reword の照合（`update-ref`）は一瞬で、残りの時間は `rebase --continue` が使う。最初の 1 本に
   揃えていたころは `CheckoutPr` でたまたま一致していた。見張りは `verb_matches_the_argv`
-  （1 本の変種は `argv[0]` と一致、複数の変種は列のどれかの `argv[0]` と一致）
+  （複数の変種はどの 1 本かもテストに書く。「列のどれかと一致」では、語が別の手順へずれても通る）
 
 ### BatchMode の重ね方
 
@@ -703,8 +703,11 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
      コミットを amend する** —— 端末で continue して次の停止に移っていても
      `mewgit-reword-<Oid>` は残るので、照合が無いと止まったコミットのメッセージで別の
      コミットを書き換える。断りは `HeadMoved` に分ける（上の「エラー分類」）
-  2. `commit --amend --file -`（メッセージは stdin）。`--file` の cleanup は `whitespace` なので、
-     行頭の `#` は `core.commentString` に頼らずに残る（下の表）。**hook がまた断れば
+  2. `commit --amend`（メッセージを渡さない）。git がエディタを起こし、`--commit-editor` が
+     `done` の最終行から `mewgit-reword-<X>` を差し込む —— **rebase の開始と同じ経路**なので、
+     cleanup も `core.commentString` も同じに効き、行頭の `#` が残る（統合テストで確認）。
+     メッセージを `--file -` で流し直す形（最初の版）は、同じメッセージを開始とやり直しで
+     別の cleanup に通していた（`/simplify` の altitude が拾った）。**hook がまた断れば
      ここで止まり、rebase は止まったまま** —— 同じ形なので、hook を直して `m` から押し直せる。
      案内は足さない（git は hook の出力しか書かないので、分ける手掛かりが無い。通知の
      `detail` に hook の stderr が出る）

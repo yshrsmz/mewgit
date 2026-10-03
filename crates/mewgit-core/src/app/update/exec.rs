@@ -838,10 +838,7 @@ mod tests {
     fn a_moved_head_before_amending_a_refused_reword_is_a_warning_to_reopen_the_menu() {
         // 照合（`update-ref --stdin` の `verify`）が外れた形。rebase は止まったままなので
         // バッジと並ぶ（01 の「失敗の案内文」）。素の continue には出さない。
-        let reword = crate::git_read::RefusedReword {
-            head: fake_oid(7),
-            message: "new".into(),
-        };
+        let reword = crate::git_read::RefusedReword { head: fake_oid(7) };
         let mut plain = state();
         let mut state = state();
         finish_exec(

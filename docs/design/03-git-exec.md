@@ -592,7 +592,7 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
 | 行頭の `CONFLICT (` / `error: could not apply` | `Conflict` |
 | `is now empty` | `Empty` |
 | `nothing to commit` / `nothing added to commit` / `no changes added to commit` | `NoChanges` |
-| stdout の `[` で始まらない行の末尾の `: needs merge` / `Committing is not possible because you have unmerged files` | `Unmerged` |
+| stdout の行末の `: needs merge` / `Committing is not possible because you have unmerged files` | `Unmerged` |
 | `non-fast-forward` / `fetch first` / `stale info` / `Not possible to fast-forward` | `NonFastForward` |
 | その他 | `Other` |
 
@@ -623,11 +623,13 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
 | `rebase --continue` | 1 | stdout `<path>: needs merge` / `You must edit all merge conflicts and then` / `mark them as resolved using git add`、**stderr 空** |
 | `cherry-pick --continue` / `revert --continue` / `commit` | 128 | stdout `U	<path>`、stderr `error: Committing is not possible because you have unmerged files.` + `hint:` + `fatal: Exiting because of an unresolved conflict.` |
 
-- **`needs merge` は行末で、`[` で始まる行を除いて見る。** 複数の cherry-pick は積んだぶんの
-  `[main <oid>] <件名>` を stdout に並べる（上のコンフリクトの印と同じ）ので、件名が
-  `fix: needs merge` のコミットを積んだあとで merge に当たって止まる形（下の「複数の
-  コミットの cherry-pick / revert」の `-m` 無し）を `Unmerged` に取り違える。git が書く
-  行は `<path>: needs merge` で、パスは行頭から始まる
+- **`classify` は stdout から `[` で始まる行を先に除く。** 複数の cherry-pick / revert は
+  積んだぶんの `[main <oid>] <件名>` を stdout に並べる（上のコンフリクトの印と同じ）ので、
+  件名が `fix: needs merge` や `fix: nothing to commit` のコミットを積んだあとで merge に
+  当たって止まる形（下の「複数のコミットの cherry-pick / revert」の `-m` 無し）を、語ごとに
+  取り違える。**語ごとに守らず入口で 1 度だけ除く** —— git が `[` で始めて書く stdout の
+  行はこの写しだけ。stderr の写し（`could not apply <oid>... <件名>`）は行の途中なので、
+  行頭で見る印（`HeadMoved` / `Conflict`）だけが守られる
 - **`NoChanges` の後ろ。** どちらの出力も相手の語を含まないので順は効かないが、
   語が広いほうを後ろに置く（`NonFastForward` と同じ数え方）
 - **`switch` / `pull` / `rebase -i` の開始などは別の文言で断る**（`you need to resolve your

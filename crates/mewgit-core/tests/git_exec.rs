@@ -99,6 +99,14 @@ fn failure_kind(err: &ExecError) -> ExecErrorKind {
     }
 }
 
+/// `git` が非 0 で終わったときの stdout と stderr。それ以外の失敗なら panic する。
+fn failure_output(err: &ExecError) -> (&str, &str) {
+    let ExecError::Failed { stdout, stderr, .. } = err else {
+        panic!("git が走っていません: {err:?}");
+    };
+    (stdout, stderr)
+}
+
 #[tokio::test]
 async fn stage_and_unstage_a_tracked_file() {
     let repo = TestRepo::init();
@@ -557,16 +565,8 @@ async fn unresolved_files_refuse_continue_and_stash_as_unmerged() {
         .run(&GitOp::RebaseContinue { reword: None })
         .await
         .expect_err("未解消のまま continue できてしまいました");
-    let ExecError::Failed {
-        stdout,
-        stderr,
-        kind,
-        ..
-    } = &err
-    else {
-        panic!("git が走っていません: {err:?}");
-    };
-    assert_eq!(*kind, ExecErrorKind::Unmerged);
+    assert_eq!(failure_kind(&err), ExecErrorKind::Unmerged);
+    let (stdout, stderr) = failure_output(&err);
     assert!(stdout.contains("file.txt: needs merge"), "{stdout}");
     assert_eq!(stderr, "");
 
@@ -578,10 +578,8 @@ async fn unresolved_files_refuse_continue_and_stash_as_unmerged() {
         })
         .await
         .expect_err("未解消のまま stash できてしまいました");
-    let ExecError::Failed { stdout, kind, .. } = &err else {
-        panic!("git が走っていません: {err:?}");
-    };
-    assert_eq!(*kind, ExecErrorKind::Unmerged);
+    assert_eq!(failure_kind(&err), ExecErrorKind::Unmerged);
+    let (stdout, _) = failure_output(&err);
     assert!(stdout.contains("file.txt: needs merge"), "{stdout}");
 
     runner

@@ -463,7 +463,19 @@ fn lossy(bytes: Vec<u8>) -> String {
 /// （01 の「失敗の案内文」）。`hint:` の行は `advice.diverging false` で消えるので、
 /// 見るのは `fatal:` の側。**広げても force は arm されない** —— 憶える
 /// `push_rejection` は `GitOp::Push` で門番している（01 の「force push」）。
+///
+/// **stdout から、git が写したコミットの行を先に除く。** 複数の cherry-pick / revert は
+/// 積んだぶんの `[main <oid>] <件名>` を stdout に並べるので、件名が `fix: nothing to
+/// commit` のようなコミットを積んでから別の理由で止まると、語ごとに取り違える（03 の
+/// 「エラー分類」）。git 自身が `[` で始めて書く stdout の行はこれだけなので、語ごとに
+/// 守らず入口で 1 度だけ除く。
 fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
+    let stdout = stdout
+        .lines()
+        .filter(|line| !line.starts_with('['))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let stdout = stdout.as_str();
     let has = |needle: &str| stderr.contains(needle) || stdout.contains(needle);
     let starts_a_line = |prefix: &str| {
         stdout
@@ -509,15 +521,9 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
         // dirty。03 の「revert の開始」）。**`Empty` より後ろ** —— 空で止まった
         // cherry-pick の stdout にも status が出るので、先に見ると進行中を見落とす。
         ExecErrorKind::NoChanges
-    } else if stdout
-        .lines()
-        .any(|line| !line.starts_with('[') && line.ends_with(": needs merge"))
+    } else if stdout.lines().any(|line| line.ends_with(": needs merge"))
         || has("Committing is not possible because you have unmerged files")
     {
-        // **`[` で始まる行は見ない。** 複数の cherry-pick が積んだぶんの
-        // `[main <oid>] <件名>` を並べるので、件名が `…: needs merge` のコミットを積んで
-        // から別の理由で止まると取り違える。git が書くのは `<path>: needs merge`
-        // （03 の「エラー分類」）。
         ExecErrorKind::Unmerged
     } else if has("non-fast-forward")
         || has("fetch first")
@@ -721,12 +727,19 @@ mod tests {
     }
 
     #[test]
-    fn a_subject_ending_in_needs_merge_is_not_unmerged() {
-        // 複数の cherry-pick が件名 `fix: needs merge` のコミットを積んでから、`-m` の無い
-        // merge で止まった形（stderr は 03 の「複数のコミットの cherry-pick / revert」の実測）。
-        let stdout = "[main 1a2b3c4] fix: needs merge\n 1 file changed, 1 insertion(+)\n";
+    fn a_subject_echoed_by_git_is_not_read_as_the_reason() {
+        // 複数の cherry-pick がコミットを積んでから、`-m` の無い merge で止まった形（stderr は
+        // 03 の「複数のコミットの cherry-pick / revert」の実測）。積んだコミットの件名が
+        // stdout に写る。
         let stderr = "error: commit 5d6e7f8 is a merge but no -m option was given.\nfatal: cherry-pick failed\n";
-        assert_eq!(classify(stdout, stderr), ExecErrorKind::Other);
+        for subject in [
+            "fix: needs merge",
+            "fix: nothing to commit",
+            "x is now empty",
+        ] {
+            let stdout = format!("[main 1a2b3c4] {subject}\n 1 file changed, 1 insertion(+)\n");
+            assert_eq!(classify(&stdout, stderr), ExecErrorKind::Other, "{subject}");
+        }
     }
 
     #[test]

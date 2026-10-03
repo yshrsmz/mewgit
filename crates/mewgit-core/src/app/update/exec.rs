@@ -314,13 +314,14 @@ fn ref_may_have_moved(result: &Result<ExecOutput, ExecError>) -> bool {
 ///
 /// **stdout も載せる。** 理由が stdout にしか出ない失敗がある（`needs merge` は
 /// stderr が `could not write index` だけでも stdout に出る。03 の「エラー分類」）。
-/// 順は argv、stdout、stderr —— 端末で見るときと同じく、stderr の結び（`fatal:` など）が
-/// 最後に来る。
+/// **順は argv、stderr、stdout** —— 履歴のモーダルは入りきらない `detail` を末尾から
+/// `…` で切る（07）ので、長くなりうる stdout（複数の cherry-pick が積んだ行、status の
+/// 一覧）を前に置くと stderr の理由が箱から押し出される。
 fn exec_detail(err: &ExecError) -> String {
     let mut detail = err.command_line();
     match err {
         ExecError::Failed { stdout, stderr, .. } => {
-            for output in [stdout, stderr] {
+            for output in [stderr, stdout] {
                 let output = output.trim_end();
                 if !output.is_empty() {
                     detail.push('\n');
@@ -349,13 +350,14 @@ fn exec_detail(err: &ExecError) -> String {
 /// **stderr があるときは使わない** —— stderr の最後の行は `hint:` のことが多く、理由の行を
 /// 選べない（そちらは `L` の履歴で読む。07）。
 fn exec_summary(err: &ExecError) -> String {
-    if let ExecError::Failed { stdout, stderr, .. } = err {
-        let last = stdout.lines().map(str::trim).rfind(|line| !line.is_empty());
-        if let (true, Some(last)) = (stderr.trim().is_empty(), last) {
-            return last.to_string();
-        }
+    match err {
+        ExecError::Failed { stdout, stderr, .. } if stderr.trim().is_empty() => stdout
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .map_or_else(|| err.to_string(), str::to_string),
+        _ => err.to_string(),
     }
-    err.to_string()
 }
 
 /// 通知の要約行。失敗の種別から「次に何をすればよいか」を出す（01 の「失敗の案内文」）。
@@ -1115,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    fn the_detail_carries_stdout_before_stderr() {
+    fn the_detail_carries_stderr_before_stdout() {
         // stash を unmerged のまま押した形（git 2.56.0 の出力）。理由は stdout にしか無い
         // （03 の「エラー分類」）。
         let mut state = state();
@@ -1134,7 +1136,7 @@ mod tests {
         let notice = state.notices.back().expect("通知がありません");
         assert_eq!(
             notice.detail.as_deref(),
-            Some("git stash apply stash@{0}\nb: needs merge\nerror: could not write index")
+            Some("git stash apply stash@{0}\nerror: could not write index\nb: needs merge")
         );
     }
 

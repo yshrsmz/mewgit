@@ -2470,7 +2470,10 @@ pub struct PushRejection {
 (1) 案内文（`ExecErrorKind` と `GitOp` から決める純粋関数 `exec_advice`）、
 (2) 案内が無く **stderr が空なら stdout の最後の行**（空行を飛ばして trim したもの）、
 (3) どちらも無ければ `ExecError` の `Display`（`git の実行に失敗しました: git <argv>`）。
-`detail` は argv、stdout、stderr の順に**全文**を並べる（空のものは飛ばす）。
+`detail` は argv、stderr、stdout の順に**全文**を並べる（空のものは飛ばす）。**stderr が
+stdout より前**なのは、履歴のモーダルが入りきらない `detail` を `…` で切る（07）ため ——
+長くなりうる stdout（複数の cherry-pick が積んだ行、status の一覧）を前に置くと、stderr の
+理由が箱から押し出される。
 
 **置き場所は `app`。** 答えるのが「mewgit のどのキーを押すか」で、`f` / `p` / `P` を
 知っているのは `app` だけ（`git_exec` に置くと `moves_refs()` と同じ、層をまたぐ述語に

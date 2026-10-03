@@ -81,6 +81,9 @@ CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace -
 - ブランチ: `feat/<topic>`、`fix/<topic>`。`github:git-workflow` スキルは `<type>-<subject>` を指示するが、こちらを優先する。main へは PR 経由
 - コミットメッセージ: Conventional Commits（`feat(graph): ...`、`fix(git_exec): ...`）。scope はモジュール名
 - `docs/plan.md` のタスクを完了したらチェックを付けて同じコミットに含める
+- **リリースは release-please の release PR をマージして切る。** タグを手で打たない、
+  `Cargo.toml` の版を手で上げない（release PR が `Cargo.toml` と `Cargo.lock` を書き換える）。
+  CHANGELOG はコミットメッセージから作られるので、Conventional Commits の type がそのまま節になる
 - **1 つのタスクを複数の PR に割ると決めたら、その割り方を `docs/plan.md` に反映し、
   なぜそう割るかを設計書に書く。** 会話の中だけで決めると、次のセッションは plan.md の
   元の粒度を読んで再び 1 本にまとめる。割った理由が設計書にある制約から来ているなら

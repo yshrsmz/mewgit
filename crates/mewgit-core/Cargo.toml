@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "Core logic for mewgit (git reading, git CLI execution, GitHub integration, graph layout)"
 
 [dependencies]

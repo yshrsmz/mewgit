@@ -1,0 +1,100 @@
+name: Release
+
+# main への push ごとに release-please が release PR を起こし直し、その PR をマージした
+# push でタグと GitHub Release を作る。バイナリは同じワークフローの後段で作って Release に
+# 載せる。**タグの push を別のワークフローで拾う形にはしない** —— 拾えるのはタグを作った
+# トークンが GITHUB_TOKEN でない場合だけで、トークンの差し替えで黙ってビルドが止まる。
+#
+# このファイルを触る PR では build だけを走らせる（Release には載せない）。runner の
+# 都合（arm の Linux が回るか、macOS の setup が通るか）はタグを切るまで分からないので、
+# ここで先に踏む。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # release-please の途中で止めると、タグだけ打って Release が無い形が残りうる。
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      # GITHUB_TOKEN で作った PR には pull_request の CI が走らない。release PR は
+      # Cargo.toml / Cargo.lock の版を書き換えるので、CI を通してからマージしたい。
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+  # macOS runner は 1 分 $0.062（ubuntu-latest の 10.33 倍。ci.yml）。走るのはリリースと
+  # このファイルを触る PR のときだけなので、ci.yml のように落とす対象にはしない。
+  build:
+    needs: release-please
+    # release-please を飛ばした PR でも走らせる。`always()` が無いと、needs が skipped の
+    # 時点でこのジョブも skipped になる。
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || needs.release-please.outputs.release_created == 'true')
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - run: cargo build --release --locked -p mewgit
+      - name: Package
+        id: package
+        env:
+          TARGET: ${{ matrix.target }}
+          # PR ではタグが無いので、ファイル名が組めることだけを確かめる。
+          TAG: ${{ needs.release-please.outputs.tag_name || 'pr' }}
+        run: |
+          name="mewgit-${TAG}-${TARGET}"
+          mkdir "$name"
+          cp target/release/mewgit README.md LICENSE-APACHE LICENSE-MIT "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          cat "$name.tar.gz.sha256"
+          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+      - name: Upload to the release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber -R "$GITHUB_REPOSITORY"

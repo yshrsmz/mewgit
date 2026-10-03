@@ -109,7 +109,7 @@ impl AppState {
   （`Modal::NoticeLog`。下）が読む
 - ステータスバーは**最新の通知とキーヒントの両方**を出す（07）。通知で置き換えると、
   起動時の設定警告 1 件でヒントが二度と戻らなくなる
-- **`message` は「次に何をすればよいか」、`detail` は証拠**（argv と stderr）。
+- **`message` は「次に何をすればよいか」、`detail` は証拠**（argv と git の stdout・stderr）。
   ステータスバーが描くのは `message` の 1 行目だけなので、そこを証拠で埋めると
   案内が画面から消える（下の「失敗の案内文」）
 - **ステータスバーの通知は次の入力で下ろす**（M6。2026-09-26 に決めた）。下ろすのは
@@ -133,7 +133,7 @@ impl AppState {
   libgit2 の `git_signature_now` に数えさせ、日時のクレートは足さない）
 - **全部を見るのは `Modal::NoticeLog`**（`L`。どのペインでも効く）。新しい順の一覧と、
   カーソル行の `message` の全文と `detail` を出す（07 の「NoticeLog モーダル」）。
-  **ステータスバーでは読めない証拠（argv と stderr）が画面に出るのはここだけ**で、
+  **ステータスバーでは読めない証拠（argv と git の出力）が画面に出るのはここだけ**で、
   不変ルール 4 の「UI まで届ける」はこのモーダルで閉じる
 - **選んでいる通知は番号で持つ**（`Notice.seq`。`push_notice` が積んだ順に振る）。
   **添字で持たない** —— 開いているあいだに非同期の完了が 1 件積むと、添字の下の通知が
@@ -2466,10 +2466,14 @@ pub struct PushRejection {
 
 ### 失敗の案内文
 
-`git` の失敗は `exec_finished` が通知に積む。**`message` に入れるのは案内文**
-（`ExecErrorKind` と `GitOp` から決める純粋関数 `exec_advice`）で、案内が無い kind では
-`ExecError` の `Display`（`git の実行に失敗しました: git <argv>`）に落ちる。
-`detail` は今までどおり argv + stderr。
+`git` の失敗は `exec_finished` が通知に積む。**`message` は上から順に決める** ——
+(1) 案内文（`ExecErrorKind` と `GitOp` から決める純粋関数 `exec_advice`）、
+(2) 案内が無く **stderr が空なら stdout の最後の行**（空行を飛ばして trim したもの）、
+(3) どちらも無ければ `ExecError` の `Display`（`git の実行に失敗しました: git <argv>`）。
+`detail` は argv、stderr、stdout の順に**全文**を並べる（空のものは飛ばす）。**stderr が
+stdout より前**なのは、履歴のモーダルが入りきらない `detail` を `…` で切る（07）ため ——
+長くなりうる stdout（複数の cherry-pick が積んだ行、status の一覧）を前に置くと、stderr の
+理由が箱から押し出される。
 
 **置き場所は `app`。** 答えるのが「mewgit のどのキーを押すか」で、`f` / `p` / `P` を
 知っているのは `app` だけ（`git_exec` に置くと `moves_refs()` と同じ、層をまたぐ述語に
@@ -2490,7 +2494,11 @@ pub struct PushRejection {
 | `NoChanges` + revert（continue・skip・複数の開始） | `m` から skip する（**`Warn`**） |
 | `HeadMoved` + `RebaseInteractive` | 組んだあとに履歴が動いた。`i` から開き直す（**`Warn`**、48 セル） |
 | `HeadMoved` + `RebaseContinue { reword: Some }` | 止まったあとに HEAD が動いた。`m` から開き直す（**`Warn`**、48 セル） |
-| それ以外 | 無し（`Display` に落とす） |
+| `Unmerged` + rebase / cherry-pick / revert の continue | 未解消のまま。`git add` したら `m` から continue（**`Warn`**、44 セル） |
+| `Unmerged` + `Commit` | 未解消のまま。`git add` してから commit（**`Warn`**、37 セル） |
+| `Unmerged` + `StashPush` | コンフリクトを解消してから stash（**`Warn`**。手前の断りと同じ文） |
+| `Unmerged` + `StashApply` / `StashPop` | コンフリクトを解消してから stash を戻す（**`Warn`**、41 セル） |
+| それ以外 | 無し（stderr が空なら stdout の最後の行、そうでなければ `Display`） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
   `stale info` で断られた形は fetch を勧める側（lease は fetch してからでないと通らない。
@@ -2542,8 +2550,8 @@ pub struct PushRejection {
   revert は同じ文言で**進行中のまま**止まる（03）ので、「取り消し済み」と言うと進行中の
   操作を隠す。continue / skip と複数の開始には `Empty` と同じ「変更が空で止まった。m から skip」を
   出す（複数の途中が空の形は `sequencer/` だけが残り、continue でも skip でも抜けられる。
-  案内は skip に揃える）。**`git commit` も同じ文言を出すが、あちらは `Display` のまま**。**stderr が
-  空の失敗は理由が画面に出ない**（`ExecError` が stdout を運ばない。`docs/plan.md` の M6）
+  案内は skip に揃える）。**`git commit` も同じ文言を出すが、案内は付けない** —— stderr が
+  空なので、要約行には stdout の結び（`no changes added to commit …`）がそのまま出る（下）
 - **`Conflict` は `Warn` で出す。** continue / skip のあとに次のコミットでまた止まった
   形で（03 の「continue / skip / abort の終わり方」）、進行中操作は残ってバッジの数が
   進む。**想定どおりの停止を赤で出すと、壊れたように読める。** 案内は「`git add` したら」
@@ -2576,6 +2584,28 @@ pub struct PushRejection {
   実装」）。こちらは rebase が止まったままなので必ずバッジと並ぶ。失敗のあとの status が
   見分け直すので、**開き直したメニューはいまの HEAD で組まれる**（端末で amend し直して
   いれば素の continue）。文は「止まったあとに HEAD が動いた。m から開き直して」（46 セル）
+- **stderr が空の失敗は stdout の最後の行を要約にする**（2026-10-03）。git は理由を
+  stdout にだけ書くことがあり（何も stage していない `git commit`、未解消のままの
+  `rebase --continue`、複数の revert が空で止まった形。03 の「エラー分類」）、
+  `Display` に落とすと **argv だけの赤い通知になって理由が画面に出なかった**。
+  **最後の行**なのは、git の stdout が status の一覧 → 結びの順に並ぶから。
+  英語のまま出す —— 訳すと文言の数だけ表が要り、表に無い文言では結局 argv に戻る。
+  71 セルを超えれば `…` で切れるが、`detail` に全文がある。
+  **stderr があるときは使わない** —— stderr の最後の行は `hint:` のことが多く
+  （`advice.*` で消える行でもある）、理由の行を選べない。**非対称は残る**:
+  stderr にだけ理由が出る失敗（`would be overwritten` など）は今までどおり
+  `Display` で、理由は `L` で読む（07 の「Branches ペイン」）。stderr から理由の行を
+  選ぶ規則は op ごとの実測が要るので `docs/plan.md` の M6 に送った
+- **`Unmerged` は「解消してから」を案内する**（2026-10-03）。未解消のファイルがあると、
+  stash の 3 つは stdout に `<path>: needs merge`・stderr に `could not write index` だけを
+  書き、`rebase --continue` は stdout に `needs merge` と結びを書いて **stderr は空**、
+  cherry-pick / revert の continue と `commit` は stderr に `Committing is not possible
+  because you have unmerged files` を書く（03 の「エラー分類」）。**入口で文言が割れても
+  同じ状態なので、案内も揃える** —— rebase だけ案内が出て cherry-pick は赤い argv、では
+  同じ `m` を押した結果が食い違う。stash の push は鮮度のある snapshot なら手前で断る
+  （上の「stash の書き込み」）ので、ここに来るのは外で作った unmerged を読む前だけ。
+  **`Warn`** —— 何も書き込まれず、解消すれば済む。continue の文は進行中操作のバッジと
+  並ぶので 48 セルに収める
 - **argv は画面から退く。** これまでステータスバーに出ていた `git <argv>` は
   `detail` の 1 行目に移り、`L` の履歴（上の「通知」）で読む。**1 行目を 2 つで分けない**
   —— 案内文は端末の幅いっぱいまで使う前提で書いてある（上）ので、argv を前に置くと

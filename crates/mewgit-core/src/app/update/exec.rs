@@ -28,7 +28,7 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     if let Err(err) = &done.result {
         // **要約行は案内文、証拠は `detail`。** ステータスバーは `message` の 1 行目
         // しか描かない（07）ので、そこを argv で埋めると案内が画面に出ない
-        // （01 の「失敗の案内文」）。
+        // （01 の「失敗の案内文」）。案内が無ければ [`exec_summary`] に落とす。
         let detail = exec_detail(err);
         let advice = exec_advice(&done.op, err);
         // **中断は失敗ではない。** 押した本人が止めたものを `Error` で出すと、
@@ -37,7 +37,8 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         // 残ってバッジの数が進む（01 の「失敗の案内文」）。**変更が空で止まった pick も**
         // 進行中操作が残り、出口は `m` の skip にある。**取り消す変更が無かった revert** は
         // 何も始まらずに終わっただけで、壊れたものが無い。**HEAD が動いて断った
-        // interactive rebase も**始まっておらず、`i` から開き直せば済む。
+        // interactive rebase も**始まっておらず、`i` から開き直せば済む。**未解消の
+        // ファイルで断られた書き込みも**何も書いておらず、解消すれば済む。
         let level = match err {
             ExecError::Canceled { .. } => NoticeLevel::Info,
             // git を起こしていない。読み直した差分で押し直せば済む。
@@ -47,12 +48,13 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
                     ExecErrorKind::Conflict
                     | ExecErrorKind::Empty
                     | ExecErrorKind::NoChanges
-                    | ExecErrorKind::HeadMoved,
+                    | ExecErrorKind::HeadMoved
+                    | ExecErrorKind::Unmerged,
                 ..
             } if advice.is_some() => NoticeLevel::Warn,
             ExecError::NoResult { .. } | ExecError::Failed { .. } => NoticeLevel::Error,
         };
-        let message = advice.map_or_else(|| err.to_string(), str::to_string);
+        let message = advice.map_or_else(|| exec_summary(err), str::to_string);
         state.push_notice(level, message, Some(detail));
     }
 
@@ -308,15 +310,23 @@ fn ref_may_have_moved(result: &Result<ExecOutput, ExecError>) -> bool {
     }
 }
 
-/// 通知に添える詳細。実行した argv と stderr を握りつぶさない（不変ルール 4）。
+/// 通知に添える詳細。実行した argv と git の出力を握りつぶさない（不変ルール 4）。
+///
+/// **stdout も載せる。** 理由が stdout にしか出ない失敗がある（`needs merge` は
+/// stderr が `could not write index` だけでも stdout に出る。03 の「エラー分類」）。
+/// **順は argv、stderr、stdout** —— 履歴のモーダルは入りきらない `detail` を末尾から
+/// `…` で切る（07）ので、長くなりうる stdout（複数の cherry-pick が積んだ行、status の
+/// 一覧）を前に置くと stderr の理由が箱から押し出される。
 fn exec_detail(err: &ExecError) -> String {
     let mut detail = err.command_line();
     match err {
-        ExecError::Failed { stderr, .. } => {
-            let stderr = stderr.trim_end();
-            if !stderr.is_empty() {
-                detail.push('\n');
-                detail.push_str(stderr);
+        ExecError::Failed { stdout, stderr, .. } => {
+            for output in [stderr, stdout] {
+                let output = output.trim_end();
+                if !output.is_empty() {
+                    detail.push('\n');
+                    detail.push_str(output);
+                }
             }
         }
         // **どのファイルかは argv に無い**（パッチは標準入力）。要約行にも入れていない。
@@ -332,10 +342,27 @@ fn exec_detail(err: &ExecError) -> String {
     detail
 }
 
+/// 案内文の無い失敗の要約行（01 の「失敗の案内文」）。
+///
+/// **stderr が空なら stdout の最後の行。** git は理由を stdout にだけ書くことがあり
+/// （何も stage していない `commit` など）、`Display` に落とすと argv だけの通知になって
+/// 理由が画面に出ない。git の stdout は status の一覧 → 結びの順に並ぶので最後の行を採る。
+/// **stderr があるときは使わない** —— stderr の最後の行は `hint:` のことが多く、理由の行を
+/// 選べない（そちらは `L` の履歴で読む。07）。
+fn exec_summary(err: &ExecError) -> String {
+    match err {
+        ExecError::Failed { stdout, stderr, .. } if stderr.trim().is_empty() => stdout
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .map_or_else(|| err.to_string(), str::to_string),
+        _ => err.to_string(),
+    }
+}
+
 /// 通知の要約行。失敗の種別から「次に何をすればよいか」を出す（01 の「失敗の案内文」）。
 ///
-/// `None` は案内が無いということ。呼び出し側は [`ExecError`] の `Display`
-/// （`git の実行に失敗しました: git <argv>`）に落とす。
+/// `None` は案内が無いということ。呼び出し側は [`exec_summary`] に落とす。
 ///
 /// **`op` まで見るのは非 FF のため。** 同じ `(non-fast-forward)` でも、force push が
 /// lease に断られた形（fetch を勧める）、`-u` の提案から入って force に上げる経路が
@@ -382,7 +409,59 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
             }
             _ => None,
         },
+        ExecErrorKind::Unmerged => unmerged_advice(op),
         ExecErrorKind::Other => None,
+    }
+}
+
+/// 未解消のファイルで断られたときの案内（[`ExecErrorKind::Unmerged`]。01 の「失敗の
+/// 案内文」）。**入口で git の文言が割れても同じ状態なので、案内を揃える** —— rebase の
+/// continue は stdout に、cherry-pick / revert の continue は stderr に理由を書く。
+///
+/// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由 —— 書き込みを足したときに、
+/// 未解消のファイルで git が断る操作かを選ばせる。**git が別の文言で断る op**（`switch` の
+/// `you need to resolve your current index first` など）は `Unmerged` にならないので `None`。
+fn unmerged_advice(op: &GitOp) -> Option<&'static str> {
+    match op {
+        GitOp::RebaseContinue { .. } | GitOp::CherryPickContinue | GitOp::RevertContinue => {
+            Some("未解消のまま。git add したら m から continue")
+        }
+        GitOp::Commit { .. } => Some("未解消のまま。git add してから commit"),
+        // 鮮度のある snapshot なら手前で断る（`refuse_by_held_values`）。ここに来るのは
+        // 外で作った unmerged を読む前だけなので、同じ文で断る。
+        GitOp::StashPush { .. } => Some(super::stash::UNMERGED),
+        GitOp::StashApply(_) | GitOp::StashPop(_) => {
+            Some("コンフリクトを解消してから stash を戻して")
+        }
+        GitOp::Stage(_)
+        | GitOp::Unstage(_)
+        | GitOp::StageHunk(_)
+        | GitOp::UnstageHunk(_)
+        | GitOp::DiscardHunk(_)
+        | GitOp::Discard(_)
+        | GitOp::DiscardUntracked(_)
+        | GitOp::DiscardAdded(_)
+        | GitOp::BranchCreate { .. }
+        | GitOp::Switch(_)
+        | GitOp::BranchDelete { .. }
+        | GitOp::BranchRename { .. }
+        | GitOp::Fetch { .. }
+        | GitOp::Pull { .. }
+        | GitOp::Push { .. }
+        | GitOp::RebaseInteractive { .. }
+        | GitOp::RebaseSkip
+        | GitOp::RebaseAbort
+        | GitOp::CherryPick(_)
+        | GitOp::CherryPickSkip
+        | GitOp::CherryPickAbort
+        | GitOp::Revert { .. }
+        | GitOp::RevertSkip
+        | GitOp::RevertAbort
+        | GitOp::MergeAbort
+        | GitOp::StashDrop(_)
+        | GitOp::SetAccount { .. }
+        | GitOp::UnsetAccount
+        | GitOp::CheckoutPr(_) => None,
     }
 }
 
@@ -507,7 +586,7 @@ fn empty_advice(op: &GitOp) -> Option<&'static str> {
 /// continue は同じ理由で断られるので出口は skip。**複数の revert の開始も途中が空だと
 /// `sequencer/` を残して止まる**（continue でも skip でも抜けられるが、案内は skip に
 /// 揃える。03 の「複数のコミットの cherry-pick / revert」）。**commit も同じ文言を出す**が、
-/// あちらは `Display` のまま。
+/// 案内は付けない（stderr が空なので、要約行に stdout の結びがそのまま出る。[`exec_summary`]）。
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由。
 fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
@@ -640,6 +719,7 @@ mod tests {
             exec_done(Err(ExecError::Failed {
                 argv: vec!["add".into(), "--".into(), "a.txt".into()],
                 code: Some(128),
+                stdout: String::new(),
                 stderr: "fatal: pathspec 'a.txt' did not match any files".to_string(),
                 kind: ExecErrorKind::Other,
             })),
@@ -802,7 +882,38 @@ mod tests {
         };
         let no_changes = [GitOp::RevertContinue, GitOp::RevertSkip, several]
             .map(|op| (op, ExecErrorKind::NoChanges, "m から skip"));
-        for (op, kind, way) in conflict.into_iter().chain(empty).chain(no_changes) {
+        // 未解消のまま押した形（03 の「エラー分類」）。rebase は stdout に、cherry-pick /
+        // revert は stderr に理由を書くが、案内は揃える。stash と commit は進行中操作の
+        // 途中（merge の途中の commit など）でも押せるので、同じ幅に収める。
+        let unmerged = [
+            (GitOp::RebaseContinue { reword: None }, "m から continue"),
+            (GitOp::CherryPickContinue, "m から continue"),
+            (GitOp::RevertContinue, "m から continue"),
+            (
+                GitOp::Commit {
+                    message: "m".to_string(),
+                    amend: false,
+                },
+                "git add してから commit",
+            ),
+            (
+                GitOp::StashPush {
+                    message: None,
+                    include_untracked: true,
+                    paths: None,
+                },
+                "解消してから stash して",
+            ),
+            (GitOp::StashApply(0), "解消してから stash を戻して"),
+            (GitOp::StashPop(0), "解消してから stash を戻して"),
+        ]
+        .map(|(op, way)| (op, ExecErrorKind::Unmerged, way));
+        for (op, kind, way) in conflict
+            .into_iter()
+            .chain(empty)
+            .chain(no_changes)
+            .chain(unmerged)
+        {
             let mut state = state();
             finish_exec(&mut state, op.clone(), Err(failed_with(kind)));
 
@@ -957,22 +1068,75 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolved_continue_stays_red_with_what_git_said() {
-        // 解消せずに continue した形は `Other`（stdout の `needs merge`）。git の文言が
-        // そのまま理由なので、案内に差し替えない。
+    fn an_unmerged_refusal_of_an_op_git_words_differently_stays_red() {
+        // `Unmerged` の案内は、git が未解消で断ると数えた op だけ（`unmerged_advice`）。
+        // `switch` は別の文言で断るので、分類が外れて来ても「解消してから」とは言わない。
         let mut state = state();
         finish_exec(
             &mut state,
-            GitOp::RebaseContinue { reword: None },
-            Err(failed_with(ExecErrorKind::Other)),
+            GitOp::Switch("topic".to_string()),
+            Err(failed_with(ExecErrorKind::Unmerged)),
         );
 
         let notice = state.notices.back().expect("通知がありません");
         assert_eq!(notice.level, NoticeLevel::Error);
-        assert!(
-            !notice.message.contains("m から continue"),
-            "{}",
-            notice.message
+        assert!(!notice.message.contains("解消"), "{}", notice.message);
+    }
+
+    #[test]
+    fn a_failure_with_an_empty_stderr_is_summed_up_by_the_last_line_of_stdout() {
+        // 何も stage していない `git commit`（git 2.56.0 の出力）。stderr が空なので、
+        // `Display` に落とすと argv だけの通知になる（01 の「失敗の案内文」）。
+        let stdout = "On branch main\nChanges not staged for commit:\n\tmodified:   a\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\n\n";
+        let failed = |stderr: &str| ExecError::Failed {
+            argv: vec!["commit".into(), "-m".into(), "m".into()],
+            code: Some(1),
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            kind: ExecErrorKind::NoChanges,
+        };
+        let commit = GitOp::Commit {
+            message: "m".to_string(),
+            amend: false,
+        };
+
+        let mut state = state();
+        finish_exec(&mut state, commit.clone(), Err(failed("")));
+        let notice = state.notices.back().expect("通知がありません");
+        // 末尾の空行は飛ばす。
+        assert_eq!(
+            notice.message,
+            "no changes added to commit (use \"git add\" and/or \"git commit -a\")"
+        );
+        assert_eq!(notice.level, NoticeLevel::Error);
+
+        // **stderr があれば使わない**（最後の行が `hint:` のことが多い）。
+        finish_exec(&mut state, commit, Err(failed("hint: 何か\n")));
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.message, "git の実行に失敗しました: git commit -m m");
+    }
+
+    #[test]
+    fn the_detail_carries_stderr_before_stdout() {
+        // stash を unmerged のまま押した形（git 2.56.0 の出力）。理由は stdout にしか無い
+        // （03 の「エラー分類」）。
+        let mut state = state();
+        finish_exec(
+            &mut state,
+            GitOp::StashApply(0),
+            Err(ExecError::Failed {
+                argv: vec!["stash".into(), "apply".into(), "stash@{0}".into()],
+                code: Some(128),
+                stdout: "b: needs merge\n".to_string(),
+                stderr: "error: could not write index\n".to_string(),
+                kind: ExecErrorKind::Unmerged,
+            }),
+        );
+
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(
+            notice.detail.as_deref(),
+            Some("git stash apply stash@{0}\nerror: could not write index\nb: needs merge")
         );
     }
 
@@ -1484,6 +1648,7 @@ mod tests {
         assert!(!ref_may_have_moved(&Err(ExecError::Failed {
             argv: vec!["commit".into()],
             code: Some(1),
+            stdout: String::new(),
             stderr: "pre-commit hook が断りました".to_string(),
             kind: ExecErrorKind::Other,
         })));

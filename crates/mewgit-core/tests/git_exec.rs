@@ -99,6 +99,14 @@ fn failure_kind(err: &ExecError) -> ExecErrorKind {
     }
 }
 
+/// `git` が非 0 で終わったときの stdout と stderr。それ以外の失敗なら panic する。
+fn failure_output(err: &ExecError) -> (&str, &str) {
+    let ExecError::Failed { stdout, stderr, .. } = err else {
+        panic!("git が走っていません: {err:?}");
+    };
+    (stdout, stderr)
+}
+
 #[tokio::test]
 async fn stage_and_unstage_a_tracked_file() {
     let repo = TestRepo::init();
@@ -534,6 +542,59 @@ async fn a_conflicting_cherry_pick_is_classified_as_conflict() {
         .await
         .expect("abort できませんでした");
     assert_eq!(repo.porcelain(), "");
+}
+
+#[tokio::test]
+async fn unresolved_files_refuse_continue_and_stash_as_unmerged() {
+    // 未解消のファイルを残したまま押した形（03 の「エラー分類」）。git の文言は入口で割れる
+    // —— rebase の continue は stdout にだけ、stash は stdout の `needs merge` と stderr の
+    // `could not write index`、cherry-pick の continue は stderr に理由を書く。
+    let repo = TestRepo::init();
+    repo.commit_bytes("file.txt", b"base\n", "base");
+    repo.git(&["switch", "-qc", "side"]);
+    let side = repo.commit_bytes("file.txt", b"side\n", "side");
+    repo.git(&["switch", "-q", "main"]);
+    repo.commit_bytes("file.txt", b"main\n", "main");
+    let runner = repo.runner();
+
+    assert!(
+        !repo.try_git(&["rebase", "side"]),
+        "コンフリクトするはずです"
+    );
+    let err = runner
+        .run(&GitOp::RebaseContinue { reword: None })
+        .await
+        .expect_err("未解消のまま continue できてしまいました");
+    assert_eq!(failure_kind(&err), ExecErrorKind::Unmerged);
+    let (stdout, stderr) = failure_output(&err);
+    assert!(stdout.contains("file.txt: needs merge"), "{stdout}");
+    assert_eq!(stderr, "");
+
+    let err = runner
+        .run(&GitOp::StashPush {
+            message: None,
+            include_untracked: true,
+            paths: None,
+        })
+        .await
+        .expect_err("未解消のまま stash できてしまいました");
+    assert_eq!(failure_kind(&err), ExecErrorKind::Unmerged);
+    let (stdout, _) = failure_output(&err);
+    assert!(stdout.contains("file.txt: needs merge"), "{stdout}");
+
+    runner
+        .run(&GitOp::RebaseAbort)
+        .await
+        .expect("abort できませんでした");
+    assert!(
+        !repo.try_git(&["cherry-pick", &side.to_string()]),
+        "コンフリクトするはずです"
+    );
+    let err = runner
+        .run(&GitOp::CherryPickContinue)
+        .await
+        .expect_err("未解消のまま continue できてしまいました");
+    assert_eq!(failure_kind(&err), ExecErrorKind::Unmerged);
 }
 
 #[tokio::test]

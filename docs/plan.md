@@ -405,7 +405,8 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 ## M6: 仕上げ
 
 **順序**（2026-10-03 にユーザーと決めた）—— (1) 黙って壊れる・理由が出ない穴を先に塞ぐ:
-hook が reword を断ったあとの continue → stderr が空の失敗の理由 → `-u` の提案を push の
+hook が reword を断ったあとの continue → stderr が空の失敗の理由 → stderr にだけ理由がある
+失敗の要約（2026-10-03 に前のタスクから割った）→ `-u` の提案を push の
 規則に揃える → アカウント書き込み中の `A` を断る → 消えたバイナリのエディタ（まず実測）→
 git の最低版。(2) README とリリースワークフローで 0.1 を切る。(3) そのあと端末幅 < 100 の
 レイアウト、`1`〜`5`、ロケールと `graph.ascii`、意図的な巻き戻しの force push。
@@ -438,17 +439,28 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       足さず、hook の stderr が通知の `detail` に出る（rebase は止まったまま）。この形の
       skip はコミットを捨てないので、メニューの説明も変えた（01）
 
-- [ ] **stderr が空の git の失敗に理由を出す。** `ExecError::Failed` は stdout を
-      運ばないので、stdout にだけ理由を書く失敗（`git commit` で stage したものが無い、
-      複数の revert が空で止まった形など。03 の「revert の開始」）は、通知にも `L` の
-      履歴にも argv しか出ない。**塞ぐには `Failed` に stdout を足し、stderr が空なら
-      stdout の結びの行を `detail` と要約に使う**（01 の「失敗の案内文」）。1 本だけの
-      revert は `NoChanges` の案内で先に塞いである。**stderr が空でない形は別に要る** ——
-      外（端末の `stash pop` など）で作った unmerged を snapshot が知らないまま `z` / `Z` が
-      git に届くと、理由は stdout の `needs merge` にだけ出て、stderr は
-      `could not write index` だけ（03 の「stash push のパス指定」）。塞ぐには
-      `classify` で `needs merge` を種別に分けて案内する（`refuse_by_held_values` の門は mewgit の
-      snapshot が見えている範囲でしか効かない）
+- [x] **stderr が空の git の失敗に理由を出す。** `ExecError::Failed` は stdout を
+      運ばなかったので、stdout にだけ理由を書く失敗（`git commit` で stage したものが無い、
+      未解消の `rebase --continue` など）は、通知にも `L` の履歴にも argv しか出なかった。
+      **`Failed` に stdout を足し、`detail` は argv → stderr → stdout の全文、要約行は
+      案内が無く stderr が空なら stdout の最後の行**にした（01 の「失敗の案内文」）。
+      **stderr があっても理由が stdout にある形**（外で作った unmerged の `z` / `Z`、
+      stash の apply / pop。stderr は `could not write index` だけ）は `classify` に
+      `Unmerged` を足して案内する。**同じ未解消でも cherry-pick / revert の continue と
+      `commit` は stderr に別の文言を書く**ので、それも `Unmerged` に入れて案内を揃えた
+      （rebase だけが案内付きになるのを避けるため。03 の「エラー分類」に実測、git 2.56.0）。
+      stderr にだけ理由がある失敗（`would be overwritten` など）の要約は `Display` のまま
+      （下の行へ送った）
+- [ ] **stderr にだけ理由がある失敗の要約行に、その理由を出す。** いまの要約は案内が
+      無ければ「stderr が空なら stdout の最後の行、そうでなければ argv」なので、いちばん
+      よく出る赤い通知（`switch` の `would be overwritten`、`branch -d` の `not fully merged`、
+      `add` の `pathspec did not match`）が argv だけになり、理由は `L` でしか読めない
+      （01 の「失敗の案内文」）。**選び方は op ごとに stderr を実測してから決める** ——
+      「最初の `error:` / `fatal:` 行」は素直に見えるが、hook に断られた push は
+      ` ! [remote rejected] … (pre-receive hook declined)` を先に、`error: failed to push
+      some refs` を後に書くので、情報の薄いほうを採る。`hint:` の行（`advice.*` で消える）は
+      飛ばす。決めたら 01 の「失敗の案内文」の (2) と、07 の「Branches ペイン」の非対称の
+      注記を直す（2026-10-03 にユーザーと決めて送った）
 - [x] ステータスバーのキーヒント。**M4 の残りより先にやる**（2026-09-19 に決めた）。
       フッターを **2 行**にして 1 行目を通知、2 行目をフォーカス中のペインのキーにする。
       **キーの一覧は `app` に置く唯一の表**で、`Modal::Help`（M5 に前倒しした）と `config.keymap` が

@@ -263,6 +263,7 @@ impl Runner {
                 argv: command.argv,
                 code: output.status.code(),
                 kind: classify(&stdout, &stderr),
+                stdout,
                 stderr,
             })
         }
@@ -462,7 +463,18 @@ fn lossy(bytes: Vec<u8>) -> String {
 /// （01 の「失敗の案内文」）。`hint:` の行は `advice.diverging false` で消えるので、
 /// 見るのは `fatal:` の側。**広げても force は arm されない** —— 憶える
 /// `push_rejection` は `GitOp::Push` で門番している（01 の「force push」）。
+///
+/// **stdout から、git が写したコミットの行を先に除く**（[`echoes_a_commit`]）。複数の
+/// cherry-pick / revert は積んだぶんの `[main <oid>] <件名>` を stdout に並べるので、件名が
+/// `fix: nothing to commit` のようなコミットを積んでから別の理由で止まると、語ごとに
+/// 取り違える（03 の「エラー分類」）。語ごとに守らず入口で 1 度だけ除く。
 fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
+    let stdout = stdout
+        .lines()
+        .filter(|line| !echoes_a_commit(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let stdout = stdout.as_str();
     let has = |needle: &str| stderr.contains(needle) || stdout.contains(needle);
     let starts_a_line = |prefix: &str| {
         stdout
@@ -508,6 +520,10 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
         // dirty。03 の「revert の開始」）。**`Empty` より後ろ** —— 空で止まった
         // cherry-pick の stdout にも status が出るので、先に見ると進行中を見落とす。
         ExecErrorKind::NoChanges
+    } else if stdout.lines().any(|line| line.ends_with(": needs merge"))
+        || has("Committing is not possible because you have unmerged files")
+    {
+        ExecErrorKind::Unmerged
     } else if has("non-fast-forward")
         || has("fetch first")
         || has("stale info")
@@ -517,6 +533,19 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
     } else {
         ExecErrorKind::Other
     }
+}
+
+/// git がコミットを積んだときに stdout に写す行か（`[main 1a2b3c4] <件名>`、
+/// `[detached HEAD 1a2b3c4] …`、`[main (root-commit) 1a2b3c4] …`）。
+///
+/// **`[` で始まるだけでは決めない。** パスも `[` で始まりうる —— `[slug].txt` が未解消だと
+/// git は `[slug].txt: needs merge` と書く（git 2.56.0 で実測。`core.quotePath` でも
+/// 引用されない）。括弧の中の最後の語が oid（16 進）の形だけを写しと読む。
+fn echoes_a_commit(line: &str) -> bool {
+    line.strip_prefix('[')
+        .and_then(|rest| rest.split_once("] "))
+        .and_then(|(head, _)| head.rsplit_once(' '))
+        .is_some_and(|(_, oid)| oid.len() >= 4 && oid.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]
@@ -673,6 +702,73 @@ mod tests {
             "On branch main\nChanges not staged for commit:\n\tmodified:   a\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\n",
         ] {
             assert_eq!(classify(stdout, ""), ExecErrorKind::NoChanges, "{stdout}");
+        }
+    }
+
+    #[test]
+    fn unresolved_files_are_unmerged_whichever_stream_says_so() {
+        // 未解消のファイルを残したまま書き込んだ形（git 2.56.0 で実測。03 の「エラー分類」）。
+        // stash の 3 つは stdout に理由、stderr に `could not write index` だけ。
+        assert_eq!(
+            classify("b: needs merge\n", "error: could not write index\n"),
+            ExecErrorKind::Unmerged
+        );
+        assert_eq!(
+            classify(
+                "b: needs merge\nThe stash entry is kept in case you need it again.\n",
+                "error: could not write index\n"
+            ),
+            ExecErrorKind::Unmerged
+        );
+        // **パスが `[` で始まっても**写しの行と読まない（`/code-review` が踏んだ）。
+        assert_eq!(
+            classify(
+                "[slug].txt: needs merge\n",
+                "error: could not write index\n"
+            ),
+            ExecErrorKind::Unmerged
+        );
+        // rebase の continue は stderr が空。
+        assert_eq!(
+            classify(
+                "a: needs merge\nYou must edit all merge conflicts and then\nmark them as resolved using git add\n",
+                ""
+            ),
+            ExecErrorKind::Unmerged
+        );
+        // cherry-pick / revert の continue と commit は stderr に理由。
+        assert_eq!(
+            classify(
+                "U\ta\n",
+                "error: Committing is not possible because you have unmerged files.\nhint: Fix them up in the work tree, and then use 'git add/rm <file>'\nhint: as appropriate to mark resolution and make a commit.\nfatal: Exiting because of an unresolved conflict.\n"
+            ),
+            ExecErrorKind::Unmerged
+        );
+    }
+
+    #[test]
+    fn a_subject_echoed_by_git_is_not_read_as_the_reason() {
+        // 複数の cherry-pick がコミットを積んでから、`-m` の無い merge で止まった形（stderr は
+        // 03 の「複数のコミットの cherry-pick / revert」の実測）。積んだコミットの件名が
+        // stdout に写る。
+        let stderr = "error: commit 5d6e7f8 is a merge but no -m option was given.\nfatal: cherry-pick failed\n";
+        for subject in [
+            "fix: needs merge",
+            "fix: nothing to commit",
+            "x is now empty",
+        ] {
+            for head in [
+                "main 1a2b3c4",
+                "detached HEAD 93fb6f8",
+                "main (root-commit) 1a2b3c4",
+            ] {
+                let stdout = format!("[{head}] {subject}\n 1 file changed, 1 insertion(+)\n");
+                assert_eq!(
+                    classify(&stdout, stderr),
+                    ExecErrorKind::Other,
+                    "{head} {subject}"
+                );
+            }
         }
     }
 

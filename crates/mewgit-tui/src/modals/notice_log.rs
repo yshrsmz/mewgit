@@ -1,7 +1,7 @@
 //! 通知の履歴モーダルの描画。設計は `docs/design/07-ui.md` の「NoticeLog モーダル」。
 //!
 //! **ステータスバーでは読めないものを出す場所**（01 の「通知」）—— 日付と、
-//! `Notice.detail`（argv と stderr）と、`message` の 2 行目以降。
+//! `Notice.detail`（argv と git の出力）と、`message` の 2 行目以降。
 //!
 //! **`modals::picker` を使わない。** あちらは「本文 → 一覧」の順で、本文を先に測って
 //! 一覧に残りを渡す。ここは「一覧 → カーソル行の中身」で、中身がカーソルで入れ替わる
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn the_notice_under_the_cursor_shows_its_whole_message_and_detail() {
-        // **ステータスバーでは読めない argv と stderr が出るのはここだけ**（07）。
+        // **ステータスバーでは読めない argv と git の出力が出るのはここだけ**（07）。
         // 2 行目以降の `message` も同じ。
         let mut state = log_of(&[
             (

@@ -11,7 +11,7 @@ use crate::git_read::GitReadError;
 
 use super::prs;
 use super::remote::conventional_remote;
-use super::{exec_busy, submit_exec};
+use super::submit_exec;
 use crate::app::{
     AccountListing, AccountView, AppState, Cmd, GithubBlock, JobKind, Modal, NoticeLevel, Repick,
     RepoSnapshot, TargetState,
@@ -105,7 +105,7 @@ pub(super) fn account_picked(state: &mut AppState) -> Cmd {
     };
     // **[`submit_exec`] を通す。** ほかの `git` が走っているあいだは閉じない
     // —— 閉じてから `Cmd` が落とされると、選んだのに何も起きない。
-    submit_exec(state, GitOp::SetAccount { login })
+    submit_account_write(state, GitOp::SetAccount { login })
 }
 
 /// [`Modal::AccountPicker`] の `u`。`.git/config` の `mewgit.user` を外す。
@@ -121,22 +121,37 @@ pub(super) fn account_unset(state: &mut AppState) -> Cmd {
     if !view.is_unsettable() {
         return Cmd::None;
     }
-    submit_exec(state, GitOp::UnsetAccount)
+    submit_account_write(state, GitOp::UnsetAccount)
+}
+
+/// `.git/config` の `mewgit.user` を書く `op` を出し、**出せたら `account` を
+/// `Resolving` に落とす**（01 の「写しの寿命」）。
+///
+/// **書き込みが終わるまで待たない。** 終わってから落とすと、走っているあいだに
+/// `A` で**書き込み前の写しを持ったモーダルが開き直せる**（[`submit_exec`] は
+/// `git` を走らせる前に閉じる）。`Resolving` の `A` は通知に落ちるので、写しが
+/// 書き込みより長生きする窓がここで消える。**断られたら動かさない** —— 落としてから
+/// `Cmd` が消えると、頼み直す相手がいないまま `Resolving` に残る。
+fn submit_account_write(state: &mut AppState, op: GitOp) -> Cmd {
+    let cmd = submit_exec(state, op);
+    if matches!(cmd, Cmd::Exec(_)) {
+        leave_account(state);
+    }
+    cmd
 }
 
 /// [`Modal::AccountPicker`] の `r`。外で直したあとの再解決。
 ///
 /// 効く条件は [`AccountView::is_reresolvable`] の 1 本で、キーの案内
-/// （`[r] 解決し直す`）も同じものを読む（#53）。**ほかの `git` が走っている
-/// あいだは断る**（[`submit_exec`] と同じ [`exec_busy`]。**モーダルは閉じない**）——
-/// 書き込みを追い越すと、選んだ login が黙って無視される。**理由は 01 の
-/// 「外で直したあとの再解決」**（踏む手順は
-/// `r_is_refused_while_the_write_it_would_overtake_is_running`）。
+/// （`[r] 解決し直す`）も同じものを読む（#53）。**ほかの `git` が走っていても
+/// 断らない** —— 追い越すと困る書き込み（`mewgit.user` を書く 2 つ）が走っている
+/// あいだは `account` が `Resolving` で、このモーダルが開かない
+/// （[`submit_account_write`]。01 の「外で直したあとの再解決」）。
 pub(super) fn account_reresolve(state: &mut AppState) -> Cmd {
     let Some((view, _)) = account_picker(state) else {
         return Cmd::None;
     };
-    if !view.is_reresolvable() || exec_busy(state) {
+    if !view.is_reresolvable() {
         return Cmd::None;
     }
     resolve_again(state)
@@ -327,23 +342,6 @@ pub(super) fn account_resolved(
 ///
 /// **呼ぶ条件は 1 つ** —— `target` が決まっていて、決めたときの材料が変わったあと。
 /// 誰が呼ぶかはここに書かない（`resolve_again` で grep すれば出る）。
-///
-/// **開いている [`Modal::AccountPicker`] は閉じる。** [`Repick`] は
-/// [`AppState::account`] の写しを持っていて、ここから先その写しは嘘になる ——
-/// `submit_exec` は `git` を走らせる**前に**モーダルを閉じるので、走っている
-/// あいだに `A` をもう一度押せば、**書き込み前の写しを持ったモーダルが開き直せる**
-/// （`A` に実行中の断りは無い）。閉じないと、外した直後の画面が
-/// `[u] 指定を解除` を出したままになり、押すと既に無いキーへ
-/// `git config --unset` が飛ぶ。**そのとき出るのは argv だけの赤い通知** ——
-/// `exec_finished` は `Err` を必ず通知に積むが、`exec_advice` は
-/// `ExecErrorKind::Other` に案内を持たず、**exit 5 は stderr も stdout も空**（03 の実測表。
-/// stdout は git 2.56.0 で測った）なので、`ExecError::Failed` の `Display`（= 実行した
-/// argv）しか残らない。
-/// **「通知が出ない」ではなく「理由が出ない」**（独立したレビューが拾った）。
-/// `/code-review` が拾った。
-///
-/// **写しを禁じるのではなく、写しの寿命を切る。** `ui` のモーダル描画は `Modal`
-/// しか受け取らないので写し自体は要る（[`Repick`] の doc）。
 pub(super) fn resolve_again(state: &mut AppState) -> Cmd {
     // **`target` が無ければ何もしない。** `Degraded` は `target` が決まったあとにしか
     // 出ないのでここには来ないが、来たときに `Resolving` へ落とすと
@@ -351,8 +349,20 @@ pub(super) fn resolve_again(state: &mut AppState) -> Cmd {
     let Some(target) = state.repo.target.resolved().cloned() else {
         return Cmd::None;
     };
-    // **`target` を読めなかったときは閉じない。** そのときは `account` も動かさない
-    // ので、開いている写しはまだ本当のことを言っている。
+    leave_account(state);
+    Cmd::ResolveAccount(target)
+}
+
+/// 決まっていたアカウントを手放して `Resolving` に落とす。**落とす側はここ 1 本**
+/// （[`resolve_again`] と [`submit_account_write`]）。
+///
+/// **開いている [`Modal::AccountPicker`] は閉じる。** [`Repick`] は
+/// [`AppState::account`] の写しを持っていて、ここから先その写しは嘘になる ——
+/// 閉じないと、外した直後の画面が `[u] 指定を解除` を出したままになり、押すと
+/// 既に無いキーへ `git config --unset` が飛ぶ（argv だけの赤い通知が出る。
+/// 01 の「写しの寿命」）。**写しを禁じるのではなく、写しの寿命を切る** ——
+/// `ui` のモーダル描画は `Modal` しか受け取らないので写し自体は要る（[`Repick`] の doc）。
+fn leave_account(state: &mut AppState) {
     if matches!(state.modal, Some(Modal::AccountPicker { .. })) {
         state.modal = None;
     }
@@ -360,7 +370,6 @@ pub(super) fn resolve_again(state: &mut AppState) -> Cmd {
     // 出したままにすると、`*` / `R` の印だけが消えた前のアカウントの一覧が残る。
     state.prs.forget();
     state.account = AccountState::Resolving;
-    Cmd::ResolveAccount(target)
 }
 
 #[cfg(test)]
@@ -899,85 +908,58 @@ mod tests {
     }
 
     #[test]
-    fn a_picker_reopened_while_the_write_runs_does_not_outlive_the_write() {
-        // **`Repick` は `state.account` の写し**なので、`account` が動く瞬間に
-        // 閉じないと嘘を出したまま残る（`/code-review` が拾った）。
+    fn a_cannot_reopen_the_picker_while_the_account_write_runs() {
+        // **`Repick` は `state.account` の写し**なので、書き込みのあいだ開き直せると
+        // 書き込み前の写しが残る（#78 で `/code-review` が拾った）。**書き込みを
+        // 出した時点で `Resolving` に落とす**ので、`A` は通知に落ちる（01 の
+        // 「写しの寿命」）。
         //
-        // **開き直す経路を実際に踏む。** `submit_exec` が `git` を走らせる**前に**
-        // 閉じることと、閉じているあいだの `A` が `open_account` に届くことの両方が
-        // 前提なので、そこを `assert` で押さえてから開き直す —— モーダルを開いた
-        // まま `A` を押しても `update_key` が `modal_key` へ渡すだけで、**何も
-        // 起きないのに「開いている」は真になる**（最初に書いた見張りがその形で、
-        // 独立したレビューに拾われた）。
-        let mut state = state_resolved(AccountSource::GitConfig);
-        let _ = press(&mut state, 'A');
-        // **先に一覧を届ける。** 1 枚目を `Listed` にしておくと、開き直した
-        // 2 枚目が `Waiting` に戻ることが**別のモーダルである証拠**になる
-        // （どちらも `Waiting` だと、開き直していなくても同じ値になる）。
-        let _ = update(&mut state, Msg::AccountsListed(Ok(fake_logins(&["taro"]))));
-
-        let cmd = press(&mut state, 'u');
-        assert_eq!(cmd, Cmd::Exec(GitOp::UnsetAccount));
-        // ここで閉じているのが「開き直せる」の前提。
-        assert!(state.modal.is_none(), "submit_exec が閉じていない");
-
-        // 走っているあいだに開き直す。**書き込み前の写しが入る。**
-        // `Cmd::ListAccounts` が返ることが、**新しいモーダルが開いた**証拠
-        // （閉じていなければ `modal_key` に吸われて `Cmd::None` になる）。
-        let reopened = press(&mut state, 'A');
-        assert_eq!(reopened, Cmd::ListAccounts("github.com".to_string()));
-        assert!(
-            matches!(
-                &state.modal,
-                Some(Modal::AccountPicker {
-                    view: AccountView::Repick(Repick {
-                        logins: AccountListing::Waiting,
-                        ..
-                    }),
-                    ..
-                })
+        // **出口が 2 つある**（`u` → `UnsetAccount`、`Enter` → `SetAccount`）ので両方を踏む。
+        // 一覧を届けてから押すのは、`Enter` が候補を要るから。
+        // 確定のキー（`u` / `Enter`）と、それが出す書き込み。
+        type Confirm = fn(&mut AppState) -> Cmd;
+        let cases: [(Confirm, GitOp); 2] = [
+            (|state| press(state, 'u'), GitOp::UnsetAccount),
+            (
+                |state| press_code(state, KeyCode::Enter),
+                GitOp::SetAccount {
+                    login: "taro".to_string(),
+                },
             ),
-            "開き直した形になっていない: {:?}",
-            state.modal
-        );
+        ];
+        for (confirm, op) in cases {
+            let mut state = state_resolved(AccountSource::GitConfig);
+            let _ = press(&mut state, 'A');
+            let _ = update(&mut state, Msg::AccountsListed(Ok(fake_logins(&["taro"]))));
 
-        let _ = update(
-            &mut state,
-            exec_done_of(GitOp::UnsetAccount, Ok(fake_output())),
-        );
+            let cmd = confirm(&mut state);
+            assert_eq!(cmd, Cmd::Exec(op.clone()));
+            assert!(state.modal.is_none(), "{op:?}: 確定したのに開いたまま");
+            // **これが本体。** 終わるまで待つと、そのあいだ `A` が写しを開き直せる。
+            assert!(
+                matches!(state.account, AccountState::Resolving),
+                "{op:?}: {:?}",
+                state.account
+            );
 
-        // 閉じないと、外した直後の画面が `[u] 指定を解除` を出したままになり、
-        // 押すと既に無いキーへ `git config --unset` が飛ぶ。
-        assert!(state.modal.is_none(), "古い写しが残った");
-        assert!(matches!(state.account, AccountState::Resolving));
-    }
+            // **開き直す経路を実際に踏む**（`.claude/rules/testing.md`）。モーダルが
+            // 閉じていることは上で押さえたので、`A` は `open_account` に届く。
+            let reopened = press(&mut state, 'A');
+            assert_eq!(reopened, Cmd::None, "{op:?}: 一覧を引き直した");
+            assert!(state.modal.is_none(), "{op:?}: 書き込み前の写しが開いた");
+            assert_eq!(
+                state.notices.back().map(|n| n.message.clone()),
+                Some(GithubBlock::AccountResolving.notice()),
+                "{op:?}"
+            );
 
-    #[test]
-    fn the_same_holds_for_the_picker_that_saved_an_account() {
-        // 上の `u` と**別の経路**（`Enter` → `GitOp::SetAccount`）。候補が要るので
-        // 一覧を届けてから押す。閉じる判断は `resolve_again` の 1 箇所だが、
-        // **そこへ来る出口が 2 つある**ので両方を踏む。
-        let mut state = state_resolved(AccountSource::Probe);
-        let _ = press(&mut state, 'A');
-        let _ = update(
-            &mut state,
-            Msg::AccountsListed(Ok(fake_logins(&["taro_acme"]))),
-        );
-
-        let op = GitOp::SetAccount {
-            login: "taro_acme".to_string(),
-        };
-        let cmd = press_code(&mut state, KeyCode::Enter);
-        assert_eq!(cmd, Cmd::Exec(op.clone()));
-        assert!(state.modal.is_none(), "submit_exec が閉じていない");
-
-        let reopened = press(&mut state, 'A');
-        assert_eq!(reopened, Cmd::ListAccounts("github.com".to_string()));
-
-        let _ = update(&mut state, exec_done_of(op, Ok(fake_output())));
-
-        assert!(state.modal.is_none(), "古い写しが残った");
-        assert!(matches!(state.account, AccountState::Resolving));
+            // 書き込みが終われば解決し直す。
+            let cmd = update(&mut state, exec_done_of(op.clone(), Ok(fake_output())));
+            assert!(
+                issued(&cmd, &Cmd::ResolveAccount(fake_target())),
+                "{op:?}: {cmd:?}"
+            );
+        }
     }
 
     #[test]
@@ -1020,8 +1002,8 @@ mod tests {
         assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
         // **落とされたのではなく出た**、の区別（`Cmd` の戻り値だけからは読めない）。
         assert!(state.jobs.is_running(JobKind::ResolveAccount));
-        // 閉じるのは `resolve_again` の 1 箇所。開いたまま差し替えると、`Repick` で
-        // 塞いだ「書き込み前の写しを持つモーダル」を degraded 側に開け直す。
+        // 閉じるのは `leave_account` の 1 箇所。開いたまま差し替えると、`Resolving` の
+        // あいだも古い `DegradedReason` の写しが残る（01 の「写しの寿命」）。
         assert!(state.modal.is_none(), "写しが残った");
         assert!(matches!(state.account, AccountState::Resolving));
 
@@ -1044,47 +1026,22 @@ mod tests {
     }
 
     #[test]
-    fn r_is_refused_while_the_write_it_would_overtake_is_running() {
-        // **これが `exec_busy` を置いた理由の踏む手順**（01 の「外で直したあとの
-        // 再解決」）。断らないと書き込み前の `.git/config` を読む解決が先に走り、
-        // `exec_finished` が出す 2 通目は `issue` に同種として落とされるので、
-        // 選んだ login が黙って無視される。
-        let mut state = state_degraded(fake_ambiguous(&["taro_acme", "taro"]));
+    fn r_is_not_refused_while_an_unrelated_git_runs() {
+        // **追い越すと困るのは `mewgit.user` の書き込みだけ**で、そのあいだはこの
+        // モーダルが開かない（上の `a_cannot_reopen_the_picker_while_the_account_write_runs`）。
+        // stage が `.git/config` を書くことは無いので、読み取りの `r` を書き込み向けの
+        // 文言（「ほかの git 実行が終わるまで」）で断らない（01 の「外で直したあとの再解決」）。
+        let mut state = state_degraded(DegradedReason::NotLoggedIn {
+            host: "github.com".to_string(),
+        });
+        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
         let _ = press(&mut state, 'A');
-
-        let op = GitOp::SetAccount {
-            login: "taro_acme".to_string(),
-        };
-        assert_eq!(
-            press_code(&mut state, KeyCode::Enter),
-            Cmd::Exec(op.clone())
-        );
-        // ここで閉じているのが「開き直せる」の前提（`submit_exec`）。
-        assert!(state.modal.is_none(), "submit_exec が閉じていない");
-        // 走っているあいだに開き直す。**書き込み前の写しが入る。**
-        let reopened = press(&mut state, 'A');
-        assert_eq!(reopened, Cmd::None, "degraded は一覧を引き直さない");
-        assert!(state.modal.is_some(), "開き直していない");
 
         let cmd = press(&mut state, 'r');
 
-        // **これが本体。** 走っていたら、書き込み前の config を読む解決が先に出て
-        // いる。**`Cmd` の戻り値より先に見る** —— 落ちる理由を「断らなかった」では
-        // なく「追い越した」にしておかないと、断り方だけ直して穴が残る形で緑になる。
-        assert!(
-            !state.jobs.is_running(JobKind::ResolveAccount),
-            "書き込みを追い越した"
-        );
-        assert_eq!(cmd, Cmd::None);
-        // `submit_exec` と同じ断り方（モーダルは閉じない・理由を通知に出す）。
-        assert!(state.modal.is_some(), "落とされたのにモーダルを閉じた");
-        let notice = state.notices.back().expect("通知が無い");
-        assert!(notice.message.contains("ほかの git"), "{}", notice.message);
-
-        // 書き込みが終われば `resolve_again` が通る（落とされていない）。
-        let cmd = update(&mut state, exec_done_of(op, Ok(fake_output())));
-        assert!(issued(&cmd, &Cmd::ResolveAccount(fake_target())), "{cmd:?}");
+        assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
         assert!(state.jobs.is_running(JobKind::ResolveAccount));
+        assert!(state.notices.is_empty(), "{:?}", state.notices);
     }
 
     #[test]
@@ -1122,6 +1079,13 @@ mod tests {
         assert!(state.modal.is_some(), "落とされたのにモーダルを閉じた");
         let notice = state.notices.back().expect("通知が無い");
         assert!(notice.message.contains("ほかの git"), "{}", notice.message);
+        // **断られたら `account` を動かさない**（`submit_account_write`）。落とすと、
+        // 頼み直す相手がいないまま `Resolving` に残る。
+        assert!(
+            matches!(state.account, AccountState::Degraded(_)),
+            "{:?}",
+            state.account
+        );
     }
 
     /// `.git/config` を書き換える `GitOp` の 2 つ。**どちらも `Reload::Account`。**

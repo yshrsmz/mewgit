@@ -421,11 +421,12 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
     let typed = (title.text(), body.text(), base.text(), *draft);
     let chosen = heads.selected().cloned();
 
-    // **開いてから材料が消えることはある。** `A` で選び直すと `GitOp::SetAccount` が
-    // 走り、**その書き込みが終わった時点で** `exec_finished` → `resolve_again` が
-    // `account` を `Resolving` に戻す —— あれが閉じるのは `Modal::AccountPicker` だけ
-    // なので、`N` で開いた箱はそのまま残る。**ここで断らないと**、材料の無い
-    // `Cmd::CreatePr` がランタイムへ出て `no_material` に落ち、**打った本文が消える**。
+    // **叩く先は開いたときではなく確定のときに取る**（[`github_ready`]）。いまは
+    // 開いてから材料が消える経路が無い —— `account` を `Resolving` に落とすのは
+    // `Modal::AccountPicker` を開いているあいだの `Enter` / `u` / `r` だけで、その間
+    // この箱は開いていない（01 の「写しの寿命」）。それでも取り直すのは、開いたときの
+    // 答えを箱に写すと、あとで落とす経路が増えたときに材料の無い `Cmd::CreatePr` が
+    // ランタイムへ出て、**打った本文が消える**から。
     let Some(target) = github_ready(state) else {
         return Cmd::None;
     };
@@ -725,9 +726,8 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, enter_with, exec_done_of, fake_output, issued, load_branches, press, press_code,
-        remotes_of, repo_snapshot, state, state_with_commits, tab_to, type_text, with_branches,
-        ALT, NOTICE_CELLS,
+        cells, enter_with, issued, load_branches, press, press_code, remotes_of, repo_snapshot,
+        state, state_with_commits, tab_to, type_text, with_branches, ALT, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -742,7 +742,7 @@ mod tests {
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
-        deliver_pr_details, fake_account, fake_branch, fake_oid, fake_pull_request,
+        deliver_pr_details, fake_account, fake_branch, fake_logins, fake_oid, fake_pull_request,
         fake_rate_limit, fake_target, fetch_pr_details, pr_list_loaded as list_msg, put_on_branch,
         reply, start_pr_details, FAKE_NOW,
     };
@@ -1401,38 +1401,28 @@ mod tests {
     }
 
     #[test]
-    fn the_box_stays_open_when_the_account_went_away_while_it_was_open() {
-        // **モーダルを開いているあいだに材料が消える経路はある。** `A` で選び直すと
-        // `GitOp::SetAccount` が走り、**その書き込みが終わった時点で**
-        // `exec_finished` → `resolve_again` が `account` を `Resolving` に戻す。
-        // モーダルは `AccountPicker` しか閉じないので、**`N` で開いた箱はそのまま
-        // 残る** —— そこで確定すると、材料の無い `Cmd::CreatePr` がランタイムへ出て
-        // 打った本文が消える。
+    fn n_is_refused_while_the_account_write_runs() {
+        // **書き込みを出した時点で `account` が `Resolving` に落ちる**（01 の
+        // 「写しの寿命」）ので、走っているあいだに `N` で箱を開いても、確定の時点で
+        // 材料が消えることはない —— 開く時点で断られる。
         let mut state = state_for_create("feat/x");
-        let _ = press(&mut state, 'N');
-        type_text(&mut state, "fix");
-
-        // 書き込みが終わって解決し直しが始まる（`Reload::Account`）。
+        let _ = press(&mut state, 'A');
         let _ = update(
             &mut state,
-            exec_done_of(
-                GitOp::SetAccount {
-                    login: "hanako".to_string(),
-                },
-                Ok(fake_output()),
-            ),
+            Msg::AccountsListed(Ok(fake_logins(&["hanako"]))),
         );
-        assert!(
-            state.github_block().is_some(),
-            "解決し直しが始まっていない: {:?}",
-            state.account
-        );
-
         let cmd = press_code(&mut state, KeyCode::Enter);
+        assert_eq!(
+            cmd,
+            Cmd::Exec(GitOp::SetAccount {
+                login: "hanako".to_string()
+            })
+        );
 
-        assert_eq!(cmd, Cmd::None, "材料が無いのに出した");
-        assert!(state.modal.is_some(), "閉じてしまった");
-        assert_eq!(modal_of(&state).0.text(), "fix", "打った本文が消えた");
+        let cmd = press(&mut state, 'N');
+
+        assert_eq!(cmd, Cmd::None);
+        assert!(state.modal.is_none(), "書き込みのあいだに箱が開いた");
         assert_eq!(last_notice(&state), GithubBlock::AccountResolving.notice());
     }
 

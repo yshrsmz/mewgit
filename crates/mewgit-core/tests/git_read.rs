@@ -917,6 +917,46 @@ fn branches_has_no_upstream_config_when_nothing_is_configured() {
 }
 
 #[test]
+fn branches_reads_the_push_remote_before_the_push_default() {
+    // git の push はこの 2 つを追跡設定より先に見る（01 の「push の行き先」）。
+    // `pushRemote` が勝ち、無いブランチは `pushDefault` に落ちる（01 の表の H / B）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["branch", "topic"]);
+    repo.git(&["config", "remote.pushDefault", "up"]);
+    repo.git(&["config", "branch.topic.pushRemote", "fork"]);
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let branches = reader.branches().unwrap();
+
+    let push_remote = |name: &str| {
+        branches
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap()
+            .push_remote
+            .clone()
+    };
+    assert_eq!(push_remote("topic").as_deref(), Some("fork"));
+    assert_eq!(push_remote("main").as_deref(), Some("up"));
+}
+
+#[test]
+fn branches_has_no_push_remote_when_neither_is_configured() {
+    // 追跡設定はあっても、push 先の設定が無ければ `None`（fetch の規則は畳まない。02）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let branches = reader.branches().unwrap();
+
+    let main = branches.iter().find(|b| b.name == "main").unwrap();
+    assert_eq!(main.push_remote, None);
+}
+
+#[test]
 fn branches_needs_both_halves_of_the_tracking_config() {
     // 片方だけ書かれた設定から push の行き先は決まらない。組み合わせを呼び出し側に
     // 数えさせないよう、揃っていなければ `None`（02）。

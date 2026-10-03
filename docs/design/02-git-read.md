@@ -128,6 +128,7 @@ pub struct Branch {
     pub oid: Oid,
     pub upstream: Option<Upstream>,  // 追跡 ref から読んだ名前と位置
     pub upstream_config: Option<UpstreamConfig>,  // push の行き先
+    pub push_remote: Option<String>,  // branch.<name>.pushRemote、無ければ remote.pushDefault
     pub ahead: usize,            // upstream に対する ahead / behind
     pub behind: usize,
     pub is_head: bool,
@@ -179,6 +180,14 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
 - **`remote` と `merge` は 2 つ揃って初めて `Option` を出る。** 片方だけ書かれた設定から
   push の行き先は決まらないので、揃っていなければ `None`。呼び出し側に組み合わせを
   数えさせない
+- **`push_remote` は `branch.<name>.pushRemote`、無ければ `remote.pushDefault`**
+  （値は名前でも URL でも `.` でも、書かれたまま）。git の push はこの 2 つを追跡設定より
+  先に見る（01 の「push の行き先」に実測の表）。**畳むのはこの 2 段だけ** —— 3 段目
+  （fetch の規則）はリモートの一覧が要るので `app` の `conventional_remote` が持つ。
+  **`pushDefault` をリポジトリ単位の値として `RepoInfo` に載せない**のは、読み手（`P`）が
+  `Branch` と組み合わせるので、別のジョブから届く値を混ぜると到着順を数えることになる
+  ため。config の snapshot は一覧の読み取りで 1 回だけ取る。非 UTF-8 の値は書かれて
+  いないものとして扱う（argv に載せられない。`upstream_config` と同じ）
 - **`merge` は完全な ref 名のまま持つ**（`refs/heads/main`）。`refs/heads/` の下に無い
   値も書けるので、短縮を読み取り側で決め打つと別の ref を動かす。短縮するのは argv を
   組む側（01 の「push の行き先」）

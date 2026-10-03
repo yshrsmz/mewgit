@@ -4,7 +4,7 @@
 //! アカウントと同じくリポジトリ単位の話で、どのペインに居るかと関係が無い。
 
 use crate::git_exec::{push_remote_ref, ExecError, ExecErrorKind, ExecOutput, GitOp};
-use crate::git_read::{short_oid, Remote};
+use crate::git_read::{short_oid, Branch, Remote};
 
 use super::confirm;
 use crate::app::state::Tracked;
@@ -126,8 +126,25 @@ fn push_plan(state: &AppState) -> PushPlan {
         // ブランチが外で消えても「force push できません」と言い続ける。**`P` は
         // 押し直せる**ままにして、force に上げられない事実は失敗時の案内で伝える
         // （01 の「失敗の案内文」）。
-        return propose_upstream(&head.name, state);
+        return propose_upstream(head, state);
     };
+
+    // **git の push 先が追跡先と違うなら送らない**（01 の「push の行き先」）。git は
+    // 追跡設定があっても `pushRemote` / `pushDefault` へ同名で送る。追跡先へ送ると、
+    // `origin/main` を追跡して `pushRemote=fork` を書いたブランチで `origin e:main`
+    // —— upstream の `main` へ確認なしに流れ込む。**行き先を差し替えない**のは、lease と
+    // `ahead` が追跡先に対する値で、差し替えると比べる相手がずれるため。`.` より先に
+    // 見るのは、`remote = .` でも git は `pushRemote` へ送るから。
+    if let Some(push) = head
+        .push_remote
+        .as_deref()
+        .filter(|push| *push != config.remote)
+    {
+        return PushPlan::Refused(format!(
+            "push 先 {push} が追跡先 {} と違います。git push で送ってください",
+            config.remote
+        ));
+    }
 
     // **`.` はローカル追跡**（`git branch --set-upstream-to=main topic`）。渡すと
     // `git push . topic:main` になり、**ネットワークに出ないままローカルの `main` を
@@ -307,7 +324,8 @@ const LOCAL_TRACKING: &str = "追跡先がローカルです";
 /// **`propose_upstream`（push の `-u`）もここに畳めない。** git 自身が fetch と push で
 /// 違う規則を持っており（push は `branch.<name>.pushRemote` > `remote.pushDefault` >
 /// fetch の規則）、畳むと **fetch の既定へ push する**という git がしない挙動になる。
-/// あちらが呼ぶのは追跡設定が無いと判った**あと**なので、[`conventional_remote`] でよい。
+/// あちらは追跡設定が無いと判った**あと**に `Branch.push_remote` を見て、無ければ
+/// [`conventional_remote`] へ落ちる。
 fn default_remote(state: &AppState) -> Result<&Remote, NoRemote> {
     // **リモート一覧が空のあいだは 1 段目に入らない。** `LoadRepoInfo` と
     // `LoadBranches` は別のジョブなので、ブランチだけ先に届いた瞬間がある。そこで
@@ -387,32 +405,59 @@ pub(super) fn conventional_remote(state: &AppState) -> Result<&Remote, NoRemote>
 
 /// 追跡設定の無いブランチに `-u` 付きの push を提案する。
 ///
-/// リモートは [`conventional_remote`] が選ぶ。**適当に選ばない** — fork 運用の
-/// リポジトリで他人のリポジトリへ push する形になる。
+/// リモートは **`Branch.push_remote`（`pushRemote` / `pushDefault`）があればそれ、
+/// 無ければ [`conventional_remote`]** —— git の push の規則と同じ順（01 の「push の
+/// 行き先」に実測の表）。**適当に選ばない** — fork 運用のリポジトリで他人の
+/// リポジトリへ push する形になる。
 ///
-/// **git の規則そのものではない**（git は `branch.<name>.pushRemote` と
-/// `remote.pushDefault` も見る）。読むこと自体は `git_read` にならできるが、そこまで
-/// 写すのは追跡設定を読む本 PR の範囲を越える。**食い違っても確認モーダルに出た
-/// 行き先を見て `n` で止められる**ので、危ないのは「見ずに `y`」だけ。読む判断は
-/// 01 の「push の行き先」に送り先を書いた。
-fn propose_upstream(branch: &str, state: &AppState) -> PushPlan {
-    let candidate = match conventional_remote(state) {
-        Ok(remote) => &remote.name,
-        // **`Ask` でもモーダルは開かない。** push の行き先を選ばせるのは不変ルール 5 の
-        // 手前の判断で、読むだけの fetch と同じ扱いにはできない（01）。
-        Err(no) => return PushPlan::Refused(no.into_notice()),
+/// **`-u` を付ける。** 素の `git push` は付けないが、付けないと次の `P` もここに来て
+/// 毎回確認モーダルが出る。git の `push -u` が書く値と同じもの（URL なら URL）を書く。
+fn propose_upstream(head: &Branch, state: &AppState) -> PushPlan {
+    let candidate = match head.push_remote.as_deref() {
+        Some(value) => match pushed_to(value, state) {
+            Ok(remote) => remote,
+            Err(message) => return PushPlan::Refused(message),
+        },
+        None => match conventional_remote(state) {
+            Ok(remote) => &remote.name,
+            // **`Ask` でもモーダルは開かない。** push の行き先を選ばせるのは不変ルール 5 の
+            // 手前の判断で、読むだけの fetch と同じ扱いにはできない（01）。
+            Err(no) => return PushPlan::Refused(no.into_notice()),
+        },
     };
 
     PushPlan::Ask {
         title: "upstream を設定して push",
-        body: format!("{branch} を {candidate} に push し、追跡先に設定します。"),
+        body: format!(
+            "{} を {candidate} に push し、追跡先に設定します。",
+            head.name
+        ),
         op: GitOp::Push {
-            remote: candidate.clone(),
-            src: branch.to_string(),
+            remote: candidate.to_string(),
+            src: head.name.clone(),
             dst: None,
             set_upstream: true,
             lease: None,
         },
+    }
+}
+
+/// `Branch.push_remote` の値を、`-u` で渡すリモート（名前か URL）に読む。
+///
+/// **`.` と一覧に無い名前は断る。** `.` は git が何も送らず exit 0 で返る形、無い名前は
+/// git 自身が fatal にする形（01 の表の J / L / M）。**`origin` へ落とさない** —— 落とすと
+/// ユーザーが書いた行き先とは別のリモートへ送る（[`default_remote`] の `Missing` と同じ）。
+fn pushed_to<'a>(value: &'a str, state: &'a AppState) -> Result<&'a str, String> {
+    match state.repo.tracked(value) {
+        Tracked::Named(remote) => Ok(&remote.name),
+        Tracked::Url(url) => Ok(url),
+        Tracked::Local => Err("push 先がローカルです".to_string()),
+        // **一覧がまだなら「無い」と言わない**（[`conventional_remote`] の `[]` の腕と
+        // 同じ。起動直後の一瞬に押した `P` が設定の壊れを言い出す）。
+        Tracked::Missing(_) if state.jobs.is_running(JobKind::LoadRepoInfo) => {
+            Err("リモート一覧をまだ読めていません".to_string())
+        }
+        Tracked::Missing(name) => Err(format!("push 先の {name} がリモートにありません")),
     }
 }
 
@@ -437,9 +482,9 @@ fn push_dst(local: &str, merge: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        fake_output, fetched_remote, finish_exec, forced_push_op, open_confirm, press, press_code,
-        push_op, reject_non_fast_forward, state_for_push, state_with_commits, tracked_head,
-        tracking_branch, with_branches, with_remotes, HEADS_MAIN,
+        cells, fake_output, fetched_remote, finish_exec, forced_push_op, open_confirm, press,
+        press_code, push_op, reject_non_fast_forward, state_for_push, state_with_commits,
+        tracked_head, tracking_branch, with_branches, with_remotes, HEADS_MAIN, NOTICE_CELLS,
     };
     use super::super::update;
 
@@ -1104,5 +1149,122 @@ mod tests {
             state.notices.back().map(|notice| notice.level),
             Some(NoticeLevel::Warn)
         );
+    }
+
+    /// `push_remote`（`pushRemote` / `pushDefault`）を書いたブランチ。
+    fn pushing_to(branch: Branch, push_remote: &str) -> Branch {
+        Branch {
+            push_remote: Some(push_remote.to_string()),
+            ..branch
+        }
+    }
+
+    #[test]
+    fn a_push_remote_other_than_the_tracked_remote_is_refused() {
+        // `checkout -b e origin/main` + `pushRemote=fork`。git は fork の `e` へ送るが、
+        // 追跡先へ送ると **`origin e:main`** —— upstream の `main` へ確認なしに流れ込む
+        // （01 の表の E）。行き先を差し替えないのは lease と ahead が追跡先に対する値だから。
+        let mut state = state_for_push(
+            &["origin", "fork"],
+            pushing_to(tracking_branch("e", "origin", HEADS_MAIN), "fork"),
+        );
+
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        assert_eq!(state.modal, None);
+        let notice = state.notices.back().expect("通知が出ていません");
+        assert_eq!(notice.level, NoticeLevel::Warn);
+        assert!(
+            notice.message.contains("fork") && notice.message.contains("origin"),
+            "{}",
+            notice.message
+        );
+        assert!(cells(&notice.message) <= NOTICE_CELLS, "{}", notice.message);
+    }
+
+    #[test]
+    fn a_push_remote_equal_to_the_tracked_remote_pushes_as_before() {
+        // `gh pr checkout` と PR の取り出しは `remote` と `pushRemote` に同じ値を書く。
+        let mut state = state_for_push(
+            &["origin", "fork"],
+            pushing_to(tracking_branch("main", "origin", HEADS_MAIN), "origin"),
+        );
+
+        assert_eq!(
+            press(&mut state, 'P'),
+            Cmd::Exec(push_op("origin", "main", false))
+        );
+    }
+
+    #[test]
+    fn a_push_remote_wins_over_local_tracking() {
+        // `remote = .` でも git は `pushRemote` へ送るので、ローカル追跡の文言より
+        // 食い違いの文言のほうが合う。
+        let message = refusal(
+            &["origin", "fork"],
+            Some(vec![pushing_to(
+                tracking_branch("topic", ".", HEADS_MAIN),
+                "fork",
+            )]),
+        );
+        assert!(message.contains("fork"), "{message}");
+    }
+
+    #[test]
+    fn set_upstream_proposes_the_push_remote_before_origin() {
+        // git の push の規則は pushRemote > pushDefault > fetch の規則（01 の表の A / B）。
+        let mut state = state_for_push(
+            &["fork", "origin"],
+            pushing_to(fake_branch("topic", true), "fork"),
+        );
+
+        assert_eq!(press(&mut state, 'P'), Cmd::None);
+        let (body, on_yes) = open_confirm(&state);
+        assert!(body.contains("fork"), "{body}");
+        assert_eq!(*on_yes, Cmd::Exec(push_op("fork", "topic", true)));
+    }
+
+    #[test]
+    fn set_upstream_proposes_a_push_remote_url_as_is() {
+        // `git push -u` も URL をそのまま `branch.<b>.remote` に書く（01 の表の K）。
+        let url = "git@github.com:me/x.git";
+        let mut state = state_for_push(&["origin"], pushing_to(fake_branch("topic", true), url));
+
+        let _ = press(&mut state, 'P');
+
+        let (body, on_yes) = open_confirm(&state);
+        assert!(body.contains(url), "{body}");
+        assert_eq!(*on_yes, Cmd::Exec(push_op(url, "topic", true)));
+    }
+
+    #[test]
+    fn set_upstream_refuses_a_push_remote_it_cannot_send_to() {
+        // `.` は git が何も送らない形、無い名前は git が fatal にする形（01 の表の J / L）。
+        // **`origin` へ落とさない** —— ユーザーが書いた行き先とは別のリモートへ送る。
+        let local = refusal(
+            &["origin"],
+            Some(vec![pushing_to(fake_branch("topic", true), ".")]),
+        );
+        assert!(local.contains("ローカル"), "{local}");
+        let missing = refusal(
+            &["origin"],
+            Some(vec![pushing_to(fake_branch("topic", true), "nosuch")]),
+        );
+        assert!(missing.contains("nosuch"), "{missing}");
+    }
+
+    #[test]
+    fn a_push_remote_is_not_reported_missing_before_the_remotes_arrive() {
+        // 一覧だけ先に届いた瞬間に「リモートにありません」と言うと、設定の壊れになる。
+        let mut state = state_with_commits(2);
+        let _ = state.issue(Cmd::LoadRepoInfo);
+        let _ = with_branches(
+            &mut state,
+            Ok(vec![pushing_to(fake_branch("topic", true), "fork")]),
+        );
+
+        let PushPlan::Refused(message) = push_plan(&state) else {
+            panic!("断られていません");
+        };
+        assert!(message.contains("読めていません"), "{message}");
     }
 }

@@ -547,10 +547,17 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       **`Branch.upstream_config` を消せるかは別の問い** —— あちらの読み手は ahead /
       behind と追跡 ref も同じ行から取っており、出どころを混ぜると到着順の問いが
       戻るかを数えていない
-- [ ] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
+- [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。
-      `git_read` に `Branch.push_remote` の読み取りが要る（04 の「既定リモート」、02）
+      `git_read` の `Branch.push_remote` が前の 2 段を畳んで運び（02）、`-u` の提案は
+      それを先に見る（URL もそのまま。`.` と無い名前は断る）。**実測で、追跡設定がある
+      ブランチでも git は `pushRemote` / `pushDefault` へ同名で送る**と判った（01 の
+      「push の行き先」の表）ので、**`push_remote` が追跡先と違えば `P` は断る**
+      （2026-10-03 にユーザーと決めた）—— 追跡先へ送ると `origin/main` を追跡する
+      ブランチが upstream の `main` へ確認なしに流れ込む。**行き先を git に揃えて
+      差し替えるのは残した** —— lease と `ahead == 0` を push 先の追跡 ref に対して
+      読み直す別の読み取りが要る。いまはそのブランチを mewgit から push できない
 - [ ] 意図的な巻き戻しの force push（`reset --hard HEAD~1` してから `P`）。**いまは
       `ahead == 0` でまとめて断っている** —— `↓n` だけのブランチが `f` のあとに force で
       通ってしまう形と同じ見た目なので、区別するには「巻き戻すつもりだ」を別の入口で

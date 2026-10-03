@@ -395,6 +395,12 @@ pub struct Branch {
     /// （02 の「ブランチ一覧」）、そのうち「設定が無い」だけを取り出せない。
     /// **`-u` を付けるかはここで決める**（02）。
     pub upstream_config: Option<UpstreamConfig>,
+    /// `branch.<name>.pushRemote`、無ければ `remote.pushDefault`。書かれたままの値
+    /// （名前・URL・`.`）。
+    ///
+    /// **git の push はこの 2 つを追跡設定より先に見る**（01 の「push の行き先」）。
+    /// 畳むのはこの 2 段だけで、fetch の規則（3 段目）は `app` が持つ（02）。
+    pub push_remote: Option<String>,
     /// upstream に対する ahead / behind。
     pub ahead: usize,
     pub behind: usize,

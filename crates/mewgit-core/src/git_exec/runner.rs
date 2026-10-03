@@ -535,6 +535,37 @@ fn classify(stdout: &str, stderr: &str) -> ExecErrorKind {
     }
 }
 
+/// 失敗の理由の行（03 の「エラー分類」の「理由の行」。[`ExecError::reason`]）。
+///
+/// stderr が空なら stdout の最後の行（[`classify`] と同じく、git が写したコミットの行は
+/// 除く）。stderr があれば ` ! [` の行 → 最初の `error:` / `fatal:` の行 → `hint:` 以外の
+/// 最後の行。**行頭は trim する前に見る** —— ファイルの一覧はタブで字下げされるので、
+/// trim してから見ると `error: ` や `! [` で始まるパスを取り違える。
+pub(super) fn reason<'a>(stdout: &'a str, stderr: &'a str) -> Option<&'a str> {
+    let last = |output: &'a str, skip: fn(&str) -> bool| {
+        output
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty() && !skip(line))
+    };
+    if stderr.trim().is_empty() {
+        return last(stdout, echoes_a_commit);
+    }
+    stderr
+        .lines()
+        .find(|line| line.starts_with(" ! ["))
+        .map(str::trim)
+        .or_else(|| {
+            stderr.lines().find_map(|line| {
+                line.strip_prefix("error: ")
+                    .or_else(|| line.strip_prefix("fatal: "))
+                    .map(str::trim)
+                    .filter(|rest| !rest.is_empty())
+            })
+        })
+        .or_else(|| last(stderr, |line| line.starts_with("hint:")))
+}
+
 /// git がコミットを積んだときに stdout に写す行か（`[main 1a2b3c4] <件名>`、
 /// `[detached HEAD 1a2b3c4] …`、`[main (root-commit) 1a2b3c4] …`）。
 ///
@@ -551,6 +582,63 @@ fn echoes_a_commit(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reason_is_picked_from_stderr_by_the_shape_of_the_line() {
+        // 03 の「エラー分類」の「理由の行」。stderr は git 2.56.0（`LC_ALL=C`）の出力を
+        // そのまま写した（同じ節の `Other` の表）。
+        let cases: [(&str, &str); 7] = [
+            // 最初の `error:` の行。下のパスの字下げはタブ。
+            (
+                "error: Your local changes to the following files would be overwritten by checkout:\n\t! [x].txt\nPlease commit your changes or stash them before you switch branches.\nAborting\n",
+                "Your local changes to the following files would be overwritten by checkout:",
+            ),
+            // `hint:` は飛ばす。
+            (
+                "error: the branch 'side' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D side'\nhint: Disable this message with \"git config set advice.forceDeleteBranch false\"\n",
+                "the branch 'side' is not fully merged",
+            ),
+            // **最後ではなく最初。** 最後は `cherry-pick failed` / `Could not read from remote`。
+            (
+                "error: The following untracked working tree files would be overwritten by merge:\n\tg\nPlease move or remove them before you merge.\nAborting\nfatal: cherry-pick failed\n",
+                "The following untracked working tree files would be overwritten by merge:",
+            ),
+            (
+                "fatal: 'nope' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+                "'nope' does not appear to be a git repository",
+            ),
+            // push は ` ! [` の行。`error:` の `failed to push some refs` はどの ref がなぜかを言わない。
+            (
+                "remote: protected branch        \nTo /tmp/o.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to '/tmp/o.git'\n",
+                "! [remote rejected] main -> main (pre-receive hook declined)",
+            ),
+            // `error:` も `fatal:` も無ければ `hint:` 以外の最後の行（hook の文言）。
+            ("lint failed: f\n", "lint failed: f"),
+            (
+                "Aborting commit due to empty commit message.\n",
+                "Aborting commit due to empty commit message.",
+            ),
+        ];
+        for (stderr, expected) in cases {
+            assert_eq!(reason("", stderr), Some(expected), "stderr: {stderr}");
+        }
+        // `hint:` しか無ければ選べない。
+        assert_eq!(reason("", "hint: 何か\n"), None);
+    }
+
+    #[test]
+    fn the_reason_falls_back_to_the_last_line_of_stdout_only_when_stderr_is_empty() {
+        // 何も stage していない `git commit`（git 2.56.0）。末尾の空行は飛ばす。
+        let stdout = "On branch main\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\n\n";
+        assert_eq!(
+            reason(stdout, ""),
+            Some("no changes added to commit (use \"git add\" and/or \"git commit -a\")")
+        );
+        // git が写したコミットの行は理由ではない（`classify` と同じく除く）。
+        assert_eq!(reason("[main 1a2b3c4] fix\n", ""), None);
+        // stderr があれば stdout は見ない。
+        assert_eq!(reason(stdout, "hint: 何か\n"), None);
+    }
 
     #[test]
     fn the_comment_string_is_appended_after_the_users_config() {

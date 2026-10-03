@@ -350,7 +350,7 @@ pub enum ExecError {
   （何も stage していない `commit`、未解消の `rebase --continue`、複数の revert が空で
   止まった形。下の「エラー分類」）。分類（`classify`）だけが読んで捨てていたので、
   通知には argv しか出なかった。`app` は stdout を `detail` に載せ、stderr が空なら
-  最後の行を要約にする（stderr があればそこから理由の行を選ぶ。01 の「失敗の案内文」）
+  最後の行を要約にする（stderr があればそこから理由の行を選ぶ。下の「理由の行」）
 
 - argv と stdin の組み立ては純粋関数 `to_commands()`（「argv への変換」）
 - `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
@@ -638,8 +638,56 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
   current index first` など。どれも stderr）ので `Unmerged` にしない —— 案内を出す op を
   数えていない（01 の「失敗の案内文」）
 
+**案内文は 01 の「失敗の案内文」が持つ。** ここに文言まで並べると、同じ kind でも
+op で変わる分（非 FF は 4 通り）を表に書けないうえ、「次に何のキーを押すか」は
+`git_exec` が答えられる問いではない（`moves_refs()` を `app` へ移したのと同じ数え方。
+`.claude/rules/rust-coding.md` の「層をまたぐ述語」）。
+
+**`SshAuthFailed` の案内にホストは入れていない。** `ssh -T <host>` を出すには
+「どのリモートで失敗したか」が要るが、`GitOp::Pull` はリモート名を運ばず、
+`RemoteUrl` は `user@` を捨てる（04）ので `git@` を書き足すと推測になる。
+**M4 で `RepoInfo.target` が埋まったので、材料は届いている**（04 の「既定リモート」）。
+ただし `target.host` は**既定リモートのホスト**で、失敗した `GitOp` が使ったリモートとは
+限らない（`Push` は自分でリモート名を運ぶ）。**案内にホストを入れるなら、`GitOp` 側から
+辿る**（#49 の「完了時に `state` から取る値は、発行時と同じである保証を数える」）。
+**入れないと決めた**（2026-09-26、通知の履歴のタスク）。stderr は `Notice.detail` に
+残って `L` の履歴で読め、**ssh は認証の失敗で自分からホストを名乗る** ——
+`git@github.com: Permission denied (publickey).`（鍵を渡さずに `git ls-remote
+git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSSH 10.3p1）。
+失敗した `GitOp` から辿る配線を足さなくても、どのホストで断られたかは画面に出る。
+
+分類するのは git の出力があるとき、つまり `ExecError::Failed` だけ。`NoResult` には
+`kind` が無い（分類関数を通らない）。
+
+### 理由の行（`ExecError::reason`）
+
+案内の無い失敗の要約行（01 の「失敗の案内文」）に出す 1 行を、git の出力から選ぶ。
+**置き場所は `git_exec`**（`runner::reason`、`classify` の隣）—— 「どの行が理由か」は
+git の出力の形の問いで、写されたコミットの行（`echoes_a_commit`）を除くのも `classify` と
+同じ。上から順に ——
+
+1. **stderr が空なら stdout の最後の行。** git は理由を stdout にだけ書くことがある
+   （何も stage していない `commit`、未解消のままの `rebase --continue`、複数の revert が
+   空で止まった形）。stdout は status の一覧 → 結びの順に並ぶ
+2. **push の ` ! [` の行**（`! [remote rejected] main -> main (pre-receive hook declined)`）。
+   push の `error:` は後ろの `failed to push some refs` で、どの ref がなぜかを言わない
+3. **最初の `error:` / `fatal:` の行**から接頭辞を剥いだもの。最後ではないのは、
+   cherry-pick / revert が理由のあとに `fatal: cherry-pick failed` を、fetch が
+   `fatal: Could not read from remote repository.` を足すから（下の表の太字）
+4. **`hint:` 以外の最後の行。** `error:` も `fatal:` も書かない失敗 —— hook が断った
+   commit と `Aborting commit due to empty commit message.`。`hint:` は `advice.*` で
+   消える行で、理由ではない
+
+どれも選べなければ `None`（`app` は `Display` に落とす）。**stderr があれば stdout は
+見ない** —— 下の表の形では、stderr があれば理由はそちらにあり、stdout は進捗や status の
+一覧だった（`pull` の `Updating …`、stash の apply の status）。例外の `needs merge`
+（stderr は `could not write index` だけ）は `Unmerged` の案内が先に拾う。
+**2 と 3 は trim する前の行頭で見る** —— `would be overwritten` の下のファイル一覧は
+タブで字下げされるので、trim してから見ると `error: ` や `! [` で始まるパスを
+取り違える。
+
 **`Other` に落ちる失敗の stderr**（git 2.56.0、`LC_ALL=C`、2026-10-03 に一時リポジトリで
-実測）。案内の無い失敗の要約行はここから理由の行を選ぶ（01 の「失敗の案内文」）。
+実測）。
 
 | 操作 | exit | stderr（タブの字下げは `⇥`） |
 |---|---|---|
@@ -672,27 +720,6 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
 - 非 FF の push（`(fetch first)` / `(non-fast-forward)`）と `pull --ff-only` の
   `Not possible to fast-forward` は `NonFastForward` に分類されて案内が付くので、ここの
   対象ではない
-
-**案内文は 01 の「失敗の案内文」が持つ。** ここに文言まで並べると、同じ kind でも
-op で変わる分（非 FF は 4 通り）を表に書けないうえ、「次に何のキーを押すか」は
-`git_exec` が答えられる問いではない（`moves_refs()` を `app` へ移したのと同じ数え方。
-`.claude/rules/rust-coding.md` の「層をまたぐ述語」）。
-
-**`SshAuthFailed` の案内にホストは入れていない。** `ssh -T <host>` を出すには
-「どのリモートで失敗したか」が要るが、`GitOp::Pull` はリモート名を運ばず、
-`RemoteUrl` は `user@` を捨てる（04）ので `git@` を書き足すと推測になる。
-**M4 で `RepoInfo.target` が埋まったので、材料は届いている**（04 の「既定リモート」）。
-ただし `target.host` は**既定リモートのホスト**で、失敗した `GitOp` が使ったリモートとは
-限らない（`Push` は自分でリモート名を運ぶ）。**案内にホストを入れるなら、`GitOp` 側から
-辿る**（#49 の「完了時に `state` から取る値は、発行時と同じである保証を数える」）。
-**入れないと決めた**（2026-09-26、通知の履歴のタスク）。stderr は `Notice.detail` に
-残って `L` の履歴で読め、**ssh は認証の失敗で自分からホストを名乗る** ——
-`git@github.com: Permission denied (publickey).`（鍵を渡さずに `git ls-remote
-git@github.com:octocat/Hello-World.git` を叩いて実測。git 2.55.0 / OpenSSH 10.3p1）。
-失敗した `GitOp` から辿る配線を足さなくても、どのホストで断られたかは画面に出る。
-
-分類するのは git の出力があるとき、つまり `ExecError::Failed` だけ。`NoResult` には
-`kind` が無い（分類関数を通らない）。
 
 ## Interactive rebase の実装
 

@@ -28,7 +28,8 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     if let Err(err) = &done.result {
         // **要約行は案内文、証拠は `detail`。** ステータスバーは `message` の 1 行目
         // しか描かない（07）ので、そこを argv で埋めると案内が画面に出ない
-        // （01 の「失敗の案内文」）。案内が無ければ [`exec_summary`] に落とす。
+        // （01 の「失敗の案内文」）。案内が無ければ git の出力から選んだ理由の行
+        // （`ExecError::reason`）、それも無ければ `Display`。
         let detail = exec_detail(err);
         let advice = exec_advice(&done.op, err);
         // **中断は失敗ではない。** 押した本人が止めたものを `Error` で出すと、
@@ -54,7 +55,9 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
             } if advice.is_some() => NoticeLevel::Warn,
             ExecError::NoResult { .. } | ExecError::Failed { .. } => NoticeLevel::Error,
         };
-        let message = advice.map_or_else(|| exec_summary(err), str::to_string);
+        let message = advice
+            .or_else(|| err.reason())
+            .map_or_else(|| err.to_string(), str::to_string);
         state.push_notice(level, message, Some(detail));
     }
 
@@ -342,60 +345,9 @@ fn exec_detail(err: &ExecError) -> String {
     detail
 }
 
-/// 案内文の無い失敗の要約行（01 の「失敗の案内文」）。
-///
-/// stderr があれば [`stderr_reason`]、**stderr が空なら stdout の最後の行。** git は理由を
-/// stdout にだけ書くことがあり（何も stage していない `commit` など）、`Display` に落とすと
-/// argv だけの通知になって理由が画面に出ない。git の stdout は status の一覧 → 結びの順に
-/// 並ぶので最後の行を採る。どちらからも選べなければ `Display`。
-fn exec_summary(err: &ExecError) -> String {
-    let ExecError::Failed { stdout, stderr, .. } = err else {
-        return err.to_string();
-    };
-    let reason = if stderr.trim().is_empty() {
-        stdout.lines().map(str::trim).rfind(|line| !line.is_empty())
-    } else {
-        stderr_reason(stderr)
-    };
-    reason.map_or_else(|| err.to_string(), str::to_string)
-}
-
-/// stderr から理由の行を選ぶ（01 の「失敗の案内文」。op ごとの実測は 03 の「エラー分類」）。
-///
-/// 1. **push の ` ! [` の行**（`! [remote rejected] main -> main (pre-receive hook declined)`）。
-///    push の `error:` は後ろの `failed to push some refs` で、どの ref がなぜかが無い
-/// 2. **最初の `error:` / `fatal:` の行**から接頭辞を剥いだもの。最後ではないのは、
-///    cherry-pick / revert が理由のあとに `fatal: cherry-pick failed` を、fetch が
-///    `fatal: Could not read from remote repository.` を足すから。接頭辞は通知の赤と
-///    重なるので剥ぐ（`would be overwritten by checkout` が 71 セルに入るかの差）
-/// 3. **`hint:` 以外の最後の行**（hook が自分で書いた文言、`Aborting commit due to empty
-///    commit message.`）。`hint:` は `advice.*` で消える行で、理由ではない
-///
-/// **1 と 2 は trim する前の行頭で見る。** git はファイルの一覧をタブで字下げして
-/// 並べる（`would be overwritten` の下）ので、trim してから見ると `error: ` や `! [` で
-/// 始まるパスを理由の行と取り違える。
-fn stderr_reason(stderr: &str) -> Option<&str> {
-    stderr
-        .lines()
-        .find(|line| line.starts_with(" ! ["))
-        .or_else(|| {
-            stderr.lines().find_map(|line| {
-                line.strip_prefix("error: ")
-                    .or_else(|| line.strip_prefix("fatal: "))
-            })
-        })
-        .or_else(|| {
-            stderr
-                .lines()
-                .rfind(|line| !line.trim().is_empty() && !line.starts_with("hint:"))
-        })
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-}
-
 /// 通知の要約行。失敗の種別から「次に何をすればよいか」を出す（01 の「失敗の案内文」）。
 ///
-/// `None` は案内が無いということ。呼び出し側は [`exec_summary`] に落とす。
+/// `None` は案内が無いということ。呼び出し側は `ExecError::reason` に落とす。
 ///
 /// **`op` まで見るのは非 FF のため。** 同じ `(non-fast-forward)` でも、force push が
 /// lease に断られた形（fetch を勧める）、`-u` の提案から入って force に上げる経路が
@@ -619,7 +571,7 @@ fn empty_advice(op: &GitOp) -> Option<&'static str> {
 /// continue は同じ理由で断られるので出口は skip。**複数の revert の開始も途中が空だと
 /// `sequencer/` を残して止まる**（continue でも skip でも抜けられるが、案内は skip に
 /// 揃える。03 の「複数のコミットの cherry-pick / revert」）。**commit も同じ文言を出す**が、
-/// 案内は付けない（stderr が空なので、要約行に stdout の結びがそのまま出る。[`exec_summary`]）。
+/// 案内は付けない（stderr が空なので、要約行に stdout の結びがそのまま出る。`ExecError::reason`）。
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由。
 fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
@@ -1147,57 +1099,26 @@ mod tests {
 
     #[test]
     fn a_failure_with_a_reason_only_on_stderr_is_summed_up_by_that_reason() {
-        // 01 の「失敗の案内文」。stderr は git 2.56.0（`LC_ALL=C`）の出力をそのまま写した
-        // （03 の「エラー分類」）。
-        let cases: [(&str, &str); 7] = [
-            // 最初の `error:` の行。下のパスの字下げはタブ。
-            (
-                "error: Your local changes to the following files would be overwritten by checkout:\n\t! [x].txt\nPlease commit your changes or stash them before you switch branches.\nAborting\n",
-                "Your local changes to the following files would be overwritten by checkout:",
-            ),
-            // `hint:` は飛ばす。
-            (
-                "error: the branch 'side' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D side'\nhint: Disable this message with \"git config set advice.forceDeleteBranch false\"\n",
-                "the branch 'side' is not fully merged",
-            ),
-            // **最後ではなく最初。** 最後は `cherry-pick failed` / `Could not read from remote`。
-            (
-                "error: The following untracked working tree files would be overwritten by merge:\n\tg\nPlease move or remove them before you merge.\nAborting\nfatal: cherry-pick failed\n",
-                "The following untracked working tree files would be overwritten by merge:",
-            ),
-            (
-                "fatal: 'nope' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
-                "'nope' does not appear to be a git repository",
-            ),
-            // push は ` ! [` の行。`error:` の `failed to push some refs` はどの ref がなぜかを言わない。
-            (
-                "remote: protected branch        \nTo /tmp/o.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to '/tmp/o.git'\n",
-                "! [remote rejected] main -> main (pre-receive hook declined)",
-            ),
-            // `error:` も `fatal:` も無ければ `hint:` 以外の最後の行（hook の文言）。
-            ("lint failed: f\n", "lint failed: f"),
-            (
-                "Aborting commit due to empty commit message.\n",
-                "Aborting commit due to empty commit message.",
-            ),
-        ];
+        // 案内の無い失敗は `ExecError::reason` の行（01 の「失敗の案内文」）。選び方の
+        // 見張りは `git_exec::runner` の `reason` のテスト。
         let mut state = state();
-        for (stderr, expected) in cases {
-            finish_exec(
-                &mut state,
-                GitOp::Switch("side".to_string()),
-                Err(ExecError::Failed {
-                    argv: vec!["switch".into(), "side".into()],
-                    code: Some(1),
-                    stdout: String::new(),
-                    stderr: stderr.to_string(),
-                    kind: ExecErrorKind::Other,
-                }),
-            );
-            let notice = state.notices.back().expect("通知がありません");
-            assert_eq!(notice.message, expected, "stderr: {stderr}");
-            assert_eq!(notice.level, NoticeLevel::Error);
-        }
+        finish_exec(
+            &mut state,
+            GitOp::BranchDelete {
+                name: "side".to_string(),
+                force: false,
+            },
+            Err(ExecError::Failed {
+                argv: vec!["branch".into(), "--delete".into(), "side".into()],
+                code: Some(1),
+                stdout: String::new(),
+                stderr: "error: the branch 'side' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D side'\n".to_string(),
+                kind: ExecErrorKind::Other,
+            }),
+        );
+        let notice = state.notices.back().expect("通知がありません");
+        assert_eq!(notice.message, "the branch 'side' is not fully merged");
+        assert_eq!(notice.level, NoticeLevel::Error);
     }
 
     #[test]

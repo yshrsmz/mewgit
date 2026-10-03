@@ -488,6 +488,60 @@ async fn branch_create_switch_delete_and_rename() {
 }
 
 #[tokio::test]
+async fn the_reason_of_a_failure_is_the_line_git_wrote_it_on() {
+    // 03 の「エラー分類」の「理由の行」を、実物の git の出力で踏む。どれも案内の無い
+    // `Other` で、要約行には `ExecError::reason` がそのまま出る（01 の「失敗の案内文」）。
+    let repo = TestRepo::init();
+    repo.commit_bytes("file.txt", b"one\n", "first");
+    repo.git(&["branch", "old"]);
+    repo.git(&["switch", "--quiet", "--create", "side"]);
+    repo.commit_bytes("file.txt", b"side\n", "side");
+    let side = repo.git(&["rev-parse", "HEAD"]);
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.commit_bytes("file.txt", b"two\n", "second");
+    repo.write_worktree_file("file.txt", b"dirty\n");
+    let runner = repo.runner();
+
+    // 最初の `error:` の行（下にファイルの一覧と `Aborting` が続く）。
+    let err = runner
+        .run(&GitOp::Switch("old".into()))
+        .await
+        .expect_err("上書きされるので断るはずです");
+    assert_eq!(failure_kind(&err), ExecErrorKind::Other);
+    assert_eq!(
+        err.reason(),
+        Some("Your local changes to the following files would be overwritten by checkout:")
+    );
+
+    // **最初であって最後ではない** —— 最後は `fatal: cherry-pick failed`。
+    let err = runner
+        .run(&GitOp::CherryPick(vec![side.parse().expect("oid")]))
+        .await
+        .expect_err("上書きされるので断るはずです");
+    let (_, stderr) = failure_output(&err);
+    assert!(
+        stderr.trim_end().ends_with("fatal: cherry-pick failed"),
+        "{stderr}"
+    );
+    assert_eq!(
+        err.reason(),
+        Some("Your local changes to the following files would be overwritten by merge:")
+    );
+
+    // `hint:` は飛ばす。
+    let err = runner
+        .run(&GitOp::BranchDelete {
+            name: "side".into(),
+            force: false,
+        })
+        .await
+        .expect_err("未マージなので断るはずです");
+    let (_, stderr) = failure_output(&err);
+    assert!(stderr.contains("hint:"), "{stderr}");
+    assert_eq!(err.reason(), Some("the branch 'side' is not fully merged"));
+}
+
+#[tokio::test]
 async fn stash_push_and_pop() {
     let repo = TestRepo::init();
     repo.commit_bytes("file.txt", b"original\n", "first");

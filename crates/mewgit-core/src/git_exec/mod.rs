@@ -7,6 +7,7 @@ mod argv;
 mod patch;
 mod rebase;
 mod runner;
+mod version;
 
 use std::path::PathBuf;
 
@@ -19,6 +20,7 @@ pub use rebase::{
     RebasePlanError, EDITOR_STDERR_PREFIX,
 };
 pub use runner::Runner;
+pub use version::{require_minimum, VersionError};
 
 /// 書き込み操作。[`to_commands`] で `git` の argv と標準入力に変換する。
 #[derive(Debug, Clone, PartialEq, Eq)]

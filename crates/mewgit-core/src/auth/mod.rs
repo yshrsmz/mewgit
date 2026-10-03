@@ -20,7 +20,7 @@
 //! [`git_read::Remote`]: crate::git_read::Remote
 
 pub mod gh;
-mod probe;
+pub(crate) mod probe;
 mod resolve;
 pub mod ssh;
 pub mod url;

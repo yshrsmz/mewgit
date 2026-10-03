@@ -691,6 +691,9 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       CI が走らない）。App の client ID は変数 `RELEASE_APP_CLIENT_ID`、鍵はシークレット
       `RELEASE_APP_PRIVATE_KEY`。ビルドは同じワークフローの後段（`release_created`）に
       置き、`release.yml` を触る PR では build だけを走らせて runner を先に踏む
+      （#152 で `ubuntu-24.04-arm` が private リポジトリでも回ることを確かめた。build は
+      macOS 1 分 34 秒、Linux arm 3 分 25 秒）。**チェックを付けるのは v0.1.0 の Release に
+      2 つのバイナリが載ってから** —— Release への upload はタグが無いと踏めない
 
 ## MVP 後
 

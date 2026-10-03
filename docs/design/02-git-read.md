@@ -212,8 +212,12 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
   落とされたぶんの追いつき 1 通だけ。libgit2 の再実装を先に払う根拠が無い。
   **払う場面が見えてから決める** —— ブランチが多いリポジトリで一覧の読み込みが
   体感できたとき（M6 の「端末幅 < 100」と同じ仕上げの並び）。
-  **`upstream_config` は config の snapshot をさらに 2 回取る**（`branch_upstream_remote`
-  と `branch_upstream_merge`）ので、畳むときはこの 2 本も一緒に数える
+  **`upstream_config` は live の config を 2 回引く**（`branch_upstream_remote` と
+  `branch_upstream_merge`。snapshot は取らないが、readonly でない config は引くたびに
+  `config_file_refresh` で各レベルのファイルを見直す。libgit2 1.9.7 の `branch.c` /
+  `config_file.c` で確認）。**`push_remote` のために一覧の読み取りで snapshot を 1 回
+  取るようになった**ので、畳むときはこの 2 本もその snapshot から引く形にする（#148 の
+  `/simplify` が挙げた。効果は未計測）
 
 **`refs()` / `head` / `remotes` と 1 通にまとめない**（`Cmd::LoadRepoInfo` に乗せない）。
 ブランチの本数だけ upstream の解決と `graph_ahead_behind` の walk が要り、グラフの

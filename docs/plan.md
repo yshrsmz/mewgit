@@ -658,6 +658,13 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       起こさずに `ExecError::Stale`（`Warn`）で断る。unstage は index と HEAD を比べる（外の commit は HEAD だけを動かす。`/code-review` が拾った）。
       **比べる場所は `Runner`、指紋を組むのは `git_read::path_stamp` の 1 本**（2026-10-02 に
       ユーザーと決めた。00 のレイヤーに例外を 1 つ足した）
+- [ ] 「リモート一覧がまだ届いていない」の守りを 1 本にする。**いま 3 通りの書き方が
+      ある** —— `update::default_remote` の `remotes.is_empty()`、`conventional_remote` の
+      `[]` の腕、`push_destination` の `Tracked::Missing` の腕（文言は `REMOTES_LOADING` で
+      共有済み）。塞ぐ形は `RepoInfo::tracked` の入口で未着を判じる（`Tracked` に未着の
+      腕を足す）か、`default_remote` と対になる push の解決関数を 1 本置くこと。**`f` 側の
+      判定も触る**ので #148 では見送った（`/simplify` の altitude が挙げた）。上の「HEAD の
+      追跡設定を 1 本にする」で `default_remote` のガードが消えるなら、そちらと一緒に数える
 - [ ] テストで status を届ける 3 行（`reply(state, Cmd::LoadStatus, Msg::StatusLoaded(..))`）を
       `test_support` のヘルパ 1 本に寄せ、`worktree_state` もそれを呼ぶ形にする。いまは
       diff / graph / exec / worktree / mod / progress の各テストにインラインで散っている

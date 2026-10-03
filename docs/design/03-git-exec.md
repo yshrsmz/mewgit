@@ -356,7 +356,8 @@ pub enum ExecError {
 - `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
   引数にしているのは、設定を読んだのに渡し忘れる経路を作らないため
 - `mewgit_bin` は interactive rebase の sequence editor として起こす自バイナリ
-  （`std::env::current_exe()`。下の「Interactive rebase の実装」）。`git_bin` と同じ理由で
+  （Linux では `/proc/<pid>/exe`、ほかは `std::env::current_exe()`。下の「Interactive
+  rebase の実装」の「消えた自バイナリ」）。`git_bin` と同じ理由で
   引数にする。core は自分がどのバイナリに入っているかを知らない。`new` が引用して
   `GIT_SEQUENCE_EDITOR` と `GIT_EDITOR` の値に組んでおく。**パスそのものも持つ** ——
   エディタの失敗のあとに、そのパスがまだ在るかを見る（下の「エラー分類」の `EditorGone`）
@@ -823,7 +824,8 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   測った）で、それより古い git は未知のキーを黙って無視するので `#` の行が消える形に
   戻るはず。**確かめていない**（mewgit はまだ git の最低版を決めていない。M6）
 - **消えた自バイナリ。** エディタが自バイナリなので、起動中に mewgit のバイナリが消えると、
-  エディタを起こす git が落ちる（以前の `true` では起きない）。**落ちるのは rebase の系統と
+  エディタを起こす git が落ちる（以前の `true` では起きない。**Linux では `/proc/<pid>/exe`
+  を渡すので起きない** —— 下の 2 つ目）。**落ちるのは rebase の系統と
   `commit --amend` だけ**で、revert / cherry-pick は開始も continue もエディタを起こさない ——
   `Runner` は stdin を `Stdio::null()` か pipe にするので、git の `--edit` の既定（端末から
   起こされたとき）が外れる（下の表）。**落ちても壊れるものは無い** —— 開始は始まらず、
@@ -834,16 +836,23 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   - **`true` 相当に倒さない。** パスが無いときに `true` を渡すと、sequence editor は既定の
     todo を黙って採り（plan が効かない）、commit editor は reword のメッセージを黙って落とす
     （#145 で塞いだ形そのもの）。閉じた側に倒れるいまの形を採る
-  - **消えるのは主に Linux。** `current_exe()` の返すパスが OS で違う（rust 1.98.1 の std と
-    実測）。Linux は `/proc/self/exe` を読むので **symlink を解いた実体**のパスで、Linuxbrew の
-    keg のように実体のディレクトリごと消えるとパスも消える。macOS は `_NSGetExecutablePath`
-    で、**起動に使ったパスを symlink のまま**返す（相対パスで起こしても絶対パス）ので、
-    Homebrew の `/opt/homebrew/bin/mewgit` は upgrade のあとも残り、新しい keg を指す。
-    起動時に 1 度だけ読むので、Linux の ` (deleted)` の付いた値は掴まない
-  - **パスが残って中身が別の版になる（版ずれ）は塞いでいない。** macOS の Homebrew、
-    `cargo install`、apt はどれも同じパスに新しい版を置くので、**新しい版の
+  - **Linux では `/proc/<pid>/exe` を渡して、消える形も版ずれも起こさない**（`/simplify` の
+    altitude が出し、2026-10-03 にユーザーと決めた）。`current_exe()` は `/proc/self/exe` を
+    読んで **symlink を解いた実体**のパスを返すので、Linuxbrew の keg のように実体の
+    ディレクトリごと消えるとパスも消え、apt や `cargo install` のように同じパスへ新しい版を
+    rename で置くと**新しい版のエディタが古い TUI の plan を読む**（版ずれ）。
+    `/proc/<pid>/exe` は走っているプロセスの実体を指すので、**どちらでも起動した版そのものが
+    起きる**（下の表）。`self` ではなく pid で書くのは、エディタを起こすのが git の子の `sh`
+    だから。起動時に読めなければ（`/proc` の無い環境）`current_exe()` に戻す（`mewgit-tui` の
+    `runtime::editor_bin`）。**stat もこのリンクを辿るので、実体が消えても `EditorGone` には
+    ならない** —— エディタは起きるので、それで正しい
+  - **macOS には同じ仕組みが無い。** `current_exe()` は `_NSGetExecutablePath` で、**起動に
+    使ったパスを symlink のまま**返す（相対パスで起こしても絶対パス）。Homebrew の
+    `/opt/homebrew/bin/mewgit` は upgrade のあとも残って新しい keg を指すので、消えるのは
+    手で消した形くらいで、そこを `EditorGone` の案内が拾う
+  - **macOS の版ずれ（Homebrew の upgrade、`cargo install`）は塞いでいない。** 新しい版の
     `--sequence-editor` / `--commit-editor` が古い TUI の組んだ stdin の JSON と
-    `mewgit-reword-<Oid>` を読む**。受け渡しの形を変えない限り起きない。変えたときは
+    `mewgit-reword-<Oid>` を読む。受け渡しの形を変えない限り起きない。変えたときは
     sequence editor は JSON を読めずに非 0 で断る側に倒れるが、`mewgit-reword-<Oid>` の
     中身の形を変えると commit editor が黙って読み違えうる（2026-10-03 にユーザーと決めて
     タスクにしていない）
@@ -967,6 +976,7 @@ git 2.47.3 で同じ結果。`LC_ALL=C`、stdin は `/dev/null`。エディタ�
 | ↑ reword の行で止まった形を、mewgit の実バイナリで（plan は `--sequence-editor` に stdin で渡した）。早送りの形と `--onto` で載せ直す形 | — | 早送りは HEAD = X・`amend` 在り・reflog `rebase: fast-forward`、載せ直しは reflog `rebase (reword): A`・`amend` 無し。**どちらも `mewgit-reword-<X>` が残る**。エディタを戻して verify → `commit --amend` → continue で**新しいメッセージが入る** |
 | shell の行 | — | macOS: `'…' --commit-editor: /nonexistent dir/mewgit: No such file or directory`、dash: `'…' --commit-editor: 1: /nonexistent dir/mewgit: not found` |
 | `current_exe()`（rust 1.98.1。symlink `bin/exe` → `real/exe` で起こす） | — | macOS は `…/bin/exe`（相対パスで起こしても絶対パス）、Linux は `/opt/real/exe`。起動後に実体を消すと、Linux で読み直した値は `/opt/real/exe (deleted)`、macOS は消える前と同じ |
+| Linux で、起動したプロセスが `sh -c "'/proc/<自分の pid>/exe' child"` を孫として起こす（Debian trixie のコンテナ、rust 1.98.1） | — | 何もしない / 起動後に実体を消す / 同じパスへ新しい版を rename で置く、の 3 形とも**起動した版が exit 0 で走る**。同じ 3 形を `current_exe()` のパスで起こすと、消した形は exit 127 `not found`、置いた形は**新しい版**が走る |
 
 ## 進行中操作との整合
 

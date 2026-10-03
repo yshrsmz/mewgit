@@ -279,11 +279,7 @@ impl Runner {
     }
 
     /// 失敗の分類。**エディタを起こせなかった失敗だけは、出力ではなく自バイナリの
-    /// パスで決める** —— 起こせなかったときの行は shell で割れ（macOS の `sh` は
-    /// `No such file or directory`、dash は `not found`）、`there was a problem with the
-    /// editor` は自バイナリが自分で断った形（[`ExecErrorKind::HeadMoved`] など）も書く
-    /// （03 の「エラー分類」）。パスを見るのは失敗のあとだけで、起こす前の op には
-    /// 何も足さない。
+    /// パスで決める**（理由は 03 の「エラー分類」の `EditorGone`）。
     fn kind_of_failure(&self, stdout: &str, stderr: &str) -> ExecErrorKind {
         if stderr.contains("there was a problem with the editor") && !self.mewgit_bin.exists() {
             ExecErrorKind::EditorGone

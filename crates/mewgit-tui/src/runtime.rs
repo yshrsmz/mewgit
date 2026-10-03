@@ -103,7 +103,7 @@ where
         state.repo.path.clone(),
         &state.config.general.git_bin,
         ssh.clone(),
-        std::env::current_exe()?,
+        editor_bin()?,
     );
     let (mut runtime, mut msgs) = Runtime::new(reader, runner, ssh);
 
@@ -165,6 +165,24 @@ where
             return Ok(());
         }
     }
+}
+
+/// git に起こさせるエディタ（自バイナリ）のパス（03 の「消えた自バイナリ」）。
+///
+/// **Linux では `/proc/<pid>/exe` を渡す。** 走っているプロセスの実体を指すので、起動中に
+/// 実体が消えても、同じパスに新しい版が置かれても、**起動した版そのもの**が起きる。
+/// `self` ではなく pid で書くのは、エディタを起こすのが git の子の `sh` だから。読めなければ
+/// （`/proc` の無い環境）`current_exe()` に戻す。macOS には同じ仕組みが無く、消えた形は
+/// `ExecErrorKind::EditorGone` の案内が拾う。
+fn editor_bin() -> std::io::Result<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let proc_exe = std::path::PathBuf::from(format!("/proc/{}/exe", std::process::id()));
+        if std::fs::read_link(&proc_exe).is_ok() {
+            return Ok(proc_exe);
+        }
+    }
+    std::env::current_exe()
 }
 
 /// グラフに使える行数が変わっていたら [`Msg::Layout`] を流す。
@@ -629,6 +647,23 @@ mod tests {
     use mewgit_core::test_util::{fake_account, fake_target, wait_for_pid, BareRepo, TestRepo};
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn the_editor_is_the_running_process_itself_on_linux() {
+        // Linux では起動中に実体が消えても差し替わっても起動した版が起きる形
+        // （03 の「消えた自バイナリ」に実測）。`current_exe()` に戻ると、Linuxbrew の
+        // upgrade で rebase の continue が落ちる形に戻る。
+        let bin = editor_bin().expect("自バイナリのパスが引けません");
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            bin,
+            std::path::PathBuf::from(format!("/proc/{}/exe", std::process::id()))
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(bin, std::env::current_exe().expect("current_exe"));
+        // `EditorGone` の判定（`Runner`）はこのパスの在否を見る。
+        assert!(bin.exists(), "{}", bin.display());
+    }
 
     /// リポジトリを開いた状態とハンドル。
     fn opened(repo: &TestRepo) -> (AppState, ReaderHandle) {

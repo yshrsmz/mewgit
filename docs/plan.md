@@ -405,7 +405,8 @@ open な PR が全部並ぶ。2 本目は PR ごとに `checks` / `reviews` を�
 ## M6: 仕上げ
 
 **順序**（2026-10-03 にユーザーと決めた）—— (1) 黙って壊れる・理由が出ない穴を先に塞ぐ:
-hook が reword を断ったあとの continue → stderr が空の失敗の理由 → `-u` の提案を push の
+hook が reword を断ったあとの continue → stderr が空の失敗の理由 → stderr にだけ理由がある
+失敗の要約（2026-10-03 に前のタスクから割った）→ `-u` の提案を push の
 規則に揃える → アカウント書き込み中の `A` を断る → 消えたバイナリのエディタ（まず実測）→
 git の最低版。(2) README とリリースワークフローで 0.1 を切る。(3) そのあと端末幅 < 100 の
 レイアウト、`1`〜`5`、ロケールと `graph.ascii`、意図的な巻き戻しの force push。
@@ -449,6 +450,17 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       `commit` は stderr に別の文言を書く**ので、それも `Unmerged` に入れて案内を揃えた
       （rebase だけが案内付きになるのを避けるため。03 の「エラー分類」に実測、git 2.56.0）。
       stderr にだけ理由がある失敗（`would be overwritten` など）の要約は `Display` のまま
+      （下の行へ送った）
+- [ ] **stderr にだけ理由がある失敗の要約行に、その理由を出す。** いまの要約は案内が
+      無ければ「stderr が空なら stdout の最後の行、そうでなければ argv」なので、いちばん
+      よく出る赤い通知（`switch` の `would be overwritten`、`branch -d` の `not fully merged`、
+      `add` の `pathspec did not match`）が argv だけになり、理由は `L` でしか読めない
+      （01 の「失敗の案内文」）。**選び方は op ごとに stderr を実測してから決める** ——
+      「最初の `error:` / `fatal:` 行」は素直に見えるが、hook に断られた push は
+      ` ! [remote rejected] … (pre-receive hook declined)` を先に、`error: failed to push
+      some refs` を後に書くので、情報の薄いほうを採る。`hint:` の行（`advice.*` で消える）は
+      飛ばす。決めたら 01 の「失敗の案内文」の (2) と、07 の「Branches ペイン」の非対称の
+      注記を直す（2026-10-03 にユーザーと決めて送った）
 - [x] ステータスバーのキーヒント。**M4 の残りより先にやる**（2026-09-19 に決めた）。
       フッターを **2 行**にして 1 行目を通知、2 行目をフォーカス中のペインのキーにする。
       **キーの一覧は `app` に置く唯一の表**で、`Modal::Help`（M5 に前倒しした）と `config.keymap` が

@@ -2594,7 +2594,8 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
   **stderr があるときは使わない** —— stderr の最後の行は `hint:` のことが多く
   （`advice.*` で消える行でもある）、理由の行を選べない。**非対称は残る**:
   stderr にだけ理由が出る失敗（`would be overwritten` など）は今までどおり
-  `Display` で、理由は `L` で読む（07 の「Branches ペイン」）
+  `Display` で、理由は `L` で読む（07 の「Branches ペイン」）。stderr から理由の行を
+  選ぶ規則は op ごとの実測が要るので `docs/plan.md` の M6 に送った
 - **`Unmerged` は「解消してから」を案内する**（2026-10-03）。未解消のファイルがあると、
   stash の 3 つは stdout に `<path>: needs merge`・stderr に `could not write index` だけを
   書き、`rebase --continue` は stdout に `needs merge` と結びを書いて **stderr は空**、

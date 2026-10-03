@@ -44,6 +44,9 @@ pub struct Runner {
     /// 後ろの reword が元のメッセージのまま通る（03 の実測）。reword 以外で起こされた
     /// ときは何もしない（`GIT_EDITOR=true` と同じ）。
     commit_editor: OsString,
+    /// 2 つのエディタが起こす自バイナリそのもの。エディタの失敗のあとに、まだ在るかを
+    /// 見る（[`ExecErrorKind::EditorGone`]。03 の「エラー分類」）。
+    mewgit_bin: PathBuf,
     /// 実行時に重ねる環境変数。テストの隔離に使う。
     env: Vec<(OsString, OsString)>,
     /// `GIT_SSH_COMMAND` に入れる値。**生の設定値ではなく、実効 ssh に
@@ -71,6 +74,7 @@ impl Runner {
             git_bin: git_bin.into(),
             sequence_editor: editor(&mewgit_bin, "--sequence-editor"),
             commit_editor: editor(&mewgit_bin, "--commit-editor"),
+            mewgit_bin,
             env: Vec::new(),
             git_ssh_command: match ssh {
                 SshCommand::Shell(command) => Some(command + BATCH_MODE),
@@ -267,10 +271,24 @@ impl Runner {
             Err(ExecError::Failed {
                 argv: command.argv,
                 code: output.status.code(),
-                kind: classify(&stdout, &stderr),
+                kind: self.kind_of_failure(&stdout, &stderr),
                 stdout,
                 stderr,
             })
+        }
+    }
+
+    /// 失敗の分類。**エディタを起こせなかった失敗だけは、出力ではなく自バイナリの
+    /// パスで決める** —— 起こせなかったときの行は shell で割れ（macOS の `sh` は
+    /// `No such file or directory`、dash は `not found`）、`there was a problem with the
+    /// editor` は自バイナリが自分で断った形（[`ExecErrorKind::HeadMoved`] など）も書く
+    /// （03 の「エラー分類」）。パスを見るのは失敗のあとだけで、起こす前の op には
+    /// 何も足さない。
+    fn kind_of_failure(&self, stdout: &str, stderr: &str) -> ExecErrorKind {
+        if stderr.contains("there was a problem with the editor") && !self.mewgit_bin.exists() {
+            ExecErrorKind::EditorGone
+        } else {
+            classify(stdout, stderr)
         }
     }
 

@@ -257,8 +257,11 @@ impl TestRepo {
     ///
     /// 自バイナリは**存在しないパス**にしてある。core のテストからは `mewgit` の
     /// バイナリを引けないので、interactive rebase は git が sequence editor の失敗で
-    /// 断る形になる。**`GIT_EDITOR` だけは `true` に戻す** —— revert / cherry-pick の
-    /// continue もエディタを起こすので、存在しないパスのままだとそちらが落ちる。
+    /// 断る形になる（`EditorGone`）。**`GIT_EDITOR` だけは `true` に戻す** —— pick の
+    /// コンフリクトを解いたあとの `rebase --continue` と、メッセージを渡さない
+    /// `commit --amend` はエディタを起こすので、存在しないパスのままだとそちらが落ちる。
+    /// revert / cherry-pick は stdin が端末でないので起こさない（03 の「消えた自バイナリ」。
+    /// いまの core のテストはどれもこの形を踏まず、外しても全部通る。2026-10-03）。
     /// 通しで流すのは [`runner_with_mewgit`](Self::runner_with_mewgit)。
     pub fn runner(&self) -> Runner {
         self.runner_with_mewgit(self.path().join("mewgit-is-not-built-here"))

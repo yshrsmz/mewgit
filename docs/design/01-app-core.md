@@ -2540,6 +2540,9 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
 | `Unmerged` + `Commit` | 未解消のまま。`git add` してから commit（**`Warn`**、37 セル） |
 | `Unmerged` + `StashPush` | コンフリクトを解消してから stash（**`Warn`**。手前の断りと同じ文） |
 | `Unmerged` + `StashApply` / `StashPop` | コンフリクトを解消してから stash を戻す（**`Warn`**、41 セル） |
+| `EditorGone` + `RebaseInteractive` | mewgit が消えた。起動し直して `i` から開き直す（`Error`、46 セル） |
+| `EditorGone` + `RebaseContinue` / `RebaseSkip` | mewgit が消えた。起動し直して `m` から続ける（`Error`、42 セル） |
+| `EditorGone` + それ以外 | mewgit が消えた。起動し直してから押し直す（`Error`、43 セル） |
 | それ以外 | 無し（git の出力から選んだ理由の行。選べなければ固定の文言か `Display`） |
 
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
@@ -2626,6 +2629,17 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
   実装」）。こちらは rebase が止まったままなので必ずバッジと並ぶ。失敗のあとの status が
   見分け直すので、**開き直したメニューはいまの HEAD で組まれる**（端末で amend し直して
   いれば素の continue）。文は「止まったあとに HEAD が動いた。m から開き直して」（46 セル）
+- **`EditorGone` は起動し直せと言う**（2026-10-03）。起動中に mewgit のバイナリが消え、
+  git がエディタ（自バイナリ）を起こせなかった形（03 の「Interactive rebase の実装」の
+  「消えた自バイナリ」）。案内が無いと理由の行は `there was a problem with the editor
+  ''<パス>' --commit-editor'` で、Linuxbrew のパスなら 110 セル前後になって 71 で切れ、
+  **起動し直せば済むことがどこにも出ない**。起動し直すと `current_exe()` を読み直すので、
+  新しいパスのエディタで続けられる。**壊れたものは無い**（開始は始まらず、continue は
+  止まったまま解消が残る）が、`Warn` にはしない —— コンフリクトのような想定どおりの
+  結末ではなく、起動し直すまで同じ失敗を繰り返す。**予算はバッジの隣の 48 セル**
+  （continue / skip は rebase が止まったまま失敗する）。op を 3 つに分けるのは押すキーが
+  違うため。それ以外の op は git がエディタを起こさないはず（03 の実測）なので、
+  キーを名指ししない文にした
 - **stderr が空の失敗は stdout の最後の行を要約にする**（2026-10-03）。git は理由を
   stdout にだけ書くことがあり（何も stage していない `git commit`、未解消のままの
   `rebase --continue`、複数の revert が空で止まった形。03 の「エラー分類」）、

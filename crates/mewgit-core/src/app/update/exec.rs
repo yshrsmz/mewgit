@@ -422,6 +422,17 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
             _ => None,
         },
         ExecErrorKind::Unmerged => unmerged_advice(op),
+        // 起動中に mewgit のバイナリが消えた（03 の「消えた自バイナリ」）。起動し直せば
+        // `current_exe()` を読み直すので続けられる。**押すキーで 3 つに分ける** —— 開始は
+        // 始まっておらず、continue / skip は rebase が止まったまま（バッジと並ぶので 48
+        // セルに収める）。ほかの op は git がエディタを起こさないはずで、キーを名指ししない。
+        ExecErrorKind::EditorGone => Some(match op {
+            GitOp::RebaseInteractive { .. } => "mewgit が消えた。起動し直して i から開き直して",
+            GitOp::RebaseContinue { .. } | GitOp::RebaseSkip => {
+                "mewgit が消えた。起動し直して m から続けて"
+            }
+            _ => "mewgit が消えた。起動し直してから押し直して",
+        }),
         ExecErrorKind::Other => None,
     }
 }
@@ -995,6 +1006,59 @@ mod tests {
         );
         let notice = plain.notices.back().expect("通知がありません");
         assert!(!notice.message.contains("開き直して"), "{}", notice.message);
+    }
+
+    #[test]
+    fn a_vanished_binary_is_an_error_that_says_to_restart_with_the_key_to_press() {
+        // 起動中に mewgit のバイナリが消え、git がエディタを起こせなかった形（03 の
+        // 「消えた自バイナリ」）。理由の行は `there was a problem with the editor ''<パス>'
+        // --commit-editor'` で、71 セルで切れて「起動し直せば済む」がどこにも出なかった。
+        let reword = crate::git_read::RefusedReword { head: fake_oid(7) };
+        let cases = [
+            (
+                GitOp::RebaseInteractive {
+                    onto: fake_oid(1).to_string(),
+                    head: fake_oid(7),
+                    plan: RebasePlan::default(),
+                },
+                "i から開き直して",
+            ),
+            (GitOp::RebaseContinue { reword: None }, "m から続けて"),
+            (
+                GitOp::RebaseContinue {
+                    reword: Some(reword),
+                },
+                "m から続けて",
+            ),
+            (GitOp::RebaseSkip, "m から続けて"),
+            (
+                GitOp::Commit {
+                    message: "m".to_string(),
+                    amend: true,
+                },
+                "起動し直してから押し直して",
+            ),
+        ];
+        for (op, way) in cases {
+            let mut state = state();
+            finish_exec(
+                &mut state,
+                op.clone(),
+                Err(failed_with(ExecErrorKind::EditorGone)),
+            );
+
+            let notice = state.notices.back().expect("通知がありません");
+            // 想定どおりの結末（コンフリクト）とは違い、起動し直すまで同じ失敗を繰り返す。
+            assert_eq!(notice.level, NoticeLevel::Error, "{op:?}");
+            assert!(notice.message.contains(way), "{op:?}: {}", notice.message);
+            // continue / skip は rebase が止まったまま失敗するので、バッジと並ぶ。
+            assert!(
+                cells(&notice.message) <= BESIDE_BADGE_CELLS,
+                "{} セル: {}",
+                cells(&notice.message),
+                notice.message
+            );
+        }
     }
 
     #[test]

@@ -420,13 +420,17 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       最低版を決めて、起動時に `git --version` を見て案内するか、古い版では reword の
       メッセージの行頭の `#` を断るかを選ぶ
 
-- [ ] **起動中に mewgit のバイナリが消えたときのエディタ。** `GIT_EDITOR` /
-      `GIT_SEQUENCE_EDITOR` は `current_exe()` を指すので、パッケージの更新などで
-      バイナリが消えると、エディタを起こす git（revert / cherry-pick の continue など）が
-      落ちるはず（以前の `GIT_EDITOR=true` では起きない。03 の「Interactive rebase の
-      実装」）。**確かめていない** —— まず Linux と macOS で消えたバイナリを起こして
-      実際に落ちるかを叩き、落ちるなら起動時に同じパスが無いことを検知して案内するか、
-      エディタを起こすときに exe の有無を見て `true` 相当に倒すかを決める
+- [x] **起動中に mewgit のバイナリが消えたときのエディタ。** `GIT_EDITOR` /
+      `GIT_SEQUENCE_EDITOR` は `current_exe()` を指す。**着手前は「revert / cherry-pick の
+      continue などが落ちるはず」と書いていたが、実測では落ちるのは rebase の系統と
+      `commit --amend` だけ**で、revert / cherry-pick は stdin が端末でないのでエディタを
+      起こさない。落ちても壊れるものは無く（開始は始まらず、continue は止まったまま）、
+      起動し直せば `m` から続けられる（実測の表は 03 の「Interactive rebase の実装」、
+      macOS と Debian のコンテナ）。**失敗のあとに `Runner` が自バイナリのパスを見て、
+      無ければ `ExecErrorKind::EditorGone` にし、起動し直せと案内する**（01 の「失敗の
+      案内文」）。`true` 相当に倒す形は plan と reword を黙って落とすので採らなかった。
+      **パスが残って中身が新しい版に変わる版ずれは 03 に書くだけにした**（2026-10-03 に
+      ユーザーと決めた）
 
 - [x] **hook が reword を断ったあとの continue で、新しいメッセージが消える。** git は
       continue でエディタを起こし直さず、元のメッセージでコミットする（git 自身の挙動。

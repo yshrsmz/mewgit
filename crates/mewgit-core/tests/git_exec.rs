@@ -986,7 +986,10 @@ async fn interactive_rebase_leaves_the_branch_alone_when_the_editor_fails() {
         .await
         .expect_err("editor が無いので git は断るはずです");
 
-    let ExecError::Failed { argv, stderr, .. } = &err else {
+    let ExecError::Failed {
+        argv, stderr, kind, ..
+    } = &err
+    else {
         panic!("git が走っていない: {err:?}");
     };
     assert_eq!(
@@ -997,8 +1000,47 @@ async fn interactive_rebase_leaves_the_branch_alone_when_the_editor_fails() {
         stderr.contains("there was a problem with the editor"),
         "{stderr}"
     );
+    // 起動中にバイナリが消えた形と同じ（03 の「消えた自バイナリ」）。
+    assert_eq!(*kind, ExecErrorKind::EditorGone);
     assert_eq!(repo.head_oid(), before);
     assert!(!repo.path().join(".git/rebase-merge").exists());
+}
+
+#[tokio::test]
+async fn an_editor_that_is_there_but_refuses_is_not_a_vanished_binary() {
+    // `there was a problem with the editor` は、在るエディタが自分で断った形
+    // （HEAD の照合、plan の無い `--sequence-editor`）でも出る。パスが在れば
+    // `EditorGone` にしない（03 の「エラー分類」）。`false` は在って、引数に関わらず
+    // 非 0 で返る（macOS にも Debian にも `/usr/bin/false` が在る）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.commit("second");
+    let before = repo.head_oid();
+
+    let err = repo
+        .runner_with_mewgit("/usr/bin/false")
+        .run(&GitOp::RebaseInteractive {
+            onto: "HEAD~1".into(),
+            head: before,
+            plan: RebasePlan {
+                entries: vec![RebaseEntry {
+                    action: RebaseAction::Drop,
+                    oid: before,
+                    summary: "second".into(),
+                }],
+            },
+        })
+        .await
+        .expect_err("editor が断るので git も断るはずです");
+
+    let ExecError::Failed { stderr, kind, .. } = &err else {
+        panic!("git が走っていない: {err:?}");
+    };
+    assert!(
+        stderr.contains("there was a problem with the editor"),
+        "{stderr}"
+    );
+    assert_eq!(*kind, ExecErrorKind::Other);
 }
 
 #[tokio::test]

@@ -44,6 +44,9 @@ pub struct Runner {
     /// 後ろの reword が元のメッセージのまま通る（03 の実測）。reword 以外で起こされた
     /// ときは何もしない（`GIT_EDITOR=true` と同じ）。
     commit_editor: OsString,
+    /// 2 つのエディタが起こす自バイナリそのもの。エディタの失敗のあとに、まだ在るかを
+    /// 見る（[`ExecErrorKind::EditorGone`]。03 の「エラー分類」）。
+    mewgit_bin: PathBuf,
     /// 実行時に重ねる環境変数。テストの隔離に使う。
     env: Vec<(OsString, OsString)>,
     /// `GIT_SSH_COMMAND` に入れる値。**生の設定値ではなく、実効 ssh に
@@ -58,7 +61,8 @@ pub struct Runner {
 impl Runner {
     /// `ssh` は git が実際に使う ssh（`auth::ssh::effective_ssh_from_env`）。
     /// **`git_bin` と同じくコンストラクタの引数にしている**のは、決めたのに渡し忘れる
-    /// 経路を作らないため。`mewgit_bin` も同じ（`std::env::current_exe()`）。
+    /// 経路を作らないため。`mewgit_bin` も同じ（Linux では `/proc/<pid>/exe`、ほかは
+    /// `std::env::current_exe()`。`mewgit-tui` の `runtime::editor_bin`）。
     pub fn new(
         repo_root: impl Into<PathBuf>,
         git_bin: impl Into<PathBuf>,
@@ -71,6 +75,7 @@ impl Runner {
             git_bin: git_bin.into(),
             sequence_editor: editor(&mewgit_bin, "--sequence-editor"),
             commit_editor: editor(&mewgit_bin, "--commit-editor"),
+            mewgit_bin,
             env: Vec::new(),
             git_ssh_command: match ssh {
                 SshCommand::Shell(command) => Some(command + BATCH_MODE),
@@ -267,10 +272,20 @@ impl Runner {
             Err(ExecError::Failed {
                 argv: command.argv,
                 code: output.status.code(),
-                kind: classify(&stdout, &stderr),
+                kind: self.kind_of_failure(&stdout, &stderr),
                 stdout,
                 stderr,
             })
+        }
+    }
+
+    /// 失敗の分類。**エディタを起こせなかった失敗だけは、出力ではなく自バイナリの
+    /// パスで決める**（理由は 03 の「エラー分類」の `EditorGone`）。
+    fn kind_of_failure(&self, stdout: &str, stderr: &str) -> ExecErrorKind {
+        if stderr.contains("there was a problem with the editor") && !self.mewgit_bin.exists() {
+            ExecErrorKind::EditorGone
+        } else {
+            classify(stdout, stderr)
         }
     }
 

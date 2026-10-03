@@ -356,9 +356,11 @@ pub enum ExecError {
 - `git_bin` は `config` の `general.git_bin`（既定は `"git"`、絶対パスも書ける。08）から渡す。
   引数にしているのは、設定を読んだのに渡し忘れる経路を作らないため
 - `mewgit_bin` は interactive rebase の sequence editor として起こす自バイナリ
-  （`std::env::current_exe()`。下の「Interactive rebase の実装」）。`git_bin` と同じ理由で
+  （Linux では `/proc/<pid>/exe`、ほかは `std::env::current_exe()`。下の「Interactive
+  rebase の実装」の「消えた自バイナリ」）。`git_bin` と同じ理由で
   引数にする。core は自分がどのバイナリに入っているかを知らない。`new` が引用して
-  `GIT_SEQUENCE_EDITOR` と `GIT_EDITOR` の値に組んでおく
+  `GIT_SEQUENCE_EDITOR` と `GIT_EDITOR` の値に組んでおく。**パスそのものも持つ** ——
+  エディタの失敗のあとに、そのパスがまだ在るかを見る（下の「エラー分類」の `EditorGone`）
 - **`ExecError` を割るのは、失敗の種類で埋まるフィールドが違うため。** 1 つの
   struct にすると「起動していないときは `code` が `None`、`stderr` に git ではない文言、
   `kind` は分類表に載らない値」という約束を、読む側が毎回思い出すことになる。
@@ -584,6 +586,7 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
 
 | パターン | kind |
 |---|---|
+| stderr に `there was a problem with the editor` があり、**`Runner` の `mewgit_bin` が無い**（`classify` の外で `Runner` が見る） | `EditorGone` |
 | stderr の行頭の `mewgit: [head-moved]`（mewgit の sequence editor が出す印） | `HeadMoved` |
 | stderr の行頭の `fatal: cannot lock ref 'HEAD': is at ` で、同じ行に ` but expected `（reword を持つ continue の照合。下の「Interactive rebase の実装」） | `HeadMoved` |
 | `SAML SSO` / `organization has enabled or enforced SAML` | `SamlSsoRequired` |
@@ -605,6 +608,21 @@ cherry-pick / revert / merge / rebase / `pull --rebase` / `pull --no-rebase` で
 （`/code-review` が踏んだ）。件名は行の途中にしか出ないので、行頭で合わせれば先頭に置いてよい。**照合の断りは
 `cannot lock ref` だけで拾わない** —— 同じ語は lock ファイルの取り合いでも出る（そちらは
 「HEAD が動いた」ではない）。`is at … but expected` まで揃ったときだけ `HeadMoved` にする。
+
+**`EditorGone` は起動中に mewgit のバイナリが消えた形**（下の「Interactive rebase の
+実装」の「消えた自バイナリ」）。ほかのどの kind より先に採る —— エディタが起きられなければ、
+git がその先で何を書いても原因はそこにある（reword の行で止まると stderr に `You can amend
+the commit now` も並ぶ）。見分けは 2 つ揃えたときだけ:
+
+- **`there was a problem with the editor` だけでは決めない。** 自バイナリのエディタが自分で
+  断った形（HEAD の照合の `[head-moved]`、plan の無い `--sequence-editor`）も同じ行を書く
+- **shell の文言では照合しない。** 起こせなかったときの行は shell で割れる —— macOS の `sh` は
+  `<path>: No such file or directory`、Debian の dash は `1: <path>: not found`（実測は下の表）
+- **パスを見るのは失敗のあとだけ。** op ごとに起こす前に見ると、エディタを起こさない大半の
+  書き込みにも stat が載る。`Runner` は変種を見ない（上の「Runner」）ので、どの op が
+  エディタを起こすかで分けることもできない
+
+`classify` は出力だけの純粋関数のまま残し、`Runner` が結果を上書きする。
 
 **`NoChanges` は `Empty` より後ろ。** 空で止まった cherry-pick の stdout の末尾にも
 `nothing to commit, working tree clean` が出る（git 2.55.0 で実測）ので、先に見ると
@@ -805,9 +823,41 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
   **`core.commentString` を読むのは git 2.45 以降**（リリースノートより。手元は 2.55 だけで
   測った）で、それより古い git は未知のキーを黙って無視するので `#` の行が消える形に
   戻るはず。**確かめていない**（mewgit はまだ git の最低版を決めていない。M6）
-- **エディタが自バイナリになったので、起動中に mewgit のバイナリが消えると、エディタを
-  起こす git（revert / cherry-pick の continue など）が落ちる**はず（以前の `true` では
-  起きない）。パッケージの更新で起きうるが、**確かめていない**
+- **消えた自バイナリ。** エディタが自バイナリなので、起動中に mewgit のバイナリが消えると、
+  エディタを起こす git が落ちる（以前の `true` では起きない。**Linux では `/proc/<pid>/exe`
+  を渡すので起きない** —— 下の 2 つ目）。**落ちるのは rebase の系統と
+  `commit --amend` だけ**で、revert / cherry-pick は開始も continue もエディタを起こさない ——
+  `Runner` は stdin を `Stdio::null()` か pipe にするので、git の `--edit` の既定（端末から
+  起こされたとき）が外れる（下の表）。**落ちても壊れるものは無い** —— 開始は始まらず、
+  continue は止まったまま stage した解消が残る。reword の行で止まった形は #145 の「断られた
+  reword」と同じ形で、`mewgit-reword-<Oid>` も残るので、起動し直せば `m` の continue が
+  新しいメッセージを入れる（下の表）。**案内は `EditorGone`**（上の「エラー分類」、文は 01 の
+  「失敗の案内文」）
+  - **`true` 相当に倒さない。** パスが無いときに `true` を渡すと、sequence editor は既定の
+    todo を黙って採り（plan が効かない）、commit editor は reword のメッセージを黙って落とす
+    （#145 で塞いだ形そのもの）。閉じた側に倒れるいまの形を採る
+  - **Linux では `/proc/<pid>/exe` を渡して、消える形も版ずれも起こさない**（`/simplify` の
+    altitude が出し、2026-10-03 にユーザーと決めた）。`current_exe()` は `/proc/self/exe` を
+    読んで **symlink を解いた実体**のパスを返すので、Linuxbrew の keg のように実体の
+    ディレクトリごと消えるとパスも消え、apt や `cargo install` のように同じパスへ新しい版を
+    rename で置くと**新しい版のエディタが古い TUI の plan を読む**（版ずれ）。
+    `/proc/<pid>/exe` は走っているプロセスの実体を指すので、**どちらでも起動した版そのものが
+    起きる**（下の表）。`self` ではなく pid で書くのは、エディタを起こすのが git の子の `sh`
+    だから。起動時に読めなければ（`/proc` の無い環境）か、`/proc/self/exe` と別の実体を指せば（PID
+    名前空間で `/proc` をマウントし直していない形。`/code-review` が拾った）`current_exe()` に
+    戻す（`mewgit-tui` の
+    `runtime::editor_bin`）。**stat もこのリンクを辿るので、実体が消えても `EditorGone` には
+    ならない** —— エディタは起きるので、それで正しい
+  - **macOS には同じ仕組みが無い。** `current_exe()` は `_NSGetExecutablePath` で、**起動に
+    使ったパスを symlink のまま**返す（相対パスで起こしても絶対パス）。Homebrew の
+    `/opt/homebrew/bin/mewgit` は upgrade のあとも残って新しい keg を指すので、消えるのは
+    手で消した形くらいで、そこを `EditorGone` の案内が拾う
+  - **macOS の版ずれ（Homebrew の upgrade、`cargo install`）は塞いでいない。** 新しい版の
+    `--sequence-editor` / `--commit-editor` が古い TUI の組んだ stdin の JSON と
+    `mewgit-reword-<Oid>` を読む。受け渡しの形を変えない限り起きない。変えたときは
+    sequence editor は JSON を読めずに非 0 で断る側に倒れるが、`mewgit-reword-<Oid>` の
+    中身の形を変えると commit editor が黙って読み違えうる（2026-10-03 にユーザーと決めて
+    タスクにしていない）
 - **plan は一時ファイルではなく stdin で渡す。** git が editor に stdin を継がせる（下の表）
   ので、ハンクの patch と同じ経路に乗る。`tempfile` を本依存に上げずに済み、後始末も無い
 - **メッセージのファイルは `rebase-merge/` の中に置き、Oid で引く。** 完了でも abort でも
@@ -911,6 +961,24 @@ pub enum RebaseAction { Pick, Reword { message: String }, Edit, Squash, Fixup, D
 | `pick A` / `squash B`（`GIT_EDITOR=true`） | メッセージは `A の件名` + 空行 + `B の件名` |
 | reword のメッセージ `Fix bug` + 空行 + `#123 is closed`（`--commit-editor`） | `#123` の行が消える。`-c core.commentString=#mewgit#` を付けると残り、同じ rebase の squash のメッセージにもコメントの行は残らない |
 | `GIT_CONFIG_COUNT=2`（0 番はユーザーの設定、1 番が `core.commentString`）、reword 2 本の 1 本目がコンフリクト → 解消して continue | 2 本とも `#` の行が残る（`#42 only` だけのメッセージも通る）。0 番の設定も効いたまま |
+
+消えた自バイナリの実測（2026-10-03。macOS の git 2.56.0 と、Debian trixie のコンテナの
+git 2.47.3 で同じ結果。`LC_ALL=C`、stdin は `/dev/null`。エディタは「呼ばれたら印を残す」
+スクリプトと、存在しないパス `'/nonexistent dir/mewgit' --commit-editor` の 2 通りで流した）:
+
+| 操作 | エディタ | 存在しないパスのとき |
+|---|---|---|
+| `revert <X>` / コンフリクトを解いて `revert --continue` / 2 本の revert の continue | 起こされない | 影響なし |
+| `cherry-pick <X>` / コンフリクトを解いて `cherry-pick --continue` | 起こされない | 影響なし |
+| `pull --no-rebase`（マージコミットができる形） | 起こされない | 影響なし |
+| `rebase --interactive` の開始 | sequence editor | exit 1、stderr `<shell の行>` + `error: there was a problem with the editor '…'`。HEAD は動かず `rebase-merge/` も残らない |
+| pick のコンフリクトを解いて `rebase --continue` | commit editor | exit 1、`there was a problem with the editor` + `could not commit staged changes`。**rebase は止まったまま**で、stage した解消も残る |
+| reword の行 | commit editor | exit 1、`there was a problem with the editor` + `You can amend the commit now`。pick は元のメッセージでコミット済み |
+| `commit --amend`（メッセージを渡さない） | commit editor | exit 1、`there was a problem with the editor` + `Please supply the message using either -m or -F option.` |
+| ↑ reword の行で止まった形を、mewgit の実バイナリで（plan は `--sequence-editor` に stdin で渡した）。早送りの形と `--onto` で載せ直す形 | — | 早送りは HEAD = X・`amend` 在り・reflog `rebase: fast-forward`、載せ直しは reflog `rebase (reword): A`・`amend` 無し。**どちらも `mewgit-reword-<X>` が残る**。エディタを戻して verify → `commit --amend` → continue で**新しいメッセージが入る** |
+| shell の行 | — | macOS: `'…' --commit-editor: /nonexistent dir/mewgit: No such file or directory`、dash: `'…' --commit-editor: 1: /nonexistent dir/mewgit: not found` |
+| `current_exe()`（rust 1.98.1。symlink `bin/exe` → `real/exe` で起こす） | — | macOS は `…/bin/exe`（相対パスで起こしても絶対パス）、Linux は `/opt/real/exe`。起動後に実体を消すと、Linux で読み直した値は `/opt/real/exe (deleted)`、macOS は消える前と同じ |
+| Linux で、起動したプロセスが `sh -c "'/proc/<自分の pid>/exe' child"` を孫として起こす（Debian trixie のコンテナ、rust 1.98.1） | — | 何もしない / 起動後に実体を消す / 同じパスへ新しい版を rename で置く、の 3 形とも**起動した版が exit 0 で走る**。同じ 3 形を `current_exe()` のパスで起こすと、消した形は exit 127 `not found`、置いた形は**新しい版**が走る |
 
 ## 進行中操作との整合
 

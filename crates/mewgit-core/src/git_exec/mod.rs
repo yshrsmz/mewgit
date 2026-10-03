@@ -479,6 +479,10 @@ pub enum ExecErrorKind {
     /// `Committing is not possible because you have unmerged files`）。何も書き込まれて
     /// いない（03 の「エラー分類」）。
     Unmerged,
+    /// git がエディタ（自バイナリ）を起こせず、そのパスがもう無い —— 起動中に mewgit の
+    /// バイナリが消えた。**出力からは決めない**（shell で文言が割れる）。[`Runner`] が
+    /// 失敗のあとにパスを見て決める（03 の「エラー分類」）。
+    EditorGone,
     Other,
 }
 

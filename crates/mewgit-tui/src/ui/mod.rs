@@ -1498,11 +1498,10 @@ mod tests {
             height: 24,
         };
         for reason in reasons {
-            // **末尾に空白まで見る。** `contains` だけだと、スピナーと隙間なく
-            // 並んだ状態（余白ゼロ）で通ってしまい、**リポジトリ名が 1 桁伸びた
-            // 瞬間に案内が落ちる**のを見張れない（`/code-review` が拾った。
-            // 実測で `Ambiguous` がちょうどその状態だったので文言を詰めた）。
-            let want = format!("{} ", degraded_label(&reason));
+            // **`owner/repo` ごと見る。** 理由が伸びても `owner/repo` から落ちる
+            // （`the_header_drops_parts_in_the_agreed_order`）ので、理由だけを見ると
+            // 伸びたことに気付けない。隣の席とのあいだは区切りの領域が空けている。
+            let want = format!("anthropics/claude-code  {}", degraded_label(&reason));
             let mut state = shipping_header_state();
             state.account = AccountState::Degraded(reason);
             let line = header(&state, size);

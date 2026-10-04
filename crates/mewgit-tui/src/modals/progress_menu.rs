@@ -13,7 +13,7 @@ use crate::modals;
 use crate::modals::picker::{self, Picker};
 
 /// キーの案内。`update::picker_key` と `update::progress::progress_picked` が受けるキーと揃える。
-const HINT: &str = "[j/k] 選ぶ   [Enter] 実行   [Esc] やめる";
+const HINT: modals::Hint<'static> = &[&["[j/k] 選ぶ", "[Enter] 実行", "[Esc] やめる"]];
 
 /// git の語の桁。**いちばん長い `continue` に 2 桁足す**（説明の頭を揃える）。
 const WORD_CELLS: usize = "continue".len() + 2;

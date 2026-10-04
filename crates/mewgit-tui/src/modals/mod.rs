@@ -18,8 +18,8 @@ pub mod remote_picker;
 use mewgit_core::app::{AppState, Modal, RewordInput, TextBuffer};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::ui;
@@ -101,31 +101,23 @@ pub const WIDTH: u16 = 60;
 /// 本文とキーの案内のあいだに空ける行数。
 const GAP_ROWS: u16 = 1;
 
-/// 枠の内側の右に空ける桁数。
+/// キーの案内。外側が行（手で分けた切れ目）、内側が群（`[キー] 動詞`）。
 ///
-/// **ratatui の折り返しは 1 セルだけはみ出す。** `WordWrapper` は行が幅を超えるかを
-/// **次の文字を足す前**に見る（`>=` 比較）ので、最後の 1 文字が全角だと行が
-/// `幅 + 1` セルで確定し、最後に残った語をそのまま吐く（`ratatui-widgets` 0.3.2 の
-/// `reflow.rs` を読んで確認）。**はみ出した 1 セルは枠の縦線を上書きする** ——
-/// `Paragraph` は枠より後に描き、`render_line` は領域の幅で切らないため
-/// （同 `paragraph.rs`）。1 桁空けておけば、はみ出しはそこに落ちる。
-///
-/// **`Confirm` から在ったが、`gh` の `message`（全角と識別子が混ざる）を出す
-/// `AccountPicker` で初めて実機に出た**（`the_box_keeps_its_border_when_a_line_just_
-/// overflows`）。はみ出しが 1 セルで収まるのは、比較が `>=` なので**最後の文字を
-/// 足す前の幅が `幅 - 1` 以下**だから。
-///
-/// **[`Block`] の padding に載せる。** [`Block::inner`] が padding を差し引くので、
-/// 幅を測る側（[`inner_width`]）と描く側（[`place`]）が**どちらも `Block::inner` の
-/// 1 本から出る**。`inner` を受け取ってから引く形にすると、`block()` を受けて自分で
-/// `inner` を呼ぶモーダルが 1 つ増えた時点で黙って穴が戻る。
-const RIGHT_MARGIN: u16 = 1;
+/// **群の並びのまま受ける。** 1 本の文字列で受けて区切りの空白で割り直す形だと、
+/// 区切りを守っているかを誰も見ない —— 空白 2 で並べた群は 1 つと読まれて折れずに
+/// 切れ、群の中に空白 3 を書けばそこで割れる。群を繋ぐのは [`place`] だけ。
+pub type Hint<'a> = &'a [&'a [&'a str]];
+
+/// 案内の群のあいだに置く空白。
+const HINT_GAP: &str = "   ";
 
 /// モーダルの枠。
+///
+/// **右に余白を持たない。** 折り返しが 1 セルはみ出す件の余白は `ui::wrapped` が
+/// 持つ（07 の「モーダル」）。ここにも載せていたころは本文の余白が 2 重にかかっていた。
 pub fn block(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .padding(Padding::right(RIGHT_MARGIN))
         .title(title.to_string())
         .border_style(Style::default().add_modifier(Modifier::BOLD))
 }
@@ -149,20 +141,23 @@ pub fn inner_width(area: Rect, want: u16, block: &Block<'_>) -> u16 {
 /// `body_rows` は本文が要求する行数。画面に収まらない分は [`centered`] が削る。
 ///
 /// **キーの案内は本文とは別に最下行へ描く。** 1 つの `Paragraph` にまとめると、
-/// 本文が伸びたときに案内だけが枠の外へ押し出される。**案内は改行で割った行数だけ
-/// 取る**（07 の「モーダルのキーの案内」）—— 1 行に収まらないキーを本文へ押し出さない。
+/// 本文が伸びたときに案内だけが枠の外へ押し出される。**案内は [`fold_hint`] で
+/// 箱の内側の幅に折った行数だけ取る**（07 の「モーダルのキーの案内」）—— 1 行に
+/// 収まらないキーを本文へ押し出さず、右端で切りもしない。
 pub fn place(
     frame: &mut Frame,
     area: Rect,
     block: Block<'_>,
     want: u16,
     body_rows: u16,
-    hint: &str,
+    hint: Hint<'_>,
 ) -> Rect {
     let probe = probe(area, want);
-    let border_rows = probe.height - block.inner(probe).height;
+    let probe_inner = block.inner(probe);
+    let border_rows = probe.height - probe_inner.height;
+    let hint = fold_hint(hint, probe_inner.width);
     // 高さの見積もりと `Layout` で同じものを使う。
-    let hint_rows = u16::try_from(hint.lines().count()).unwrap_or(u16::MAX);
+    let hint_rows = u16::try_from(hint.len()).unwrap_or(u16::MAX);
 
     // 本文 + 空行 + キーの案内 + 枠。
     let height = body_rows.saturating_add(GAP_ROWS + hint_rows + border_rows);
@@ -175,8 +170,39 @@ pub fn place(
 
     let [body, hint_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(hint_rows)]).areas(inner);
-    frame.render_widget(Paragraph::new(Text::from(hint)), hint_area);
+    let hint: Vec<Line<'_>> = hint.into_iter().map(Line::from).collect();
+    frame.render_widget(Paragraph::new(hint), hint_area);
     body
+}
+
+/// キーの案内を幅 `width` に折る。
+///
+/// **群の途中では割らない。** 前から詰めて、入らない群を次の行へ送る。**手で分けた
+/// 行はそのまま行の切れ目**（RebaseEditor は動作のキーと移動・実行のキーを意味で
+/// 分けている）。収まるかは組んだ字から数える（[`ui::fits`]）。
+///
+/// 群 1 つが `width` より長ければ、その群だけで 1 行にする（描くときに右端で切れる）。
+/// `ratatui` の `Wrap` に任せないのは、あれが単語（空白 1）で割るので群が割れるから。
+fn fold_hint(hint: Hint<'_>, width: u16) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in hint {
+        let mut row: Vec<&str> = Vec::new();
+        for &group in *line {
+            row.push(group);
+            if row.len() > 1 && !ui::fits(&hint_row(&row), width) {
+                row.pop();
+                rows.push(hint_row(&row));
+                row = vec![group];
+            }
+        }
+        rows.push(hint_row(&row));
+    }
+    rows
+}
+
+/// 群を 1 行に繋ぐ。**描く行と同じ字**なので、テストが行を丸ごと突き合わせるのにも使う。
+pub fn hint_row(groups: &[&str]) -> String {
+    groups.join(HINT_GAP)
 }
 
 /// 枠を測るための当て木。幅は画面に収まるところまで縮め、高さは測る側に任せる。
@@ -257,8 +283,8 @@ pub fn cursor_col(buf: &TextBuffer, width: u16) -> (u16, u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::cursor_col;
-    use crate::test_util::{draw, row_of, state_with_modal, terminal_with};
+    use super::{cursor_col, fold_hint, Hint};
+    use crate::test_util::{draw, modal_text, row_of, state_with_modal, terminal_with};
     use mewgit_core::app::{Cmd, Modal, TermSize, TextBuffer};
 
     const SIZE: TermSize = TermSize {
@@ -268,13 +294,15 @@ mod tests {
 
     #[test]
     fn the_box_keeps_its_border_when_a_line_just_overflows() {
-        // **ratatui の折り返しは 1 セルはみ出す**（[`RIGHT_MARGIN`]）。はみ出した
+        // **ratatui の折り返しは 1 セルはみ出す**（`ui::WRAP_MARGIN`）。はみ出した
         // 全角 1 文字が枠の縦線を上書きするので、**箱の右辺がその行だけ消える**。
         //
         // **踏むには幅がぴったり `内側 + 1` セルで、最後が全角の本文が要る。**
         // 下は 10 + 1 + 25 + 1 + 22 = 59 セル（枠の内側は 58）。1 セル短いと通る。
         // `Confirm` から在った形だが、実機で出たのは `gh` の `message`（全角と
-        // 識別子が混ざる）を出す `AccountPicker` を入れてから。
+        // 識別子が混ざる）を出す `AccountPicker` を入れてから。**枠の余白
+        // （`RIGHT_MARGIN`）を外したあとも、`ui::WRAP_MARGIN` を 0 にすると落ちる**
+        // （実測 2026-10-04）。
         let state = state_with_modal(Modal::Confirm {
             title: "確認".to_string(),
             body: "設定が指す nobody-does-not-exist-xyz のトークンがありません".to_string(),
@@ -294,6 +322,83 @@ mod tests {
         };
 
         assert_eq!(borders(body), borders(hint), "本文が枠の縦線を食っている");
+    }
+
+    #[test]
+    fn a_hint_that_fits_stays_on_one_row() {
+        assert_eq!(
+            fold_hint(&[&["[y] 実行", "[n] やめる"]], 21),
+            ["[y] 実行   [n] やめる"]
+        );
+    }
+
+    #[test]
+    fn a_hint_wider_than_the_box_breaks_between_groups() {
+        // **群の途中では割らない**（07 の「モーダルのキーの案内」）。`[Shift+Enter /
+        // Ctrl-J] 改行` は中に空白を持つので、単語で割る `Wrap` に任せると割れる。
+        // 46 セル = 16 + 3 + 27。
+        let hint: Hint<'_> = &[&[
+            "[Enter] コミット",
+            "[Shift+Enter / Ctrl-J] 改行",
+            "[Esc] やめる",
+        ]];
+
+        assert_eq!(
+            fold_hint(hint, 46),
+            [
+                "[Enter] コミット   [Shift+Enter / Ctrl-J] 改行",
+                "[Esc] やめる"
+            ]
+        );
+        // 1 セル狭いと 2 つ目の群も送る。
+        assert_eq!(
+            fold_hint(hint, 45),
+            [
+                "[Enter] コミット",
+                "[Shift+Enter / Ctrl-J] 改行   [Esc] やめる"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_break_written_by_hand_is_kept() {
+        // RebaseEditor は動作のキーと移動・実行のキーを意味で分けて折っている。幅が
+        // 足りても混ぜない。
+        assert_eq!(
+            fold_hint(&[&["[p] pick"], &["[Esc] やめる"]], 80),
+            ["[p] pick", "[Esc] やめる"]
+        );
+    }
+
+    #[test]
+    fn a_group_wider_than_the_box_takes_a_row_of_its_own() {
+        // 割れないものは割らない。描くときに右端で切れる（07 の「残る限界」）。
+        assert_eq!(
+            fold_hint(&[&["[a] x", "[Shift+Enter / Ctrl-J] 改行", "[b] y"]], 10),
+            ["[a] x", "[Shift+Enter / Ctrl-J] 改行", "[b] y"]
+        );
+    }
+
+    #[test]
+    fn a_folded_hint_grows_the_box_and_keeps_every_key() {
+        // **右端で切らない。** 折る前は箱が端末の幅まで縮むと末尾の `[Esc]` から
+        // 消えた（PrCreate は 73 桁未満。07）。折ったぶん箱を伸ばし、本文を削らない。
+        let state = state_with_modal(Modal::CommitMessage {
+            buf: TextBuffer::from_text("subject"),
+            amend: false,
+        });
+        let narrow = TermSize { width: 50, ..SIZE };
+
+        let wide = modal_text(&state, SIZE);
+        let text = modal_text(&state, narrow);
+
+        assert!(text.contains("[Esc] やめる"), "{text}");
+        assert!(text.contains("subject"), "{text}");
+        assert_eq!(
+            text.lines().count(),
+            wide.lines().count() + 1,
+            "案内が 2 行にならない:\n{text}"
+        );
     }
 
     #[test]

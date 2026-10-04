@@ -8,12 +8,13 @@ use mewgit_core::git_read::{
 };
 use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents, reply, FAKE_NOW};
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::Line;
 use ratatui::Terminal;
 
-use crate::ui;
+use crate::{modals, ui};
 
 /// 右列がいちばん狭くなる端末（本文を左右に割る最小の幅）。
 ///
@@ -194,9 +195,57 @@ pub fn pane_row(state: &AppState, size: TermSize, pane: Pane, needle: &str) -> S
 /// `Buffer::set_stringn` で確認）。幅は ratatui 自身の `Line::width` から取る。
 pub fn pane_text(state: &AppState, size: TermSize, pane: Pane) -> String {
     let area = ui::pane_area(pane, size, state);
-    let terminal = terminal_with(state, size);
-    let buffer = terminal.backend().buffer();
+    region_text(terminal_with(state, size).backend().buffer(), area)
+}
 
+/// 表示中のモーダルの枠の内側（本文とキーの案内）を描いた文字列。行は `\n` で繋ぐ。
+///
+/// **枠の字で割らない。** 端末 1 行を `│` で割る形は、`modals::block` やペインの枠
+/// （フォーカスは `┃`）を変えるたびに割れた（#117）。内側は [`modal_area`] から取る。
+pub fn modal_text(state: &AppState, size: TermSize) -> String {
+    let (buffer, inner) = draw_modal(state, size);
+    region_text(&buffer, inner)
+}
+
+/// 表示中のモーダルの枠の内側。
+pub fn modal_area(state: &AppState, size: TermSize) -> Rect {
+    draw_modal(state, size).1
+}
+
+/// モーダルだけを描いたバッファと、その枠の内側。
+///
+/// **箱の位置は各モーダルの `render` の中で決まる**（`modals::place` が本文の行数から
+/// 高さを出す）ので、状態からは出せない。**描いて拾う** —— 埋め草の字で塗った画面に
+/// モーダルだけを描くと、`place` が `Clear` で消した矩形が箱になる。内側はそこから
+/// `modals::block` の `Block::inner` で出すので、枠の形を変えても追随する。箱の中は
+/// `Clear` してから描くので、下のペインを描かなくても中身は `ui::render` と同じ。
+fn draw_modal(state: &AppState, size: TermSize) -> (Buffer, Rect) {
+    // 制御文字は使えない（`cell_width` が panic する）。モーダルが描かない字にする。
+    const FILL: &str = "\u{2591}";
+    let modal = state.modal.as_ref().expect("モーダルが開いていない");
+    let mut terminal = Terminal::new(TestBackend::new(size.width, size.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            for cell in &mut frame.buffer_mut().content {
+                cell.set_symbol(FILL);
+            }
+            modals::render(frame, frame.area(), modal, state);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let outer = buffer
+        .area
+        .positions()
+        .filter(|&at| buffer[at].symbol() != FILL)
+        .map(|at| Rect::new(at.x, at.y, 1, 1))
+        .reduce(Rect::union)
+        .expect("箱が描かれていない");
+    let inner = modals::block("").inner(outer);
+    (buffer, inner)
+}
+
+/// バッファの `area` を行ごとに読む。全角の 2 セル目は飛ばす。
+fn region_text(buffer: &Buffer, area: Rect) -> String {
     let mut rows = Vec::with_capacity(area.height as usize);
     for y in area.y..area.bottom() {
         let mut row = String::new();

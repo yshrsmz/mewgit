@@ -23,10 +23,10 @@ const TITLE_PICK: &str = "GitHub アカウントを選ぶ";
 const TITLE_SHOW: &str = "GitHub アカウント";
 
 /// キーの案内。`update::picker_key` と `update::account_picked` が受けるキーと揃える。
-const HINT_PICK: &str = "[j/k] 選ぶ   [Enter] 保存   [Esc] やめる";
+const HINT_PICK: &[&str] = &["[j/k] 選ぶ", "[Enter] 保存", "[Esc] やめる"];
 
 /// 選べないときの案内。**`j/k` も `Enter` も書かない** —— どれも効かない。
-const HINT_SHOW: &str = "[Esc] 閉じる";
+const HINT_SHOW: &[&str] = &["[Esc] 閉じる"];
 
 /// `u` の案内。**出すのは [`AccountView::is_unsettable`] が真のときだけ** ——
 /// `update::account_key` が受けるかどうかを同じ述語から出す（#53）。
@@ -57,6 +57,7 @@ fn saves_to() -> String {
 /// アカウント解決の内訳を出し、選べるなら選ばせる。
 pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize) {
     let candidates = view.candidates();
+    let hint = hint(view);
 
     picker::render(
         frame,
@@ -67,7 +68,7 @@ pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize) 
             body: body(view),
             rows: candidates.iter().map(candidate_line).collect(),
             cursor,
-            hint: &hint(view),
+            hint: &[&hint],
         },
     );
 }
@@ -105,7 +106,7 @@ fn waiting(view: &AccountView) -> bool {
 ///
 /// **`pick` を引数に取らない。** 呼ぶ側が計算して渡す形にすると、候補が無いのに
 /// `[Enter] 保存` を出す組み合わせが型で作れる（「導出できる値を引数に取らせない」）。
-fn hint(view: &AccountView) -> String {
+fn hint(view: &AccountView) -> Vec<&'static str> {
     let base = if view.candidates().is_empty() {
         HINT_SHOW
     } else {
@@ -119,8 +120,8 @@ fn hint(view: &AccountView) -> String {
     if view.is_reresolvable() {
         parts.push(HINT_RERESOLVE);
     }
-    parts.push(base);
-    parts.join("   ")
+    parts.extend_from_slice(base);
+    parts
 }
 
 /// 本文。[`AccountView`] の 2 つで分かれる。
@@ -368,7 +369,7 @@ fn candidate_line(login: &GhLogin) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::{attempt_lines, hint, HINT_RERESOLVE};
-    use crate::test_util::{draw, row_is_reversed, row_of, state_with_modal};
+    use crate::test_util::{draw, modal_text, row_is_reversed, state_with_modal};
     use mewgit_core::app::{AccountListing, AccountView, AppState, Modal, Repick, TermSize};
     use mewgit_core::auth::{
         AccountSource, AttemptFailure, DegradedReason, GhLogin, LoginState, ProbeAttempt,
@@ -477,29 +478,20 @@ mod tests {
     }
 
     #[test]
-    fn the_longest_hints_still_fit_one_row_of_the_box() {
-        // 案内が溢れると `modals::place` が案内に取る 1 行の右端で**切れて**、
-        // 最後の `[Esc]` が消える（確認を挟まずに閉じるキーなので、押す前に見えて
-        // いる必要がある）。**`contains` だけでは 1 行に収まったかを見ていない**ので、
-        // 行そのものを取り出して確かめる（#73 の「余白が残るか」）。
-        //
-        // **`[u]` か `[r]` を足した案内が箱の内側とちょうど同じ 57 セル**
-        // （`WIDTH` 60 から枠 2 と `RIGHT_MARGIN` 1 を引いた値）で、**余白は無い**。
-        // `[u] 指定を解除` と `[r] 解決し直す` はどちらも 14 セルなので、選ばせる
-        // 画面ではどちらを足しても同じ幅になる（実測）。
+    fn every_key_of_the_longest_hints_shows_on_a_narrow_terminal() {
+        // 案内が箱に入らなければ `modals::place` がキーの区切りで折る（07 の
+        // 「モーダルのキーの案内」）。**折る前は右端で切れて、最後の `[Esc]` が
+        // 消えた** —— 確認を挟まずに閉じるキーなので、押す前に見えている必要がある。
+        // `[u]` か `[r]` を足した案内は 57 セルで、**59 桁で `[Esc]` が切れていた**
+        // （実測 2026-10-04）。
         //
         // **産出元が増えたら回す画面を足す**（共有した見張りは新しい産出元を自分では
         // 拾わない。`.claude/rules/testing.md`）—— `[r]` を足したときに degraded 側が抜けていると、
         // `[u]` を出す画面だけで緑のままになる。
         //
-        // **端末を狭めたときの境目は実測で 53 桁**（52 桁で `[Esc]` が切れる。
-        // `[u]` を足す前は 36 桁まで保っていた）。いま見張るのは 80 桁だけで、
-        // 狭い端末は M6 の「端末幅 < 100 のレイアウト（4/5）」が持つ。
-        //
-        // **行を探すのは案内の先頭トークン、収まったかを見るのは [`hint`] が組んだ
-        // 文字列そのもの。** 綴りを手で書くと、案内を伸ばして溢れさせたときに「行が
-        // 見つからない」で落ちてしまい、**幅を見ているのか綴りを見ているのかが
-        // 判らなくなる**。**`[Esc]` を `contains` で探す形では浅い** —— 切れるのは
+        // **見るのは [`hint`] が組んだ群そのもの。** 綴りを手で書くと、案内を変えた
+        // ときに「見つからない」で落ちて、幅を見ているのか綴りを見ているのかが
+        // 判らなくなる。**`[Esc]` を `contains` で探す形では浅い** —— 切れるのは
         // 行末からなので、5 セル溢れても `[Esc] やめ` が残って素通りする（実測）。
         let cases = [
             // `[u]` + 選ばせる案内。
@@ -511,21 +503,32 @@ mod tests {
             AccountView::Degraded(ambiguous(vec![fake_login("taro_acme"), fake_login("taro")])),
             // **`[u]` と `[r]` が同居する形。** `ConfiguredUnavailable` は出どころを
             // 持つので `[u]` も出る。候補を運ばないので**いまは 46 セル**だが、
-            // **運ぶようになれば 74 セルで入らなくなる** —— その回を拾うのはこの腕だけ。
+            // 運ぶようになれば 74 セル —— その回を拾うのはこの腕だけ。
             AccountView::Degraded(fake_configured_unavailable()),
         ];
 
-        for view in cases {
-            let want = hint(&view);
-            // **鍵は `want` から導く**（「導出できる値を引数に取らせない」）。案内の
-            // 並び順を変えても、直す場所が増えない。
-            let marker = want.split(' ').next().expect("案内が空");
-            let state = state_with_modal(Modal::AccountPicker { view, cursor: 0 });
+        // 80 は箱が既定の幅で開く端末、58 は折らなければ 57 セルの案内が内側 56 に
+        // 入らない幅（**59 ではない** —— 枠の余白を外したので 59 の内側は 57 で、
+        // 折らなくても入る。`/code-review` が折り返しを止めて 59 の腕が素通りするのを
+        // 確かめた）、30 はいちばん長い群（`[u] 指定を解除`、14 セル）が入る幅より
+        // 十分広い下限。
+        for width in [80, 58, 30] {
+            for view in &cases {
+                let want = hint(view);
+                let state = state_with_modal(Modal::AccountPicker {
+                    view: view.clone(),
+                    cursor: 0,
+                });
 
-            let rows = draw(&state, SIZE);
-            let row = &rows[row_of(&rows, marker) as usize];
+                let text = modal_text(&state, TermSize { width, ..SIZE });
 
-            assert!(row.contains(&want), "案内が 1 行に収まっていない: {row}");
+                for group in &want {
+                    assert!(
+                        text.lines().any(|line| line.contains(group)),
+                        "{width} 桁で {group:?} が欠けた:\n{text}"
+                    );
+                }
+            }
         }
     }
 
@@ -821,23 +824,14 @@ mod tests {
         assert!(switch.len() > 60, "箱の幅を超えていない: {switch}");
         let state = state_with_reason(fake_no_access(vec![attempt]));
 
-        // モーダルの行だけを取り出し、折り返しを繋ぎ直して読む。モーダルが
-        // 重なった行は `│ 余白 │本文│ 余白 │` の 5 片に割れる。**フォーカスのある
-        // ペインの縦線は `┃`**（07 の「ペインとフォーカス」）なので両方で割る。
-        let body: Vec<String> = draw(&state, SIZE)
-            .iter()
-            .filter_map(|row| {
-                let parts: Vec<&str> = row.split(['│', '┃']).collect();
-                (parts.len() == 5).then(|| parts[2].trim_end().to_string())
-            })
-            .collect();
-        let joined = body.join(" ");
-        let joined = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+        // モーダルの内側だけを取り出し、折り返しを繋ぎ直して読む。
+        let body = modal_text(&state, SIZE);
+        let joined = body.split_whitespace().collect::<Vec<_>>().join(" ");
 
-        assert!(joined.contains(&switch), "{body:#?}");
+        assert!(joined.contains(&switch), "{body}");
         assert!(
             joined.contains(&format!("gh auth refresh -h {host} -s repo")),
-            "{body:#?}"
+            "{body}"
         );
     }
 

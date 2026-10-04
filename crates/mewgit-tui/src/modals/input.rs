@@ -11,7 +11,7 @@ use crate::ui;
 ///
 /// **操作名（作成 / リネーム）は書かない。** 枠のタイトルが言っているので、`Modal::Input`
 /// に案内の文言まで持たせると同じことを 2 箇所で言い、片方だけ直った状態が生まれる（07）。
-const HINT: &str = "[Enter] 決定   [Esc] やめる";
+const HINT: modals::Hint<'static> = &[&["[Enter] 決定", "[Esc] やめる"]];
 
 /// 入力欄に取る行数。1 行しか打てない（01 の「1 行入力」）。
 const INPUT_ROWS: u16 = 1;

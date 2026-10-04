@@ -16,7 +16,7 @@ use crate::modals::picker::{self, Picker};
 const TITLE: &str = "fetch するリモート";
 
 /// キーの案内。`update::picker_key` と `update::remote_picked` が受けるキーと揃える。
-const HINT: &str = "[j/k] 選ぶ   [Enter] fetch   [Esc] やめる";
+const HINT: modals::Hint<'static> = &[&["[j/k] 選ぶ", "[Enter] fetch", "[Esc] やめる"]];
 
 /// 一覧から fetch するリモートを選ばせる。
 pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], cursor: usize) {

@@ -938,7 +938,7 @@ const KEY_GAP: &str = " ";
 ///
 /// **`Line` を通さない。** あちらは幅を測るためだけに `Vec<Span>` を 1 本確保する
 /// （`modals::cursor_col` と同じ理由）。
-fn fits(text: &str, width: u16) -> bool {
+pub fn fits(text: &str, width: u16) -> bool {
     Span::raw(text).width() <= width as usize
 }
 
@@ -1707,8 +1707,7 @@ mod tests {
     fn a_notice_leads_with_the_time_it_was_raised() {
         let bar = notice_bar_with("push に失敗しました");
         assert!(
-            bar.trim_start_matches(['│', ' '])
-                .starts_with("10:03:26 push に失敗しました"),
+            bar.trim_start().starts_with("10:03:26 push に失敗しました"),
             "notice: {bar:?}"
         );
     }

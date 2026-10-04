@@ -7,7 +7,7 @@ use crate::modals;
 use crate::ui;
 
 /// キーの案内。`update::confirm_key` が受けるキーと揃える。
-const HINT: &str = "[y] 実行   [n] やめる";
+const HINT: modals::Hint<'static> = &[&["[y] 実行", "[n] やめる"]];
 
 /// 破壊的操作の確認を描く。
 pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {

@@ -21,7 +21,7 @@ use crate::ui::{self, theme, time};
 const TITLE: &str = "通知の履歴";
 
 /// キーの案内。`update::picker_key` が受けるキーと揃える（`Enter` は何もしない）。
-const HINT: &str = "[j/k] 選ぶ   [Esc] 閉じる";
+const HINT: modals::Hint<'static> = &[&["[j/k] 選ぶ", "[Esc] 閉じる"]];
 
 /// 箱の幅。**`modals::WIDTH`（60）より広く取る** —— stderr は英語の長い行で、
 /// 60 では 1 行が 2〜3 行に折れる。狭い端末では画面の幅まで縮む。
@@ -162,7 +162,7 @@ fn content(notice: &Notice, max_lines: usize) -> Text<'static> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, row_is_reversed, row_of, state_at};
+    use crate::test_util::{draw, modal_text, row_is_reversed, row_of, state_at};
     use crate::ui::time;
     use mewgit_core::app::{update, AppState, Key, Msg, NoticeLevel, TermSize};
 
@@ -305,15 +305,11 @@ mod tests {
         // **fixture が境目を越えていること**を先に見る（`.claude/rules/testing.md`）。
         assert!(!text.contains("stderr 39"), "{text}");
         assert!(text.contains("stderr 0"), "{text}");
-        let hint = row_of(&lines, "[j/k] 選ぶ");
+        let inner: Vec<String> = modal_text(&state, SIZE).lines().map(String::from).collect();
+        let hint = usize::from(row_of(&inner, "[j/k] 選ぶ"));
         // `…` は中身の最下行。**箱が端末の高さに丸められると、案内の上の空行も
         // 中身に回る**（`modals::place` が割るのは本文と案内だけ）ので、案内の直上。
-        assert!(
-            lines[usize::from(hint) - 1]
-                .trim_start_matches('│')
-                .starts_with('…'),
-            "{text}"
-        );
+        assert!(inner[hint - 1].starts_with('…'), "{text}");
     }
 
     #[test]
@@ -340,10 +336,10 @@ mod tests {
         let text = lines.join("\n");
 
         assert!(text.contains("stderr 0"), "{text}");
-        // **箱の行頭だけを見る。** 下のペインの「読み込み中…」も `…` を持つ。
-        let marked = lines
-            .iter()
-            .any(|line| line.trim_start_matches('│').starts_with('…'));
+        // **箱の内側の行頭だけを見る。** 下のペインの「読み込み中…」も `…` を持つ。
+        let marked = modal_text(&state, SIZE)
+            .lines()
+            .any(|line| line.starts_with('…'));
         assert!(!marked, "{text}");
     }
 

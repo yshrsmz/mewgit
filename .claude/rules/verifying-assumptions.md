@@ -37,6 +37,13 @@
 | 手元に無いプラットフォームでのビルド | 依存更新だけを積んだ draft PR を立てて CI を回す。手元は macOS しか無い |
 | hook が絡む git の振る舞い | 一時リポジトリでは `git config hook.<名前>.event <hook>` と `hook.<名前>.command 'sh <スクリプト>'` で置く。**chmod が要らない**（git 2.56.0 で確認）。Rust のテストは `TestRepo::write_hook` —— 設定で置く hook は知らない git が黙って無視するので、CI ではファイルで置く |
 
+- **複数のコマンドを並べて確かめるときは、出力ごとに見出しを付ける。** 空の出力は
+  何も残さないので、隣のコマンドの行がその結果に見える。#152 のマージ前に
+  `gh variable list; gh secret list` を叩き、**variable の一覧が空だったのに**、secret の
+  2 行を「variable 1 つと secret 1 つ」と読んで「登録済み」と判断した。ワークフローは
+  `vars.` から読んでいたので、main の Release ワークフローが `client-id` が空で落ち、
+  修正 PR #153 が要った。`echo '## variables'; gh variable list; echo '## secrets'; …`
+  のように区切る。**判断の根拠にする確認ほど、空になりうる出力を区切る**
 - **`[api: N]` の罠は 2 つ。** #96 で「`r` 1 回の往復は 5」と書いて外した。
   **(1) 起動をまたいだ差では測れない** —— `auth::resolve` の probe は使い捨ての
   クライアントで叩くので残量をヘッダに出さず、次の起動の初期値がその手前で減って

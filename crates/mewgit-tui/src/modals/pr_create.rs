@@ -11,15 +11,15 @@ use crate::ui;
 
 /// キーの案内。`update::prs::pr_create_key` が受けるキーと揃える。
 ///
-/// **群のあいだは空白 2**（`CommitMessage` は 3）。キーが 1 つ多いので、3 だと
-/// 枠の内側に入らない（07。#73 の「置かれる場所の予算が違うなら別の文言でよい」の
-/// 空白版）。
+/// **群のあいだはほかと同じ [`modals::HINT_GAP`]**（74 セルで、幅 76 の枠の内側に
+/// ちょうど入る）。枠に右の余白があったころは入らず、ここだけ空白 2 に詰めていた。
+/// 折り返しがこの区切りで群を見分けるので揃えた（07 の「モーダルのキーの案内」）。
 ///
 /// **`Shift+Enter` は出さない。** `CommitMessage` は `Ctrl-J` と両方出しているが、
 /// ここは予算が無い。**落とすのは `Shift+Enter` のほう** —— `Ctrl-J` はどの端末でも
 /// 届くので、出す側を落としても**打つ手が無くなる人は出ない**（逆にすると、
 /// 区別して送れない端末の人が行き止まる）。`Shift+Enter` 自体は効く。
-const HINT: &str = "[Enter] 作成  [Tab] 次の欄  [Space] draft  [Ctrl-J] 改行  [Esc] やめる";
+const HINT: &str = "[Enter] 作成   [Tab] 次の欄   [Space] draft   [Ctrl-J] 改行   [Esc] やめる";
 
 /// モーダルの幅。本文を書く箱なので `Confirm` より広い（`CommitMessage` と同じ）。
 const WIDTH: u16 = 76;
@@ -191,7 +191,9 @@ fn label_at(frame: &mut Frame, at: Rect, label: &str, focused: bool) {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{col_of, cursor, draw, row_of, state_with_modal, terminal_with};
+    use crate::test_util::{
+        col_of, cursor, draw, modal_area, row_of, state_with_modal, terminal_with,
+    };
     use mewgit_core::app::{AppState, Modal, PrField, PrHead, PrHeads, TermSize, TextBuffer};
     use ratatui::style::Modifier;
     use ratatui::text::Line;
@@ -376,9 +378,8 @@ mod tests {
         assert!(row.contains("END"), "{row:?}");
         assert_eq!(at.y, row_of(&lines, "Title"), "Title の行にない");
         assert!(row.contains("Title"), "ラベルが値に潰された: {row:?}");
-        // **枠の右辺より左に居る。桁で測る** —— `rfind` のバイト位置をそのまま桁に
-        // すると、行の左にある枠 1 本につき 2 大きくなって見張りが緩む。
-        let right = Line::from(&row[..row.rfind('│').expect("枠の右辺")]).width() as u16;
+        // **枠の内側に居る。**
+        let right = modal_area(&state, SIZE).right();
         assert!(at.x < right, "カーソルが枠の外: x={} right={right}", at.x);
         // 値が始まるのはラベルの桁のあと（`split`）。
         assert!(

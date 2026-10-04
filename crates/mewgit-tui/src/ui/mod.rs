@@ -1707,8 +1707,7 @@ mod tests {
     fn a_notice_leads_with_the_time_it_was_raised() {
         let bar = notice_bar_with("push に失敗しました");
         assert!(
-            bar.trim_start_matches(['│', ' '])
-                .starts_with("10:03:26 push に失敗しました"),
+            bar.trim_start().starts_with("10:03:26 push に失敗しました"),
             "notice: {bar:?}"
         );
     }

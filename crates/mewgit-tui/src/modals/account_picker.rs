@@ -368,7 +368,8 @@ fn candidate_line(login: &GhLogin) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::{attempt_lines, hint, HINT_RERESOLVE};
-    use crate::test_util::{draw, row_is_reversed, row_of, state_with_modal};
+    use crate::modals;
+    use crate::test_util::{draw, modal_text, row_is_reversed, state_with_modal};
     use mewgit_core::app::{AccountListing, AccountView, AppState, Modal, Repick, TermSize};
     use mewgit_core::auth::{
         AccountSource, AttemptFailure, DegradedReason, GhLogin, LoginState, ProbeAttempt,
@@ -477,29 +478,20 @@ mod tests {
     }
 
     #[test]
-    fn the_longest_hints_still_fit_one_row_of_the_box() {
-        // 案内が溢れると `modals::place` が案内に取る 1 行の右端で**切れて**、
-        // 最後の `[Esc]` が消える（確認を挟まずに閉じるキーなので、押す前に見えて
-        // いる必要がある）。**`contains` だけでは 1 行に収まったかを見ていない**ので、
-        // 行そのものを取り出して確かめる（#73 の「余白が残るか」）。
-        //
-        // **`[u]` か `[r]` を足した案内が箱の内側とちょうど同じ 57 セル**
-        // （`WIDTH` 60 から枠 2 と `RIGHT_MARGIN` 1 を引いた値）で、**余白は無い**。
-        // `[u] 指定を解除` と `[r] 解決し直す` はどちらも 14 セルなので、選ばせる
-        // 画面ではどちらを足しても同じ幅になる（実測）。
+    fn every_key_of_the_longest_hints_shows_on_a_narrow_terminal() {
+        // 案内が箱に入らなければ `modals::place` がキーの区切りで折る（07 の
+        // 「モーダルのキーの案内」）。**折る前は右端で切れて、最後の `[Esc]` が
+        // 消えた** —— 確認を挟まずに閉じるキーなので、押す前に見えている必要がある。
+        // `[u]` か `[r]` を足した案内は 57 セルで、**59 桁で `[Esc]` が切れていた**
+        // （実測 2026-10-04）。
         //
         // **産出元が増えたら回す画面を足す**（共有した見張りは新しい産出元を自分では
         // 拾わない。`.claude/rules/testing.md`）—— `[r]` を足したときに degraded 側が抜けていると、
         // `[u]` を出す画面だけで緑のままになる。
         //
-        // **端末を狭めたときの境目は実測で 53 桁**（52 桁で `[Esc]` が切れる。
-        // `[u]` を足す前は 36 桁まで保っていた）。いま見張るのは 80 桁だけで、
-        // 狭い端末は M6 の「端末幅 < 100 のレイアウト（4/5）」が持つ。
-        //
-        // **行を探すのは案内の先頭トークン、収まったかを見るのは [`hint`] が組んだ
-        // 文字列そのもの。** 綴りを手で書くと、案内を伸ばして溢れさせたときに「行が
-        // 見つからない」で落ちてしまい、**幅を見ているのか綴りを見ているのかが
-        // 判らなくなる**。**`[Esc]` を `contains` で探す形では浅い** —— 切れるのは
+        // **見るのは [`hint`] が組んだ群そのもの。** 綴りを手で書くと、案内を変えた
+        // ときに「見つからない」で落ちて、幅を見ているのか綴りを見ているのかが
+        // 判らなくなる。**`[Esc]` を `contains` で探す形では浅い** —— 切れるのは
         // 行末からなので、5 セル溢れても `[Esc] やめ` が残って素通りする（実測）。
         let cases = [
             // `[u]` + 選ばせる案内。
@@ -511,21 +503,29 @@ mod tests {
             AccountView::Degraded(ambiguous(vec![fake_login("taro_acme"), fake_login("taro")])),
             // **`[u]` と `[r]` が同居する形。** `ConfiguredUnavailable` は出どころを
             // 持つので `[u]` も出る。候補を運ばないので**いまは 46 セル**だが、
-            // **運ぶようになれば 74 セルで入らなくなる** —— その回を拾うのはこの腕だけ。
+            // 運ぶようになれば 74 セル —— その回を拾うのはこの腕だけ。
             AccountView::Degraded(fake_configured_unavailable()),
         ];
 
-        for view in cases {
-            let want = hint(&view);
-            // **鍵は `want` から導く**（「導出できる値を引数に取らせない」）。案内の
-            // 並び順を変えても、直す場所が増えない。
-            let marker = want.split(' ').next().expect("案内が空");
-            let state = state_with_modal(Modal::AccountPicker { view, cursor: 0 });
+        // 80 は箱が既定の幅で開く端末、59 は折る前に `[Esc]` が切れた幅、30 は
+        // いちばん長い群（`[u] 指定を解除`、14 セル）が入る幅より十分広い下限。
+        for width in [80, 59, 30] {
+            for view in &cases {
+                let want = hint(view);
+                let state = state_with_modal(Modal::AccountPicker {
+                    view: view.clone(),
+                    cursor: 0,
+                });
 
-            let rows = draw(&state, SIZE);
-            let row = &rows[row_of(&rows, marker) as usize];
+                let text = modal_text(&state, TermSize { width, ..SIZE });
 
-            assert!(row.contains(&want), "案内が 1 行に収まっていない: {row}");
+                for group in want.split(modals::HINT_GAP) {
+                    assert!(
+                        text.lines().any(|line| line.contains(group)),
+                        "{width} 桁で {group:?} が欠けた:\n{text}"
+                    );
+                }
+            }
         }
     }
 
@@ -821,23 +821,15 @@ mod tests {
         assert!(switch.len() > 60, "箱の幅を超えていない: {switch}");
         let state = state_with_reason(fake_no_access(vec![attempt]));
 
-        // モーダルの行だけを取り出し、折り返しを繋ぎ直して読む。モーダルが
-        // 重なった行は `│ 余白 │本文│ 余白 │` の 5 片に割れる。**フォーカスのある
-        // ペインの縦線は `┃`**（07 の「ペインとフォーカス」）なので両方で割る。
-        let body: Vec<String> = draw(&state, SIZE)
-            .iter()
-            .filter_map(|row| {
-                let parts: Vec<&str> = row.split(['│', '┃']).collect();
-                (parts.len() == 5).then(|| parts[2].trim_end().to_string())
-            })
-            .collect();
-        let joined = body.join(" ");
+        // モーダルの内側だけを取り出し、折り返しを繋ぎ直して読む。
+        let body = modal_text(&state, SIZE);
+        let joined = body.lines().collect::<Vec<_>>().join(" ");
         let joined = joined.split_whitespace().collect::<Vec<_>>().join(" ");
 
-        assert!(joined.contains(&switch), "{body:#?}");
+        assert!(joined.contains(&switch), "{body}");
         assert!(
             joined.contains(&format!("gh auth refresh -h {host} -s repo")),
-            "{body:#?}"
+            "{body}"
         );
     }
 

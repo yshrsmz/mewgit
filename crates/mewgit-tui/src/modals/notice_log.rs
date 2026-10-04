@@ -162,7 +162,7 @@ fn content(notice: &Notice, max_lines: usize) -> Text<'static> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, row_is_reversed, row_of, state_at};
+    use crate::test_util::{draw, modal_text, row_is_reversed, row_of, state_at};
     use crate::ui::time;
     use mewgit_core::app::{update, AppState, Key, Msg, NoticeLevel, TermSize};
 
@@ -305,15 +305,15 @@ mod tests {
         // **fixture が境目を越えていること**を先に見る（`.claude/rules/testing.md`）。
         assert!(!text.contains("stderr 39"), "{text}");
         assert!(text.contains("stderr 0"), "{text}");
-        let hint = row_of(&lines, "[j/k] 選ぶ");
+        let inner = modal_text(&state, SIZE);
+        let inner: Vec<&str> = inner.lines().collect();
+        let hint = inner
+            .iter()
+            .position(|line| line.contains("[j/k] 選ぶ"))
+            .expect("案内の行");
         // `…` は中身の最下行。**箱が端末の高さに丸められると、案内の上の空行も
         // 中身に回る**（`modals::place` が割るのは本文と案内だけ）ので、案内の直上。
-        assert!(
-            lines[usize::from(hint) - 1]
-                .trim_start_matches('│')
-                .starts_with('…'),
-            "{text}"
-        );
+        assert!(inner[hint - 1].starts_with('…'), "{text}");
     }
 
     #[test]
@@ -340,10 +340,10 @@ mod tests {
         let text = lines.join("\n");
 
         assert!(text.contains("stderr 0"), "{text}");
-        // **箱の行頭だけを見る。** 下のペインの「読み込み中…」も `…` を持つ。
-        let marked = lines
-            .iter()
-            .any(|line| line.trim_start_matches('│').starts_with('…'));
+        // **箱の内側の行頭だけを見る。** 下のペインの「読み込み中…」も `…` を持つ。
+        let marked = modal_text(&state, SIZE)
+            .lines()
+            .any(|line| line.starts_with('…'));
         assert!(!marked, "{text}");
     }
 

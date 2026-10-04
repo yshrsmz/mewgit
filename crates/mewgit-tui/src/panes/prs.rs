@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use mewgit_core::app::{AppState, PrLoad};
+use mewgit_core::app::{keys, AppState, Key, PrLoad};
 use mewgit_core::auth::AccountState;
 use mewgit_core::config::Theme;
 use mewgit_core::github::{GithubError, PrDetail, PrStatus, PullRequest};
@@ -207,18 +207,18 @@ fn counts(items: &[(usize, &str)]) -> String {
 
 /// 集計の桁に許す幅。
 ///
-/// **80x24 で測って決めた**（2026-09-18）。当時は 80 桁でも右列を割っていて、枠の内側が
-/// 30 セルだった（いまは 80 桁では割らない。07 の「狭い端末」）。行頭の印と `#<番号>` と
-/// 状態で 11 セル、集計の前後の区切りで 4 セル使うので、
-/// ここを 10 にするとタイトルに 5 セル残る。**これを外すとタイトルが 1 文字も出ない
-/// 行ができる**（`✓12 ✗3 ○2 ⊘5 ·1` は 17 セル）。**80 桁で右列を割らなくなって、
-/// この 5 セルの前提は崩れた** —— 右列がいちばん狭い幅でも余るので、見張り
-/// （`a_pr_with_many_checks_does_not_eat_the_whole_title`）が落ちるのはもっと大きな予算から
-/// （実測。15 と 18 では通り、21 で落ちる）。数え直しは M6 の狭い幅での畳み方（`docs/plan.md`）。
+/// **件数が 1〜2 桁ならチェック 5 種が丸ごと出て、タイトルも潰れない幅**（07 の「PRs ペイン」）。
+/// `✓12 ✗3 ○2 ⊘5 ·1`（15 セル）に `+` を足しても入り、右列がいちばん狭い幅 100 で
+/// 件数が 1〜2 桁なら、集計がいちばん広い行でもタイトルに 6 セル残る（`+` まで入れて集計が
+/// 17 セルに達した形。テストの行 `✓12 ✗3 ○2 ⊘5 ·1+` は 16 セルで 7 セル。19 にすると
+/// 4 セル。実測 2026-10-04）。件数が 3 桁になるとチェック 5 種も丸ごとは出ず、PR 番号の
+/// 桁が増えるとタイトルはそのぶん減る。**これを外すとタイトルが 1 文字も出ない行が
+/// できる。** 最初は 10 だった —— 80 桁でも右列を割っていたころの内側 30 セルに合わせた数
+/// （2026-09-18）。
 ///
 /// **狭い幅で何をどう畳むかは M6 の狭い幅での畳み方のタスク**（07）。ここでやっているのは
 /// 「いちばん前だけは必ず出す」ことだけ。
-const SUMMARY_BUDGET: usize = 10;
+const SUMMARY_BUDGET: usize = 17;
 
 /// チェックの記号。`(UTF-8, ASCII)`。**`config.graph.ascii` を通す**
 /// （Branches ペインの `↑` `↓` と同じ理由で、同じ端末で一部だけ化けるのを避ける）。
@@ -287,15 +287,20 @@ fn status_style(pr: &PullRequest, theme: &Theme) -> Style {
     })
 }
 
+/// 引けたが open な PR が 1 件も無いときの文言。`（N）` を添えるかは `placeholder` が決める。
+const EMPTY: &str = "開いている PR はありません";
+
 /// 一覧を出せない理由。
 ///
 /// **消去法で導かない。** [`AccountState`] と [`PrLoad`] の腕から出す（01 の
 /// 「失敗の記憶」と同じ理由）。**`ui::LOADING` を使う** —— 文言を自分で組むと、
 /// 既にある「読み込み中…」の見張りがこの産出元を拾えない。
 ///
-/// **`N`（PR 作成）を案内しない。** 決めたときの枠の内側は 80x24 で 30 セルで、
-/// 「開いている PR はありません」が 26 セルある（07）。**行き止まりにはならない**
-/// —— このペインにフォーカスがあるあいだ、フッターの 2 行目が `N:PR 作成` を出す。
+/// **空の一覧には、`N`（PR 作成）が効くときだけ `（N）` を添える**（degraded の `（A）` と
+/// 同じ書き方。07 の「PRs ペイン」）。幅 100 以上ではフォーカスが Graph のままこの文言が
+/// 見えるので、そこで添えると押しても何も起きない案内になる。**効くかは
+/// [`keys::is_live`] に聞く** —— `focus` をここで見ると、モーダル表示中の扱いなど
+/// 振り分けの規則の写しが 2 本になる。
 fn placeholder(state: &AppState) -> Cow<'static, str> {
     match &state.account {
         // **既定リモートが GitHub でないときもここに落ちる**（`TargetState::Unavailable`
@@ -314,7 +319,10 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
         // 読めていた一覧があればそちらが出る。
         AccountState::Resolved(_) => match state.prs.load() {
             PrLoad::Pending => ui::LOADING.into(),
-            PrLoad::Loaded => "開いている PR はありません".into(),
+            PrLoad::Loaded if keys::is_live(state, Key::char('N')) => {
+                format!("{EMPTY}（N）").into()
+            }
+            PrLoad::Loaded => EMPTY.into(),
             PrLoad::Failed(err) => format!("PR を読み込めませんでした: {err}").into(),
         },
     }
@@ -327,7 +335,7 @@ mod tests {
         col_of, draw, pane_row, pane_row_is_reversed, pane_text, state_at, terminal_with,
     };
     use crate::ui;
-    use mewgit_core::app::{Cmd, Msg, Pane, TermSize};
+    use mewgit_core::app::{update, Cmd, KeyCode, Msg, Pane, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::github::{CheckSummary, ReviewSummary};
     use mewgit_core::test_util::{
@@ -475,7 +483,7 @@ mod tests {
         // **`pr_row` の doc が「末尾に置くと黙って消える」を理由に集計を前へ置いた
         // その守りが、桁を足したことで自分に返る。** 右列は狭い（`SUMMARY_BUDGET` の
         // doc）ので、集計を伸ばし放題にすると**タイトルが 1 文字も出ない**
-        // （実測: `✓12 ✗3 ○2 ⊘5 ·1` は 17 セル）。
+        // （実測: 幅 100 のこの行で、予算 17 ならタイトルに 7 セル、19 なら 4 セル）。
         let detail = PrDetail {
             checks: CheckSummary {
                 success: 12,
@@ -498,6 +506,9 @@ mod tests {
         assert!(wide.contains('+'), "落としたことを言っていない: {wide}");
         // **いちばん前は残す** —— 次に何をするかが変わるのはそちら。
         assert!(wide.contains("✓12"), "{wide}");
+        // **チェック 5 種は丸ごと出す**（`SUMMARY_BUDGET` を 17 にした理由）。落ちるのは
+        // 後ろのレビューから。
+        assert!(wide.contains("·1"), "チェックの末尾が落ちた: {wide}");
         // **巻き添えにしない。** 幅は一覧の最大から決まるので、広い行が 1 つあると
         // 狭い行のタイトルまで押し出される。
         let narrow = pane_row(&state, SIZE, Pane::Prs, "#90");
@@ -754,6 +765,31 @@ mod tests {
     }
 
     #[test]
+    fn the_empty_list_offers_n_only_while_n_works() {
+        // **`N` が効くのはこのペインにフォーカスがあるときだけ**（`prs_key`）。幅 100 以上では
+        // `Esc` でフォーカスが Graph に移っても右上は PRs のまま見えるので、そこで `（N）` を
+        // 出すと押しても何も起きない案内になる。
+        let mut state = with_list(Vec::new());
+        // **先にフォーカスがある形で、この fixture でも `N` が反応することを見る。** ブランチが
+        // push されていないので箱は開かず、断りの通知が積まれる —— 下の「増えない」が
+        // 自明に通らない証拠。
+        let before = state.notices.len();
+        let _ = update(&mut state, Msg::Key(Key::char('N')));
+        assert_eq!(state.notices.len(), before + 1, "Prs で N が反応しなかった");
+
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Esc)));
+        assert_eq!(state.focus, Pane::Graph);
+        let text = pane_text(&state, SIZE, Pane::Prs);
+        assert!(text.contains("開いている PR はありません"), "{text}");
+        assert!(!text.contains("（N）"), "効かない N を案内した: {text}");
+        // 案内が嘘でないことを、同じ状態で `N` を押して確かめる。
+        let before = state.notices.len();
+        let _ = update(&mut state, Msg::Key(Key::char('N')));
+        assert_eq!(state.notices.len(), before, "Graph で N が効いた");
+        assert!(state.modal.is_none(), "{:?}", state.modal);
+    }
+
+    #[test]
     fn every_reason_the_pane_cannot_show_the_list_is_told_apart() {
         // **消去法で導かない。** 腕ごとに違う文言が出ることをここで押さえる（07）。
         let loading = on_prs_tab();
@@ -767,12 +803,9 @@ mod tests {
         // **空の `Vec` と「まだ引いていない」を出し分ける**（`Fetch` の 3 状態。01）。
         assert!(text.contains("開いている PR はありません"), "{text}");
         assert!(!text.contains("読み込み中"), "{text}");
-        // **`N`（PR 作成）を案内しない。** 枠の内側に入らなかったため（`placeholder` の doc。07）。
-        // 出すのはフッターの 2 行目で、そちらは `N` が効くときだけ出る。
-        // **キーの案内の形で見る** —— 素の `N` を見ると、いつかタイトルや login に
-        // `N` が入っただけで落ちる。
-        assert!(!text.contains("N で"), "{text}");
-        assert!(!text.contains("[N]"), "{text}");
+        // **フォーカスがあるので `（N）` を添える**（`placeholder` の doc）。右列が
+        // いちばん狭い幅で、閉じ括弧まで入ることを見る。
+        assert!(text.contains("開いている PR はありません（N）"), "{text}");
 
         let mut failed = on_prs_tab();
         let _ = reply(

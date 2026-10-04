@@ -23,7 +23,7 @@ use mewgit_core::github::RateLimit;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
 /// 1 フレーム描く。
@@ -157,16 +157,49 @@ pub fn pane_block(title: impl Into<Line<'static>>, focused: bool) -> Block<'stat
     }
 }
 
-/// 折り返す `Paragraph` と、それを幅 `width` で描いたときの行数（07 の「モーダル」）。
+/// 折り返す `Paragraph` の右に空ける桁数。
 ///
-/// **測る `Paragraph` はここでしか組まない。** 測るときと描くときで `Wrap` の設定が
-/// ずれないようにするためと、枠を付けたまま測らせないため。`Paragraph::line_count` は
-/// 枠の上下を行数に足す一方、枠の左右ぶんを幅からは引かないので、枠付きで測ると
-/// 外側の幅で折り返した行数が返り、本文の末尾が切れる。枠のぶんは呼び出し側が
+/// **ratatui の折り返しは 1 セルだけはみ出す。** `WordWrapper` は行が幅を超えるかを
+/// **次の文字を足す前**に見る（`>=` 比較）ので、最後の 1 文字が全角だと行が
+/// `幅 + 1` セルで確定する（`ratatui-widgets` 0.3.2 の `reflow.rs`）。`Paragraph` は
+/// 枠より後に描き、`render_line` は領域の幅で切らないので、**はみ出した 1 セルが
+/// 枠の縦線を上書きしてその行だけ箱が開く**（同 `paragraph.rs`）。1 桁空けておけば
+/// そこに落ちる。はみ出しが 1 セルで収まるのは、最後の文字を足す前の幅が `幅 - 1`
+/// 以下だから（07 の「モーダル」）。
+///
+/// **折り返す描画の側に置く。** はみ出すのは `Wrap` の経路だけで、折り返さない一覧や
+/// diff は領域の幅で切れる。枠（`pane_block`）に載せると、折り返さないペインまで
+/// 1 桁ずつ削る。
+const WRAP_MARGIN: u16 = 1;
+
+/// 折り返す `Paragraph`。右に [`WRAP_MARGIN`] を空けて描く。
+///
+/// **`Wrap` を付けるのはここだけ。** 余白を忘れた折り返しが 1 本でも残ると、そこで
+/// 枠が開く。行数も要るなら [`wrapped`]。
+pub fn wrapping<'a>(text: impl Into<Text<'a>>) -> Paragraph<'a> {
+    Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .block(wrap_margin())
+}
+
+/// [`WRAP_MARGIN`] を載せた枠なしの [`Block`]。描く側と測る側が同じものを使う。
+fn wrap_margin() -> Block<'static> {
+    Block::default().padding(Padding::right(WRAP_MARGIN))
+}
+
+/// 折り返す `Paragraph` と、それを幅 `width` に描いたときの行数（07 の「モーダル」）。
+///
+/// **測る `Paragraph` はここでしか組まない。** 測るときと描くときで `Wrap` の設定と
+/// 余白がずれないようにするため。`Paragraph::line_count` は枠の上下を行数に足す一方、
+/// 左右ぶんを幅からは引かない（`ratatui-widgets` 0.3.2 の `paragraph.rs`）ので、
+/// 余白の [`Block`] を付けたまま `width` で測ると、余白の無い幅で折り返した行数が返り、
+/// 本文の末尾が切れる。**測る幅も `Block::inner` から出す**（[`WRAP_MARGIN`] を
+/// 手で引くと、余白を変えたときに測る側だけ古くなる）。外側の枠のぶんは呼び出し側が
 /// `Block::inner` から出す。
 pub fn wrapped<'a>(text: impl Into<Text<'a>>, width: u16) -> (Paragraph<'a>, u16) {
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-    let rows = u16::try_from(paragraph.line_count(width)).unwrap_or(u16::MAX);
+    let inner = wrap_margin().inner(Rect::new(0, 0, width, 1)).width;
+    let paragraph = wrapping(text);
+    let rows = u16::try_from(paragraph.line_count(inner)).unwrap_or(u16::MAX);
     (paragraph, rows)
 }
 
@@ -864,7 +897,10 @@ mod tests {
         fake_account, fake_ambiguous, fake_no_access, fake_oid, fake_rate_limit, fake_snapshot,
         fetch_pr_details,
     };
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier};
+    use ratatui::widgets::Widget;
 
     #[test]
     fn a_file_row_puts_the_status_letter_before_the_path() {
@@ -903,6 +939,31 @@ mod tests {
         let mut out = String::new();
         push_expanded(&mut out, "error:\n\ta.txt\r");
         assert_eq!(out, "error:\n        a.txt");
+    }
+
+    #[test]
+    fn a_wrapped_line_that_just_overflows_keeps_the_border() {
+        // **ratatui の折り返しは 1 セルはみ出す**（[`super::WRAP_MARGIN`]）。踏むには
+        // `内側 - 1` セルの後ろに全角 1 文字を置く —— 足す前の幅が内側に届いていないので
+        // そのまま足し、行が `内側 + 1` セルで確定する。ペインで折り返すのは CommitDetail
+        // だけなので、枠付きのペインと同じ形（`pane_block` の内側に描く）で見る。
+        let area = Rect::new(0, 0, 12, 4);
+        let block = super::pane_block("t", false);
+        let inner = block.inner(area);
+        let text = format!("{}あ", "x".repeat(usize::from(inner.width) - 1));
+        let (paragraph, rows) = wrapped(text, inner.width);
+
+        let mut buffer = Buffer::empty(area);
+        block.render(area, &mut buffer);
+        paragraph.render(inner, &mut buffer);
+
+        // **枠の記号ではなく、内側の右端が空いているかを見る。** はみ出した全角は内側の
+        // 最後の桁から始まり、2 セル目が枠に掛かるが、`Buffer` の上では枠の桁の記号が
+        // `│` のまま残る（実端末では重なって描かれる）ので、枠を見ても通ってしまう。
+        let last = inner.right() - 1;
+        assert_eq!(buffer[(last, inner.y)].symbol(), " ", "全角が枠に掛かった");
+        // **はみ出す手前で折れたことも見る** —— 1 行に収まったなら踏めていない。
+        assert_eq!(rows, 2);
     }
 
     #[test]

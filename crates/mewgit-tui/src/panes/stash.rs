@@ -2,6 +2,8 @@
 //!
 //! 右列の上のタブの 1 枚。Branches と同じく、**左の選択では入れ替わらない**。
 
+use std::borrow::Cow;
+
 use mewgit_core::app::{AppState, ListLoad};
 use mewgit_core::git_read::StashEntry;
 use ratatui::text::{Line, Span};
@@ -9,15 +11,13 @@ use ratatui::text::{Line, Span};
 use super::Rows;
 use crate::ui::{self, theme};
 
-/// タブ見出しに出すこのペインの名前。
+/// タブ見出しに出すこのペインの名前。件数は出せるときだけ添える（[`super::counted`]）。
 ///
-/// **件数を添えない**（Branches とは違う）。見出しは 3 枚ぶんが右列の枠の上辺に並び、
-/// 決めたときの 80x24 の右列は枠の内側が 30 セルだった。`Branches (12)` と `Stash (3)` と
-/// `PRs` を前後の空白と区切りごと並べると 33 セルで、`PRs` が切れる（件数なしなら 29 セル）。
-/// 件数は一覧の `stash@{n}` から読める。**80 桁で右列を割らなくなってこの前提は崩れた**
-/// ので、添えるかは M6 の狭い幅での畳み方で決め直す（07 の「右上のタブ」）。
-pub(super) fn title() -> &'static str {
-    "Stash"
+/// **最初は件数を添えなかった。** 右列が 80 桁で内側 30 セルだったころは、3 枚の見出しを
+/// 並べると `PRs` が切れた。いまの右列は幅 100 でも見出しに 38 セル使え、
+/// `Branches (1234)` / `Stash (123)` / `PRs` でも 37 セルで入る（07 の「右上のタブ」）。
+pub(super) fn title(state: &AppState) -> Cow<'static, str> {
+    super::counted("Stash", state.stashes.entries.len())
 }
 
 /// 一覧の行と、カーソルが何行目か。一覧が出せないときは文言 1 行（Branches と同じ）。
@@ -127,6 +127,18 @@ mod tests {
     }
 
     #[test]
+    fn the_tab_title_counts_only_entries_that_were_read() {
+        // **`(0)` を出さない**（`title` の doc）。読み込み中・失敗に `(0)` を出すと、
+        // stash が 1 つも無いリポジトリと同じ見た目になる。
+        let mut state = state_at("/repo");
+        assert_eq!(super::title(&state), "Stash");
+        with_stashes(&mut state, Err(GitReadError::ReaderGone));
+        assert_eq!(super::title(&state), "Stash");
+        with_stashes(&mut state, Ok((0..3).map(fake_stash).collect()));
+        assert_eq!(super::title(&state), "Stash (3)");
+    }
+
+    #[test]
     fn a_list_that_failed_says_so_instead_of_loading() {
         let mut state = state_at("/repo");
         with_stashes(&mut state, Err(GitReadError::ReaderGone));
@@ -139,13 +151,19 @@ mod tests {
 
     #[test]
     fn every_tab_title_fits_in_the_narrowest_right_column() {
-        // **右列がいちばん狭い幅で、3 枚の見出しが入るかを見る。** 件数を添えない
-        // 判断の境目だった幅はもう出ない（`title` の doc）ので、ブランチの件数を
-        // 2 桁にしたまま、見出しが入ることだけを見る。
+        // **右列がいちばん狭い幅で、3 枚の見出しが件数ごと入るかを見る**（`title` の doc）。
+        // 件数は現実に届きうる上の側（ブランチ 4 桁・stash 3 桁）に置く。`fake_stash` は
+        // oid を index から作るので 3 桁は組めない —— 見出しは件数しか見ないので oid は揃える。
         let mut state = state_at("/repo");
-        with_stashes(&mut state, Ok((0..3).map(fake_stash).collect()));
-        let branches = (0..12)
-            .map(|n| fake_branch(&format!("b{n:02}"), n == 0))
+        let stashes = (0..123)
+            .map(|index| StashEntry {
+                index,
+                ..fake_stash(0)
+            })
+            .collect();
+        with_stashes(&mut state, Ok(stashes));
+        let branches = (0..1234)
+            .map(|n| fake_branch(&format!("b{n:04}"), n == 0))
             .collect();
         let _ = reply(
             &mut state,
@@ -154,9 +172,9 @@ mod tests {
         );
 
         let lines = draw(&state, SIZE);
-        let header = &lines[row_of(&lines, "Branches (12)") as usize];
+        let header = &lines[row_of(&lines, "Branches (1234)") as usize];
 
-        assert!(header.contains("Stash"), "{header}");
+        assert!(header.contains(" Stash (123) "), "{header}");
         // **末尾の見出しが空白ごと残っていること。** 切れると ` PR` や ` PRs` で止まる。
         assert!(header.contains(" PRs "), "{header}");
     }

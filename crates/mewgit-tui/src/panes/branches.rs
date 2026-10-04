@@ -3,6 +3,8 @@
 //! 右列の上に置く。下の Working tree / コミット詳細と違い、**左の選択では
 //! 入れ替わらない**（ブランチ一覧はグラフで何を選んでいるかと無関係）。
 
+use std::borrow::Cow;
+
 use mewgit_core::app::{AppState, ListLoad};
 use mewgit_core::git_read::Branch;
 use ratatui::text::{Line, Span};
@@ -10,15 +12,9 @@ use ratatui::text::{Line, Span};
 use super::Rows;
 use crate::ui::{self, theme};
 
-/// タブ見出しに出すこのペインの名前。件数は出せるときだけ添える。
-///
-/// 読み込み中や失敗のときに `(0)` を出すと、ブランチが 1 本も無いリポジトリと
-/// 同じ見た目になる（本文で出し分けているのと同じ理由）。
-pub(super) fn title(state: &AppState) -> String {
-    match state.branches.branches.len() {
-        0 => "Branches".to_string(),
-        len => format!("Branches ({len})"),
-    }
+/// タブ見出しに出すこのペインの名前。件数は出せるときだけ添える（[`super::counted`]）。
+pub(super) fn title(state: &AppState) -> Cow<'static, str> {
+    super::counted("Branches", state.branches.branches.len())
 }
 
 /// 一覧の行と、カーソルが何行目か。

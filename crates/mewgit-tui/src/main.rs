@@ -1,12 +1,17 @@
 //! mewgit エントリポイント。
 //!
+//! 解釈するオプションは `--version` / `-V` と `--help` / `-h` だけで、どちらも stdout に
+//! 書いて終わる。版は `Cargo.toml` の `[workspace.package] version`（release-please が
+//! release PR で上げる）。
+//!
 //! 隠しサブコマンド `--sequence-editor <todo>` / `--commit-editor <file>` は interactive
 //! rebase 用。git が `GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` として起こし、plan は git から
 //! 継いだ標準入力で届く（`docs/design/03-git-exec.md` の
 //! 「Interactive rebase の実装」）。本体は `mewgit_core::git_exec::write_todo`。
 //!
-//! ここは配線だけで、実端末が必要なためテストを書かない（`.claude/rules/testing.md` の例外）。
-//! 分岐のある処理は `runtime` 側に置く。
+//! ここは配線だけで、TUI の起動は実端末が必要なため単体テストを書かない
+//! （`.claude/rules/testing.md` の例外）。分岐のある処理は `runtime` 側に置く。
+//! 端末に触れないオプションの扱いは `tests/cli.rs` が本物のバイナリで確かめる。
 
 mod input;
 mod modals;
@@ -17,6 +22,7 @@ mod test_util;
 mod ui;
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -42,11 +48,41 @@ fn main() -> Result<ExitCode> {
             }))
         }
         Some("--commit-editor") => return Ok(editor(&args[1..], git_exec::write_commit_message)),
+        Some("--version" | "-V") => return Ok(print(&format!("{VERSION_LINE}\n"))),
+        Some("--help" | "-h") => return Ok(print(HELP)),
         _ => {}
     }
     tui(repo_path(args.first())?)?;
     Ok(ExitCode::SUCCESS)
 }
+
+/// `--version` / `--help` の出力。
+///
+/// `println!` は書けないと panic するので使わない。`mewgit --help | head -1` のように
+/// 読み手が先に閉じると EPIPE が返る（Rust は SIGPIPE を無視するので、死なずに返る）。
+/// 読み手が要らないと言っただけなので、終了コードは成功のままにする。
+fn print(text: &str) -> ExitCode {
+    let _ = std::io::stdout().write_all(text.as_bytes());
+    ExitCode::SUCCESS
+}
+
+const VERSION_LINE: &str = concat!("mewgit ", env!("CARGO_PKG_VERSION"));
+
+const HELP: &str = concat!(
+    "mewgit ",
+    env!("CARGO_PKG_VERSION"),
+    "
+tig 風のコミットグラフと GitHub 連携を持つ TUI の git クライアント
+
+使い方: mewgit [repo-path]
+
+  repo-path      開くリポジトリ。省略するとカレントディレクトリ
+  -h, --help     この使い方を出す
+  -V, --version  版を出す
+
+起動したあとは ? でフォーカス中のペインのキーを、q で終了。
+"
+);
 
 /// エディタとして起こされたとき。git はファイルのパスを末尾に 1 つ足す。
 ///
@@ -137,11 +173,10 @@ fn push_keyboard_enhancement() {
 fn repo_path(arg: Option<&OsString>) -> Result<PathBuf> {
     let raw = match arg {
         Some(arg) => {
-            // オプションは隠しサブコマンドしか解釈しないので、`--help` という名前の
-            // リポジトリを開きにいかないよう弾く。
+            // 解釈しないオプションを、その名前のリポジトリとして開きにいかないよう弾く。
             if arg.to_string_lossy().starts_with('-') {
                 bail!(
-                    "オプションはまだ対応していません: {}",
+                    "知らないオプションです: {}（mewgit --help で使い方を出します）",
                     arg.to_string_lossy()
                 );
             }

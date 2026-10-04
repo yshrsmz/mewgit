@@ -6,8 +6,10 @@ members = ["crates/mewgit-core", "crates/mewgit-tui"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/codingfeline/mewgit"
+repository = "https://github.com/yshrsmz/mewgit"
 authors = ["CODINGFELINE"]
+# crates.io には上げない。配布は GitHub Release のバイナリと `cargo install --path`。
+publish = false
 
 [workspace.dependencies]
 # io-util は `git apply --cached -` の標準入力に書くため（`AsyncWriteExt`）。

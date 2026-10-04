@@ -675,7 +675,25 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       diff / graph / exec / worktree / mod / progress の各テストにインラインで散っている
       （#120 の `/simplify` が拾い、範囲外として見送った）。`WorktreeSnapshot` に
       フィールドが増えたときに直す場所が 1 つになる
-- [ ] README、リリースワークフロー（`cargo dist` or release-please）
+- [ ] README、リリースワークフロー。**release-please + 手書きのビルド、private のまま自分用、
+      `aarch64-apple-darwin` と `aarch64-unknown-linux-gnu`、crates.io には上げない
+      （`publish = false`）**（2026-10-04 にユーザーと決めた）。**`release-type: rust` は
+      このワークスペースで動かない** —— ルートの `Cargo.toml` に `[package]` が無いと
+      `CargoToml` が throw し、メンバーの `version.workspace = true` は書き換え先が値で
+      ない（release-please 17.11.2 のソース）。**`simple` + `extra-files` の toml で
+      `$.workspace.package.version` と `Cargo.lock` の 2 crate を書き換える**。lock の
+      jsonpath は `@.name.value=='mewgit'` —— release-please は値に位置を付けた
+      オブジェクトで解析するので、`@.name=='mewgit'` は何も当たらない（実物の
+      `GenericToml` を `Cargo.toml` / `Cargo.lock` に当てて確かめた）。内部の形が
+      変わって当たらなくなると lock が古いまま release PR が出て、CI の `--locked` が
+      落ちる。`simple` の初版は 1.0.0 なので `initial-version: 0.1.0` を置く。
+      **release PR とタグは GitHub App のトークンで作る**（`GITHUB_TOKEN` で作った PR には
+      CI が走らない）。App の client ID は変数 `RELEASE_APP_CLIENT_ID`、鍵はシークレット
+      `RELEASE_APP_PRIVATE_KEY`。ビルドは同じワークフローの後段（`release_created`）に
+      置き、`release.yml` を触る PR では build だけを走らせて runner を先に踏む
+      （#152 で `ubuntu-24.04-arm` が private リポジトリでも回ることを確かめた。build は
+      macOS 1 分 34 秒、Linux arm 3 分 25 秒）。**チェックを付けるのは v0.1.0 の Release に
+      2 つのバイナリが載ってから** —— Release への upload はタグが無いと踏めない
 
 ## MVP 後
 

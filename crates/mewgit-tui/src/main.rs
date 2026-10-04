@@ -22,6 +22,7 @@ mod test_util;
 mod ui;
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -47,18 +48,22 @@ fn main() -> Result<ExitCode> {
             }))
         }
         Some("--commit-editor") => return Ok(editor(&args[1..], git_exec::write_commit_message)),
-        Some("--version" | "-V") => {
-            println!("{VERSION_LINE}");
-            return Ok(ExitCode::SUCCESS);
-        }
-        Some("--help" | "-h") => {
-            print!("{HELP}");
-            return Ok(ExitCode::SUCCESS);
-        }
+        Some("--version" | "-V") => return Ok(print(&format!("{VERSION_LINE}\n"))),
+        Some("--help" | "-h") => return Ok(print(HELP)),
         _ => {}
     }
     tui(repo_path(args.first())?)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// `--version` / `--help` の出力。
+///
+/// `println!` は書けないと panic するので使わない。`mewgit --help | head -1` のように
+/// 読み手が先に閉じると EPIPE が返る（Rust は SIGPIPE を無視するので、死なずに返る）。
+/// 読み手が要らないと言っただけなので、終了コードは成功のままにする。
+fn print(text: &str) -> ExitCode {
+    let _ = std::io::stdout().write_all(text.as_bytes());
+    ExitCode::SUCCESS
 }
 
 const VERSION_LINE: &str = concat!("mewgit ", env!("CARGO_PKG_VERSION"));

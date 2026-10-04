@@ -427,9 +427,13 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
 
 - [x] `--version` / `-V` と `--help` / `-h`。**v0.1.0 を切ったあとで、版を確かめる手段が
       無いとユーザーに指摘された**（2026-10-04）—— それまで `-` 始まりの引数は全部断っていた。
-      版は `CARGO_PKG_VERSION`（`[workspace.package] version`）なので release-please の書き換えに
-      そのまま追従する。どちらも端末にも設定にも触れず、隠しサブコマンドと同じ入口で分ける。
-      知らないオプションの断りには `--help` を案内する
+      版は `CARGO_PKG_VERSION`（`[workspace.package] version`）で、release-please が書き換える
+      値と同じ。**ただし書き換えは 0.1.0 では空振りしており、まだ一度も動いていない** ——
+      `Cargo.toml` 側だけが外れると `--version` は古い版を黙って出す（`Cargo.lock` 側が外れれば
+      `--locked` が落ちて気付く）ので、次の release PR で `Cargo.toml` の差分を見る。
+      どちらも端末にも設定にも触れず、隠しサブコマンドと同じ入口で分ける。知らないオプションの
+      断りには `--help` を案内する。**stdout への書き込みは `println!` にしない** —— 読み手が
+      先に閉じた pipe（`| head -1`）で panic して rc=101 になった（`/code-review` が再現）
 
 - [x] **起動中に mewgit のバイナリが消えたときのエディタ。** `GIT_EDITOR` /
       `GIT_SEQUENCE_EDITOR` は `current_exe()` を指す。**着手前は「revert / cherry-pick の

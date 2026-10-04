@@ -1,7 +1,7 @@
 //! 本物の `mewgit` に `--version` / `--help` を渡す。端末にも設定にも触れずに
 //! stdout へ書いて終わることを見る（`main.rs` は単体テストを持たないので、ここに置く）。
 
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn mewgit(arg: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mewgit"))
@@ -54,4 +54,21 @@ fn an_unknown_option_is_refused_with_a_pointer_to_help() {
         "{stderr}"
     );
     assert!(stderr.contains("mewgit --help"), "{stderr}");
+}
+
+#[test]
+fn a_reader_that_closed_first_does_not_make_it_panic() {
+    // 読み手を先に閉じた pipe を渡すと、書き込みは必ず EPIPE になる（`| head -1` の
+    // 読み手が先に終わった形を、競合なしに作る）。
+    for arg in ["--version", "--help"] {
+        let (reader, writer) = std::io::pipe().expect("pipe を作れるはずです");
+        drop(reader);
+        let output = Command::new(env!("CARGO_BIN_EXE_mewgit"))
+            .arg(arg)
+            .stdout(Stdio::from(writer))
+            .output()
+            .expect("mewgit を起こせるはずです");
+        assert!(output.status.success(), "{arg}: {output:?}");
+        assert!(output.stderr.is_empty(), "{arg}: {output:?}");
+    }
 }

@@ -938,7 +938,7 @@ const KEY_GAP: &str = " ";
 ///
 /// **`Line` を通さない。** あちらは幅を測るためだけに `Vec<Span>` を 1 本確保する
 /// （`modals::cursor_col` と同じ理由）。
-fn fits(text: &str, width: u16) -> bool {
+pub fn fits(text: &str, width: u16) -> bool {
     Span::raw(text).width() <= width as usize
 }
 

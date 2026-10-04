@@ -19,7 +19,7 @@ const TITLE: &str = "revert: 残す側の親";
 
 /// キーの案内。`update::picker_key` と `update::graph::mainline_picked` が受けるキーと揃える。
 /// **`Enter` は確認へ進むだけ**で、まだ revert しない。
-const HINT: &str = "[j/k] 選ぶ   [Enter] 確認へ   [Esc] やめる";
+const HINT: modals::Hint<'static> = &[&["[j/k] 選ぶ", "[Enter] 確認へ", "[Esc] やめる"]];
 
 /// merge コミットの親を並べ、残す側を選ばせる。
 pub fn render(

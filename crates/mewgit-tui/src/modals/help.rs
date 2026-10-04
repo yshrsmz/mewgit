@@ -14,7 +14,7 @@ use crate::ui::{self, theme};
 const TITLE: &str = "キー";
 
 /// キーの案内。`update::picker_key` が受けるキーと揃える（`Enter` は何もしない）。
-const HINT: &str = "[j/k] 移動   [Esc] 閉じる";
+const HINT: modals::Hint<'static> = &[&["[j/k] 移動", "[Esc] 閉じる"]];
 
 /// `pane` のキーとどこでも効くキーを並べる。
 pub fn render(frame: &mut Frame, area: Rect, pane: Pane, cursor: usize) {

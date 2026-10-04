@@ -23,10 +23,10 @@ const TITLE_PICK: &str = "GitHub アカウントを選ぶ";
 const TITLE_SHOW: &str = "GitHub アカウント";
 
 /// キーの案内。`update::picker_key` と `update::account_picked` が受けるキーと揃える。
-const HINT_PICK: &str = "[j/k] 選ぶ   [Enter] 保存   [Esc] やめる";
+const HINT_PICK: &[&str] = &["[j/k] 選ぶ", "[Enter] 保存", "[Esc] やめる"];
 
 /// 選べないときの案内。**`j/k` も `Enter` も書かない** —— どれも効かない。
-const HINT_SHOW: &str = "[Esc] 閉じる";
+const HINT_SHOW: &[&str] = &["[Esc] 閉じる"];
 
 /// `u` の案内。**出すのは [`AccountView::is_unsettable`] が真のときだけ** ——
 /// `update::account_key` が受けるかどうかを同じ述語から出す（#53）。
@@ -57,6 +57,7 @@ fn saves_to() -> String {
 /// アカウント解決の内訳を出し、選べるなら選ばせる。
 pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize) {
     let candidates = view.candidates();
+    let hint = hint(view);
 
     picker::render(
         frame,
@@ -67,7 +68,7 @@ pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize) 
             body: body(view),
             rows: candidates.iter().map(candidate_line).collect(),
             cursor,
-            hint: &hint(view),
+            hint: &[&hint],
         },
     );
 }
@@ -105,7 +106,7 @@ fn waiting(view: &AccountView) -> bool {
 ///
 /// **`pick` を引数に取らない。** 呼ぶ側が計算して渡す形にすると、候補が無いのに
 /// `[Enter] 保存` を出す組み合わせが型で作れる（「導出できる値を引数に取らせない」）。
-fn hint(view: &AccountView) -> String {
+fn hint(view: &AccountView) -> Vec<&'static str> {
     let base = if view.candidates().is_empty() {
         HINT_SHOW
     } else {
@@ -119,8 +120,8 @@ fn hint(view: &AccountView) -> String {
     if view.is_reresolvable() {
         parts.push(HINT_RERESOLVE);
     }
-    parts.push(base);
-    parts.join("   ")
+    parts.extend_from_slice(base);
+    parts
 }
 
 /// 本文。[`AccountView`] の 2 つで分かれる。
@@ -368,7 +369,6 @@ fn candidate_line(login: &GhLogin) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::{attempt_lines, hint, HINT_RERESOLVE};
-    use crate::modals;
     use crate::test_util::{draw, modal_text, row_is_reversed, state_with_modal};
     use mewgit_core::app::{AccountListing, AccountView, AppState, Modal, Repick, TermSize};
     use mewgit_core::auth::{
@@ -519,7 +519,7 @@ mod tests {
 
                 let text = modal_text(&state, TermSize { width, ..SIZE });
 
-                for group in want.split(modals::HINT_GAP) {
+                for group in &want {
                     assert!(
                         text.lines().any(|line| line.contains(group)),
                         "{width} 桁で {group:?} が欠けた:\n{text}"
@@ -823,8 +823,7 @@ mod tests {
 
         // モーダルの内側だけを取り出し、折り返しを繋ぎ直して読む。
         let body = modal_text(&state, SIZE);
-        let joined = body.lines().collect::<Vec<_>>().join(" ");
-        let joined = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+        let joined = body.split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(joined.contains(&switch), "{body}");
         assert!(

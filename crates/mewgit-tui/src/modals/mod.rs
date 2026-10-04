@@ -101,11 +101,15 @@ pub const WIDTH: u16 = 60;
 /// 本文とキーの案内のあいだに空ける行数。
 const GAP_ROWS: u16 = 1;
 
-/// キーの案内で群（`[キー] 動詞`）のあいだに置く空白。
+/// キーの案内。外側が行（手で分けた切れ目）、内側が群（`[キー] 動詞`）。
 ///
-/// **折り返しはこの区切りで群を見分ける**（[`fold_hint`]）。群の中
-/// （`[Shift+Enter / Ctrl-J] 改行`）は空白 1 なので割れない。
-pub const HINT_GAP: &str = "   ";
+/// **群の並びのまま受ける。** 1 本の文字列で受けて区切りの空白で割り直す形だと、
+/// 区切りを守っているかを誰も見ない —— 空白 2 で並べた群は 1 つと読まれて折れずに
+/// 切れ、群の中に空白 3 を書けばそこで割れる。群を繋ぐのは [`place`] だけ。
+pub type Hint<'a> = &'a [&'a [&'a str]];
+
+/// 案内の群のあいだに置く空白。
+const HINT_GAP: &str = "   ";
 
 /// モーダルの枠。
 ///
@@ -146,7 +150,7 @@ pub fn place(
     block: Block<'_>,
     want: u16,
     body_rows: u16,
-    hint: &str,
+    hint: Hint<'_>,
 ) -> Rect {
     let probe = probe(area, want);
     let probe_inner = block.inner(probe);
@@ -173,34 +177,32 @@ pub fn place(
 
 /// キーの案内を幅 `width` に折る。
 ///
-/// **群（[`HINT_GAP`] で区切った `[キー] 動詞`）の途中では割らない。** 前から詰めて、
-/// 入らない群を次の行へ送る。**手で入れた改行はそのまま行の切れ目**（RebaseEditor は
-/// 動作のキーと移動・実行のキーを意味で分けている）。
+/// **群の途中では割らない。** 前から詰めて、入らない群を次の行へ送る。**手で分けた
+/// 行はそのまま行の切れ目**（RebaseEditor は動作のキーと移動・実行のキーを意味で
+/// 分けている）。収まるかは組んだ字から数える（[`ui::fits`]）。
 ///
 /// 群 1 つが `width` より長ければ、その群だけで 1 行にする（描くときに右端で切れる）。
 /// `ratatui` の `Wrap` に任せないのは、あれが単語（空白 1）で割るので群が割れるから。
-fn fold_hint(hint: &str, width: u16) -> Vec<String> {
-    let width = usize::from(width);
+fn fold_hint(hint: Hint<'_>, width: u16) -> Vec<String> {
     let mut rows = Vec::new();
-    for line in hint.lines() {
-        let mut row = String::new();
-        for group in line.split(HINT_GAP) {
-            if !row.is_empty() && cells(&row) + HINT_GAP.len() + cells(group) > width {
-                rows.push(std::mem::take(&mut row));
+    for line in hint {
+        let mut row: Vec<&str> = Vec::new();
+        for &group in *line {
+            row.push(group);
+            if row.len() > 1 && !ui::fits(&hint_row(&row), width) {
+                row.pop();
+                rows.push(hint_row(&row));
+                row = vec![group];
             }
-            if !row.is_empty() {
-                row.push_str(HINT_GAP);
-            }
-            row.push_str(group);
         }
-        rows.push(row);
+        rows.push(hint_row(&row));
     }
     rows
 }
 
-/// 描いたときの幅。数え方は描画と同じ `Span::width`。
-fn cells(text: &str) -> usize {
-    Span::raw(text).width()
+/// 群を 1 行に繋ぐ。**描く行と同じ字**なので、テストが行を丸ごと突き合わせるのにも使う。
+pub fn hint_row(groups: &[&str]) -> String {
+    groups.join(HINT_GAP)
 }
 
 /// 枠を測るための当て木。幅は画面に収まるところまで縮め、高さは測る側に任せる。
@@ -281,7 +283,7 @@ pub fn cursor_col(buf: &TextBuffer, width: u16) -> (u16, u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::{cursor_col, fold_hint};
+    use super::{cursor_col, fold_hint, Hint};
     use crate::test_util::{draw, modal_text, row_of, state_with_modal, terminal_with};
     use mewgit_core::app::{Cmd, Modal, TermSize, TextBuffer};
 
@@ -325,7 +327,7 @@ mod tests {
     #[test]
     fn a_hint_that_fits_stays_on_one_row() {
         assert_eq!(
-            fold_hint("[y] 実行   [n] やめる", 21),
+            fold_hint(&[&["[y] 実行", "[n] やめる"]], 21),
             ["[y] 実行   [n] やめる"]
         );
     }
@@ -334,7 +336,12 @@ mod tests {
     fn a_hint_wider_than_the_box_breaks_between_groups() {
         // **群の途中では割らない**（07 の「モーダルのキーの案内」）。`[Shift+Enter /
         // Ctrl-J] 改行` は中に空白を持つので、単語で割る `Wrap` に任せると割れる。
-        let hint = "[Enter] コミット   [Shift+Enter / Ctrl-J] 改行   [Esc] やめる";
+        // 46 セル = 16 + 3 + 27。
+        let hint: Hint<'_> = &[&[
+            "[Enter] コミット",
+            "[Shift+Enter / Ctrl-J] 改行",
+            "[Esc] やめる",
+        ]];
 
         assert_eq!(
             fold_hint(hint, 46),
@@ -358,7 +365,7 @@ mod tests {
         // RebaseEditor は動作のキーと移動・実行のキーを意味で分けて折っている。幅が
         // 足りても混ぜない。
         assert_eq!(
-            fold_hint("[p] pick\n[Esc] やめる", 80),
+            fold_hint(&[&["[p] pick"], &["[Esc] やめる"]], 80),
             ["[p] pick", "[Esc] やめる"]
         );
     }
@@ -367,7 +374,7 @@ mod tests {
     fn a_group_wider_than_the_box_takes_a_row_of_its_own() {
         // 割れないものは割らない。描くときに右端で切れる（07 の「残る限界」）。
         assert_eq!(
-            fold_hint("[a] x   [Shift+Enter / Ctrl-J] 改行   [b] y", 10),
+            fold_hint(&[&["[a] x", "[Shift+Enter / Ctrl-J] 改行", "[b] y"]], 10),
             ["[a] x", "[Shift+Enter / Ctrl-J] 改行", "[b] y"]
         );
     }

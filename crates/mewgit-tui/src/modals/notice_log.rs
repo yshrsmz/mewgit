@@ -21,7 +21,7 @@ use crate::ui::{self, theme, time};
 const TITLE: &str = "通知の履歴";
 
 /// キーの案内。`update::picker_key` が受けるキーと揃える（`Enter` は何もしない）。
-const HINT: &str = "[j/k] 選ぶ   [Esc] 閉じる";
+const HINT: modals::Hint<'static> = &[&["[j/k] 選ぶ", "[Esc] 閉じる"]];
 
 /// 箱の幅。**`modals::WIDTH`（60）より広く取る** —— stderr は英語の長い行で、
 /// 60 では 1 行が 2〜3 行に折れる。狭い端末では画面の幅まで縮む。
@@ -305,12 +305,8 @@ mod tests {
         // **fixture が境目を越えていること**を先に見る（`.claude/rules/testing.md`）。
         assert!(!text.contains("stderr 39"), "{text}");
         assert!(text.contains("stderr 0"), "{text}");
-        let inner = modal_text(&state, SIZE);
-        let inner: Vec<&str> = inner.lines().collect();
-        let hint = inner
-            .iter()
-            .position(|line| line.contains("[j/k] 選ぶ"))
-            .expect("案内の行");
+        let inner: Vec<String> = modal_text(&state, SIZE).lines().map(String::from).collect();
+        let hint = usize::from(row_of(&inner, "[j/k] 選ぶ"));
         // `…` は中身の最下行。**箱が端末の高さに丸められると、案内の上の空行も
         // 中身に回る**（`modals::place` が割るのは本文と案内だけ）ので、案内の直上。
         assert!(inner[hint - 1].starts_with('…'), "{text}");

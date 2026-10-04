@@ -36,7 +36,7 @@ pub struct Picker<'a> {
     pub rows: Vec<Line<'a>>,
     pub cursor: usize,
     /// キーの案内。**受けるキーと揃える**（`update` の `*_key`）。
-    pub hint: &'a str,
+    pub hint: modals::Hint<'a>,
 }
 
 /// 箱を描き、本文と一覧を置く。

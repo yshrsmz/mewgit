@@ -11,15 +11,20 @@ use crate::ui;
 
 /// キーの案内。`update::prs::pr_create_key` が受けるキーと揃える。
 ///
-/// **群のあいだはほかと同じ [`modals::HINT_GAP`]**（74 セルで、幅 76 の枠の内側に
+/// **群のあいだはほかと同じ幅**（`modals::place` が繋ぐ。74 セルで、幅 76 の枠の内側に
 /// ちょうど入る）。枠に右の余白があったころは入らず、ここだけ空白 2 に詰めていた。
-/// 折り返しがこの区切りで群を見分けるので揃えた（07 の「モーダルのキーの案内」）。
 ///
 /// **`Shift+Enter` は出さない。** `CommitMessage` は `Ctrl-J` と両方出しているが、
 /// ここは予算が無い。**落とすのは `Shift+Enter` のほう** —— `Ctrl-J` はどの端末でも
 /// 届くので、出す側を落としても**打つ手が無くなる人は出ない**（逆にすると、
 /// 区別して送れない端末の人が行き止まる）。`Shift+Enter` 自体は効く。
-const HINT: &str = "[Enter] 作成   [Tab] 次の欄   [Space] draft   [Ctrl-J] 改行   [Esc] やめる";
+const HINT: modals::Hint<'static> = &[&[
+    "[Enter] 作成",
+    "[Tab] 次の欄",
+    "[Space] draft",
+    "[Ctrl-J] 改行",
+    "[Esc] やめる",
+]];
 
 /// モーダルの幅。本文を書く箱なので `Confirm` より広い（`CommitMessage` と同じ）。
 const WIDTH: u16 = 76;

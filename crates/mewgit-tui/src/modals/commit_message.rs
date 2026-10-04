@@ -13,7 +13,11 @@ use crate::modals;
 /// 送れるときだけ届き、後者はどの端末でも届く（01 の「コミットメッセージの編集」）。
 /// 片方だけ書くと、届かない端末の人に打つ手が無いか、届く端末の人が慣れたキーを
 /// 見つけられない。
-const HINT: &str = "[Enter] コミット   [Shift+Enter / Ctrl-J] 改行   [Esc] やめる";
+const HINT: modals::Hint<'static> = &[&[
+    "[Enter] コミット",
+    "[Shift+Enter / Ctrl-J] 改行",
+    "[Esc] やめる",
+]];
 
 /// モーダルの幅。狭い端末では画面の幅まで縮む。
 ///
@@ -36,7 +40,13 @@ pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool) {
 /// メッセージを打つ箱を描く。**RebaseEditor の reword も同じ箱**で、違うのは題と
 /// キーの案内だけ（07）。写すと、横のずらし方やカーソルの置き方を直したときに片方だけ
 /// 古くなる。
-pub fn render_editor(frame: &mut Frame, area: Rect, title: &str, hint: &str, buf: &TextBuffer) {
+pub fn render_editor(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    hint: modals::Hint<'_>,
+    buf: &TextBuffer,
+) {
     // 折り返さないので、本文の行数はそのままバッファの行数（下の `Paragraph`）。
     let body_rows = u16::try_from(buf.lines.len()).unwrap_or(u16::MAX);
     let body_area = modals::place(frame, area, modals::block(title), WIDTH, body_rows, hint);

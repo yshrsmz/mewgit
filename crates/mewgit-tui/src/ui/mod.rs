@@ -32,7 +32,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     frame.render_widget(header_line(state, header.width), header);
     // **スピナーは同じ領域に右寄せで重ねる。** `Paragraph` は既定のスタイルで
-    // 領域を塗り直すだけなので、左に描いたリポジトリ名は消えない。
+    // 領域を塗り直すだけなので、左に描いたリポジトリ名は消えない。左群が右端の席
+    // （`SPINNER_SEAT`）に掛からないことは `header_line` が保証する。
     if let Some(spinner) = spinner_line(state) {
         frame.render_widget(Paragraph::new(spinner).right_aligned(), header);
     }
@@ -516,58 +517,78 @@ pub fn graph_rows(term: TermSize) -> usize {
     panes::graph::area(left_area(body)).height as usize
 }
 
-/// ヘッダ。リポジトリと、解決できていればアカウントを出す。
+/// ヘッダ。リポジトリと、解決できていればアカウントと残量を出す。
 ///
-/// **幅を受けるのは残量のため**（下の `[api: …]`）。同じ領域に重ねて描くスピナーの
-/// ぶんを引かないと、「余っているか」を数えられない。
-fn header_line(state: &AppState, width: u16) -> Paragraph<'_> {
-    let mut spans = vec![Span::styled(
-        repo_label(state),
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
+/// **左群は「幅 − スピナーの席」に入る最初の段で組む**（07 の「ヘッダ › 幅が足りない
+/// とき」）。`@ host` → `[api: …]` → `owner/repo` → degraded の理由 → `[gh: login]` の順に
+/// 落とし、degraded のキーの形（`[gh: A で選ぶ]`）は最後まで残す —— `A` で開く
+/// ピッカーへ辿り着く手掛かりがそれしか無い。
+///
+/// **席はいつも引く。** そのフレームのスピナーの幅で引くと、境目の幅でジョブが
+/// 出入りするたびに段が変わり、`[api: …]` が走っているあいだだけ消える。
+fn header_line(state: &AppState, width: u16) -> Paragraph<'static> {
+    let sep = Span::raw(SEP).width();
+    let budget = usize::from(width).saturating_sub(usize::from(SPINNER_SEAT) + sep);
+    let repo = repo_label(state);
+    let target = state
+        .repo
+        .target
+        .resolved()
+        .map(|target| Span::raw(format!("{}/{}", target.owner, target.repo)));
+    let quota = state.prs.rate_limit().map(rate_limit_span);
 
-    if let Some(target) = state.repo.target.resolved() {
-        spans.push(Span::raw(format!("{SEP}{}/{}", target.owner, target.repo)));
-    }
-
-    if let Some(account) = account_span(&state.account) {
-        spans.push(Span::raw(SEP));
-        spans.push(account);
-    }
-
-    if let Some(limit) = state.prs.rate_limit() {
-        let quota = rate_limit_span(limit);
-        // **入らなければ出さない。** 右端のスピナーは同じ領域に重ねて描くので、
-        // はみ出した `[api: 4984]` は **`[api: 49` として残り、桁の減った数が
-        // そのまま読める**（実測。07 のヘッダに幅の表がある）。**切れた数は
-        // 「無い」より悪い。**
-        // **譲るのは新しく足したほう** —— `owner/repo` と `[gh: …]` が食われる形は
-        // 足す前からあり、落とす順序を全体で決めるのは M6（07）。
-        let spinner = spinner_line(state).as_ref().map_or(0, Line::width);
-        if quota_fits(&spans, &quota, spinner, width) {
+    // 段ごとに (owner/repo を出すか, `[gh: …]` の形, 残量を出すか)。
+    const STAGES: [(bool, Option<GhForm>, bool); 5] = [
+        (true, Some(GhForm::Full), true),
+        (true, Some(GhForm::Short), true),
+        (true, Some(GhForm::Short), false),
+        (false, Some(GhForm::Short), false),
+        (false, Some(GhForm::Key), false),
+    ];
+    for (with_target, form, with_quota) in STAGES {
+        let mut spans = vec![Span::styled(repo.clone(), header_repo_style())];
+        let parts = [
+            target.clone().filter(|_| with_target),
+            form.and_then(|form| account_span(&state.account, form)),
+            quota.clone().filter(|_| with_quota),
+        ];
+        for part in parts.into_iter().flatten() {
             spans.push(Span::raw(SEP));
-            spans.push(quota);
+            spans.push(part);
+        }
+        if spans.iter().map(Span::width).sum::<usize>() <= budget {
+            return Paragraph::new(Line::from(spans));
         }
     }
-
-    Paragraph::new(Line::from(spans))
+    // **最後はリポジトリ名だけ。** それも入らなければ切る。
+    let repo = ellipsize(&repo, u16::try_from(budget).unwrap_or(u16::MAX)).into_owned();
+    Paragraph::new(Line::from(Span::styled(repo, header_repo_style())))
 }
 
-/// 残量を足しても、右端のスピナーとのあいだに [`SEP`] が残るか。
+fn header_repo_style() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
+}
+
+/// 右端のスピナーにいつも空けておくセル数（駒と説明。左群との区切りは別）。
 ///
-/// **数えるのは余白まで。** **`contains` だけの見張りでは余白ゼロが通る**（#73）ので、
-/// 「入った」の基準を隣の語と地続きにならないところに置く。
-fn quota_fits(spans: &[Span<'_>], quota: &Span<'_>, spinner: usize, width: u16) -> bool {
-    // **区切りもセル幅で数える。** `SEP.len()` はバイト数なので、いまの `"  "` では
-    // 同じ値になるが、区切りを非 ASCII にした瞬間に組む側とずれる。
-    let sep = Span::raw(SEP).width();
-    let left: usize = spans.iter().map(Span::width).sum();
-    left + sep + quota.width() + sep + spinner <= width as usize
+/// `⠋ cherry-pick` が入る幅。**入らない説明は [`spinner_line`] が畳む**ので、
+/// ラベルの長さをここに合わせる見張りは要らない（07 の「ヘッダ」）。
+const SPINNER_SEAT: u16 = 13;
+
+/// ヘッダの `[gh: …]` の形。広い順（07 の「ヘッダ › 幅が足りないとき」）。
+#[derive(Clone, Copy)]
+enum GhForm {
+    /// `[gh: login @ host]`。degraded は理由とキー。
+    Full,
+    /// `@ host` を落とす。degraded は `Full` と同じ。
+    Short,
+    /// degraded のキーだけ（`[gh: A で選ぶ]`）。解決済みは出さない。
+    Key,
 }
 
 /// 1 行に並べる要素の区切り。**1 セルだと隣の語と地続きに見える。**
 ///
-/// 組む側（`Span::raw(SEP)`）と数える側（[`quota_fits`]）が同じものを読む ——
+/// 組む側（`Span::raw(SEP)`）と数える側（[`header_line`]）が同じものを読む ——
 /// 幅だけを定数にすると、区切りを広げたときに数えるほうが 2 のまま残る。
 ///
 /// **ヘッダとフッターで同じものを使う** —— ヘッダの `[api: …]` の手前と、キーヒントの
@@ -609,17 +630,27 @@ fn rate_limit_span(limit: RateLimit) -> Span<'static> {
 /// （`account`）が出しているので、左にも「解決中」を出すと同じことを 2 箇所で言う。
 /// 既定リモートが無いなどで一度も頼まないリポジトリ（`TargetState::Unavailable`）も
 /// ここに来るので、GitHub と関係のないリポジトリには何も出ない（01）。
-fn account_span(account: &AccountState) -> Option<Span<'_>> {
+fn account_span(account: &AccountState, form: GhForm) -> Option<Span<'static>> {
     match account {
         // **`Disabled` でも何も出さない**（07 の「ヘッダ」）。自分で切った設定を毎
         // フレーム言い返すことになるうえ、1 行しかないヘッダで `owner/repo` と
         // スピナーの予算を食う。`A` を押せば理由が通知に出る。
         AccountState::Resolving | AccountState::Disabled => None,
-        AccountState::Resolved(account) => Some(Span::raw(format!(
-            "[gh: {} @ {}]",
-            account.login, account.host
-        ))),
-        AccountState::Degraded(reason) => Some(Span::styled(degraded_label(reason), theme::warn())),
+        AccountState::Resolved(account) => match form {
+            GhForm::Full => Some(Span::raw(format!(
+                "[gh: {} @ {}]",
+                account.login, account.host
+            ))),
+            GhForm::Short => Some(Span::raw(format!("[gh: {}]", account.login))),
+            GhForm::Key => None,
+        },
+        AccountState::Degraded(reason) => {
+            let text = match form {
+                GhForm::Full | GhForm::Short => degraded_label(reason),
+                GhForm::Key => format!("[gh: {}]", degraded_key(reason)),
+            };
+            Some(Span::styled(text, theme::warn()))
+        }
     }
 }
 
@@ -641,12 +672,17 @@ fn account_span(account: &AccountState) -> Option<Span<'_>> {
 /// 出荷される形をそのまま渡すため。** `degraded` だけを渡すと、キーのぶんが
 /// 見張りから外れる。
 fn degraded_label(reason: &DegradedReason) -> String {
-    let hint = if reason.candidates().is_empty() {
-        "。A で詳細"
+    format!("[gh: {}。{}]", degraded(reason), degraded_key(reason))
+}
+
+/// degraded のとき押すキーの案内。幅が足りなければ理由を落としてこれだけ残す
+/// （07 の「ヘッダ › 幅が足りないとき」）。
+fn degraded_key(reason: &DegradedReason) -> &'static str {
+    if reason.candidates().is_empty() {
+        "A で詳細"
     } else {
-        "。A で選ぶ"
-    };
-    format!("[gh: {}{hint}]", degraded(reason))
+        "A で選ぶ"
+    }
 }
 
 /// degraded の理由を 1 行にする。
@@ -697,24 +733,50 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
     // **`Tick` を 1 つまたいで走っているジョブだけを描く**（`Job::since`。07 の
     // 「ヘッダ」）。1 フレームで終わるもの（2 秒ごとの probe、小さなリポジトリの
     // status）まで描くと、そのたびに駒が 1 フレームだけ光る。
-    let mut labels = state
+    let labels: Vec<&'static str> = state
         .jobs
         .iter()
         .filter(|job| job.since < state.tick)
         .map(|job| job.label)
-        .peekable();
-    labels.peek()?;
+        .collect();
+    if labels.is_empty() {
+        return None;
+    }
     // 駒は `Tick` の回数で選ぶ。`jobs` の中身では選ばない —— 走っているものが
     // 変わらないあいだ止まって見える。
     let frame = SPINNER[(state.tick % SPINNER.len() as u64) as usize];
-    // 説明は `&'static str` なので、組むのは `Vec<Span>` 1 本だけ。描画は入力が
-    // 無くても `Tick` で回る（1 秒に 4 回）ので、中間の `String` を作らない。
-    let mut spans = vec![Span::raw(frame)];
-    for label in labels {
-        spans.push(Span::raw(" "));
-        spans.push(Span::raw(label));
+    Some(fold_spinner(frame, &labels))
+}
+
+/// 駒と説明を [`SPINNER_SEAT`] に畳む（07 の「ヘッダ」）。
+///
+/// 入るだけ並べて残りを `+N` にする（`⠋ fetch +2`）。1 つも入らなければ `⠋ +3`、
+/// 1 つしか無いのに入らなければその説明を切る。
+fn fold_spinner(frame: &'static str, labels: &[&'static str]) -> Line<'static> {
+    let seat = usize::from(SPINNER_SEAT);
+    for shown in (1..=labels.len()).rev() {
+        let rest = labels.len() - shown;
+        let mut spans = vec![Span::raw(frame)];
+        for label in &labels[..shown] {
+            spans.push(Span::raw(" "));
+            spans.push(Span::raw(*label));
+        }
+        if rest > 0 {
+            spans.push(Span::raw(format!(" +{rest}")));
+        }
+        let line = Line::from(spans);
+        if line.width() <= seat {
+            return line;
+        }
     }
-    Some(Line::from(spans))
+    let tail = match labels {
+        [label] => {
+            let room = SPINNER_SEAT.saturating_sub(Span::raw(frame).width() as u16 + 1);
+            ellipsize(label, room).into_owned()
+        }
+        _ => format!("+{}", labels.len()),
+    };
+    Line::from(vec![Span::raw(frame), Span::raw(" "), Span::raw(tail)])
 }
 
 /// フッターの 1 行目。進行中操作のバッジと、直近の通知を積まれた時刻を添えて出す。
@@ -1398,15 +1460,15 @@ mod tests {
         // **出荷される形のヘッダで測る**（`/code-review` が拾った）。`[gh: …]` が
         // 出るのは `Cmd::ResolveAccount` を出したリポジトリだけで、それを出すのは
         // `target_resolved` —— **`owner/repo` が必ず左隣にある**。走っているジョブの
-        // スピナーも右端に重なる。素の `state_at("/repo")` で測ると、実際には
+        // スピナーも右端の席に出る。素の `state_at("/repo")` で測ると、実際には
         // 存在しない短いヘッダを見張ることになる。
         //
         // **幅は 100。** 07 の目標のレイアウトがその幅で、`< 100` は M6 のタスク。
         //
         // **`owner/repo` と login の長さは fixture 任せ。** どちらも上限が無いので
-        // 「いちばん長い形」を作れない —— 31 桁の `owner/repo` を実測したら
-        // `A` の案内が落ちた（07 のヘッダに残した）。ここが見張るのは
-        // 「現実的な名前で、目標幅に収まって隙間が残るか」まで。
+        // 「いちばん長い形」を作れない。入らなければ `owner/repo` から落ち、理由も
+        // 落ちてキーだけが残る（`the_header_drops_parts_in_the_agreed_order`）。
+        // ここが見張るのは「現実的な名前なら、目標幅で理由ごと出るか」まで。
         let reasons = [
             DegradedReason::GhMissing,
             DegradedReason::GhTooOld {
@@ -1519,14 +1581,10 @@ mod tests {
     #[test]
     fn the_header_shows_the_api_quota_next_to_the_account() {
         // **出荷形で測る。** 左に `owner/repo` と `[gh: …]`、右端に扇形のスピナーが
-        // 重なる（07 のヘッダ）。**左の区切りごと綴じる** —— `SEP` を落とすと
+        // 並ぶ（07 のヘッダ）。**左の区切りごと綴じる** —— `SEP` を落とすと
         // `github.com][api: 4984]` と地続きになるが、`[api: 4984]` だけを見る形では
         // それが通る（実測 2026-09-18、`SEP` を外して 226 本とも緑だった）。
-        //
-        // **右の余白はここでは見張れない。** 幅 100 ではスピナーとのあいだが 6 セル
-        // 余っているので、`quota_fits` が取る隙間を 2 セルから 0 に緩めても通る。
-        // 隙間を見張るのは `a_quota_that_does_not_fit_is_dropped_whole_not_cut` の
-        // 境目（95 / 96）。
+        // 右の余白（席と区切り）は `the_header_keeps_the_spinner_seat_and_its_separator`。
         let size = TermSize {
             width: 100,
             height: 24,
@@ -1572,58 +1630,126 @@ mod tests {
         assert!(!line.contains("[api:"), "header: {line:?}");
     }
 
+    /// ヘッダの左群（右端のスピナーより手前）。
+    ///
+    /// **駒で切る。** fixture は `tick` を駒の数の倍に揃えているので、駒はいつも `⠋`。
+    fn header_left(state: &AppState, width: u16) -> String {
+        let line = header(state, TermSize { width, height: 24 });
+        let left = line.find('⠋').map_or(line.as_str(), |at| &line[..at]);
+        left.trim_end().to_string()
+    }
+
     #[test]
-    fn a_quota_that_does_not_fit_is_dropped_whole_not_cut() {
-        // **切れた数は「無い」より悪い。** 右端にはスピナーが重なるので、はみ出した
-        // `[api: 4984]` は `[api: 49` として残り、**桁の減った数がそのまま読める**
-        // 形になる（#89 の「桁を足した瞬間に予算が自分へ返る」の、返り先が
-        // 自分の数だった版）。
-        //
-        // **幅は実測で選ぶ**（2026-09-18、扇形のスピナー `pr checks` が走っている
-        // 最中）—— `anthropics/claude-code` + `user_shortcode` の左群は 70 セル、
-        // スピナーは 11 セル。**80 では測れない** —— 残量の始まる 72 桁目が
-        // スピナーの下（69 桁目から）に丸ごと隠れるので、**門を外しても画面が
-        // 変わらない**（この見張りは最初その幅で書いて、変異で素通りした）。
-        // **切れた数が読めるのは幅 90〜92**（`[api: 4`／`[api: 49`／`[api: 498`）。
-        // 幅 84〜89 は `[api: ` までで桁が 1 つも出ず、幅 93〜95 は数が全部読める
-        // （うち 93 だけは `]` も食われ、94〜95 は隙間が 2 セルに足りないだけ）。
-        // 出るのは**幅 96 以上**（隙間 2 セルを両側に取るため。`quota_fits`）。
-        let narrow = TermSize {
-            width: 90,
-            height: 24,
-        };
-        let line = header(&state_with_quota(4984), narrow);
+    fn the_header_drops_parts_in_the_agreed_order() {
+        // **`@ host` → `[api: …]` → `owner/repo` → degraded の理由 → `[gh: login]`**
+        // （07 の「ヘッダ › 幅が足りないとき」の試算の表と同じ値）。**左群を丸ごと
+        // 比べる** —— `contains` だけでは、落としたはずの要素が残っていても通る。
+        let resolved = state_with_quota(4984);
+        let mut degraded = shipping_header_state();
+        degraded.account = AccountState::Degraded(fake_ambiguous(&["user_shortcode", "taro"]));
+        let ambiguous = "[gh: 1 つに絞れません（2 件）。A で選ぶ]";
+        let cases = [
+            (
+                100,
+                "claude-code  anthropics/claude-code  [gh: user_shortcode @ github.com]  [api: 4984]"
+                    .to_string(),
+                format!("claude-code  anthropics/claude-code  {ambiguous}"),
+            ),
+            (
+                90,
+                "claude-code  anthropics/claude-code  [gh: user_shortcode]  [api: 4984]".to_string(),
+                format!("claude-code  {ambiguous}"),
+            ),
+            (
+                80,
+                "claude-code  anthropics/claude-code  [gh: user_shortcode]".to_string(),
+                format!("claude-code  {ambiguous}"),
+            ),
+            (
+                70,
+                "claude-code  [gh: user_shortcode]".to_string(),
+                format!("claude-code  {ambiguous}"),
+            ),
+            (
+                60,
+                "claude-code  [gh: user_shortcode]".to_string(),
+                "claude-code  [gh: A で選ぶ]".to_string(),
+            ),
+            (40, "claude-code".to_string(), "claude-code".to_string()),
+        ];
+        for (width, want_resolved, want_degraded) in cases {
+            assert_eq!(header_left(&resolved, width), want_resolved, "幅 {width}");
+            assert_eq!(header_left(&degraded, width), want_degraded, "幅 {width}");
+        }
+    }
 
-        assert!(!line.contains("[api:"), "切れた数を出した: {line:?}");
-        // **足したことで他の要素が 1 セルも動かない。** 幅が足りない回は、残量が
-        // 届く前とまったく同じヘッダになる。
+    #[test]
+    fn the_header_keeps_the_spinner_seat_and_its_separator() {
+        // **境目の両側を踏む。** 全部の左群は 83 セルで、席 13 と区切り 2 を足した
+        // 幅 98 でちょうど入る。区切りを予算から外すと 96 で入ってしまい、席を
+        // 外すと 85 で入るので、97 が全部ではないことで両方を見張る。
+        let state = state_with_quota(4984);
+        let full =
+            "claude-code  anthropics/claude-code  [gh: user_shortcode @ github.com]  [api: 4984]";
+        assert_eq!(header_left(&state, 98), full);
         assert_eq!(
-            line,
-            header(&state_fetching_details(), narrow),
-            "残量を落とすのに他がずれた"
+            header_left(&state, 97),
+            "claude-code  anthropics/claude-code  [gh: user_shortcode]  [api: 4984]"
         );
+    }
 
-        // **境目の両側を踏む。** 幅 90 の側だけでは「隙間 2 セル」を見張れない ——
-        // `quota_fits` から右の `sep` を外すと門は幅 94 へ下がるが、幅 90 では
-        // 相変わらず落ち、幅 96 では相変わらず出るので**両方とも通る**
-        // （実測 2026-09-18、外して 226 本とも緑）。1 セル手前の 95 を踏む。
-        let just_short = TermSize {
-            width: 95,
-            height: 24,
-        };
-        assert!(
-            !header(&state_with_quota(4984), just_short).contains("[api:"),
-            "スピナーとの隙間が 1 セルしか無いのに出した"
-        );
+    #[test]
+    fn running_jobs_do_not_change_the_left_group() {
+        // **席はいつも引く**（07 の「ヘッダ」）。そのフレームのスピナーの幅で引くと、
+        // 境目の幅で扇形が走っているあいだだけ `[api: …]` が消えていた（5/5 より前の
+        // 帯。左群 70 セルなら幅 85〜95）。帯の中の幅で、走っている最中と終わったあとを
+        // 比べる。
+        let running = state_with_quota(4984);
+        let mut idle = state_with_quota(4984);
+        idle.jobs.finish(JobKind::FetchPrDetails);
+        for width in [85, 90, 95] {
+            let left = header_left(&running, width);
+            assert!(left.contains("[api: 4984]"), "幅 {width}: {left:?}");
+            assert_eq!(left, header_left(&idle, width), "幅 {width}");
+        }
+        assert!(!header(
+            &idle,
+            TermSize {
+                width: 90,
+                height: 24
+            }
+        )
+        .contains('⠋'));
+    }
 
-        let wide = TermSize {
-            width: 96,
-            height: 24,
-        };
-        assert!(
-            header(&state_with_quota(4984), wide).contains("[api: 4984]"),
-            "余地があるのに出さない"
+    #[test]
+    fn the_spinner_folds_what_does_not_fit_its_seat() {
+        // 入るだけ並べて残りを `+N` にする。
+        assert_eq!(
+            super::fold_spinner("⠋", &["fetch", "status", "branches"]).to_string(),
+            "⠋ fetch +2"
         );
+        // ちょうど席に入るものは畳まない（`⠋ cherry-pick` は 13 セル）。
+        assert_eq!(
+            super::fold_spinner("⠋", &["cherry-pick"]).to_string(),
+            "⠋ cherry-pick"
+        );
+        // 1 つも入らなければ数だけ。
+        assert_eq!(
+            super::fold_spinner("⠋", &["cherry-pick", "pr checks"]).to_string(),
+            "⠋ +2"
+        );
+        // 1 つしか無いのに入らなければ切る。
+        assert_eq!(
+            super::fold_spinner("⠋", &["a-very-long-label"]).to_string(),
+            "⠋ a-very-lon…"
+        );
+    }
+
+    #[test]
+    fn a_header_too_narrow_for_the_name_cuts_it() {
+        // 席 13 と区切り 2 を引いて 5 セル。
+        assert_eq!(header_left(&shipping_header_state(), 20), "clau…");
     }
 
     #[test]

@@ -109,8 +109,7 @@ fn column(cells: impl Iterator<Item = String>) -> Vec<String> {
 /// 38 桁で `MERGED` が出なかった）。行の左端は切られない。
 ///
 /// **その守りは自分にも返る。** 集計の桁を無制限に伸ばすと、今度は**タイトルが
-/// 1 文字も出なくなる**（決めたときの 80x24 の右列は内側 30 セルだった。いまの最小は
-/// 07 の「狭い端末」）。伸びないように
+/// 1 文字も出なくなる**（`SUMMARY_BUDGET` の doc）。伸びないように
 /// するのは `SUMMARY_BUDGET` のほう。
 ///
 /// **`AppState` ごとは受け取らない。** 要るのは `theme` と `login` と組み終えたセル
@@ -148,7 +147,7 @@ fn pr_row(
 /// 黙って「まだ引いていない」を描く。
 ///
 /// **チェックとレビューを 1 本の桁にする。** 別々の桁にすると区切りの 2 セルが
-/// もう 1 組要り、決めたときの右列（80x24 で内側 30 セル）ではそれだけでタイトルが消えた。
+/// もう 1 組要り、狭い右列ではそれだけでタイトルが消える（`SUMMARY_BUDGET` の doc）。
 fn summary_cell(detail: Option<&Result<PrDetail, GithubError>>, ascii: bool) -> String {
     match detail {
         None => ui::pick_charset(CHECK_WAIT, ascii).to_string(),
@@ -209,7 +208,8 @@ fn counts(items: &[(usize, &str)]) -> String {
 /// 集計の桁に許す幅。
 ///
 /// **80x24 で測って決めた**（2026-09-18）。当時は 80 桁でも右列を割っていて、枠の内側が
-/// 30 セルだった（いまは 80 桁では割らない。07 の「狭い端末」）。行頭の印と `#<番号>` と状態で 11 セル、集計の前後の区切りで 4 セル使うので、
+/// 30 セルだった（いまは 80 桁では割らない。07 の「狭い端末」）。行頭の印と `#<番号>` と
+/// 状態で 11 セル、集計の前後の区切りで 4 セル使うので、
 /// ここを 10 にするとタイトルに 5 セル残る。**これを外すとタイトルが 1 文字も出ない
 /// 行ができる**（`✓12 ✗3 ○2 ⊘5 ·1` は 17 セル）。
 ///
@@ -297,9 +297,9 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
     match &state.account {
         // **既定リモートが GitHub でないときもここに落ちる**（`TargetState::Unavailable`
         // なら `Cmd::ResolveAccount` が出ないので `Resolving` のまま）。理由を出せる
-        // のは `A` だけで、このペインでは「読み込み中…」のまま留まる。**決めたときの
-        // 枠の内側は 80x24 で 30 セル**で、理由（`A` が出す「既定リモートから GitHub の
-        // リポジトリを特定できません」）が入らない。畳み方は plan.md に送ってある。
+        // のは `A` だけで、このペインでは「読み込み中…」のまま留まる。**枠の内側に
+        // 理由（`A` が出す「既定リモートから GitHub のリポジトリを特定できません」）が
+        // 入らなかった**（決めたときは 80x24 で 30 セル）。畳み方は plan.md に送ってある。
         AccountState::Resolving => ui::LOADING.into(),
         AccountState::Degraded(reason) => format!("GitHub: {}（A）", ui::degraded(reason)).into(),
         // **巡回候補にもタブにも出ないのでここへは来ない**（01 の「右上のタブ」）。
@@ -355,7 +355,7 @@ mod tests {
 
     /// `#82 OPEN "Lanes"` と `#90 DRAFT "Bump"` の 2 件。
     ///
-    /// **右列は狭い**（`SIZE` で 40 桁）ので、桁を見る見張りと混ざらないようタイトルは
+    /// **右列は狭い**ので、桁を見る見張りと混ざらないようタイトルは
     /// 切れない長さにする（切れることは
     /// `the_number_and_state_survive_a_narrow_pane…` が見る）。
     fn open_and_draft() -> Vec<PullRequest> {
@@ -470,8 +470,8 @@ mod tests {
     #[test]
     fn a_pr_with_many_checks_does_not_eat_the_whole_title() {
         // **`pr_row` の doc が「末尾に置くと黙って消える」を理由に集計を前へ置いた
-        // その守りが、桁を足したことで自分に返る。** 右列は狭い（`SIZE` で内側 38
-        // セル）ので、集計を伸ばし放題にすると**タイトルが 1 文字も出ない**
+        // その守りが、桁を足したことで自分に返る。** 右列は狭い（`SUMMARY_BUDGET` の
+        // doc）ので、集計を伸ばし放題にすると**タイトルが 1 文字も出ない**
         // （実測: `✓12 ✗3 ○2 ⊘5 ·1` は 17 セル）。
         let detail = PrDetail {
             checks: CheckSummary {
@@ -764,7 +764,7 @@ mod tests {
         // **空の `Vec` と「まだ引いていない」を出し分ける**（`Fetch` の 3 状態。01）。
         assert!(text.contains("開いている PR はありません"), "{text}");
         assert!(!text.contains("読み込み中"), "{text}");
-        // **`N`（PR 作成）を案内しない。** 決めたときの枠の内側 30 セルに入らなかったため（07）。
+        // **`N`（PR 作成）を案内しない。** 枠の内側に入らなかったため（`placeholder` の doc。07）。
         // 出すのはフッターの 2 行目で、そちらは `N` が効くときだけ出る。
         // **キーの案内の形で見る** —— 素の `N` を見ると、いつかタイトルや login に
         // `N` が入っただけで落ちる。

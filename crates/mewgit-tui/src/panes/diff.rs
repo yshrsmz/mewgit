@@ -225,7 +225,8 @@ mod tests {
     use mewgit_core::git_read::{FileDiff, GitReadError, WorktreeSnapshot};
     use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk, fake_stash};
 
-    /// 既定の 80x24。左は 46 桁になるので、テストはその幅で読める内容にする。
+    /// 右列がいちばん狭くなる端末。左の Diff も割ったときの幅になるので、テストはその幅で
+    /// 読める内容にする。
     const SIZE: TermSize = crate::test_util::SPLIT_NARROWEST;
 
     /// `a.txt` だけが変更されたワーキングツリー。

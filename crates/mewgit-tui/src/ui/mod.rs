@@ -49,12 +49,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         }
         // **狭い端末では `focus` のペインだけを本文いっぱいに描く**（07 の「レイアウト」）。
         // 巡回の候補は幅で変えないので、`Tab` で移った先がそのまま全画面になる。
-        None => match state.focus {
-            Pane::Graph | Pane::Diff => render_left(frame, body, state),
-            Pane::Branches | Pane::Stash | Pane::Prs => {
-                panes::TopPane::build(state).render(frame, body, state);
-            }
-            Pane::Worktree | Pane::CommitDetail => render_below(frame, body, state),
+        None => match Region::of(state.focus) {
+            Region::Left => render_left(frame, body, state),
+            Region::Top => panes::TopPane::build(state).render(frame, body, state),
+            Region::Below => render_below(frame, body, state),
         },
     }
     frame.render_widget(status_line(state, notice.width), notice);
@@ -63,6 +61,30 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // モーダルは最後。下のペインを覆って描く（07）。
     if let Some(modal) = &state.modal {
         modals::render(frame, frame.area(), modal, state);
+    }
+}
+
+/// 本文の領域。どのペインもどれか 1 つを差し替えで使う（07 の「レイアウト」）。
+#[derive(Clone, Copy)]
+enum Region {
+    /// Graph か Diff。
+    Left,
+    /// 右列の上のタブ（Branches / Stash / PRs）。
+    Top,
+    /// 右列の下（Working tree かコミット詳細）。
+    Below,
+}
+
+impl Region {
+    /// **ペインと領域の対応はここ 1 つ。** 狭い端末で `focus` のペインを描く `render` と、
+    /// テストの [`pane_area`] が同じものを読む。2 本にすると、テストは写しのほうを正として
+    /// 緑のまま通る。
+    fn of(pane: Pane) -> Self {
+        match pane {
+            Pane::Graph | Pane::Diff => Region::Left,
+            Pane::Branches | Pane::Stash | Pane::Prs => Region::Top,
+            Pane::Worktree | Pane::CommitDetail => Region::Below,
+        }
     }
 }
 
@@ -231,12 +253,12 @@ pub fn pane_area(pane: Pane, size: TermSize, state: &AppState) -> Rect {
     };
     // 右列は上のタブとその下に割れている。割る位置も実際の関数から出す。
     let [top, below] = split_right(state, &panes::TopPane::build(state), right);
-    match pane {
-        // **Branches / Stash / PRs も同じ領域を差し替えで使う**（07 の「右上のタブ」）。
-        Pane::Branches | Pane::Stash | Pane::Prs => top,
-        Pane::Worktree | Pane::CommitDetail => below,
-        // **Graph と Diff は同じ領域を差し替えで使う**（07）ので同じ Rect を返す。
-        Pane::Graph | Pane::Diff => left,
+    // **同じ領域を差し替えで使うペインには同じ `Rect` を返す**（Graph と Diff、
+    // Branches / Stash / PRs。07 の「レイアウト」「右上のタブ」）。
+    match Region::of(pane) {
+        Region::Left => left,
+        Region::Top => top,
+        Region::Below => below,
     }
 }
 
@@ -828,7 +850,7 @@ mod tests {
     };
     use crate::test_util::{
         draw, footer_area, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status,
-        tab_to, terminal_with,
+        tab_to, terminal_with, SPLIT_NARROWEST,
     };
     use mewgit_core::app::{
         keys, update, AppState, Cmd, JobKind, Key, KeyCode, Modal, Msg, NoticeLevel, Pane,
@@ -932,7 +954,7 @@ mod tests {
         // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
         // **線の形と色の両方を見る**（07）。形は色も修飾も出ない端末のための強調で、
         // 色だけを見ると `BorderType` を落としても通る。
-        let size = crate::test_util::SPLIT_NARROWEST;
+        let size = SPLIT_NARROWEST;
         // 巡回の候補はグラフの選択で変わる（01）。WIP 側で回す。
         //
         // **差分で表せる行を 1 つ置く。** 変更が無いと `Diff` が候補から外れ（01 の
@@ -978,13 +1000,13 @@ mod tests {
     #[test]
     fn the_left_area_swaps_between_the_graph_and_the_diff() {
         let state = state_at("/repo");
-        let text = draw(&state, crate::test_util::SPLIT_NARROWEST).join("\n");
+        let text = draw(&state, SPLIT_NARROWEST).join("\n");
         assert!(text.contains("Graph"), "{text}");
 
         // **`focus` を直に置かない。** 対象の無い `Diff` は候補から外れる（01）ので、
         // 直に置くと実物では出ない画面を見張ることになる。
         let state = state_showing_diff(fake_snapshot(&[], &["a.txt"], &[]));
-        let text = draw(&state, crate::test_util::SPLIT_NARROWEST).join("\n");
+        let text = draw(&state, SPLIT_NARROWEST).join("\n");
 
         // 差し替えであって分割ではない。両方出すと左の 60% ではどちらも読めない。
         assert!(!text.contains("Graph"), "{text}");
@@ -998,12 +1020,12 @@ mod tests {
     fn the_right_area_swaps_between_the_worktree_and_the_commit_detail() {
         // 右ペインの中身はグラフの選択だけで決まる。`focus` では決めない（07）。
         let state = crate::test_util::state_with_commits(&["first"]);
-        let text = draw(&state, crate::test_util::SPLIT_NARROWEST).join("\n");
+        let text = draw(&state, SPLIT_NARROWEST).join("\n");
         assert!(text.contains("Working tree"), "{text}");
         assert!(!text.contains("Commit "), "{text}");
 
         let state = crate::test_util::state_on_first_commit(&["first"]);
-        let text = draw(&state, crate::test_util::SPLIT_NARROWEST).join("\n");
+        let text = draw(&state, SPLIT_NARROWEST).join("\n");
 
         assert!(!text.contains("Working tree"), "{text}");
         assert!(text.contains("Commit "), "{text}");
@@ -1015,7 +1037,7 @@ mod tests {
         let mut state = crate::test_util::state_on_first_commit(&["first"]);
         state.focus = Pane::Graph;
 
-        let text = draw(&state, crate::test_util::SPLIT_NARROWEST).join("\n");
+        let text = draw(&state, SPLIT_NARROWEST).join("\n");
 
         assert!(text.contains("Commit "), "{text}");
     }
@@ -1036,16 +1058,12 @@ mod tests {
         let state = state_at("/repo");
         let narrow = TermSize {
             width: SPLIT_MIN_WIDTH - 1,
-            height: 24,
-        };
-        let split = TermSize {
-            width: SPLIT_MIN_WIDTH,
-            height: 24,
+            ..SPLIT_NARROWEST
         };
 
         assert_eq!(pane_corners(&state, narrow), [0]);
         // 左（Graph）と右列の上（Branches）の 2 枚。
-        assert_eq!(pane_corners(&state, split).len(), 2);
+        assert_eq!(pane_corners(&state, SPLIT_NARROWEST).len(), 2);
     }
 
     #[test]
@@ -1078,8 +1096,9 @@ mod tests {
                 let buffer = terminal.backend().buffer();
                 let why = format!("focus={pane:?}");
 
-                assert_eq!(pane_area(pane, size, &state).width, size.width, "{why}");
-                // 枠は左端から右端まで 1 枚で、フォーカスの太線。
+                // 枠は左端から右端まで 1 枚で、フォーカスの太線。**太線を見るのは、
+                // 描いたのが `focus` のペインであることの証拠を兼ねるため** —— 別の
+                // ペインを描くと、そのペインの枠はフォーカスが無いので細線になる。
                 assert_eq!(buffer[(0, 1)].symbol(), "┏", "{why}");
                 assert_eq!(buffer[(size.width - 1, 1)].symbol(), "┓", "{why}");
                 assert_eq!(pane_corners(&state, size), [0], "{why}");

@@ -14,8 +14,8 @@ use crate::ui::{self, theme, time};
 
 /// 詳細のうち、メッセージに必ず残す行数。
 ///
-/// 見出しは幅が狭いと折り返して伸びる（決めたときは 80 桁でも右列を割っていて、右ペインが 32 桁になり、
-/// `Author: 名前 <メール>  日時` が 3 行を超える）。1 つの `Paragraph` にまとめると、
+/// 見出しは幅が狭いと折り返して伸びる（決めたときは 80 桁でも右列を割っていて、右ペインが
+/// 32 桁になり、`Author: 名前 <メール>  日時` が 3 行を超えた）。1 つの `Paragraph` にまとめると、
 /// 伸びたぶんメッセージが下から押し出されて**本文が 1 行も見えなくなる**。先に
 /// メッセージの領域を取り、足りないときは見出しのほうを切る。
 const MIN_MESSAGE_ROWS: u16 = 3;
@@ -188,7 +188,10 @@ mod tests {
         state
     }
 
-    /// 見出しの折り返しを避けたいときの端末。右列がいちばん狭い幅 100 では 40 桁になる。
+    /// 右列がいちばん狭くなる端末（07 の「狭い端末」）。
+    const SIZE: TermSize = crate::test_util::SPLIT_NARROWEST;
+
+    /// 見出しの折り返しを避けたいときの端末。
     const WIDE: TermSize = TermSize {
         width: 120,
         height: 24,
@@ -231,21 +234,17 @@ mod tests {
     fn the_message_survives_a_narrow_pane() {
         // 右列が狭いと見出しが折り返して高さを埋める。1 つの `Paragraph` に
         // まとめていると本文が 1 行も見えなくなる（07）。
-        // **高さは 20。** 右列がいちばん狭い幅 100 でも、高さ 24 では見出しが
-        // 折り返しきっても本文が残り、`MIN_MESSAGE_ROWS` を 0 にしても通る（実測。
-        // 12〜20 では落ちる）。決めたときは 80x24 で右列が 32 桁だった。
-        let detail = fake_detail(0, "subject line\n\nbody line");
+        // **見出しが確実に溢れる長さの author にする。** 端末の高さで境目を合わせると、
+        // 見出しの文言や枠が変わった瞬間に境目が動いて見張りが黙る（幅 100・高さ 24 の
+        // 既定の名前では、`MIN_MESSAGE_ROWS` を 0 にしても通った）。
+        let mut detail = fake_detail(0, "subject line\n\nbody line");
+        detail.author.name = format!("{}END", "a".repeat(400));
         let state = with_detail(&["subject line"], detail);
 
-        let text = draw(
-            &state,
-            TermSize {
-                width: crate::test_util::SPLIT_NARROWEST.width,
-                height: 20,
-            },
-        )
-        .join("\n");
+        let text = draw(&state, SIZE).join("\n");
 
+        // **溢れていることを先に確かめる。** 名前の末尾が見えるなら境目をまたいでいない。
+        assert!(!text.contains("END"), "{text}");
         assert!(text.contains("subject line"), "{text}");
         assert!(text.contains("body line"), "{text}");
     }
@@ -298,7 +297,7 @@ mod tests {
             fake_entry("b.txt", FileStatus::Added),
         ]);
 
-        let text = draw(&state, crate::test_util::SPLIT_NARROWEST).join("\n");
+        let text = draw(&state, SIZE).join("\n");
 
         assert!(text.contains("Files (2)"), "{text}");
         assert!(text.contains("M a.txt"), "{text}");
@@ -316,7 +315,7 @@ mod tests {
         state.focus = mewgit_core::app::Pane::CommitDetail;
         let _ = update(&mut state, Msg::Key(Key::char('j')));
 
-        let size = crate::test_util::SPLIT_NARROWEST;
+        let size = SIZE;
 
         assert!(row_is_reversed(&state, size, "b.txt"));
         assert!(!row_is_reversed(&state, size, "a.txt"));
@@ -327,11 +326,7 @@ mod tests {
         // `--allow-empty` のコミット。**「読み込み中」と同じ見た目にしない**（01）。
         let state = with_detail_and_files(Vec::new());
 
-        let text = pane_text(
-            &state,
-            crate::test_util::SPLIT_NARROWEST,
-            Pane::CommitDetail,
-        );
+        let text = pane_text(&state, SIZE, Pane::CommitDetail);
 
         assert!(text.contains("変更はありません"), "{text}");
         assert!(!text.contains("読み込み中"), "{text}");
@@ -376,7 +371,7 @@ mod tests {
         );
         deliver_commit_files(&mut state, Ok(entries));
 
-        let text = draw(&state, crate::test_util::SPLIT_NARROWEST).join("\n");
+        let text = draw(&state, SIZE).join("\n");
 
         assert!(text.contains("subject line"), "{text}");
         assert!(text.contains("body line"), "{text}");

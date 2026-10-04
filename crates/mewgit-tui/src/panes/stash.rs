@@ -77,7 +77,7 @@ mod tests {
         state
     }
 
-    /// 既定の 80x24。
+    /// 右列がいちばん狭くなる端末（07 の「狭い端末」）。
     const SIZE: TermSize = crate::test_util::SPLIT_NARROWEST;
 
     #[test]
@@ -139,10 +139,9 @@ mod tests {
 
     #[test]
     fn every_tab_title_fits_in_the_narrowest_right_column() {
-        // **右列がいちばん狭い幅で、3 枚の見出しが入るかを見る。** 決めたときの
-        // 80x24（内側 30 セル）では Stash に件数を添えると `PRs` が切れる境目だった
-        // （`title` の doc）。いまの `SIZE`（内側 38 セル）は境目ではないので、
-        // ブランチの件数を 2 桁にしたまま、見出しが入ることだけを見る。
+        // **右列がいちばん狭い幅で、3 枚の見出しが入るかを見る。** 件数を添えない
+        // 判断の境目だった幅はもう出ない（`title` の doc）ので、ブランチの件数を
+        // 2 桁にしたまま、見出しが入ることだけを見る。
         let mut state = state_at("/repo");
         with_stashes(&mut state, Ok((0..3).map(fake_stash).collect()));
         let branches = (0..12)

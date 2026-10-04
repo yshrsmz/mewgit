@@ -428,9 +428,9 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
 - [x] `--version` / `-V` と `--help` / `-h`。**v0.1.0 を切ったあとで、版を確かめる手段が
       無いとユーザーに指摘された**（2026-10-04）—— それまで `-` 始まりの引数は全部断っていた。
       版は `CARGO_PKG_VERSION`（`[workspace.package] version`）で、release-please が書き換える
-      値と同じ。**ただし書き換えは 0.1.0 では空振りしており、まだ一度も動いていない** ——
+      値と同じ（書き換えは release PR #157 で動いたのを確かめた。上のリリースの行）。
       `Cargo.toml` 側だけが外れると `--version` は古い版を黙って出す（`Cargo.lock` 側が外れれば
-      `--locked` が落ちて気付く）ので、次の release PR で `Cargo.toml` の差分を見る。
+      `--locked` が落ちて気付く）ので、release PR では `Cargo.toml` の差分を見る。
       どちらも端末にも設定にも触れず、隠しサブコマンドと同じ入口で分ける。知らないオプションの
       断りには `--help` を案内する。**stdout への書き込みは `println!` にしない** —— 読み手が
       先に閉じた pipe（`| head -1`）で panic して rc=101 になった（`/code-review` が再現）
@@ -711,8 +711,9 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       2 つのバイナリが載ってから** —— Release への upload はタグが無いと踏めない
       **v0.1.0 を切った**（2026-10-04、#154）。Release に tar.gz と sha256 が 2 組載り、README の
       `gh release download` → `shasum -c` → 展開の手順で macOS arm64 のバイナリが起動した。
-      **版の書き換え（`Cargo.toml` / `Cargo.lock`）は 0.1.0 では空振りした**（初版が元の版と
-      同じ）ので、本番で踏むのは次の release PR が最初
+      版の書き換え（`Cargo.toml` / `Cargo.lock`）は 0.1.0 では空振りし、**release PR #157（0.1.1）で
+      初めて動いた** —— `[workspace.package] version` と lock の `mewgit` / `mewgit-core` の 3 行だけが
+      変わった
 
 ## MVP 後
 

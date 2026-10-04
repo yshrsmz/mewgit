@@ -435,6 +435,11 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       断りには `--help` を案内する。**stdout への書き込みは `println!` にしない** —— 読み手が
       先に閉じた pipe（`| head -1`）で panic して rc=101 になった（`/code-review` が再現）
 
+- [ ] 2 つ目以降の引数を見る。**いま `-` 始まりの判定は `args.first()` だけ**なので、
+      `mewgit <path> --help` は `--help` を黙って捨てて TUI を起動する（`/code-review` が拾った。
+      `--version` を足す前からの挙動）。余った引数を断るか、オプションを位置によらず拾うかを決める。
+      `main` の `match` を引数全体の解析に置き換えることになるので、`tests/cli.rs` に腕を足す
+
 - [x] **起動中に mewgit のバイナリが消えたときのエディタ。** `GIT_EDITOR` /
       `GIT_SEQUENCE_EDITOR` は `current_exe()` を指す。**着手前は「revert / cherry-pick の
       continue などが落ちるはず」と書いていたが、実測では落ちるのは rebase の系統と

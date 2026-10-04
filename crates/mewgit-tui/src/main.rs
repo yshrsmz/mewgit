@@ -9,8 +9,9 @@
 //! 継いだ標準入力で届く（`docs/design/03-git-exec.md` の
 //! 「Interactive rebase の実装」）。本体は `mewgit_core::git_exec::write_todo`。
 //!
-//! ここは配線だけで、実端末が必要なためテストを書かない（`.claude/rules/testing.md` の例外）。
-//! 分岐のある処理は `runtime` 側に置く。
+//! ここは配線だけで、TUI の起動は実端末が必要なため単体テストを書かない
+//! （`.claude/rules/testing.md` の例外）。分岐のある処理は `runtime` 側に置く。
+//! 端末に触れないオプションの扱いは `tests/cli.rs` が本物のバイナリで確かめる。
 
 mod input;
 mod modals;
@@ -47,11 +48,11 @@ fn main() -> Result<ExitCode> {
         }
         Some("--commit-editor") => return Ok(editor(&args[1..], git_exec::write_commit_message)),
         Some("--version" | "-V") => {
-            println!("mewgit {VERSION}");
+            println!("{VERSION_LINE}");
             return Ok(ExitCode::SUCCESS);
         }
         Some("--help" | "-h") => {
-            print!("{}", help());
+            print!("{HELP}");
             return Ok(ExitCode::SUCCESS);
         }
         _ => {}
@@ -60,11 +61,12 @@ fn main() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION_LINE: &str = concat!("mewgit ", env!("CARGO_PKG_VERSION"));
 
-fn help() -> String {
-    format!(
-        "mewgit {VERSION}
+const HELP: &str = concat!(
+    "mewgit ",
+    env!("CARGO_PKG_VERSION"),
+    "
 tig 風のコミットグラフと GitHub 連携を持つ TUI の git クライアント
 
 使い方: mewgit [repo-path]
@@ -75,8 +77,7 @@ tig 風のコミットグラフと GitHub 連携を持つ TUI の git クライ�
 
 起動したあとは ? でフォーカス中のペインのキーを、q で終了。
 "
-    )
-}
+);
 
 /// エディタとして起こされたとき。git はファイルのパスを末尾に 1 つ足す。
 ///

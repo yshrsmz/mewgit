@@ -1,5 +1,5 @@
 //! 本物の `mewgit` に `--version` / `--help` を渡す。端末にも設定にも触れずに
-//! stdout へ書いて終わることを見る（`main.rs` は配線だけでテストを持たないので、ここに置く）。
+//! stdout へ書いて終わることを見る（`main.rs` は単体テストを持たないので、ここに置く）。
 
 use std::process::{Command, Output};
 

@@ -23,7 +23,7 @@ use mewgit_core::github::RateLimit;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
 /// 1 フレーム描く。
@@ -147,7 +147,12 @@ pub fn pane_block(title: impl Into<Line<'static>>, focused: bool) -> Block<'stat
     // ループのたびに組まれるので、そこで毎回 `String` を確保しない。
     // **`Line` も受ける**のは、右上のタブが見出しの中で 2 枚を描き分けるため
     // （`panes::right_tabs`。07 の「右上のタブ」）。
-    let block = Block::default().borders(Borders::ALL).title(title.into());
+    // **右に 1 桁空ける**（`modals::block` と同じ）。`Wrap` 付きの本文は全角が混ざると
+    // 1 セルはみ出し、枠の縦線を上書きしてその行だけ箱が開く（07 の「モーダル」）。
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .padding(Padding::right(1))
+        .title(title.into());
     if focused {
         block
             .border_type(BorderType::Thick)

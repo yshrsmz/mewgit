@@ -123,7 +123,7 @@ fn right_tabs(state: &AppState) -> Line<'static> {
     for right_tab in tabs {
         let title: Cow<'static, str> = match right_tab {
             RightTab::Branches => branches::title(state).into(),
-            RightTab::Stash => stash::title().into(),
+            RightTab::Stash => stash::title(state).into(),
             RightTab::Prs => prs::title().into(),
         };
         if !spans.is_empty() {

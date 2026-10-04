@@ -98,7 +98,7 @@ const GRAPH: &[KeyHint] = &[
     MOVE,
     // 行き先は選択で変わる（Working tree かコミット詳細）ので、どちらでも嘘に
     // ならない語にする。
-    hint(&[Key::new(KeyCode::Enter)], "右へ"),
+    hint(&[Key::new(KeyCode::Enter)], "詳細"),
     // **git の語のまま**（`y:cherry-pick` と同じ）。「ブランチ作成」だと `i` を足したときに
     // 80 桁を 1 セル超えた（07 の「Help モーダル」の実測）。
     hint(&[Key::char('n')], "branch"),

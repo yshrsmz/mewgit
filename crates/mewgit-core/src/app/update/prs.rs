@@ -270,7 +270,7 @@ fn open_pr_create(state: &mut AppState) -> Cmd {
 ///
 /// **引けないときは理由を通知に出す**（押しても何も起きない形にしない）。**理由を
 /// 消去法で組み立てない** —— [`AppState::github_block`] が腕で答える（潰すと
-/// `Degraded` が「アカウントが決まっていない」になり、30 セル隣のペインが同じ瞬間に
+/// `Degraded` が「アカウントが決まっていない」になり、PRs ペインが同じ瞬間に
 /// 出している `GitHub: …（A）` と食い違う）。
 fn refresh(state: &mut AppState) -> Cmd {
     if github_ready(state).is_none() {
@@ -359,7 +359,7 @@ pub(super) fn pr_create_key(state: &mut AppState, key: Key) -> Cmd {
 /// GitHub を叩く先。叩けないなら理由を通知に出して `None`。
 ///
 /// **理由を消去法で組み立てない** —— [`AppState::github_target`] が腕で答える
-/// （潰すと `Degraded` が「アカウントが決まっていない」になり、30 セル隣のペインが
+/// （潰すと `Degraded` が「アカウントが決まっていない」になり、PRs ペインが
 /// 同じ瞬間に出している `GitHub: …（A）` と食い違う）。**叩く先も同じ答えから
 /// 取る** —— 理由だけを見て `target` を読み直すと、「叩けるのに `target` が無い」
 /// という到達しない腕が要る。

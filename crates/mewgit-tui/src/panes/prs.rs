@@ -109,7 +109,7 @@ fn column(cells: impl Iterator<Item = String>) -> Vec<String> {
 /// 38 桁で `MERGED` が出なかった）。行の左端は切られない。
 ///
 /// **その守りは自分にも返る。** 集計の桁を無制限に伸ばすと、今度は**タイトルが
-/// 1 文字も出なくなる**（80x24 の右列は内側 30 セルしかない）。伸びないように
+/// 1 文字も出なくなる**（`SUMMARY_BUDGET` の doc）。伸びないように
 /// するのは `SUMMARY_BUDGET` のほう。
 ///
 /// **`AppState` ごとは受け取らない。** 要るのは `theme` と `login` と組み終えたセル
@@ -147,7 +147,7 @@ fn pr_row(
 /// 黙って「まだ引いていない」を描く。
 ///
 /// **チェックとレビューを 1 本の桁にする。** 別々の桁にすると区切りの 2 セルが
-/// もう 1 組要り、30 セルしかない右列ではそれだけでタイトルが消える。
+/// もう 1 組要り、狭い右列ではそれだけでタイトルが消える（`SUMMARY_BUDGET` の doc）。
 fn summary_cell(detail: Option<&Result<PrDetail, GithubError>>, ascii: bool) -> String {
     match detail {
         None => ui::pick_charset(CHECK_WAIT, ascii).to_string(),
@@ -207,12 +207,16 @@ fn counts(items: &[(usize, &str)]) -> String {
 
 /// 集計の桁に許す幅。
 ///
-/// **80x24 で測って決めた**（2026-09-18）。右列は端末幅の 40% で、80 桁なら枠の内側が
-/// 30 セル。行頭の印と `#<番号>` と状態で 11 セル、集計の前後の区切りで 4 セル使うので、
+/// **80x24 で測って決めた**（2026-09-18）。当時は 80 桁でも右列を割っていて、枠の内側が
+/// 30 セルだった（いまは 80 桁では割らない。07 の「狭い端末」）。行頭の印と `#<番号>` と
+/// 状態で 11 セル、集計の前後の区切りで 4 セル使うので、
 /// ここを 10 にするとタイトルに 5 セル残る。**これを外すとタイトルが 1 文字も出ない
-/// 行ができる**（`✓12 ✗3 ○2 ⊘5 ·1` は 17 セル）。
+/// 行ができる**（`✓12 ✗3 ○2 ⊘5 ·1` は 17 セル）。**80 桁で右列を割らなくなって、
+/// この 5 セルの前提は崩れた** —— 右列がいちばん狭い幅でも余るので、見張り
+/// （`a_pr_with_many_checks_does_not_eat_the_whole_title`）が落ちるのはもっと大きな予算から
+/// （実測。15 と 18 では通り、21 で落ちる）。数え直しは M6 の狭い幅での畳み方（`docs/plan.md`）。
 ///
-/// **狭い端末で何をどう畳むかは M6 のレイアウトのタスク**（07）。ここでやっているのは
+/// **狭い幅で何をどう畳むかは M6 の狭い幅での畳み方のタスク**（07）。ここでやっているのは
 /// 「いちばん前だけは必ず出す」ことだけ。
 const SUMMARY_BUDGET: usize = 10;
 
@@ -289,16 +293,16 @@ fn status_style(pr: &PullRequest, theme: &Theme) -> Style {
 /// 「失敗の記憶」と同じ理由）。**`ui::LOADING` を使う** —— 文言を自分で組むと、
 /// 既にある「読み込み中…」の見張りがこの産出元を拾えない。
 ///
-/// **`N`（PR 作成）を案内しない。** 枠の内側は 80x24 で 30 セルしか無く、
+/// **`N`（PR 作成）を案内しない。** 決めたときの枠の内側は 80x24 で 30 セルで、
 /// 「開いている PR はありません」が 26 セルある（07）。**行き止まりにはならない**
 /// —— このペインにフォーカスがあるあいだ、フッターの 2 行目が `N:PR 作成` を出す。
 fn placeholder(state: &AppState) -> Cow<'static, str> {
     match &state.account {
         // **既定リモートが GitHub でないときもここに落ちる**（`TargetState::Unavailable`
         // なら `Cmd::ResolveAccount` が出ないので `Resolving` のまま）。理由を出せる
-        // のは `A` だけで、このペインでは「読み込み中…」のまま留まる。**枠の内側は
-        // 80x24 で 30 セル**しか無く、理由（`A` が出す「既定リモートから GitHub の
-        // リポジトリを特定できません」）が入らない。畳み方は plan.md に送ってある。
+        // のは `A` だけで、このペインでは「読み込み中…」のまま留まる。**枠の内側に
+        // 理由（`A` が出す「既定リモートから GitHub のリポジトリを特定できません」）が
+        // 入らなかった**（決めたときは 80x24 で 30 セル）。畳み方は plan.md に送ってある。
         AccountState::Resolving => ui::LOADING.into(),
         AccountState::Degraded(reason) => format!("GitHub: {}（A）", ui::degraded(reason)).into(),
         // **巡回候補にもタブにも出ないのでここへは来ない**（01 の「右上のタブ」）。
@@ -332,10 +336,7 @@ mod tests {
     };
     use ratatui::style::Modifier;
 
-    const SIZE: TermSize = TermSize {
-        width: 80,
-        height: 24,
-    };
+    const SIZE: TermSize = crate::test_util::SPLIT_NARROWEST;
 
     /// PRs タブを開いた状態。アカウント（login は `taro`）と対象は決まっている。
     fn on_prs_tab() -> AppState {
@@ -357,7 +358,7 @@ mod tests {
 
     /// `#82 OPEN "Lanes"` と `#90 DRAFT "Bump"` の 2 件。
     ///
-    /// **右列は 80x24 で 32 桁**しかないので、桁を見る見張りと混ざらないようタイトルは
+    /// **右列は狭い**ので、桁を見る見張りと混ざらないようタイトルは
     /// 切れない長さにする（切れることは
     /// `the_number_and_state_survive_a_narrow_pane…` が見る）。
     fn open_and_draft() -> Vec<PullRequest> {
@@ -472,8 +473,8 @@ mod tests {
     #[test]
     fn a_pr_with_many_checks_does_not_eat_the_whole_title() {
         // **`pr_row` の doc が「末尾に置くと黙って消える」を理由に集計を前へ置いた
-        // その守りが、桁を足したことで自分に返る。** 80x24 の右列は内側 30 セルしか
-        // ないので、集計を伸ばし放題にすると**タイトルが 1 文字も出ない**
+        // その守りが、桁を足したことで自分に返る。** 右列は狭い（`SUMMARY_BUDGET` の
+        // doc）ので、集計を伸ばし放題にすると**タイトルが 1 文字も出ない**
         // （実測: `✓12 ✗3 ○2 ⊘5 ·1` は 17 セル）。
         let detail = PrDetail {
             checks: CheckSummary {
@@ -766,7 +767,7 @@ mod tests {
         // **空の `Vec` と「まだ引いていない」を出し分ける**（`Fetch` の 3 状態。01）。
         assert!(text.contains("開いている PR はありません"), "{text}");
         assert!(!text.contains("読み込み中"), "{text}");
-        // **`N`（PR 作成）を案内しない。** 枠の内側 30 セルに入らないため（07）。
+        // **`N`（PR 作成）を案内しない。** 枠の内側に入らなかったため（`placeholder` の doc。07）。
         // 出すのはフッターの 2 行目で、そちらは `N` が効くときだけ出る。
         // **キーの案内の形で見る** —— 素の `N` を見ると、いつかタイトルや login に
         // `N` が入っただけで落ちる。

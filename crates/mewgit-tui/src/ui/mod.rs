@@ -3,8 +3,8 @@
 //! `render` は [`AppState`] のみを参照する（不変ルール 2）。git2 / CLI / HTTP を
 //! ここから呼ばない。
 //!
-//! いまはヘッダ・グラフ・ブランチ一覧・ワーキングツリー（またはコミット詳細）・
-//! ステータスバー。`Stash` と `PRs` は、そのタブを実装するタスクで足す（07）。
+//! 本文は幅 100 から左右に割り、狭い端末では `focus` のペインだけを描く（07 の
+//! 「レイアウト」）。
 
 pub mod lanes;
 pub mod theme;
@@ -29,7 +29,6 @@ use ratatui::Frame;
 /// 1 フレーム描く。
 pub fn render(frame: &mut Frame, state: &AppState) {
     let [header, body, notice, hints] = split(frame.area());
-    let [left, right] = split_body(body);
 
     frame.render_widget(header_line(state, header.width), header);
     // **スピナーは同じ領域に右寄せで重ねる。** `Paragraph` は既定のスタイルで
@@ -37,26 +36,24 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if let Some(spinner) = spinner_line(state) {
         frame.render_widget(Paragraph::new(spinner).right_aligned(), header);
     }
-    // **左は Graph と Diff の差し替え。** どちらを描くかは `focus` だけで決まる（07）。
-    // 「いまどちらを見せているか」を別に持つと、`focus` と食い違う状態
-    // （Diff を見せているのにキーは Graph が受ける）が表現できてしまう。
-    if state.focus == Pane::Diff {
-        panes::diff::render(frame, left, state);
-    } else {
-        panes::graph::render(frame, left, state);
-    }
-    // **右列の上は Branches / Stash / PRs のタブ。** 左の選択では入れ替わらないので、
-    // 上を先に置いて残りを下のペインに渡す（07 の「レイアウト」）。
-    // **組むのはここ 1 回**で、高さの決定と描画の両方に回す。
-    let top_pane = panes::TopPane::build(state);
-    let [top, right] = split_right(state, &top_pane, right);
-    top_pane.render(frame, top, state);
-    // **右列の下は Working tree とコミット詳細の差し替え。** どちらを描くかはグラフの
-    // 選択だけで決まる（07）。`focus` で決めると、Graph にフォーカスした瞬間に
-    // 右が消える。
-    match state.graph.selection() {
-        GraphSelection::Wip => panes::worktree::render(frame, right, state),
-        GraphSelection::Commit(line) => panes::commit::render(frame, right, state, &line.commit),
+    match split_body(body) {
+        Some([left, right]) => {
+            render_left(frame, left, state);
+            // **右列の上は Branches / Stash / PRs のタブ。** 左の選択では入れ替わらないので、
+            // 上を先に置いて残りを下のペインに渡す（07 の「レイアウト」）。
+            // **組むのはここ 1 回**で、高さの決定と描画の両方に回す。
+            let top_pane = panes::TopPane::build(state);
+            let [top, below] = split_right(state, &top_pane, right);
+            top_pane.render(frame, top, state);
+            render_below(frame, below, state);
+        }
+        // **狭い端末では `focus` のペインだけを本文いっぱいに描く**（07 の「レイアウト」）。
+        // 巡回の候補は幅で変えないので、`Tab` で移った先がそのまま全画面になる。
+        None => match Region::of(state.focus) {
+            Region::Left => render_left(frame, body, state),
+            Region::Top => panes::TopPane::build(state).render(frame, body, state),
+            Region::Below => render_below(frame, body, state),
+        },
     }
     frame.render_widget(status_line(state, notice.width), notice);
     frame.render_widget(hint_line(state, hints.width), hints);
@@ -67,12 +64,66 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 }
 
-/// 本文を左右に割る。
+/// 本文の領域。どのペインもどれか 1 つを差し替えで使う（07 の「レイアウト」）。
+#[derive(Clone, Copy)]
+enum Region {
+    /// Graph か Diff。
+    Left,
+    /// 右列の上のタブ（Branches / Stash / PRs）。
+    Top,
+    /// 右列の下（Working tree かコミット詳細）。
+    Below,
+}
+
+impl Region {
+    /// **ペインと領域の対応はここ 1 つ。** 狭い端末で `focus` のペインを描く `render` と、
+    /// テストの [`pane_area`] が同じものを読む。2 本にすると、テストは写しのほうを正として
+    /// 緑のまま通る。
+    fn of(pane: Pane) -> Self {
+        match pane {
+            Pane::Graph | Pane::Diff => Region::Left,
+            Pane::Branches | Pane::Stash | Pane::Prs => Region::Top,
+            Pane::Worktree | Pane::CommitDetail => Region::Below,
+        }
+    }
+}
+
+/// 左の領域（Graph か Diff）。**どちらを描くかは `focus` だけで決まる**（07）。
+/// 「いまどちらを見せているか」を別に持つと、`focus` と食い違う状態
+/// （Diff を見せているのにキーは Graph が受ける）が表現できてしまう。
+fn render_left(frame: &mut Frame, area: Rect, state: &AppState) {
+    if state.focus == Pane::Diff {
+        panes::diff::render(frame, area, state);
+    } else {
+        panes::graph::render(frame, area, state);
+    }
+}
+
+/// 右列の下（Working tree かコミット詳細）。**どちらを描くかはグラフの選択だけで
+/// 決まる**（07）。`focus` で決めると、Graph にフォーカスした瞬間に右が消える。
+fn render_below(frame: &mut Frame, area: Rect, state: &AppState) {
+    match state.graph.selection() {
+        GraphSelection::Wip => panes::worktree::render(frame, area, state),
+        GraphSelection::Commit(line) => panes::commit::render(frame, area, state, &line.commit),
+    }
+}
+
+/// 本文を左右に割れる最小の幅（07 の「レイアウト」）。
 ///
-/// 幅 < 100 で右ペインを隠す分岐は M6（07）。全画面切替が同じタスクなので、
-/// 隠すほうだけ先に入れると 80 桁の端末から右ペインへ到達できなくなる。
-fn split_body(area: Rect) -> [Rect; 2] {
-    Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area)
+/// 下回ると右列を出さず、`focus` のペインを本文いっぱいに描く。60/40 で割ると
+/// 80 桁の右列は 32 桁（枠の内側 30 セル）しか無く、PR の行や見出しのタブが切れる。
+pub const SPLIT_MIN_WIDTH: u16 = 100;
+
+/// 本文を左右に割る。幅が [`SPLIT_MIN_WIDTH`] に足りなければ `None`（割らない）。
+fn split_body(area: Rect) -> Option<[Rect; 2]> {
+    (area.width >= SPLIT_MIN_WIDTH).then(|| {
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area)
+    })
+}
+
+/// 左の領域。割らないときは本文そのもの。
+fn left_area(body: Rect) -> Rect {
+    split_body(body).map_or(body, |[left, _]| left)
 }
 
 /// 右列を上のタブ（Branches / Stash / PRs）と、その下のペイン（Working tree / コミット詳細）に
@@ -129,8 +180,8 @@ pub fn wrapped<'a>(text: impl Into<Text<'a>>, width: u16) -> (Paragraph<'a>, u16
 /// 塊が窓より高いときは先頭を優先して残りを切る。
 ///
 /// **スクロール位置を状態に持たない。** グラフ（01 の `scroll`）と違ってカーソルが
-/// 下端に貼り付く癖が残るが、そのために `Msg::Layout` にフィールドを足すのは M6
-/// （狭いレイアウト）と一緒にする（07）。
+/// 下端に貼り付く癖が残るが、そのために `Msg::Layout` にフィールドを足すのは M6 の
+/// 狭い幅での畳み方と一緒にする（07。全画面切替の 1 本目には入れていない）。
 pub fn window(len: usize, must_show: Range<usize>, height: usize) -> Range<usize> {
     if height == 0 {
         return 0..0;
@@ -190,15 +241,24 @@ pub fn pick_charset(glyphs: (&'static str, &'static str), ascii: bool) -> &'stat
 #[cfg(test)]
 pub fn pane_area(pane: Pane, size: TermSize, state: &AppState) -> Rect {
     let [_, body, _, _] = split(Rect::new(0, 0, size.width, size.height));
-    let [left, right] = split_body(body);
+    // **狭い端末では `focus` のペインしか出ていない。** 出ていないペインに本文の
+    // `Rect` を返すと、そこに描かれた別のペインを読んで `contains` が黙って通る。
+    let Some([left, right]) = split_body(body) else {
+        assert_eq!(
+            state.focus, pane,
+            "幅 {} では {pane:?} は出ていない（focus のペインだけを描く）",
+            size.width
+        );
+        return body;
+    };
     // 右列は上のタブとその下に割れている。割る位置も実際の関数から出す。
     let [top, below] = split_right(state, &panes::TopPane::build(state), right);
-    match pane {
-        // **Branches / Stash / PRs も同じ領域を差し替えで使う**（07 の「右上のタブ」）。
-        Pane::Branches | Pane::Stash | Pane::Prs => top,
-        Pane::Worktree | Pane::CommitDetail => below,
-        // **Graph と Diff は同じ領域を差し替えで使う**（07）ので同じ Rect を返す。
-        Pane::Graph | Pane::Diff => left,
+    // **同じ領域を差し替えで使うペインには同じ `Rect` を返す**（Graph と Diff、
+    // Branches / Stash / PRs。07 の「レイアウト」「右上のタブ」）。
+    match Region::of(pane) {
+        Region::Left => left,
+        Region::Top => top,
+        Region::Below => below,
     }
 }
 
@@ -334,8 +394,7 @@ pub fn footer(term: TermSize) -> [Rect; 2] {
 /// この依存は消えている（07 の「CommitDetail ペイン」）。
 pub fn graph_rows(term: TermSize) -> usize {
     let [_, body, _, _] = split(Rect::new(0, 0, term.width, term.height));
-    let [left, _] = split_body(body);
-    panes::graph::area(left).height as usize
+    panes::graph::area(left_area(body)).height as usize
 }
 
 /// ヘッダ。リポジトリと、解決できていればアカウントを出す。
@@ -787,14 +846,15 @@ fn repo_label(state: &AppState) -> String {
 mod tests {
     use super::{
         degraded_label, ellipsize, file_row, hint_text, pane_area, progress_label, push_expanded,
-        window, wrapped, SPACES, TAB_WIDTH,
+        window, wrapped, SPACES, SPLIT_MIN_WIDTH, TAB_WIDTH,
     };
     use crate::test_util::{
         draw, footer_area, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status,
-        terminal_with,
+        tab_to, terminal_with, SPLIT_NARROWEST,
     };
     use mewgit_core::app::{
-        keys, update, AppState, Cmd, JobKind, Modal, Msg, NoticeLevel, Pane, TargetState, TermSize,
+        keys, update, AppState, Cmd, JobKind, Key, KeyCode, Modal, Msg, NoticeLevel, Pane,
+        TargetState, TermSize,
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
@@ -894,7 +954,7 @@ mod tests {
         // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
         // **線の形と色の両方を見る**（07）。形は色も修飾も出ない端末のための強調で、
         // 色だけを見ると `BorderType` を落としても通る。
-        let size = TermSize::default();
+        let size = SPLIT_NARROWEST;
         // 巡回の候補はグラフの選択で変わる（01）。WIP 側で回す。
         //
         // **差分で表せる行を 1 つ置く。** 変更が無いと `Diff` が候補から外れ（01 の
@@ -940,15 +1000,15 @@ mod tests {
     #[test]
     fn the_left_area_swaps_between_the_graph_and_the_diff() {
         let state = state_at("/repo");
-        let text = draw(&state, TermSize::default()).join("\n");
+        let text = draw(&state, SPLIT_NARROWEST).join("\n");
         assert!(text.contains("Graph"), "{text}");
 
         // **`focus` を直に置かない。** 対象の無い `Diff` は候補から外れる（01）ので、
         // 直に置くと実物では出ない画面を見張ることになる。
         let state = state_showing_diff(fake_snapshot(&[], &["a.txt"], &[]));
-        let text = draw(&state, TermSize::default()).join("\n");
+        let text = draw(&state, SPLIT_NARROWEST).join("\n");
 
-        // 差し替えであって分割ではない。両方出すと 80 桁ではどちらも読めない。
+        // 差し替えであって分割ではない。両方出すと左の 60% ではどちらも読めない。
         assert!(!text.contains("Graph"), "{text}");
         assert!(text.contains("Diff"), "{text}");
         // **右のワーキングツリーは出したまま。** どのファイルを見ているかが一覧の側でも
@@ -960,12 +1020,12 @@ mod tests {
     fn the_right_area_swaps_between_the_worktree_and_the_commit_detail() {
         // 右ペインの中身はグラフの選択だけで決まる。`focus` では決めない（07）。
         let state = crate::test_util::state_with_commits(&["first"]);
-        let text = draw(&state, TermSize::default()).join("\n");
+        let text = draw(&state, SPLIT_NARROWEST).join("\n");
         assert!(text.contains("Working tree"), "{text}");
         assert!(!text.contains("Commit "), "{text}");
 
         let state = crate::test_util::state_on_first_commit(&["first"]);
-        let text = draw(&state, TermSize::default()).join("\n");
+        let text = draw(&state, SPLIT_NARROWEST).join("\n");
 
         assert!(!text.contains("Working tree"), "{text}");
         assert!(text.contains("Commit "), "{text}");
@@ -977,9 +1037,91 @@ mod tests {
         let mut state = crate::test_util::state_on_first_commit(&["first"]);
         state.focus = Pane::Graph;
 
-        let text = draw(&state, TermSize::default()).join("\n");
+        let text = draw(&state, SPLIT_NARROWEST).join("\n");
 
         assert!(text.contains("Commit "), "{text}");
+    }
+
+    /// 本文の 1 行目（ヘッダの直下）に並ぶ、ペインの枠の左上の桁。
+    fn pane_corners(state: &AppState, size: TermSize) -> Vec<u16> {
+        let terminal = terminal_with(state, size);
+        let buffer = terminal.backend().buffer();
+        (0..size.width)
+            .filter(|&x| matches!(buffer[(x, 1)].symbol(), "┌" | "┏"))
+            .collect()
+    }
+
+    #[test]
+    fn the_body_splits_from_the_minimum_width_and_not_below() {
+        // **境目の両側を見る。** 99 桁で割ると右列は 39 桁（内側 37 セル）になり、
+        // 割らない側の 80 桁だけを見ても閾値がずれたことは判らない。
+        let state = state_at("/repo");
+        let narrow = TermSize {
+            width: SPLIT_MIN_WIDTH - 1,
+            ..SPLIT_NARROWEST
+        };
+
+        assert_eq!(pane_corners(&state, narrow), [0]);
+        // 左（Graph）と右列の上（Branches）の 2 枚。
+        assert_eq!(pane_corners(&state, SPLIT_NARROWEST).len(), 2);
+    }
+
+    #[test]
+    fn a_narrow_terminal_shows_every_candidate_alone_across_the_full_width() {
+        // **巡回の候補は幅で変えない**（07 の「レイアウト」）。狭い端末では `Tab` で
+        // 移った先が本文いっぱいに出る。候補のどれかが描かれないと、80 桁の端末から
+        // そのペインへ届かない。
+        let size = TermSize::default();
+        assert!(size.width < SPLIT_MIN_WIDTH, "{size:?}");
+        let wip = || state_with_status(fake_snapshot(&[], &["a.txt"], &[]));
+        let commit = || crate::test_util::state_on_first_commit(&["first"]);
+        // **回す範囲を先に確かめる。** 候補は production の集合から導くので、
+        // 狙ったペインが落ちると見張りが黙って減る（`.claude/rules/testing.md`）。
+        let wip_candidates = wip().focus_candidates();
+        let commit_candidates = commit().focus_candidates();
+        for pane in [Pane::Branches, Pane::Worktree, Pane::Diff] {
+            assert!(wip_candidates.contains(&pane), "{wip_candidates:?}");
+        }
+        assert!(commit_candidates.contains(&Pane::CommitDetail));
+
+        for (base, candidates) in [
+            (&wip as &dyn Fn() -> AppState, wip_candidates),
+            (&commit, commit_candidates),
+        ] {
+            for &pane in candidates {
+                let mut state = base();
+                // **`Tab` を通す。** 直に置くと右上のタブが `focus` と揃わない。
+                tab_to(&mut state, pane);
+                let terminal = terminal_with(&state, size);
+                let buffer = terminal.backend().buffer();
+                let why = format!("focus={pane:?}");
+
+                // 枠は左端から右端まで 1 枚で、フォーカスの太線。**太線を見るのは、
+                // 描いたのが `focus` のペインであることの証拠を兼ねるため** —— 別の
+                // ペインを描くと、そのペインの枠はフォーカスが無いので細線になる。
+                assert_eq!(buffer[(0, 1)].symbol(), "┏", "{why}");
+                assert_eq!(buffer[(size.width - 1, 1)].symbol(), "┓", "{why}");
+                assert_eq!(pane_corners(&state, size), [0], "{why}");
+            }
+        }
+    }
+
+    #[test]
+    fn tab_on_a_narrow_terminal_swaps_the_graph_for_the_branches() {
+        // 隠したペインへ届く手段は `Tab` だけ。押す前と後で、描かれる中身が
+        // 丸ごと入れ替わることを見る。
+        let size = TermSize::default();
+        let mut state = state_at("/repo");
+        let before = draw(&state, size).join("\n");
+        assert!(before.contains("Graph"), "{before}");
+        assert!(!before.contains("Branches"), "{before}");
+
+        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
+        assert_eq!(state.focus, Pane::Branches);
+        let after = draw(&state, size).join("\n");
+
+        assert!(after.contains("Branches"), "{after}");
+        assert!(!after.contains("Graph"), "{after}");
     }
 
     /// 解決済みのアカウントを持つ状態。
@@ -1296,7 +1438,7 @@ mod tests {
     /// 描いたヘッダ（最上行）。
     ///
     /// **取り出しはここ 1 本。** `test_util::notice_bar` と同じ理由で、ヘッダの位置や
-    /// 高さが変わる（M6 の狭いレイアウト）と、各テストが持っている `[0]` が一斉に嘘になる。
+    /// 高さが変わる（M6 の狭い幅での畳み方）と、各テストが持っている `[0]` が一斉に嘘になる。
     fn header(state: &AppState, size: TermSize) -> String {
         draw(state, size)[0].clone()
     }

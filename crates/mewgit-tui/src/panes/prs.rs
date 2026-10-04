@@ -207,10 +207,12 @@ fn counts(items: &[(usize, &str)]) -> String {
 
 /// 集計の桁に許す幅。
 ///
-/// **チェック 5 種が丸ごと出て、タイトルも潰れない幅**（07 の「PRs ペイン」）。
+/// **件数が 1〜2 桁ならチェック 5 種が丸ごと出て、タイトルも潰れない幅**（07 の「PRs ペイン」）。
 /// `✓12 ✗3 ○2 ⊘5 ·1`（15 セル）に `+` を足しても入り、右列がいちばん狭い幅 100 で
-/// 集計がいちばん広い行（チェック 5 種 + レビュー 2 種）でもタイトルに 7 セル残る
-/// （実測 2026-10-04。19 にすると 4 セル）。**これを外すとタイトルが 1 文字も出ない行が
+/// 件数が 1〜2 桁なら、集計がいちばん広い行でもタイトルに 6 セル残る（`+` まで入れて集計が
+/// 17 セルに達した形。テストの行 `✓12 ✗3 ○2 ⊘5 ·1+` は 16 セルで 7 セル。19 にすると
+/// 4 セル。実測 2026-10-04）。件数が 3 桁になるとチェック 5 種も丸ごとは出ず、PR 番号の
+/// 桁が増えるとタイトルはそのぶん減る。**これを外すとタイトルが 1 文字も出ない行が
 /// できる。** 最初は 10 だった —— 80 桁でも右列を割っていたころの内側 30 セルに合わせた数
 /// （2026-09-18）。
 ///
@@ -481,7 +483,7 @@ mod tests {
         // **`pr_row` の doc が「末尾に置くと黙って消える」を理由に集計を前へ置いた
         // その守りが、桁を足したことで自分に返る。** 右列は狭い（`SUMMARY_BUDGET` の
         // doc）ので、集計を伸ばし放題にすると**タイトルが 1 文字も出ない**
-        // （実測: 幅 100 で、予算 17 ならタイトルに 7 セル、19 なら 4 セル）。
+        // （実測: 幅 100 のこの行で、予算 17 ならタイトルに 7 セル、19 なら 4 セル）。
         let detail = PrDetail {
             checks: CheckSummary {
                 success: 12,
@@ -768,14 +770,22 @@ mod tests {
         // `Esc` でフォーカスが Graph に移っても右上は PRs のまま見えるので、そこで `（N）` を
         // 出すと押しても何も起きない案内になる。
         let mut state = with_list(Vec::new());
+        // **先にフォーカスがある形で、この fixture でも `N` が反応することを見る。** ブランチが
+        // push されていないので箱は開かず、断りの通知が積まれる —— 下の「増えない」が
+        // 自明に通らない証拠。
+        let before = state.notices.len();
+        let _ = update(&mut state, Msg::Key(Key::char('N')));
+        assert_eq!(state.notices.len(), before + 1, "Prs で N が反応しなかった");
+
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Esc)));
         assert_eq!(state.focus, Pane::Graph);
-
         let text = pane_text(&state, SIZE, Pane::Prs);
         assert!(text.contains("開いている PR はありません"), "{text}");
         assert!(!text.contains("（N）"), "効かない N を案内した: {text}");
         // 案内が嘘でないことを、同じ状態で `N` を押して確かめる。
+        let before = state.notices.len();
         let _ = update(&mut state, Msg::Key(Key::char('N')));
+        assert_eq!(state.notices.len(), before, "Graph で N が効いた");
         assert!(state.modal.is_none(), "{:?}", state.modal);
     }
 

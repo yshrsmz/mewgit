@@ -425,6 +425,12 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       Debian 12（2.39.5）は床の内側。git 2.39.5 で `cargo test` を流し、残る失敗は文言の違い
       だけで、`EditorGone` の照合を大文字小文字無視にした
 
+- [x] `--version` / `-V` と `--help` / `-h`。**v0.1.0 を切ったあとで、版を確かめる手段が
+      無いとユーザーに指摘された**（2026-10-04）—— それまで `-` 始まりの引数は全部断っていた。
+      版は `CARGO_PKG_VERSION`（`[workspace.package] version`）なので release-please の書き換えに
+      そのまま追従する。どちらも端末にも設定にも触れず、隠しサブコマンドと同じ入口で分ける。
+      知らないオプションの断りには `--help` を案内する
+
 - [x] **起動中に mewgit のバイナリが消えたときのエディタ。** `GIT_EDITOR` /
       `GIT_SEQUENCE_EDITOR` は `current_exe()` を指す。**着手前は「revert / cherry-pick の
       continue などが落ちるはず」と書いていたが、実測では落ちるのは rebase の系統と

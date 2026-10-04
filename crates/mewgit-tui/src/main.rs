@@ -1,5 +1,9 @@
 //! mewgit エントリポイント。
 //!
+//! 解釈するオプションは `--version` / `-V` と `--help` / `-h` だけで、どちらも stdout に
+//! 書いて終わる。版は `Cargo.toml` の `[workspace.package] version`（release-please が
+//! release PR で上げる）。
+//!
 //! 隠しサブコマンド `--sequence-editor <todo>` / `--commit-editor <file>` は interactive
 //! rebase 用。git が `GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` として起こし、plan は git から
 //! 継いだ標準入力で届く（`docs/design/03-git-exec.md` の
@@ -42,10 +46,36 @@ fn main() -> Result<ExitCode> {
             }))
         }
         Some("--commit-editor") => return Ok(editor(&args[1..], git_exec::write_commit_message)),
+        Some("--version" | "-V") => {
+            println!("mewgit {VERSION}");
+            return Ok(ExitCode::SUCCESS);
+        }
+        Some("--help" | "-h") => {
+            print!("{}", help());
+            return Ok(ExitCode::SUCCESS);
+        }
         _ => {}
     }
     tui(repo_path(args.first())?)?;
     Ok(ExitCode::SUCCESS)
+}
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn help() -> String {
+    format!(
+        "mewgit {VERSION}
+tig 風のコミットグラフと GitHub 連携を持つ TUI の git クライアント
+
+使い方: mewgit [repo-path]
+
+  repo-path      開くリポジトリ。省略するとカレントディレクトリ
+  -h, --help     この使い方を出す
+  -V, --version  版を出す
+
+起動したあとは ? でフォーカス中のペインのキーを、q で終了。
+"
+    )
 }
 
 /// エディタとして起こされたとき。git はファイルのパスを末尾に 1 つ足す。
@@ -137,11 +167,10 @@ fn push_keyboard_enhancement() {
 fn repo_path(arg: Option<&OsString>) -> Result<PathBuf> {
     let raw = match arg {
         Some(arg) => {
-            // オプションは隠しサブコマンドしか解釈しないので、`--help` という名前の
-            // リポジトリを開きにいかないよう弾く。
+            // 解釈しないオプションを、その名前のリポジトリとして開きにいかないよう弾く。
             if arg.to_string_lossy().starts_with('-') {
                 bail!(
-                    "オプションはまだ対応していません: {}",
+                    "知らないオプションです: {}（mewgit --help で使い方を出します）",
                     arg.to_string_lossy()
                 );
             }

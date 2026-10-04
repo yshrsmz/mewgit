@@ -30,12 +30,16 @@ use ratatui::Frame;
 pub fn render(frame: &mut Frame, state: &AppState) {
     let [header, body, notice, hints] = split(frame.area());
 
-    frame.render_widget(header_line(state, header.width), header);
-    // **スピナーは同じ領域に右寄せで重ねる。** `Paragraph` は既定のスタイルで
-    // 領域を塗り直すだけなので、左に描いたリポジトリ名は消えない。左群が右端の席
-    // （`SPINNER_SEAT`）に掛からないことは `header_line` が保証する。
+    // **右端はいつもスピナーの席**（07 の「ヘッダ」）。左群は残りに入る段で組む。
+    let [left, _, seat] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(Span::raw(SEP).width() as u16),
+        Constraint::Length(SPINNER_SEAT),
+    ])
+    .areas(header);
+    frame.render_widget(header_line(state, left.width), left);
     if let Some(spinner) = spinner_line(state) {
-        frame.render_widget(Paragraph::new(spinner).right_aligned(), header);
+        frame.render_widget(Paragraph::new(spinner).right_aligned(), seat);
     }
     match split_body(body) {
         Some([left, right]) => {
@@ -524,11 +528,10 @@ pub fn graph_rows(term: TermSize) -> usize {
 /// 落とし、degraded のキーの形（`[gh: A で選ぶ]`）は最後まで残す —— `A` で開く
 /// ピッカーへ辿り着く手掛かりがそれしか無い。
 ///
-/// **席はいつも引く。** そのフレームのスピナーの幅で引くと、境目の幅でジョブが
-/// 出入りするたびに段が変わり、`[api: …]` が走っているあいだだけ消える。
+/// **`width` はスピナーの席を除いた幅**（[`render`] が割る）。そのフレームの
+/// スピナーの幅で引くと、境目の幅でジョブが出入りするたびに段が変わり、
+/// `[api: …]` が走っているあいだだけ消える。
 fn header_line(state: &AppState, width: u16) -> Paragraph<'static> {
-    let sep = Span::raw(SEP).width();
-    let budget = usize::from(width).saturating_sub(usize::from(SPINNER_SEAT) + sep);
     let repo = repo_label(state);
     let target = state
         .repo
@@ -538,30 +541,31 @@ fn header_line(state: &AppState, width: u16) -> Paragraph<'static> {
     let quota = state.prs.rate_limit().map(rate_limit_span);
 
     // 段ごとに (owner/repo を出すか, `[gh: …]` の形, 残量を出すか)。
-    const STAGES: [(bool, Option<GhForm>, bool); 5] = [
-        (true, Some(GhForm::Full), true),
-        (true, Some(GhForm::Short), true),
-        (true, Some(GhForm::Short), false),
-        (false, Some(GhForm::Short), false),
-        (false, Some(GhForm::Key), false),
+    // 解決済みの `[gh: login]` は `Key` の段で落ちる（`account_span`）。
+    const STAGES: [(bool, GhForm, bool); 5] = [
+        (true, GhForm::Full, true),
+        (true, GhForm::Short, true),
+        (true, GhForm::Short, false),
+        (false, GhForm::Short, false),
+        (false, GhForm::Key, false),
     ];
     for (with_target, form, with_quota) in STAGES {
         let mut spans = vec![Span::styled(repo.clone(), header_repo_style())];
         let parts = [
             target.clone().filter(|_| with_target),
-            form.and_then(|form| account_span(&state.account, form)),
+            account_span(&state.account, form),
             quota.clone().filter(|_| with_quota),
         ];
         for part in parts.into_iter().flatten() {
             spans.push(Span::raw(SEP));
             spans.push(part);
         }
-        if spans.iter().map(Span::width).sum::<usize>() <= budget {
+        if spans.iter().map(Span::width).sum::<usize>() <= usize::from(width) {
             return Paragraph::new(Line::from(spans));
         }
     }
     // **最後はリポジトリ名だけ。** それも入らなければ切る。
-    let repo = ellipsize(&repo, u16::try_from(budget).unwrap_or(u16::MAX)).into_owned();
+    let repo = ellipsize(&repo, width).into_owned();
     Paragraph::new(Line::from(Span::styled(repo, header_repo_style())))
 }
 
@@ -605,8 +609,8 @@ const SEP: &str = "  ";
 /// **乏しいときだけ色を付ける。** 割合で見るのは [`RateLimit::is_low`] で、上限は
 /// トークンの種類で変わる。
 ///
-/// **上限は添えない。** `[api: 4984/5000]` は 18 セルで、80 桁では `owner/repo` が
-/// 現実的な長さでもスピナーに重なる（実測。07 のヘッダ）。
+/// **上限は添えない。** `[api: 4984/5000]` は 18 セルで、そのぶん残量が先に落ちる
+/// 幅が広がる（07 のヘッダ）。
 ///
 /// **`[gh: …]` の degraded とは同時に出ない。** degraded なら [`PrState::forget`] が残量を
 /// 落としており、`Resolving` では一度も引いていない —— 出るのは
@@ -753,30 +757,28 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
 /// 入るだけ並べて残りを `+N` にする（`⠋ fetch +2`）。1 つも入らなければ `⠋ +3`、
 /// 1 つしか無いのに入らなければその説明を切る。
 fn fold_spinner(frame: &'static str, labels: &[&'static str]) -> Line<'static> {
-    let seat = usize::from(SPINNER_SEAT);
-    for shown in (1..=labels.len()).rev() {
+    let lead = || vec![Span::raw(frame), Span::raw(" ")];
+    // `shown == 0` は `⠋ +3`。1 つしか無いときは数だけにせず、下で切る。
+    let fewest = usize::from(labels.len() == 1);
+    for shown in (fewest..=labels.len()).rev() {
         let rest = labels.len() - shown;
-        let mut spans = vec![Span::raw(frame)];
-        for label in &labels[..shown] {
-            spans.push(Span::raw(" "));
-            spans.push(Span::raw(*label));
-        }
+        let mut words: Vec<Span<'static>> = labels[..shown].iter().map(|l| Span::raw(*l)).collect();
         if rest > 0 {
-            spans.push(Span::raw(format!(" +{rest}")));
+            words.push(Span::raw(format!("+{rest}")));
+        }
+        let mut spans = lead();
+        for (i, word) in words.into_iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" "));
+            }
+            spans.push(word);
         }
         let line = Line::from(spans);
-        if line.width() <= seat {
+        if line.width() <= usize::from(SPINNER_SEAT) {
             return line;
         }
     }
-    let tail = match labels {
-        [label] => {
-            let room = SPINNER_SEAT.saturating_sub(Span::raw(frame).width() as u16 + 1);
-            ellipsize(label, room).into_owned()
-        }
-        _ => format!("+{}", labels.len()),
-    };
-    Line::from(vec![Span::raw(frame), Span::raw(" "), Span::raw(tail)])
+    lead_line(lead(), labels[0], SPINNER_SEAT)
 }
 
 /// フッターの 1 行目。進行中操作のバッジと、直近の通知を積まれた時刻を添えて出す。
@@ -1463,7 +1465,8 @@ mod tests {
         // スピナーも右端の席に出る。素の `state_at("/repo")` で測ると、実際には
         // 存在しない短いヘッダを見張ることになる。
         //
-        // **幅は 100。** 07 の目標のレイアウトがその幅で、`< 100` は M6 のタスク。
+        // **幅は 100。** 07 の目標のレイアウトがその幅。狭い幅で理由から落ちるのは
+        // `the_header_drops_parts_in_the_agreed_order`。
         //
         // **`owner/repo` と login の長さは fixture 任せ。** どちらも上限が無いので
         // 「いちばん長い形」を作れない。入らなければ `owner/repo` から落ち、理由も
@@ -1550,20 +1553,6 @@ mod tests {
     /// 扇形のもの**（`pr checks`）—— 数が動くのはそのあいだだけなので、同時に
     /// 出るのはこの組み合わせ（#73 の「出荷される形を測る」）。
     fn state_with_quota(remaining: u32) -> AppState {
-        let mut state = state_fetching_details();
-        let epoch = state.prs.epoch();
-        let _ = update(
-            &mut state,
-            Msg::RateLimitSeen {
-                epoch,
-                seen: fake_rate_limit(remaining, 1789703295),
-            },
-        );
-        state
-    }
-
-    /// 残量が届く前の同じ形。**足したことで他が変わっていないか**を比べる相手。
-    fn state_fetching_details() -> AppState {
         let mut state = shipping_header_state();
         state.jobs.finish(JobKind::LoadBranches);
         state.account = resolved_account();
@@ -1575,6 +1564,14 @@ mod tests {
         // `Tick` を 1 つまたぐ。またがないジョブはスピナーに出ない（`Job::since`）。
         // 1 周（駒の数）進めるので、描かれる駒は `tick` が 0 のときと同じ。
         state.tick += super::SPINNER.len() as u64;
+        let epoch = state.prs.epoch();
+        let _ = update(
+            &mut state,
+            Msg::RateLimitSeen {
+                epoch,
+                seen: fake_rate_limit(remaining, 1789703295),
+            },
+        );
         state
     }
 
@@ -1761,7 +1758,7 @@ mod tests {
     /// 描いたヘッダ（最上行）。
     ///
     /// **取り出しはここ 1 本。** `test_util::notice_bar` と同じ理由で、ヘッダの位置や
-    /// 高さが変わる（M6 の狭い幅での畳み方）と、各テストが持っている `[0]` が一斉に嘘になる。
+    /// 高さが変わると、各テストが持っている `[0]` が一斉に嘘になる。
     fn header(state: &AppState, size: TermSize) -> String {
         draw(state, size)[0].clone()
     }
@@ -1791,7 +1788,7 @@ mod tests {
 
         // 駒と一緒に「何が」走っているかも出す（07 のヘッダ）。
         assert!(header.contains("⠋ fetch"), "header: {header:?}");
-        // リポジトリ名は消えない（同じ領域に右寄せで重ねている）。
+        // リポジトリ名は消えない（右端の席とは領域が別）。
         assert!(header.contains("repo"), "header: {header:?}");
     }
 

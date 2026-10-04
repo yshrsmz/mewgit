@@ -675,7 +675,7 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       diff / graph / exec / worktree / mod / progress の各テストにインラインで散っている
       （#120 の `/simplify` が拾い、範囲外として見送った）。`WorktreeSnapshot` に
       フィールドが増えたときに直す場所が 1 つになる
-- [ ] README、リリースワークフロー。**release-please + 手書きのビルド、private のまま自分用、
+- [x] README、リリースワークフロー。**release-please + 手書きのビルド、private のまま自分用、
       `aarch64-apple-darwin` と `aarch64-unknown-linux-gnu`、crates.io には上げない
       （`publish = false`）**（2026-10-04 にユーザーと決めた）。**`release-type: rust` は
       このワークスペースで動かない** —— ルートの `Cargo.toml` に `[package]` が無いと
@@ -694,6 +694,10 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       （#152 で `ubuntu-24.04-arm` が private リポジトリでも回ることを確かめた。build は
       macOS 1 分 34 秒、Linux arm 3 分 25 秒）。**チェックを付けるのは v0.1.0 の Release に
       2 つのバイナリが載ってから** —— Release への upload はタグが無いと踏めない
+      **v0.1.0 を切った**（2026-10-04、#154）。Release に tar.gz と sha256 が 2 組載り、README の
+      `gh release download` → `shasum -c` → 展開の手順で macOS arm64 のバイナリが起動した。
+      **版の書き換え（`Cargo.toml` / `Cargo.lock`）は 0.1.0 では空振りした**（初版が元の版と
+      同じ）ので、本番で踏むのは次の release PR が最初
 
 ## MVP 後
 

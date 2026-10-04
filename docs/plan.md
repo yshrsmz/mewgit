@@ -688,8 +688,8 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       変わって当たらなくなると lock が古いまま release PR が出て、CI の `--locked` が
       落ちる。`simple` の初版は 1.0.0 なので `initial-version: 0.1.0` を置く。
       **release PR とタグは GitHub App のトークンで作る**（`GITHUB_TOKEN` で作った PR には
-      CI が走らない）。App の client ID は変数 `RELEASE_APP_CLIENT_ID`、鍵はシークレット
-      `RELEASE_APP_PRIVATE_KEY`。ビルドは同じワークフローの後段（`release_created`）に
+      CI が走らない）。App の client ID はシークレット `RELEASE_APP_CLIENT_ID`、鍵はシークレット
+      `RELEASE_APP_PRIVATE_KEY`（どちらも secret。変数から読む形は空で落ちた）。ビルドは同じワークフローの後段（`release_created`）に
       置き、`release.yml` を触る PR では build だけを走らせて runner を先に踏む
       （#152 で `ubuntu-24.04-arm` が private リポジトリでも回ることを確かめた。build は
       macOS 1 分 34 秒、Linux arm 3 分 25 秒）。**チェックを付けるのは v0.1.0 の Release に

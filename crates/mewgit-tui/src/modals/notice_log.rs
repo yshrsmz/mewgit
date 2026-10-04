@@ -135,7 +135,7 @@ fn level(level: NoticeLevel) -> (char, Style) {
 /// （`ui::push_expanded`）—— git の stderr は上書きされるファイルをタブで字下げする。
 ///
 /// **`max_lines` で打ち切る。** `detail` は長さに上限が無い（hook の出力をそのまま
-/// 運ぶ）ので、全文を組んで折り返しを測ると 5000 行で 1 フレーム 7.1ms かかった（07）。
+/// 運ぶ）ので、全文を組んで折り返しを測ると 5000 行で 1 フレーム 1.78ms かかった（打ち切って 133µs。07）。
 /// 元の 1 行は折り返して 1 行以上になるので、元の行で数えて打ち切っても「描ける行を
 /// 越えたか」の判定は変わらない。
 fn content(notice: &Notice, max_lines: usize) -> Text<'static> {

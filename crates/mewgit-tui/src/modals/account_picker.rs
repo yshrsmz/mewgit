@@ -507,9 +507,12 @@ mod tests {
             AccountView::Degraded(fake_configured_unavailable()),
         ];
 
-        // 80 は箱が既定の幅で開く端末、59 は折る前に `[Esc]` が切れた幅、30 は
-        // いちばん長い群（`[u] 指定を解除`、14 セル）が入る幅より十分広い下限。
-        for width in [80, 59, 30] {
+        // 80 は箱が既定の幅で開く端末、58 は折らなければ 57 セルの案内が内側 56 に
+        // 入らない幅（**59 ではない** —— 枠の余白を外したので 59 の内側は 57 で、
+        // 折らなくても入る。`/code-review` が折り返しを止めて 59 の腕が素通りするのを
+        // 確かめた）、30 はいちばん長い群（`[u] 指定を解除`、14 セル）が入る幅より
+        // 十分広い下限。
+        for width in [80, 58, 30] {
             for view in &cases {
                 let want = hint(view);
                 let state = state_with_modal(Modal::AccountPicker {

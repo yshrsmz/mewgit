@@ -196,8 +196,10 @@ fn label_at(frame: &mut Frame, at: Rect, label: &str, focused: bool) {
 
 #[cfg(test)]
 mod tests {
+    use super::HINT;
+    use crate::modals;
     use crate::test_util::{
-        col_of, cursor, draw, modal_area, row_of, state_with_modal, terminal_with,
+        col_of, cursor, draw, modal_area, modal_text, row_of, state_with_modal, terminal_with,
     };
     use mewgit_core::app::{AppState, Modal, PrField, PrHead, PrHeads, TermSize, TextBuffer};
     use ratatui::style::Modifier;
@@ -260,6 +262,22 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::REVERSED)
         })
+    }
+
+    #[test]
+    fn the_hint_fits_one_row_on_an_80_column_terminal() {
+        // **74 セルの案内が、幅 76 の箱の内側 74 セルにちょうど入る**（07）。枠に右の
+        // 余白（`RIGHT_MARGIN`）が戻ると内側が 73 になり、案内が黙って 2 行に折れる ——
+        // 折れても全部見えるので、キーを探すテストでは拾えない。
+        let state = state_with_pr("t", "b", "main", false, PrField::Title);
+
+        let text = modal_text(&state, SIZE);
+
+        let want = modals::hint_row(HINT[0]);
+        assert!(
+            text.lines().any(|line| line.contains(&want)),
+            "案内が 1 行に収まっていない:\n{text}"
+        );
     }
 
     #[test]

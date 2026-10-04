@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use mewgit_core::app::{AppState, Pane, PrLoad};
+use mewgit_core::app::{keys, AppState, Key, PrLoad};
 use mewgit_core::auth::AccountState;
 use mewgit_core::config::Theme;
 use mewgit_core::github::{GithubError, PrDetail, PrStatus, PullRequest};
@@ -209,8 +209,8 @@ fn counts(items: &[(usize, &str)]) -> String {
 ///
 /// **チェック 5 種が丸ごと出て、タイトルも潰れない幅**（07 の「PRs ペイン」）。
 /// `✓12 ✗3 ○2 ⊘5 ·1`（15 セル）に `+` を足しても入り、右列がいちばん狭い幅 100 で
-/// 集計がいちばん広い行（チェック 5 種 + レビュー 2 種）でもタイトルに 6 セル残る
-/// （実測 2026-10-04。19 にすると 3 セル）。**これを外すとタイトルが 1 文字も出ない行が
+/// 集計がいちばん広い行（チェック 5 種 + レビュー 2 種）でもタイトルに 7 セル残る
+/// （実測 2026-10-04。19 にすると 4 セル）。**これを外すとタイトルが 1 文字も出ない行が
 /// できる。** 最初は 10 だった —— 80 桁でも右列を割っていたころの内側 30 セルに合わせた数
 /// （2026-09-18）。
 ///
@@ -285,17 +285,20 @@ fn status_style(pr: &PullRequest, theme: &Theme) -> Style {
     })
 }
 
+/// 引けたが open な PR が 1 件も無いときの文言。`（N）` を添えるかは `placeholder` が決める。
+const EMPTY: &str = "開いている PR はありません";
+
 /// 一覧を出せない理由。
 ///
 /// **消去法で導かない。** [`AccountState`] と [`PrLoad`] の腕から出す（01 の
 /// 「失敗の記憶」と同じ理由）。**`ui::LOADING` を使う** —— 文言を自分で組むと、
 /// 既にある「読み込み中…」の見張りがこの産出元を拾えない。
 ///
-/// **空の一覧には、このペインにフォーカスがあるときだけ `（N）`（PR 作成）を添える**
-/// （degraded の `（A）` と同じ書き方）。`N` が効くのはフォーカスがあるときだけで、幅 100
-/// 以上ではフォーカスが Graph のままこの文言が見える —— そこで添えると、押しても何も
-/// 起きない案内になる。`（N で作成）` は 1 セル入らない（右列がいちばん狭い幅 100 の
-/// 内側は 37 セルで、文言 26 + 12 = 38。07 の「PRs ペイン」）。
+/// **空の一覧には、`N`（PR 作成）が効くときだけ `（N）` を添える**（degraded の `（A）` と
+/// 同じ書き方。07 の「PRs ペイン」）。幅 100 以上ではフォーカスが Graph のままこの文言が
+/// 見えるので、そこで添えると押しても何も起きない案内になる。**効くかは
+/// [`keys::is_live`] に聞く** —— `focus` をここで見ると、モーダル表示中の扱いなど
+/// 振り分けの規則の写しが 2 本になる。
 fn placeholder(state: &AppState) -> Cow<'static, str> {
     match &state.account {
         // **既定リモートが GitHub でないときもここに落ちる**（`TargetState::Unavailable`
@@ -314,8 +317,10 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
         // 読めていた一覧があればそちらが出る。
         AccountState::Resolved(_) => match state.prs.load() {
             PrLoad::Pending => ui::LOADING.into(),
-            PrLoad::Loaded if state.focus == Pane::Prs => "開いている PR はありません（N）".into(),
-            PrLoad::Loaded => "開いている PR はありません".into(),
+            PrLoad::Loaded if keys::is_live(state, Key::char('N')) => {
+                format!("{EMPTY}（N）").into()
+            }
+            PrLoad::Loaded => EMPTY.into(),
             PrLoad::Failed(err) => format!("PR を読み込めませんでした: {err}").into(),
         },
     }
@@ -328,7 +333,7 @@ mod tests {
         col_of, draw, pane_row, pane_row_is_reversed, pane_text, state_at, terminal_with,
     };
     use crate::ui;
-    use mewgit_core::app::{update, Cmd, Key, KeyCode, Msg, TermSize};
+    use mewgit_core::app::{update, Cmd, KeyCode, Msg, Pane, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::github::{CheckSummary, ReviewSummary};
     use mewgit_core::test_util::{
@@ -476,7 +481,7 @@ mod tests {
         // **`pr_row` の doc が「末尾に置くと黙って消える」を理由に集計を前へ置いた
         // その守りが、桁を足したことで自分に返る。** 右列は狭い（`SUMMARY_BUDGET` の
         // doc）ので、集計を伸ばし放題にすると**タイトルが 1 文字も出ない**
-        // （実測: 幅 100 で、予算 17 ならタイトルに 6 セル、19 なら 3 セル）。
+        // （実測: 幅 100 で、予算 17 ならタイトルに 7 セル、19 なら 4 セル）。
         let detail = PrDetail {
             checks: CheckSummary {
                 success: 12,

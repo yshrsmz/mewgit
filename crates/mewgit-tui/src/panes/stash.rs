@@ -2,6 +2,8 @@
 //!
 //! 右列の上のタブの 1 枚。Branches と同じく、**左の選択では入れ替わらない**。
 
+use std::borrow::Cow;
+
 use mewgit_core::app::{AppState, ListLoad};
 use mewgit_core::git_read::StashEntry;
 use ratatui::text::{Line, Span};
@@ -9,17 +11,13 @@ use ratatui::text::{Line, Span};
 use super::Rows;
 use crate::ui::{self, theme};
 
-/// タブ見出しに出すこのペインの名前と件数。0 件と読み込み中は名前だけ
-/// （`branches::title` と同じ規則）。
+/// タブ見出しに出すこのペインの名前。件数は出せるときだけ添える（[`super::counted`]）。
 ///
 /// **最初は件数を添えなかった。** 右列が 80 桁で内側 30 セルだったころは、3 枚の見出しを
 /// 並べると `PRs` が切れた。いまの右列は幅 100 でも見出しに 38 セル使え、
 /// `Branches (1234)` / `Stash (123)` / `PRs` でも 37 セルで入る（07 の「右上のタブ」）。
-pub(super) fn title(state: &AppState) -> String {
-    match state.stashes.entries.len() {
-        0 => "Stash".to_string(),
-        len => format!("Stash ({len})"),
-    }
+pub(super) fn title(state: &AppState) -> Cow<'static, str> {
+    super::counted("Stash", state.stashes.entries.len())
 }
 
 /// 一覧の行と、カーソルが何行目か。一覧が出せないときは文言 1 行（Branches と同じ）。

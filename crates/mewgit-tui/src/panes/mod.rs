@@ -122,8 +122,8 @@ fn right_tabs(state: &AppState) -> Line<'static> {
         .filter_map(|&pane| RightTab::of(pane));
     for right_tab in tabs {
         let title: Cow<'static, str> = match right_tab {
-            RightTab::Branches => branches::title(state).into(),
-            RightTab::Stash => stash::title(state).into(),
+            RightTab::Branches => branches::title(state),
+            RightTab::Stash => stash::title(state),
             RightTab::Prs => prs::title().into(),
         };
         if !spans.is_empty() {
@@ -132,6 +132,16 @@ fn right_tabs(state: &AppState) -> Line<'static> {
         spans.extend(tab(state, right_tab, title));
     }
     Line::from(spans)
+}
+
+/// タブ見出しの名前と件数。**0 件なら名前だけ** —— 読み込み中や失敗のときに `(0)` を
+/// 出すと、1 件も無いリポジトリと同じ見た目になる（本文で出し分けているのと同じ理由）。
+/// Branches と Stash が同じ規則で、片方だけ直すと見出しの規則がずれる。
+fn counted(name: &'static str, len: usize) -> Cow<'static, str> {
+    match len {
+        0 => name.into(),
+        len => format!("{name} ({len})").into(),
+    }
 }
 
 /// タブ 1 枚の見出し。いま出ているほうは前後 1 空白ごと反転し、出ていないほうは

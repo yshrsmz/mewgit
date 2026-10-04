@@ -7,7 +7,7 @@ use mewgit_core::app::{AppState, Pane};
 use mewgit_core::git_read::{short_oid, Commit, CommitDetail, Signature, Timestamp};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::ui::{self, theme, time};
@@ -68,8 +68,7 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
 
     frame.render_widget(head, head_area);
     frame.render_widget(
-        Paragraph::new(message_lines(detail, message_area.height as usize))
-            .wrap(Wrap { trim: false }),
+        ui::wrapping(message_lines(detail, message_area.height as usize)),
         message_area,
     );
 }

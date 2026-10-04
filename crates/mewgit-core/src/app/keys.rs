@@ -217,6 +217,16 @@ pub fn live(state: &AppState) -> Option<&'static [KeyHint]> {
     Some(pane(state.focus))
 }
 
+/// `key` が**いま**効くか。[`live`] の表に載っているかで答える。
+///
+/// **ペインの本文にキーを書くときに使う**（PRs ペインの「開いている PR はありません（N）」。
+/// 07 の「PRs ペイン」）。`ui` が `focus` やモーダルを見て自分で決めると、振り分けの規則の
+/// 写しが 2 本になり、モーダル表示中に効かない案内が出る（[`live`] の doc と同じ理由）。
+/// 表に載っていない別名（`Down` など）は偽 —— 案内に書くのは表のキーだけ。
+pub fn is_live(state: &AppState, key: Key) -> bool {
+    live(state).is_some_and(|hints| hints.iter().any(|hint| hint.keys().contains(&key)))
+}
+
 /// そのペインで押せるキー。
 ///
 /// **網羅 `match`。** `Pane` に変種を足すと実装漏れがコンパイルエラーになる
@@ -236,6 +246,25 @@ pub fn pane(pane: Pane) -> &'static [KeyHint] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{Modal, RepoInfo};
+    use crate::config::Config;
+    use crate::test_util::FAKE_NOW;
+
+    #[test]
+    fn a_key_is_live_only_in_its_pane_and_never_under_a_modal() {
+        let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
+        let n = Key::char('N');
+        state.focus = Pane::Graph;
+        assert!(!is_live(&state, n), "Graph では N は効かない");
+        state.focus = Pane::Prs;
+        assert!(is_live(&state, n));
+        // **モーダル表示中はキーを全部モーダルが受ける**（`live`）。
+        state.modal = Some(Modal::Help {
+            pane: Pane::Prs,
+            cursor: 0,
+        });
+        assert!(!is_live(&state, n), "モーダルの下で効くと言った");
+    }
 
     #[test]
     fn the_help_has_the_pane_keys_then_the_keys_that_work_anywhere() {

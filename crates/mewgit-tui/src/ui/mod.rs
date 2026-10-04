@@ -42,7 +42,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             // **右列の上は Branches / Stash / PRs のタブ。** 左の選択では入れ替わらないので、
             // 上を先に置いて残りを下のペインに渡す（07 の「レイアウト」）。
             // **組むのはここ 1 回**で、高さの決定と描画の両方に回す。
-            let top_pane = panes::TopPane::build(state);
+            let top_pane = panes::TopPane::build(state, right.width);
             let [top, below] = split_right(state, &top_pane, right);
             top_pane.render(frame, top, state);
             render_below(frame, below, state);
@@ -51,7 +51,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         // 巡回の候補は幅で変えないので、`Tab` で移った先がそのまま全画面になる。
         None => match Region::of(state.focus) {
             Region::Left => render_left(frame, body, state),
-            Region::Top => panes::TopPane::build(state).render(frame, body, state),
+            Region::Top => panes::TopPane::build(state, body.width).render(frame, body, state),
             Region::Below => render_below(frame, body, state),
         },
     }
@@ -213,8 +213,8 @@ pub fn wrapped<'a>(text: impl Into<Text<'a>>, width: u16) -> (Paragraph<'a>, u16
 /// 塊が窓より高いときは先頭を優先して残りを切る。
 ///
 /// **スクロール位置を状態に持たない。** グラフ（01 の `scroll`）と違ってカーソルが
-/// 下端に貼り付く癖が残るが、そのために `Msg::Layout` にフィールドを足すのは M6 の
-/// 狭い幅での畳み方と一緒にする（07。全画面切替の 1 本目には入れていない）。
+/// 下端に貼り付く癖が残るが、受け入れた（07 の「Worktree ペイン」）。右列のペインは
+/// 高さが右上のタブの行数で動くので、`Msg::Layout` で運ぶと一覧の到着ごとに流れる。
 pub fn window(len: usize, must_show: Range<usize>, height: usize) -> Range<usize> {
     if height == 0 {
         return 0..0;
@@ -227,10 +227,16 @@ pub fn window(len: usize, must_show: Range<usize>, height: usize) -> Range<usize
     start..(start + height).min(len)
 }
 
-/// `must_show` が入る窓を切り出して描く。
+/// `must_show` が入る窓を決め、**窓の中の行だけを `row` で組んで**描く。
 ///
 /// 行の組み立てはペインごとに違うが、**切り出して描くところまでが 1 つ**。
 /// [`window`] だけを共有すると、その戻り値の使い方が各ペインに写る。
+///
+/// **組んでから捨てない**（07 の「見えない行の組み立て」）。描画は `Tick` で毎秒 4 回
+/// 回るので、500 ファイルのコミットや長い diff の全行を組んでは大半を捨てることになる。
+/// 呼ぶ側は行の数と、添字から 1 行を組む関数を渡す。**添字を数える規則は呼ぶ側の 1 本**
+/// —— 見出しを挟むペインは、描く行の軽い記述（借用だけで `String` を持たない）を先に
+/// 1 回で並べ、`len` とカーソルの行を同じ走査で出す。
 ///
 /// **例外は `modals::edit_area`** で、そちらは [`window`] だけを使う（編集中の
 /// モーダルはみな、あの 1 本を通る）。編集中はカーソルが枠の右端を越えるので横に
@@ -240,17 +246,33 @@ pub fn window(len: usize, must_show: Range<usize>, height: usize) -> Range<usize
 ///
 /// **折り返さない**（`Wrap` を付けない）。diff は桁の揃いが意味を持ち、一覧のパスも
 /// 折り返すと行とカーソルの対応が崩れる。
-pub fn render_rows(
+pub fn render_rows<'a>(
+    frame: &mut Frame,
+    area: Rect,
+    len: usize,
+    must_show: Range<usize>,
+    row: impl FnMut(usize) -> Line<'a>,
+) {
+    let window = window(len, must_show, area.height as usize);
+    frame.render_widget(Paragraph::new(window.map(row).collect::<Vec<_>>()), area);
+}
+
+/// 組み終えた行を [`render_rows`] で描く。
+///
+/// **全部組むしかない一覧のための口。** 右上のタブは割く高さを行数から出し、PRs は桁の
+/// 幅を一覧ぜんぶから決める（`panes::TopPane`）。picker と通知の履歴の一覧は本数に
+/// 上限がある（候補・通知 100 件）。どれも行を組まずに数を出す形にすると、数える規則が
+/// 2 本になる。
+pub fn render_built(
     frame: &mut Frame,
     area: Rect,
     mut lines: Vec<Line<'_>>,
     must_show: Range<usize>,
 ) {
-    let window = window(lines.len(), must_show, area.height as usize);
-    frame.render_widget(
-        Paragraph::new(lines.drain(window).collect::<Vec<_>>()),
-        area,
-    );
+    let len = lines.len();
+    render_rows(frame, area, len, must_show, |at| {
+        std::mem::take(&mut lines[at])
+    });
 }
 
 /// UTF-8 と ASCII の字を選ぶ。`config.graph.ascii` に従う（08）。
@@ -285,7 +307,7 @@ pub fn pane_area(pane: Pane, size: TermSize, state: &AppState) -> Rect {
         return body;
     };
     // 右列は上のタブとその下に割れている。割る位置も実際の関数から出す。
-    let [top, below] = split_right(state, &panes::TopPane::build(state), right);
+    let [top, below] = split_right(state, &panes::TopPane::build(state, right.width), right);
     // **同じ領域を差し替えで使うペインには同じ `Rect` を返す**（Graph と Diff、
     // Branches / Stash / PRs。07 の「レイアウト」「右上のタブ」）。
     match Region::of(pane) {
@@ -350,12 +372,76 @@ pub fn files_placeholder(state: &AppState) -> &'static str {
 /// **Worktree ペインとコミット詳細のファイル一覧が同じものを使う**（07）。区画の
 /// 見出しを挟むかどうかはペインごとに違うが、行そのものが 2 本あると種別の字だけが
 /// 片方で古くなる。
-pub fn file_row(entry: &FileEntry) -> String {
-    format!(
-        " {} {}",
-        mark(entry.status),
-        path_label(&entry.path, entry.old_path.as_deref())
-    )
+///
+/// **`width` に入らないパスは左を切る**（[`ellipsize_left`]。07 の「Worktree ペイン」）。
+/// 右で切るとファイル名が消える。
+pub fn file_row(entry: &FileEntry, width: u16) -> String {
+    let lead = format!(" {} ", mark(entry.status));
+    let room = width.saturating_sub(u16::try_from(lead.len()).unwrap_or(u16::MAX));
+    let label = path_label(&entry.path, entry.old_path.as_deref());
+    lead + &ellipsize_left(&label, room)
+}
+
+/// `path` を `cells` セルに収める。溢れるときは先頭の成分から落として `…/` にする。
+///
+/// **`/` の区切りで落とす**（07 の「Worktree ペイン」）。どこまで落としてもファイル名が
+/// 入らないときは、書記素で左を落として `…` + 末尾にする。測るのは [`ellipsize`] と
+/// 同じく書記素ごと。
+fn ellipsize_left(path: &str, cells: u16) -> Cow<'_, str> {
+    if fits(path, cells) {
+        return Cow::Borrowed(path);
+    }
+    // `…/` の後ろに残す形を、長いほうから試す。先頭の成分は残す候補にしない
+    // （それはパス全体で、上で入らないと判っている）。
+    for (at, _) in path.match_indices('/') {
+        let rest = &path[at..];
+        if fits(rest, cells.saturating_sub(1)) {
+            return Cow::Owned(format!("…{rest}"));
+        }
+    }
+    if cells == 0 {
+        return Cow::Borrowed("");
+    }
+    // `…` の 1 セルを先に取っておき、末尾から詰める。
+    Cow::Owned(format!("…{}", take_cells(path, cells - 1, End::Tail)))
+}
+
+/// [`take_cells`] がどちらの端から取るか。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum End {
+    Head,
+    Tail,
+}
+
+/// `text` のうち `cells` セルに入るだけを、`end` の側から取る。
+///
+/// **書記素ごとに測る。** 描くときの単位がそれで、文字ごとに足すと異体字セレクタ付きの
+/// 絵文字（`❤️` は 2 文字で 2 セル、文字ごとだと 1）を少なく数えて `…` が溢れる。
+/// [`ellipsize`]（末尾を切る）と [`ellipsize_left`]（先頭を切る）が同じ測り方を使う。
+fn take_cells(text: &str, cells: u16, end: End) -> String {
+    let span = Span::raw(text);
+    let mut symbols: Vec<&str> = span
+        .styled_graphemes(Style::default())
+        .map(|grapheme| grapheme.symbol)
+        .collect();
+    if end == End::Tail {
+        symbols.reverse();
+    }
+    let mut left = usize::from(cells);
+    let taken = symbols
+        .iter()
+        .take_while(|symbol| {
+            let w = Span::raw(**symbol).width();
+            let fits = w <= left;
+            left = left.saturating_sub(w);
+            fits
+        })
+        .count();
+    let kept = &mut symbols[..taken];
+    if end == End::Tail {
+        kept.reverse();
+    }
+    kept.concat()
 }
 
 /// 変更種別の 1 文字。`git status --short` と同じ字を使う。
@@ -742,18 +828,7 @@ fn ellipsize(text: &str, cells: u16) -> Cow<'_, str> {
         return Cow::Borrowed("");
     }
     // `…` の 1 セルを先に取っておく。
-    let mut left = usize::from(cells - 1);
-    let mut kept = String::new();
-    // **書記素ごとに測る。** 描くときの単位がそれで、文字ごとに足すと異体字セレクタ付きの
-    // 絵文字（`❤️` は 2 文字で 2 セル、文字ごとだと 1）を少なく数えて `…` が溢れる。
-    for grapheme in Span::raw(text).styled_graphemes(Style::default()) {
-        let w = Span::raw(grapheme.symbol).width();
-        if w > left {
-            break;
-        }
-        left -= w;
-        kept.push_str(grapheme.symbol);
-    }
+    let mut kept = take_cells(text, cells - 1, End::Head);
     kept.push('…');
     Cow::Owned(kept)
 }
@@ -878,8 +953,8 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        degraded_label, ellipsize, file_row, hint_text, pane_area, progress_label, push_expanded,
-        window, wrapped, SPACES, SPLIT_MIN_WIDTH, TAB_WIDTH,
+        degraded_label, ellipsize, ellipsize_left, file_row, hint_text, pane_area, progress_label,
+        push_expanded, render_rows, window, wrapped, SPACES, SPLIT_MIN_WIDTH, TAB_WIDTH,
     };
     use crate::test_util::{
         draw, footer_area, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status,
@@ -909,7 +984,7 @@ mod tests {
         use mewgit_core::git_read::FileStatus;
         use mewgit_core::test_util::fake_entry;
 
-        let row = |status| file_row(&fake_entry("a.txt", status));
+        let row = |status| file_row(&fake_entry("a.txt", status), 80);
 
         assert_eq!(row(FileStatus::Added), " A a.txt");
         assert_eq!(row(FileStatus::Modified), " M a.txt");
@@ -922,7 +997,68 @@ mod tests {
         // rename は元の名前も出す（`path_label`）。
         let mut renamed = fake_entry("new.txt", FileStatus::Renamed);
         renamed.old_path = Some("old.txt".into());
-        assert_eq!(file_row(&renamed), " R old.txt -> new.txt");
+        assert_eq!(file_row(&renamed, 80), " R old.txt -> new.txt");
+    }
+
+    #[test]
+    fn a_file_row_that_does_not_fit_keeps_the_end_of_the_path() {
+        // **右で切るとファイル名が消える**（07 の「Worktree ペイン」）。種別の 3 セルを
+        // 除いた残りに、`…/` と入るだけの末尾の成分を置く。
+        use mewgit_core::git_read::FileStatus;
+        use mewgit_core::test_util::fake_entry;
+
+        let entry = fake_entry(
+            "crates/mewgit-tui/src/panes/worktree.rs",
+            FileStatus::Modified,
+        );
+        // 幅 24 なら種別の 3 セルを除いて 21 セル。`…/panes/worktree.rs`（19 セル）は入り、
+        // `…/src/panes/worktree.rs`（23 セル）は入らない。
+        assert_eq!(file_row(&entry, 24), " M …/panes/worktree.rs");
+        assert_eq!(file_row(&entry, 21), " M …/worktree.rs");
+        // 入る幅では切らない。
+        assert_eq!(
+            file_row(&entry, 42),
+            " M crates/mewgit-tui/src/panes/worktree.rs"
+        );
+    }
+
+    #[test]
+    fn a_left_cut_falls_back_to_graphemes_when_the_name_alone_is_too_long() {
+        // ファイル名だけでも入らなければ、区切りを諦めて末尾を書記素で残す。
+        assert_eq!(ellipsize_left("dir/abcdefgh.rs", 6), "…gh.rs");
+        // 区切りが無いパスも同じ。
+        assert_eq!(ellipsize_left("abcdefgh.rs", 4), "….rs");
+        // **全角は 2 セルで数える。** 文字数で数えると `…` が枠を越える。
+        assert_eq!(ellipsize_left("ディレクトリ/ファイル", 7), "…ァイル");
+        assert_eq!(ellipsize_left("a/b", 0), "");
+    }
+
+    #[test]
+    fn a_left_cut_of_a_rename_drops_the_old_name_first() {
+        // 1 本の文字列として左から切る（07 で受け入れた穴）。`R` の印で rename は読める。
+        assert_eq!(
+            ellipsize_left("src/old_name.rs -> src/new_name.rs", 20),
+            "…/new_name.rs"
+        );
+    }
+
+    #[test]
+    fn render_rows_builds_only_the_rows_in_the_window() {
+        // **組んでから捨てない**（07 の「見えない行の組み立て」）。行数のテストだけでは、
+        // 全部組んで窓の外を捨てる形に戻しても通るので、呼ばれた添字を数える。
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 4)).unwrap();
+        let mut built = Vec::new();
+        terminal
+            .draw(|frame| {
+                render_rows(frame, frame.area(), 1000, 500..501, |at| {
+                    built.push(at);
+                    ratatui::text::Line::raw(at.to_string())
+                });
+            })
+            .unwrap();
+
+        assert_eq!(built, vec![497, 498, 499, 500]);
     }
 
     #[test]

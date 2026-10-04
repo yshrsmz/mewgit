@@ -45,13 +45,19 @@ pub struct Rows {
 }
 
 impl TopPane {
-    /// いま出すタブの行を組む。
-    pub fn build(state: &AppState) -> Self {
+    /// いま出すタブの行を組む。`width` は描く領域の幅（枠を含む）。
+    ///
+    /// **幅を受けるのは PRs の集計の上限のため**（`prs::lines`。07 の「PRs ペイン」）。
+    /// 枠の内側の幅は描くときと同じ [`block`](Self::block) から出す。
+    pub fn build(state: &AppState, width: u16) -> Self {
         let tab = state.right_tab;
+        let inner = Self::block(state, tab)
+            .inner(Rect::new(0, 0, width, 1))
+            .width;
         let rows = match tab {
             RightTab::Branches => branches::lines(state),
             RightTab::Stash => stash::lines(state),
-            RightTab::Prs => prs::lines(state),
+            RightTab::Prs => prs::lines(state, inner),
         };
         TopPane { tab, rows }
     }
@@ -66,7 +72,7 @@ impl TopPane {
     /// `Padding` を足すと、割く高さだけが古いまま残って最後の 1 行が黙って消える。
     pub fn height(&self, state: &AppState, available: u16) -> u16 {
         let probe = Rect::new(0, 0, 0, u16::MAX);
-        let border_rows = probe.height - self.block(state).inner(probe).height;
+        let border_rows = probe.height - Self::block(state, self.tab).inner(probe).height;
         ui::capped_rows(self.rows.lines.len() + usize::from(border_rows), available)
     }
 
@@ -75,8 +81,10 @@ impl TopPane {
     /// **`focus` はタブと突き合わせる。** `focus == Pane::Branches` のように片方の
     /// 名前で見ると、揃っていない状態（`AppState::reseat_focus` が揃える）で枠が細く
     /// 描ける。
-    fn block(&self, state: &AppState) -> Block<'static> {
-        ui::pane_block(right_tabs(state), state.focus == self.tab.pane())
+    ///
+    /// **`self` を取らない** —— 組む前（[`build`](Self::build)）にも内側の幅を測る。
+    fn block(state: &AppState, tab: RightTab) -> Block<'static> {
+        ui::pane_block(right_tabs(state), state.focus == tab.pane())
     }
 
     /// 描く。領域の高さは [`height`](Self::height) が決める。
@@ -86,7 +94,7 @@ impl TopPane {
     /// （実際に落ちた —— PRs ペインを一覧に書き直したときに反転が消え、`j` / `k` を
     /// 押しても画面が変わらないまま `o` がカーソル行を開いていた）。
     pub fn render(self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let block = self.block(state);
+        let block = Self::block(state, self.tab);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -96,7 +104,7 @@ impl TopPane {
         }
         // 選べる行が無いときは先頭を見せる（文言 1 行しか無い）。
         let at = cursor.unwrap_or(0);
-        ui::render_rows(frame, inner, lines, at..at + 1);
+        ui::render_built(frame, inner, lines, at..at + 1);
     }
 }
 

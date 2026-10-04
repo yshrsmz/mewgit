@@ -53,7 +53,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, selected: u64) {
     let chosen = newest_first()
         .nth(cursor)
         .expect("notice_log_row は一覧の中を返す");
-    let (content, content_rows) = ui::wrapped(content(chosen), width);
+    // **中身は画面に入るぶん + 1 行で打ち切る**（07 の「見えない行の組み立て」）。
+    // 箱は端末の高さで頭打ちになるので、それを越えたかが判れば `…` も箱の高さも決まる。
+    let (content, content_rows) = ui::wrapped(content(chosen, usize::from(area.height) + 1), width);
 
     let inner = modals::place(
         frame,
@@ -81,7 +83,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, selected: u64) {
     if let Some(line) = rows.get_mut(cursor) {
         line.style = theme::selected();
     }
-    ui::render_rows(frame, list, rows, cursor..cursor + 1);
+    ui::render_built(frame, list, rows, cursor..cursor + 1);
 
     frame.render_widget(
         Block::default()
@@ -125,17 +127,35 @@ fn level(level: NoticeLevel) -> (char, Style) {
     }
 }
 
-/// カーソル行の中身 —— `message` の全文、空行、`detail` の全文。
+/// カーソル行の中身 —— `message` の全文、空行、`detail` の全文。ただし先頭の
+/// `max_lines` 行まで。
 ///
 /// **`message` を 1 行目で切らない。** toml のパースエラーのように複数行の案内がある
 /// （ステータスバーが 1 行目だけを描くのはこのため。07）。**タブは開く**
 /// （`ui::push_expanded`）—— git の stderr は上書きされるファイルをタブで字下げする。
-fn content(notice: &Notice) -> Text<'static> {
+///
+/// **`max_lines` で打ち切る。** `detail` は長さに上限が無い（hook の出力をそのまま
+/// 運ぶ）ので、全文を組んで折り返しを測ると 5000 行で 1 フレーム 1.78ms かかった（打ち切って 133µs。07）。
+/// 元の 1 行は折り返して 1 行以上になるので、元の行で数えて打ち切っても「描ける行を
+/// 越えたか」の判定は変わらない。
+fn content(notice: &Notice, max_lines: usize) -> Text<'static> {
+    let detail = notice
+        .detail
+        .as_deref()
+        .into_iter()
+        .flat_map(|detail| std::iter::once("").chain(detail.lines()));
     let mut out = String::new();
-    ui::push_expanded(&mut out, &notice.message);
-    if let Some(detail) = &notice.detail {
-        out.push_str("\n\n");
-        ui::push_expanded(&mut out, detail);
+    for (index, line) in notice
+        .message
+        .lines()
+        .chain(detail)
+        .take(max_lines)
+        .enumerate()
+    {
+        if index > 0 {
+            out.push('\n');
+        }
+        ui::push_expanded(&mut out, line);
     }
     Text::from(out)
 }
@@ -294,6 +314,22 @@ mod tests {
                 .starts_with('…'),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_content_is_cut_at_the_lines_it_can_show() {
+        // **全文を組まない**（07 の「見えない行の組み立て」）。`detail` は長さに上限が
+        // 無いので、描ける行 + 1 を越えたぶんは組む前に落とす。
+        let mut state = state_at("/repo");
+        let detail: String = (0..5000).map(|i| format!("stderr {i}\n")).collect();
+        state.push_notice(NoticeLevel::Error, "失敗しました".to_string(), Some(detail));
+        let notice = state.notices.back().expect("積んだ");
+
+        let text = super::content(notice, 4);
+
+        // message、空行、detail の 2 行。
+        assert_eq!(text.lines.len(), 4, "{text:?}");
+        assert_eq!(text.lines[3].to_string(), "stderr 1");
     }
 
     #[test]

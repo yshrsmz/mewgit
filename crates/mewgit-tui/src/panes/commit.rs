@@ -4,7 +4,7 @@
 //! どちらを描くかは `focus` ではなくグラフの選択で決まる（`ui::render`）。
 
 use mewgit_core::app::{AppState, Pane};
-use mewgit_core::git_read::{short_oid, Commit, CommitDetail, Signature, Timestamp};
+use mewgit_core::git_read::{short_oid, Commit, CommitDetail, FileEntry, Signature, Timestamp};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -33,10 +33,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // **一覧は先に組んでから高さを決める。** 行数を別に数えると、見出しや文言の
+    // **一覧の行数を先に決めてから高さを決める。** 行数を別に数えると、見出しや文言の
     // 行数を変えたときに片方だけ直しても通り、枠からはみ出すか余白が残る
-    // （`panes::worktree::lines` と同じ理由）。残りを詳細に使う。
-    let (files, files_cursor) = files_lines(state);
+    // （`panes::worktree::rows` と同じ理由）。残りを詳細に使う。
+    let (files, files_cursor) = files_rows(state);
     // 上限は内側の半分。ファイルの多いコミットで**メッセージが 1 行も見えなくなる**のを
     // 防ぐ（見出しに `MIN_MESSAGE_ROWS` を確保しているのと同じ理由）。規則は
     // Branches ペインと共有する（`ui::capped_rows`）。
@@ -49,7 +49,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) 
     // カーソルを動かし、`Enter` が `DiffTarget::Commit` を開く）のに、ユーザーは
     // その行を一度も見ていないことになる。
     render_detail(frame, top, state);
-    ui::render_rows(frame, files_area, files, files_cursor..files_cursor + 1);
+    ui::render_rows(
+        frame,
+        files_area,
+        files.len(),
+        files_cursor..files_cursor + 1,
+        |at| file_line(files[at], at == files_cursor, files_area.width),
+    );
 }
 
 /// 見出しとメッセージを描く。届いていなければ理由を出す。
@@ -73,13 +79,24 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
     );
 }
 
+/// ファイル一覧の描く行の 1 つ。**借用だけで `String` を持たない**（`panes::worktree` の
+/// `Row` と同じ形）。依存の更新のような 500 ファイルのコミットでも、文字列を組むのは
+/// 窓に入った行だけになる（`ui::render_rows`）。
+#[derive(Clone, Copy)]
+enum FileRow<'a> {
+    /// 一覧が出せないときの文言。
+    Placeholder(&'static str),
+    /// `Files (n)`。
+    Heading(usize),
+    File(&'a FileEntry),
+}
+
 /// ファイル一覧の行と、カーソルが何行目か。
 ///
-/// 一覧が出せないときは文言 1 行（カーソルはその行）。**行を組むのはここ 1 本**で、
+/// 一覧が出せないときは文言 1 行（カーソルはその行）。**行を並べるのはここ 1 本**で、
 /// 割く高さもこの行数から出す。行番号を別に数えると、見出しを何行入れるかの規則が
-/// 2 本になり、反転する行と窓の基準行が静かにずれる
-/// （`panes::worktree::lines` と同じ）。
-fn files_lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
+/// 2 本になり、反転する行と窓の基準行が静かにずれる（`panes::worktree::rows` と同じ）。
+fn files_rows(state: &AppState) -> (Vec<FileRow<'_>>, usize) {
     // **空の一覧と「まだ届いていない」を出し分ける**（01 の「コミットのファイル
     // 一覧」）。`--allow-empty` のコミットは変更を持たない。
     let Some(files) = state
@@ -87,25 +104,25 @@ fn files_lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
         .fresh_files()
         .filter(|files| !files.entries.is_empty())
     else {
-        return (vec![Line::raw(ui::files_placeholder(state))], 0);
+        return (vec![FileRow::Placeholder(ui::files_placeholder(state))], 0);
     };
 
-    let mut lines = Vec::with_capacity(files.entries.len() + 1);
-    lines.push(Line::from(Span::styled(
-        format!("Files ({})", files.entries.len()),
-        theme::muted(),
-    )));
-    let mut cursor = 0;
-    for (index, entry) in files.entries.iter().enumerate() {
-        let line = Line::raw(ui::file_row(entry));
-        if index == files.cursor {
-            cursor = lines.len();
-            lines.push(line.style(theme::selected()));
-        } else {
-            lines.push(line);
+    let mut rows = Vec::with_capacity(files.entries.len() + 1);
+    rows.push(FileRow::Heading(files.entries.len()));
+    let cursor = rows.len() + files.cursor;
+    rows.extend(files.entries.iter().map(FileRow::File));
+    (rows, cursor)
+}
+
+/// 1 行を組む。カーソル行は反転（見出しと文言は選べる行ではない）。
+fn file_line(row: FileRow<'_>, is_cursor: bool, width: u16) -> Line<'static> {
+    match row {
+        FileRow::Placeholder(text) => Line::raw(text),
+        FileRow::Heading(count) => {
+            Line::from(Span::styled(format!("Files ({count})"), theme::muted()))
         }
+        FileRow::File(entry) => theme::select(Line::raw(ui::file_row(entry, width)), is_cursor),
     }
-    (lines, cursor)
 }
 
 /// 詳細がまだ無いときの文言。

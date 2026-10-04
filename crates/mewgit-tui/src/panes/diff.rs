@@ -226,10 +226,7 @@ mod tests {
     use mewgit_core::test_util::{fake_entry, fake_file_diff, fake_hunk, fake_stash};
 
     /// 既定の 80x24。左は 46 桁になるので、テストはその幅で読める内容にする。
-    const SIZE: TermSize = TermSize {
-        width: 80,
-        height: 24,
-    };
+    const SIZE: TermSize = crate::test_util::SPLIT_NARROWEST;
 
     /// `a.txt` だけが変更されたワーキングツリー。
     fn one_file() -> WorktreeSnapshot {

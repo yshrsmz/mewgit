@@ -12,9 +12,10 @@ use crate::ui::{self, theme};
 /// タブ見出しに出すこのペインの名前。
 ///
 /// **件数を添えない**（Branches とは違う）。見出しは 3 枚ぶんが右列の枠の上辺に並び、
-/// 80x24 の右列は枠の内側が 30 セルしか無い。`Branches (12)` と `Stash (3)` と `PRs` を
-/// 前後の空白と区切りごと並べると 33 セルで、`PRs` が切れる（件数なしなら 29 セル）。
-/// 件数は一覧の `stash@{n}` から読める。
+/// 決めたときの 80x24 の右列は枠の内側が 30 セルだった。`Branches (12)` と `Stash (3)` と
+/// `PRs` を前後の空白と区切りごと並べると 33 セルで、`PRs` が切れる（件数なしなら 29 セル）。
+/// 件数は一覧の `stash@{n}` から読める。**80 桁で右列を割らなくなってこの前提は崩れた**
+/// ので、添えるかは M6 の狭い幅での畳み方で決め直す（07 の「右上のタブ」）。
 pub(super) fn title() -> &'static str {
     "Stash"
 }
@@ -39,7 +40,7 @@ pub(super) fn lines(state: &AppState) -> Rows {
 
 /// 1 行。`stash@{0}  On main: wip`。
 ///
-/// **`stash@{n}` を先に置く。** 右列は 80 桁で内側 30 セルほどしか無く、メッセージは
+/// **`stash@{n}` を先に置く。** 右列は狭く（07 の「狭い端末」）、メッセージは
 /// 右で切れる。番号が残れば、端末で `git stash show stash@{n}` を打つときの手掛かりに
 /// なる。
 fn row(stash: &StashEntry) -> Line<'static> {
@@ -77,10 +78,7 @@ mod tests {
     }
 
     /// 既定の 80x24。
-    const SIZE: TermSize = TermSize {
-        width: 80,
-        height: 24,
-    };
+    const SIZE: TermSize = crate::test_util::SPLIT_NARROWEST;
 
     #[test]
     fn the_list_shows_each_stash_by_its_name_and_message() {
@@ -140,9 +138,11 @@ mod tests {
     }
 
     #[test]
-    fn every_tab_title_fits_in_the_default_terminal() {
-        // **80x24 の右列は枠の内側 30 セル**（`title` の doc）。Stash に件数を添えると
-        // `PRs` が切れる境目なので、ブランチの件数を 2 桁にして見る。
+    fn every_tab_title_fits_in_the_narrowest_right_column() {
+        // **右列がいちばん狭い幅で、3 枚の見出しが入るかを見る。** 決めたときの
+        // 80x24（内側 30 セル）では Stash に件数を添えると `PRs` が切れる境目だった
+        // （`title` の doc）。いまの `SIZE`（内側 38 セル）は境目ではないので、
+        // ブランチの件数を 2 桁にしたまま、見出しが入ることだけを見る。
         let mut state = state_at("/repo");
         with_stashes(&mut state, Ok((0..3).map(fake_stash).collect()));
         let branches = (0..12)

@@ -15,6 +15,16 @@ use ratatui::Terminal;
 
 use crate::ui;
 
+/// 右列がいちばん狭くなる端末（本文を左右に割る最小の幅）。
+///
+/// **右列のペインを読むテストはこの幅で描く。** 80 桁では右列を出さず `focus` の
+/// ペインだけを描くので（07 の「レイアウト」）、右列の幅に効く見張りはここが境目。
+/// 幅を `ui` から導くので、割る幅を変えたときにテストだけ古い桁を持たない。
+pub const SPLIT_NARROWEST: TermSize = TermSize {
+    width: ui::SPLIT_MIN_WIDTH,
+    height: 24,
+};
+
 /// 描画結果を行ごとの文字列にする。
 ///
 /// `TestBackend` の `Display` を使う。自前でセルを走査すると全角文字の 2 セル目が

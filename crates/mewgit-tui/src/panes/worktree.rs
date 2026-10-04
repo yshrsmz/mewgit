@@ -92,11 +92,8 @@ mod tests {
     use mewgit_core::git_read::{FileStatus, WorktreeSnapshot};
     use mewgit_core::test_util::fake_entry;
 
-    /// 既定の 80x24。右ペインは 32 桁になるので、テストはその幅で読める内容にする。
-    const SIZE: TermSize = TermSize {
-        width: 80,
-        height: 24,
-    };
+    /// 右列がいちばん狭くなる端末。テストはその幅で読める内容にする。
+    const SIZE: TermSize = crate::test_util::SPLIT_NARROWEST;
 
     /// スナップショットを `Msg::StatusLoaded` 経由で入れた状態。
     ///

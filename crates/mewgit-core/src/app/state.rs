@@ -860,7 +860,7 @@ impl TargetState {
 ///
 /// **読み手は `r` の通知と `A` の通知（`update::account::account_view` の `Err`）。**
 /// どちらも 1 行で予算が同じなので文言を分けない（#73 の「置かれる場所の予算が違うなら
-/// 別の文言でよい」が当たらない側）。**枠の内側 30 セルの PRs ペイン**（07）は別で、
+/// 別の文言でよい」が当たらない側）。**枠の狭い PRs ペイン**（07）は別で、
 /// あちらが読むのは M6 のタスク（`docs/plan.md`）。
 ///
 /// [`DegradedReason`]: crate::auth::DegradedReason

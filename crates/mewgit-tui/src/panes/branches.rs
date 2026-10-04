@@ -112,11 +112,8 @@ mod tests {
         state
     }
 
-    /// 既定の 80x24。右列は 32 桁（07）。
-    const SIZE: TermSize = TermSize {
-        width: 80,
-        height: 24,
-    };
+    /// 右列がいちばん狭くなる端末（07 の「狭い端末」）。
+    const SIZE: TermSize = crate::test_util::SPLIT_NARROWEST;
 
     #[test]
     fn the_list_marks_the_head_branch_and_counts_the_rest() {

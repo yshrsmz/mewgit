@@ -103,9 +103,9 @@ pub fn render(frame: &mut Frame, area: Rect, picker: Picker<'_>) {
     if let Some(line) = lines.get_mut(picker.cursor) {
         line.style = theme::selected();
     }
-    // **`ui::render_rows` を通す。** 素の `Paragraph` で描くと、枠に入りきらない
+    // **`ui::render_built` を通す。** 素の `Paragraph` で描くと、枠に入りきらない
     // 本数のときにカーソル行が画面の外へ出たまま `j` で動き続け、**見えていない
     // 相手を `Enter` で選ぶ** —— このモーダルが防ぐために在る「黙って選ばない」
     // そのもの。ペインの一覧が 4 つともここを通っている。
-    ui::render_rows(frame, list, lines, picker.cursor..picker.cursor + 1);
+    ui::render_built(frame, list, lines, picker.cursor..picker.cursor + 1);
 }

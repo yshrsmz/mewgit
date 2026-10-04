@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use mewgit_core::app::{AppState, DiffView, Pane};
-use mewgit_core::git_read::{DiffTarget, FileStatus, HunkLine, LineOrigin};
+use mewgit_core::git_read::{DiffTarget, FileDiff, FileStatus, HunkLine, LineOrigin};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -37,13 +37,48 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     };
 
-    let (lines, cursor) = lines(view);
-    if lines.is_empty() {
+    let (rows, cursor) = rows(view);
+    if rows.is_empty() {
         frame.render_widget(Paragraph::new(no_hunks(view)), inner);
         return;
     }
 
-    ui::render_rows(frame, inner, lines, cursor);
+    // カーソルがどのハンクも指していなければ（範囲が空）、どの行も反転しない。
+    let selected = (!cursor.is_empty()).then_some(cursor.start);
+    ui::render_rows(frame, inner, rows.len(), cursor, |at| {
+        line(rows[at], selected == Some(at))
+    });
+}
+
+/// 描く行の 1 つ。**借用だけで `String` を持たない** —— 長い diff でも、文字列を
+/// 組むのは窓に入った行だけになる（`ui::render_rows`）。
+#[derive(Clone, Copy)]
+enum Row<'a> {
+    /// ファイルの見出し（枠のタイトルがファイルを名乗らないときだけ。[`names_file`]）。
+    File(&'a FileDiff),
+    /// ハンクの見出し（`@@ ...`）。
+    Hunk(&'a str),
+    /// ハンクの本文の 1 行。
+    Body(&'a HunkLine),
+}
+
+/// 1 行を組む。`selected` はカーソルの指すハンクの見出し。
+fn line(row: Row<'_>, selected: bool) -> Line<'_> {
+    match row {
+        Row::File(file) => Line::from(Span::styled(
+            ui::path_label(&file.path, file.old_path.as_deref()),
+            theme::muted(),
+        )),
+        Row::Hunk(header) => {
+            let header = Line::from(Span::styled(header, theme::muted()));
+            if selected {
+                header.style(theme::selected())
+            } else {
+                header
+            }
+        }
+        Row::Body(body) => hunk_line(body),
+    }
 }
 
 /// 枠のタイトル。**対象を必ず出す**（07）。
@@ -121,39 +156,32 @@ fn no_hunks(view: &DiffView) -> &'static str {
 ///
 /// **返すのは見出しの行番号ではなくハンク全体の範囲。** 見出し 1 行だけを窓に入れる
 /// 形にすると、それが窓の下端に来て本文が 1 行も見えない（07 の「Diff ペイン」）。
+/// 反転するのは範囲の先頭（ハンクの見出し）。
 ///
 /// **ファイルの見出しは、枠のタイトルがファイルを名乗っていないときだけ**
 /// （[`names_file`]）。名乗っていれば、同じ名前を 2 度並べても行を消費するだけになる。
-fn lines(view: &DiffView) -> (Vec<Line<'_>>, Range<usize>) {
-    let mut lines = Vec::new();
+fn rows(view: &DiffView) -> (Vec<Row<'_>>, Range<usize>) {
+    let mut rows = Vec::new();
     let mut cursor = 0..0;
     let headed = !names_file(view);
 
     for (file_index, file) in view.files.iter().enumerate() {
         if headed {
-            let label = ui::path_label(&file.path, file.old_path.as_deref());
-            lines.push(Line::from(Span::styled(label, theme::muted())));
+            rows.push(Row::File(file));
         }
 
         for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-            let start = lines.len();
-            let header = Line::from(Span::styled(hunk.header.as_str(), theme::muted()));
-            let selected = view.cursor.file == file_index && view.cursor.hunk == hunk_index;
+            let start = rows.len();
+            rows.push(Row::Hunk(hunk.header.as_str()));
+            rows.extend(hunk.lines.iter().map(Row::Body));
 
-            lines.push(if selected {
-                header.style(theme::selected())
-            } else {
-                header
-            });
-            lines.extend(hunk.lines.iter().map(hunk_line));
-
-            if selected {
-                cursor = start..lines.len();
+            if view.cursor.file == file_index && view.cursor.hunk == hunk_index {
+                cursor = start..rows.len();
             }
         }
     }
 
-    (lines, cursor)
+    (rows, cursor)
 }
 
 /// 対象全体の diff の枠のタイトル（[`title`]）。
@@ -180,9 +208,7 @@ fn names_file(view: &DiffView) -> bool {
 }
 
 /// ハンクの 1 行。先頭に種別の記号を付ける。
-/// 中身は所有した `String` なので、どの寿命の `Line` としても返せる。`'static` に
-/// 固定すると、ヘッダを借用している `Vec<Line<'_>>` に `extend` できない
-/// （`&mut Vec<T>` は `T` に対して不変）。
+/// 中身は所有した `String` なので、どの寿命の `Line` としても返せる。
 fn hunk_line<'a>(line: &HunkLine) -> Line<'a> {
     // **記号は `LineOrigin::mark()`。** パッチに戻す `git_exec::hunk_patch` と同じ
     // ものを使う。ここで別に書くと「画面では文脈行、パッチでは追加行」になりうる。

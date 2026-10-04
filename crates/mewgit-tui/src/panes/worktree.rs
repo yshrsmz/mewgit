@@ -3,7 +3,7 @@
 //! 1 行は `<種別 1 文字> <パス>`。区画の見出しと、その中のファイルを並べる。
 
 use mewgit_core::app::{AppState, JobKind, Pane, WorktreeState};
-use mewgit_core::git_read::WorktreeSection;
+use mewgit_core::git_read::{FileEntry, WorktreeSection};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -22,9 +22,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let (lines, cursor) = lines(state);
+    let (rows, cursor) = rows(state);
     // 見せたいのはカーソルの 1 行だけ。Diff ペインはハンク全体を渡す。
-    ui::render_rows(frame, inner, lines, cursor..cursor + 1);
+    ui::render_rows(frame, inner, rows.len(), cursor..cursor + 1, |at| {
+        line(rows[at], at == cursor, inner.width)
+    });
+}
+
+/// 描く行の 1 つ。**借用だけで `String` を持たない** —— 全行ぶん並べても安く、
+/// 文字列を組むのは窓に入った行だけになる（`ui::render_rows`）。
+#[derive(Clone, Copy)]
+enum Row<'a> {
+    Heading(WorktreeSection),
+    File(&'a FileEntry),
 }
 
 /// 枠のタイトル。件数は全区画の合計。
@@ -50,8 +60,8 @@ fn empty_message(state: &AppState) -> &'static str {
 ///
 /// 行番号を別の関数で数え直さないのは、見出しを何行入れるかの規則が 2 本になると、
 /// 反転する行と窓の基準行が静かにずれるため。
-fn lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
-    let mut lines = Vec::with_capacity(state.worktree.len() + WorktreeState::SECTIONS.len());
+fn rows(state: &AppState) -> (Vec<Row<'_>>, usize) {
+    let mut rows = Vec::with_capacity(state.worktree.len() + WorktreeState::SECTIONS.len());
     let mut cursor = 0;
 
     for section in WorktreeState::SECTIONS {
@@ -59,19 +69,31 @@ fn lines(state: &AppState) -> (Vec<Line<'_>>, usize) {
         if entries.is_empty() {
             continue;
         }
-        lines.push(Line::from(Span::styled(heading(section), theme::muted())));
+        rows.push(Row::Heading(section));
 
         for (index, entry) in entries.iter().enumerate() {
-            let line = Line::raw(ui::file_row(entry));
             if state.worktree.section == section && state.worktree.cursor == index {
-                cursor = lines.len();
-                lines.push(line.style(theme::selected()));
+                cursor = rows.len();
+            }
+            rows.push(Row::File(entry));
+        }
+    }
+    (rows, cursor)
+}
+
+/// 1 行を組む。カーソル行は反転。
+fn line(row: Row<'_>, selected: bool, width: u16) -> Line<'static> {
+    match row {
+        Row::Heading(section) => Line::from(Span::styled(heading(section), theme::muted())),
+        Row::File(entry) => {
+            let line = Line::raw(ui::file_row(entry, width));
+            if selected {
+                line.style(theme::selected())
             } else {
-                lines.push(line);
+                line
             }
         }
     }
-    (lines, cursor)
 }
 
 /// 区画の見出し。
@@ -117,6 +139,24 @@ mod tests {
         assert!(text.contains("? new.txt"), "{text}");
         // 空の区画は見出しごと出さない。
         assert!(!text.contains("Conflicted"), "{text}");
+    }
+
+    #[test]
+    fn a_long_path_keeps_its_file_name() {
+        // **右で切るとファイル名が消える**（07）。右列の内側 38 セルから種別の 3 セルを
+        // 除いた 35 セルに、`…/` と入るだけの末尾を置く。
+        let state = state_with_status(WorktreeSnapshot {
+            unstaged: vec![fake_entry(
+                "crates/mewgit-tui/src/panes/a_long_file_name.rs",
+                FileStatus::Modified,
+            )],
+            ..WorktreeSnapshot::default()
+        });
+
+        let text = pane_text(&state, SIZE, Pane::Worktree);
+
+        assert!(text.contains("M …/src/panes/a_long_file_name.rs"), "{text}");
+        assert!(!text.contains("crates/"), "{text}");
     }
 
     #[test]
@@ -180,8 +220,8 @@ mod tests {
             ..WorktreeSnapshot::default()
         });
         // 見出し(0) s.txt(1) 見出し(2) u.txt(3)。起動時のカーソルは Unstaged。
-        assert_eq!(lines(&state).1, 3);
+        assert_eq!(rows(&state).1, 3);
         state.worktree.move_cursor(-1);
-        assert_eq!(lines(&state).1, 1);
+        assert_eq!(rows(&state).1, 1);
     }
 }

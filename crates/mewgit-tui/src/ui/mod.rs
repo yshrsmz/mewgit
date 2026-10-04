@@ -391,10 +391,11 @@ fn ellipsize_left(path: &str, cells: u16) -> Cow<'_, str> {
     if fits(path, cells) {
         return Cow::Borrowed(path);
     }
-    // `…/` の後ろに残す形を、長いほうから試す。
+    // `…/` の後ろに残す形を、長いほうから試す。先頭の成分は残す候補にしない
+    // （それはパス全体で、上で入らないと判っている）。
     for (at, _) in path.match_indices('/') {
         let rest = &path[at..];
-        if fits(rest, cells.saturating_sub(1)) && at > 0 {
+        if fits(rest, cells.saturating_sub(1)) {
             return Cow::Owned(format!("…{rest}"));
         }
     }
@@ -402,22 +403,45 @@ fn ellipsize_left(path: &str, cells: u16) -> Cow<'_, str> {
         return Cow::Borrowed("");
     }
     // `…` の 1 セルを先に取っておき、末尾から詰める。
-    let mut left = usize::from(cells - 1);
-    let span = Span::raw(path);
-    let graphemes: Vec<&str> = span
+    Cow::Owned(format!("…{}", take_cells(path, cells - 1, End::Tail)))
+}
+
+/// [`take_cells`] がどちらの端から取るか。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum End {
+    Head,
+    Tail,
+}
+
+/// `text` のうち `cells` セルに入るだけを、`end` の側から取る。
+///
+/// **書記素ごとに測る。** 描くときの単位がそれで、文字ごとに足すと異体字セレクタ付きの
+/// 絵文字（`❤️` は 2 文字で 2 セル、文字ごとだと 1）を少なく数えて `…` が溢れる。
+/// [`ellipsize`]（末尾を切る）と [`ellipsize_left`]（先頭を切る）が同じ測り方を使う。
+fn take_cells(text: &str, cells: u16, end: End) -> String {
+    let span = Span::raw(text);
+    let mut symbols: Vec<&str> = span
         .styled_graphemes(Style::default())
         .map(|grapheme| grapheme.symbol)
         .collect();
-    let mut start = graphemes.len();
-    for (index, symbol) in graphemes.iter().enumerate().rev() {
-        let w = Span::raw(*symbol).width();
-        if w > left {
-            break;
-        }
-        left -= w;
-        start = index;
+    if end == End::Tail {
+        symbols.reverse();
     }
-    Cow::Owned(format!("…{}", graphemes[start..].concat()))
+    let mut left = usize::from(cells);
+    let taken = symbols
+        .iter()
+        .take_while(|symbol| {
+            let w = Span::raw(**symbol).width();
+            let fits = w <= left;
+            left = left.saturating_sub(w);
+            fits
+        })
+        .count();
+    let kept = &mut symbols[..taken];
+    if end == End::Tail {
+        kept.reverse();
+    }
+    kept.concat()
 }
 
 /// 変更種別の 1 文字。`git status --short` と同じ字を使う。
@@ -804,18 +828,7 @@ fn ellipsize(text: &str, cells: u16) -> Cow<'_, str> {
         return Cow::Borrowed("");
     }
     // `…` の 1 セルを先に取っておく。
-    let mut left = usize::from(cells - 1);
-    let mut kept = String::new();
-    // **書記素ごとに測る。** 描くときの単位がそれで、文字ごとに足すと異体字セレクタ付きの
-    // 絵文字（`❤️` は 2 文字で 2 セル、文字ごとだと 1）を少なく数えて `…` が溢れる。
-    for grapheme in Span::raw(text).styled_graphemes(Style::default()) {
-        let w = Span::raw(grapheme.symbol).width();
-        if w > left {
-            break;
-        }
-        left -= w;
-        kept.push_str(grapheme.symbol);
-    }
+    let mut kept = take_cells(text, cells - 1, End::Head);
     kept.push('…');
     Cow::Owned(kept)
 }

@@ -3,6 +3,7 @@
 //! ペインをまたいで使うのでここに置く。個々のペインで色名を直接書かない（07）。
 
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Line;
 
 /// 空白区切りのスタイル指定を読む。
 ///
@@ -28,6 +29,16 @@ pub fn style(spec: &str) -> Style {
 /// `[theme]` にキーを足すときの受け口でもある。
 pub fn selected() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
+}
+
+/// `is_cursor` なら行に [`selected`] を当てる。窓の中の行だけを組むペイン
+/// （`ui::render_rows`）が、組みながら反転するのに使う。
+pub fn select(line: Line<'_>, is_cursor: bool) -> Line<'_> {
+    if is_cursor {
+        line.style(selected())
+    } else {
+        line
+    }
 }
 
 /// フォーカスのあるペインの枠と見出し（07 の「ペインとフォーカス」）。

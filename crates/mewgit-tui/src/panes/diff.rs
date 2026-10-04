@@ -70,12 +70,7 @@ fn line(row: Row<'_>, selected: bool) -> Line<'_> {
             theme::muted(),
         )),
         Row::Hunk(header) => {
-            let header = Line::from(Span::styled(header, theme::muted()));
-            if selected {
-                header.style(theme::selected())
-            } else {
-                header
-            }
+            theme::select(Line::from(Span::styled(header, theme::muted())), selected)
         }
         Row::Body(body) => hunk_line(body),
     }

@@ -128,14 +128,24 @@ fn pr_row(
     summary: &str,
 ) -> Line<'static> {
     let label = status_label(pr);
+    let [mark, number] = lead(pr, login);
     Line::from(vec![
-        Span::styled(mark(pr, login), theme::muted()),
-        Span::raw(format!("#{} ", pr.number)),
+        mark,
+        number,
         Span::styled(format!("{label:width$}"), status_style(pr, theme)),
         // **空なら 1 セルも描かれない**ので、幅 0 の桁はここで消える。
         Span::styled(summary.to_string(), theme::muted()),
         Span::raw(format!("{COLUMN_GAP}{}", pr.title)),
     ])
+}
+
+/// 行頭の印と `#番号 `。**[`pr_row`] が描くものと [`summary_budget`] が測るものを
+/// 同じ値にする** —— 書式を 2 箇所に書くと、片方を変えたときに上限だけが黙ってずれる。
+fn lead(pr: &PullRequest, login: &str) -> [Span<'static>; 2] {
+    [
+        Span::styled(mark(pr, login), theme::muted()),
+        Span::raw(format!("#{} ", pr.number)),
+    ]
 }
 
 /// 1 行ぶんの集計（07 の「PRs ペイン」）。
@@ -223,8 +233,8 @@ fn counts(items: &[(usize, &str)], budget: usize) -> String {
 /// 集計の桁に許す幅（07 の「PRs ペイン」）。
 ///
 /// **枠の内側の幅 `width` から、集計の前後に並ぶものを引き、タイトルに [`TITLE_MIN`] を
-/// 残した残り。** 印・`#番号`・状態の桁は一覧の最大から出す —— どれも行ごとに揃えて
-/// 描く（[`pr_row`]）ので、いちばん広い行の幅がそのまま全行の幅になる。
+/// 残した残り。** 行頭（[`lead`]）と状態の桁は一覧の最大から出す —— 状態は行ごとに
+/// 揃えて描き（[`pr_row`]）、行頭はいちばん広い行でタイトルが削られる。
 ///
 /// **幅 100 の右列（内側 38 セル）で番号が 2 桁なら 17。** チェック 5 種の
 /// `✓12 ✗3 ○2 ⊘5 ·1`（15 セル）に `+` を足しても入る。定数だったころは「幅 100 で
@@ -234,7 +244,7 @@ fn summary_budget(state: &AppState, login: &str, width: usize, status: usize) ->
         .prs
         .list
         .iter()
-        .map(|pr| mark(pr, login).len() + format!("#{} ", pr.number).len())
+        .map(|pr| lead(pr, login).iter().map(Span::width).sum::<usize>())
         .max()
         .unwrap_or(0);
     width.saturating_sub(lead + status + 2 * COLUMN_GAP.len() + TITLE_MIN)

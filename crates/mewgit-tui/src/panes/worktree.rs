@@ -85,14 +85,7 @@ fn rows(state: &AppState) -> (Vec<Row<'_>>, usize) {
 fn line(row: Row<'_>, selected: bool, width: u16) -> Line<'static> {
     match row {
         Row::Heading(section) => Line::from(Span::styled(heading(section), theme::muted())),
-        Row::File(entry) => {
-            let line = Line::raw(ui::file_row(entry, width));
-            if selected {
-                line.style(theme::selected())
-            } else {
-                line
-            }
-        }
+        Row::File(entry) => theme::select(Line::raw(ui::file_row(entry, width)), selected),
     }
 }
 

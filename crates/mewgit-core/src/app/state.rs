@@ -1998,6 +1998,14 @@ pub struct PrState {
     /// ときに**同じ往復を回し続ける**（01 の「`Err` から再発行してよいのは対象が
     /// 違うときだけ」と同じ形）。
     list_behind: bool,
+    /// 一覧を落としたとき（[`PrState::forget`]）に飛んでいた `FetchPrList` の返事を
+    /// 捨てる印（01 の「一覧はアカウントに紐づく」）。
+    ///
+    /// **`JobTracker::is_fresh` では拾えない。** アカウントの解決し直しは
+    /// `Region::Refs` を進めないので、前のトークンで頼んだ一覧が新しいものとして通る。
+    /// **[`PrState::forget`] では落とさない** —— 立てるのはその直後で、落とすのは
+    /// 返事が届いたときだけ。
+    list_orphaned: bool,
 }
 
 /// PR 1 行ぶんの集計と、どの head sha について引いたか。
@@ -2275,6 +2283,16 @@ impl PrState {
     /// 作った直後の一覧が落とされていたか。**読んだら落とす**（1 回きり）。
     pub(super) fn take_list_behind(&mut self) -> bool {
         std::mem::take(&mut self.list_behind)
+    }
+
+    /// 飛んでいる一覧の返事を捨てる印を立てる（[`PrState::list_orphaned`]）。
+    pub(super) fn orphan_list(&mut self) {
+        self.list_orphaned = true;
+    }
+
+    /// 届いた一覧の返事を捨てるかを答え、印を落とす。
+    pub(super) fn take_list_orphaned(&mut self) -> bool {
+        std::mem::take(&mut self.list_orphaned)
     }
 
     /// まだ座れていない作成の記憶があるか。
@@ -3013,15 +3031,6 @@ impl AccountView {
     /// 黙って偽を返す。
     pub fn is_unsettable(&self) -> bool {
         self.source().is_some_and(AccountSource::is_unsettable)
-    }
-
-    /// `r`（解決し直す）が効くか。**キーの案内（`[r] 解決し直す`）もこれを読む**
-    /// （`is_unsettable` と同じ理由。#53）。
-    ///
-    /// **degraded だけ。** `Repick` を外してある理由は 01 の「外で直したあとの
-    /// 再解決」にある。
-    pub fn is_reresolvable(&self) -> bool {
-        matches!(self, AccountView::Degraded(_))
     }
 
     /// この画面が指している明示指定の出どころ。無ければ `None`。

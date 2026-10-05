@@ -314,7 +314,7 @@ pub(super) fn account_resolved(
             // `Degraded` では `prs::reload` が `Cmd::None` を返すので、落とす経路が
             // ここしか無い —— 残すと `*` / `R` の印（login で決まる）だけが黙って
             // 消えた一覧が出たままになる。
-            state.prs.forget();
+            prs::forget(state);
             AccountState::Degraded(reason)
         }
     };
@@ -358,7 +358,7 @@ fn leave_account(state: &mut AppState) {
     }
     // **一覧も落とす**（`account_resolved` の `Err` と同じ理由）。解決し直しているあいだ
     // 出したままにすると、`*` / `R` の印だけが消えた前のアカウントの一覧が残る。
-    state.prs.forget();
+    prs::forget(state);
     state.account = AccountState::Resolving;
 }
 
@@ -379,7 +379,8 @@ mod tests {
 
     use crate::test_util::{
         fake_account, fake_ambiguous, fake_attempt, fake_configured_unavailable, fake_denied,
-        fake_logins, fake_no_access, fake_repo_snapshot, fake_target, reply,
+        fake_logins, fake_no_access, fake_pull_request, fake_repo_snapshot, fake_target,
+        pr_list_loaded, reply,
     };
 
     /// リモートを載せた `RepoInfoLoaded` を 1 通届ける。
@@ -1025,6 +1026,60 @@ mod tests {
             Msg::AccountsListed(Ok(fake_logins(&["taro", "hanako"]))),
         );
         assert!(state.modal.is_none(), "{:?}", state.modal);
+    }
+
+    /// `Resolved` で一覧の要求が飛んでいるところから `A` → `r` を押した状態。
+    fn state_reresolving_with_a_list_in_flight() -> AppState {
+        let mut state = state_resolved(AccountSource::Single);
+        assert_eq!(state.issue(Cmd::FetchPrList), Cmd::FetchPrList);
+        let _ = press(&mut state, 'A');
+        let _ = press(&mut state, 'r');
+        assert!(matches!(state.account, AccountState::Resolving));
+        state
+    }
+
+    #[test]
+    fn a_list_asked_by_the_previous_account_is_dropped_while_resolving() {
+        // **アカウントの解決し直しは `Region::Refs` を進めない**ので、`is_fresh` では
+        // 前のトークンで頼んだ一覧を見分けられない（01 の「一覧はアカウントに紐づく」）。
+        // 落とさないと、捨てたはずの一覧が `Resolving` のあいだに戻る。
+        let mut state = state_reresolving_with_a_list_in_flight();
+
+        let cmd = update(
+            &mut state,
+            pr_list_loaded(vec![fake_pull_request(1, "feat", "aaa")]),
+        );
+
+        assert!(state.prs.list.is_empty(), "前のアカウントの一覧が戻った");
+        // 頼み直しは決まったときの `reload` に任せる（`Resolving` では何も出さない）。
+        assert_eq!(cmd, Cmd::None);
+        let cmd = update(&mut state, Msg::AccountResolved(Ok(fake_account("hanako"))));
+        assert_eq!(cmd, Cmd::FetchPrList);
+    }
+
+    #[test]
+    fn a_list_asked_by_the_previous_account_is_asked_again_after_resolving() {
+        // **決まったほうが先に届く形。** そのときの `reload` は同種の走行中として
+        // `AppState::issue` に落とされるので、古い返事を捨てるだけだと誰も頼み直さない。
+        let mut state = state_reresolving_with_a_list_in_flight();
+        let cmd = update(&mut state, Msg::AccountResolved(Ok(fake_account("hanako"))));
+        assert_eq!(cmd, Cmd::None, "走っているあいだの 2 本目は落ちる");
+
+        let cmd = update(
+            &mut state,
+            pr_list_loaded(vec![fake_pull_request(1, "feat", "aaa")]),
+        );
+
+        assert!(state.prs.list.is_empty(), "前のトークンの一覧が残った");
+        assert_eq!(cmd, Cmd::FetchPrList);
+        assert!(state.jobs.is_running(JobKind::FetchPrList));
+
+        // 頼み直した返事は採る（印は 1 回きり）。
+        let _ = update(
+            &mut state,
+            pr_list_loaded(vec![fake_pull_request(2, "fix", "bbb")]),
+        );
+        assert_eq!(state.prs.list.len(), 1);
     }
 
     #[test]

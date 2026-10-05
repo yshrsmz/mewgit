@@ -548,6 +548,15 @@ pub(super) fn reload(state: &AppState) -> Cmd {
     }
 }
 
+/// アカウントが変わるので一覧を落とす（`PrState::forget`）。**飛んでいる一覧の
+/// 返事も捨てさせる**（`PrState::orphan_list`。01 の「一覧はアカウントに紐づく」）。
+pub(super) fn forget(state: &mut AppState) {
+    state.prs.forget();
+    if state.jobs.is_running(JobKind::FetchPrList) {
+        state.prs.orphan_list();
+    }
+}
+
 /// 一覧が届いた。
 ///
 /// **鍵は無いが世代は見る**（01 の「何を引くか」）。書き込みの最中に飛んでいた要求の
@@ -562,6 +571,11 @@ pub(super) fn pr_list_loaded(
     result: Result<Vec<PullRequest>, GithubError>,
 ) -> Cmd {
     let asked = state.jobs.finish(JobKind::FetchPrList);
+    // **前のアカウントで頼んだ返事は捨てて頼み直す**（[`forget`]）。`Resolving` の
+    // あいだなら `reload` は何も出さず、決まったときの `reload` が頼む。
+    if state.prs.take_list_orphaned() {
+        return reload(state);
+    }
     match result {
         // **座り直す先は `PrState::loaded` が決める。** 呼ぶ側が渡すのは「いま選んで
         // いる PR が消えていたときの行き先」だけで、それは新しい一覧といまの HEAD から

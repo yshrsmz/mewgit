@@ -1397,6 +1397,18 @@ pub enum PrLoad { Pending, Loaded, Failed(GithubError) }
   **印だけが黙って消えた前のアカウントの一覧**が出たままになる。**`Degraded` では
   `reload` が何も出さない**ので、落とす経路は `account_resolved` の `Err` と
   `resolve_again` の 2 つしかない
+- **落とすときに飛んでいた一覧の要求は、返事を捨てて頼み直す**（`prs::forget` が
+  `JobKind::FetchPrList` が走っていれば `PrState::list_orphaned` を立て、
+  `pr_list_loaded` がそれを見る）。**上の「追いつきは世代だけで足りる」は git の
+  書き込みについてだけ成り立つ** —— アカウントの解決し直しは `Region::Refs` を
+  進めないので、前のトークンで頼んだ返事が `is_fresh` を通る。届く順は 2 通りあり、
+  `Resolving` のあいだに届けば**捨てたはずの一覧が戻り**、決まったあとに届けば
+  **`account_resolved` の `reload` が同種の走行中として `AppState::issue` に落とされた
+  うえで**古い一覧が新しい login の印付きで残る（`/code-review` が両方を再現。`A` の
+  `r` で、git の書き込みなしに安く踏めるようになった）。頼み直しは `reload` を通すので、
+  `Resolving` のあいだは何も出さず、決まったあとなら 1 本出る。**扇形の `epoch` を
+  一覧に流用しない** —— 一覧の `Cmd` / `Msg` は世代を運ばず、運ばせると `runtime` まで
+  形が変わる。走っている 1 本に印を付ければ足りる（同種は 1 本しか走らない）
 - **カーソルは PR の番号で座り直す。** 一覧は `sort=updated` で引くので、**ref を
   動かす書き込みのたびに並びが変わる** —— 添字で座り直すと、自分が commit した
   瞬間にカーソルが別の PR を指す。見つからなければ（マージされて open から消えた）

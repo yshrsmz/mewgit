@@ -710,8 +710,8 @@ mod tests {
                 }
             }
         }
-        // **Diff から押す。** いま居るペインの番号は正しく無反応（07 の「ペインと
-        // フォーカス」）なので、番号の付いていないペインから押せば特例が要らない。
+        // **Diff から押す。** いま居るペインの番号はフォーカスを動かさない（07 の
+        // 「ペインとフォーカス」）ので、番号の付いていないペインから押せば特例が要らない。
         for hint in keys::COMMON.iter().chain(keys::PINNED) {
             for key in hint.keys() {
                 assert_reacts(Pane::Diff, *key, hint.label());

@@ -485,8 +485,8 @@ mod tests {
         // （実測 2026-10-04）。
         //
         // **産出元が増えたら回す画面を足す**（共有した見張りは新しい産出元を自分では
-        // 拾わない。`.claude/rules/testing.md`）—— `[r]` を足したときに degraded 側が抜けていると、
-        // `[u]` を出す画面だけで緑のままになる。
+        // 拾わない。`.claude/rules/testing.md`）—— `[u]` / `[r]` / 選ばせる案内の組み合わせを
+        // 出す画面を、`Repick` と degraded の両側から 1 本ずつ回す。
         //
         // **見るのは [`hint`] が組んだ群そのもの。** 綴りを手で書くと、案内を変えた
         // ときに「見つからない」で落ちて、幅を見ているのか綴りを見ているのかが
@@ -501,8 +501,8 @@ mod tests {
             ),
             // `[r]` + 選ばせる案内（`Ambiguous` は候補を運ぶので選ばせる側に出る）。
             AccountView::Degraded(ambiguous(vec![fake_login("taro_acme"), fake_login("taro")])),
-            // **`[u]` と `[r]` が同居する形。** `ConfiguredUnavailable` は出どころを
-            // 持つので `[u]` も出る。候補を運ばないので 46 セル。
+            // **degraded で `[u]` を出す唯一の産出元。** `ConfiguredUnavailable` は
+            // 出どころを持つ。候補を運ばないので 46 セル。
             AccountView::Degraded(fake_configured_unavailable()),
         ];
 

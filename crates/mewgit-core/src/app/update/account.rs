@@ -80,10 +80,11 @@ fn account_view(account: &AccountState, target: &TargetState) -> Result<AccountV
 
 /// 開いている [`Modal::AccountPicker`] の中身。
 ///
-/// **キーを受ける 3 本が同じ分解を書いていたので寄せた**（`.claude/rules/rust-coding.md` の「2 つ目の
+/// **キーを受ける 3 本が同じ分解を書いていたので寄せた**（いまは `Enter` と `u` の 2 本。
+/// `r` は条件を持たなくなったので分解しない）（`.claude/rules/rust-coding.md` の「2 つ目の
 /// 利用者が出た時点で共有先を作る」）。`None` の腕は**どれも踏めない** ——
 /// [`modal_key`](super::modal_key) が `Modal::AccountPicker` に一致したときだけ
-/// この 3 本を呼ぶ。踏めない腕を 3 本に散らさないためでもある。
+/// これらを呼ぶ。踏めない腕を呼ぶ側に散らさないためでもある。
 fn account_picker(state: &AppState) -> Option<(&AccountView, usize)> {
     match state.modal.as_ref() {
         Some(Modal::AccountPicker { view, cursor }) => Some((view, *cursor)),
@@ -144,18 +145,6 @@ fn submit_account_write(state: &mut AppState, op: GitOp) -> Cmd {
         leave_account(state);
     }
     cmd
-}
-
-/// [`Modal::AccountPicker`] の `r`。外で直したあとの再解決。
-///
-/// **[`AccountView`] のどちらでも効く**ので述語を持たない（`Repick` にも出す理由は
-/// 01 の「外で直したあとの再解決」）。**ほかの `git` が走っていても断らない** ——
-/// `mewgit.user` の書き込みとは重ならない（[`submit_account_write`]）。
-pub(super) fn account_reresolve(state: &mut AppState) -> Cmd {
-    if account_picker(state).is_none() {
-        return Cmd::None;
-    }
-    resolve_again(state)
 }
 
 /// 取り直した候補を [`Modal::AccountPicker`] に入れる（01 の「候補の取り直し」）。

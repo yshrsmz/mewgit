@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use mewgit_core::app::{keys, AppState, Key, PrLoad};
+use mewgit_core::app::{keys, AppState, GithubBlock, Key, PrLoad};
 use mewgit_core::auth::AccountState;
 use mewgit_core::config::Theme;
 use mewgit_core::github::{GithubError, PrDetail, PrStatus, PullRequest};
@@ -330,6 +330,14 @@ fn status_style(pr: &PullRequest, theme: &Theme) -> Style {
 /// 引けたが open な PR が 1 件も無いときの文言。`（N）` を添えるかは `placeholder` が決める。
 const EMPTY: &str = "開いている PR はありません";
 
+/// 既定リモートから GitHub のリポジトリを特定できなかったときの文言（07 の「PRs ペイン」）。
+///
+/// **通知（`GithubBlock::notice`）とは分ける。** あちらの文言は右列がいちばん狭い幅の
+/// 内側に入らない（`.claude/rules/rust-coding.md` の「置かれる場所の予算が違うなら別の
+/// 文言でよい」）。**キーを添えない** —— `A` を押しても
+/// 同じ事実が通知に出るだけで、直す操作を mewgit は持っていない。
+const TARGET_UNAVAILABLE: &str = "GitHub のリポジトリを特定できません";
+
 /// 一覧を出せない理由。
 ///
 /// **消去法で導かない。** [`AccountState`] と [`PrLoad`] の腕から出す（01 の
@@ -344,10 +352,11 @@ const EMPTY: &str = "開いている PR はありません";
 fn placeholder(state: &AppState) -> Cow<'static, str> {
     match &state.account {
         // **既定リモートが GitHub でないときもここに落ちる**（`TargetState::Unavailable`
-        // なら `Cmd::ResolveAccount` が出ないので `Resolving` のまま）。理由を出せる
-        // のは `A` だけで、このペインでは「読み込み中…」のまま留まる。**枠の内側に
-        // 理由（`A` が出す「既定リモートから GitHub のリポジトリを特定できません」）が
-        // 入らなかった**（決めたときは 80x24 で 30 セル）。畳み方は plan.md に送ってある。
+        // なら `Cmd::ResolveAccount` が出ないので `Resolving` のまま）。「読み込み中…」を
+        // 出すと**永久に待たせる**ので、待てば変わるかを `github_block` に聞く。
+        AccountState::Resolving if state.github_block() == Some(GithubBlock::TargetUnavailable) => {
+            TARGET_UNAVAILABLE.into()
+        }
         AccountState::Resolving => ui::LOADING.into(),
         AccountState::Degraded(reason) => format!("GitHub: {}（A）", ui::degraded(reason)).into(),
         // **巡回候補にもタブにも出ないのでここへは来ない**（01 の「右上のタブ」）。
@@ -375,12 +384,12 @@ mod tests {
         col_of, draw, pane_row, pane_row_is_reversed, pane_text, state_at, terminal_with,
     };
     use crate::ui;
-    use mewgit_core::app::{update, Cmd, KeyCode, Msg, Pane, TermSize};
+    use mewgit_core::app::{update, Cmd, KeyCode, Msg, Pane, TargetState, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::github::{CheckSummary, ReviewSummary};
     use mewgit_core::test_util::{
-        deliver_pr_details, fake_pull_request, fetch_pr_details, pr_list_loaded, put_on_branch,
-        reply,
+        deliver_pr_details, fake_pull_request, fake_repo_snapshot, fetch_pr_details,
+        pr_list_loaded, put_on_branch, reply,
     };
     use ratatui::style::Modifier;
 
@@ -900,6 +909,42 @@ mod tests {
         let text = pane_text(&degraded, SIZE, Pane::Prs);
         assert!(text.contains("GitHub"), "{text}");
         assert!(text.contains("A"), "案内が無い: {text}");
+    }
+
+    #[test]
+    fn a_repository_github_cannot_be_found_for_says_so_instead_of_loading_forever() {
+        // **`TargetState::Unavailable` ではアカウントの解決を頼まない**ので、`Resolving` の
+        // まま二度と動かない。「読み込み中…」を出すと永久に待たせる（`placeholder`）。
+        let mut state = state_at("/repo");
+        state.focus = Pane::Prs;
+        state.reseat_focus();
+        assert_eq!(state.focus, Pane::Prs, "巡回候補に入っていません");
+        // **まだ見ていないあいだは待てば変わる**ので「読み込み中…」のまま。
+        assert!(
+            pane_text(&state, SIZE, Pane::Prs).contains(ui::LOADING),
+            "既定リモートを見る前"
+        );
+
+        // リモートの無いリポジトリ。**状態を直に置かず、実物と同じ返信で落とす。**
+        let _ = reply(
+            &mut state,
+            Cmd::LoadRepoInfo,
+            Msg::RepoInfoLoaded(Box::new(Ok(fake_repo_snapshot()))),
+        );
+        assert_eq!(
+            state.repo.target,
+            TargetState::Unavailable,
+            "前提が崩れている"
+        );
+        assert!(
+            matches!(state.account, AccountState::Resolving),
+            "前提が崩れている"
+        );
+
+        // **右列がいちばん狭い幅で、末尾まで入る**（`contains` は右端で切れた形を拾わない）。
+        let text = pane_text(&state, SIZE, Pane::Prs);
+        assert!(text.contains(TARGET_UNAVAILABLE), "{text}");
+        assert!(!text.contains(ui::LOADING), "永久に待たせている: {text}");
     }
 
     #[test]

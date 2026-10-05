@@ -380,8 +380,8 @@ fn leave_account(state: &mut AppState) {
 mod tests {
     use super::super::test_support::{
         cells, commit, exec_done_of, fake_output, fetched_remote, issued, press, press_code,
-        remotes_of, repo_snapshot, state, state_with_commits, tracking_branch, with_branches,
-        HEADS_MAIN, NOTICE_CELLS,
+        remotes_of, state, state_with_commits, tracking_branch, with_branches, HEADS_MAIN,
+        NOTICE_CELLS,
     };
     use super::super::{init, update};
     use super::*;
@@ -393,7 +393,7 @@ mod tests {
 
     use crate::test_util::{
         fake_account, fake_ambiguous, fake_attempt, fake_configured_unavailable, fake_denied,
-        fake_logins, fake_no_access, fake_target, reply,
+        fake_logins, fake_no_access, fake_repo_snapshot, fake_target, reply,
     };
 
     /// リモートを載せた `RepoInfoLoaded` を 1 通届ける。
@@ -403,7 +403,7 @@ mod tests {
     fn deliver_repo_info(state: &mut AppState, remotes: &[(&str, &str)]) -> Cmd {
         let info = RepoSnapshot {
             remotes: remotes_of(remotes),
-            ..repo_snapshot()
+            ..fake_repo_snapshot()
         };
         reply(
             state,

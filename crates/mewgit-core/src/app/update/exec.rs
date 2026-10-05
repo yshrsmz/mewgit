@@ -714,8 +714,8 @@ mod tests {
     use super::super::test_support::{
         cells, commit, commit_op, exec_done, exec_done_of, failed_with, fake_output, finish_exec,
         forced_push_op, issued, page_loaded, press, push_op, refs_and_log, reject_non_fast_forward,
-        reload, repo_snapshot, state, state_for_push, state_with_commits, state_with_page,
-        tracked_head, with_branches, worktree_state, BESIDE_BADGE_CELLS, HEADS_MAIN, NOTICE_CELLS,
+        reload, state, state_for_push, state_with_commits, state_with_page, tracked_head,
+        with_branches, worktree_state, BESIDE_BADGE_CELLS, HEADS_MAIN, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -723,7 +723,7 @@ mod tests {
 
     use crate::git_exec::{ExecErrorKind, HunkApply, LocalBranch, PrSource, PullMode, RebasePlan};
     use crate::git_read::{GitReadError, LogPage, WorktreeSection};
-    use crate::test_util::fake_pr_checkout;
+    use crate::test_util::{fake_pr_checkout, fake_repo_snapshot};
 
     use crate::test_util::{fake_branch, fake_detail, fake_oid, fake_snapshot, fake_stamp};
 
@@ -1363,7 +1363,7 @@ mod tests {
         // ラベルは出せるので、届くまで前のものを出したままにする）。
         let cmd = update(
             &mut state,
-            Msg::RepoInfoLoaded(Box::new(Ok(repo_snapshot()))),
+            Msg::RepoInfoLoaded(Box::new(Ok(fake_repo_snapshot()))),
         );
         assert_eq!(cmd, Cmd::LoadRepoInfo);
         let cmd = with_branches(&mut state, Ok(vec![fake_branch("main", true)]));
@@ -1372,7 +1372,7 @@ mod tests {
         // 頼み直したぶんは書き込みより後に頼んだものなので、そこで止まる。
         let cmd = update(
             &mut state,
-            Msg::RepoInfoLoaded(Box::new(Ok(repo_snapshot()))),
+            Msg::RepoInfoLoaded(Box::new(Ok(fake_repo_snapshot()))),
         );
         assert_eq!(cmd, Cmd::None);
         let cmd = with_branches(&mut state, Ok(vec![fake_branch("main", true)]));

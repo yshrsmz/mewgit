@@ -10,12 +10,12 @@
 //! 土台で、ここは `app::update` の中だけ。
 
 use super::*;
-use crate::app::{ExecDone, InputIntent, Modal, Modifiers, RepoInfo, RepoSnapshot, TextBuffer};
+use crate::app::{ExecDone, InputIntent, Modal, Modifiers, RepoInfo, TextBuffer};
 use crate::config::Config;
 use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput};
 use crate::git_read::{
-    Branch, Commit, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, HeadInfo, LogPage,
-    Oid, RefIndex, Remote, StashEntry, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
+    Branch, Commit, DiffTarget, FileDiff, FileEntry, FileStatus, GitReadError, LogPage, Oid,
+    Remote, StashEntry, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
 };
 use crate::test_util::{
     fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid,
@@ -514,19 +514,6 @@ pub(super) fn issued(cmd: &Cmd, wanted: &Cmd) -> bool {
     match cmd {
         Cmd::Batch(cmds) => cmds.iter().any(|cmd| issued(cmd, wanted)),
         cmd => cmd == wanted,
-    }
-}
-
-/// ref の索引 1 つぶん。中身は見ないので空でよい。
-pub(super) fn repo_snapshot() -> RepoSnapshot {
-    RepoSnapshot {
-        remotes: Vec::new(),
-        head: HeadInfo::Branch {
-            name: "main".to_string(),
-            oid: commit(1).oid,
-            upstream: None,
-        },
-        refs: RefIndex::from_iter([]),
     }
 }
 

@@ -833,9 +833,9 @@ pub enum TargetState {
     /// 既定リモートが決まらなかったか、その URL が GitHub のものではなかった。
     /// **頼み直さない。**
     ///
-    /// **理由は持たない。** 出す先がまだ無く（ヘッダの degraded 表示は M4 の別タスク）、
-    /// 持たせても読む腕が無い。表示を入れるときに [`DegradedReason`] へ畳むかを決める
-    /// （04）。
+    /// **理由は持たない。** 読み手（`A` と `r` の通知、PRs ペイン）はどれも 2 つを分けずに
+    /// 同じ事実を出すので（[`GithubBlock::TargetUnavailable`]）、持たせても読む腕が無い。
+    /// 分けて出すときに [`DegradedReason`] へ畳むかを決める（04）。
     ///
     /// [`DegradedReason`]: crate::auth::DegradedReason
     Unavailable,
@@ -860,8 +860,8 @@ impl TargetState {
 ///
 /// **読み手は `r` の通知と `A` の通知（`update::account::account_view` の `Err`）。**
 /// どちらも 1 行で予算が同じなので文言を分けない（#73 の「置かれる場所の予算が違うなら
-/// 別の文言でよい」が当たらない側）。**枠の狭い PRs ペイン**（07）は別で、
-/// あちらが読むのは M6 のタスク（`docs/plan.md`）。
+/// 別の文言でよい」が当たらない側）。**枠の狭い PRs ペイン**（07）も
+/// `TargetUnavailable` を読むが、文言は枠の内側に合わせて別に持つ。
 ///
 /// [`DegradedReason`]: crate::auth::DegradedReason
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

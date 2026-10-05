@@ -285,12 +285,9 @@ fetch / pull / push を 2 本に割った理由。1 本目は新しい読み取�
       実測して `AttemptFailure::SsoRequired` に URL を持たせ、`A` の内訳に出す
       （04 の「権限不足の案内」）。送り先だった「通知の履歴」は、承認 URL を運ぶ値が
       無いまま済んだので、ここへ移した
-- [x] 既定リモートが GitHub でないときの PRs ペインの文言 — `TargetState::Unavailable` でも
-      `Cmd::ResolveAccount` が出ないため `AccountState::Resolving` のままで、ペインが
-      **永久に「読み込み中…」**になっていた。`AppState::github_block` が `TargetUnavailable` を
-      返すときは「GitHub のリポジトリを特定できません」（35 セル）を出す。**通知の文言
-      （50 セル）は幅 100 の内側 38 セルに入らないので、結論だけを残した**（2026-10-05 に
-      ユーザーと決めた。07 の「PRs ペイン」）
+- [x] 既定リモートが GitHub でないときの PRs ペインの文言 — 永久に「読み込み中…」だったのを、
+      `github_block` が `TargetUnavailable` なら「GitHub のリポジトリを特定できません」にした
+      （07 の「PRs ペイン」）
 - [ ] PR 一覧の打ち切りを知らせる — `get_paged` は 10 ページ（1000 件）で黙って
       打ち切り、`Ok` を返す。open PR がそれを超えるリポジトリでは**いちばん古い側が
       画面から消え**、`AppState::current_pr` も当たらなくなる（05 の「一覧は `Link` の

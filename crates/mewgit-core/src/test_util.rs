@@ -69,7 +69,7 @@ pub const FAKE_NOW: Timestamp = Timestamp {
     offset_minutes: 540,
 };
 
-use crate::app::{update, AppState, Cmd, Msg, TargetState};
+use crate::app::{update, AppState, Cmd, Msg, RepoSnapshot, TargetState};
 use crate::auth::ssh::SshCommand;
 use crate::auth::{
     Account, AccountSource, AccountState, AttemptFailure, AuthError, Backend, DegradedReason,
@@ -79,8 +79,8 @@ use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Ru
 use crate::git_exec::{RebaseAction, RebaseEntry};
 use crate::git_read::{
     Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
-    LineOrigin, Oid, PathStamp, Remote, RepoReader, Signature, StashEntry, Timestamp, Upstream,
-    WorktreeSnapshot,
+    LineOrigin, Oid, PathStamp, RefIndex, Remote, RepoReader, Signature, StashEntry, Timestamp,
+    Upstream, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PrStatus, PullRequest, RateLimit, RefSpec, RepoRef};
 use secrecy::SecretString;
@@ -825,6 +825,22 @@ pub fn fake_entry(path: &str, status: FileStatus) -> FileEntry {
         path: path.into(),
         old_path: None,
         status,
+    }
+}
+
+/// [`Msg::RepoInfoLoaded`] の中身 1 つぶん。リモートは無く、HEAD は `main`、ref の索引は空。
+///
+/// **`mewgit-tui` からも呼ぶ**（PRs ペインが「リモートの無いリポジトリ」を実物と同じ
+/// 返信で作る）ので、`app/update/test_support.rs` ではなくここに置く。
+pub fn fake_repo_snapshot() -> RepoSnapshot {
+    RepoSnapshot {
+        remotes: Vec::new(),
+        head: HeadInfo::Branch {
+            name: "main".to_string(),
+            oid: fake_oid(1),
+            upstream: None,
+        },
+        refs: RefIndex::from_iter([]),
     }
 }
 

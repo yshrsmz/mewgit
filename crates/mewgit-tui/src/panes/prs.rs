@@ -332,9 +332,9 @@ const EMPTY: &str = "開いている PR はありません";
 
 /// 既定リモートから GitHub のリポジトリを特定できなかったときの文言（07 の「PRs ペイン」）。
 ///
-/// **通知（`GithubBlock::notice`）とは分ける。** あちらの「既定リモートから…」は 50 セルで、
-/// 右列がいちばん狭い幅 100 の内側 38 セルに入らない（`.claude/rules/rust-coding.md` の
-/// 「置かれる場所の予算が違うなら別の文言でよい」）。**キーを添えない** —— `A` を押しても
+/// **通知（`GithubBlock::notice`）とは分ける。** あちらの文言は右列がいちばん狭い幅の
+/// 内側に入らない（`.claude/rules/rust-coding.md` の「置かれる場所の予算が違うなら別の
+/// 文言でよい」）。**キーを添えない** —— `A` を押しても
 /// 同じ事実が通知に出るだけで、直す操作を mewgit は持っていない。
 const TARGET_UNAVAILABLE: &str = "GitHub のリポジトリを特定できません";
 
@@ -384,13 +384,12 @@ mod tests {
         col_of, draw, pane_row, pane_row_is_reversed, pane_text, state_at, terminal_with,
     };
     use crate::ui;
-    use mewgit_core::app::{update, Cmd, KeyCode, Msg, Pane, RepoSnapshot, TargetState, TermSize};
+    use mewgit_core::app::{update, Cmd, KeyCode, Msg, Pane, TargetState, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason};
-    use mewgit_core::git_read::{HeadInfo, RefIndex};
     use mewgit_core::github::{CheckSummary, ReviewSummary};
     use mewgit_core::test_util::{
-        deliver_pr_details, fake_oid, fake_pull_request, fetch_pr_details, pr_list_loaded,
-        put_on_branch, reply,
+        deliver_pr_details, fake_pull_request, fake_repo_snapshot, fetch_pr_details,
+        pr_list_loaded, put_on_branch, reply,
     };
     use ratatui::style::Modifier;
 
@@ -927,19 +926,10 @@ mod tests {
         );
 
         // リモートの無いリポジトリ。**状態を直に置かず、実物と同じ返信で落とす。**
-        let snapshot = RepoSnapshot {
-            remotes: Vec::new(),
-            head: HeadInfo::Branch {
-                name: "main".to_string(),
-                oid: fake_oid(0),
-                upstream: None,
-            },
-            refs: RefIndex::from_iter([]),
-        };
         let _ = reply(
             &mut state,
             Cmd::LoadRepoInfo,
-            Msg::RepoInfoLoaded(Box::new(Ok(snapshot))),
+            Msg::RepoInfoLoaded(Box::new(Ok(fake_repo_snapshot()))),
         );
         assert_eq!(
             state.repo.target,

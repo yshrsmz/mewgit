@@ -724,8 +724,8 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, enter_with, issued, load_branches, press, press_code, remotes_of, repo_snapshot,
-        state, state_with_commits, tab_to, type_text, with_branches, ALT, NOTICE_CELLS,
+        cells, enter_with, issued, load_branches, press, press_code, remotes_of, state,
+        state_with_commits, tab_to, type_text, with_branches, ALT, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -741,8 +741,8 @@ mod tests {
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
         deliver_pr_details, fake_account, fake_branch, fake_logins, fake_oid, fake_pull_request,
-        fake_rate_limit, fake_target, fetch_pr_details, pr_list_loaded as list_msg, put_on_branch,
-        reply, start_pr_details, FAKE_NOW,
+        fake_rate_limit, fake_repo_snapshot, fake_target, fetch_pr_details,
+        pr_list_loaded as list_msg, put_on_branch, reply, start_pr_details, FAKE_NOW,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -1341,7 +1341,7 @@ mod tests {
         // —— 画面の外で読み直された形そのもの。HEAD はいまの値を持ち越す
         // （組み直すと `put_on_branch` の値に黙って依存する）。
         let deliver_copies = |state: &mut AppState, copies: &[(&str, bool)]| {
-            let mut snapshot = repo_snapshot();
+            let mut snapshot = fake_repo_snapshot();
             snapshot.remotes = state.repo.remotes.clone();
             snapshot.head = state.repo.head.clone().expect("ブランチに乗っている");
             snapshot.refs = copies_of(&state.repo, copies);
@@ -1555,7 +1555,7 @@ mod tests {
         let _ = press(&mut state, 'N');
         type_text(&mut state, "fix");
 
-        let mut snapshot = repo_snapshot();
+        let mut snapshot = fake_repo_snapshot();
         snapshot.head = HeadInfo::Detached(fake_oid(1));
         snapshot.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
         let _ = update(&mut state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
@@ -1685,7 +1685,7 @@ mod tests {
                     oid: fake_oid(0),
                     upstream: None,
                 },
-                ..repo_snapshot()
+                ..fake_repo_snapshot()
             }))),
         );
         assert!(issued(&cmd, &Cmd::FetchPrList), "{cmd:?}");

@@ -3015,15 +3015,6 @@ impl AccountView {
         self.source().is_some_and(AccountSource::is_unsettable)
     }
 
-    /// `r`（解決し直す）が効くか。**キーの案内（`[r] 解決し直す`）もこれを読む**
-    /// （`is_unsettable` と同じ理由。#53）。
-    ///
-    /// **degraded だけ。** `Repick` を外してある理由は 01 の「外で直したあとの
-    /// 再解決」にある。
-    pub fn is_reresolvable(&self) -> bool {
-        matches!(self, AccountView::Degraded(_))
-    }
-
     /// この画面が指している明示指定の出どころ。無ければ `None`。
     fn source(&self) -> Option<AccountSource> {
         match self {

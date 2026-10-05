@@ -32,7 +32,8 @@ const HINT_SHOW: &[&str] = &["[Esc] 閉じる"];
 /// `update::account_key` が受けるかどうかを同じ述語から出す（#53）。
 const HINT_UNSET: &str = "[u] 指定を解除";
 
-/// `r` の案内。**出すのは [`AccountView::is_reresolvable`] が真のときだけ**（同上）。
+/// `r` の案内。**どちらの画面にも出す** —— `update::account_key` も述語なしで受ける
+/// （01 の「外で直したあとの再解決」）。
 const HINT_RERESOLVE: &str = "[r] 解決し直す";
 
 /// 外での直し方が mewgit の設定ファイルを指すときに添える 1 行。
@@ -100,9 +101,9 @@ fn waiting(view: &AccountView) -> bool {
     )
 }
 
-/// キーの案内。**`u` と `r` はそれぞれの述語が真のときだけ足す**
-/// （[`AccountView::is_unsettable`] / [`AccountView::is_reresolvable`]）——
+/// キーの案内。**`u` は [`AccountView::is_unsettable`] が真のときだけ足す** ——
 /// 出す条件と `update::account_key` が受ける条件が同じ 1 本の述語から出る（#53）。
+/// `r` はいつも足す。
 ///
 /// **`pick` を引数に取らない。** 呼ぶ側が計算して渡す形にすると、候補が無いのに
 /// `[Enter] 保存` を出す組み合わせが型で作れる（「導出できる値を引数に取らせない」）。
@@ -117,9 +118,7 @@ fn hint(view: &AccountView) -> Vec<&'static str> {
     if view.is_unsettable() {
         parts.push(HINT_UNSET);
     }
-    if view.is_reresolvable() {
-        parts.push(HINT_RERESOLVE);
-    }
+    parts.push(HINT_RERESOLVE);
     parts.extend_from_slice(base);
     parts
 }
@@ -494,7 +493,8 @@ mod tests {
         // 判らなくなる。**`[Esc]` を `contains` で探す形では浅い** —— 切れるのは
         // 行末からなので、5 セル溢れても `[Esc] やめ` が残って素通りする（実測）。
         let cases = [
-            // `[u]` + 選ばせる案内。
+            // `[u]` + `[r]` + 選ばせる案内。**いちばん長い 74 セル**で、箱が既定の幅でも
+            // 2 行に折れる。
             repick(
                 AccountSource::GitConfig,
                 AccountListing::Listed(vec![fake_login("taro")]),
@@ -502,8 +502,7 @@ mod tests {
             // `[r]` + 選ばせる案内（`Ambiguous` は候補を運ぶので選ばせる側に出る）。
             AccountView::Degraded(ambiguous(vec![fake_login("taro_acme"), fake_login("taro")])),
             // **`[u]` と `[r]` が同居する形。** `ConfiguredUnavailable` は出どころを
-            // 持つので `[u]` も出る。候補を運ばないので**いまは 46 セル**だが、
-            // 運ぶようになれば 74 セル —— その回を拾うのはこの腕だけ。
+            // 持つので `[u]` も出る。候補を運ばないので 46 セル。
             AccountView::Degraded(fake_configured_unavailable()),
         ];
 
@@ -559,11 +558,10 @@ mod tests {
     }
 
     #[test]
-    fn r_is_offered_only_where_resolving_again_can_change_the_answer() {
-        // **案内と `update::account_key` が同じ述語（`AccountView::is_reresolvable`）を
-        // 読む**（#53）。`Repick` に出さないのは、あちらが行き止まりではないから ——
-        // 選んで保存すれば書き込みのあとの `resolve_again` を通る（01 の
-        // 「外で直したあとの再解決」）。
+    fn r_is_offered_on_both_views() {
+        // **`update::account_key` は `r` をどちらの画面でも受ける**ので、案内も両方に出す
+        // （#53）。`Repick` に出すのは、外のログイン追加を拾う入口が `Enter`（`mewgit.user`
+        // を書く副作用付き）しか無いから（01 の「外で直したあとの再解決」）。
         let degraded = draw(&state_with_reason(DegradedReason::GhMissing), SIZE).join("\n");
         assert!(degraded.contains(HINT_RERESOLVE), "{degraded}");
 
@@ -575,7 +573,7 @@ mod tests {
             SIZE,
         )
         .join("\n");
-        assert!(!repick.contains(HINT_RERESOLVE), "{repick}");
+        assert!(repick.contains(HINT_RERESOLVE), "{repick}");
     }
 
     #[test]

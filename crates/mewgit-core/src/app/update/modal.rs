@@ -97,10 +97,10 @@ pub(super) fn picker_key(
 ///
 /// **どちらも [`picker_key`] に足さない。** [`Modal::RemotePicker`] には外す対象も
 /// 解決し直す相手も無いので、共通の骨格に置くと片方でしか意味を持たないキーが増える。
-/// **効くかどうかは `AccountView` の述語 1 本ずつ**（`is_unsettable` /
-/// `is_reresolvable`）で、キーの案内を出す `ui` 側も同じものを読む（#53）。
-/// **3 本目を足すなら、キーと述語と文言の対を型で括ることを考える** —— いまは
-/// ここと `modals::account_picker::hint` が手で揃えている。
+/// **`u` が効くかどうかは `AccountView::is_unsettable` の 1 本**で、キーの案内を出す
+/// `ui` 側も同じものを読む（#53）。`r` はどちらの画面でも効くので述語を持たない。
+/// **条件付きのキーを 2 本目に足すなら、キーと述語と文言の対を型で括ることを
+/// 考える** —— いまはここと `modals::account_picker::hint` が手で揃えている。
 fn account_key(state: &mut AppState, key: Key) -> Cmd {
     if key == Key::char('u') {
         return account_unset(state);

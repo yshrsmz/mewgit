@@ -148,14 +148,11 @@ fn submit_account_write(state: &mut AppState, op: GitOp) -> Cmd {
 
 /// [`Modal::AccountPicker`] の `r`。外で直したあとの再解決。
 ///
-/// 効く条件は [`AccountView::is_reresolvable`] の 1 本で、キーの案内
-/// （`[r] 解決し直す`）も同じものを読む（#53）。**ほかの `git` が走っていても
-/// 断らない** —— `mewgit.user` の書き込みとは重ならない（[`submit_account_write`]）。
+/// **[`AccountView`] のどちらでも効く**ので述語を持たない（`Repick` にも出す理由は
+/// 01 の「外で直したあとの再解決」）。**ほかの `git` が走っていても断らない** ——
+/// `mewgit.user` の書き込みとは重ならない（[`submit_account_write`]）。
 pub(super) fn account_reresolve(state: &mut AppState) -> Cmd {
-    let Some((view, _)) = account_picker(state) else {
-        return Cmd::None;
-    };
-    if !view.is_reresolvable() {
+    if account_picker(state).is_none() {
         return Cmd::None;
     }
     resolve_again(state)
@@ -1017,16 +1014,28 @@ mod tests {
     }
 
     #[test]
-    fn r_does_nothing_on_the_repick() {
-        // **`Repick` を外してある理由は 01 の「外で直したあとの再解決」。**
-        let mut state = state_resolved(AccountSource::GitConfig);
+    fn r_resolves_again_from_the_repick_too() {
+        // **`Single` で決まったあと外で `gh auth login` を足すと `Ambiguous` に変わる**が、
+        // `A` の候補の取り直しは一覧を引き直すだけで拾えない。`Enter` の入口は
+        // `mewgit.user` を書く副作用付きなので、解決し直すだけの入口を別に置く
+        // （01 の「外で直したあとの再解決」）。
+        let mut state = state_resolved(AccountSource::Single);
         let _ = press(&mut state, 'A');
 
         let cmd = press(&mut state, 'r');
 
-        assert_eq!(cmd, Cmd::None);
-        assert!(state.modal.is_some(), "効かないのに閉じた");
-        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
+        assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
+        assert!(state.jobs.is_running(JobKind::ResolveAccount));
+        assert!(state.modal.is_none(), "写しが残った");
+        assert!(matches!(state.account, AccountState::Resolving));
+
+        // **一覧の待ちを追い越しても、遅れた 1 通は何も開かない** —— 採るのは
+        // モーダルがまだ `Repick` のときだけ（01 の「候補の取り直し」）。
+        let _ = update(
+            &mut state,
+            Msg::AccountsListed(Ok(fake_logins(&["taro", "hanako"]))),
+        );
+        assert!(state.modal.is_none(), "{:?}", state.modal);
     }
 
     #[test]

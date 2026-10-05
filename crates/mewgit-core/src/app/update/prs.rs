@@ -738,8 +738,8 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, enter_with, issued, load_branches, press, press_code, remotes_of, state,
-        state_with_commits, tab_to, type_text, with_branches, ALT, NOTICE_CELLS,
+        cells, enter_with, github_disabled_state, issued, load_branches, press, press_code,
+        remotes_of, state, state_with_commits, tab_to, type_text, with_branches, ALT, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -748,7 +748,6 @@ mod tests {
         GithubBlock, Msg, NoticeLevel, PrLoad, Region, RepoSnapshot, RightTab, TargetState,
     };
     use crate::auth::{AccountState, DegradedReason};
-    use crate::config::Config;
     use crate::git_exec::GitOp;
     use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote, UpstreamConfig};
     use crate::github::RepoRef;
@@ -756,7 +755,7 @@ mod tests {
     use crate::test_util::{
         deliver_pr_details, fake_account, fake_branch, fake_logins, fake_oid, fake_pull_request,
         fake_rate_limit, fake_repo_snapshot, fake_target, fetch_pr_details,
-        pr_list_loaded as list_msg, put_on_branch, reply, start_pr_details, FAKE_NOW,
+        pr_list_loaded as list_msg, put_on_branch, reply, start_pr_details,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -2876,9 +2875,7 @@ mod tests {
     fn github_disabled_never_starts_gh_and_drops_the_prs_pane() {
         // 旗を読むのは `AppState::new` の 1 つ（01 の「GitHub 機能を切る」）。
         let default_state = state();
-        let mut config = Config::default();
-        config.github.enabled = false;
-        let mut state = AppState::new(crate::app::RepoInfo::default(), config, FAKE_NOW);
+        let mut state = github_disabled_state();
         assert!(matches!(state.account, AccountState::Disabled));
         assert!(!state.focus_candidates().contains(&Pane::Prs));
 

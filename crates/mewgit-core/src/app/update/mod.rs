@@ -17,8 +17,8 @@
 use crate::git_exec::{GitOp, PullMode};
 
 use super::{
-    AppState, Cmd, GithubBlock, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg,
-    NoticeLevel, Pane, PrField, RewordInput, TextBuffer,
+    AppState, Cmd, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
+    PrField, RewordInput, TextBuffer,
 };
 use account::{account_resolved, accounts_listed, open_account, repo_info_loaded, target_resolved};
 use branches::{branches_key, branches_loaded};
@@ -396,18 +396,13 @@ fn numbered_pane(state: &AppState, key: Key) -> Option<Pane> {
 /// （07 の「ペインとフォーカス」）。黙って何も起きないと、キーが効いていないのか
 /// 対象が悪いのか判らない。
 fn jump(state: &mut AppState, pane: Pane) -> Cmd {
-    if state.focus_candidates().contains(&pane) {
-        return focus(state, pane);
+    match state.focus_refusal(pane) {
+        None => focus(state, pane),
+        Some(reason) => {
+            state.push_notice(NoticeLevel::Info, reason, None);
+            Cmd::None
+        }
     }
-    // 番号の付いたペインで候補から落ちうるのは、GitHub 機能を切ったときの `Prs` だけ
-    // （`Diff` には番号が無く、右下は `right_pane` が候補と同じ選択から決める）。
-    debug_assert_eq!(pane, Pane::Prs, "候補から落ちる理由が増えました");
-    state.push_notice(
-        NoticeLevel::Info,
-        GithubBlock::AccountDisabled.notice(),
-        None,
-    );
-    Cmd::None
 }
 
 /// フォーカスを移し、見えるようになったものが要るなら頼む。
@@ -581,9 +576,9 @@ fn submit(state: &mut AppState, cmd: Cmd) -> Cmd {
 mod tests {
 
     use super::test_support::{
-        commit_loads, cursor, detail_ok, diff_state, exec_done_of, more, on_first_commit,
-        on_first_commit_with_files, press, press_code, state, state_on_branches, state_on_stashes,
-        state_with_commits, state_with_page, tab_to, tick, worktree_state, ROWS,
+        commit_loads, cursor, detail_ok, diff_state, exec_done_of, github_disabled_state, more,
+        on_first_commit, on_first_commit_with_files, press, press_code, state, state_on_branches,
+        state_on_stashes, state_with_commits, state_with_page, tab_to, tick, worktree_state, ROWS,
     };
     use super::*;
     use crate::app::{keys, Modal, RightTab, TermSize};
@@ -715,16 +710,11 @@ mod tests {
                 }
             }
         }
+        // **Diff から押す。** いま居るペインの番号は正しく無反応（07 の「ペインと
+        // フォーカス」）なので、番号の付いていないペインから押せば特例が要らない。
         for hint in keys::COMMON.iter().chain(keys::PINNED) {
             for key in hint.keys() {
-                // **いま居るペインの番号は正しく無反応**（07 の「ペインとフォーカス」）。
-                // `1` だけは Graph 以外から押す。
-                let from = if *key == Key::char('1') {
-                    Pane::Branches
-                } else {
-                    Pane::Graph
-                };
-                assert_reacts(from, *key, hint.label());
+                assert_reacts(Pane::Diff, *key, hint.label());
             }
         }
     }
@@ -919,9 +909,7 @@ mod tests {
     fn a_digit_for_a_pane_out_of_the_candidates_is_refused_with_a_notice() {
         // `config.github.enabled = false` だと `Prs` が候補から落ちる（01 の「GitHub 機能を
         // 切る」）。黙って何も起きないと、キーが効いていないのか判らない。
-        let mut config = crate::config::Config::default();
-        config.github.enabled = false;
-        let mut state = AppState::new(crate::app::RepoInfo::default(), config, FAKE_NOW);
+        let mut state = github_disabled_state();
         state.focus = Pane::Branches;
 
         let cmd = press(&mut state, '4');
@@ -930,7 +918,7 @@ mod tests {
         assert_eq!(state.focus, Pane::Branches, "フォーカスが動きました");
         assert_eq!(
             shown(&state),
-            Some(GithubBlock::AccountDisabled.notice().as_str())
+            Some(crate::app::GithubBlock::AccountDisabled.notice().as_str())
         );
     }
 

@@ -80,6 +80,17 @@ pub const COMMON: &[KeyHint] = &[
         &[Key::new(KeyCode::Tab), Key::new(KeyCode::BackTab)],
         "ペイン移動",
     ),
+    // 番号は画面の場所に付ける（07 の「ペインとフォーカス」）。`5` は右下。
+    hint(
+        &[
+            Key::char('1'),
+            Key::char('2'),
+            Key::char('3'),
+            Key::char('4'),
+            Key::char('5'),
+        ],
+        "Graph/Branches/Stash/PRs/右下へ",
+    ),
     // git が走っていれば中断、そうでなければ終了（`update_key` の先頭）。
     hint(&[Key::ctrl('c')], "中断 / 終了"),
 ];

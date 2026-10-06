@@ -3057,7 +3057,7 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
   —— 案内に出すものの一覧なので、出さないものを入れると「表 → 実際に押せる」の
   見張りが通るだけで案内は変わらない。**逆向き（`match` の腕が全部表にあるか）は
   `match` から導けない**ので、そこは見張れない
-- **`m` / `Tab` / `Shift+Tab` / `Ctrl-C` は `COMMON` に入っている**（`Modal::Help` で
+- **`m` / `Tab` / `Shift+Tab` / `1`〜`5` / `Ctrl-C` は `COMMON` に入っている**（`Modal::Help` で
   足した）。読むのは `?` の一覧だけで、フッターには出ない
 - **押して無反応なキーを表に入れない見張り**は `every_hinted_key_does_something`
   （`update` を通して 1 打鍵ずつ叩き、`Cmd` か `AppState` が動くことを見る）。

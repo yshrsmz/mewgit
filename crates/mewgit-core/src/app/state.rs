@@ -414,6 +414,25 @@ impl AppState {
         }
     }
 
+    /// `pane` へ移れない理由。候補に入っていれば `None`（07 の「ペインとフォーカス」の
+    /// `1`〜`5`）。
+    ///
+    /// **候補を決める規則の隣に置く。** 落とす条件（[`pick`](Self::pick) と `Diff` の
+    /// 絞り）を足す人がここも直せるように —— 呼ぶ側が理由を決め打ちすると、条件が
+    /// 増えたときに別の理由へ「GitHub 機能が無効」と言う。
+    pub fn focus_refusal(&self, pane: Pane) -> Option<String> {
+        if self.focus_candidates().contains(&pane) {
+            return None;
+        }
+        Some(match pane {
+            // `pick` が `Prs` を落とすのは GitHub 機能を切ったときだけ。
+            Pane::Prs => GithubBlock::AccountDisabled.notice(),
+            // 選択に合わない右下と、対象の無い `Diff`。どちらも番号では選べない
+            // （`5` は `right_pane` が候補と同じ選択から決め、`Diff` に番号は無い）。
+            _ => "そのペインはいま出ていません".to_string(),
+        })
+    }
+
     /// 巡回の次。末尾からは先頭に戻る。
     pub fn next_focus(&self) -> Pane {
         self.focus.cycle(self.focus_candidates(), 1)
@@ -3611,6 +3630,19 @@ mod tests {
                 state.focus_candidates()
             );
         }
+    }
+
+    #[test]
+    fn a_pane_out_of_the_candidates_is_refused_with_a_reason_that_is_not_github() {
+        // `Prs` 以外の理由で落ちたペインに「GitHub 機能が無効」と言わない
+        // （`focus_refusal` の doc）。コミットを選んでいるあいだ Working tree は候補の外。
+        let mut state = state_with_a_commit();
+        state.graph.cursor = 1;
+        assert_eq!(state.focus_refusal(Pane::CommitDetail), None);
+        let reason = state
+            .focus_refusal(Pane::Worktree)
+            .expect("候補に入っています");
+        assert_ne!(reason, GithubBlock::AccountDisabled.notice());
     }
 
     #[test]

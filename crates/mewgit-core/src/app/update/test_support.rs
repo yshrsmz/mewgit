@@ -36,6 +36,16 @@ pub(super) fn state() -> AppState {
     state
 }
 
+/// `config.github.enabled = false` で起動した状態（01 の「GitHub 機能を切る」）。
+/// 旗を読むのは `AppState::new` の 1 つなので、あとから `account` を書き換えずに作る。
+pub(super) fn github_disabled_state() -> AppState {
+    let mut config = Config::default();
+    config.github.enabled = false;
+    let mut state = AppState::new(RepoInfo::default(), config, FAKE_NOW);
+    state.graph.viewport = ROWS;
+    state
+}
+
 /// `n` 番目のコミット。oid は `n` から作るので、256 件以上は重なる。
 pub(super) fn commit(n: usize) -> Commit {
     fake_commit(n as u8, &format!("commit {n}"))

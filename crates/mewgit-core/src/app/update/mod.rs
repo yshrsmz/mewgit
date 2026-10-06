@@ -295,6 +295,10 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         KeyCode::BackTab => return focus(state, state.prev_focus()),
         _ => {}
     }
+    // 番号で直接移るのも同じ理由でペインより先に見る（07 の「ペインとフォーカス」）。
+    if let Some(pane) = numbered_pane(state, key) {
+        return jump(state, pane);
+    }
 
     match state.focus {
         Pane::Graph => graph_key(state, key),
@@ -365,9 +369,45 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
     Cmd::None
 }
 
+/// `1`〜`5` が指すペイン。番号は画面の場所に付ける（07 の「ペインとフォーカス」）。
+///
+/// **`5` は右下で、相手はグラフの選択で決まる**（[`GraphSelection::right_pane`]）。
+/// `Diff` には番号を付けない —— 対象が無いと候補から外れるので、断られる場面が増える。
+///
+/// [`GraphSelection::right_pane`]: super::GraphSelection::right_pane
+fn numbered_pane(state: &AppState, key: Key) -> Option<Pane> {
+    let pane = if key == Key::char('1') {
+        Pane::Graph
+    } else if key == Key::char('2') {
+        Pane::Branches
+    } else if key == Key::char('3') {
+        Pane::Stash
+    } else if key == Key::char('4') {
+        Pane::Prs
+    } else if key == Key::char('5') {
+        state.graph.selection().right_pane()
+    } else {
+        return None;
+    };
+    Some(pane)
+}
+
+/// 番号で `pane` へ移る。**候補に入っていなければ通知で断り、フォーカスを動かさない**
+/// （07 の「ペインとフォーカス」）。黙って何も起きないと、キーが効いていないのか
+/// 対象が悪いのか判らない。
+fn jump(state: &mut AppState, pane: Pane) -> Cmd {
+    match state.focus_refusal(pane) {
+        None => focus(state, pane),
+        Some(reason) => {
+            state.push_notice(NoticeLevel::Info, reason, None);
+            Cmd::None
+        }
+    }
+}
+
 /// フォーカスを移し、見えるようになったものが要るなら頼む。
 ///
-/// **フォーカスを動かすキーはすべてここを通す**（`Tab` / `Shift+Tab` の巡回、
+/// **フォーカスを動かすキーはすべてここを通す**（`Tab` / `Shift+Tab` の巡回、`1`〜`5`、
 /// Worktree の `Enter`、Diff の `Esc`）。腕ごとに `Cmd::LoadDiff` を書くと、あとから
 /// ペインを足すたびに同じ特殊ケースが増える（01 の「diff の遅延取得」）。
 ///
@@ -536,9 +576,9 @@ fn submit(state: &mut AppState, cmd: Cmd) -> Cmd {
 mod tests {
 
     use super::test_support::{
-        commit_loads, cursor, detail_ok, diff_state, exec_done_of, more, on_first_commit,
-        on_first_commit_with_files, press, press_code, state, state_on_branches, state_on_stashes,
-        state_with_commits, state_with_page, tab_to, tick, worktree_state, ROWS,
+        commit_loads, cursor, detail_ok, diff_state, exec_done_of, github_disabled_state, more,
+        on_first_commit, on_first_commit_with_files, press, press_code, state, state_on_branches,
+        state_on_stashes, state_with_commits, state_with_page, tab_to, tick, worktree_state, ROWS,
     };
     use super::*;
     use crate::app::{keys, Modal, RightTab, TermSize};
@@ -665,11 +705,17 @@ mod tests {
             Pane::Diff,
         ] {
             for hint in keys::pane(pane) {
-                assert_reacts(pane, hint);
+                for key in hint.keys() {
+                    assert_reacts(pane, *key, hint.label());
+                }
             }
         }
+        // **Diff から押す。** いま居るペインの番号はフォーカスを動かさない（07 の
+        // 「ペインとフォーカス」）ので、番号の付いていないペインから押せば特例が要らない。
         for hint in keys::COMMON.iter().chain(keys::PINNED) {
-            assert_reacts(Pane::Graph, hint);
+            for key in hint.keys() {
+                assert_reacts(Pane::Diff, *key, hint.label());
+            }
         }
     }
 
@@ -707,23 +753,20 @@ mod tests {
     }
 
     /// `pane` で `hint` のキーを 1 つずつ押し、無反応でないことを見る。
-    fn assert_reacts(pane: Pane, hint: &keys::KeyHint) {
-        for key in hint.keys() {
-            let mut state = hinted_state(pane);
-            assert_eq!(state.focus, pane, "{pane:?} に居ません");
-            // **出ている通知があると、どのキーも「下ろした」ことで反応したように
-            // 見える**（01 の「通知」）。この見張りが空になるので、無い状態から押す。
-            assert_eq!(state.shown_notice(), None, "{pane:?} に通知が出ています");
-            let before = format!("{state:?}");
+    fn assert_reacts(pane: Pane, key: Key, label: &str) {
+        let mut state = hinted_state(pane);
+        assert_eq!(state.focus, pane, "{pane:?} に居ません");
+        // **出ている通知があると、どのキーも「下ろした」ことで反応したように
+        // 見える**（01 の「通知」）。この見張りが空になるので、無い状態から押す。
+        assert_eq!(state.shown_notice(), None, "{pane:?} に通知が出ています");
+        let before = format!("{state:?}");
 
-            let cmd = update(&mut state, Msg::Key(*key));
+        let cmd = update(&mut state, Msg::Key(key));
 
-            assert!(
-                cmd != Cmd::None || format!("{state:?}") != before,
-                "{pane:?} の {key:?}（{}）が無反応です",
-                hint.label()
-            );
-        }
+        assert!(
+            cmd != Cmd::None || format!("{state:?}") != before,
+            "{pane:?} の {key:?}（{label}）が無反応です"
+        );
     }
 
     /// `pane` にフォーカスがあり、**表のどのキーも空振りしない**状態。
@@ -827,6 +870,74 @@ mod tests {
         assert_eq!(state.focus, Pane::Graph);
         // 逆回りで Branches を通ったので、タブはそちらに戻っている。
         assert_eq!(state.right_tab, RightTab::Branches);
+    }
+
+    #[test]
+    fn digits_jump_to_the_place_and_5_follows_the_graph_selection() {
+        // 番号は画面の場所に付ける（07 の「ペインとフォーカス」）。
+        let mut state = state_with_commits(3);
+        state.worktree.snapshot = fake_snapshot(&[], &["a.txt"], &[]);
+
+        for (c, pane, tab) in [
+            ('2', Pane::Branches, RightTab::Branches),
+            ('3', Pane::Stash, RightTab::Stash),
+            ('4', Pane::Prs, RightTab::Prs),
+        ] {
+            let _ = press(&mut state, c);
+            assert_eq!(state.focus, pane, "{c}");
+            // タブも揃う（`Tab` で入ったときと同じ出口を通る）。
+            assert_eq!(state.right_tab, tab, "{c}");
+        }
+
+        // WIP 行を選んでいるあいだ、右下は Working tree。
+        let _ = press(&mut state, '5');
+        assert_eq!(state.focus, Pane::Worktree);
+
+        // Diff からも `1` で Graph に戻れる。
+        let _ = press_code(&mut state, KeyCode::Enter);
+        assert_eq!(state.focus, Pane::Diff);
+        let _ = press(&mut state, '1');
+        assert_eq!(state.focus, Pane::Graph);
+
+        // コミットを選ぶと、右下はコミット詳細になる。
+        let _ = press(&mut state, 'j');
+        let _ = press(&mut state, '5');
+        assert_eq!(state.focus, Pane::CommitDetail);
+    }
+
+    #[test]
+    fn a_digit_for_a_pane_out_of_the_candidates_is_refused_with_a_notice() {
+        // `config.github.enabled = false` だと `Prs` が候補から落ちる（01 の「GitHub 機能を
+        // 切る」）。黙って何も起きないと、キーが効いていないのか判らない。
+        let mut state = github_disabled_state();
+        state.focus = Pane::Branches;
+
+        let cmd = press(&mut state, '4');
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.focus, Pane::Branches, "フォーカスが動きました");
+        assert_eq!(
+            shown(&state),
+            Some(crate::app::GithubBlock::AccountDisabled.notice().as_str())
+        );
+    }
+
+    #[test]
+    fn a_digit_under_a_modal_goes_to_the_modal() {
+        // モーダル表示中はキーを全部モーダルが受ける。`CommitMessage` では入力文字。
+        let mut state = state_with_commits(1);
+        state.worktree.snapshot = fake_snapshot(&["a.txt"], &[], &[]);
+        state.focus = Pane::Worktree;
+        let _ = press(&mut state, 'c');
+        assert!(matches!(state.modal, Some(Modal::CommitMessage { .. })));
+
+        let _ = press(&mut state, '2');
+
+        assert_eq!(state.focus, Pane::Worktree);
+        let Some(Modal::CommitMessage { buf, .. }) = &state.modal else {
+            panic!("モーダルが閉じました");
+        };
+        assert_eq!(buf.text(), "2");
     }
 
     #[test]

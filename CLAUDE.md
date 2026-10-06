@@ -50,6 +50,8 @@ cargo fmt --all
 cargo run -p mewgit -- <repo-path>
 ```
 
+`crates/mewgit-tui` のパッケージ名は `mewgit`（`-p mewgit-tui` は `did not match any packages` で落ちる）。core は `-p mewgit-core`。
+
 CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
 
 **TUI を pty で動かして画面を確かめるときは `pty-check` スキル**（報告の前に実物を動かす。`.claude/rules/reporting.md`）。

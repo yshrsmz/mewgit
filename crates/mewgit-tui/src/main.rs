@@ -2,7 +2,8 @@
 //!
 //! 解釈するオプションは `--version` / `-V` と `--help` / `-h` だけで、どちらも stdout に
 //! 書いて終わる。版は `Cargo.toml` の `[workspace.package] version`（release-please が
-//! release PR で上げる）。
+//! release PR で上げる）。オプションは位置によらず拾い、`--` から後ろはパスとして読む
+//! （`parse` を参照）。
 //!
 //! 隠しサブコマンド `--sequence-editor <todo>` / `--commit-editor <file>` は interactive
 //! rebase 用。git が `GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` として起こし、plan は git から
@@ -48,12 +49,62 @@ fn main() -> Result<ExitCode> {
             }))
         }
         Some("--commit-editor") => return Ok(editor(&args[1..], git_exec::write_commit_message)),
-        Some("--version" | "-V") => return Ok(print(&format!("{VERSION_LINE}\n"))),
-        Some("--help" | "-h") => return Ok(print(HELP)),
         _ => {}
     }
-    tui(repo_path(args.first())?)?;
-    Ok(ExitCode::SUCCESS)
+    match parse(&args)? {
+        Launch::Version => Ok(print(&format!("{VERSION_LINE}\n"))),
+        Launch::Help => Ok(print(HELP)),
+        Launch::Tui(path) => {
+            tui(repo_path(path))?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// 引数を読んだ結果。
+enum Launch<'a> {
+    Version,
+    Help,
+    Tui(Option<&'a OsString>),
+}
+
+/// 起動引数を読む。
+///
+/// **`--help` / `--version` は位置によらず拾う**（`mewgit <path> --help`）。どちらかが
+/// あれば、ほかの引数の誤りより先に、先に現れたほうを出す。無ければ、知らないオプションと
+/// 2 つ目のパスを断る —— 黙って捨てると、頼んだつもりのことが起きないまま TUI が開く。
+/// `--` から後ろはオプションとして読まないので、`-` で始まる名前のディレクトリも開ける。
+fn parse(args: &[OsString]) -> Result<Launch<'_>> {
+    let mut path = None;
+    let mut refusal = None;
+    let mut options_done = false;
+    for arg in args {
+        let text = arg.to_string_lossy();
+        if !options_done {
+            match &*text {
+                "--" => {
+                    options_done = true;
+                    continue;
+                }
+                "--version" | "-V" => return Ok(Launch::Version),
+                "--help" | "-h" => return Ok(Launch::Help),
+                _ if text.starts_with('-') => {
+                    refusal.get_or_insert_with(|| format!("知らないオプションです: {text}"));
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if path.is_some() {
+            refusal.get_or_insert_with(|| format!("余分な引数です: {text}"));
+        } else {
+            path = Some(arg);
+        }
+    }
+    if let Some(refusal) = refusal {
+        bail!("{refusal}（mewgit --help で使い方を出します）");
+    }
+    Ok(Launch::Tui(path))
 }
 
 /// `--version` / `--help` の出力。
@@ -74,9 +125,10 @@ const HELP: &str = concat!(
     "
 tig 風のコミットグラフと GitHub 連携を持つ TUI の git クライアント
 
-使い方: mewgit [repo-path]
+使い方: mewgit [options] [--] [repo-path]
 
-  repo-path      開くリポジトリ。省略するとカレントディレクトリ
+  repo-path      開くリポジトリ。省略するとカレントディレクトリ。
+                 - で始まる名前は -- のあとに書く
   -h, --help     この使い方を出す
   -V, --version  版を出す
 
@@ -170,20 +222,7 @@ fn push_keyboard_enhancement() {
 ///
 /// 絶対パスに直すのは、`.` や `..` のままだと `file_name()` が `None` になり、
 /// ヘッダに `.` と出てしまうため。
-fn repo_path(arg: Option<&OsString>) -> Result<PathBuf> {
-    let raw = match arg {
-        Some(arg) => {
-            // 解釈しないオプションを、その名前のリポジトリとして開きにいかないよう弾く。
-            if arg.to_string_lossy().starts_with('-') {
-                bail!(
-                    "知らないオプションです: {}（mewgit --help で使い方を出します）",
-                    arg.to_string_lossy()
-                );
-            }
-            PathBuf::from(arg)
-        }
-        None => PathBuf::from("."),
-    };
-
-    Ok(std::fs::canonicalize(&raw).unwrap_or(raw))
+fn repo_path(arg: Option<&OsString>) -> PathBuf {
+    let raw = arg.map_or_else(|| PathBuf::from("."), PathBuf::from);
+    std::fs::canonicalize(&raw).unwrap_or(raw)
 }

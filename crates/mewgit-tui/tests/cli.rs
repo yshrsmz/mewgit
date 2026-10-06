@@ -1,13 +1,23 @@
-//! 本物の `mewgit` に `--version` / `--help` を渡す。端末にも設定にも触れずに
-//! stdout へ書いて終わることを見る（`main.rs` は単体テストを持たないので、ここに置く）。
+//! 本物の `mewgit` に起動引数を渡す。`--version` / `--help` は端末にも設定にも触れずに
+//! stdout へ書いて終わり、読めない引数は端末に入る前に断ることを見る（`main.rs` は
+//! 単体テストを持たないので、ここに置く）。
 
 use std::process::{Command, Output, Stdio};
 
-fn mewgit(arg: &str) -> Output {
+fn mewgit(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mewgit"))
-        .arg(arg)
+        .args(args)
         .output()
         .expect("mewgit を起こせるはずです")
+}
+
+fn refusal(args: &[&str]) -> String {
+    let output = mewgit(args);
+    assert!(!output.status.success(), "{args:?}: {output:?}");
+    assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(stderr.contains("mewgit --help"), "{args:?}: {stderr}");
+    stderr
 }
 
 fn stdout(output: &Output) -> &str {
@@ -16,44 +26,88 @@ fn stdout(output: &Output) -> &str {
 
 #[test]
 fn version_prints_the_package_version() {
-    for arg in ["--version", "-V"] {
-        let output = mewgit(arg);
-        assert!(output.status.success(), "{arg}: {output:?}");
+    for args in [
+        &["--version"][..],
+        &["-V"],
+        &[".", "--version"],
+        &["a", "b", "-V"],
+    ] {
+        let output = mewgit(args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
         assert_eq!(
             stdout(&output),
             format!("mewgit {}\n", env!("CARGO_PKG_VERSION")),
-            "{arg}"
+            "{args:?}"
         );
-        assert!(output.stderr.is_empty(), "{arg}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
     }
 }
 
 #[test]
 fn help_prints_the_usage() {
-    for arg in ["--help", "-h"] {
-        let output = mewgit(arg);
-        assert!(output.status.success(), "{arg}: {output:?}");
+    // 後ろに置いても、知らないオプションや余分な引数より先に拾う。
+    for args in [
+        &["--help"][..],
+        &["-h"],
+        &[".", "--help"],
+        &["--nope", "a", "b", "-h"],
+    ] {
+        let output = mewgit(args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
         let help = stdout(&output);
         assert!(
             help.starts_with(&format!("mewgit {}\n", env!("CARGO_PKG_VERSION"))),
-            "{arg}: {help}"
+            "{args:?}: {help}"
         );
-        assert!(help.contains("使い方: mewgit [repo-path]"), "{arg}: {help}");
-        assert!(output.stderr.is_empty(), "{arg}: {output:?}");
+        assert!(
+            help.contains("使い方: mewgit [options] [--] [repo-path]"),
+            "{args:?}: {help}"
+        );
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
     }
 }
 
 #[test]
-fn an_unknown_option_is_refused_with_a_pointer_to_help() {
-    let output = mewgit("--nope");
+fn the_first_of_help_and_version_wins() {
+    let output = mewgit(&["-V", "--help"]);
+    assert_eq!(
+        stdout(&output),
+        format!("mewgit {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    let output = mewgit(&["-h", "--version"]);
+    assert!(stdout(&output).contains("使い方:"), "{output:?}");
+}
+
+#[test]
+fn an_unknown_option_is_refused_wherever_it_is() {
+    for args in [&["--nope"][..], &[".", "--nope"]] {
+        let stderr = refusal(args);
+        assert!(
+            stderr.contains("知らないオプションです: --nope"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_second_path_is_refused() {
+    let stderr = refusal(&[".", "other"]);
+    assert!(stderr.contains("余分な引数です: other"), "{stderr}");
+}
+
+#[test]
+fn after_double_dash_a_leading_dash_is_a_path() {
+    // `--help` という名前のリポジトリを開きにいき、無いので断る（端末に入る前に落ちる）。
+    let dir = std::env::temp_dir();
+    let output = Command::new(env!("CARGO_BIN_EXE_mewgit"))
+        .args(["--", "--help"])
+        .current_dir(&dir)
+        .output()
+        .expect("mewgit を起こせるはずです");
     assert!(!output.status.success(), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("知らないオプションです: --nope"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("mewgit --help"), "{stderr}");
+    assert!(stderr.contains("--help を開けませんでした"), "{stderr}");
 }
 
 #[test]

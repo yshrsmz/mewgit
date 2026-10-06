@@ -59,13 +59,14 @@ cargo uninstall mewgit
 ## Usage
 
 ```sh
-mewgit [repo-path]
+mewgit [options] [--] [repo-path]
 ```
 
 Without a path, it opens the repository in the current directory. Press `?`
 for the keys of the focused pane, and `q` to quit.
 
-`mewgit --version` prints the version, and `mewgit --help` the usage.
+`mewgit --version` prints the version, and `mewgit --help` the usage. Options
+may come anywhere; put a path that starts with `-` after `--`.
 
 ## Build
 

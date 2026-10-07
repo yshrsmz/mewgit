@@ -406,8 +406,9 @@ hook が reword を断ったあとの continue → stderr が空の失敗の理�
 規則に揃える → アカウント書き込み中の `A` を断る → 消えたバイナリのエディタ（まず実測）→
 git の最低版。(2) README とリリースワークフローで 0.1 を切る。(3) そのあと端末幅 < 100 の
 レイアウト、`1`〜`5`、ロケールと `graph.ascii`、意図的な巻き戻しの force push。
-**内部の掃除**（追跡設定の 1 本化、`state.rs`、`VARIANT_COUNT`、`screen.py`、テストの
-status ヘルパ）**は単独の PR にせず、近くを触るタスクに相乗りさせる**。下の並びは
+**内部の掃除**（追跡設定の 1 本化、`state.rs`、`screen.py`、テストの
+status ヘルパ）**は単独の PR にせず、近くを触るタスクに相乗りさせる**（`VARIANT_COUNT` は
+テストの中で閉じていて相乗り先が無かったので、2026-10-08 にユーザーと決めて単独で出した）。下の並びは
 書いた順のままで、この順序ではない
 
 - [x] **git の最低版を決める。** **床は 2.38.0 の 1 つで、下回れば端末に入る前に起動を断る**
@@ -675,14 +676,19 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       `Modal::NoticeLog` の変種 1 つと、`Modal::move_cursor` を `AppState::move_modal_cursor`
       へ移したことだけで（一覧の長さを `AppState.notices` が持つため）、`Modal` が
       独立して育ったとは言えない
-- [ ] `git_exec::argv` の `VARIANT_COUNT` を消す。**`variant()` の網羅 `match` から
-      離れた場所に変種の本数のコピーが置いてある**（`.claude/rules/rust-coding.md` の「離れた場所に、
+- [x] `git_exec::argv` の `VARIANT_COUNT` を消す。**`variant()` の網羅 `match` から
+      離れた場所に変種の本数のコピーが置いてあった**（`.claude/rules/rust-coding.md` の「離れた場所に、
       コードの『いま N ある』を書かない」）。**ただの削除では済まない** ——
       `covers_every_variant` は「`to_argv` は全 `GitOp` をカバーする」（同じく `.claude/rules/testing.md`）
-      の見張りなので、消すとカバー要求のほうが破れる。塞ぐ形は、各変種の代表値を返す
-      網羅 `match`（`fn every_variant() -> Vec<GitOp>`）を 1 本置き、`cases()` が
-      その集合を全部含むことを `BTreeSet` で比べること —— 変種を足すとそちらが
-      コンパイルエラーになるので、数を書かずに漏れが出る
+      の見張りなので、消すとカバー要求のほうが破れる。
+      **ここに最初に書いた塞ぎ方（代表値を返す `fn every_variant() -> Vec<GitOp>`）は
+      成り立たなかった** —— 引数を取らない関数は網羅 `match` を持てず、`vec!` に変種を
+      書き忘れてもコンパイルは通る。`std::mem::variant_count` は 1.98.1 で unstable
+      （E0658）。**決めた形はテスト内の `macro_rules! variants` 1 本** —— 「名前: パターン」
+      の並びから網羅 `match` の `variant()` と名前の一覧 `VARIANTS` を両方作り、
+      `cases()` の名前の集合が `VARIANTS` を全部含むことを `BTreeSet` で比べる。
+      代表値は要らない。実測（2026-10-08）: マクロの行を消すと E0004、`cases()` から
+      1 件消すとテストが名前を挙げて落ち、名前を重ねると重複の検査が落ちる
 - [ ] `scripts/screen.py` が全角文字のあとで 1 桁落とすのを直す。**桁を根拠にする
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の

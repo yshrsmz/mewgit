@@ -523,16 +523,18 @@ mod tests {
         fake_fork_source, fake_oid, fake_pr_checkout, fake_stamp, FAKE_FORK_URL,
     };
 
-    /// [`variant`] と [`VARIANTS`] を同じ並びから作る。**`variant` は網羅 `match` なので、
-    /// `GitOp` に変種を足すと 1 行足すまでコンパイルエラーになり、足せば `VARIANTS` にも
-    /// 載る**（変種の本数をどこにも書かない）。そのとき [`cases`] にも足す
-    /// （足し忘れは `covers_every_variant` が落とす）。
+    /// [`variant`] と [`VARIANTS`] を同じ名前の並びから作る（`GitOp::X { .. }` はタプルの
+    /// 変種にもユニットの変種にも当たる）。**`variant` は網羅 `match` なので、`GitOp` に
+    /// 変種を足すと名前を 1 つ足すまでコンパイルエラーになり、足せば `VARIANTS` にも
+    /// 載る**（変種の本数をどこにも書かない。同じ名前を 2 度書くと `unreachable_patterns`
+    /// で clippy が落とす）。そのとき [`cases`] にも足す（足し忘れは `covers_every_variant`
+    /// が落とす）。
     macro_rules! variants {
-        ($($name:ident: $pat:pat,)*) => {
+        ($($name:ident,)*) => {
             /// 変種の名前。
             fn variant(op: &GitOp) -> &'static str {
                 match op {
-                    $($pat => stringify!($name),)*
+                    $(GitOp::$name { .. } => stringify!($name),)*
                 }
             }
 
@@ -542,42 +544,42 @@ mod tests {
     }
 
     variants! {
-        Stage: GitOp::Stage(_),
-        Unstage: GitOp::Unstage(_),
-        StageHunk: GitOp::StageHunk(_),
-        UnstageHunk: GitOp::UnstageHunk(_),
-        DiscardHunk: GitOp::DiscardHunk(_),
-        Discard: GitOp::Discard(_),
-        DiscardUntracked: GitOp::DiscardUntracked(_),
-        DiscardAdded: GitOp::DiscardAdded(_),
-        Commit: GitOp::Commit { .. },
-        BranchCreate: GitOp::BranchCreate { .. },
-        Switch: GitOp::Switch(_),
-        BranchDelete: GitOp::BranchDelete { .. },
-        BranchRename: GitOp::BranchRename { .. },
-        Fetch: GitOp::Fetch { .. },
-        Pull: GitOp::Pull { .. },
-        Push: GitOp::Push { .. },
-        RebaseInteractive: GitOp::RebaseInteractive { .. },
-        RebaseContinue: GitOp::RebaseContinue { .. },
-        RebaseSkip: GitOp::RebaseSkip,
-        RebaseAbort: GitOp::RebaseAbort,
-        CherryPick: GitOp::CherryPick(_),
-        CherryPickContinue: GitOp::CherryPickContinue,
-        CherryPickSkip: GitOp::CherryPickSkip,
-        CherryPickAbort: GitOp::CherryPickAbort,
-        Revert: GitOp::Revert { .. },
-        RevertContinue: GitOp::RevertContinue,
-        RevertSkip: GitOp::RevertSkip,
-        RevertAbort: GitOp::RevertAbort,
-        MergeAbort: GitOp::MergeAbort,
-        StashPush: GitOp::StashPush { .. },
-        StashApply: GitOp::StashApply(_),
-        StashPop: GitOp::StashPop(_),
-        StashDrop: GitOp::StashDrop(_),
-        SetAccount: GitOp::SetAccount { .. },
-        UnsetAccount: GitOp::UnsetAccount,
-        CheckoutPr: GitOp::CheckoutPr(_),
+        Stage,
+        Unstage,
+        StageHunk,
+        UnstageHunk,
+        DiscardHunk,
+        Discard,
+        DiscardUntracked,
+        DiscardAdded,
+        Commit,
+        BranchCreate,
+        Switch,
+        BranchDelete,
+        BranchRename,
+        Fetch,
+        Pull,
+        Push,
+        RebaseInteractive,
+        RebaseContinue,
+        RebaseSkip,
+        RebaseAbort,
+        CherryPick,
+        CherryPickContinue,
+        CherryPickSkip,
+        CherryPickAbort,
+        Revert,
+        RevertContinue,
+        RevertSkip,
+        RevertAbort,
+        MergeAbort,
+        StashPush,
+        StashApply,
+        StashPop,
+        StashDrop,
+        SetAccount,
+        UnsetAccount,
+        CheckoutPr,
     }
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
@@ -990,10 +992,7 @@ mod tests {
     #[test]
     fn covers_every_variant() {
         let covered: BTreeSet<_> = all_cases().iter().map(|(op, _)| variant(op)).collect();
-        let every: BTreeSet<_> = VARIANTS.iter().copied().collect();
-        // 名前が重なると集合が縮み、覆っていない変種を隠す。
-        assert_eq!(every.len(), VARIANTS.len(), "名前が重なっている");
-        let missing: Vec<_> = every.difference(&covered).collect();
+        let missing: Vec<_> = VARIANTS.iter().filter(|v| !covered.contains(*v)).collect();
         assert!(missing.is_empty(), "argv の表に無い変種がある: {missing:?}");
     }
 

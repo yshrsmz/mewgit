@@ -687,7 +687,8 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       並びから、網羅 `match` の `variant()`（腕は `GitOp::$name { .. }`。タプルとユニットの
       変種にも当たる）と名前の一覧 `VARIANTS` を両方作り、`cases()` の名前が `VARIANTS` を
       全部含むかを比べる。代表値は要らない。実測（2026-10-08）: 名前を消すと E0004、
-      同じ名前を 2 度書くと clippy の `unreachable_patterns`、`cases()` から 1 件消すと
+      同じ名前を 2 度書くと rustc の `unreachable_patterns`（CI の `clippy -D warnings` で落ちる。
+      `cargo test` だけでは警告で通る）、`cases()` から 1 件消すと
       テストが名前を挙げて落ちる。**相乗り先が無かったので単独の PR にした**
       （2026-10-08 にユーザーと決めた）
 - [ ] enum の全変種を手で並べた一覧を、網羅 `match` とつなぐ。**`VARIANT_COUNT` と

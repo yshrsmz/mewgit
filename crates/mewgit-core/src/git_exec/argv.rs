@@ -526,9 +526,9 @@ mod tests {
     /// [`variant`] と [`VARIANTS`] を同じ名前の並びから作る（`GitOp::X { .. }` はタプルの
     /// 変種にもユニットの変種にも当たる）。**`variant` は網羅 `match` なので、`GitOp` に
     /// 変種を足すと名前を 1 つ足すまでコンパイルエラーになり、足せば `VARIANTS` にも
-    /// 載る**（変種の本数をどこにも書かない。同じ名前を 2 度書くと `unreachable_patterns`
-    /// で clippy が落とす）。そのとき [`cases`] にも足す（足し忘れは `covers_every_variant`
-    /// が落とす）。
+    /// 載る**（変種の本数をどこにも書かない。同じ名前を 2 度書くと rustc の
+    /// `unreachable_patterns` になり、CI の `clippy -D warnings` で落ちる）。そのとき
+    /// [`cases`] にも足す（足し忘れは `covers_every_variant` が落とす）。
     macro_rules! variants {
         ($($name:ident,)*) => {
             /// 変種の名前。

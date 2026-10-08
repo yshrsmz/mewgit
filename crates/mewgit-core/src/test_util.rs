@@ -709,8 +709,8 @@ pub fn fake_login(login: &str) -> GhLogin {
 /// 候補が複数ある `Ambiguous`。
 ///
 /// **候補を空にしない形をここで持つ。** ヘッダの長さの見張り
-/// （`every_degraded_reason_fits_the_header`）は候補があるときの文言
-/// （`A で選ぶ` が付く）を測るためにこれを要る。空の `Ambiguous` を各テストが
+/// （tui の `every_degraded_reason_fits_the_header`。[`every_degraded_reason`] 経由）は
+/// 候補があるときの文言（`A で選ぶ` が付く）を測るためにこれを要る。空の `Ambiguous` を各テストが
 /// 手で組めるようにしておくと、**出荷される形を測らないまま緑になる**。
 pub fn fake_ambiguous(logins: &[&str]) -> DegradedReason {
     DegradedReason::Ambiguous {
@@ -754,6 +754,48 @@ pub fn fake_attempt(login: &str, failure: AttemptFailure) -> ProbeAttempt {
 /// どの候補もリポジトリに届かなかった `NoAccess`。
 pub fn fake_no_access(attempts: Vec<ProbeAttempt>) -> DegradedReason {
     DegradedReason::NoAccess { attempts }
+}
+
+/// `DegradedReason` の全変種を 1 つずつ。変種ごとに回すテスト（ヘッダの長さの見張りなど）が
+/// 使う。
+///
+/// **ここに置くのは `all_variants!` が core の中でしか使えないから。** tui のテストが
+/// 手で並べると、変種を足したときに見張りだけ抜ける。値の書き忘れはここが名前を挙げて
+/// 落とし、変種を足して名前の一覧に書き忘れると E0004 になる。
+///
+/// **`Ambiguous` の候補を空にしない**（[`fake_ambiguous`] の doc と同じ理由）。空だと
+/// ヘッダに `A` の案内が付かず、出荷される形（いちばん長い）を測らないまま緑になる。
+pub fn every_degraded_reason() -> Vec<DegradedReason> {
+    let reasons = vec![
+        DegradedReason::GhMissing,
+        DegradedReason::GhTooOld {
+            found: "2.80.0".to_string(),
+        },
+        DegradedReason::Unusable {
+            message: "起動できませんでした".to_string(),
+        },
+        DegradedReason::NotLoggedIn {
+            host: "github.com".to_string(),
+        },
+        fake_configured_unavailable(),
+        // `auth::resolve` は試した候補を少なくとも 1 件持って `NoAccess` にする。
+        fake_no_access(vec![fake_attempt("taro", fake_denied(404))]),
+        fake_ambiguous(&["user_shortcode", "taro"]),
+    ];
+    let missing = all_variants!(missing DegradedReason {
+        GhMissing,
+        GhTooOld,
+        Unusable,
+        NotLoggedIn,
+        ConfiguredUnavailable,
+        NoAccess,
+        Ambiguous,
+    } in &reasons);
+    assert!(
+        missing.is_empty(),
+        "every_degraded_reason に無い変種: {missing:?}"
+    );
+    reasons
 }
 
 /// ログイン一覧。`gh auth status` が返したぶんの代わり。

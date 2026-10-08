@@ -374,7 +374,8 @@ mod tests {
         AccountSource, AttemptFailure, DegradedReason, GhLogin, LoginState, ProbeAttempt,
     };
     use mewgit_core::test_util::{
-        fake_attempt, fake_configured_unavailable, fake_denied, fake_login, fake_no_access,
+        every_degraded_reason, fake_attempt, fake_configured_unavailable, fake_denied, fake_login,
+        fake_no_access,
     };
 
     const SIZE: TermSize = TermSize {
@@ -861,13 +862,11 @@ mod tests {
 
     #[test]
     fn a_tiny_terminal_does_not_panic() {
-        // リサイズの途中では枠より小さい端末が来る。**選べない側も回す** ——
-        // 一覧が空のときだけ通る腕がある（`picker` の縦割りを飛ばす）。
+        // リサイズの途中では枠より小さい端末が来る。**全変種を回す** —— 選べない側には
+        // 一覧が空のときだけ通る腕があり（`picker` の縦割りを飛ばす）、`NoAccess` や
+        // `ConfiguredUnavailable` は変種ごとに行数の違う本文を描く。
         for (width, height) in [(1, 1), (10, 3), (20, 5)] {
-            for reason in [
-                ambiguous(vec![fake_login("taro")]),
-                DegradedReason::GhMissing,
-            ] {
+            for reason in every_degraded_reason() {
                 let state = state_with_reason(reason);
                 let lines = draw(&state, TermSize { width, height });
                 assert_eq!(lines.len(), height as usize);

@@ -760,11 +760,12 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       網羅 `match` から引いた**が、材料を使わない 15 種別が `None` の腕になり、来ないはずの
       `None` の受け皿（「この操作」）のせいで名前の抜けを見張りが拾えず、テストに手書きの
       一覧が戻った（`/simplify` の altitude が挙げ、2026-10-08 にユーザーと決めた）
-- [ ] 同じ形の残り（3/4）— tui の `ui/mod.rs` の `every_degraded_reason_fits_the_header` が
+- [x] 同じ形の残り（3/4）— tui の `ui/mod.rs` の `every_degraded_reason_fits_the_header` が
       `DegradedReason` を手で並べている（コメントの「7 つ」も離れた「いま N」）。**マクロは
       core の中でしか使えないので `#[macro_export]` では出さない**（2026-10-08 にユーザーと
       決めた。出すと `mewgit_core::all_variants!` が公開 API になる）—— core の `test_util` に
-      全変種の値を返す関数を置き、その中で `all_variants!(missing …)` に抜けを見させる
+      全変種の値を返す関数（`every_degraded_reason`）を置き、その中で `all_variants!(missing …)` に
+      抜けを見させる。規約は `.claude/rules/rust-coding.md` の「離れた場所に…」
 - [ ] 同じ形の残り（4/4）— `Pane::WIP_FOCUS_NO_PRS` / `COMMIT_FOCUS_NO_PRS` が `Prs` を
       抜いただけの写し。ペインを足すと片方だけ足して、`github.enabled = false` のときだけ
       巡回から漏れうる。**`const fn` で `Prs` を抜いた配列を導く**（2026-10-08 にユーザーと

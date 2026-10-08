@@ -259,7 +259,13 @@ paths:
   core の `lib.rs` の `all_variants!` 1 本で、unit 変種だけの enum には変種の配列そのものを
   吐く。フィールドを持つ変種がある enum は値を作れないので、`all_variants!(missing …)` に
   テストが手で組んだ値の一覧を渡し、1 つも無い変種の名前を受け取る（`git_exec::argv`
-  と `github` のテスト）。**並びが意味を持つなら、一覧を並びの正にもする** —— `PrField::next` /
+  と `github` のテスト）。**マクロは `#[macro_export]` していないので tui からは使えない**（出すと
+  core の公開 API になる）。tui のテストが全変種を要るなら、core の `test_util` に全変種の
+  値を返す関数を置き、その中で `missing` に抜けを見させる（`every_degraded_reason`）。
+  **下の `fn every_variant()` との違いは、関数の中で `missing` を呼ぶことだけ** —— 呼ばずに
+  値を並べるだけなら、同じく足し忘れが通る。core にも呼ぶテストを 1 本置く（tui の
+  テストを消すと assert が走らなくなる）。
+  **並びが意味を持つなら、一覧を並びの正にもする** —— `PrField::next` /
   `prev` は巡回順を 2 つの網羅 `match` に別々に持ち、食い違ってもコンパイラは何も言わなかった
   （`PrField::ALL` から両方向を導く形にした）。一覧を手で書くと、網羅 `match` が強いるのは腕だけで一覧の足し忘れは
   通る（`Region::ALL` は元この形で、テストの網羅 `match` は `ALL` の抜けを見ていなかった。

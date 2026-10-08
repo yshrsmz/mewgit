@@ -754,7 +754,9 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       テストの一覧は 3 つで**`CreatePr`（「PR の作成」）が抜けていた**。名前は呼び出し元の
       文字列ではなく、core の `GithubJob`（材料が要る 4 種別だけの enum。`ALL` は
       `all_variants!`、`JobKind` へは `kind()`）の網羅 `match` から引く形にした
-      （`no_material(state, job)`）。テストは `GithubJob::ALL` を回す。**最初は `JobKind` の
+      （`no_material(state, job)`。理由は 01 の「実行中ジョブ」）。テストは `GithubJob::ALL` ごとに
+      `Cmd` を `dispatch` へ通し、畳んだ種別を `Cmd::job_kind` の側で見る（腕が渡す変種と
+      `kind` の対応は手で書くので、`no_material` を直に呼ぶと取り違えても通った。`/code-review`）。**最初は `JobKind` の
       網羅 `match` から引いた**が、材料を使わない 15 種別が `None` の腕になり、来ないはずの
       `None` の受け皿（「この操作」）のせいで名前の抜けを見張りが拾えず、テストに手書きの
       一覧が戻った（`/simplify` の altitude が挙げ、2026-10-08 にユーザーと決めた）

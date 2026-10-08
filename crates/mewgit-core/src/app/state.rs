@@ -2565,40 +2565,6 @@ pub enum JobKind {
     Probe,
 }
 
-/// GitHub の材料（`RepoInfo.target` とアカウント）を使って走るジョブ。ランタイムが
-/// 材料を取れずに走らせなかったときの通知（tui の `no_material`）が名前を引く。
-///
-/// **`JobKind` から絞った別の型にしたのは、名前を `Option` なしで引くため。** `JobKind`
-/// の網羅 `match` から引くと材料を使わない種別が `None` の腕になり、来ないはずの
-/// `None` に受け皿を置くことになる（受け皿があると、名前の抜けを見張りが拾えない）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GithubJob {
-    FetchPrList,
-    FetchPrDetails,
-    CreatePr,
-    OpenPr,
-}
-
-impl GithubJob {
-    /// 全変種。名前を回すテストが、足した変種を見落とさないための一覧。
-    pub const ALL: &[GithubJob] = &all_variants!(GithubJob {
-        FetchPrList,
-        FetchPrDetails,
-        CreatePr,
-        OpenPr,
-    });
-
-    /// 畳むジョブの種別。
-    pub fn kind(self) -> JobKind {
-        match self {
-            GithubJob::FetchPrList => JobKind::FetchPrList,
-            GithubJob::FetchPrDetails => JobKind::FetchPrDetails,
-            GithubJob::CreatePr => JobKind::CreatePr,
-            GithubJob::OpenPr => JobKind::OpenPr,
-        }
-    }
-}
-
 impl JobKind {
     /// この種別が読む値が、どの領域の世代で古くなるか。
     ///
@@ -2664,6 +2630,38 @@ impl JobKind {
             // 古くなるという問いが無い（番号は変わらない）。一覧のほうは
             // `FetchPrList` が世代で追いつく。
             | JobKind::CreatePr => None,
+        }
+    }
+}
+
+/// GitHub の材料（`RepoInfo.target` とアカウント）を使って走るジョブ。ランタイムが
+/// 材料を取れずに走らせなかったときに、畳む種別と通知に出す名前を引く。
+///
+/// **`JobKind` から絞った別の型にした理由は 01 の「実行中ジョブ」。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubJob {
+    FetchPrList,
+    FetchPrDetails,
+    CreatePr,
+    OpenPr,
+}
+
+impl GithubJob {
+    /// 全変種。名前を回すテストが、足した変種を見落とさないための一覧。
+    pub const ALL: &[GithubJob] = &all_variants!(GithubJob {
+        FetchPrList,
+        FetchPrDetails,
+        CreatePr,
+        OpenPr,
+    });
+
+    /// 畳むジョブの種別。
+    pub fn kind(self) -> JobKind {
+        match self {
+            GithubJob::FetchPrList => JobKind::FetchPrList,
+            GithubJob::FetchPrDetails => JobKind::FetchPrDetails,
+            GithubJob::CreatePr => JobKind::CreatePr,
+            GithubJob::OpenPr => JobKind::OpenPr,
         }
     }
 }

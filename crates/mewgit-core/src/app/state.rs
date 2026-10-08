@@ -1071,11 +1071,18 @@ impl Pane {
     /// ここに入る `self` は必ず `panes` にいる。`unwrap_or(0)` はその保険で、
     /// 座り直す先を変えたときにここも直す必要はない（先頭は常に `Graph`）。
     fn cycle(self, panes: &[Pane], delta: isize) -> Pane {
-        let current = panes.iter().position(|&pane| pane == self).unwrap_or(0);
-        let len = panes.len() as isize;
-        let next = (current as isize + delta).rem_euclid(len) as usize;
-        panes[next]
+        cycled(panes, self, delta)
     }
+}
+
+/// `items` の並びのうち、`current` から `delta` 個先。端では反対側に回る。`current` が
+/// 並びに無ければ先頭から数える（呼ぶ側が、そこへ来る経路が無いことを doc に書く）。
+///
+/// **一覧のカーソル（[`stepped_index`]）とは別物。** あちらは端で止まる。
+fn cycled<T: Copy + PartialEq>(items: &[T], current: T, delta: isize) -> T {
+    let at = items.iter().position(|&item| item == current).unwrap_or(0);
+    let len = items.len() as isize;
+    items[(at as isize + delta).rem_euclid(len) as usize]
 }
 
 /// グラフの表示行が指しているもの。
@@ -2859,9 +2866,11 @@ impl AppState {
 
 /// [`Modal::PrCreate`] のどの欄を編集しているか（01 の「PR 作成（`N`）」）。
 ///
-/// **巡回の順は宣言順**（`Tab` が次へ = [`PrField::next`]、`Shift+Tab` が前へ）で、
-/// 07 が描く縦の並びと同じ。**画面の並びと巡回の順を割らない** —— 割ると `Tab` を
-/// 押した先が画面のどこかを目で追えなくなる。
+/// **巡回の順は [`PrField::ALL`] の並び**（`Tab` が次へ = [`PrField::next`]、
+/// `Shift+Tab` が前へ）で、07 が描く縦の並びと同じ。**画面の並びと巡回の順を割らない**
+/// —— 割ると `Tab` を押した先が画面のどこかを目で追えなくなる。描く順は tui の
+/// `modals::pr_create::render` が欄ごとに手で積んでいるので、片方を並べ替えたら
+/// もう片方も直す（`Tab` で 1 周するテストが並びを書き下している）。
 ///
 /// **`Draft` だけが文字を打つ欄ではない。** 端末カーソルを置ける場所が無いので、
 /// どの欄に居るかの印はラベルの反転が出す（07）。
@@ -2877,35 +2886,29 @@ pub enum PrField {
 }
 
 impl PrField {
+    /// 巡回の並び。**`next` と `prev` はこの 1 本から両方向を導く** —— 2 つの網羅
+    /// `match` に別々に書くと、食い違ってもコンパイラは何も言わない。`all_variants!` が
+    /// 網羅 `match` と同じ並びから作るので、欄を足すと並べるまでコンパイルエラーになる。
+    pub const ALL: &[PrField] = &all_variants!(PrField {
+        Title,
+        Body,
+        Base,
+        Head,
+        Draft,
+    });
+
     /// `Tab` の行き先。端では巻く。
     ///
     /// **[`stepped_index`] を使わない。** あちらは一覧のカーソルで、**端で止まる**
     /// （行が増減するものを行き過ぎないため）。欄は増えないので、`Tab` を押し続けて
     /// 最後の欄で止まるほうが驚く。
-    ///
-    /// **並びの配列を持たない。** 網羅 `match` で書くと、**変種を足したときに
-    /// コンパイルエラーになる** —— 配列にすると長さの辻褄が合ってしまい、足した欄が
-    /// 巡回から黙って漏れる（`.claude/rules/rust-coding.md` の「離れた場所に、コードの『いま N ある』を
-    /// 書かない」の、並びの版）。
     pub(super) fn next(self) -> Self {
-        match self {
-            PrField::Title => PrField::Body,
-            PrField::Body => PrField::Base,
-            PrField::Base => PrField::Head,
-            PrField::Head => PrField::Draft,
-            PrField::Draft => PrField::Title,
-        }
+        cycled(Self::ALL, self, 1)
     }
 
     /// `Shift+Tab` の行き先。[`PrField::next`] の逆。
     pub(super) fn prev(self) -> Self {
-        match self {
-            PrField::Title => PrField::Draft,
-            PrField::Body => PrField::Title,
-            PrField::Base => PrField::Body,
-            PrField::Head => PrField::Base,
-            PrField::Draft => PrField::Head,
-        }
+        cycled(Self::ALL, self, -1)
     }
 }
 

@@ -1008,18 +1008,24 @@ mod tests {
         let mut state = state_for_create("feat/x");
         let _ = press(&mut state, 'N');
 
-        // 宣言順に巡る（07 の縦の並びと同じ）。
-        for wanted in [
+        // 07 の縦の並びで巡る。**並びはここに書き下す** —— `PrField::ALL` から導くと、
+        // `ALL` を並べ替えたときに画面の並びと割れても通る。
+        let order = [
             PrField::Body,
             PrField::Base,
             PrField::Head,
             PrField::Draft,
             PrField::Title,
-        ] {
+        ];
+        for wanted in order {
             let _ = press_code(&mut state, KeyCode::Tab);
             assert_eq!(modal_of(&state).4, wanted, "Tab の行き先");
         }
-        // 端で巻く。
+        // `Shift+Tab` は同じ並びを逆に 1 周する（端で巻く）。
+        for wanted in order.iter().rev().skip(1).chain([&PrField::Title]) {
+            let _ = press_code(&mut state, KeyCode::BackTab);
+            assert_eq!(modal_of(&state).4, *wanted, "Shift+Tab の行き先");
+        }
         let _ = press_code(&mut state, KeyCode::BackTab);
         assert_eq!(modal_of(&state).4, PrField::Draft);
 

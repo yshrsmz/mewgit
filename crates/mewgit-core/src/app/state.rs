@@ -1076,7 +1076,7 @@ const fn count_without_prs(panes: &[Pane]) -> usize {
 }
 
 /// `panes` から `Pane::Prs` を抜いた並び。巡回の一覧を `const` のまま導くためのもの
-/// （`Pane::WIP_FOCUS_NO_PRS`）。
+/// （`Pane::WIP_FOCUS_NO_PRS` / `Pane::COMMIT_FOCUS_NO_PRS`。理由は前者の doc）。
 ///
 /// **長さ `N` は [`count_without_prs`] から渡す。** 手で書いた数と食い違うと、短ければ
 /// 添字の範囲外、長ければ末尾の assert が const 評価で落ちる（コンパイルエラー）。

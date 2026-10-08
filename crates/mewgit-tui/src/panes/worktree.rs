@@ -64,7 +64,7 @@ fn rows(state: &AppState) -> (Vec<Row<'_>>, usize) {
     let mut rows = Vec::with_capacity(state.worktree.len() + WorktreeState::SECTIONS.len());
     let mut cursor = 0;
 
-    for section in WorktreeState::SECTIONS {
+    for &section in WorktreeState::SECTIONS {
         let entries = state.worktree.snapshot.section(section);
         if entries.is_empty() {
             continue;

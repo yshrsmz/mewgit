@@ -990,6 +990,18 @@ pub enum Pane {
 }
 
 impl Pane {
+    /// 全ペイン。巡回の候補ではない（それは下の `*_FOCUS`）—— ペインごとに回すテストが、
+    /// 足したペインを見落とさないための一覧。
+    pub const ALL: &[Pane] = &all_variants!(Pane {
+        Graph,
+        Branches,
+        Stash,
+        Prs,
+        Worktree,
+        CommitDetail,
+        Diff,
+    });
+
     /// WIP 行を選んでいるあいだの巡回先。右は [`GraphSelection::right_pane`] が決める。
     ///
     /// **まだ実装していないペインは入れない**（07）。移れてしまうと、キーを受ける先の
@@ -1385,13 +1397,15 @@ impl WorktreeState {
     /// 区画を並べる順。カーソルが進む順でもあり、`ui` が描く順でもある。
     ///
     /// Conflicted が先頭なのは、他の操作より先に解消が要るため。**並びはここだけ。**
-    /// 描画側で別に並べると、見えている順とカーソルの動く順がずれる。
-    pub const SECTIONS: [WorktreeSection; 4] = [
-        WorktreeSection::Conflicted,
-        WorktreeSection::Staged,
-        WorktreeSection::Unstaged,
-        WorktreeSection::Untracked,
-    ];
+    /// 描画側で別に並べると、見えている順とカーソルの動く順がずれる。区画を足して
+    /// ここに足し忘れると、その区画は描かれずカーソルも届かないので、`all_variants!` の
+    /// 網羅 `match` でコンパイルエラーにする。
+    pub const SECTIONS: &[WorktreeSection] = &all_variants!(WorktreeSection {
+        Conflicted,
+        Staged,
+        Unstaged,
+        Untracked,
+    });
 
     /// 選べる行を [`SECTIONS`](Self::SECTIONS) の順に並べたもの。空の区画は入らない。
     ///
@@ -1460,7 +1474,7 @@ impl WorktreeState {
         Self::SECTIONS
             .iter()
             .position(|&candidate| candidate == section)
-            .unwrap_or(Self::SECTIONS.len())
+            .expect("SECTIONS は all_variants! で全区画を持つ")
     }
 
     /// `positions` の `index` 番目へカーソルを据える。
@@ -2349,12 +2363,17 @@ pub enum Region {
 }
 
 impl Region {
-    /// 世代を持つ領域すべて。**宣言順に並べる** —— [`JobTracker`] は
-    /// `region as usize` でカウンタを引き、その配列の幅をここの長さで取る。
+    /// 世代を持つ領域すべて。[`JobTracker`] は `region as usize` でカウンタを引き、
+    /// その配列の幅をここの長さで取る（並びは問わない）。
     ///
-    /// 腕を足してここに足し忘れると添字が範囲外になるので、`region_all_lists_every_arm`
-    /// が網羅 `match` でコンパイルエラーにする。
-    pub const ALL: [Region; 4] = [Region::Worktree, Region::Refs, Region::Log, Region::Stash];
+    /// 腕を足してここに足し忘れると添字が範囲外になるので、`all_variants!` の網羅
+    /// `match` でコンパイルエラーにする。
+    pub const ALL: &[Region] = &all_variants!(Region {
+        Worktree,
+        Refs,
+        Log,
+        Stash,
+    });
 }
 
 /// 実行中の非同期タスク。スピナー表示と `Cmd` の重複発行防止に使う。
@@ -2366,7 +2385,7 @@ impl Region {
 #[derive(Debug, Default)]
 pub struct JobTracker {
     running: Vec<Job>,
-    /// 領域ごとの世代。添字は [`Region::ALL`] の位置。
+    /// 領域ごとの世代。添字は `region as usize`、幅は [`Region::ALL`] の長さ。
     epochs: [u64; Region::ALL.len()],
 }
 
@@ -3954,27 +3973,18 @@ mod tests {
     }
 
     #[test]
-    fn region_all_lists_every_arm() {
-        // **`JobTracker.epochs` の幅は `Region::ALL` の長さ。** 腕を足してここに
-        // 足し忘れると、その領域の `advance` / `epoch` が添字の範囲外で落ちる。
-        // 網羅 `match` にしてあるので、腕を足すとこの関数がコンパイルエラーになる
-        // （そのとき `ALL` にも足す）。
-        fn listed(region: Region) -> bool {
-            let name = match region {
-                Region::Worktree => "worktree",
-                Region::Refs => "refs",
-                Region::Log => "log",
-                Region::Stash => "stash",
-            };
-            !name.is_empty()
-        }
-
+    fn every_region_has_its_own_epoch() {
+        // **`JobTracker` は `region as usize` でカウンタを引き、幅は `Region::ALL` の長さ。**
+        // 全部載っていることは `all_variants!` がコンパイル時に強いる。ここで見るのは、
+        // `advance` / `epoch` が領域ごとのカウンタを引いていること（`region` を無視して
+        // 1 つのカウンタを進める形では 1 を超える）と、明示した判別子が幅を超えて
+        // 添字が範囲外にならないこと。
         let mut jobs = JobTracker::default();
-        for (index, region) in Region::ALL.into_iter().enumerate() {
-            assert!(listed(region));
-            assert_eq!(region as usize, index, "{region:?} の添字がずれています");
+        for &region in Region::ALL {
             jobs.advance(region);
-            assert_eq!(jobs.epoch(region), 1);
+        }
+        for &region in Region::ALL {
+            assert_eq!(jobs.epoch(region), 1, "{region:?}");
         }
     }
 

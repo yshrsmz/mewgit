@@ -1922,14 +1922,7 @@ mod tests {
     fn the_footer_ends_with_help_and_quit_and_never_shows_the_common_keys() {
         // 共通キーは `?` の一覧にだけ出す（07 の「ステータスバー」）。**幅が余っても出さない**
         // ので無限の幅で見る —— 余った幅で出す旧い規則に戻すと、ここが落ちる。
-        for pane in [
-            Pane::Graph,
-            Pane::Branches,
-            Pane::Prs,
-            Pane::Worktree,
-            Pane::CommitDetail,
-            Pane::Diff,
-        ] {
+        for &pane in Pane::ALL {
             let hints = hint_text(keys::pane(pane), u16::MAX);
             assert!(hints.ends_with("  ?:help q:quit"), "{pane:?}: {hints:?}");
             assert!(!hints.contains("f:fetch"), "{pane:?}: {hints:?}");
@@ -1957,7 +1950,10 @@ mod tests {
     #[test]
     fn every_pane_but_worktree_and_graph_shows_all_of_its_keys_at_80() {
         // 80 桁でペインのキーが全部出ることを見張る（落ちる側は Worktree と Graph。07 の実測）。
-        for pane in [Pane::Branches, Pane::Prs, Pane::CommitDetail, Pane::Diff] {
+        let panes = Pane::ALL
+            .iter()
+            .filter(|pane| !matches!(pane, Pane::Worktree | Pane::Graph));
+        for &pane in panes {
             assert_eq!(
                 hint_text(keys::pane(pane), 80),
                 hint_text(keys::pane(pane), u16::MAX),

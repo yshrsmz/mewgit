@@ -695,15 +695,7 @@ mod tests {
     /// 踏む経路は同じ（`.claude/rules/testing.md` の「通る組み合わせを足しても見張りは増えない」）。
     #[test]
     fn every_hinted_key_does_something() {
-        for pane in [
-            Pane::Graph,
-            Pane::Branches,
-            Pane::Stash,
-            Pane::Prs,
-            Pane::Worktree,
-            Pane::CommitDetail,
-            Pane::Diff,
-        ] {
+        for &pane in Pane::ALL {
             for hint in keys::pane(pane) {
                 for key in hint.keys() {
                     assert_reacts(pane, *key, hint.label());

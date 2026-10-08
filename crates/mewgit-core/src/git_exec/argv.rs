@@ -523,54 +523,64 @@ mod tests {
         fake_fork_source, fake_oid, fake_pr_checkout, fake_stamp, FAKE_FORK_URL,
     };
 
-    /// 変種の名前。**網羅 `match` なので、`GitOp` に変種を足すとここが
-    /// コンパイルエラーになる。** そのとき [`VARIANTS`] と [`cases`] にも足す
-    /// （足し忘れは `covers_every_variant` が落とす）。
-    fn variant(op: &GitOp) -> &'static str {
-        match op {
-            GitOp::Stage(_) => "Stage",
-            GitOp::Unstage(_) => "Unstage",
-            GitOp::StageHunk(_) => "StageHunk",
-            GitOp::UnstageHunk(_) => "UnstageHunk",
-            GitOp::DiscardHunk(_) => "DiscardHunk",
-            GitOp::Discard(_) => "Discard",
-            GitOp::DiscardUntracked(_) => "DiscardUntracked",
-            GitOp::DiscardAdded(_) => "DiscardAdded",
-            GitOp::Commit { .. } => "Commit",
-            GitOp::BranchCreate { .. } => "BranchCreate",
-            GitOp::Switch(_) => "Switch",
-            GitOp::BranchDelete { .. } => "BranchDelete",
-            GitOp::BranchRename { .. } => "BranchRename",
-            GitOp::Fetch { .. } => "Fetch",
-            GitOp::Pull { .. } => "Pull",
-            GitOp::Push { .. } => "Push",
-            GitOp::RebaseInteractive { .. } => "RebaseInteractive",
-            GitOp::RebaseContinue { .. } => "RebaseContinue",
-            GitOp::RebaseSkip => "RebaseSkip",
-            GitOp::RebaseAbort => "RebaseAbort",
-            GitOp::CherryPick(_) => "CherryPick",
-            GitOp::CherryPickContinue => "CherryPickContinue",
-            GitOp::CherryPickSkip => "CherryPickSkip",
-            GitOp::CherryPickAbort => "CherryPickAbort",
-            GitOp::Revert { .. } => "Revert",
-            GitOp::RevertContinue => "RevertContinue",
-            GitOp::RevertSkip => "RevertSkip",
-            GitOp::RevertAbort => "RevertAbort",
-            GitOp::MergeAbort => "MergeAbort",
-            GitOp::StashPush { .. } => "StashPush",
-            GitOp::StashApply(_) => "StashApply",
-            GitOp::StashPop(_) => "StashPop",
-            GitOp::StashDrop(_) => "StashDrop",
-            GitOp::SetAccount { .. } => "SetAccount",
-            GitOp::UnsetAccount => "UnsetAccount",
-            GitOp::CheckoutPr(_) => "CheckoutPr",
-        }
+    /// [`variant`] と [`VARIANTS`] を同じ名前の並びから作る（`GitOp::X { .. }` はタプルの
+    /// 変種にもユニットの変種にも当たる）。**`variant` は網羅 `match` なので、`GitOp` に
+    /// 変種を足すと名前を 1 つ足すまでコンパイルエラーになり、足せば `VARIANTS` にも
+    /// 載る**（変種の本数をどこにも書かない。同じ名前を 2 度書くと rustc の
+    /// `unreachable_patterns` になり、CI の `clippy -D warnings` で落ちる）。そのとき
+    /// [`cases`] にも足す（足し忘れは `covers_every_variant` が落とす）。
+    macro_rules! variants {
+        ($($name:ident,)*) => {
+            /// 変種の名前。
+            fn variant(op: &GitOp) -> &'static str {
+                match op {
+                    $(GitOp::$name { .. } => stringify!($name),)*
+                }
+            }
+
+            /// 全変種の名前。
+            const VARIANTS: &[&str] = &[$(stringify!($name),)*];
+        };
     }
 
-    /// [`variant`] のアームの数。`GitOp` に変種を足すと `variant` の網羅 `match` が
-    /// コンパイルエラーになり、ここに来る。アームと一緒にこの数と [`cases`] も足す
-    /// （足し忘れは `covers_every_variant` が落とす）。
-    const VARIANT_COUNT: usize = 36;
+    variants! {
+        Stage,
+        Unstage,
+        StageHunk,
+        UnstageHunk,
+        DiscardHunk,
+        Discard,
+        DiscardUntracked,
+        DiscardAdded,
+        Commit,
+        BranchCreate,
+        Switch,
+        BranchDelete,
+        BranchRename,
+        Fetch,
+        Pull,
+        Push,
+        RebaseInteractive,
+        RebaseContinue,
+        RebaseSkip,
+        RebaseAbort,
+        CherryPick,
+        CherryPickContinue,
+        CherryPickSkip,
+        CherryPickAbort,
+        Revert,
+        RevertContinue,
+        RevertSkip,
+        RevertAbort,
+        MergeAbort,
+        StashPush,
+        StashApply,
+        StashPop,
+        StashDrop,
+        SetAccount,
+        UnsetAccount,
+        CheckoutPr,
+    }
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
     fn cases() -> Vec<(GitOp, Vec<&'static str>)> {
@@ -982,11 +992,8 @@ mod tests {
     #[test]
     fn covers_every_variant() {
         let covered: BTreeSet<_> = all_cases().iter().map(|(op, _)| variant(op)).collect();
-        assert_eq!(
-            covered.len(),
-            VARIANT_COUNT,
-            "argv の表に無い変種がある。覆えているのは {covered:?}"
-        );
+        let missing: Vec<_> = VARIANTS.iter().filter(|v| !covered.contains(*v)).collect();
+        assert!(missing.is_empty(), "argv の表に無い変種がある: {missing:?}");
     }
 
     #[test]

@@ -406,8 +406,8 @@ hook が reword を断ったあとの continue → stderr が空の失敗の理�
 規則に揃える → アカウント書き込み中の `A` を断る → 消えたバイナリのエディタ（まず実測）→
 git の最低版。(2) README とリリースワークフローで 0.1 を切る。(3) そのあと端末幅 < 100 の
 レイアウト、`1`〜`5`、ロケールと `graph.ascii`、意図的な巻き戻しの force push。
-**内部の掃除**（追跡設定の 1 本化、`state.rs`、`VARIANT_COUNT`、`screen.py`、テストの
-status ヘルパ）**は単独の PR にせず、近くを触るタスクに相乗りさせる**。下の並びは
+**内部の掃除**（追跡設定の 1 本化、`state.rs`、`screen.py`、テストの
+status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、近くを触るタスクに相乗りさせる**。下の並びは
 書いた順のままで、この順序ではない
 
 - [x] **git の最低版を決める。** **床は 2.38.0 の 1 つで、下回れば端末に入る前に起動を断る**
@@ -675,14 +675,37 @@ status ヘルパ）**は単独の PR にせず、近くを触るタスクに相�
       `Modal::NoticeLog` の変種 1 つと、`Modal::move_cursor` を `AppState::move_modal_cursor`
       へ移したことだけで（一覧の長さを `AppState.notices` が持つため）、`Modal` が
       独立して育ったとは言えない
-- [ ] `git_exec::argv` の `VARIANT_COUNT` を消す。**`variant()` の網羅 `match` から
-      離れた場所に変種の本数のコピーが置いてある**（`.claude/rules/rust-coding.md` の「離れた場所に、
+- [x] `git_exec::argv` の `VARIANT_COUNT` を消す。**`variant()` の網羅 `match` から
+      離れた場所に変種の本数のコピーが置いてあった**（`.claude/rules/rust-coding.md` の「離れた場所に、
       コードの『いま N ある』を書かない」）。**ただの削除では済まない** ——
       `covers_every_variant` は「`to_argv` は全 `GitOp` をカバーする」（同じく `.claude/rules/testing.md`）
-      の見張りなので、消すとカバー要求のほうが破れる。塞ぐ形は、各変種の代表値を返す
-      網羅 `match`（`fn every_variant() -> Vec<GitOp>`）を 1 本置き、`cases()` が
-      その集合を全部含むことを `BTreeSet` で比べること —— 変種を足すとそちらが
-      コンパイルエラーになるので、数を書かずに漏れが出る
+      の見張りなので、消すとカバー要求のほうが破れる。
+      **ここに最初に書いた塞ぎ方（代表値を返す `fn every_variant() -> Vec<GitOp>`）は
+      成り立たなかった** —— 引数を取らない関数は網羅 `match` を持てず、`vec!` に変種を
+      書き忘れてもコンパイルは通る。`std::mem::variant_count` は 1.98.1 で unstable
+      （E0658）。**決めた形はテスト内の `macro_rules! variants` 1 本** —— 変種の名前の
+      並びから、網羅 `match` の `variant()`（腕は `GitOp::$name { .. }`。タプルとユニットの
+      変種にも当たる）と名前の一覧 `VARIANTS` を両方作り、`cases()` の名前が `VARIANTS` を
+      全部含むかを比べる。代表値は要らない。実測（2026-10-08）: 名前を消すと E0004、
+      同じ名前を 2 度書くと rustc の `unreachable_patterns`（CI の `clippy -D warnings` で落ちる。
+      `cargo test` だけでは警告で通る）、`cases()` から 1 件消すと
+      テストが名前を挙げて落ちる。**相乗り先が無かったので単独の PR にした**
+      （2026-10-08 にユーザーと決めた）
+- [ ] enum の全変種を手で並べた一覧を、網羅 `match` とつなぐ。**`VARIANT_COUNT` と
+      同じ穴が 3 つ残っている**（#172 の `/simplify` の altitude が挙げ、コードを読んで
+      確かめた）——
+      - `ui/mod.rs` の `the_footer_ends_with_help_and_quit_and_never_shows_the_common_keys`
+        と `every_pane_but_worktree_and_graph_shows_all_of_its_keys_at_80` がペインを
+        手で並べており、**#129 で足した `Pane::Stash` が両方に無い**（Stash のフッターを
+        誰も見ていない）
+      - `Region::ALL` —— `region_all_lists_every_arm` の網羅 `match` が強いるのは
+        `listed()` の腕だけで、**`ALL` に足し忘れてもテストは通る**（doc は「コンパイル
+        エラーにする」と書いている）。足し忘れると `JobTracker.epochs` の添字が範囲外
+      - `WorktreeState::SECTIONS` —— 網羅を確かめるものが無い（`git_read::sort_sections`
+        は分解束縛で塞いである）。足し忘れた区画は描かれず、カーソルも届かない
+      塞ぐ形は argv の `variants!` と同じく、名前の並び 1 つから網羅 `match` と一覧を
+      作ること。マクロを `test_util` に上げて共有するか、`ALL` の隣に `const _` の網羅
+      `match` を置くかは、着手時に数える（`SECTIONS` は宣言順と違う並びを持つ）
 - [ ] `scripts/screen.py` が全角文字のあとで 1 桁落とすのを直す。**桁を根拠にする
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の

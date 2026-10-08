@@ -437,7 +437,7 @@ impl AppState {
     ///
     /// **候補に無い `focus` は先頭から数え直すが、そこへ来る経路は無い。**
     /// [`AppState::reseat_focus`] が `update` の出口で候補から外れた `focus` を潰すので、
-    /// ここで読む `focus` は必ず候補にいる。[`cycled`] の数え直しはその保険で、
+    /// ここで読む `focus` は必ず候補にいる。`cycled` の数え直しはその保険で、
     /// 座り直す先を変えたときにここも直す必要はない（先頭は常に `Graph`）。
     pub fn next_focus(&self) -> Pane {
         cycled(self.focus_candidates(), self.focus, 1)

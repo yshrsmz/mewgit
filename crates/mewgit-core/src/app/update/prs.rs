@@ -1009,7 +1009,7 @@ mod tests {
         let _ = press(&mut state, 'N');
 
         // 07 の縦の並びで巡る。**並びはここに書き下す** —— `PrField::ALL` から導くと、
-        // `ALL` を並べ替えたときに画面の並びと割れても通る。
+        // `ALL` を並べ替えたときに 07 の並びと割れても通る（画面と `Tab` はどちらも `ALL` から出る）。
         for wanted in [
             PrField::Body,
             PrField::Base,

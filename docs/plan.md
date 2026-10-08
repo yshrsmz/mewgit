@@ -725,7 +725,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       1 つも無い変種の名前を返す（照合まで中に持つので、利用者ごとに照合を写さない）。
       利用者は argv と `github` のテストの 2 つ。
       - `GithubError` の `cases: [_; 9]` —— 配列長をやめ、`missing` で漏れを見る
-      - `PrField::next` / `prev` —— `PrField::ALL` の並び 1 本から `cycled`（`Pane::cycle` と
+      - `PrField::next` / `prev` —— `PrField::ALL` の並び 1 本から `cycled`（ペインの巡回と
         共有した「端で巻く」）で両方向を導く。tui の `pr_create::render` も `ALL` を回して
         欄を積み（部品の違いは網羅 `match` の腕で書く）、ラベルの字は欄からの網羅 `match` で
         引く（字から欄を引く `label_field` の `_ => Draft` をやめた）。並びそのものは core の

@@ -1028,13 +1028,13 @@ mod tests {
         keys, update, AppState, Cmd, JobKind, Key, KeyCode, Modal, Msg, NoticeLevel, Pane,
         TargetState, TermSize,
     };
-    use mewgit_core::auth::{AccountSource, AccountState, DegradedReason, RepoTarget};
+    use mewgit_core::auth::{AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::{short_oid, InProgressOp, Step};
     use mewgit_core::github::GithubError;
     use mewgit_core::test_util::{
-        fake_account, fake_ambiguous, fake_no_access, fake_oid, fake_rate_limit, fake_snapshot,
-        fetch_pr_details,
+        every_degraded_reason, fake_account, fake_ambiguous, fake_no_access, fake_oid,
+        fake_rate_limit, fake_snapshot, fetch_pr_details,
     };
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -1456,8 +1456,9 @@ mod tests {
 
     #[test]
     fn every_degraded_reason_fits_the_header() {
-        // **7 つを 1 つずつ回す。** 理由を足したときに、文言の無い腕と、ヘッダから
-        // はみ出す長さの両方をここで落とす（通知の予算と同じ形の見張り。01）。
+        // **全変種を 1 つずつ回す**（`every_degraded_reason`）。理由を足したときに、
+        // 文言の無い腕と、ヘッダからはみ出す長さの両方をここで落とす（通知の予算と
+        // 同じ形の見張り。01）。
         //
         // **出荷される形のヘッダで測る**（`/code-review` が拾った）。`[gh: …]` が
         // 出るのは `Cmd::ResolveAccount` を出したリポジトリだけで、それを出すのは
@@ -1472,32 +1473,11 @@ mod tests {
         // 「いちばん長い形」を作れない。入らなければ `owner/repo` から落ち、理由も
         // 落ちてキーだけが残る（`the_header_drops_parts_in_the_agreed_order`）。
         // ここが見張るのは「現実的な名前なら、目標幅で理由ごと出るか」まで。
-        let reasons = [
-            DegradedReason::GhMissing,
-            DegradedReason::GhTooOld {
-                found: "2.80.0".to_string(),
-            },
-            DegradedReason::Unusable {
-                message: "起動できませんでした".to_string(),
-            },
-            DegradedReason::NotLoggedIn {
-                host: "github.com".to_string(),
-            },
-            DegradedReason::ConfiguredUnavailable {
-                login: "taro".to_string(),
-                source: AccountSource::GitConfig,
-                message: "no oauth token found".to_string(),
-            },
-            fake_no_access(Vec::new()),
-            // **候補を空にしない。** 空だと `A` の案内が付かず、**出荷される
-            // `Ambiguous` の形（いちばん長い）を測らないまま緑になる**。
-            fake_ambiguous(&["user_shortcode", "taro"]),
-        ];
         let size = TermSize {
             width: 100,
             height: 24,
         };
-        for reason in reasons {
+        for reason in every_degraded_reason() {
             // **`owner/repo` ごと見る。** 理由が伸びても `owner/repo` から落ちる
             // （`the_header_drops_parts_in_the_agreed_order`）ので、理由だけを見ると
             // 伸びたことに気付けない。隣の席とのあいだは区切りの領域が空けている。

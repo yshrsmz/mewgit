@@ -457,15 +457,17 @@ mod tests {
     #[test]
     fn the_repick_offers_u_only_where_the_setting_can_be_removed() {
         // **案内と `update::account_key` が同じ述語（`AccountView::is_unsettable`）を
-        // 読む。** 別々に見ると、効かない画面に `[u]` が出る（#53）。
-        let cases = [
-            (AccountSource::GitConfig, true),
-            (AccountSource::RepoRule, false),
-            (AccountSource::Single, false),
-            (AccountSource::Probe, false),
-        ];
+        // 読む。** 別々に見ると、効かない画面に `[u]` が出る（#53）。どの出どころが
+        // 外せるかは core の `u_removes_the_setting_only_when_it_lives_in_git_config` が
+        // 決める。ここが見るのは、案内がその述語と食い違わないこと。
+        assert!(
+            AccountSource::ALL.iter().any(|s| s.is_unsettable())
+                && AccountSource::ALL.iter().any(|s| !s.is_unsettable()),
+            "出す側と出さない側の両方を踏めていない"
+        );
 
-        for (source, offered) in cases {
+        for &source in AccountSource::ALL {
+            let offered = source.is_unsettable();
             let state = state_with_repick(source, AccountListing::Listed(vec![fake_login("taro")]));
             let text = draw(&state, SIZE).join("\n");
             assert_eq!(

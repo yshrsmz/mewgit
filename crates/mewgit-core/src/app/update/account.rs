@@ -875,14 +875,13 @@ mod tests {
     fn u_removes_the_setting_only_when_it_lives_in_git_config() {
         // **出どころで割った意味がここに出る。** `[[repos]]` は `git config` の手が
         // 届かないので `u` を効かせない（効かないなら案内も出ない。#53）。
-        let cases = [
-            (AccountSource::GitConfig, true),
-            (AccountSource::RepoRule, false),
-            (AccountSource::Single, false),
-            (AccountSource::Probe, false),
-        ];
-
-        for (source, unsettable) in cases {
+        for &source in AccountSource::ALL {
+            // **期待値は網羅 `match` で書く。** 出どころを足すと、ここで外せるかを
+            // 選ぶまでコンパイルエラーになる。
+            let unsettable = match source {
+                AccountSource::GitConfig => true,
+                AccountSource::RepoRule | AccountSource::Single | AccountSource::Probe => false,
+            };
             let mut state = state_resolved(source);
             let _ = press(&mut state, 'A');
 

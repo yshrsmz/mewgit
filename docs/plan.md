@@ -718,21 +718,23 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `unreachable_patterns`（`clippy -D warnings` で落ちる）、`advance` が常に添字 0 を
       進める形に壊すと `every_region_has_its_own_epoch` が落ちる。Stash は 80 桁でキーが
       全部出る（80 桁のテストに入れて緑）
-- [ ] 全変種の一覧の残り（上の行の `/simplify` の altitude が挙げ、コードを読んで確かめた）——
-      - `github/mod.rs` の `only_the_failures_that_are_the_whole_process_stop_the_fan_out` の
-        `cases: [(GithubError, bool); 9]` —— 離れた「いま 9」で、変種を足して行を足さなくても
-        通る（コメントは「どちらにも入れないまま通る」を防ぐと書いている）。`GithubError` は
-        フィールドを持つので、argv の `variants!` の形（名前の一覧と比べる）が要る
-      - **そのとき `all_variants!` と argv の `variants!` を `lib.rs` の 1 本に寄せるかを数える**
-        —— パターンを `$ty::$name { .. }` にすればどの変種にも当たり、値の配列を作る腕と
-        名前の一覧を作る腕を持たせられる。`GithubError` が名前の一覧の 2 つ目の利用者になる
-      - `PrField::next` / `prev` が巡回順を 2 つの網羅 `match` に別々に持ち、食い違っても
-        コンパイラは何も言わない（テストの `BackTab` は 1 歩だけ）。doc の「並びの配列を
-        持たない」の理由（配列だと足した欄が黙って漏れる）は `all_variants!` で崩れたので、
-        並び 1 本から両方向を導く形にして doc を直す
-      - `AccountSource::is_unsettable` が `matches!` —— 新しい出どころは黙って `false` になる。
-        一覧ではなく述語の網羅 `match` 化（`rust-coding.md` の「`_` の腕を数える」の族）。
-        テスト 2 箇所（`update/account.rs` と `modals/account_picker.rs`）の手並べも一緒に
+- [x] 全変種の一覧の残り（上の行の `/simplify` の altitude が挙げ、コードを読んで確かめた）——
+      **決めた形は `all_variants!` に `names` の腕を足して argv の `variants!` を寄せる** ——
+      パターンを `$ty::$name { .. }` にするとタプル・構造体・unit のどの変種にも当たる
+      （unit 変種にも通ることを実際に組んで確かめた）。`(値 → 名前の関数, 名前の配列)` を返し、
+      テストが手で組んだ値の一覧と比べる。利用者は argv と `github` のテストの 2 つ。
+      - `GithubError` の `cases: [_; 9]` —— 配列長をやめ、`names` の一覧と比べる
+      - `PrField::next` / `prev` —— `PrField::ALL` の並び 1 本から `cycled`（`Pane::cycle` と
+        共有した「端で巻く」）で両方向を導く。**描く順は tui の `pr_create::render` が欄ごとに
+        手で積んでいる**（部品が欄ごとに違うので `ALL` を回す形にしなかった）ので、
+        「巡回の順 = 画面の並び」はテストが並びを書き下して見張る。`Shift+Tab` でも 1 周する
+      - `AccountSource::is_unsettable` —— 網羅 `match`。テスト 2 本は `AccountSource::ALL` で
+        回し、core 側は期待値を網羅 `match` で選ばせ、tui 側は案内が述語と食い違わないこと
+        だけを見る（両側を踏めていることを先に assert）
+      変異の実測（2026-10-08）: `cases` から `NotFound` を消すと名前の assert で落ちる /
+      `ALL` の `Head` と `Draft` を入れ替えると `Tab` のループで落ちる / `prev` を順方向に
+      すると `Shift+Tab` のループで落ちる / `AccountSource` に変種を足すと `all_variants!` と
+      `is_unsettable` の 2 箇所が E0004
 - [ ] `scripts/screen.py` が全角文字のあとで 1 桁落とすのを直す。**桁を根拠にする
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の

@@ -434,13 +434,18 @@ impl AppState {
     }
 
     /// 巡回の次。末尾からは先頭に戻る。
+    ///
+    /// **候補に無い `focus` は先頭から数え直すが、そこへ来る経路は無い。**
+    /// [`AppState::reseat_focus`] が `update` の出口で候補から外れた `focus` を潰すので、
+    /// ここで読む `focus` は必ず候補にいる。[`cycled`] の数え直しはその保険で、
+    /// 座り直す先を変えたときにここも直す必要はない（先頭は常に `Graph`）。
     pub fn next_focus(&self) -> Pane {
-        self.focus.cycle(self.focus_candidates(), 1)
+        cycled(self.focus_candidates(), self.focus, 1)
     }
 
-    /// 巡回の前。先頭からは末尾に戻る。
+    /// 巡回の前。先頭からは末尾に戻る（候補に無い `focus` は [`AppState::next_focus`] と同じ）。
     pub fn prev_focus(&self) -> Pane {
-        self.focus.cycle(self.focus_candidates(), -1)
+        cycled(self.focus_candidates(), self.focus, -1)
     }
 
     /// 候補から外れた `focus` を [`Pane::Graph`] に座り直させる。
@@ -1063,16 +1068,6 @@ impl Pane {
         Pane::CommitDetail,
         Pane::Diff,
     ];
-
-    /// `panes` の並びのうち `delta` 個先。端では反対側に回る。
-    ///
-    /// **一覧に無いペインは先頭から数え直すが、そこへ来る経路は無い。**
-    /// [`AppState::reseat_focus`] が `update` の出口で候補から外れた `focus` を潰すので、
-    /// ここに入る `self` は必ず `panes` にいる。`unwrap_or(0)` はその保険で、
-    /// 座り直す先を変えたときにここも直す必要はない（先頭は常に `Graph`）。
-    fn cycle(self, panes: &[Pane], delta: isize) -> Pane {
-        cycled(panes, self, delta)
-    }
 }
 
 /// `items` の並びのうち、`current` から `delta` 個先。端では反対側に回る。`current` が
@@ -2868,9 +2863,8 @@ impl AppState {
 ///
 /// **巡回の順は [`PrField::ALL`] の並び**（`Tab` が次へ = [`PrField::next`]、
 /// `Shift+Tab` が前へ）で、07 が描く縦の並びと同じ。**画面の並びと巡回の順を割らない**
-/// —— 割ると `Tab` を押した先が画面のどこかを目で追えなくなる。描く順は tui の
-/// `modals::pr_create::render` が欄ごとに手で積んでいるので、片方を並べ替えたら
-/// もう片方も直す（`Tab` で 1 周するテストが並びを書き下している）。
+/// —— 割ると `Tab` を押した先が画面のどこかを目で追えなくなる。tui の
+/// `modals::pr_create::render` も `ALL` を回して欄を積む。
 ///
 /// **`Draft` だけが文字を打つ欄ではない。** 端末カーソルを置ける場所が無いので、
 /// どの欄に居るかの印はラベルの反転が出す（07）。

@@ -369,7 +369,7 @@ mod tests {
                 false,
             ),
         ];
-        let (variant, variants) = all_variants!(names GithubError {
+        let missing = all_variants!(missing GithubError {
             InvalidHost,
             Unauthorized,
             MissingScope,
@@ -379,9 +379,7 @@ mod tests {
             Network,
             Decode,
             Api,
-        });
-        let covered: Vec<_> = cases.iter().map(|(err, _)| variant(err)).collect();
-        let missing: Vec<_> = variants.iter().filter(|v| !covered.contains(v)).collect();
+        } in cases.iter().map(|(err, _)| err));
         assert!(
             missing.is_empty(),
             "判断を並べていない変種がある: {missing:?}"

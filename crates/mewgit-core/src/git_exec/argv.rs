@@ -515,8 +515,6 @@ impl GitOp {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
     use crate::git_exec::{HunkApply, RebaseAction, RebaseEntry, RebasePlan};
     use crate::test_util::{
@@ -934,7 +932,8 @@ mod tests {
     fn covers_every_variant() {
         // **`GitOp` に変種を足すと、名前を 1 つ足すまでコンパイルエラーになる**
         // （`all_variants!` の doc）。足せば [`cases`] の足し忘れをここが名前を挙げて落とす。
-        let (variant, variants) = all_variants!(names GitOp {
+        let cases = all_cases();
+        let missing = all_variants!(missing GitOp {
             Stage,
             Unstage,
             StageHunk,
@@ -971,9 +970,7 @@ mod tests {
             SetAccount,
             UnsetAccount,
             CheckoutPr,
-        });
-        let covered: BTreeSet<_> = all_cases().iter().map(|(op, _)| variant(op)).collect();
-        let missing: Vec<_> = variants.iter().filter(|v| !covered.contains(*v)).collect();
+        } in cases.iter().map(|(op, _)| op));
         assert!(missing.is_empty(), "argv の表に無い変種がある: {missing:?}");
     }
 

@@ -748,12 +748,18 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       型の次元で持たせる形も採らない**（`/simplify` の altitude が挙げた。argv と `verb` の
       作り直しになり、merge には continue / skip が無いので範囲を超える）。テストはメニューの語（`abort`）と `is_abort` を、全
       `InProgressOp`（`every_progress` が `all_variants!(missing …)` で抜けを見る）の全項目で突き合わせる
-- [ ] 同じ形の残り（2/4）— tui の `runtime.rs` の
+- [x] 同じ形の残り（2/4）— tui の `runtime.rs` の
       `every_notice_that_a_missing_material_prints_fits_the_notice_line` —— `no_material` の
       呼び出し元は 4 つ（`FetchPrList` / `FetchPrDetails` / `CreatePr` / `OpenPr`）なのに、
-      テストの一覧は 3 つで**`CreatePr`（「PR の作成」）が既に抜けている**。塞ぐ形は表示名を
-      呼び出し元の文字列ではなく `JobKind` の網羅 `match` から引くこと
-      （`no_material(state, kind)`）。テストは `JobKind::ALL`（`all_variants!` で作る）を回す
+      テストの一覧は 3 つで**`CreatePr`（「PR の作成」）が抜けていた**。名前は呼び出し元の
+      文字列ではなく、core の `GithubJob`（材料が要る 4 種別だけの enum。`ALL` は
+      `all_variants!`、`JobKind` へは `kind()`）の網羅 `match` から引く形にした
+      （`no_material(state, job)`。理由は 01 の「実行中ジョブ」）。テストは `GithubJob::ALL` ごとに
+      `Cmd` を `dispatch` へ通し、畳んだ種別を `Cmd::job_kind` の側で見る（腕が渡す変種と
+      `kind` の対応は手で書くので、`no_material` を直に呼ぶと取り違えても通った。`/code-review`）。**最初は `JobKind` の
+      網羅 `match` から引いた**が、材料を使わない 15 種別が `None` の腕になり、来ないはずの
+      `None` の受け皿（「この操作」）のせいで名前の抜けを見張りが拾えず、テストに手書きの
+      一覧が戻った（`/simplify` の altitude が挙げ、2026-10-08 にユーザーと決めた）
 - [ ] 同じ形の残り（3/4）— tui の `ui/mod.rs` の `every_degraded_reason_fits_the_header` が
       `DegradedReason` を手で並べている（コメントの「7 つ」も離れた「いま N」）。**マクロは
       core の中でしか使えないので `#[macro_export]` では出さない**（2026-10-08 にユーザーと

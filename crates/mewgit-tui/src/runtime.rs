@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::{Stream, StreamExt};
 use mewgit_core::app::{
-    init, update, AppState, Cmd, ExecDone, JobKind, Msg, NoticeLevel, RepoInfo, RepoSnapshot,
+    init, update, AppState, Cmd, ExecDone, GithubJob, Msg, NoticeLevel, RepoInfo, RepoSnapshot,
     TermSize,
 };
 use mewgit_core::auth::ssh::{effective_ssh_from_env, SshCommand};
@@ -448,7 +448,7 @@ impl Runtime {
             // 持たず、載せると `Cmd` を比べるテストが全部書けなくなる。不変ルール 3）。
             Cmd::FetchPrList => {
                 let Some((target, api)) = github_for(state) else {
-                    return no_material(state, JobKind::FetchPrList, "PR 一覧の取得");
+                    return no_material(state, GithubJob::FetchPrList);
                 };
                 // **残量に添える世代もここで読む。** `Cmd::FetchPrList` は世代を
                 // 運ばないが（一覧そのものは世代で捨てない。01）、残量は**その
@@ -476,7 +476,7 @@ impl Runtime {
             // （`GithubError::repeats_for_every_target`）。
             Cmd::FetchPrDetails { epoch, targets } => {
                 let Some((target, api)) = github_for(state) else {
-                    return no_material(state, JobKind::FetchPrDetails, "PR の集計");
+                    return no_material(state, GithubJob::FetchPrDetails);
                 };
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
@@ -525,7 +525,7 @@ impl Runtime {
             // `x-ratelimit-*` を返すので、ここで捨てるとヘッダの数が 1 本ぶん古くなる。
             Cmd::CreatePr(input) => {
                 let Some((target, api)) = github_for(state) else {
-                    return no_material(state, JobKind::CreatePr, "PR の作成");
+                    return no_material(state, GithubJob::CreatePr);
                 };
                 let epoch = state.prs.epoch();
                 let tx = self.tx.clone();
@@ -548,7 +548,7 @@ impl Runtime {
             // **`gh` は毎回 detect する**（上の `ResolveAccount` と同じ理由）。
             Cmd::OpenPr { number } => {
                 let Some(target) = state.repo.target.resolved().cloned() else {
-                    return no_material(state, JobKind::OpenPr, "PR を開く操作");
+                    return no_material(state, GithubJob::OpenPr);
                 };
                 let gh_bin = state.config.general.gh_bin.clone();
                 let tx = self.tx.clone();
@@ -626,20 +626,34 @@ fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, Gith
 ///
 /// **`FetchPrDetails` だけは、ここへ来ると行が「読み込み中」のまま残る** ——
 /// 通知は出るが、その行を頼み直す経路（`update::prs` の `fan_out`）へは次に一覧を
-/// 引き直すまで入らない。上の理由で到達しないと数えているが、**壊れたときの
-/// 見え方が他の 2 つと違う**（あちらは `PrLoad::Failed` が画面に出る）。
+/// 引き直すまで入らない。上の理由で到達しないと数えているが、**壊れたときに
+/// 画面に残るものがある**のはここだけ（ほかは通知が出て終わる）。
 /// **ジョブを畳むのが要る。** `update` の出口（[`AppState::issue`]）が登録したまま
 /// 誰も完了させないと、2 回目以降の同じ `Cmd` が通知も出さずに捨てられ、「1 回だけ
 /// 警告が出てあとは無反応」になる。`dispatch` が `notices` 以外に書いてよい唯一の
 /// 場所（01 のランタイム）。
-fn no_material(state: &mut AppState, kind: JobKind, name: &str) -> ControlFlow<()> {
-    state.jobs.finish(kind);
+fn no_material(state: &mut AppState, job: GithubJob) -> ControlFlow<()> {
+    state.jobs.finish(job.kind());
     state.push_notice(
         NoticeLevel::Warn,
-        format!("{name}に必要な材料が揃っていません"),
+        format!("{}に必要な材料が揃っていません", material_name(job)),
         None,
     );
     ControlFlow::Continue(())
+}
+
+/// [`no_material`] が通知に出す操作の名前。
+///
+/// **呼び出し元の文字列で渡さない。** 渡すと、通知が収まるかの見張りが名前を手で
+/// 並べることになり、呼び出し元を足したときに見張りだけ抜ける（`CreatePr` が
+/// 抜けていた）。網羅 `match` にしているのは、変種を足したときに選ばせるため。
+fn material_name(job: GithubJob) -> &'static str {
+    match job {
+        GithubJob::FetchPrList => "PR 一覧の取得",
+        GithubJob::FetchPrDetails => "PR の集計",
+        GithubJob::CreatePr => "PR の作成",
+        GithubJob::OpenPr => "PR を開く操作",
+    }
 }
 
 #[cfg(test)]
@@ -647,11 +661,12 @@ mod tests {
     use super::*;
     use futures::stream;
     use mewgit_core::app::{
-        AccountListing, AccountView, Modal, Pane, Repick, TargetState, TermSize,
+        AccountListing, AccountView, JobKind, Modal, Pane, Repick, TargetState, TermSize,
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
     use mewgit_core::git_read::{HeadInfo, InProgressOp};
+    use mewgit_core::github::CreatePr;
     use mewgit_core::test_util::{fake_account, fake_target, wait_for_pid, BareRepo, TestRepo};
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1258,7 +1273,7 @@ mod tests {
         // **畳むのは `update`（`prs::pr_list_loaded`）の側で、`dispatch` ではない。**
         // ここが見ているのは「返信が `update` を通ればジョブが残らない」こと ——
         // 材料が無いときに `dispatch` が畳む腕（`no_material`）は**この経路を
-        // 通らない**ので、別の見張りが要る（`every_notice_that_a_missing_material…`）。
+        // 通らない**ので、別の見張りが要る（`every_cmd_without_its_material_lets_go…`）。
         let _ = update(&mut state, Msg::PrListLoaded(result));
         assert!(!state.jobs.is_running(JobKind::FetchPrList));
         // **この腕が流す `Msg` は 1 本だけ。** ここは `github_for` が `Err` を返す形
@@ -1359,30 +1374,56 @@ mod tests {
         assert!(!state.jobs.is_running(JobKind::OpenPr));
     }
 
-    /// `no_material` が出す通知がフッターの 1 行目に収まる（01 の「失敗の案内文」）。
+    /// 材料の無い `Cmd` を `dispatch` に通すと、その `Cmd` のジョブを畳み、その操作の
+    /// 名前を出した通知がフッターの 1 行目に収まる（01 の「失敗の案内文」）。
     ///
     /// **通知の新しい産出元なので、既存の見張りは自分では拾わない**（`.claude/rules/testing.md` の
-    /// 「共有した見張りは新しい産出元を自分では拾わない」）。**範囲は実装側の集合から
-    /// 導かずに並べる**（#54 の裏返し）—— 腕を足したらここにも足す。
+    /// 「共有した見張りは新しい産出元を自分では拾わない」）。回すのは [`GithubJob::ALL`]。
+    ///
+    /// **`no_material` を直に呼ばず `dispatch` を通す。** 腕が渡す `GithubJob` と
+    /// `GithubJob::kind` の対応は手で書いてあり、直に呼ぶとどちらを取り違えても
+    /// 緑のまま通る。畳んだかは `Cmd::job_kind` の側で見る（`kind` で見ると同じ写像で
+    /// 照合することになる）。
     #[test]
-    fn every_notice_that_a_missing_material_prints_fits_the_notice_line() {
+    fn every_cmd_without_its_material_lets_go_of_its_job_and_names_itself() {
         let repo = TestRepo::init();
-        let (mut state, _reader) = opened(&repo);
-        let cases = [
-            (JobKind::FetchPrList, "PR 一覧の取得"),
-            (JobKind::FetchPrDetails, "PR の集計"),
-            (JobKind::OpenPr, "PR を開く操作"),
-        ];
+        let (mut state, reader) = opened(&repo);
+        let (mut runtime, _msgs) = runtime_for(&repo, reader);
 
-        for (kind, name) in cases {
+        for &job in GithubJob::ALL {
+            let cmd = match job {
+                GithubJob::FetchPrList => Cmd::FetchPrList,
+                GithubJob::FetchPrDetails => Cmd::FetchPrDetails {
+                    epoch: state.prs.epoch(),
+                    targets: vec![(1, "a".repeat(40))],
+                },
+                GithubJob::CreatePr => Cmd::CreatePr(Box::new(CreatePr {
+                    title: "t".to_string(),
+                    body: String::new(),
+                    head: "topic".to_string(),
+                    base: "main".to_string(),
+                    draft: false,
+                })),
+                GithubJob::OpenPr => Cmd::OpenPr { number: 1 },
+            };
+            let kind = cmd.job_kind().expect("ジョブを生む Cmd です");
             state.notices.clear();
-            let _ = no_material(&mut state, kind, name);
+
+            let cmd = state.issue(cmd);
+            assert!(state.jobs.is_running(kind), "{job:?} が発行されていません");
+            assert!(runtime.dispatch(&mut state, cmd).is_continue());
+
+            assert!(
+                !state.jobs.is_running(kind),
+                "{job:?} のジョブが残っています"
+            );
             let message = state.notices[0].message.clone();
+            assert!(message.contains(material_name(job)), "{job:?}: {message:?}");
             // **収まることを直に見る。** `contains` は末尾が切れても通る（#80）。
             // **見るのは 1 行目**（2 行目はキーヒント。07 の「ステータスバー」）。
             // 取り出しは `test_util` の 1 本を通す（行番号を手で書かない）。
             let notice = crate::test_util::notice_bar(&state, TermSize::default());
-            assert!(notice.contains(&message), "{name}: {notice:?}");
+            assert!(notice.contains(&message), "{job:?}: {notice:?}");
         }
     }
 

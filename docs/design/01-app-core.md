@@ -2838,6 +2838,16 @@ impl AppState {
 書いてよいのは `notices` だけなので、そちらでは登録できない。`Batch` は中身を 1 つずつ
 判定する。まとめて弾くと、同種が走っている `Cmd` 1 つのために他の `Cmd` まで落ちる。
 
+**例外は材料が揃わず走らせなかった GitHub の `Cmd`**（tui の `runtime::no_material`）。
+`dispatch` がジョブを畳んで通知を積む —— 畳まないと、2 回目以降の同じ `Cmd` を `issue` が
+通知も出さずに捨てる。名前と畳む種別は `GithubJob`（材料が要る 4 種別だけの enum。
+`JobKind` へは `GithubJob::kind`）から引く。**`JobKind` を直に使わないのは、名前を
+`Option` なしで引くため** —— `JobKind` の網羅 `match` から引くと材料を使わない種別が
+`None` の腕になり、来ないはずの `None` に受け皿を置くことになる（受け皿があると、名前の
+抜けを見張りが拾えない）。**`Cmd` との 1 対 1 の外に置いた並びなので**、`dispatch` の腕が
+渡す変種と `kind` の対応は、`GithubJob::ALL` ごとに `Cmd` を `dispatch` へ通すテストが
+`Cmd::job_kind` の側で照合する
+
 ### スピナー
 
 **走っているものがあるあいだ、ヘッダの右端に駒と説明を出す**（`⠋ fetch`。07 の

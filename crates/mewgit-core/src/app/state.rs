@@ -2634,6 +2634,38 @@ impl JobKind {
     }
 }
 
+/// GitHub の材料（`RepoInfo.target` とアカウント）を使って走るジョブ。ランタイムが
+/// 材料を取れずに走らせなかったときに、畳む種別と通知に出す名前を引く。
+///
+/// **`JobKind` から絞った別の型にした理由は 01 の「実行中ジョブ」。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubJob {
+    FetchPrList,
+    FetchPrDetails,
+    CreatePr,
+    OpenPr,
+}
+
+impl GithubJob {
+    /// 全変種。名前を回すテストが、足した変種を見落とさないための一覧。
+    pub const ALL: &[GithubJob] = &all_variants!(GithubJob {
+        FetchPrList,
+        FetchPrDetails,
+        CreatePr,
+        OpenPr,
+    });
+
+    /// 畳むジョブの種別。
+    pub fn kind(self) -> JobKind {
+        match self {
+            GithubJob::FetchPrList => JobKind::FetchPrList,
+            GithubJob::FetchPrDetails => JobKind::FetchPrDetails,
+            GithubJob::CreatePr => JobKind::CreatePr,
+            GithubJob::OpenPr => JobKind::OpenPr,
+        }
+    }
+}
+
 /// トースト通知 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {

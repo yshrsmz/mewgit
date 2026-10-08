@@ -766,13 +766,13 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       決めた。出すと `mewgit_core::all_variants!` が公開 API になる）—— core の `test_util` に
       全変種の値を返す関数（`every_degraded_reason`）を置き、その中で `all_variants!(missing …)` に
       抜けを見させる。規約は `.claude/rules/rust-coding.md` の「離れた場所に…」
-- [ ] 同じ形の残り（4/4）— `Pane::WIP_FOCUS_NO_PRS` / `COMMIT_FOCUS_NO_PRS` が `Prs` を
-      抜いただけの写し。ペインを足すと片方だけ足して、`github.enabled = false` のときだけ
-      巡回から漏れうる。**`const fn` で `Prs` を抜いた配列を導く**（2026-10-08 にユーザーと
-      決めた）—— `focus_candidates` の戻り値は `&'static [Pane]` のまま。配列の長さは
-      リテラルで書くので、**短すぎても長すぎても const 評価で落ちる形にする** —— 埋める
-      ループだけだと、短ければ添字の範囲外で落ちるが、長ければ末尾が埋め草のまま黙って
-      通る（`/code-review` が挙げた）。最後に埋めた数と長さが等しいことを assert する
+- [x] 同じ形の残り（4/4）— `Pane::WIP_FOCUS_NO_PRS` / `COMMIT_FOCUS_NO_PRS` が `Prs` を
+      抜いただけの写しだった。ペインを足すと片方だけ足して、`github.enabled = false` のときだけ
+      巡回から漏れうる。**`const fn` の `without_prs` で `Prs` を抜いた配列を導く**（2026-10-08 に
+      ユーザーと決めた）—— `focus_candidates` の戻り値は `&'static [Pane]` のまま。**配列の長さも
+      リテラルで書かない** —— `count_without_prs` を const 引数に渡す（具体的な const 式なので
+      stable で書ける）。それでも長さと埋めた数が食い違えば、短ければ添字の範囲外、長ければ
+      末尾の assert が const 評価で落ちる（変異で両方 E0080 を確認）
 - [ ] `scripts/screen.py` が全角文字のあとで 1 桁落とすのを直す。**桁を根拠にする
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の

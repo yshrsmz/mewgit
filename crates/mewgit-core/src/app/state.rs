@@ -990,7 +990,7 @@ pub enum Pane {
 }
 
 impl Pane {
-    /// 全ペイン。巡回の候補ではない（それは下の 4 本）—— ペインごとに回すテストが、
+    /// 全ペイン。巡回の候補ではない（それは下の `*_FOCUS`）—— ペインごとに回すテストが、
     /// 足したペインを見落とさないための一覧。
     pub const ALL: &[Pane] = &all_variants!(Pane {
         Graph,
@@ -1474,7 +1474,7 @@ impl WorktreeState {
         Self::SECTIONS
             .iter()
             .position(|&candidate| candidate == section)
-            .unwrap_or(Self::SECTIONS.len())
+            .expect("SECTIONS は all_variants! で全区画を持つ")
     }
 
     /// `positions` の `index` 番目へカーソルを据える。
@@ -3976,8 +3976,9 @@ mod tests {
     fn every_region_has_its_own_epoch() {
         // **`JobTracker` は `region as usize` でカウンタを引き、幅は `Region::ALL` の長さ。**
         // 全部載っていることは `all_variants!` がコンパイル時に強いる。ここで見るのは、
-        // どの領域の添字も範囲内で、2 つの領域が同じカウンタを分け合っていないこと
-        // （分け合うと、どちらかが 2 まで進む）。
+        // `advance` / `epoch` が領域ごとのカウンタを引いていること（`region` を無視して
+        // 1 つのカウンタを進める形では 1 を超える）と、明示した判別子が幅を超えて
+        // 添字が範囲外にならないこと。
         let mut jobs = JobTracker::default();
         for &region in Region::ALL {
             jobs.advance(region);

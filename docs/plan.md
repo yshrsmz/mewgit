@@ -691,21 +691,30 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `cargo test` だけでは警告で通る）、`cases()` から 1 件消すと
       テストが名前を挙げて落ちる。**相乗り先が無かったので単独の PR にした**
       （2026-10-08 にユーザーと決めた）
-- [ ] enum の全変種を手で並べた一覧を、網羅 `match` とつなぐ。**`VARIANT_COUNT` と
-      同じ穴が 3 つ残っている**（#172 の `/simplify` の altitude が挙げ、コードを読んで
+- [x] enum の全変種を手で並べた一覧を、網羅 `match` とつなぐ。**`VARIANT_COUNT` と
+      同じ穴が 3 つ残っていた**（#172 の `/simplify` の altitude が挙げ、コードを読んで
       確かめた）——
       - `ui/mod.rs` の `the_footer_ends_with_help_and_quit_and_never_shows_the_common_keys`
         と `every_pane_but_worktree_and_graph_shows_all_of_its_keys_at_80` がペインを
-        手で並べており、**#129 で足した `Pane::Stash` が両方に無い**（Stash のフッターを
-        誰も見ていない）
+        手で並べており、**#129 で足した `Pane::Stash` が両方に無かった**（core の
+        `every_hinted_key_does_something` も同じ手並べだった。こちらは Stash 入り）
       - `Region::ALL` —— `region_all_lists_every_arm` の網羅 `match` が強いるのは
-        `listed()` の腕だけで、**`ALL` に足し忘れてもテストは通る**（doc は「コンパイル
-        エラーにする」と書いている）。足し忘れると `JobTracker.epochs` の添字が範囲外
-      - `WorktreeState::SECTIONS` —— 網羅を確かめるものが無い（`git_read::sort_sections`
-        は分解束縛で塞いである）。足し忘れた区画は描かれず、カーソルも届かない
-      塞ぐ形は argv の `variants!` と同じく、名前の並び 1 つから網羅 `match` と一覧を
-      作ること。マクロを `test_util` に上げて共有するか、`ALL` の隣に `const _` の網羅
-      `match` を置くかは、着手時に数える（`SECTIONS` は宣言順と違う並びを持つ）
+        `listed()` の腕だけで、**`ALL` に足し忘れてもテストは通った**（doc は「コンパイル
+        エラーにする」と書いていた）。足し忘れると `JobTracker.epochs` の添字が範囲外
+      - `WorktreeState::SECTIONS` —— 網羅を確かめるものが無かった。足し忘れた区画は
+        描かれず、カーソルも届かない
+      **決めた形は core の `lib.rs` の `macro_rules! all_variants` 1 本** —— 3 つとも unit
+      変種だけなので、argv の `variants!` のように名前を比べる必要が無く、名前の並び
+      1 つから網羅 `match`（中に置いた `fn`）と変種の配列そのものを作る。`Pane::ALL` を
+      足してテスト 3 本をそこから回し、`Region::ALL` と `SECTIONS` も同じマクロで作った
+      （`SECTIONS` の並びはマクロが問わないのでそのまま）。`[T; 4]` は `&[T]` にして
+      離れた「いま 4」を消した。`Region` の宣言順は `region_all_is_in_declaration_order`
+      が見る。**`test_util` に上げる案は採らなかった** —— `Region::ALL` / `SECTIONS` は
+      production の定数なので、テスト専用の場所からは作れない。`const _` の網羅 `match` を
+      `ALL` の隣に置く案は、腕を強いるだけで一覧の抜けを見ないので元の穴と同じ。
+      実測（2026-10-08）: 3 つのどれから名前を消しても E0004、同じ名前を 2 度書くと
+      `unreachable_patterns`（`clippy -D warnings` で落ちる）、`Region` の並びを入れ替えると
+      テストが名前を挙げて落ちる。Stash は 80 桁でキーが全部出る（80 桁のテストに入れて緑）
 - [ ] `scripts/screen.py` が全角文字のあとで 1 桁落とすのを直す。**桁を根拠にする
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の

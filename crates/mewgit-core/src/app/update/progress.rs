@@ -310,7 +310,7 @@ pub(super) fn progress_picked(state: &mut AppState) -> Cmd {
         return Cmd::None;
     };
     if is_abort(&op) {
-        // abort の 4 変種では `GitOp::verb` が進行中操作の語と同じ字になる。
+        // abort の変種では `GitOp::verb` が進行中操作の語と同じ字になる。
         let verb = op.verb();
         let body = format!("{verb} を始める前の状態に戻します。解消した内容も捨てます");
         return confirm(state, &format!("{verb} を中止"), body, op);
@@ -349,7 +349,8 @@ mod tests {
         }
     }
 
-    /// 全進行中操作の値。足し忘れは `all_variants!` が名前を挙げて落とす。
+    /// 全進行中操作の値。値の足し忘れは `all_variants!` が名前を挙げて落とし、変種を
+    /// 足して一覧に書き忘れると E0004 になる。
     fn every_progress() -> Vec<InProgressOp> {
         let progresses = vec![
             rebase(),

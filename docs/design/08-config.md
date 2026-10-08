@@ -204,6 +204,8 @@ pub fn resolve_config_path(xdg_config_home: Option<&Path>, home: Option<&Path>) 
 `ascii = false` と書いたのと書いていないのが同じ値になり、「書いてあればロケールより
 勝つ」が成り立たない（06 の「ASCII フォールバック」）。`Config` の `graph.ascii` は
 `bool` のままで、`ConfigFile` → `Config` の変換で `None` をロケールの値に解く。
+**読めなかった経路（ファイルが無い・読めない・パースできない・場所が決まらない）も
+既定の `ConfigFile` からこの変換を通る**ので、書いていない値を解く場所は 1 つ。
 
 ## エラーとしない扱い
 

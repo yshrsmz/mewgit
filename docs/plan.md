@@ -667,6 +667,13 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       ASCII、どれも無ければ C ロケールなので ASCII（`locale charmap` の実測は 06）。
       `ascii = false` と書いたのを書いていないのと見分けるため、ファイル側だけ
       `Option<bool>` にした（08）。`LANG` を渡さない SSH 先や Docker では既定が ASCII に変わる
+- [ ] `graph.ascii` を枠線と `…` にも効かせる。**ロケールで ASCII に倒れても、ペインと
+      モーダルの枠（`Borders::ALL` の罫線。`ui::pane_block` と `modals`）と省略の `…`
+      （`ui` の切り詰め、通知履歴）は非 ASCII のまま**（pty で `LC_ALL=C` を確かめた。
+      ロケールの判定を入れた PR の `/simplify` が拾った）。塞ぐには枠を `ui::pick_charset` と同じ判定で
+      ASCII の `border::Set` に替え、`…` を `pick_charset` に通す。**UI の文言は日本語
+      なので、UTF-8 を出せない端末ではどのみち読めない** —— 効くのは「UTF-8 は出せるが
+      ロケールを渡していない」端末で、そこでは罫線も出せる。やるかは着手時に決める
 - [ ] `app/state.rs` を割るかを決める。**`update.rs` を割ったので workspace で
       いちばん長いファイルになった（2269 行。次は `update/graph.rs` の 1155 行）が、
       割る根拠は `update.rs` より弱い** —— 中身は `AppState` とその部品という 1 つの関心事で、

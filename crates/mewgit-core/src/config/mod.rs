@@ -221,38 +221,47 @@ impl Config {
         path: Option<&Path>,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> (Config, Vec<ConfigWarning>) {
-        let ascii = !locale_is_utf8(&lookup);
-        let (mut config, warnings) = match path {
-            Some(path) => Self::read(path, ascii),
-            None => (Self::fallback(ascii), vec![ConfigWarning::NoConfigDir]),
+        let read = match path {
+            Some(path) => Self::read(path),
+            None => (ConfigFile::default(), vec![ConfigWarning::NoConfigDir]),
         };
+        let (mut config, warnings) = Self::resolve(read, !locale_is_utf8(&lookup));
         config.apply_env(&lookup);
         (config, warnings)
     }
 
     /// 指定したパスの `config.toml` を読む。存在しなければ既定値（警告なし）。
-    /// ロケールも環境変数も見ない（`graph.ascii` の既定は偽）。
-    ///
-    /// パスを外から渡せるようにしているのはテストのため。
+    /// [`Config::load`] と違ってロケールも環境変数も見ない（`graph.ascii` の既定は偽）。
     pub fn load_from(path: &Path) -> (Config, Vec<ConfigWarning>) {
-        Self::read(path, false)
+        Self::resolve(Self::read(path), false)
     }
 
     /// TOML 文字列から読む。パースに失敗したら既定値と [`ConfigWarning::Parse`]。
     /// ロケールは見ない（`graph.ascii` の既定は偽）。
     pub fn from_toml_str(text: &str) -> (Config, Vec<ConfigWarning>) {
-        Self::parse(text, None, false)
+        Self::resolve(Self::parse(text, None), false)
     }
 
-    /// `ascii` は `graph.ascii` を書いていないときの値。
-    fn read(path: &Path, ascii: bool) -> (Config, Vec<ConfigWarning>) {
+    /// 読んだファイルを [`Config`] にする。**読めなかった経路もここを通る**ので、
+    /// 書いていない値（`ascii` は `graph.ascii` を書いていないときの値）の解決は 1 箇所。
+    fn resolve(
+        (file, mut warnings): (ConfigFile, Vec<ConfigWarning>),
+        ascii: bool,
+    ) -> (Config, Vec<ConfigWarning>) {
+        let (config, more) = file.into_config(ascii);
+        warnings.extend(more);
+        (config, warnings)
+    }
+
+    /// 読めなければ既定の [`ConfigFile`] と警告。
+    fn read(path: &Path) -> (ConfigFile, Vec<ConfigWarning>) {
         match std::fs::read_to_string(path) {
-            Ok(text) => Self::parse(&text, Some(path), ascii),
+            Ok(text) => Self::parse(&text, Some(path)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                (Self::fallback(ascii), Vec::new())
+                (ConfigFile::default(), Vec::new())
             }
             Err(err) => (
-                Self::fallback(ascii),
+                ConfigFile::default(),
                 vec![ConfigWarning::Io {
                     path: path.to_path_buf(),
                     message: err.to_string(),
@@ -261,19 +270,12 @@ impl Config {
         }
     }
 
-    /// 読めなかったときの既定値。`graph.ascii` だけはロケールから決まった値にする。
-    fn fallback(ascii: bool) -> Config {
-        let mut config = Config::default();
-        config.graph.ascii = ascii;
-        config
-    }
-
     /// `source` はエラーメッセージに出すファイルパス。文字列から直接読んだなら `None`。
-    fn parse(text: &str, source: Option<&Path>, ascii: bool) -> (Config, Vec<ConfigWarning>) {
+    fn parse(text: &str, source: Option<&Path>) -> (ConfigFile, Vec<ConfigWarning>) {
         match toml::from_str::<ConfigFile>(text) {
-            Ok(file) => file.into_config(ascii),
+            Ok(file) => (file, Vec::new()),
             Err(err) => (
-                Self::fallback(ascii),
+                ConfigFile::default(),
                 vec![ConfigWarning::Parse {
                     path: source.map(Path::to_path_buf),
                     // `to_string` は行・列を含む。`message()` だとそれが落ちる。
@@ -284,7 +286,7 @@ impl Config {
     }
 
     /// `MEWGIT_*` による上書きを適用する。`lookup` は環境変数の取得。
-    fn apply_env(&mut self, lookup: &impl Fn(&str) -> Option<String>) {
+    fn apply_env(&mut self, lookup: impl Fn(&str) -> Option<String>) {
         if let Some(value) = lookup("MEWGIT_GIT_BIN").filter(|v| !v.is_empty()) {
             self.general.git_bin = value;
         }
@@ -385,7 +387,9 @@ fn locale_is_utf8(lookup: impl Fn(&str) -> Option<String>) -> bool {
         return false;
     };
     // `ja_JP.UTF-8@modifier` の codeset。macOS は `LC_CTYPE=UTF-8` と codeset だけを書く。
-    let locale = locale.split('@').next().unwrap_or_default();
+    let locale = locale
+        .split_once('@')
+        .map_or(&*locale, |(locale, _)| locale);
     let codeset = locale
         .split_once('.')
         .map_or(locale, |(_, codeset)| codeset);
@@ -713,7 +717,7 @@ mod tests {
             gh_bin = "/from/file"
             "#,
         );
-        config.apply_env(&|key| match key {
+        config.apply_env(|key| match key {
             "MEWGIT_GIT_BIN" => Some("/from/env".to_string()),
             "MEWGIT_GH_BIN" => Some("/from/env".to_string()),
             _ => None,
@@ -725,21 +729,17 @@ mod tests {
     #[test]
     fn empty_env_var_does_not_override() {
         let (mut config, _) = Config::from_toml_str("[general]\ngit_bin = \"/from/file\"\n");
-        config.apply_env(&|_| Some(String::new()));
+        config.apply_env(|_| Some(String::new()));
         assert_eq!(config.general.git_bin, "/from/file");
         assert_eq!(config.general.gh_bin, "gh");
     }
 
     /// 環境変数の表を `lookup` にする。
-    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let vars: Vec<(String, String)> = vars
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect();
+    fn env<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |key| {
             vars.iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.clone())
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.to_string())
         }
     }
 

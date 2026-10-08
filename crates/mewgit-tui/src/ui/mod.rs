@@ -284,7 +284,8 @@ pub fn render_built(
 ///
 /// **選ぶところは 1 本。** キーは `[graph]` の下にあるが、既定は locale から決まる
 /// ので意味は「この端末が非 ASCII の字を出せるか」。グラフのレーンだけに効かせると、
-/// 同じ端末で Branches ペインの矢印だけが化ける（07）。
+/// 同じ端末で Branches ペインの矢印だけが化ける（07）。**枠線・`…`・スピナーはまだ
+/// 通していない**（`docs/plan.md` の M6）。
 pub fn pick_charset(glyphs: (&'static str, &'static str), ascii: bool) -> &'static str {
     if ascii {
         glyphs.1

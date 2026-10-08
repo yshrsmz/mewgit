@@ -133,6 +133,7 @@ pub enum Horizontal {
 
 **このキーはグラフ以外の記号にも効く。** Branches ペインの ahead / behind
 （`↑ ↓ → ^ v`。07）が最初の例で、選ぶところは `ui::pick_charset` の 1 本。
+**枠線・省略の `…`・ヘッダのスピナーはまだ通していない**（`docs/plan.md` の M6）。
 キーが `[graph]` の下にあるのは最初の利用者がグラフだったからで、意味は
 「この端末が非 ASCII の記号を出せるか」（既定は locale から決まる。08）。
 `↑`（U+2191）/ `↓`（U+2193）は下の罫線と同じ East Asian Ambiguous 幅なので、

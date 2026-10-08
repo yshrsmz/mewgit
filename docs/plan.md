@@ -737,24 +737,31 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `ALL` の `Head` と `Draft` を入れ替えると `Tab` のループで落ちる / `prev` を順方向に
       すると `Shift+Tab` のループで落ちる / `AccountSource` に変種を足すと `all_variants!` と
       `is_unsettable` の 2 箇所が E0004
-- [ ] 同じ形の残り（上の行の `/simplify` の altitude が挙げ、コードを読んで確かめた）——
-      - `app/update/progress.rs` の `is_abort` が `matches!` —— **不変ルール 5 の門番**で、
-        abort 系の `GitOp` を足してメニューに載せると黙って `false`（確認なしで実行）になる。
-        塞ぐ形は `GitOp` の網羅 `match`（36 腕を並べる）か、`progress_menu` の項目の組み立て
-        （`InProgressOp` の網羅 `match`）から abort かどうかを導くこと。どちらにするかを決める
-      - tui の `runtime.rs` の `every_notice_that_a_missing_material_prints_fits_the_notice_line`
-        —— `no_material` の呼び出し元は 4 つ（`FetchPrList` / `FetchPrDetails` / `CreatePr` /
-        `OpenPr`）なのに、テストの一覧は 3 つで**`CreatePr`（「PR の作成」）が既に抜けている**。
-        塞ぐ形は表示名を呼び出し元の文字列ではなく `JobKind` の網羅 `match` から引くこと
-        （`no_material(state, kind)`）。テストはその `match` の腕から導ける
-      - tui の `ui/mod.rs` の `every_degraded_reason_fits_the_header` が `DegradedReason` を
-        手で並べている（コメントの「7 つ」も離れた「いま N」）。`all_variants!(missing …)` で
-        比べたいが、**マクロは core の中でしか使えない** —— tui から使うには `#[macro_export]`
-        で出すかを決める（出すと `mewgit_core::all_variants!` が公開 API になる）
-      - `Pane::WIP_FOCUS_NO_PRS` / `COMMIT_FOCUS_NO_PRS` が `Prs` を抜いただけの写し。
-        ペインを足すと片方だけ足して、`github.enabled = false` のときだけ巡回から漏れうる。
-        塞ぐ形は `_NO_PRS` を持たず、`focus_candidates` で `Prs` を外して導くこと（戻り値が
-        `&'static [Pane]` なので、所有した値か固定長の配列を返す形に変える）
+- [x] 同じ形の残り（1/4）— `app/update/progress.rs` の `is_abort` を `GitOp` の網羅 `match` に
+      する。**4 本に割った**（2026-10-08 にユーザーと決めた。4 件は上の行の `/simplify` の
+      altitude が挙げ、コードを読んで確かめたもので、互いに独立した関心事なので 1 件 1 本）。
+      `matches!` だと**不変ルール 5 の門番**なのに、abort 系の `GitOp` を足してメニューに
+      載せると黙って `false`（確認なしで実行）になった。**`InProgressOp` から導く形は採らない**
+      —— モーダルは開いた時点の写しを持つので、確定時に判じるには写しの側に abort の
+      `GitOp` を持たせることになり、「項目に持たせない」（01 の「進行中操作のメニュー（`m`）」）と
+      同じ判断が 2 つになる。テストはメニューの語（`abort`）と `is_abort` を、全
+      `InProgressOp`（`all_variants!(missing …)` で抜けを見る）の全項目で突き合わせる
+- [ ] 同じ形の残り（2/4）— tui の `runtime.rs` の
+      `every_notice_that_a_missing_material_prints_fits_the_notice_line` —— `no_material` の
+      呼び出し元は 4 つ（`FetchPrList` / `FetchPrDetails` / `CreatePr` / `OpenPr`）なのに、
+      テストの一覧は 3 つで**`CreatePr`（「PR の作成」）が既に抜けている**。塞ぐ形は表示名を
+      呼び出し元の文字列ではなく `JobKind` の網羅 `match` から引くこと
+      （`no_material(state, kind)`）。テストは `JobKind::ALL`（`all_variants!` で作る）を回す
+- [ ] 同じ形の残り（3/4）— tui の `ui/mod.rs` の `every_degraded_reason_fits_the_header` が
+      `DegradedReason` を手で並べている（コメントの「7 つ」も離れた「いま N」）。**マクロは
+      core の中でしか使えないので `#[macro_export]` では出さない**（2026-10-08 にユーザーと
+      決めた。出すと `mewgit_core::all_variants!` が公開 API になる）—— core の `test_util` に
+      全変種の値を返す関数を置き、その中で `all_variants!(missing …)` に抜けを見させる
+- [ ] 同じ形の残り（4/4）— `Pane::WIP_FOCUS_NO_PRS` / `COMMIT_FOCUS_NO_PRS` が `Prs` を
+      抜いただけの写し。ペインを足すと片方だけ足して、`github.enabled = false` のときだけ
+      巡回から漏れうる。**`const fn` で `Prs` を抜いた配列を導く**（2026-10-08 にユーザーと
+      決めた）—— `focus_candidates` の戻り値は `&'static [Pane]` のまま。配列の長さは
+      リテラルで書くが、合わなければ const 評価の panic でコンパイルが落ちるので古くならない
 - [ ] `scripts/screen.py` が全角文字のあとで 1 桁落とすのを直す。**桁を根拠にする
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の

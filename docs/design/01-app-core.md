@@ -2791,7 +2791,8 @@ snapshot でも断る**（上の「stash の書き込み」）。apply / pop は
   status が届いても、カーソルの下の項目が動かない）。確定は `GitOp` をそのまま出す。**abort は `Modal::Confirm` を挟む**
   （不変ルール 5）。**skip は挟まない** —— 止まったコミットを捨てるが、`CLAUDE.md` の
   確認対象（force push、`branch -D`、discard、abort 系）に入っておらず、lazygit も挟まない。
-  確認するかは項目に持たせず `GitOp` から導く（`is_abort`。持たせると同じ判断が 2 つになる）
+  確認するかは項目に持たせず `GitOp` から導く（`is_abort`。持たせると同じ判断が 2 つになる）。
+  `is_abort` は `GitOp` の網羅 `match` で、変種を足したときに abort かを選ばせる
 - **確定は `submit_exec`**（1 行入力と同じ）。git が走っていれば閉じずに断る
 - **hook が reword を断って止まった rebase**（`Rebase.refused_reword` が `Some`。02 の
   「断られた reword」）では、continue が `GitOp::RebaseContinue { reword: Some(..) }` を出し、

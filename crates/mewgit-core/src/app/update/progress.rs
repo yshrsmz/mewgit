@@ -236,11 +236,47 @@ pub fn progress_menu(progress: &InProgressOp) -> Option<ProgressMenu> {
 
 /// 確認モーダルを挟むか（不変ルール 5）。**項目に持たせない** —— 持たせると
 /// 「abort か」の判断が項目と `GitOp` の 2 つになる。
+///
+/// 網羅 `match` にしているのは、`GitOp` に変種を足したときに選ばせるため。`matches!` だと
+/// abort 系を足してメニューに載せたときに黙って `false`（確認なしで実行）になる。
 fn is_abort(op: &GitOp) -> bool {
-    matches!(
-        op,
-        GitOp::RebaseAbort | GitOp::CherryPickAbort | GitOp::RevertAbort | GitOp::MergeAbort
-    )
+    match op {
+        GitOp::RebaseAbort | GitOp::CherryPickAbort | GitOp::RevertAbort | GitOp::MergeAbort => {
+            true
+        }
+        GitOp::Stage(_)
+        | GitOp::Unstage(_)
+        | GitOp::StageHunk(_)
+        | GitOp::UnstageHunk(_)
+        | GitOp::DiscardHunk(_)
+        | GitOp::Discard(_)
+        | GitOp::DiscardUntracked(_)
+        | GitOp::DiscardAdded(_)
+        | GitOp::Commit { .. }
+        | GitOp::BranchCreate { .. }
+        | GitOp::Switch(_)
+        | GitOp::BranchDelete { .. }
+        | GitOp::BranchRename { .. }
+        | GitOp::Fetch { .. }
+        | GitOp::Pull { .. }
+        | GitOp::Push { .. }
+        | GitOp::RebaseInteractive { .. }
+        | GitOp::RebaseContinue { .. }
+        | GitOp::RebaseSkip
+        | GitOp::CherryPick(_)
+        | GitOp::CherryPickContinue
+        | GitOp::CherryPickSkip
+        | GitOp::Revert { .. }
+        | GitOp::RevertContinue
+        | GitOp::RevertSkip
+        | GitOp::StashPush { .. }
+        | GitOp::StashApply(_)
+        | GitOp::StashPop(_)
+        | GitOp::StashDrop(_)
+        | GitOp::SetAccount { .. }
+        | GitOp::UnsetAccount
+        | GitOp::CheckoutPr(_) => false,
+    }
 }
 
 /// `m`。進行中操作のメニューを開く（01 の「進行中操作のメニュー（`m`）」）。
@@ -685,6 +721,47 @@ mod tests {
 
         // 末尾で止まる（`stepped_index`）。abort なので確認に移る。
         assert!(matches!(state.modal, Some(Modal::Confirm { .. })));
+    }
+
+    #[test]
+    fn only_the_abort_items_ask_before_running() {
+        // **語と門番を突き合わせる。** 「abort」と見せた項目が確認を挟まずに走ると
+        // 不変ルール 5 を破り、ほかの項目が確認を挟むと skip まで止まる。`is_abort` は
+        // `GitOp` から導くので、メニューに載せた項目と食い違ってもコンパイラは何も言わない。
+        let progresses = [
+            rebase(),
+            InProgressOp::Rebase {
+                step: None,
+                branch: None,
+                refused_reword: Some(RefusedReword { head: fake_oid(7) }),
+            },
+            cherry_pick(),
+            InProgressOp::Revert { oid: None },
+            InProgressOp::Merge { oid: fake_oid(1) },
+            InProgressOp::Am { step: None },
+        ];
+        let missing = all_variants!(missing InProgressOp {
+            Rebase,
+            CherryPick,
+            Revert,
+            Merge,
+            Am,
+        } in &progresses);
+        assert!(missing.is_empty(), "回していない進行中操作: {missing:?}");
+
+        for progress in &progresses {
+            let Some(menu) = progress_menu(progress) else {
+                continue;
+            };
+            for item in &menu.items {
+                assert_eq!(
+                    is_abort(&item.op),
+                    item.word == "abort",
+                    "{progress:?} の {}",
+                    item.word
+                );
+            }
+        }
     }
 
     #[test]

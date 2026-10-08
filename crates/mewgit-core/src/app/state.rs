@@ -1025,13 +1025,10 @@ impl Pane {
     /// **`Prs` は真ん中にあるので末尾で落とせない。** `Diff` のように
     /// `strip_suffix` で削る形にすると並びの意味が 2 通りになるので、一覧をもう 1 本
     /// 置く（`Prs` が落ちる条件は起動時に固まるので、揺れるのは `Diff` だけ）。
-    const WIP_FOCUS_NO_PRS: &'static [Pane] = &[
-        Pane::Graph,
-        Pane::Branches,
-        Pane::Stash,
-        Pane::Worktree,
-        Pane::Diff,
-    ];
+    /// **手で写さずにコンパイル時に導く**（[`without_prs`]）—— 写すと、ペインを足した
+    /// ときに片方だけ足して `github.enabled = false` のときだけ巡回から漏れうる。
+    const WIP_FOCUS_NO_PRS: &'static [Pane] =
+        &without_prs::<{ count_without_prs(Pane::WIP_FOCUS) }>(Pane::WIP_FOCUS);
 
     /// コミットを選んでいるあいだの巡回先。右は [`GraphSelection::right_pane`] が決める。
     ///
@@ -1061,13 +1058,41 @@ impl Pane {
     ];
 
     /// `config.github.enabled = false` のときの [`COMMIT_FOCUS`](Self::COMMIT_FOCUS)。
-    const COMMIT_FOCUS_NO_PRS: &'static [Pane] = &[
-        Pane::Graph,
-        Pane::Branches,
-        Pane::Stash,
-        Pane::CommitDetail,
-        Pane::Diff,
-    ];
+    const COMMIT_FOCUS_NO_PRS: &'static [Pane] =
+        &without_prs::<{ count_without_prs(Pane::COMMIT_FOCUS) }>(Pane::COMMIT_FOCUS);
+}
+
+/// `panes` のうち `Pane::Prs` でないものの数。[`without_prs`] の長さに渡す。
+const fn count_without_prs(panes: &[Pane]) -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < panes.len() {
+        if !matches!(panes[i], Pane::Prs) {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+/// `panes` から `Pane::Prs` を抜いた並び。巡回の一覧を `const` のまま導くためのもの
+/// （`Pane::WIP_FOCUS_NO_PRS`）。
+///
+/// **長さ `N` は [`count_without_prs`] から渡す。** 手で書いた数と食い違うと、短ければ
+/// 添字の範囲外、長ければ末尾の assert が const 評価で落ちる（コンパイルエラー）。
+const fn without_prs<const N: usize>(panes: &[Pane]) -> [Pane; N] {
+    let mut out = [Pane::Graph; N];
+    let mut filled = 0;
+    let mut i = 0;
+    while i < panes.len() {
+        if !matches!(panes[i], Pane::Prs) {
+            out[filled] = panes[i];
+            filled += 1;
+        }
+        i += 1;
+    }
+    assert!(filled == N, "長さが Prs を抜いた数と合いません");
+    out
 }
 
 /// `items` の並びのうち、`current` から `delta` 個先。端では反対側に回る。`current` が
@@ -3622,6 +3647,20 @@ mod tests {
 
         assert_eq!(worktree.cursor, 0);
         assert_eq!(selected(&worktree), None);
+    }
+
+    #[test]
+    fn the_lists_without_prs_keep_every_other_pane_in_order() {
+        // `without_prs` が `Prs` だけを抜き、並びを崩さないこと。
+        for (all, without) in [
+            (Pane::WIP_FOCUS, Pane::WIP_FOCUS_NO_PRS),
+            (Pane::COMMIT_FOCUS, Pane::COMMIT_FOCUS_NO_PRS),
+        ] {
+            // **抜く相手が入っていることを先に見る**（入っていなければ自明に通る）。
+            assert!(all.contains(&Pane::Prs), "{all:?}");
+            let expected: Vec<Pane> = all.iter().copied().filter(|&p| p != Pane::Prs).collect();
+            assert_eq!(without, expected.as_slice());
+        }
     }
 
     /// コミットを 1 件積んだ状態。カーソルは WIP 行のまま。

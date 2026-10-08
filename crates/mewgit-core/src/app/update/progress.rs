@@ -349,14 +349,24 @@ mod tests {
         }
     }
 
-    fn every_progress() -> [InProgressOp; 5] {
-        [
+    /// 全進行中操作の値。足し忘れは `all_variants!` が名前を挙げて落とす。
+    fn every_progress() -> Vec<InProgressOp> {
+        let progresses = vec![
             rebase(),
             InProgressOp::Am { step: None },
             cherry_pick(),
             InProgressOp::Revert { oid: None },
             InProgressOp::Merge { oid: fake_oid(1) },
-        ]
+        ];
+        let missing = all_variants!(missing InProgressOp {
+            Rebase,
+            Am,
+            CherryPick,
+            Revert,
+            Merge,
+        } in &progresses);
+        assert!(missing.is_empty(), "回していない進行中操作: {missing:?}");
+        progresses
     }
 
     /// 進行中操作を載せた status を届ける（鮮度のある snapshot になる）。
@@ -728,28 +738,7 @@ mod tests {
         // **語と門番を突き合わせる。** 「abort」と見せた項目が確認を挟まずに走ると
         // 不変ルール 5 を破り、ほかの項目が確認を挟むと skip まで止まる。`is_abort` は
         // `GitOp` から導くので、メニューに載せた項目と食い違ってもコンパイラは何も言わない。
-        let progresses = [
-            rebase(),
-            InProgressOp::Rebase {
-                step: None,
-                branch: None,
-                refused_reword: Some(RefusedReword { head: fake_oid(7) }),
-            },
-            cherry_pick(),
-            InProgressOp::Revert { oid: None },
-            InProgressOp::Merge { oid: fake_oid(1) },
-            InProgressOp::Am { step: None },
-        ];
-        let missing = all_variants!(missing InProgressOp {
-            Rebase,
-            CherryPick,
-            Revert,
-            Merge,
-            Am,
-        } in &progresses);
-        assert!(missing.is_empty(), "回していない進行中操作: {missing:?}");
-
-        for progress in &progresses {
+        for progress in &every_progress() {
             let Some(menu) = progress_menu(progress) else {
                 continue;
             };

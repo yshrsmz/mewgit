@@ -744,8 +744,10 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       載せると黙って `false`（確認なしで実行）になった。**`InProgressOp` から導く形は採らない**
       —— モーダルは開いた時点の写しを持つので、確定時に判じるには写しの側に abort の
       `GitOp` を持たせることになり、「項目に持たせない」（01 の「進行中操作のメニュー（`m`）」）と
-      同じ判断が 2 つになる。テストはメニューの語（`abort`）と `is_abort` を、全
-      `InProgressOp`（`all_variants!(missing …)` で抜けを見る）の全項目で突き合わせる
+      同じ判断が 2 つになる。**continue / skip / abort を `GitOp` の 1 変種に畳み、abort を
+      型の次元で持たせる形も採らない**（`/simplify` の altitude が挙げた。argv と `verb` の
+      作り直しになり、merge には continue / skip が無いので範囲を超える）。テストはメニューの語（`abort`）と `is_abort` を、全
+      `InProgressOp`（`every_progress` が `all_variants!(missing …)` で抜けを見る）の全項目で突き合わせる
 - [ ] 同じ形の残り（2/4）— tui の `runtime.rs` の
       `every_notice_that_a_missing_material_prints_fits_the_notice_line` —— `no_material` の
       呼び出し元は 4 つ（`FetchPrList` / `FetchPrDetails` / `CreatePr` / `OpenPr`）なのに、

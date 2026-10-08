@@ -992,7 +992,7 @@ pub enum Pane {
 impl Pane {
     /// 全ペイン。巡回の候補ではない（それは下の 4 本）—— ペインごとに回すテストが、
     /// 足したペインを見落とさないための一覧。
-    pub const ALL: &'static [Pane] = &all_variants!(Pane {
+    pub const ALL: &[Pane] = &all_variants!(Pane {
         Graph,
         Branches,
         Stash,
@@ -2363,12 +2363,11 @@ pub enum Region {
 }
 
 impl Region {
-    /// 世代を持つ領域すべて。**宣言順に並べる** —— [`JobTracker`] は
-    /// `region as usize` でカウンタを引き、その配列の幅をここの長さで取る。
+    /// 世代を持つ領域すべて。[`JobTracker`] は `region as usize` でカウンタを引き、
+    /// その配列の幅をここの長さで取る（並びは問わない）。
     ///
     /// 腕を足してここに足し忘れると添字が範囲外になるので、`all_variants!` の網羅
-    /// `match` でコンパイルエラーにする。宣言順かどうかは `region_all_is_in_declaration_order`
-    /// が見る。
+    /// `match` でコンパイルエラーにする。
     pub const ALL: &[Region] = &all_variants!(Region {
         Worktree,
         Refs,
@@ -2386,7 +2385,7 @@ impl Region {
 #[derive(Debug, Default)]
 pub struct JobTracker {
     running: Vec<Job>,
-    /// 領域ごとの世代。添字は [`Region::ALL`] の位置。
+    /// 領域ごとの世代。添字は `region as usize`、幅は [`Region::ALL`] の長さ。
     epochs: [u64; Region::ALL.len()],
 }
 
@@ -3974,14 +3973,17 @@ mod tests {
     }
 
     #[test]
-    fn region_all_is_in_declaration_order() {
-        // **`JobTracker` は `region as usize` でカウンタを引く。** 全部載っていることは
-        // `all_variants!` がコンパイル時に強いるが、並びは強いないのでここで見る。
+    fn every_region_has_its_own_epoch() {
+        // **`JobTracker` は `region as usize` でカウンタを引き、幅は `Region::ALL` の長さ。**
+        // 全部載っていることは `all_variants!` がコンパイル時に強いる。ここで見るのは、
+        // どの領域の添字も範囲内で、2 つの領域が同じカウンタを分け合っていないこと
+        // （分け合うと、どちらかが 2 まで進む）。
         let mut jobs = JobTracker::default();
-        for (index, &region) in Region::ALL.iter().enumerate() {
-            assert_eq!(region as usize, index, "{region:?} の添字がずれています");
+        for &region in Region::ALL {
             jobs.advance(region);
-            assert_eq!(jobs.epoch(region), 1);
+        }
+        for &region in Region::ALL {
+            assert_eq!(jobs.epoch(region), 1, "{region:?}");
         }
     }
 

@@ -515,72 +515,11 @@ impl GitOp {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
     use crate::git_exec::{HunkApply, RebaseAction, RebaseEntry, RebasePlan};
     use crate::test_util::{
         fake_fork_source, fake_oid, fake_pr_checkout, fake_stamp, FAKE_FORK_URL,
     };
-
-    /// [`variant`] と [`VARIANTS`] を同じ名前の並びから作る（`GitOp::X { .. }` はタプルの
-    /// 変種にもユニットの変種にも当たる）。**`variant` は網羅 `match` なので、`GitOp` に
-    /// 変種を足すと名前を 1 つ足すまでコンパイルエラーになり、足せば `VARIANTS` にも
-    /// 載る**（変種の本数をどこにも書かない。同じ名前を 2 度書くと rustc の
-    /// `unreachable_patterns` になり、CI の `clippy -D warnings` で落ちる）。そのとき
-    /// [`cases`] にも足す（足し忘れは `covers_every_variant` が落とす）。
-    macro_rules! variants {
-        ($($name:ident,)*) => {
-            /// 変種の名前。
-            fn variant(op: &GitOp) -> &'static str {
-                match op {
-                    $(GitOp::$name { .. } => stringify!($name),)*
-                }
-            }
-
-            /// 全変種の名前。
-            const VARIANTS: &[&str] = &[$(stringify!($name),)*];
-        };
-    }
-
-    variants! {
-        Stage,
-        Unstage,
-        StageHunk,
-        UnstageHunk,
-        DiscardHunk,
-        Discard,
-        DiscardUntracked,
-        DiscardAdded,
-        Commit,
-        BranchCreate,
-        Switch,
-        BranchDelete,
-        BranchRename,
-        Fetch,
-        Pull,
-        Push,
-        RebaseInteractive,
-        RebaseContinue,
-        RebaseSkip,
-        RebaseAbort,
-        CherryPick,
-        CherryPickContinue,
-        CherryPickSkip,
-        CherryPickAbort,
-        Revert,
-        RevertContinue,
-        RevertSkip,
-        RevertAbort,
-        MergeAbort,
-        StashPush,
-        StashApply,
-        StashPop,
-        StashDrop,
-        SetAccount,
-        UnsetAccount,
-        CheckoutPr,
-    }
 
     /// 設計書「argv への変換」の表をそのまま写したもの。
     fn cases() -> Vec<(GitOp, Vec<&'static str>)> {
@@ -991,8 +930,47 @@ mod tests {
 
     #[test]
     fn covers_every_variant() {
-        let covered: BTreeSet<_> = all_cases().iter().map(|(op, _)| variant(op)).collect();
-        let missing: Vec<_> = VARIANTS.iter().filter(|v| !covered.contains(*v)).collect();
+        // **`GitOp` に変種を足すと、名前を 1 つ足すまでコンパイルエラーになる**
+        // （`all_variants!` の doc）。足せば [`cases`] の足し忘れをここが名前を挙げて落とす。
+        let cases = all_cases();
+        let missing = all_variants!(missing GitOp {
+            Stage,
+            Unstage,
+            StageHunk,
+            UnstageHunk,
+            DiscardHunk,
+            Discard,
+            DiscardUntracked,
+            DiscardAdded,
+            Commit,
+            BranchCreate,
+            Switch,
+            BranchDelete,
+            BranchRename,
+            Fetch,
+            Pull,
+            Push,
+            RebaseInteractive,
+            RebaseContinue,
+            RebaseSkip,
+            RebaseAbort,
+            CherryPick,
+            CherryPickContinue,
+            CherryPickSkip,
+            CherryPickAbort,
+            Revert,
+            RevertContinue,
+            RevertSkip,
+            RevertAbort,
+            MergeAbort,
+            StashPush,
+            StashApply,
+            StashPop,
+            StashDrop,
+            SetAccount,
+            UnsetAccount,
+            CheckoutPr,
+        } in cases.iter().map(|(op, _)| op));
         assert!(missing.is_empty(), "argv の表に無い変種がある: {missing:?}");
     }
 

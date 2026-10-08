@@ -79,28 +79,33 @@ pub fn render(frame: &mut Frame, area: Rect, fields: Fields) {
         at
     };
 
+    // **積む順は [`PrField::ALL`]** —— `Tab` の巡回と同じ並びで、画面の並びと割らない
+    // （`PrField` の doc）。
     let mut cursor = None;
-    if let Some(at) = take(1) {
-        cursor = cursor.or(text_field(frame, at, "Title", title, field));
-    }
-    if let Some(at) = take(body_rows) {
-        cursor = cursor.or(text_field(frame, at, "Body", body, field));
-    }
-    if let Some(at) = take(1) {
-        cursor = cursor.or(text_field(frame, at, "Base", base, field));
-    }
-    if let Some(at) = take(1) {
-        // **`Head` にも端末カーソルを置かない**（`Draft` と同じく打つ欄ではない）。
-        let (label, value) = split(at);
-        label_at(frame, label, "Head", field == PrField::Head);
-        frame.render_widget(Paragraph::new(Line::from(head_value(heads))), value);
-    }
-    if let Some(at) = take(1) {
-        // **`Draft` には端末カーソルを置かない。** 文字を打つ欄ではないので列が無い。
-        // どの欄に居るかはラベルの反転が出す（07）。
-        let (label, value) = split(at);
-        label_at(frame, label, "Draft", field == PrField::Draft);
-        frame.render_widget(Paragraph::new(Line::from(draft_box(draft))), value);
+    for &at_field in PrField::ALL {
+        let height = match at_field {
+            PrField::Body => body_rows,
+            PrField::Title | PrField::Base | PrField::Head | PrField::Draft => 1,
+        };
+        let Some(at) = take(height) else { continue };
+        match at_field {
+            PrField::Title => cursor = cursor.or(text_field(frame, at, at_field, title, field)),
+            PrField::Body => cursor = cursor.or(text_field(frame, at, at_field, body, field)),
+            PrField::Base => cursor = cursor.or(text_field(frame, at, at_field, base, field)),
+            // **`Head` にも端末カーソルを置かない**（`Draft` と同じく打つ欄ではない）。
+            PrField::Head => {
+                let (label, value) = split(at);
+                label_at(frame, label, at_field, field);
+                frame.render_widget(Paragraph::new(Line::from(head_value(heads))), value);
+            }
+            // **`Draft` には端末カーソルを置かない。** 文字を打つ欄ではないので列が無い。
+            // どの欄に居るかはラベルの反転が出す（07）。
+            PrField::Draft => {
+                let (label, value) = split(at);
+                label_at(frame, label, at_field, field);
+                frame.render_widget(Paragraph::new(Line::from(draft_box(draft))), value);
+            }
+        }
     }
 
     // **端末のカーソルは編集中の欄に置く**（`CommitMessage` と同じ）。潰れた端末で
@@ -117,33 +122,32 @@ pub fn render(frame: &mut Frame, area: Rect, fields: Fields) {
 fn text_field(
     frame: &mut Frame,
     at: Rect,
-    label: &str,
+    at_field: PrField,
     buf: &TextBuffer,
     field: PrField,
 ) -> Option<Position> {
-    let focused = label_field(label) == field;
     let (label_area, value_area) = split(at);
     // ラベルは塊の先頭行にだけ置く（`Body` は下へ伸びる）。
     label_at(
         frame,
         Rect::new(label_area.x, label_area.y, label_area.width, 1),
-        label,
-        focused,
+        at_field,
+        field,
     );
     // **ずらす幅はその欄の幅**（ラベルのぶん狭い）で、箱の幅ではない。
     let position = modals::edit_area(frame, value_area, buf);
-    focused.then_some(position).flatten()
+    (at_field == field).then_some(position).flatten()
 }
 
-/// ラベルの字が指す欄。**この写像はここ 1 本**で、描く順（`render`）と
-/// フォーカスの判定が同じ字から出る。
-fn label_field(label: &str) -> PrField {
-    match label {
-        "Title" => PrField::Title,
-        "Body" => PrField::Body,
-        "Base" => PrField::Base,
-        // 打つ欄ではないので `text_field` からは来ない。
-        _ => PrField::Draft,
+/// 欄のラベルの字。**網羅 `match` で書く** —— 字から欄を引く逆向きの写像にすると、
+/// 欄を足したときに `_` の腕へ落ちてフォーカスの判定を取り違える。
+fn label(field: PrField) -> &'static str {
+    match field {
+        PrField::Title => "Title",
+        PrField::Body => "Body",
+        PrField::Base => "Base",
+        PrField::Head => "Head",
+        PrField::Draft => "Draft",
     }
 }
 
@@ -186,9 +190,9 @@ fn split(at: Rect) -> (Rect, Rect) {
 }
 
 /// ラベルを描く。**編集中の欄は反転**（07）。
-fn label_at(frame: &mut Frame, at: Rect, label: &str, focused: bool) {
-    let mut line = Line::from(label);
-    if focused {
+fn label_at(frame: &mut Frame, at: Rect, at_field: PrField, field: PrField) {
+    let mut line = Line::from(label(at_field));
+    if at_field == field {
         line = line.style(ui::theme::selected());
     }
     frame.render_widget(Paragraph::new(line), at);
@@ -277,6 +281,25 @@ mod tests {
         assert!(
             text.lines().any(|line| line.contains(&want)),
             "案内が 1 行に収まっていない:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_fields_are_stacked_in_the_order_tab_walks() {
+        // **画面の並びと `Tab` の巡回を割らない**（`PrField` の doc）。巡回の並び自体は
+        // core の `tab_walks_the_fields_and_space_only_toggles_draft` が書き下している。
+        let state = state_with_pr("t", "b", "main", false, PrField::Title);
+        let lines = draw(&state, SIZE);
+
+        let rows: Vec<_> = PrField::ALL
+            .iter()
+            .map(|&field| row_of(&lines, super::label(field)))
+            .collect();
+
+        assert!(
+            rows.is_sorted_by(|a, b| a < b),
+            "{rows:?}\n{}",
+            lines.join("\n")
         );
     }
 

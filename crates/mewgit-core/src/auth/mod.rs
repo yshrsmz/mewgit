@@ -174,12 +174,26 @@ pub enum AccountSource {
 }
 
 impl AccountSource {
+    /// 全部の出どころ。出どころごとに回すテストが、足した出どころを見落とさないための一覧。
+    pub const ALL: &[AccountSource] = &all_variants!(AccountSource {
+        GitConfig,
+        RepoRule,
+        Single,
+        Probe,
+    });
+
     /// `GitOp::UnsetAccount` で外せるか（01 の「アカウントの選び直し」）。
     ///
     /// **キーの案内（`[u] 指定を解除`）と `u` の受け口が同じ述語を読む。** 別々に
     /// `matches!` を書くと、効かない画面に案内だけが出る（#53）。
+    ///
+    /// **網羅 `match` で書く。** `matches!` だと、出どころを足したときに黙って `false`
+    /// （外せない）の側へ落ちる。
     pub fn is_unsettable(self) -> bool {
-        matches!(self, AccountSource::GitConfig)
+        match self {
+            AccountSource::GitConfig => true,
+            AccountSource::RepoRule | AccountSource::Single | AccountSource::Probe => false,
+        }
     }
 }
 

@@ -718,21 +718,43 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `unreachable_patterns`（`clippy -D warnings` で落ちる）、`advance` が常に添字 0 を
       進める形に壊すと `every_region_has_its_own_epoch` が落ちる。Stash は 80 桁でキーが
       全部出る（80 桁のテストに入れて緑）
-- [ ] 全変種の一覧の残り（上の行の `/simplify` の altitude が挙げ、コードを読んで確かめた）——
-      - `github/mod.rs` の `only_the_failures_that_are_the_whole_process_stop_the_fan_out` の
-        `cases: [(GithubError, bool); 9]` —— 離れた「いま 9」で、変種を足して行を足さなくても
-        通る（コメントは「どちらにも入れないまま通る」を防ぐと書いている）。`GithubError` は
-        フィールドを持つので、argv の `variants!` の形（名前の一覧と比べる）が要る
-      - **そのとき `all_variants!` と argv の `variants!` を `lib.rs` の 1 本に寄せるかを数える**
-        —— パターンを `$ty::$name { .. }` にすればどの変種にも当たり、値の配列を作る腕と
-        名前の一覧を作る腕を持たせられる。`GithubError` が名前の一覧の 2 つ目の利用者になる
-      - `PrField::next` / `prev` が巡回順を 2 つの網羅 `match` に別々に持ち、食い違っても
-        コンパイラは何も言わない（テストの `BackTab` は 1 歩だけ）。doc の「並びの配列を
-        持たない」の理由（配列だと足した欄が黙って漏れる）は `all_variants!` で崩れたので、
-        並び 1 本から両方向を導く形にして doc を直す
-      - `AccountSource::is_unsettable` が `matches!` —— 新しい出どころは黙って `false` になる。
-        一覧ではなく述語の網羅 `match` 化（`rust-coding.md` の「`_` の腕を数える」の族）。
-        テスト 2 箇所（`update/account.rs` と `modals/account_picker.rs`）の手並べも一緒に
+- [x] 全変種の一覧の残り（上の行の `/simplify` の altitude が挙げ、コードを読んで確かめた）——
+      **決めた形は `all_variants!` に `missing` の腕を足して argv の `variants!` を寄せる** ——
+      パターンを `$ty::$name { .. }` にするとタプル・構造体・unit のどの変種にも当たる
+      （unit 変種にも通ることを実際に組んで確かめた）。テストが手で組んだ値の一覧を受け、
+      1 つも無い変種の名前を返す（照合まで中に持つので、利用者ごとに照合を写さない）。
+      利用者は argv と `github` のテストの 2 つ。
+      - `GithubError` の `cases: [_; 9]` —— 配列長をやめ、`missing` で漏れを見る
+      - `PrField::next` / `prev` —— `PrField::ALL` の並び 1 本から `cycled`（ペインの巡回と
+        共有した「端で巻く」）で両方向を導く。tui の `pr_create::render` も `ALL` を回して
+        欄を積み（部品の違いは網羅 `match` の腕で書く）、ラベルの字は欄からの網羅 `match` で
+        引く（字から欄を引く `label_field` の `_ => Draft` をやめた）。並びそのものは core の
+        `Tab` のテストが書き下し、tui のテストはラベルの行が `ALL` の順に下へ進むかを見る
+      - `AccountSource::is_unsettable` —— 網羅 `match`。テスト 2 本は `AccountSource::ALL` で
+        回し、core 側は期待値を網羅 `match` で選ばせ、tui 側は案内が述語と食い違わないこと
+        だけを見る（両側を踏めていることを先に assert）
+      変異の実測（2026-10-08）: `cases` から `NotFound` を消すと名前の assert で落ちる /
+      `ALL` の `Head` と `Draft` を入れ替えると `Tab` のループで落ちる / `prev` を順方向に
+      すると `Shift+Tab` のループで落ちる / `AccountSource` に変種を足すと `all_variants!` と
+      `is_unsettable` の 2 箇所が E0004
+- [ ] 同じ形の残り（上の行の `/simplify` の altitude が挙げ、コードを読んで確かめた）——
+      - `app/update/progress.rs` の `is_abort` が `matches!` —— **不変ルール 5 の門番**で、
+        abort 系の `GitOp` を足してメニューに載せると黙って `false`（確認なしで実行）になる。
+        塞ぐ形は `GitOp` の網羅 `match`（36 腕を並べる）か、`progress_menu` の項目の組み立て
+        （`InProgressOp` の網羅 `match`）から abort かどうかを導くこと。どちらにするかを決める
+      - tui の `runtime.rs` の `every_notice_that_a_missing_material_prints_fits_the_notice_line`
+        —— `no_material` の呼び出し元は 4 つ（`FetchPrList` / `FetchPrDetails` / `CreatePr` /
+        `OpenPr`）なのに、テストの一覧は 3 つで**`CreatePr`（「PR の作成」）が既に抜けている**。
+        塞ぐ形は表示名を呼び出し元の文字列ではなく `JobKind` の網羅 `match` から引くこと
+        （`no_material(state, kind)`）。テストはその `match` の腕から導ける
+      - tui の `ui/mod.rs` の `every_degraded_reason_fits_the_header` が `DegradedReason` を
+        手で並べている（コメントの「7 つ」も離れた「いま N」）。`all_variants!(missing …)` で
+        比べたいが、**マクロは core の中でしか使えない** —— tui から使うには `#[macro_export]`
+        で出すかを決める（出すと `mewgit_core::all_variants!` が公開 API になる）
+      - `Pane::WIP_FOCUS_NO_PRS` / `COMMIT_FOCUS_NO_PRS` が `Prs` を抜いただけの写し。
+        ペインを足すと片方だけ足して、`github.enabled = false` のときだけ巡回から漏れうる。
+        塞ぐ形は `_NO_PRS` を持たず、`focus_candidates` で `Prs` を外して導くこと（戻り値が
+        `&'static [Pane]` なので、所有した値か固定長の配列を返す形に変える）
 - [ ] `scripts/screen.py` が全角文字のあとで 1 桁落とすのを直す。**桁を根拠にする
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の

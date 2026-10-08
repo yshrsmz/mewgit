@@ -324,8 +324,8 @@ mod tests {
         // 偽にすると同じ 401 を行の数だけ買う。
         //
         // **腕を 1 つずつ並べる。** 真偽をまとめて 2 本の `assert` にすると、腕を
-        // 足したときに**どちらにも入れないまま**通る。
-        let cases: [(GithubError, bool); 9] = [
+        // 足したときに**どちらにも入れないまま**通る。並べ忘れは下の名前の一覧が拾う。
+        let cases = [
             (GithubError::RateLimited { reset_at: None }, true),
             (GithubError::Unauthorized, true),
             (
@@ -369,6 +369,22 @@ mod tests {
                 false,
             ),
         ];
+        let missing = all_variants!(missing GithubError {
+            InvalidHost,
+            Unauthorized,
+            MissingScope,
+            Forbidden,
+            NotFound,
+            RateLimited,
+            Network,
+            Decode,
+            Api,
+        } in cases.iter().map(|(err, _)| err));
+        assert!(
+            missing.is_empty(),
+            "判断を並べていない変種がある: {missing:?}"
+        );
+
         for (err, wanted) in cases {
             assert_eq!(
                 err.repeats_for_every_target(),

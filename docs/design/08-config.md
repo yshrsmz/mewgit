@@ -22,7 +22,7 @@ editor_fallback = false  # true なら reword 等で $EDITOR を使う
 refresh_interval = 10    # 秒。この間隔で status を読み直す（外での編集を拾う）。0 で止める
 
 [graph]
-ascii = false
+ascii = false            # 書かなければロケールから決まる（UTF-8 でなければ true）
 page_size = 300                                                  # 0 なら既定値に戻す
 colors = ["blue", "magenta", "cyan", "green", "yellow", "red"]   # 読めない色名は端末既定色
 
@@ -100,6 +100,9 @@ git config mewgit.user taro_acme
 3. `.git/config` の `[mewgit]`
 4. 環境変数 `MEWGIT_*`（`_GIT_BIN` など、デバッグ用）
 
+**`graph.ascii` だけは 1 の既定値が環境変数（ロケール）から決まる。** 2 に書いてあれば
+そちらが勝つので、4 の上書きとは向きが逆になる。
+
 `Config` は起動時に確定し、実行中の再読込は MVP では行わない。読み込んだ `Config` は
 `AppState` が持つ（01）。`ui` は `AppState` 経由でしか値を読めないため（不変ルール 2）、
 `theme` を届けるにはここに置くしかない。
@@ -113,9 +116,11 @@ git config mewgit.user taro_acme
 1・2 は `config` モジュールの責務。3 はリポジトリのパスを必要とし、値としても
 `mewgit.user` しか読まないため `auth::resolve`（04）が `Config` とは別に読む。
 4 は `Config::load()` が 2 の直後に適用する。`Config` 自身は `.git/config` を見ない。
-MVP で見る環境変数は `MEWGIT_GIT_BIN` と `MEWGIT_GH_BIN` の 2 つ。M6 で
-`LC_ALL` / `LC_CTYPE` / `LANG` を足し、UTF-8 でなければ `graph.ascii` の既定を
-真にする（06 の「ASCII フォールバック」）。設定ファイルに書いてあればそちらが勝つ。
+上書きに使う環境変数は `MEWGIT_GIT_BIN` と `MEWGIT_GH_BIN`。これとは別に
+`LC_ALL` / `LC_CTYPE` / `LANG` を見て、UTF-8 でなければ `graph.ascii` の既定を
+真にする（判定の規則と実測は 06 の「ASCII フォールバック」）。
+**`load_from` / `from_toml_str` はどちらの環境変数も見ない**（テストの入口なので、
+`graph.ascii` の既定は偽のまま）。
 
 ## 構造体
 
@@ -129,11 +134,20 @@ MVP で見る環境変数は `MEWGIT_GIT_BIN` と `MEWGIT_GH_BIN` の 2 つ。M6
 #[serde(default)]
 struct ConfigFile {
     general: General,
-    graph: Graph,
+    graph: GraphFile,
     github: Github,
     repos: Vec<RepoRuleSpec>,
     keymap: HashMap<String, String>,
     theme: Theme,
+}
+
+/// TOML 上の `[graph]`。`ascii` は書いていなければロケールに任せるので `Option`。
+#[derive(Deserialize)]
+#[serde(default)]
+struct GraphFile {
+    ascii: Option<bool>,
+    page_size: usize,
+    colors: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -180,11 +194,16 @@ pub fn resolve_config_path(xdg_config_home: Option<&Path>, home: Option<&Path>) 
 `account_for` が黙って `None` を返す」という状態を型で排除する。`ConfigFile` から
 `Config` への変換のときに glob をコンパイルし、失敗したルールはそこで捨てる。
 
-`Default` は `General` / `Graph` / `Github` / `Theme` に手で実装する（`Config` と
+`Default` は `General` / `Graph` / `GraphFile` / `Github` / `Theme` に手で実装する（`Config` と
 `ConfigFile` はサブ構造体の `Default` を呼ぶだけなので derive でよい）。`derive(Default)`
 ではゼロ値になり、上記の既定値（`git_bin = "git"`、`page_size = 300`、
 `github.enabled = true` など）と食い違うため。各フィールドに `#[serde(default)]` を付け、
 部分的な TOML でも書かれていない項目が既定値のまま残るようにする。
+
+**`GraphFile` を `Graph` と分けるのは `ascii` のため。** `bool` + `#[serde(default)]` では
+`ascii = false` と書いたのと書いていないのが同じ値になり、「書いてあればロケールより
+勝つ」が成り立たない（06 の「ASCII フォールバック」）。`Config` の `graph.ascii` は
+`bool` のままで、`ConfigFile` → `Config` の変換で `None` をロケールの値に解く。
 
 ## エラーとしない扱い
 

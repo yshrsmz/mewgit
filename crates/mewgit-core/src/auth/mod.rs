@@ -432,7 +432,14 @@ pub enum AuthError {
 mod tests {
     use super::url::RemoteUrl;
     use super::*;
-    use crate::test_util::{fake_ssh, fake_ssh_host};
+    use crate::test_util::{every_degraded_reason, fake_ssh, fake_ssh_host};
+
+    #[test]
+    fn every_degraded_reason_has_every_variant() {
+        // **抜けの assert を core の中で走らせる。** `every_degraded_reason` を呼ぶのが
+        // tui のテストだけだと、そちらを消すと値の書き忘れが黙って通る。
+        assert!(!every_degraded_reason().is_empty());
+    }
 
     #[tokio::test]
     async fn an_https_remote_keeps_its_port_and_does_not_run_ssh() {

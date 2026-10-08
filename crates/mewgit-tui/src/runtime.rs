@@ -448,7 +448,7 @@ impl Runtime {
             // 持たず、載せると `Cmd` を比べるテストが全部書けなくなる。不変ルール 3）。
             Cmd::FetchPrList => {
                 let Some((target, api)) = github_for(state) else {
-                    return no_material(state, JobKind::FetchPrList, "PR 一覧の取得");
+                    return no_material(state, JobKind::FetchPrList);
                 };
                 // **残量に添える世代もここで読む。** `Cmd::FetchPrList` は世代を
                 // 運ばないが（一覧そのものは世代で捨てない。01）、残量は**その
@@ -476,7 +476,7 @@ impl Runtime {
             // （`GithubError::repeats_for_every_target`）。
             Cmd::FetchPrDetails { epoch, targets } => {
                 let Some((target, api)) = github_for(state) else {
-                    return no_material(state, JobKind::FetchPrDetails, "PR の集計");
+                    return no_material(state, JobKind::FetchPrDetails);
                 };
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
@@ -525,7 +525,7 @@ impl Runtime {
             // `x-ratelimit-*` を返すので、ここで捨てるとヘッダの数が 1 本ぶん古くなる。
             Cmd::CreatePr(input) => {
                 let Some((target, api)) = github_for(state) else {
-                    return no_material(state, JobKind::CreatePr, "PR の作成");
+                    return no_material(state, JobKind::CreatePr);
                 };
                 let epoch = state.prs.epoch();
                 let tx = self.tx.clone();
@@ -548,7 +548,7 @@ impl Runtime {
             // **`gh` は毎回 detect する**（上の `ResolveAccount` と同じ理由）。
             Cmd::OpenPr { number } => {
                 let Some(target) = state.repo.target.resolved().cloned() else {
-                    return no_material(state, JobKind::OpenPr, "PR を開く操作");
+                    return no_material(state, JobKind::OpenPr);
                 };
                 let gh_bin = state.config.general.gh_bin.clone();
                 let tx = self.tx.clone();
@@ -632,14 +632,45 @@ fn github_for(state: &AppState) -> Option<(RepoTarget, Result<GithubClient, Gith
 /// 誰も完了させないと、2 回目以降の同じ `Cmd` が通知も出さずに捨てられ、「1 回だけ
 /// 警告が出てあとは無反応」になる。`dispatch` が `notices` 以外に書いてよい唯一の
 /// 場所（01 のランタイム）。
-fn no_material(state: &mut AppState, kind: JobKind, name: &str) -> ControlFlow<()> {
+fn no_material(state: &mut AppState, kind: JobKind) -> ControlFlow<()> {
     state.jobs.finish(kind);
+    // 材料を使わない種別で呼ぶのは書き間違いだが、それでも黙らない（上と同じ理由）。
+    let name = material_name(kind).unwrap_or("この操作");
     state.push_notice(
         NoticeLevel::Warn,
         format!("{name}に必要な材料が揃っていません"),
         None,
     );
     ControlFlow::Continue(())
+}
+
+/// [`no_material`] が通知に出す操作の名前。`None` は GitHub の材料を使わない種別。
+///
+/// **呼び出し元の文字列で渡さない。** 渡すと、通知が収まるかの見張りが名前を手で
+/// 並べることになり、呼び出し元を足したときに見張りだけ抜ける（`CreatePr` が
+/// 抜けていた）。網羅 `match` にしているのは、種別を足したときに選ばせるため。
+fn material_name(kind: JobKind) -> Option<&'static str> {
+    match kind {
+        JobKind::FetchPrList => Some("PR 一覧の取得"),
+        JobKind::FetchPrDetails => Some("PR の集計"),
+        JobKind::CreatePr => Some("PR の作成"),
+        JobKind::OpenPr => Some("PR を開く操作"),
+        JobKind::LoadLog
+        | JobKind::LoadCommitDetail
+        | JobKind::LoadCommitFiles
+        | JobKind::LoadHeadMessage
+        | JobKind::LoadCommitMessage
+        | JobKind::LoadRepoInfo
+        | JobKind::LoadStatus
+        | JobKind::LoadBranches
+        | JobKind::LoadStashes
+        | JobKind::LoadDiff
+        | JobKind::Exec
+        | JobKind::ResolveTarget
+        | JobKind::ResolveAccount
+        | JobKind::ListAccounts
+        | JobKind::Probe => None,
+    }
 }
 
 #[cfg(test)]
@@ -1362,27 +1393,33 @@ mod tests {
     /// `no_material` が出す通知がフッターの 1 行目に収まる（01 の「失敗の案内文」）。
     ///
     /// **通知の新しい産出元なので、既存の見張りは自分では拾わない**（`.claude/rules/testing.md` の
-    /// 「共有した見張りは新しい産出元を自分では拾わない」）。**範囲は実装側の集合から
-    /// 導かずに並べる**（#54 の裏返し）—— 腕を足したらここにも足す。
+    /// 「共有した見張りは新しい産出元を自分では拾わない」）。**回すのは全種別** ——
+    /// 名前は `material_name` の網羅 `match` が持ち、材料を使わない種別の文言
+    /// （`この操作`）も同じ 1 行に出るので、どの種別で呼ばれても収まるかを見る。
     #[test]
     fn every_notice_that_a_missing_material_prints_fits_the_notice_line() {
         let repo = TestRepo::init();
         let (mut state, _reader) = opened(&repo);
-        let cases = [
-            (JobKind::FetchPrList, "PR 一覧の取得"),
-            (JobKind::FetchPrDetails, "PR の集計"),
-            (JobKind::OpenPr, "PR を開く操作"),
-        ];
+        // **狙った種別が名前を持っていることを先に見る**（#54。全種別を回すので、
+        // 名前が `None` に落ちても文言は出て緑のまま通る）。
+        for kind in [
+            JobKind::FetchPrList,
+            JobKind::FetchPrDetails,
+            JobKind::CreatePr,
+            JobKind::OpenPr,
+        ] {
+            assert!(material_name(kind).is_some(), "{kind:?} に名前がありません");
+        }
 
-        for (kind, name) in cases {
+        for &kind in JobKind::ALL {
             state.notices.clear();
-            let _ = no_material(&mut state, kind, name);
+            let _ = no_material(&mut state, kind);
             let message = state.notices[0].message.clone();
             // **収まることを直に見る。** `contains` は末尾が切れても通る（#80）。
             // **見るのは 1 行目**（2 行目はキーヒント。07 の「ステータスバー」）。
             // 取り出しは `test_util` の 1 本を通す（行番号を手で書かない）。
             let notice = crate::test_util::notice_bar(&state, TermSize::default());
-            assert!(notice.contains(&message), "{name}: {notice:?}");
+            assert!(notice.contains(&message), "{kind:?}: {notice:?}");
         }
     }
 

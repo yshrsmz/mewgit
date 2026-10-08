@@ -2566,6 +2566,30 @@ pub enum JobKind {
 }
 
 impl JobKind {
+    /// 全種別。種別ごとに回すテストが、足した種別を見落とさないための一覧（[`Pane::ALL`]
+    /// と同じ）。
+    pub const ALL: &[JobKind] = &all_variants!(JobKind {
+        LoadLog,
+        LoadCommitDetail,
+        LoadCommitFiles,
+        LoadHeadMessage,
+        LoadCommitMessage,
+        LoadRepoInfo,
+        LoadStatus,
+        LoadBranches,
+        LoadStashes,
+        LoadDiff,
+        Exec,
+        ResolveTarget,
+        ResolveAccount,
+        ListAccounts,
+        FetchPrList,
+        FetchPrDetails,
+        CreatePr,
+        OpenPr,
+        Probe,
+    });
+
     /// この種別が読む値が、どの領域の世代で古くなるか。
     ///
     /// `None` は「書き込みでは古くならない」か、**値そのものが鍵を持っていて世代より

@@ -70,7 +70,7 @@ pub struct Config {
 #[serde(default)]
 struct ConfigFile {
     general: General,
-    graph: Graph,
+    graph: GraphFile,
     github: Github,
     repos: Vec<RepoRuleSpec>,
     keymap: HashMap<String, String>,
@@ -98,12 +98,23 @@ pub struct General {
 }
 
 /// `[graph]`
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Graph {
+    /// 非 ASCII の記号を使わない。**書かなければロケールから決まる**（[`Config::load`]。
+    /// 06 の「ASCII フォールバック」）。
     pub ascii: bool,
     pub page_size: usize,
     pub colors: Vec<String>,
+}
+
+/// TOML 上の `[graph]`。`ascii` は「書いていない」をロケールに任せるので `Option`
+/// （`bool` だと `ascii = false` と書いたのと見分けられない）。
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct GraphFile {
+    ascii: Option<bool>,
+    page_size: usize,
+    colors: Vec<String>,
 }
 
 /// `[github]`
@@ -158,6 +169,21 @@ impl Default for Graph {
     }
 }
 
+impl Default for GraphFile {
+    fn default() -> Self {
+        let Graph {
+            ascii: _,
+            page_size,
+            colors,
+        } = Graph::default();
+        Self {
+            ascii: None,
+            page_size,
+            colors,
+        }
+    }
+}
+
 impl Default for Github {
     fn default() -> Self {
         Self {
@@ -179,33 +205,63 @@ impl Default for Theme {
 }
 
 impl Config {
-    /// 既定のパスから読み、環境変数の上書きを適用する。
+    /// 既定のパスから読み、環境変数を適用する。
     ///
-    /// ファイルが無い場合は既定値を返し、警告も出さない。
+    /// ファイルが無い場合は既定値を返し、警告も出さない。`graph.ascii` を書いていなければ
+    /// ロケール（`LC_ALL` / `LC_CTYPE` / `LANG`）が UTF-8 でないときに真になる。
     pub fn load() -> (Config, Vec<ConfigWarning>) {
         let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
         let home = std::env::home_dir();
+        let path = resolve_config_path(xdg.as_deref(), home.as_deref());
+        Self::load_with(path.as_deref(), |key| std::env::var(key).ok())
+    }
 
-        let (mut config, warnings) = match resolve_config_path(xdg.as_deref(), home.as_deref()) {
-            Some(path) => Self::load_from(&path),
-            None => (Config::default(), vec![ConfigWarning::NoConfigDir]),
+    /// [`Config::load`] の本体。`lookup` は環境変数の取得で、テストが差し替える。
+    fn load_with(
+        path: Option<&Path>,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> (Config, Vec<ConfigWarning>) {
+        let read = match path {
+            Some(path) => Self::read(path),
+            None => (ConfigFile::default(), vec![ConfigWarning::NoConfigDir]),
         };
-
-        config.apply_env(|key| std::env::var(key).ok());
+        let (mut config, warnings) = Self::resolve(read, !locale_is_utf8(&lookup));
+        config.apply_env(&lookup);
         (config, warnings)
     }
 
     /// 指定したパスの `config.toml` を読む。存在しなければ既定値（警告なし）。
-    ///
-    /// パスを外から渡せるようにしているのはテストのため。
+    /// [`Config::load`] と違ってロケールも環境変数も見ない（`graph.ascii` の既定は偽）。
     pub fn load_from(path: &Path) -> (Config, Vec<ConfigWarning>) {
+        Self::resolve(Self::read(path), false)
+    }
+
+    /// TOML 文字列から読む。パースに失敗したら既定値と [`ConfigWarning::Parse`]。
+    /// ロケールは見ない（`graph.ascii` の既定は偽）。
+    pub fn from_toml_str(text: &str) -> (Config, Vec<ConfigWarning>) {
+        Self::resolve(Self::parse(text, None), false)
+    }
+
+    /// 読んだファイルを [`Config`] にする。**読めなかった経路もここを通る**ので、
+    /// 書いていない値（`ascii` は `graph.ascii` を書いていないときの値）の解決は 1 箇所。
+    fn resolve(
+        (file, mut warnings): (ConfigFile, Vec<ConfigWarning>),
+        ascii: bool,
+    ) -> (Config, Vec<ConfigWarning>) {
+        let (config, more) = file.into_config(ascii);
+        warnings.extend(more);
+        (config, warnings)
+    }
+
+    /// 読めなければ既定の [`ConfigFile`] と警告。
+    fn read(path: &Path) -> (ConfigFile, Vec<ConfigWarning>) {
         match std::fs::read_to_string(path) {
             Ok(text) => Self::parse(&text, Some(path)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                (Config::default(), Vec::new())
+                (ConfigFile::default(), Vec::new())
             }
             Err(err) => (
-                Config::default(),
+                ConfigFile::default(),
                 vec![ConfigWarning::Io {
                     path: path.to_path_buf(),
                     message: err.to_string(),
@@ -214,17 +270,12 @@ impl Config {
         }
     }
 
-    /// TOML 文字列から読む。パースに失敗したら既定値と [`ConfigWarning::Parse`]。
-    pub fn from_toml_str(text: &str) -> (Config, Vec<ConfigWarning>) {
-        Self::parse(text, None)
-    }
-
     /// `source` はエラーメッセージに出すファイルパス。文字列から直接読んだなら `None`。
-    fn parse(text: &str, source: Option<&Path>) -> (Config, Vec<ConfigWarning>) {
+    fn parse(text: &str, source: Option<&Path>) -> (ConfigFile, Vec<ConfigWarning>) {
         match toml::from_str::<ConfigFile>(text) {
-            Ok(file) => file.into_config(),
+            Ok(file) => (file, Vec::new()),
             Err(err) => (
-                Config::default(),
+                ConfigFile::default(),
                 vec![ConfigWarning::Parse {
                     path: source.map(Path::to_path_buf),
                     // `to_string` は行・列を含む。`message()` だとそれが落ちる。
@@ -256,7 +307,8 @@ impl Config {
 
 impl ConfigFile {
     /// glob をコンパイルして [`Config`] にする。不正なルールは捨てて警告に載せる。
-    fn into_config(mut self) -> (Config, Vec<ConfigWarning>) {
+    /// `ascii` は `graph.ascii` を書いていないときの値。
+    fn into_config(mut self, ascii: bool) -> (Config, Vec<ConfigWarning>) {
         let mut warnings = Vec::new();
 
         // 0 件ずつ読むと 1 行も進まないまま「まだ続きがある」ページが返り、
@@ -292,7 +344,11 @@ impl ConfigFile {
 
         let config = Config {
             general: self.general,
-            graph: self.graph,
+            graph: Graph {
+                ascii: self.graph.ascii.unwrap_or(ascii),
+                page_size: self.graph.page_size,
+                colors: self.graph.colors,
+            },
             github: self.github,
             repos,
             keymap: self.keymap,
@@ -315,6 +371,29 @@ fn compile_pattern(pattern: &str) -> Result<GlobMatcher, globset::Error> {
         .case_insensitive(true)
         .build()?
         .compile_matcher())
+}
+
+/// ロケールが UTF-8 か。`LC_ALL` → `LC_CTYPE` → `LANG` の最初の空でない値の綴りで
+/// 決める（06 の「ASCII フォールバック」）。どれも無ければ C ロケールなので偽。
+///
+/// libc には聞かない。libc の答えは**そのロケールが入っているか**で変わる（Debian で
+/// 未生成の `en_US.UTF-8` は ASCII になる）が、知りたいのは端末が UTF-8 を出せるかで、
+/// それにはユーザーが書いた綴りのほうが近い。
+fn locale_is_utf8(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    let Some(locale) = ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .find_map(|key| lookup(key).filter(|value| !value.is_empty()))
+    else {
+        return false;
+    };
+    // `ja_JP.UTF-8@modifier` の codeset。macOS は `LC_CTYPE=UTF-8` と codeset だけを書く。
+    let locale = locale
+        .split_once('@')
+        .map_or(&*locale, |(locale, _)| locale);
+    let codeset = locale
+        .split_once('.')
+        .map_or(locale, |(_, codeset)| codeset);
+    codeset.replace('-', "").eq_ignore_ascii_case("utf8")
 }
 
 /// 設定ファイルのパスを組み立てる。
@@ -654,6 +733,83 @@ mod tests {
         assert_eq!(config.general.git_bin, "/from/file");
         assert_eq!(config.general.gh_bin, "gh");
     }
+
+    /// 環境変数の表を `lookup` にする。
+    fn env<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            vars.iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.to_string())
+        }
+    }
+
+    #[test]
+    fn locale_codeset_decides_utf8_by_its_spelling() {
+        // macOS は `LC_CTYPE` に codeset だけを書く。Linux は `utf8` と綴ることがある。
+        for value in [
+            "ja_JP.UTF-8",
+            "en_US.utf8",
+            "C.UTF-8",
+            "UTF-8",
+            "de_DE.UTF-8@euro",
+        ] {
+            assert!(locale_is_utf8(env(&[("LANG", value)])), "{value}");
+        }
+        for value in ["C", "POSIX", "ja_JP.eucJP", "en_US", "utf8_xx"] {
+            assert!(!locale_is_utf8(env(&[("LANG", value)])), "{value}");
+        }
+        // 何も無ければ C ロケール。
+        assert!(!locale_is_utf8(env(&[])));
+    }
+
+    #[test]
+    fn locale_takes_the_first_non_empty_of_lc_all_lc_ctype_lang() {
+        let utf8 = "ja_JP.UTF-8";
+        assert!(!locale_is_utf8(env(&[
+            ("LC_ALL", "C"),
+            ("LC_CTYPE", utf8),
+            ("LANG", utf8)
+        ])));
+        assert!(!locale_is_utf8(env(&[("LC_CTYPE", "C"), ("LANG", utf8)])));
+        assert!(locale_is_utf8(env(&[("LC_CTYPE", utf8), ("LANG", "C")])));
+        // 空の値は未設定と同じで、次へ落ちる。
+        assert!(locale_is_utf8(env(&[
+            ("LC_ALL", ""),
+            ("LC_CTYPE", ""),
+            ("LANG", utf8)
+        ])));
+    }
+
+    #[test]
+    fn graph_ascii_defaults_from_the_locale_unless_the_file_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.toml");
+        let c_locale = env(&[("LANG", "C")]);
+        let utf8 = env(&[("LANG", "ja_JP.UTF-8")]);
+
+        // ファイルが無い・設定ファイルの場所が決まらない、のどちらでもロケールに従う。
+        assert!(Config::load_with(Some(&missing), &c_locale).0.graph.ascii);
+        assert!(!Config::load_with(Some(&missing), &utf8).0.graph.ascii);
+        assert!(Config::load_with(None, &c_locale).0.graph.ascii);
+
+        // 書いてあればロケールより勝つ。`ascii = false` は UTF-8 でないロケールで
+        // 記号を戻す唯一の手なので、書いていないのと区別する。
+        let (_dir, path) = crate::test_util::temp_file("config.toml", "[graph]\nascii = false\n");
+        assert!(!Config::load_with(Some(&path), &c_locale).0.graph.ascii);
+        let (_dir, path) = crate::test_util::temp_file("config.toml", "[graph]\nascii = true\n");
+        assert!(Config::load_with(Some(&path), &utf8).0.graph.ascii);
+
+        // 書いていなければ、ほかのキーがあってもロケールに従う。
+        let (_dir, path) = crate::test_util::temp_file("config.toml", "[graph]\npage_size = 42\n");
+        let (config, _) = Config::load_with(Some(&path), &c_locale);
+        assert!(config.graph.ascii);
+        assert_eq!(config.graph.page_size, 42);
+
+        // 読めないファイルでも既定値はロケールから。
+        let (_dir, path) = crate::test_util::temp_file("config.toml", "[graph\n");
+        assert!(Config::load_with(Some(&path), &c_locale).0.graph.ascii);
+    }
+
     #[test]
     fn a_page_size_of_zero_falls_back_to_the_default() {
         // 0 件ずつ読むと 1 行も進まないページが返り続け、追加読み込みが止まらない。

@@ -133,6 +133,7 @@ pub enum Horizontal {
 
 **このキーはグラフ以外の記号にも効く。** Branches ペインの ahead / behind
 （`↑ ↓ → ^ v`。07）が最初の例で、選ぶところは `ui::pick_charset` の 1 本。
+**枠線・省略の `…`・ヘッダのスピナーはまだ通していない**（`docs/plan.md` の M6）。
 キーが `[graph]` の下にあるのは最初の利用者がグラフだったからで、意味は
 「この端末が非 ASCII の記号を出せるか」（既定は locale から決まる。08）。
 `↑`（U+2191）/ `↓`（U+2193）は下の罫線と同じ East Asian Ambiguous 幅なので、
@@ -144,9 +145,30 @@ double width" を有効にした場合など）では 1 マスが 2 桁になる
 数えるので、その端末では Oid 以降が右にずれ、ペインの右枠が画面外へ出る。
 逃げ道は `ascii = true`。ロケールが UTF-8 でも起きるので、下の自動判定では拾えない。
 
-端末が UTF-8 かどうかの自動判定はまだ入れていない。入れるときは `Config::load()` が
-`LC_ALL` / `LC_CTYPE` / `LANG` を見て `graph.ascii` の既定を決める（08 の「読み込み順」
-手順 4。`ui` は環境変数を読まない）。M6 のタスク。
+**`graph.ascii` を設定ファイルに書いていなければ、既定はロケールから決まる。**
+`Config::load()` が `LC_ALL` → `LC_CTYPE` → `LANG` の最初の空でない値を見て、
+codeset（`.` の後ろ、`@` の手前。`.` が無ければ値全体）が `-` を除いて大文字小文字を
+問わず `utf8` でなければ真にする（08 の「読み込み順」。`ui` は環境変数を読まない）。
+**どれも無ければ C ロケールなので真**。書いてあれば `ascii = false` でもそちらが勝つ ——
+UTF-8 でないロケールのまま記号を戻す手はそれしか無い。
+
+**判定は綴りで行い、libc に聞かない。** libc の答えはそのロケールが入っているかで変わる
+が、知りたいのは端末が UTF-8 を出せるかで、それにはユーザーが書いた綴りのほうが近い。
+`locale charmap` の実測（2026-10-09）:
+
+| 環境 | 値 | `locale charmap` | mewgit |
+|---|---|---|---|
+| macOS 27 | 未設定 | `US-ASCII` | ASCII |
+| macOS 27 | `LC_CTYPE=UTF-8` | `UTF-8` | UTF-8 |
+| macOS 27 | `LC_ALL= LANG=ja_JP.UTF-8` | `UTF-8` | UTF-8（空の `LC_ALL` は飛ばす） |
+| macOS 27 | `LC_ALL=C LANG=ja_JP.UTF-8` | `US-ASCII` | ASCII |
+| macOS 27 | `LANG=en_US.utf8` | `US-ASCII`（macOS に無い名前） | UTF-8 |
+| Debian 12 | `LANG=C.utf8` / `C.UTF-8` | `UTF-8` | UTF-8 |
+| Debian 12 | 未設定 | `ANSI_X3.4-1968` | ASCII |
+| Debian 12 | `LANG=en_US.UTF-8`（未生成） | `ANSI_X3.4-1968` | UTF-8 |
+
+**帰結として、`LANG` を渡さない SSH 先や Docker の中では既定が ASCII になる。** 戻すには
+`ascii = false` を書くか、`LANG` を export する。
 
 ## テスト
 

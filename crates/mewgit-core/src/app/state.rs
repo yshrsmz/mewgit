@@ -1023,8 +1023,8 @@ impl Pane {
     /// `config.github.enabled = false` のときの [`WIP_FOCUS`](Self::WIP_FOCUS)。
     ///
     /// **`Prs` は真ん中にあるので末尾で落とせない。** `Diff` のように
-    /// `strip_suffix` で削る形にすると並びの意味が 2 通りになるので、一覧をもう 1 本
-    /// 置く（`Prs` が落ちる条件は起動時に固まるので、揺れるのは `Diff` だけ）。
+    /// `strip_suffix` で削る形にすると並びの意味が 2 通りになるので、別の一覧として
+    /// 持つ（`Prs` が落ちる条件は起動時に固まるので、揺れるのは `Diff` だけ）。
     /// **手で写さずにコンパイル時に導く**（[`without_prs`]）—— 写すと、ペインを足した
     /// ときに片方だけ足して `github.enabled = false` のときだけ巡回から漏れうる。
     const WIP_FOCUS_NO_PRS: &'static [Pane] =

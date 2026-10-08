@@ -751,12 +751,13 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
 - [x] 同じ形の残り（2/4）— tui の `runtime.rs` の
       `every_notice_that_a_missing_material_prints_fits_the_notice_line` —— `no_material` の
       呼び出し元は 4 つ（`FetchPrList` / `FetchPrDetails` / `CreatePr` / `OpenPr`）なのに、
-      テストの一覧は 3 つで**`CreatePr`（「PR の作成」）が抜けていた**。表示名を呼び出し元の
-      文字列ではなく `material_name` の `JobKind` の網羅 `match` から引く形にした
-      （`no_material(state, kind)`）。テストは `JobKind::ALL`（`all_variants!` で作った）を回す。
-      **材料を使わない種別は `None` で、そのとき文言は「この操作」**（書き間違いで呼んでも
-      黙らない）—— 全種別を回すので、名前が `None` に落ちても緑のまま通る。そこで
-      呼び出し元の 4 種別が名前を持つことだけは手で並べて先に見る（`testing.md` の #54）
+      テストの一覧は 3 つで**`CreatePr`（「PR の作成」）が抜けていた**。名前は呼び出し元の
+      文字列ではなく、core の `GithubJob`（材料が要る 4 種別だけの enum。`ALL` は
+      `all_variants!`、`JobKind` へは `kind()`）の網羅 `match` から引く形にした
+      （`no_material(state, job)`）。テストは `GithubJob::ALL` を回す。**最初は `JobKind` の
+      網羅 `match` から引いた**が、材料を使わない 15 種別が `None` の腕になり、来ないはずの
+      `None` の受け皿（「この操作」）のせいで名前の抜けを見張りが拾えず、テストに手書きの
+      一覧が戻った（`/simplify` の altitude が挙げ、2026-10-08 にユーザーと決めた）
 - [ ] 同じ形の残り（3/4）— tui の `ui/mod.rs` の `every_degraded_reason_fits_the_header` が
       `DegradedReason` を手で並べている（コメントの「7 つ」も離れた「いま N」）。**マクロは
       core の中でしか使えないので `#[macro_export]` では出さない**（2026-10-08 にユーザーと

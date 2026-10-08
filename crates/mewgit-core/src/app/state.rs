@@ -2565,31 +2565,41 @@ pub enum JobKind {
     Probe,
 }
 
-impl JobKind {
-    /// 全種別。種別ごとに回すテストが、足した種別を見落とさないための一覧（[`Pane::ALL`]
-    /// と同じ）。
-    pub const ALL: &[JobKind] = &all_variants!(JobKind {
-        LoadLog,
-        LoadCommitDetail,
-        LoadCommitFiles,
-        LoadHeadMessage,
-        LoadCommitMessage,
-        LoadRepoInfo,
-        LoadStatus,
-        LoadBranches,
-        LoadStashes,
-        LoadDiff,
-        Exec,
-        ResolveTarget,
-        ResolveAccount,
-        ListAccounts,
+/// GitHub の材料（`RepoInfo.target` とアカウント）を使って走るジョブ。ランタイムが
+/// 材料を取れずに走らせなかったときの通知（tui の `no_material`）が名前を引く。
+///
+/// **`JobKind` から絞った別の型にしたのは、名前を `Option` なしで引くため。** `JobKind`
+/// の網羅 `match` から引くと材料を使わない種別が `None` の腕になり、来ないはずの
+/// `None` に受け皿を置くことになる（受け皿があると、名前の抜けを見張りが拾えない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubJob {
+    FetchPrList,
+    FetchPrDetails,
+    CreatePr,
+    OpenPr,
+}
+
+impl GithubJob {
+    /// 全変種。名前を回すテストが、足した変種を見落とさないための一覧。
+    pub const ALL: &[GithubJob] = &all_variants!(GithubJob {
         FetchPrList,
         FetchPrDetails,
         CreatePr,
         OpenPr,
-        Probe,
     });
 
+    /// 畳むジョブの種別。
+    pub fn kind(self) -> JobKind {
+        match self {
+            GithubJob::FetchPrList => JobKind::FetchPrList,
+            GithubJob::FetchPrDetails => JobKind::FetchPrDetails,
+            GithubJob::CreatePr => JobKind::CreatePr,
+            GithubJob::OpenPr => JobKind::OpenPr,
+        }
+    }
+}
+
+impl JobKind {
     /// この種別が読む値が、どの領域の世代で古くなるか。
     ///
     /// `None` は「書き込みでは古くならない」か、**値そのものが鍵を持っていて世代より

@@ -19,7 +19,7 @@ pub use keys::{HelpRow, HelpSection, KeyHint};
 pub use msg::{ExecDone, Msg, RepoSnapshot};
 pub use state::{
     AccountListing, AccountView, AppState, BranchState, CommitFiles, DiffCursor, DiffOrigin,
-    DiffSource, DiffState, DiffView, GithubBlock, GraphLine, GraphSelection, GraphState,
+    DiffSource, DiffState, DiffView, GithubBlock, GithubJob, GraphLine, GraphSelection, GraphState,
     InputIntent, Job, JobKind, JobTracker, ListLoad, Modal, Motion, Notice, NoticeLevel, Pane,
     ParentChoice, PrField, PrHead, PrHeads, PrLoad, PrState, PushRejection, Region, Repick,
     RepoInfo, RewordInput, RightTab, StashState, TargetState, TermSize, TextBuffer, WatchState,

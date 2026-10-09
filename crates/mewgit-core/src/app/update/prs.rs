@@ -8,12 +8,12 @@ use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource};
 use crate::git_read::{Branch, Remote};
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 
-use super::remote::{conventional_remote, NoRemote};
+use super::remote::{conventional_remote, repo_unread, NoRemote};
 use super::{edit_key, focus, multiline_edit_key, submit};
 use crate::app::state::current_row;
 use crate::app::{
-    AppState, Cmd, JobKind, Key, KeyCode, ListLoad, Modal, NoticeLevel, Pane, PrField, PrHeads,
-    RepoInfo, TextBuffer,
+    AppState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHeads, RepoInfo,
+    TextBuffer,
 };
 use crate::git_read::HeadInfo;
 use crate::github::CreatePr;
@@ -82,7 +82,7 @@ fn checkout(state: &mut AppState) -> Cmd {
     let refusal = match (conventional_remote(state), state.repo.target.resolved()) {
         // **`target` を決めたのと同じ規則でリモートを選ぶ**（PR 作成の base と同じ）。
         // 一覧はそのリポジトリの PR なので、そこを指しているリモートから取る。
-        (Ok(remote), Some(target)) if state.branches.load() == ListLoad::Loaded => {
+        (Ok(remote), Some(target)) if repo_unread(state).is_none() => {
             let plan = checkout_plan(pr, remote, target, &state.branches.branches);
             return Cmd::Exec(GitOp::CheckoutPr(Box::new(plan)));
         }
@@ -92,7 +92,11 @@ fn checkout(state: &mut AppState) -> Cmd {
         // 一覧が出ているなら `target` は決まっている（一覧を引く前提）。届く前に
         // 一覧だけが残る経路は無いが、組めないものは断る。
         (Ok(_), None) => "取り出す先のリポジトリが決まっていません".to_string(),
-        (Ok(_), Some(_)) => "ブランチ一覧をまだ読めていません".to_string(),
+        // `target` が決まっているなら一度は届いているので、ここに来るのは読み直しが
+        // 失敗したとき（[`repo_unread`]）。
+        (Ok(_), Some(_)) => repo_unread(state)
+            .unwrap_or("リポジトリ情報を読めませんでした")
+            .to_string(),
     };
     state.push_notice(NoticeLevel::Warn, refusal, None);
     Cmd::None
@@ -738,17 +742,18 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, enter_with, github_disabled_state, issued, load_branches, press, press_code,
-        remotes_of, state, state_with_commits, tab_to, type_text, with_branches, ALT, NOTICE_CELLS,
+        cells, deliver_branches, enter_with, github_disabled_state, issued, load_branches, press,
+        press_code, remotes_of, state, state_with_commits, tab_to, type_text, ALT, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
-    use crate::app::PrHead;
     use crate::app::{
         GithubBlock, Msg, NoticeLevel, PrLoad, Region, RepoSnapshot, RightTab, TargetState,
     };
+    use crate::app::{ListLoad, PrHead};
     use crate::auth::{AccountState, DegradedReason};
     use crate::git_exec::GitOp;
+    use crate::git_read::GitReadError;
     use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote, UpstreamConfig};
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
@@ -2689,16 +2694,19 @@ mod tests {
         let message = &state.notices.back().expect("通知が無い").message;
         assert!(message.contains("N で作成"), "{message}");
 
-        // ブランチ一覧がまだ無い。「在るか」を決められない。
+        // ブランチ一覧の読み直しが失敗した。どれだけ古いかが判らないので「在るか」を
+        // 決められない。**`target` が決まっているなら一度は届いている**ので、未着の形は
+        // 組めない（リモート一覧と同じ返信。02 の「ブランチ一覧」）。
         let mut state = state_on_branch("main");
         state.repo.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
         state.focus = Pane::Prs;
         deliver(&mut state, vec![fake_pull_request(1, "feat", "a")]);
+        let _ = deliver_branches(&mut state, Err(GitReadError::ReaderGone));
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
         let message = &state.notices.back().expect("通知が無い").message;
-        assert_eq!(message, "ブランチ一覧をまだ読めていません");
+        assert_eq!(message, "リポジトリ情報を読めませんでした");
         // **届いたら取り出せる** —— 断ったのが一覧の有無だったことの裏返し。
-        let _ = with_branches(&mut state, Ok(vec![fake_branch("main", true)]));
+        let _ = deliver_branches(&mut state, Ok(vec![fake_branch("main", true)]));
         let plan = checkout_of(press_code(&mut state, KeyCode::Enter));
         assert_eq!(plan.branch, "feat");
 

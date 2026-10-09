@@ -62,9 +62,9 @@ pub struct Runtime {
 /// リポジトリを開いて初期状態を作る。
 ///
 /// ここでやるのは `open` だけ。bare や存在しないパスは起動できないので `Err` を返す
-/// （端末を初期化する前に出す）。リモート・HEAD・ref は `Cmd::LoadRepoInfo` として
-/// ループの中で読む。ref の列挙は本数ぶんの object 読み出しになるので、待つと
-/// 最初の 1 フレームが出るまで画面が真っ黒になる。
+/// （端末を初期化する前に出す）。リモート・HEAD・ref・ブランチ一覧は `Cmd::LoadRepoInfo`
+/// としてループの中で読む。ref の列挙は本数ぶんの object 読み出しに、ブランチ一覧は
+/// 本数ぶんの walk になるので、待つと最初の 1 フレームが出るまで画面が真っ黒になる。
 pub fn open(path: &Path, config: Config) -> Result<(AppState, ReaderHandle), GitReadError> {
     let reader = ReaderHandle::spawn(path)?;
     let repo = RepoInfo {

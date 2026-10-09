@@ -194,6 +194,11 @@ pub(super) fn accounts_listed(
 /// 「既定リモート」）。失敗しても通知だけで続ける（ラベルもリモートも無いままグラフは
 /// 出せる）。読めていた値は捨てず、ブランチ一覧には `Failed` の印だけを立てる ——
 /// 空のまま失敗したときに「読み込み中…」で固まらせないため（01 の「ブランチ一覧」）。
+///
+/// **通知は `Error`。** 元はリポジトリ情報の失敗を `Warn`、ブランチ一覧の失敗を `Error`
+/// にしていた。1 つの返信になったので、失敗すると Branches ペインが空のまま失敗表示に
+/// なり、`P` も PR の取り出しも断る（`remote::repo_unread`）—— 続けられるのはグラフだけで、
+/// 黙って隠せる軽さではない。
 pub(super) fn repo_info_loaded(
     state: &mut AppState,
     result: Result<RepoSnapshot, GitReadError>,
@@ -369,8 +374,8 @@ fn leave_account(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, commit, exec_done_of, fake_output, fetched_remote, issued, press, press_code,
-        remotes_of, state, state_with_commits, tracking_branch, with_branches, HEADS_MAIN,
+        cells, commit, deliver_branches, exec_done_of, fake_output, fetched_remote, issued, press,
+        press_code, remotes_of, state, state_with_commits, tracking_branch, HEADS_MAIN,
         NOTICE_CELLS,
     };
     use super::super::{init, update};
@@ -423,13 +428,13 @@ mod tests {
         //
         // fork 運用（`origin` = 自分、`upstream` = 本家、HEAD が `upstream` 追跡）で
         // **`f` は `upstream` を、`target` は `origin` を選ぶ**。リモート一覧と
-        // ブランチ一覧は同じ返信で届く（`with_branches` が今のリモート一覧を写す）。
+        // ブランチ一覧は同じ返信で届く（`deliver_branches` が今のリモート一覧を写す）。
         let mut state = state_with_commits(2);
         state.repo.remotes = remotes_of(&[
             ("origin", "git@github.com:me/x.git"),
             ("upstream", "git@github.com:them/x.git"),
         ]);
-        let cmd = with_branches(
+        let cmd = deliver_branches(
             &mut state,
             Ok(vec![tracking_branch("main", "upstream", HEADS_MAIN)]),
         );

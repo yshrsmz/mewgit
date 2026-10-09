@@ -565,7 +565,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       畳んだ**（`RepoSnapshot.branches`。2026-10-09 にユーザーと決めた。理由と実測は 02 の
       「ブランチ一覧」）。**最初は `f` だけを `RepoInfo.head` から読む形にしたが、レビューで
       窓の向きが変わるだけと判った** —— ブランチを切り替えた直後にブランチ一覧の返信が
-      先に届くと、前のブランチの追跡先を fetch する。2 つの読み取りを単独で出す経路が無く、
+      先に届くと、前のブランチの追跡先を fetch する。片方だけを頼む経路は追いつきしか無く、
       分けて残っていたのは到着順の問いだけだった（`/simplify` の altitude が拾った）。
       `f` も push も `BranchState` から取り、リモート一覧と同じ返信に乗る。**払うのは
       ラベルと `target` の遅れ**で、ふつうは 1ms 前後、ローカル 300 本の合成で 0.4 秒
@@ -808,12 +808,15 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       起こさずに `ExecError::Stale`（`Warn`）で断る。unstage は index と HEAD を比べる（外の commit は HEAD だけを動かす。`/code-review` が拾った）。
       **比べる場所は `Runner`、指紋を組むのは `git_read::path_stamp` の 1 本**（2026-10-02 に
       ユーザーと決めた。00 のレイヤーに例外を 1 つ足した）
-- [x] 「リモート一覧がまだ届いていない」の守りを数え直す。**上の「到着順をなくす」で
-      `push_destination` の腕が消えた**（ブランチ一覧の行とリモート一覧が同じ返信に乗り、
-      `push_plan` は一覧が `Loaded` になるまで先に断る）。**残るのは `conventional_remote`
-      の `[]` の腕だけ**で、`f` と `-u` の提案と `target` がここを通る。`default_remote` の
-      `remotes.is_empty()` は未着の守りではなくなった（空の `RemotePicker` を開かないため。
-      01 の「既定リモート」）
+- [x] 「リモート一覧がまだ届いていない」の守りを 1 本にする。**上の「到着順をなくす」で
+      `push_destination` の腕が消え**（ブランチ一覧の行とリモート一覧が同じ返信に乗る）、
+      **残りは `remote::repo_unread` の 1 本に寄せた** —— 届いたかの印はブランチ一覧の
+      `load` で、`push_plan`・`conventional_remote` の `[]` の腕・PR の取り出しが読む。
+      `jobs.is_running(LoadRepoInfo)` で判じていた `[]` の腕は、起動時の読み取りが失敗すると
+      「登録されていません」と嘘を言い、読み直しのあいだは届いている空の一覧を「まだ」と
+      言っていた（#180 の `/simplify` の altitude が拾った）。未着と失敗は言い分ける。
+      `default_remote` の `remotes.is_empty()` は未着の守りではなくなった（空の
+      `RemotePicker` を開かないため。01 の「既定リモート」）
 - [ ] テストで status を届ける 3 行（`reply(state, Cmd::LoadStatus, Msg::StatusLoaded(..))`）を
       `test_support` のヘルパ 1 本に寄せ、`worktree_state` もそれを呼ぶ形にする。いまは
       diff / graph / exec / worktree / mod / progress の各テストにインラインで散っている

@@ -8,7 +8,7 @@ use crate::git_read::{short_oid, Branch, Remote};
 
 use super::confirm;
 use crate::app::state::Tracked;
-use crate::app::{AppState, Cmd, JobKind, ListLoad, Modal, NoticeLevel, PushRejection};
+use crate::app::{AppState, Cmd, ListLoad, Modal, NoticeLevel, PushRejection};
 
 /// `P`。HEAD のブランチを push する（01 の「push の行き先」）。
 ///
@@ -111,9 +111,11 @@ enum PushPlan {
 fn push_plan(state: &AppState) -> PushPlan {
     let branches = &state.branches;
     // **空の `Vec` からは「まだ届いていない」と detached / unborn を区別できない**
-    // ので `load` を見る（01 の「ブランチ一覧」で `bool` 2 つにしなかったのと同じ）。
-    if branches.load() != ListLoad::Loaded {
-        return PushPlan::Refused("ブランチ一覧をまだ読めていません".to_string());
+    // ので印を見る（01 の「ブランチ一覧」で `bool` 2 つにしなかったのと同じ）。
+    // **失敗のあとも断る** —— 読めていた一覧は残るが、どれだけ古いかが判らない
+    // （#22 の「キャッシュした状態から破壊的操作を選ばない」）。
+    if let Some(unread) = repo_unread(state) {
+        return PushPlan::Refused(unread.to_string());
     }
     let Some(head) = branches.head() else {
         return PushPlan::Refused("HEAD がブランチを指していません".to_string());
@@ -425,6 +427,21 @@ fn default_remote(state: &AppState) -> Result<&Remote, NoRemote> {
     conventional_remote(state)
 }
 
+/// リポジトリ情報（リモート一覧とブランチ一覧）が手元に無い理由。届いていれば `None`。
+///
+/// **「届いたか」の印はブランチ一覧の `load` 1 つ。** 2 つは同じ `Msg::RepoInfoLoaded` に
+/// 乗る（02 の「ブランチ一覧」）ので、印も 1 つで足りる。**`jobs.is_running` で判じない**
+/// —— あれは「いま読み直しているか」で、起動時の読み取りが失敗したあとは偽になり
+/// （「登録されていません」と嘘を言う）、読み直しのあいだは真になる（届いている値を
+/// 「まだ」と言う）。**未着と失敗を言い分ける**（01 の「失敗の記憶」）。
+pub(super) fn repo_unread(state: &AppState) -> Option<&'static str> {
+    match state.branches.load() {
+        ListLoad::Loaded => None,
+        ListLoad::Pending => Some("リポジトリ情報をまだ読めていません"),
+        ListLoad::Failed => Some("リポジトリ情報を読めませんでした"),
+    }
+}
+
 /// リモート集合だけで決まる既定リモート。
 ///
 /// ```text
@@ -440,12 +457,13 @@ fn default_remote(state: &AppState) -> Result<&Remote, NoRemote> {
 /// 「どうすればよいか」の側から消える（M6 で詳細を出すまで）。
 pub(super) fn conventional_remote(state: &AppState) -> Result<&Remote, NoRemote> {
     match state.repo.remotes.as_slice() {
-        // **`RepoInfo` には「届いたか」の印が無い**ので、空の一覧からは「まだ」と
-        // 「登録されていない」を区別できない。走っているなら待たせる。
-        [] if state.jobs.is_running(JobKind::LoadRepoInfo) => Err(NoRemote::Nobody(
-            "リモート一覧をまだ読めていません".to_string(),
+        // **空の一覧からは「まだ」「読めなかった」と「登録されていない」を区別できない**
+        // ので、届いたかの印を見る（[`repo_unread`]）。
+        [] => Err(NoRemote::Nobody(
+            repo_unread(state)
+                .unwrap_or("リモートが登録されていません")
+                .to_string(),
         )),
-        [] => Err(NoRemote::Nobody("リモートが登録されていません".to_string())),
         [only] => Ok(only),
         many => many
             .iter()
@@ -496,7 +514,10 @@ fn propose_upstream(branch: &str, state: &AppState) -> PushPlan {
 ///
 /// **一覧に無いのは未着ではない。** 行の `push_remote` とリモート一覧は同じ
 /// `Msg::RepoInfoLoaded` に乗り、[`push_plan`] は一覧が `Loaded` になるまで先に断る
-/// （01 の「push の行き先」）。
+/// （01 の「push の行き先」）。**ただし同じ時点の値とまでは言えない** —— 4 つの読みは
+/// リーダースレッドへの別々の要求なので、そのあいだに外で `git remote add` と
+/// `pushRemote` を書くと、古い一覧と新しい行が同じ返信に乗る。外の変更は probe が拾って
+/// 読み直すので、断るのはその 1 回だけ。
 fn push_destination<'a>(value: &'a str, state: &'a AppState) -> Result<&'a str, String> {
     match state.repo.tracked(value) {
         Tracked::Named(remote) => Ok(&remote.name),
@@ -527,9 +548,9 @@ fn push_dst(local: &str, merge: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, fake_output, fetched_remote, finish_exec, forced_push_op, open_confirm, press,
-        press_code, push_op, reject_non_fast_forward, state_for_push, state_with_commits,
-        tracked_head, tracking_branch, with_branches, with_remotes, HEADS_MAIN, NOTICE_CELLS,
+        cells, deliver_branches, fake_output, fetched_remote, finish_exec, forced_push_op,
+        open_confirm, press, press_code, push_op, reject_non_fast_forward, state_for_push,
+        state_with_commits, tracked_head, tracking_branch, with_remotes, HEADS_MAIN, NOTICE_CELLS,
     };
     use super::super::update;
 
@@ -537,7 +558,7 @@ mod tests {
     use crate::app::{Key, KeyCode, Modal, Msg, Pane};
 
     use crate::git_exec::PullMode;
-    use crate::git_read::Branch;
+    use crate::git_read::{Branch, GitReadError};
 
     use crate::test_util::{fake_branch, fake_oid, fake_upstream};
 
@@ -701,7 +722,7 @@ mod tests {
         // **候補が 0 本なら開かない。** 「まだ読めていません」と「登録されていません」は
         // 選ばせる相手がいないので通知のまま（01）。
         let mut state = state_with_commits(2);
-        let _ = with_branches(&mut state, Ok(vec![fake_branch("main", true)]));
+        let _ = deliver_branches(&mut state, Ok(vec![fake_branch("main", true)]));
 
         assert_eq!(press(&mut state, 'f'), Cmd::None);
         assert_eq!(state.modal, None, "選ぶ相手がいないのに開いている");
@@ -711,6 +732,35 @@ mod tests {
             "{}",
             notice.message
         );
+    }
+
+    #[test]
+    fn f_tells_a_failed_read_from_no_remote_and_from_a_reload_in_flight() {
+        // **届いたかの印は 1 つ**（`repo_unread`）。`jobs.is_running` で判じていたころは、
+        // 起動時の読み取りが失敗すると「登録されていません」と嘘を言い、読み直しの
+        // あいだは届いている空の一覧を「まだ」と言った。
+        let notice_after_f = |state: &mut AppState| {
+            assert_eq!(press(state, 'f'), Cmd::None);
+            state
+                .notices
+                .back()
+                .expect("通知が出ていない")
+                .message
+                .clone()
+        };
+
+        // 起動時の読み取りが失敗した。
+        let mut state = state_with_commits(2);
+        let _ = deliver_branches(&mut state, Err(GitReadError::ReaderGone));
+        let message = notice_after_f(&mut state);
+        assert!(message.contains("読めませんでした"), "{message}");
+
+        // 届いた一覧が空で、いま読み直している。
+        let mut state = state_with_commits(2);
+        let _ = deliver_branches(&mut state, Ok(vec![fake_branch("main", true)]));
+        let _ = state.issue(Cmd::LoadRepoInfo);
+        let message = notice_after_f(&mut state);
+        assert!(message.contains("登録されていません"), "{message}");
     }
 
     #[test]
@@ -748,11 +798,12 @@ mod tests {
     }
 
     #[test]
-    fn f_works_before_the_branch_list_arrives() {
-        // **1 段目だけ飛ばす。** 決まらないに落とすと、リモートが 1 本のふつうの
-        // リポジトリで起動直後の `f` が断られる（01 の「既定リモート」）。
-        let mut state = state_with_commits(2);
-        with_remotes(&mut state, &["origin"]);
+    fn f_works_on_a_detached_head() {
+        // **1 段目だけ飛ばす。** 追跡設定を持つ行が無い（detached / unborn）ときに
+        // 決まらないに落とすと、リモートが 1 本のふつうのリポジトリで `f` が断られる
+        // （01 の「既定リモート」）。
+        let mut state = state_for_push(&["origin"], fake_branch("main", false));
+        assert!(state.branches.head().is_none(), "HEAD の行がある");
         let cmd = press(&mut state, 'f');
         assert_eq!(fetched_remote(&cmd).as_deref(), Some("origin"), "{cmd:?}");
     }
@@ -859,7 +910,7 @@ mod tests {
         reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
         // pull が通って先端が動いた。
-        let _ = with_branches(
+        let _ = deliver_branches(
             &mut state,
             Ok(vec![Branch {
                 oid: fake_oid(3),
@@ -883,7 +934,7 @@ mod tests {
         );
         reject_non_fast_forward(&mut state, push_op("origin", "main", false));
         // 別のブランチへ切り替わった（一覧の読み直しで届く形）。
-        let _ = with_branches(
+        let _ = deliver_branches(
             &mut state,
             Ok(vec![tracked_head(
                 "topic",
@@ -955,7 +1006,7 @@ mod tests {
             tracked_head("main", "origin", HEADS_MAIN, Some(lease)),
         );
         // 押したのは main。返るまでに HEAD が topic へ移った。
-        let _ = with_branches(
+        let _ = deliver_branches(
             &mut state,
             Ok(vec![tracked_head(
                 "topic",
@@ -1013,7 +1064,7 @@ mod tests {
         );
         // fetch はローカルの先端を動かさないので、記憶は生きたまま。届く一覧では
         // 追跡 ref だけが進んでいる。
-        let _ = with_branches(
+        let _ = deliver_branches(
             &mut state,
             Ok(vec![tracked_head(
                 "main",
@@ -1128,7 +1179,7 @@ mod tests {
         let mut state = state_with_commits(2);
         with_remotes(&mut state, remotes);
         if let Some(branches) = branches {
-            let _ = with_branches(&mut state, Ok(branches));
+            let _ = deliver_branches(&mut state, Ok(branches));
         }
         match push_plan(&state) {
             PushPlan::Refused(message) => message,

@@ -1204,8 +1204,13 @@ pub fn put_on_branch(state: &mut AppState, branch: &str) {
 /// **ほかの値はいまの状態から写す**（リモート一覧、ref の索引）。ブランチ一覧は
 /// リポジトリ情報と同じ返信に乗るので、**一覧だけを届ける返信は実物に無い** —— 写さずに
 /// 空で届けると、先に置いたリモート一覧を消す。HEAD は一覧の HEAD の行から作り
-/// （追跡設定も写す。実物では同じ config を読む）、HEAD の行が無ければ detached にする。
-/// `Err` はそのまま届ける。`reply` を通す（ランタイムでは `Cmd` が必ず `issue` を通る）。
+/// （追跡設定も写す。実物では同じ config を読む）、HEAD の行が無ければ detached にする
+/// —— **先に置いた `repo.head` は上書きされる**。`Err` はそのまま届ける。`reply` を通す
+/// （ランタイムでは `Cmd` が必ず `issue` を通る）。
+///
+/// **実物の返信と同じ副作用が走る**（`repo_info_loaded` の `resolve_target` と PR 一覧の
+/// 引き直し）。リモートを先に置いていれば `Cmd::ResolveTarget` が返り、その返信は
+/// 届けない —— 要るテストは戻り値を見て自分で届ける。
 pub fn deliver_branches(state: &mut AppState, result: Result<Vec<Branch>, GitReadError>) -> Cmd {
     let result = result.map(|branches| RepoSnapshot {
         remotes: state.repo.remotes.clone(),

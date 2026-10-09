@@ -18,8 +18,8 @@ use crate::git_read::{
     Remote, StashEntry, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
 };
 use crate::test_util::{
-    fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid,
-    fake_remote, fake_snapshot, fake_stash, fake_upstream, reply, FAKE_NOW,
+    deliver_branches, fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk,
+    fake_oid, fake_remote, fake_snapshot, fake_stash, fake_upstream, reply, FAKE_NOW,
 };
 
 /// グラフに使える行数。`ui` が決めた値が [`Msg::Layout`] で来る想定。
@@ -175,7 +175,6 @@ pub(super) fn refs_and_log(state: &AppState) -> Cmd {
     Cmd::Batch(vec![
         Cmd::LoadStatus,
         Cmd::LoadRepoInfo,
-        Cmd::LoadBranches,
         Cmd::LoadStashes,
         reload(state),
     ])
@@ -253,12 +252,12 @@ pub(super) fn diff_ok(target: DiffTarget, files: Vec<FileDiff>) -> Msg {
     }
 }
 
-/// ブランチ一覧の返信を届ける。**成功も失敗もここを通す。**
+/// ブランチ一覧の返信を届ける。**成功も失敗もここを通す**（`test_util::deliver_branches`）。
 pub(super) fn with_branches(
     state: &mut AppState,
     result: Result<Vec<Branch>, GitReadError>,
 ) -> Cmd {
-    update(state, Msg::BranchesLoaded(Box::new(result)))
+    deliver_branches(state, result)
 }
 
 /// Branches ペインにフォーカスを置き、一覧が届いた状態。

@@ -377,8 +377,8 @@ impl TextBuffer {
   時点の刻印は「最新」。断り方は確定時（`submit_exec`）と同じ `JobKind::Exec` の
   `drop_notice` で、判定は `exec_busy` の 1 箇所
 - **amend の初期値は `Cmd::LoadHeadMessage` で読む。** `RepoInfo.head` からは取らない。
-  あれは起動時に 1 回読んだきりで、1 回コミットした時点で古い（`Cmd::LoadRepoInfo` が
-  `issue` に落とされていれば commit のあとも古いまま）。**古い初期値は「1 つ前の
+  あれは書き込みのあとに読み直されるが、返るまでのあいだは古い（`Cmd::LoadRepoInfo` が
+  `issue` に落とされていれば、追いつきが返るまで commit の前のまま）。**古い初期値は「1 つ前の
   コミットのメッセージで HEAD を上書きする」になる。** HEAD の解決と本文の取得は
   リーダースレッドの中で 1 回で行い、途中で HEAD が動く隙を作らない
 - **届いた本文でモーダルを開くのは `modal` が空のときだけ。** `C` を押してから届く
@@ -544,11 +544,11 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 |---|---|---|
 | `Nothing` | `LoadStatus` | stage / unstage / discard |
 | `Stashes` | `+ LoadStashes`（`Stash` を進める） | stash の push / apply / pop / drop、merge の abort |
-| `Refs` | `+ LoadRepoInfo` `+ LoadBranches` | checkout、branch 作成 / リネーム、非 force push |
+| `Refs` | `+ LoadRepoInfo`（ブランチ一覧も運ぶ） | checkout、branch 作成 / リネーム、非 force push |
 | `RefsAndLog` | `+ LoadLog { restart }` | commit、fetch / pull、force push、branch 削除、rebase / cherry-pick / revert |
 
-- **ブランチ一覧も `Refs` に入れる。** ラベルと HEAD（`LoadRepoInfo`）と同じく ref から
-  導かれる値で、同じ書き込みで古くなる。commit は `refs/heads/<現在>` を動かすので、
+- **ブランチ一覧も `Refs` に入れる。** ラベルと HEAD と同じく ref から導かれる値で、
+  同じ書き込みで古くなる（同じ `LoadRepoInfo` が運ぶ。02 の「ブランチ一覧」）。commit は `refs/heads/<現在>` を動かすので、
   外すと Branches ペインが commit 前の ahead を出したまま残る
 - **`Refs` と `RefsAndLog` を分ける。** グラフのラベルと HEAD は行に焼き込まず
   `GraphState.refs` から引く（07）ので、**既にあるコミットを指し直すだけの操作では
@@ -603,7 +603,7 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 - **読み直しを組む関数にも「出すか」の判断を置かない。** 呼び出し元は 2 つあり、
   どちらも出すと決めたあとで呼ぶ。置くと、やはり踏めない偽の腕が残る
 - **`Cmd::LoadRepoInfo` も一緒に出す。** ref のラベル（`main` が新しいコミットへ動く）と
-  `RepoInfo.head` が古くなるため。こちらが `issue` に落ちたときの追いつきは持たない。
+  `RepoInfo.head` とブランチ一覧が古くなるため。こちらが `issue` に落ちたときの追いつきは持たない。
   発行元が起動時とここの 2 つしかなく重なる窓が実質無いので長らく塞いでいなかったが、
   世代を入れたときに塞いだ（下の「実行中ジョブ › 世代」）
 
@@ -950,8 +950,8 @@ pub struct WorktreeState {
 - discard は区画と変更種別で `GitOp` が変わる（03 の「discard は 3 変種」）。
   Untracked なら `DiscardUntracked`、staged の `Added`（= HEAD に無い）なら
   `DiscardAdded`、それ以外は `Discard`。**判断はここにしか無い。**`to_commands` は
-  純粋関数でどちらも見られない。**`RepoInfo.head` では判断しない。** あれは起動時に
-  1 回読むきりで外部のコミットで古くなり、古い `Unborn` を信じると HEAD にある
+  純粋関数でどちらも見られない。**`RepoInfo.head` では判断しない。** あれは外部で
+  コミットされると読み直しが返るまで古く、古い `Unborn` を信じると HEAD にある
   ファイルを `git rm --force` で消してしまう。`FileStatus` なら `LoadStatus` が
   毎回運んでくる
 - Conflicted の行では stage / unstage / discard を出さない。解消ビューは MVP 外で、
@@ -1237,7 +1237,7 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
   `Stash` を進め、`LoadStatus` と `LoadStashes` を出す（上の「ログの読み直し」の表）。**成否を見ない** —— pop はコンフリクトで exit 1 でも作業ツリーを
   書き換え（stash は残す）、apply も同じ。ラベルとログは読み直さない（`refs/stash` は
   グラフの walk に押していない。02 の「ログ列挙」）
-- **`Cmd::LoadBranches` に乗せない。** 古くなる書き込みが違う —— `Reload::Refs` の
+- **`Cmd::LoadRepoInfo`（ブランチ一覧を運ぶ読み取り）に乗せない。** 古くなる書き込みが違う —— `Reload::Refs` の
   書き込み（switch、ブランチの作成 / 改名、非 force の push）は `refs/stash` を動かさない
   （`switch` に autostash は無い）
 - **カーソルは選んでいた stash の oid で座り直す。** **index では座り直さない** ——
@@ -1697,11 +1697,11 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
   （座る行が変わるだけで通知は出さない）。**残る穴**は、fork 運用で upstream 側にも
   同名のブランチの PR があり、しかも**自分の fork の PR が無い**とき ——
   そのとき他人の行に座る
-- **材料は `Cmd::LoadRepoInfo` に載せる**（02 の「head」）。`BranchState` にも同じ
-  設定があるが、**座り直しは 1 回きり**（一覧が 1 度届くと以後は選んでいる番号で
-  座るので、この導出は二度と走らない）なので、**別のジョブから届く値を混ぜると
-  到着順で答えが変わり、二度と直らない**。`RepoInfo.target` が `default_remote` を
-  呼ばないのと同じ数え方
+- **材料は `Cmd::LoadRepoInfo` に載せる**（02 の「head」）。**座り直しは 1 回きり**
+  （一覧が 1 度届くと以後は選んでいる番号で座るので、この導出は二度と走らない）なので、
+  **別のジョブから届く値を混ぜると到着順で答えが変わり、二度と直らない**。
+  `BranchState` にも同じ設定があり、いまは同じ返信に乗る（02 の「ブランチ一覧」）が、
+  あちらは `RepoInfo` の外にある
 - **host は比べない。** `target.host` は `ssh -G` で正規化済み、こちらは URL に書かれた
   ままなので、生のまま比べると **fork だけ別のエイリアス（`gh-me:owner/repo`）を使う
   多アカウント運用**——04 が想定している形——で逆に落ちる。**正規化をもう 1 回頼むと、
@@ -2033,21 +2033,24 @@ default_remote      = branch.<HEAD>.remote → conventional_remote
 conventional_remote = リモートが 1 本ならそれ → origin → 決まらない
 ```
 
-**`RepoInfo.target` が `default_remote` を呼ばない理由は 04 にある**（返信の到着順で
-答えが割れ、latch されるので直らない）。ここで数えておくのは**引き受ける側の非対称**
-だけ —— `f` はキーなので、遅れて届いたブランチ一覧は次に押したときに効く。`target` は
-1 回きりなので効かない。
+**`RepoInfo.target` が `default_remote` を呼ばない理由は 04 にある**（ブランチを
+切り替えても `target` は変わらない。`target` は 1 回きり決めて latch する）。
 
-- **HEAD のブランチは `BranchState` から取る**（push の行き先と同じ理由。
-  `RepoInfo.head` は起動時に読んだきりで古い）。まだ届いていなければ
-  `branch.<HEAD>.remote` の段だけを飛ばす —— **決まらないに落とさない** ——
-  リモートが 1 本のふつうのリポジトリで、起動直後の `f` が断られてしまう。
-  **この寛容さは `f` にしか成り立たない**（上の非対称）
-- **逆順も数える。** ブランチ一覧だけが先に届く瞬間もある（`LoadRepoInfo` と
-  `LoadBranches` は別のジョブ）。リモート一覧が空のまま 1 段目を通すと、追跡先が
-  見つからないのは当たり前なので「追跡先の origin がリモートにありません」と、
-  **設定が壊れていると言ってしまう**。空のあいだは 1 段目に入らず
-  `conventional_remote` の「まだ読めていません」に落とす
+- **HEAD のブランチは `BranchState` から取る**（push の行き先と同じ）。**照らし合わせる
+  リモート一覧と同じ `Cmd::LoadRepoInfo` の返信に乗る**ので、2 つのあいだに到着順は無い
+  （02 の「ブランチ一覧」）。**元は別のジョブで、両方の順序に守りが要った** ——
+  ブランチ一覧だけが先に届くと、追跡先が見つからないのは当たり前なのに「追跡先の
+  origin がリモートにありません」と**設定が壊れていると言い**（`/code-review` が拾った）、
+  ブランチを切り替えた直後にリモート一覧の返信だけが先に届くと、前のブランチの追跡先を
+  fetch した
+- **まだ届いていなければ、リモート一覧も空なので下の守りで `conventional_remote` の
+  「まだ読めていません」に落ちる**
+- **リモート一覧が空なら 1 段目に入らない。** 届いた一覧が空でも追跡設定は残りうる
+  （`git remote remove` は `branch.<name>.remote` / `.merge` ごと消す（git 2.56.0 で
+  確認）が、手で書いた追跡設定は残る）。1 段目を通すと `Missing` で `NoRemote::Ask` に
+  なり、**選ばせる相手のいない `Modal::RemotePicker` が開く**。空なら
+  `conventional_remote` の「登録されていません」（まだ読んでいるあいだは「まだ読めて
+  いません」）に落とす
 - **`.`（ローカル追跡）は決まらない。** push が既に断っている形で、
   fetch に渡すと git が「そんなリモートは無い」で落ちる
 - **`branch.<HEAD>.remote` が一覧に無い名前を指していたら、その段を飛ばさず
@@ -2377,11 +2380,10 @@ mewgit には無い —— 押されたときに読み直す以外にない。
 別の位置に置くので、1 本の文字列に畳むと lease が壊れる）。
 
 決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る** ——
-行き先の材料（`branch.<name>.merge`、追跡 ref の位置、ahead / behind）を運ぶのは
-`Branch` の行だけで、`RepoInfo.head` が持つのは名前と oid と `branch.<name>.remote`
-だけ（#22 の「キャッシュした状態から破壊的操作を選ばない」）。**鮮度の差ではない**
-—— どちらも ref を動かす書き込みのたびに読み直される（`Reload::Refs` が両方を
-同じバッチで出す）。
+行き先の材料（追跡 ref の位置、ahead / behind、`push_remote`）を運ぶのは `Branch` の
+行だけで、`RepoInfo.head` が持つのは名前と oid と追跡設定だけ（#22 の「キャッシュした
+状態から破壊的操作を選ばない」）。**鮮度の差ではない** —— どちらも同じ
+`Cmd::LoadRepoInfo` の返信に乗る（02 の「ブランチ一覧」）。
 
 1. HEAD のブランチが無い（detached / unborn）→ 通知して何も出さない
 2. **`Branch.push_remote`（`pushRemote` / `pushDefault`）があり、追跡先と違うなら、
@@ -2460,11 +2462,12 @@ mewgit には無い —— 押されたときに読み直す以外にない。
 **拒否の出口は `push_plan` の中に 1 本。** 「一覧がまだ届いていない」を呼び出し側の
 早期 return にすると、同じ「Warn を出して `Cmd::None`」が 2 箇所に割れる。
 
-**「無い」と「まだ届いていない」はブランチ一覧とリモート一覧の両方で区別する。**
-`LoadRepoInfo` と `LoadBranches` は別のジョブなので、一覧だけ先に届いた瞬間がある。
-`BranchState` には `load` があるが `RepoInfo` には印が無いので、リモート側は
-`JobKind::LoadRepoInfo` が走っているかを見る。**空の `Vec` を片方だけ区別すると、
-起動直後の一瞬に押した `P` が「リモートが登録されていません」と嘘を言う。**
+**「まだ届いていない」はブランチ一覧の `load` 1 つで判じる。** ブランチ一覧とリモート
+一覧は同じ `Cmd::LoadRepoInfo` の返信に乗る（02 の「ブランチ一覧」）ので、一覧が
+`Loaded` ならリモート一覧も届いている —— 行の `push_remote` が一覧に無ければ、それは
+未着ではなく本当に無い。**元は 2 つの返信が別のジョブで、片方だけ先に届いた瞬間に
+「リモートが登録されていません」「push 先の X がリモートにありません」と嘘を言う形を、
+`JobKind::LoadRepoInfo` が走っているかで個別に守っていた。**
 
 ### force push
 
@@ -2967,9 +2970,10 @@ impl JobKind {
 の世代）。**どれも「発行側の事情」を覚える印だった** —— 頼んだか、落とされたか。刻印は
 返信そのものに付いているので、受け取り側が 1 つの問いで判じられる。
 
-**塞いだ穴**: `LoadRepoInfo` / `LoadBranches` / `LoadHeadMessage` は書き込みのあとに出る
-のに追いつきを持っていなかった（`issue` に落とされると、`switch` のあともラベルと
-ブランチ一覧が切り替え前のまま残る）。3 つとも `Region::Refs`。
+**塞いだ穴**: `LoadRepoInfo` / `LoadBranches`（当時はブランチ一覧を別に読んでいた。
+02 の「ブランチ一覧」）/ `LoadHeadMessage` は書き込みのあとに出るのに追いつきを
+持っていなかった（`issue` に落とされると、`switch` のあともラベルとブランチ一覧が
+切り替え前のまま残る）。どれも `Region::Refs`。
 
 **刻印が拾えるのは「読みが飛んでいるあいだに書き込みが終わった」形だけ。** 逆順
 （書き込みが走っているあいだに読みを頼み、読みのほうが先に返る）は刻印では捕まらない
@@ -2978,7 +2982,7 @@ impl JobKind {
 **押した時点で断る**（下の「commit」の `C`）。
 
 **追いつきを 1 つの関数にはまとめない。** 判じ方（`is_fresh`）は 1 つだが、判じたあとの
-形が 2 通りある —— `status_loaded` / `repo_info_loaded` / `branches_loaded` は**採った
+形が 2 通りある —— `status_loaded` / `repo_info_loaded` は**採った
 うえで頼み直す**（古い索引でもラベルは出せるので、届くまで前のものを出したままにする）。
 `head_message_loaded` と `log_loaded` は**中身を見る前に返す**（古い本文で入力欄を開くと
 あとから届く返信では取り消せず、古いページは積むと消えたはずの行が残る）。関数 1 本に
@@ -3097,10 +3101,9 @@ pub enum Msg {
     CommitFilesLoaded { oid: Oid, result: Box<Result<Vec<FileEntry>, GitReadError>> },
     HeadMessageLoaded(Result<Option<String>, GitReadError>),  // amend の初期値。None は unborn
     CommitMessageLoaded { oid: Oid, result: Box<Result<String, GitReadError>> },  // reword の初期値
-    RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs }
+    RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs, branches }
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
     FingerprintLoaded(Box<Result<RepoFingerprint, GitReadError>>),  // 下の「外部の変更の検知」
-    BranchesLoaded(Box<Result<Vec<Branch>, GitReadError>>),   // ローカルブランチの一覧
     DiffLoaded { target: DiffTarget, result: Box<Result<Vec<FileDiff>, GitReadError>> },
     // git_exec
     ExecFinished(Box<ExecDone>),       // { op, result }
@@ -3171,11 +3174,13 @@ pub enum Msg {
 「どの対象が失敗したか」を知る手掛かりがこれしかない。加えて `Ok` でも、届いた
 diff がいま選んでいるファイルのものかを判定するのに要る。
 
-`BranchesLoaded` も `Result` を運ぶ。理由は `StatusLoaded` と同じで、失敗の通り道が
-無いと `JobKind::LoadBranches` が走ったまま残り、以後の `Cmd::LoadBranches` が黙って
-落ちる。**要求した内容は運ばない。** 一覧は対象を持たない（リポジトリ全体で 1 つ）ので、
-`CommitDetailLoaded` の `oid` に当たるものが無い。`LogLoaded` の `restart` のような
-「同じ `Cmd` の 2 つの意味」も無い。
+`RepoInfoLoaded` は**ブランチ一覧も運ぶ**（02 の「ブランチ一覧」。元は
+`BranchesLoaded` を別に持っていた）。**一部だけ成功という形にしない** —— どれも同じ
+ref と config から導かれる値で、片方だけ新しくすると、別の返信だった頃の到着順の問いが
+状態の中に戻る。`Err` なら何も書き換えず、ブランチ一覧に `Failed` の印だけを立てる
+（空のまま失敗したときに「読み込み中…」で固まらせない）。**要求した内容は運ばない。**
+対象を持たない（リポジトリ全体で 1 つ）ので、`CommitDetailLoaded` の `oid` に当たる
+ものが無い。
 
 `CommitFilesLoaded` は `CommitDetailLoaded` と同じ形（`Result` + 要求した Oid）。
 理由も同じなので繰り返さない。**別の `Msg` にするのは `Cmd` を分けているから**で、
@@ -3184,7 +3189,7 @@ diff がいま選んでいるファイルのものかを判定するのに要る
 
 大きい payload は `Box` に入れる。入れないと `Msg` が数百バイトになり、1 打鍵ごとに
 作られる `Msg::Key`（実データ 12 バイト）まで同じ大きさで動く。**どれを `Box` するかを
-ここに並べない** —— 並べた一覧は実物と割れる（実際に `BranchesLoaded` と
+ここに並べない** —— 並べた一覧は実物と割れる（実際に、いまは無い `BranchesLoaded` と
 `TargetResolved` が漏れたまま残っていた）。**見張りは `msg.rs` のテスト（128 バイト）**
 で、超えた変種はそこで落ちる。
 
@@ -3199,8 +3204,7 @@ pub enum Cmd {
     LoadHeadMessage,                   // amend の初期値。HEAD の解決ごとリーダーで行う
     LoadCommitMessage(Oid),            // RebaseEditor の reword の初期値（上の「interactive rebase の開始」）
     LoadStatus, LoadDiff(DiffTarget),
-    LoadRepoInfo,                      // remotes / head / refs。起動時と ref 変更後（M3）
-    LoadBranches,                      // ローカルブランチ一覧。RepoInfo とは別（02）
+    LoadRepoInfo,                      // remotes / head / refs / ブランチ一覧。起動時と ref 変更後（02）
     Probe,                             // 外の変更を見張る指紋（下の「外部の変更の検知」）
     Exec(GitOp),                       // git CLI 実行（03 参照）
     CancelExec,                        // 走っている Exec を中断する（上の「キャンセル」）
@@ -3464,9 +3468,11 @@ pub fn init(state: &mut AppState) -> Cmd;
 ```
 
 `runtime::run` がループに入る前に 1 回呼ぶ。`main.rs` から呼ぶと、テストを書かない
-配線の側に処理が出てしまう。出すのは `LoadRepoInfo`、
+配線の側に処理が出てしまう。出すのは
 `LoadLog { count: config.graph.page_size, restart: false }`、`LoadStatus`、
-`LoadBranches`、`LoadStashes`。
+`LoadRepoInfo`、`LoadStashes`。**`LoadRepoInfo` は log と status の後ろに置く** ——
+ブランチ一覧の walk を運ぶので、最初のグラフを待たせない（02 の「ブランチ一覧」の
+実測。リーダースレッドに届く順は決まらないので、確実ではなく寄せるだけ）。
 **`ResolveTarget` と `ResolveAccount` は `init` からは出さない** —— 前者はリモート
 一覧が要るので `Msg::RepoInfoLoaded` を、後者は `RepoTarget` が要るので
 `Msg::TargetResolved` を待ってから出す（上の「`RepoInfo.target` を埋める」）。起動時はまだ何も読んでいないので

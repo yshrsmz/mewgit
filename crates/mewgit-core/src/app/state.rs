@@ -284,7 +284,6 @@ impl AppState {
             | JobKind::LoadCommitMessage
             | JobKind::LoadRepoInfo
             | JobKind::LoadStatus
-            | JobKind::LoadBranches
             | JobKind::LoadStashes
             | JobKind::LoadDiff
             | JobKind::ResolveTarget
@@ -1807,13 +1806,11 @@ impl BranchState {
 
     /// HEAD が指しているブランチ。detached / unborn では `None`。
     ///
-    /// **push の行き先も、断られたことの記憶も、HEAD はここからしか取らない。**
-    /// あちらの材料（`branch.<name>.merge`、追跡 ref の位置、ahead / behind）を運ぶのは
-    /// [`Branch`] の行だけで、`RepoInfo.head` が持つのは名前と oid と
-    /// `branch.<name>.remote` だけ（#22 の「キャッシュした状態から破壊的操作を
-    /// 選ばない」）。**鮮度の差ではない** —— `Reload::Refs` は `Cmd::LoadRepoInfo` と
-    /// `Cmd::LoadBranches` を同じバッチで出すので、どちらも ref を動かす書き込みの
-    /// たびに読み直される。
+    /// **push と fetch の行き先も、断られたことの記憶も、HEAD はここからしか取らない。**
+    /// あちらの材料（追跡 ref の位置、ahead / behind、`push_remote`）を運ぶのは
+    /// [`Branch`] の行だけで、`RepoInfo.head` が持つのは名前と oid と追跡設定だけ
+    /// （#22 の「キャッシュした状態から破壊的操作を選ばない」）。**鮮度の差ではない**
+    /// —— どちらも同じ `Cmd::LoadRepoInfo` の返信に乗る（02 の「ブランチ一覧」）。
     pub fn head(&self) -> Option<&Branch> {
         self.branches.iter().find(|branch| branch.is_head)
     }
@@ -2575,7 +2572,6 @@ pub enum JobKind {
     LoadCommitMessage,
     LoadRepoInfo,
     LoadStatus,
-    LoadBranches,
     LoadStashes,
     LoadDiff,
     Exec,
@@ -2618,7 +2614,6 @@ impl JobKind {
             // 最中に飛んでいた要求の答え（書き込み前の GitHub の状態）が採られ、
             // そのあとの引き直しは `AppState::issue` に落とされたまま誰も拾わない。
             JobKind::LoadRepoInfo
-            | JobKind::LoadBranches
             | JobKind::LoadHeadMessage
             | JobKind::FetchPrList => Some(Region::Refs),
             // `refs/stash` の reflog。進めるのは stash の書き込みと、autostash の起きうる

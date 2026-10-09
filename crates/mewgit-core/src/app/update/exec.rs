@@ -110,9 +110,10 @@ pub(super) fn reload(state: &mut AppState, reload: Reload) -> Cmd {
     match reload {
         Reload::Nothing => Cmd::LoadStatus,
         Reload::Stashes => Cmd::batch([Cmd::LoadStatus, Cmd::LoadStashes]),
-        // **ブランチ一覧も ref から導かれる。** commit は `refs/heads/<現在>` を
-        // 動かすので、読み直さないと Branches ペインが commit 前の ahead のまま残る。
-        Reload::Refs => Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches]),
+        // **ブランチ一覧も ref から導かれる**（`LoadRepoInfo` が運ぶ）。commit は
+        // `refs/heads/<現在>` を動かすので、読み直さないと Branches ペインが commit 前の
+        // ahead のまま残る。
+        Reload::Refs => Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo]),
         // **stash の一覧もここで読む**（01 の「Stash ペイン」）。stash の書き込みでなくても
         // `refs/stash` は動く —— `merge.autoStash` / `rebase.autoStash` を設定していると、
         // `pull --ff-only` や `rebase --continue` が exit 0 のまま `stash@{0}: autostash` を
@@ -121,7 +122,6 @@ pub(super) fn reload(state: &mut AppState, reload: Reload) -> Cmd {
         Reload::RefsAndLog => Cmd::batch([
             Cmd::LoadStatus,
             Cmd::LoadRepoInfo,
-            Cmd::LoadBranches,
             Cmd::LoadStashes,
             reload_log(state),
         ]),
@@ -715,7 +715,7 @@ mod tests {
         cells, commit, commit_op, exec_done, exec_done_of, failed_with, fake_output, finish_exec,
         forced_push_op, issued, page_loaded, press, push_op, refs_and_log, reject_non_fast_forward,
         reload, state, state_for_push, state_with_commits, state_with_page, tracked_head,
-        with_branches, worktree_state, BESIDE_BADGE_CELLS, HEADS_MAIN, NOTICE_CELLS,
+        worktree_state, BESIDE_BADGE_CELLS, HEADS_MAIN, NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -725,7 +725,7 @@ mod tests {
     use crate::git_read::{GitReadError, LogPage, WorktreeSection};
     use crate::test_util::{fake_pr_checkout, fake_repo_snapshot};
 
-    use crate::test_util::{fake_branch, fake_detail, fake_oid, fake_snapshot, fake_stamp};
+    use crate::test_util::{fake_detail, fake_oid, fake_snapshot, fake_stamp};
 
     #[test]
     fn exec_finished_reloads_the_status() {
@@ -1346,18 +1346,16 @@ mod tests {
 
     #[test]
     fn a_refs_read_dropped_after_a_write_is_asked_again_when_the_older_one_arrives() {
-        // `LoadRepoInfo` と `LoadBranches` は書き込みのあとに必ず出るが、走っていれば
-        // `issue` に落ちる。追いつきが無いと、`switch` のあともラベルとブランチ一覧が
-        // 切り替え前のまま残る（01 の「実行中ジョブ › 世代」）。
+        // `LoadRepoInfo`（ラベルとブランチ一覧）は書き込みのあとに必ず出るが、走って
+        // いれば `issue` に落ちる。追いつきが無いと、`switch` のあともラベルとブランチ
+        // 一覧が切り替え前のまま残る（01 の「実行中ジョブ › 世代」）。
         let op = GitOp::Switch("main".into());
         let mut state = state();
         let _ = state.issue(Cmd::LoadRepoInfo);
-        let _ = state.issue(Cmd::LoadBranches);
         let _ = state.issue(Cmd::Exec(op.clone()));
 
         let cmd = update(&mut state, exec_done_of(op, Ok(fake_output())));
         assert!(!issued(&cmd, &Cmd::LoadRepoInfo), "{cmd:?}");
-        assert!(!issued(&cmd, &Cmd::LoadBranches), "{cmd:?}");
 
         // 書き込みより前に頼まれた返信が届く。**採ったうえで頼み直す**（古い索引でも
         // ラベルは出せるので、届くまで前のものを出したままにする）。
@@ -1366,16 +1364,12 @@ mod tests {
             Msg::RepoInfoLoaded(Box::new(Ok(fake_repo_snapshot()))),
         );
         assert_eq!(cmd, Cmd::LoadRepoInfo);
-        let cmd = with_branches(&mut state, Ok(vec![fake_branch("main", true)]));
-        assert_eq!(cmd, Cmd::LoadBranches);
 
         // 頼み直したぶんは書き込みより後に頼んだものなので、そこで止まる。
         let cmd = update(
             &mut state,
             Msg::RepoInfoLoaded(Box::new(Ok(fake_repo_snapshot()))),
         );
-        assert_eq!(cmd, Cmd::None);
-        let cmd = with_branches(&mut state, Ok(vec![fake_branch("main", true)]));
         assert_eq!(cmd, Cmd::None);
     }
 
@@ -1422,7 +1416,7 @@ mod tests {
         let cmd = update(&mut state, exec_done(Ok(fake_output())));
 
         // **`Cmd::LoadStatus` 単体と厳密に比べる。** `issued` で「読み直しが無い」を
-        // 見る形にすると、`LoadRepoInfo` や `LoadBranches` が紛れ込んでも通る ——
+        // 見る形にすると、`LoadRepoInfo` が紛れ込んでも通る ——
         // index しか触らない操作では ref も動かないので、そちらも出てはいけない。
         assert_eq!(cmd, Cmd::LoadStatus);
         // **世代が進まないから積んだ行がそのまま使える。** 1 本のカウンタにすると
@@ -1446,12 +1440,7 @@ mod tests {
         // 読み直しは落ちている。
         assert_eq!(
             cmd,
-            Cmd::batch([
-                Cmd::LoadStatus,
-                Cmd::LoadRepoInfo,
-                Cmd::LoadBranches,
-                Cmd::LoadStashes
-            ])
+            Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadStashes])
         );
 
         // **走っていたページは積まない。** 積んでも直後の読み直しで捨てるだけで、
@@ -1619,10 +1608,7 @@ mod tests {
         let cmd = update(&mut state, exec_done_of(op, Ok(fake_output())));
 
         // ラベル・HEAD・ブランチ一覧は ref から導かれるので読み直す。行は動かない。
-        assert_eq!(
-            cmd,
-            Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo, Cmd::LoadBranches])
-        );
+        assert_eq!(cmd, Cmd::batch([Cmd::LoadStatus, Cmd::LoadRepoInfo]));
         assert_eq!(state.jobs.epoch(Region::Log), before);
     }
 

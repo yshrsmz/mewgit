@@ -93,18 +93,14 @@ fn placeholder(state: &AppState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use crate::test_util::{draw, pane_text, row_is_reversed, row_of, state_at};
-    use mewgit_core::app::{update, AppState, Cmd, Key, Msg, Pane, TermSize};
+    use mewgit_core::app::{update, AppState, Key, Msg, Pane, TermSize};
     use mewgit_core::git_read::{Branch, GitReadError};
-    use mewgit_core::test_util::{fake_branch, fake_oid, fake_upstream, reply};
+    use mewgit_core::test_util::{deliver_branches, fake_branch, fake_oid, fake_upstream};
 
     /// 一覧が届いた状態。**`update` を通す**ので `JobTracker` も本番と同じ。
     fn state_with_branches(branches: Vec<Branch>) -> AppState {
         let mut state = state_at("/repo");
-        let _ = reply(
-            &mut state,
-            Cmd::LoadBranches,
-            Msg::BranchesLoaded(Box::new(Ok(branches))),
-        );
+        let _ = deliver_branches(&mut state, Ok(branches));
         state
     }
 
@@ -215,11 +211,7 @@ mod tests {
     #[test]
     fn a_list_that_failed_says_so_instead_of_loading() {
         let mut state = state_at("/repo");
-        let _ = reply(
-            &mut state,
-            Cmd::LoadBranches,
-            Msg::BranchesLoaded(Box::new(Err(GitReadError::ReaderGone))),
-        );
+        let _ = deliver_branches(&mut state, Err(GitReadError::ReaderGone));
 
         let text = pane_text(&state, SIZE, Pane::Branches);
 

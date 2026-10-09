@@ -561,19 +561,21 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       - **stderr のタブは空白に展開する**（ratatui が描かないので字下げが消える。実物を
         描いて判った。07 の「NoticeLog モーダル」）
       - **中身のスクロールは入れていない**（入りきらなければ最下行を `…`）。受け入れた穴
-- [ ] HEAD の追跡設定を 1 本にする。**いま `branch.<HEAD>.remote` は 2 箇所にある**
-      —— `RepoInfo.head`（`HeadInfo::Branch.upstream`。PR の座り先と PR 作成の
-      `head` が読む）と `BranchState::head()` の `Branch.upstream_config`（`f` と push の
-      行き先が読む）。**`HeadInfo` に `UpstreamConfig` を対で載せるところまでは
-      PR チェックアウト（2/2）で済んだ**（`merge` の読み手が来たため）。残るのは
-      `f` / push の読み手を寄せること。
-      **見返りは `update::default_remote` の 2 つのガード** ——「リモート一覧が空のあいだ
-      1 段目を飛ばす」「ブランチ一覧がまだなら飛ばす」——で、どちらも追跡設定を
-      `remotes` と別のジョブから取っていることだけが理由なので消えるはず
-      （`/simplify` の altitude が挙げた。**こちらでは数え直していない**）。
-      **`Branch.upstream_config` を消せるかは別の問い** —— あちらの読み手は ahead /
-      behind と追跡 ref も同じ行から取っており、出どころを混ぜると到着順の問いが
-      戻るかを数えていない
+- [x] HEAD の追跡設定の到着順をなくす。**ブランチ一覧をリポジトリ情報と同じ読み取りに
+      畳んだ**（`RepoSnapshot.branches`。2026-10-09 にユーザーと決めた。理由と実測は 02 の
+      「ブランチ一覧」）。**最初は `f` だけを `RepoInfo.head` から読む形にしたが、レビューで
+      窓の向きが変わるだけと判った** —— ブランチを切り替えた直後にブランチ一覧の返信が
+      先に届くと、前のブランチの追跡先を fetch する。2 つの読み取りを単独で出す経路が無く、
+      分けて残っていたのは到着順の問いだけだった（`/simplify` の altitude が拾った）。
+      `f` も push も `BranchState` から取り、リモート一覧と同じ返信に乗る。**払うのは
+      ラベルと `target` の遅れ**で、ふつうは 1ms 前後、ローカル 300 本の合成で 0.4 秒
+- [ ] `HeadInfo::Branch.upstream` を消して `Branch.upstream_config` の 1 本にする。
+      **同じ設定を同じ返信が 2 回運んでいる**（上のタスクで 1 つの読み取りに畳んだ。
+      02 の「head」）。残したのは読み手の `RepoInfo::url_tracked` と `head_homes`
+      （`&RepoInfo` を取る自由関数）が `BranchState` を見ないから —— 消すならこの 2 つに
+      HEAD の行（`BranchState::head()`）を渡す形にし、`AppState::head_candidates` も
+      そちらから読む。**unborn の HEAD は一覧に行が無い**ので、追跡設定を持たないことを数える
+      （いまの `HeadInfo::Unborn` も持たない）
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。
@@ -806,13 +808,12 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       起こさずに `ExecError::Stale`（`Warn`）で断る。unstage は index と HEAD を比べる（外の commit は HEAD だけを動かす。`/code-review` が拾った）。
       **比べる場所は `Runner`、指紋を組むのは `git_read::path_stamp` の 1 本**（2026-10-02 に
       ユーザーと決めた。00 のレイヤーに例外を 1 つ足した）
-- [ ] 「リモート一覧がまだ届いていない」の守りを 1 本にする。**いま 3 通りの書き方が
-      ある** —— `update::default_remote` の `remotes.is_empty()`、`conventional_remote` の
-      `[]` の腕、`push_destination` の `Tracked::Missing` の腕（文言は `REMOTES_LOADING` で
-      共有済み）。塞ぐ形は `RepoInfo::tracked` の入口で未着を判じる（`Tracked` に未着の
-      腕を足す）か、`default_remote` と対になる push の解決関数を 1 本置くこと。**`f` 側の
-      判定も触る**ので #148 では見送った（`/simplify` の altitude が挙げた）。上の「HEAD の
-      追跡設定を 1 本にする」で `default_remote` のガードが消えるなら、そちらと一緒に数える
+- [x] 「リモート一覧がまだ届いていない」の守りを数え直す。**上の「到着順をなくす」で
+      `push_destination` の腕が消えた**（ブランチ一覧の行とリモート一覧が同じ返信に乗り、
+      `push_plan` は一覧が `Loaded` になるまで先に断る）。**残るのは `conventional_remote`
+      の `[]` の腕だけ**で、`f` と `-u` の提案と `target` がここを通る。`default_remote` の
+      `remotes.is_empty()` は未着の守りではなくなった（空の `RemotePicker` を開かないため。
+      01 の「既定リモート」）
 - [ ] テストで status を届ける 3 行（`reply(state, Cmd::LoadStatus, Msg::StatusLoaded(..))`）を
       `test_support` のヘルパ 1 本に寄せ、`worktree_state` もそれを呼ぶ形にする。いまは
       diff / graph / exec / worktree / mod / progress の各テストにインラインで散っている

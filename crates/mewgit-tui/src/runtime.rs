@@ -311,15 +311,6 @@ impl Runtime {
                 ControlFlow::Continue(())
             }
 
-            Cmd::LoadBranches => {
-                let reader = self.reader.clone();
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let _ = tx.send(Msg::BranchesLoaded(Box::new(reader.branches().await)));
-                });
-                ControlFlow::Continue(())
-            }
-
             Cmd::LoadStashes => {
                 let reader = self.reader.clone();
                 let tx = self.tx.clone();
@@ -568,14 +559,20 @@ impl Runtime {
     }
 }
 
-/// リモート・HEAD・ref をまとめて読む。
+/// リモート・HEAD・ref とブランチ一覧をまとめて読む。
 ///
 /// リーダースレッドは 1 本なので、並行にしても待ち時間は変わらない。
+///
+/// **ブランチ一覧を最後に読む**（02 の「ブランチ一覧」）。本数だけ walk が要る重い読みで、
+/// リーダースレッドは要求を届いた順に捌くので、前の 3 つを待っているあいだに積まれた
+/// log と status の要求は walk を待たずに通る（どちらが先に届くかは決まらないので、
+/// 確実ではなく寄せるだけ）。
 async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> {
     Ok(RepoSnapshot {
         remotes: reader.remotes().await?,
         head: reader.head().await?,
         refs: reader.refs().await?,
+        branches: reader.branches().await?,
     })
 }
 
@@ -661,7 +658,7 @@ mod tests {
     use super::*;
     use futures::stream;
     use mewgit_core::app::{
-        AccountListing, AccountView, JobKind, Modal, Pane, Repick, TargetState, TermSize,
+        AccountListing, AccountView, JobKind, ListLoad, Modal, Pane, Repick, TargetState, TermSize,
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
@@ -742,7 +739,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_repo_info_fills_in_the_remotes_head_and_ref_labels() {
+    async fn load_repo_info_fills_in_the_remotes_head_ref_labels_and_branches() {
         let repo = TestRepo::init();
         let oid = repo.commit("first");
         repo.git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
@@ -772,6 +769,12 @@ mod tests {
             .map(|label| label.name())
             .collect();
         assert_eq!(labels, ["main"]);
+        // **ブランチ一覧も同じ返信で届く**（02 の「ブランチ一覧」）。
+        assert_eq!(state.branches.load(), ListLoad::Loaded);
+        assert_eq!(
+            state.branches.head().map(|head| head.name.as_str()),
+            Some("main")
+        );
     }
 
     #[test]

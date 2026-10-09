@@ -1522,7 +1522,7 @@ mod tests {
             owner: "anthropics".to_string(),
             repo: "claude-code".to_string(),
         });
-        let _ = state.issue(Cmd::LoadBranches);
+        let _ = state.issue(Cmd::LoadRepoInfo);
         state
     }
 
@@ -1534,7 +1534,7 @@ mod tests {
     /// 出るのはこの組み合わせ（#73 の「出荷される形を測る」）。
     fn state_with_quota(remaining: u32) -> AppState {
         let mut state = shipping_header_state();
-        state.jobs.finish(JobKind::LoadBranches);
+        state.jobs.finish(JobKind::LoadRepoInfo);
         state.account = resolved_account();
         // **世代は `fetch_pr_details` に書かせる**（`PrState::forget` が進めたあとの
         // 状態でも「古い返信」を組めるようにするため）。答えは届けないので、ここが

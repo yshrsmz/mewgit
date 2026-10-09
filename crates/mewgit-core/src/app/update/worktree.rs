@@ -116,8 +116,8 @@ fn commit_submit(state: &mut AppState) -> Cmd {
 
 /// `C`。HEAD のメッセージを読んでから amend の入力欄を開く。
 ///
-/// **初期値は読んでから開く**（01 の「commit」）。`RepoInfo.head` は起動時に 1 回
-/// 読んだきりなので、1 回コミットした時点で古い。
+/// **初期値は読んでから開く**（01 の「commit」）。`RepoInfo.head` は書き込みのあとに
+/// 読み直されるが、返るまでのあいだは古い（コミットの直後に押すと 1 つ前のコミット）。
 ///
 /// **書き込みが走っているあいだは断る。** 走っている `git` が HEAD を動かせば、
 /// 読んだ本文は 1 つ前のコミットのものになる。**返信の刻印では捕まえられない** ——
@@ -411,8 +411,8 @@ fn expect_of(stamp: Option<PathStamp>) -> Result<PathStamp, String> {
 /// ファイルは 3 変種で、区画と変更種別で決まる（03 の「discard は 3 変種」）。
 /// **この判断はここにしか無い。**`to_command` は純粋関数でどちらも見られない。
 ///
-/// **HEAD に無いか（`Added`）は `RepoInfo.head` では判断しない。** `head` は起動時に
-/// 1 回読んだきりで、外部でコミットされると古くなる。古い `Unborn` を信じて
+/// **HEAD に無いか（`Added`）は `RepoInfo.head` では判断しない。** `head` は外部で
+/// コミットされると、probe が拾って読み直しが返るまで古い。古い `Unborn` を信じて
 /// `DiscardAdded` を出すと、HEAD にあるファイルを `git rm --force` で消してしまう。
 /// `FileStatus` は `LoadStatus` が毎回運んでくるので、そちらで判断する。
 ///
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn a_stale_unborn_head_does_not_turn_discard_into_a_delete() {
-        // `repo.head` は起動時に 1 回読んだきりなので、外部でコミットされると古くなる。
+        // `repo.head` は外部でコミットされると、読み直しが返るまで古い。
         // 古い `Unborn` を信じて `rm --force` を出すと、HEAD にあるファイルが消える。
         // 判断は `LoadStatus` が毎回運んでくる `FileStatus` で行う。
         let mut state = worktree_state(
@@ -995,8 +995,8 @@ mod tests {
 
     #[test]
     fn amend_reads_the_head_message_before_opening() {
-        // **`RepoInfo.head` からは取らない。** 起動時に 1 回読んだきりで、1 回
-        // コミットした時点で古い（01 の「commit」）。
+        // **`RepoInfo.head` からは取らない。** 書き込みのあとの読み直しが返るまでは
+        // 古い（01 の「commit」）。
         let mut state = only_staged();
 
         assert_eq!(press(&mut state, 'C'), Cmd::LoadHeadMessage);

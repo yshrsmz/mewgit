@@ -44,8 +44,8 @@ pub enum Cmd {
     LoadCommitFiles(Oid),
     /// amend の初期値にする HEAD のメッセージ全文（02 の `head_message`）。
     ///
-    /// `RepoInfo.head` からは取らない。起動時に 1 回読んだきりなので、1 回コミット
-    /// した時点で古い。古い初期値は「1 つ前のコミットのメッセージで HEAD を上書き
+    /// `RepoInfo.head` からは取らない。書き込みのあとに読み直されるが、返るまでの
+    /// あいだは古い。古い初期値は「1 つ前のコミットのメッセージで HEAD を上書き
     /// する」になる（01 の「commit」）。
     LoadHeadMessage,
     /// RebaseEditor の reword の初期値にする、そのコミットのメッセージ全文
@@ -58,23 +58,19 @@ pub enum Cmd {
     LoadCommitMessage(Oid),
     LoadStatus,
     LoadDiff(DiffTarget),
-    /// リモート・HEAD・ref の索引を読む。起動時と、ref が変わったあと（M3）。
+    /// リモート・HEAD・ref の索引とローカルブランチの一覧を読む。起動時と、ref が
+    /// 変わったあと（M3）。
+    ///
+    /// **ブランチ一覧も乗せる**（02 の「ブランチ一覧」）。元は `LoadBranches` として
+    /// 分けていた —— ブランチの本数だけ upstream の解決と `graph_ahead_behind` の walk が
+    /// 要るので、ラベルと HEAD だけが欲しい経路に払わせないため。**ところが単独で出す
+    /// 経路は無く**、分けて残ったのは `f` / `P` の到着順の問いだけだった。払うのは
+    /// ラベルと `target` の遅れ（ふつう 1ms 前後、ローカル 300 本の合成で 0.4 秒）。
+    /// **古くなる時点は ref を動かす書き込みの後**（`update::Reload` の `Refs` 以上）。
     LoadRepoInfo,
-    /// ローカルブランチの一覧を読む（02 の「ブランチ一覧」）。
-    ///
-    /// **[`Cmd::LoadRepoInfo`] に乗せない。** ブランチの本数だけ upstream の解決と
-    /// `graph_ahead_behind` の walk が要り、グラフのラベルと HEAD だけが欲しい経路に
-    /// そのコストを払わせることになる（`LoadCommitFiles` を `LoadCommitDetail` と
-    /// 分けたのと同じ理由）。
-    ///
-    /// **古くなる時点は [`Cmd::LoadRepoInfo`] と同じ**なので、起動時と、ref を動かす
-    /// 書き込みの後（`update::Reload` の `Refs` 以上）に出す。commit は
-    /// `refs/heads/<現在>` を動かすので、ここを外すと Branches ペインが commit 前の
-    /// ahead を出したまま残る。
-    LoadBranches,
     /// stash の一覧を読む（02 の「stash 一覧」、01 の「Stash ペイン」）。
     ///
-    /// **[`Cmd::LoadBranches`] に乗せない。** 古くなる書き込みが違う —— `update::Reload`
+    /// **[`Cmd::LoadRepoInfo`] に乗せない。** 古くなる書き込みが違う —— `update::Reload`
     /// の `Refs`（switch やブランチの作成）は `refs/stash` を動かさないが、`RefsAndLog`
     /// の pull / rebase は autostash で動かしうる（01 の「Stash ペイン」）。出すのは
     /// 起動時と `RefsAndLog` のあと。
@@ -228,7 +224,6 @@ impl Cmd {
             Cmd::LoadCommitMessage(_) => Some((JobKind::LoadCommitMessage, "message")),
             Cmd::LoadStatus => Some((JobKind::LoadStatus, "status")),
             Cmd::LoadRepoInfo => Some((JobKind::LoadRepoInfo, "repo")),
-            Cmd::LoadBranches => Some((JobKind::LoadBranches, "branches")),
             Cmd::LoadStashes => Some((JobKind::LoadStashes, "stashes")),
             Cmd::Probe => Some((JobKind::Probe, "probe")),
             Cmd::LoadDiff(_) => Some((JobKind::LoadDiff, "diff")),

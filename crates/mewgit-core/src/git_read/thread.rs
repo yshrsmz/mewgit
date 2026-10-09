@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, LogPage,
-    LogSession, Oid, RefIndex, Remote, RepoFingerprint, RepoReader, StashEntry, WorktreeSnapshot,
+    BranchList, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, LogPage, LogSession,
+    Oid, RefIndex, Remote, RepoFingerprint, RepoReader, StashEntry, WorktreeSnapshot,
 };
 
 /// リーダースレッドへの窓口。
@@ -49,9 +49,8 @@ enum Request {
         reply: Reply<Vec<FileEntry>>,
     },
     Refs(Reply<RefIndex>),
-    Branches(Reply<Vec<Branch>>),
+    Branches(Reply<BranchList>),
     Stashes(Reply<Vec<StashEntry>>),
-    Head(Reply<HeadInfo>),
     HeadMessage(Reply<Option<String>>),
     Remotes(Reply<Vec<Remote>>),
     Status(Reply<WorktreeSnapshot>),
@@ -154,12 +153,12 @@ impl ReaderHandle {
         self.request(Request::Refs).await
     }
 
-    /// ローカルブランチの一覧（02 の「ブランチ一覧」）。
+    /// ローカルブランチの一覧と HEAD の状態（02 の「ブランチ一覧」と「head」）。
     ///
     /// ブランチの本数だけ upstream の解決と `graph_ahead_behind` の walk を行う重い読み。
     /// `Cmd::LoadRepoInfo` が `refs` などと同じ返信で運び、最後に読む（02 の「ブランチ
     /// 一覧」）。
-    pub async fn branches(&self) -> Result<Vec<Branch>, GitReadError> {
+    pub async fn branches(&self) -> Result<BranchList, GitReadError> {
         self.request(Request::Branches).await
     }
 
@@ -168,14 +167,9 @@ impl ReaderHandle {
         self.request(Request::Stashes).await
     }
 
-    /// HEAD の状態。
-    pub async fn head(&self) -> Result<HeadInfo, GitReadError> {
-        self.request(Request::Head).await
-    }
-
     /// HEAD のコミットメッセージ全文。コミットが 1 つも無ければ `None`。
     ///
-    /// amend の初期値に使う。`head` と `commit_detail` に分けないのは、そのあいだに
+    /// amend の初期値に使う。HEAD の解決と `commit_detail` に分けないのは、そのあいだに
     /// HEAD が動く隙を作らないため（[`RepoReader::head_message`]）。
     pub async fn head_message(&self) -> Result<Option<String>, GitReadError> {
         self.request(Request::HeadMessage).await
@@ -270,9 +264,6 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
             }
             Request::Stashes(reply) => {
                 let _ = reply.send(reader.stashes());
-            }
-            Request::Head(reply) => {
-                let _ = reply.send(reader.head());
             }
             Request::HeadMessage(reply) => {
                 let _ = reply.send(reader.head_message());

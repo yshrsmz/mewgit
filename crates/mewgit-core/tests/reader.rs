@@ -143,7 +143,7 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
     repo.git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
     let reader = spawn(&repo);
 
-    let head = reader.head().await.unwrap();
+    let head = reader.branches().await.unwrap().head;
     let refs = reader.refs().await.unwrap();
     let remotes = reader.remotes().await.unwrap();
 

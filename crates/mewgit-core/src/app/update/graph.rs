@@ -1375,7 +1375,8 @@ mod tests {
     #[test]
     fn the_target_name_comes_from_the_head_row_and_falls_back_to_repo_head() {
         // HEAD の行を先に読み、行が無いときだけ `repo.head` を見る（02 の「head」）。
-        // 取り違えを見張るため、行と `repo.head` に別の名前を持たせる。
+        // 取り違えを見張るため、行と `repo.head` に別の名前を持たせる（行と `Unborn` の
+        // 組は `branches()` からは届かないが、読み元を取り違える変異はこれで落ちる）。
         let body_with = |row: Option<&str>, head: Option<HeadInfo>| {
             let mut state = state_with_commits(3);
             state.branches.branches = row

@@ -360,13 +360,14 @@ impl RepoReader {
             Err(err) => return Err(err.into()),
         };
 
+        // ブランチの腕でも peel する。コミットを指さない ref は `branches` が行ごと落とすので、
+        // 通すと「ブランチに居るのに HEAD の行が無い」が黙って届く（02 の「head」）。
+        let oid = head.peel_to_commit()?.id();
         if !head.is_branch() {
-            return Ok(HeadInfo::Detached(head.peel_to_commit()?.id()));
+            return Ok(HeadInfo::Detached(oid));
         }
-        // 名前は載せないが、非 UTF-8 は握りつぶさずエラーにする（02 の「非 UTF-8 の扱い」）。
-        // `branches` はその行を落とすので、通すと「ブランチに居るのに HEAD の行が無い」
-        // になり、読み手が detached と区別できない。git2 0.21 の `shorthand()` は `Err` が
-        // 非 UTF-8 そのもの。
+        // 名前は載せないが、非 UTF-8 も同じ理由でエラーにする（02 の「非 UTF-8 の扱い」）。
+        // git2 0.21 の `shorthand()` は `Err` が非 UTF-8 そのもの。
         head.shorthand().map_err(|_| GitReadError::NonUtf8Head)?;
         Ok(HeadInfo::Branch)
     }

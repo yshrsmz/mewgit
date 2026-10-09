@@ -1373,6 +1373,35 @@ mod tests {
     }
 
     #[test]
+    fn the_target_name_comes_from_the_head_row_and_falls_back_to_repo_head() {
+        // HEAD の行を先に読み、行が無いときだけ `repo.head` を見る（02 の「head」）。
+        // 取り違えを見張るため、行と `repo.head` に別の名前を持たせる。
+        let body_with = |row: Option<&str>, head: Option<HeadInfo>| {
+            let mut state = state_with_commits(3);
+            state.branches.branches = row
+                .map(|name| fake_branch(name, true))
+                .into_iter()
+                .collect();
+            state.repo.head = head;
+            let _ = press(&mut state, 'j');
+            let _ = press(&mut state, 'y');
+            open_confirm(&state).0.to_string()
+        };
+        let unborn = || {
+            Some(HeadInfo::Unborn {
+                name: "fresh".to_string(),
+            })
+        };
+
+        let body = body_with(Some("main"), unborn());
+        assert!(body.contains("main") && !body.contains("fresh"), "{body}");
+        let body = body_with(None, unborn());
+        assert!(body.contains("fresh"), "{body}");
+        let body = body_with(None, Some(HeadInfo::Detached(fake_oid(9))));
+        assert!(body.contains("を HEAD に"), "{body}");
+    }
+
+    #[test]
     fn y_on_a_commit_asks_before_cherry_picking_it_onto_head() {
         let mut state = state_with_commits(3);
         on_main(&mut state);

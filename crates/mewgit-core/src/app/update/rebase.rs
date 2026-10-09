@@ -407,6 +407,28 @@ mod tests {
     }
 
     #[test]
+    fn i_reads_head_from_its_row_and_falls_back_to_a_detached_head() {
+        // HEAD の行を先に読み、行が無いときだけ `repo.head` を見る（02 の「head」）。
+        // 取り違えを見張るため、行と `repo.head` に別のコミットを持たせる。
+        let mut state = linear(4);
+        state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
+        let _ = press_i_on(&mut state, 2);
+        let Some(Modal::RebaseEditor { head, .. }) = &state.modal else {
+            panic!("RebaseEditor が開いていません: {:?}", state.modal);
+        };
+        assert_eq!(*head, fake_oid(0));
+
+        let mut state = linear(4);
+        state.branches.branches.clear();
+        state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
+        let _ = press_i_on(&mut state, 2);
+        let Some(Modal::RebaseEditor { head, .. }) = &state.modal else {
+            panic!("RebaseEditor が開いていません: {:?}", state.modal);
+        };
+        assert_eq!(*head, fake_oid(1));
+    }
+
+    #[test]
     fn i_walks_first_parents_not_the_rows_between() {
         // HEAD（commit 0）の親は commit 2。あいだの行（commit 1）は別の枝で、
         // 表示行の並びで切ると混ざる（01）。

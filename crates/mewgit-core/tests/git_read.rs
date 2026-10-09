@@ -405,6 +405,20 @@ fn head_errors_when_the_branch_name_is_not_utf8() {
 }
 
 #[test]
+fn head_errors_when_the_branch_does_not_point_at_a_commit() {
+    // `branches` は peel できない行を落とす。`head` が通すと「ブランチに居るのに HEAD の
+    // 行が無い」が、壊れたリポジトリで黙って届く（02 の「head」）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let tree = repo.rev_parse("HEAD^{tree}");
+    repo.write_git_file("refs/heads/main", format!("{tree}\n").as_bytes());
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert!(reader.branches().unwrap().is_empty());
+    assert!(reader.head().is_err());
+}
+
+#[test]
 fn head_reports_an_unborn_branch() {
     // コミットが 1 つも無いと `repo.head()` は失敗する。
     let repo = TestRepo::init();

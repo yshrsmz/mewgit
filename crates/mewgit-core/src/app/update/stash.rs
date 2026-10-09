@@ -251,7 +251,7 @@ fn open_stash_diff(state: &mut AppState) -> Cmd {
 
 /// stash の一覧が届いた。
 ///
-/// **成功も失敗も `jobs.finish` を通る**（`branches_loaded` と同じ）。
+/// **成功も失敗も `jobs.finish` を通る**（`repo_info_loaded` と同じ）。
 pub(super) fn stashes_loaded(
     state: &mut AppState,
     result: Result<Vec<StashEntry>, GitReadError>,
@@ -262,7 +262,7 @@ pub(super) fn stashes_loaded(
         // **いつの一覧かを値に添える**（`status_loaded` と同じ）。apply / pop / drop に
         // 渡す index を信じてよいかは、この刻印で判る。
         Ok(entries) => state.stashes.loaded(entries, asked),
-        // 読めていた一覧は捨てない（`branches_loaded` と同じ理由）。
+        // 読めていた一覧は捨てない（`repo_info_loaded` と同じ理由）。
         Err(err) => {
             state.stashes.failed();
             state.push_notice(NoticeLevel::Error, err.to_string(), None);

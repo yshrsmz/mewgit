@@ -78,9 +78,9 @@ use crate::auth::{
 use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Runner};
 use crate::git_exec::{RebaseAction, RebaseEntry};
 use crate::git_read::{
-    Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, HeadInfo, Hunk, HunkLine,
-    LineOrigin, Oid, PathStamp, RefIndex, Remote, RepoReader, Signature, StashEntry, Timestamp,
-    Upstream, WorktreeSnapshot,
+    Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, GitReadError, HeadInfo, Hunk,
+    HunkLine, LineOrigin, Oid, PathStamp, RefIndex, Remote, RepoReader, Signature, StashEntry,
+    Timestamp, Upstream, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PrStatus, PullRequest, RateLimit, RefSpec, RepoRef};
 use secrecy::SecretString;
@@ -870,7 +870,8 @@ pub fn fake_entry(path: &str, status: FileStatus) -> FileEntry {
     }
 }
 
-/// [`Msg::RepoInfoLoaded`] の中身 1 つぶん。リモートは無く、HEAD は `main`、ref の索引は空。
+/// [`Msg::RepoInfoLoaded`] の中身 1 つぶん。リモートは無く、HEAD は `main`、ref の索引は空、
+/// ブランチ一覧は HEAD の `main` 1 本。
 ///
 /// **`mewgit-tui` からも呼ぶ**（PRs ペインが「リモートの無いリポジトリ」を実物と同じ
 /// 返信で作る）ので、`app/update/test_support.rs` ではなくここに置く。
@@ -883,6 +884,10 @@ pub fn fake_repo_snapshot() -> RepoSnapshot {
             upstream: None,
         },
         refs: RefIndex::from_iter([]),
+        branches: vec![Branch {
+            oid: fake_oid(1),
+            ..fake_branch("main", true)
+        }],
     }
 }
 
@@ -1192,6 +1197,39 @@ pub fn put_on_branch(state: &mut AppState, branch: &str) {
         oid: fake_oid(0),
         upstream: None,
     });
+}
+
+/// ブランチ一覧を、それを運ぶ `Msg::RepoInfoLoaded` で届ける（02 の「ブランチ一覧」）。
+///
+/// **ほかの値はいまの状態から写す**（リモート一覧、ref の索引）。ブランチ一覧は
+/// リポジトリ情報と同じ返信に乗るので、**一覧だけを届ける返信は実物に無い** —— 写さずに
+/// 空で届けると、先に置いたリモート一覧を消す。HEAD は一覧の HEAD の行から作り
+/// （追跡設定も写す。実物では同じ config を読む）、HEAD の行が無ければ detached にする
+/// —— **先に置いた `repo.head` は上書きされる**。`Err` はそのまま届ける。`reply` を通す
+/// （ランタイムでは `Cmd` が必ず `issue` を通る）。
+///
+/// **実物の返信と同じ副作用が走る**（`repo_info_loaded` の `resolve_target` と PR 一覧の
+/// 引き直し）。リモートを先に置いていれば `Cmd::ResolveTarget` が返り、その返信は
+/// 届けない —— 要るテストは戻り値を見て自分で届ける。
+pub fn deliver_branches(state: &mut AppState, result: Result<Vec<Branch>, GitReadError>) -> Cmd {
+    let result = result.map(|branches| RepoSnapshot {
+        remotes: state.repo.remotes.clone(),
+        head: branches.iter().find(|branch| branch.is_head).map_or(
+            HeadInfo::Detached(fake_oid(0)),
+            |head| HeadInfo::Branch {
+                name: head.name.clone(),
+                oid: head.oid,
+                upstream: head.upstream_config.clone(),
+            },
+        ),
+        refs: state.graph.refs.clone(),
+        branches,
+    });
+    reply(
+        state,
+        Cmd::LoadRepoInfo,
+        Msg::RepoInfoLoaded(Box::new(result)),
+    )
 }
 
 /// `cmd` を発行してから、その返信を届ける。

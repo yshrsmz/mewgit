@@ -6,7 +6,9 @@ use mewgit_core::config::Config;
 use mewgit_core::git_read::{
     Commit, FileEntry, GitReadError, LogPage, StashEntry, WorktreeSnapshot,
 };
-use mewgit_core::test_util::{fake_branch, fake_commit, fake_commit_with_parents, reply, FAKE_NOW};
+use mewgit_core::test_util::{
+    deliver_branches, fake_branch, fake_commit, fake_commit_with_parents, reply, FAKE_NOW,
+};
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -421,11 +423,7 @@ fn state_with_log(commits: Vec<Commit>) -> AppState {
     // リポジトリ」なので、一覧だけ「読み込み中…」で残っていると画面が実際とずれる。
     // （文言が他のペインのテストに当たるのは別の問題で、そちらは `pane_text` が
     // ペインの中だけを見ることで塞いである。）
-    let _ = reply(
-        &mut state,
-        Cmd::LoadBranches,
-        Msg::BranchesLoaded(Box::new(Ok(vec![fake_branch("main", true)]))),
-    );
+    let _ = deliver_branches(&mut state, Ok(vec![fake_branch("main", true)]));
     state
 }
 

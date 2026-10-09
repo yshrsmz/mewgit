@@ -156,9 +156,9 @@ impl ReaderHandle {
 
     /// ローカルブランチの一覧（02 の「ブランチ一覧」）。
     ///
-    /// `refs` と分けているのは、こちらがブランチの本数だけ upstream の解決と
-    /// `graph_ahead_behind` の walk を行うため。グラフのラベルと HEAD だけが欲しい
-    /// 経路にそのコストを払わせない（01）。
+    /// ブランチの本数だけ upstream の解決と `graph_ahead_behind` の walk を行う重い読み。
+    /// `Cmd::LoadRepoInfo` が `refs` などと同じ返信で運び、最後に読む（02 の「ブランチ
+    /// 一覧」）。
     pub async fn branches(&self) -> Result<Vec<Branch>, GitReadError> {
         self.request(Request::Branches).await
     }

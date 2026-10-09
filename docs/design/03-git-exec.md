@@ -213,7 +213,7 @@ argv に載せられないため。`git_read` が非 UTF-8 のパスを一覧ご
   消える）と同じで、ワークツリー側が既に消えている staged 削除でも通る（git 2.55 で確認）。
   **`Discard` の代わりに無条件で使ってはいけない。** HEAD にあるファイルへ掛けると、
   変更ではなくファイルそのものが消える。**「HEAD に無いか」は `RepoInfo.head` では
-  判断しない。** あれは起動時に 1 回読むきりで、外部でコミットされると古くなる。
+  判断しない。** あれは外部でコミットされると、probe が拾って読み直しが返るまで古い。
   `FileStatus::Added` は `LoadStatus` が毎回運んでくるので、そちらで決める
 - **untracked の discard に `-d` は付けない。** `git_read::status` が
   `recurse_untracked_dirs(true)` で列挙するので、渡すのは常にファイル。ディレクトリごと

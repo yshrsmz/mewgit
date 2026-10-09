@@ -246,13 +246,13 @@ default_remote      = branch.<HEAD>.remote → conventional_remote
 conventional_remote = リモートが 1 本ならそれ → origin → 決まらない
 ```
 
-**`RepoInfo.target` は `default_remote` を呼ばない。** ブランチの追跡設定を混ぜると、
-`Msg::BranchesLoaded` と `Msg::RepoInfoLoaded` の**どちらが先に届くかで答えが割れる**
-——`init` が両方を別々のジョブとして出すので順序は決まらず、しかも `target` は
-1 回きり決めて latch するので二度と直らない。`.claude/rules/testing.md` が「ループテストは非同期の
-返信の順序に依存できない」と書いている、その順序に production が乗ってしまう。
-**ブランチを切り替えても `target` は変わらない**という事実とも噛み合わない。
-`/simplify` の altitude が拾った。
+**`RepoInfo.target` は `default_remote` を呼ばない。** `target` は 1 回きり決めて
+latch するので、ブランチの追跡設定を混ぜると、**起動時にたまたま居たブランチの追跡先**が
+セッションのあいだずっと残る —— **ブランチを切り替えても `target` は変わらない**という
+事実と噛み合わない。**元はもう 1 つ理由があった** —— ブランチ一覧が別の返信
+（`Msg::BranchesLoaded`）だったころは、どちらが先に届くかで答えが割れ、latch されて二度と
+直らなかった（`/simplify` の altitude が拾った）。いまは同じ返信に乗る（02 の「ブランチ
+一覧」）のでこちらは消えた。
 
 git 2.55 で実測した（`env -i` の一時リポジトリ）。
 

@@ -355,11 +355,12 @@ pub enum HeadInfo {
         oid: Oid,
         /// `branch.<name>.remote` / `branch.<name>.merge`（02 の「head」）。
         ///
-        /// **[`Branch::upstream_config`] と同じ設定を、別のジョブがもう一度読む。**
+        /// **[`Branch::upstream_config`] と同じ設定を、同じ返信がもう一度運ぶ。**
         /// 読み手は `app` の「現ブランチの PR」で、**fork から出した PR を当てる**のに
-        /// 要る（01）。あちらの `BranchState` から取ると、`Cmd::LoadBranches` の返信と
-        /// PR 一覧のどちらが先に届くかで**座り直しの答えが変わる** —— 一覧が 1 度
-        /// 届いたら以後は選んでいる番号で座るので、**間違えても二度と直らない**。
+        /// 要る（01）。元はブランチ一覧が別の返信だったので、そちらから取ると PR 一覧との
+        /// 到着順で座り直しの答えが変わった。いまは同じ `Msg::RepoInfoLoaded` に乗るが、
+        /// 読み手が `RepoInfo` の上にあって `BranchState` を見ないので重複を残している
+        /// （02 の「head」、`docs/plan.md` の M6）。
         ///
         /// **対で載せる。** `merge` の読み手は PR 作成の `head` の候補と「現ブランチの
         /// PR」で、どちらも追跡設定が fork の URL のときだけ読む —— そこに在るブランチの

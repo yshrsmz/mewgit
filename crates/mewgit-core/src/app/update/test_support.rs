@@ -175,7 +175,6 @@ pub(super) fn refs_and_log(state: &AppState) -> Cmd {
     Cmd::Batch(vec![
         Cmd::LoadStatus,
         Cmd::LoadRepoInfo,
-        Cmd::LoadBranches,
         Cmd::LoadStashes,
         reload(state),
     ])
@@ -254,12 +253,7 @@ pub(super) fn diff_ok(target: DiffTarget, files: Vec<FileDiff>) -> Msg {
 }
 
 /// ブランチ一覧の返信を届ける。**成功も失敗もここを通す。**
-pub(super) fn with_branches(
-    state: &mut AppState,
-    result: Result<Vec<Branch>, GitReadError>,
-) -> Cmd {
-    update(state, Msg::BranchesLoaded(Box::new(result)))
-}
+pub(super) use crate::test_util::deliver_branches;
 
 /// Branches ペインにフォーカスを置き、一覧が届いた状態。
 pub(super) fn state_on_branches(names: &[(&str, bool)]) -> AppState {
@@ -275,7 +269,7 @@ pub(super) fn load_branches(state: &mut AppState, names: &[(&str, bool)]) {
         .iter()
         .map(|(name, is_head)| fake_branch(name, *is_head))
         .collect();
-    let _ = with_branches(state, Ok(branches));
+    let _ = deliver_branches(state, Ok(branches));
 }
 
 /// stash 一覧の返信を届ける。**発行してから届ける**（`test_util::reply`）。
@@ -371,7 +365,7 @@ pub(super) fn tracking_branch(name: &str, remote: &str, merge: &str) -> Branch {
 pub(super) fn state_for_push(remotes: &[&str], head: Branch) -> AppState {
     let mut state = state_with_commits(2);
     with_remotes(&mut state, remotes);
-    let _ = with_branches(&mut state, Ok(vec![head]));
+    let _ = deliver_branches(&mut state, Ok(vec![head]));
     state
 }
 

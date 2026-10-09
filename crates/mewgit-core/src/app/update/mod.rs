@@ -21,7 +21,7 @@ use super::{
     PrField, RewordInput, TextBuffer,
 };
 use account::{account_resolved, accounts_listed, open_account, repo_info_loaded, target_resolved};
-use branches::{branches_key, branches_loaded};
+use branches::branches_key;
 use diff::{diff_key, diff_loaded, load_diff};
 use exec::exec_finished;
 use graph::{
@@ -62,14 +62,16 @@ mod worktree;
 /// アカウント解決は、そのタスクでここに足す。
 pub fn init(state: &mut AppState) -> Cmd {
     let cmd = Cmd::batch([
-        Cmd::LoadRepoInfo,
         Cmd::LoadLog {
             count: state.config.graph.page_size,
             // まだ何も読んでいないので、セッションを捨てる必要が無い。
             restart: false,
         },
         Cmd::LoadStatus,
-        Cmd::LoadBranches,
+        // **log と status の後ろに置く**（01 の「起動時の読み込み」）。ブランチ一覧の walk を
+        // 運ぶので、最初のグラフを待たせない。リーダースレッドに届く順は決まらないので、
+        // 寄せるだけ。
+        Cmd::LoadRepoInfo,
         Cmd::LoadStashes,
         // 外の変更を比べる基準（01 の「外部の変更の検知」）。次の probe は 2 秒後。
         Cmd::Probe,
@@ -174,7 +176,6 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         // `Msg` に変種を足したときに実装漏れをコンパイルエラーにするため。
         Msg::StatusLoaded(result) => status_loaded(state, *result),
         Msg::FingerprintLoaded(result) => fingerprint_loaded(state, *result),
-        Msg::BranchesLoaded(result) => branches_loaded(state, *result),
         Msg::StashesLoaded(result) => stashes_loaded(state, *result),
         Msg::DiffLoaded { target, result } => diff_loaded(state, target, *result),
         Msg::ExecFinished(done) => exec_finished(state, *done),
@@ -941,10 +942,11 @@ mod tests {
         assert_eq!(
             cmd,
             Cmd::Batch(vec![
-                Cmd::LoadRepoInfo,
                 more(&state),
                 Cmd::LoadStatus,
-                Cmd::LoadBranches,
+                // **log と status の後ろ。** ブランチ一覧の walk を運ぶので、最初の
+                // グラフを待たせない（02 の「ブランチ一覧」）。
+                Cmd::LoadRepoInfo,
                 Cmd::LoadStashes,
                 // 外の変更を比べる基準（01 の「外部の変更の検知」）。
                 Cmd::Probe,
@@ -953,7 +955,6 @@ mod tests {
         assert!(state.jobs.is_running(JobKind::LoadLog));
         assert!(state.jobs.is_running(JobKind::LoadRepoInfo));
         assert!(state.jobs.is_running(JobKind::LoadStatus));
-        assert!(state.jobs.is_running(JobKind::LoadBranches));
         assert!(state.jobs.is_running(JobKind::LoadStashes));
     }
 

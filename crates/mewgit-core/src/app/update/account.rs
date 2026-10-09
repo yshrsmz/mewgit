@@ -187,11 +187,18 @@ pub(super) fn accounts_listed(
     Cmd::None
 }
 
-/// リポジトリの概要を反映する。
+/// リポジトリの概要とブランチ一覧を反映する。
 ///
-/// 一部だけ成功という形にしていないのは、3 つとも同じ ref から導かれる値で、
-/// 途中まで新しい状態を持っても意味が無いため。失敗しても通知だけで続ける
-/// （ラベルもリモートも無いままグラフは出せる）。
+/// **一部だけ成功という形にしない。** どれも同じ ref と config から導かれる値で、
+/// 片方だけ新しくすると、別の返信だった頃の到着順の問いが状態の中に戻る（01 の
+/// 「既定リモート」）。失敗しても通知だけで続ける（ラベルもリモートも無いままグラフは
+/// 出せる）。読めていた値は捨てず、ブランチ一覧には `Failed` の印だけを立てる ——
+/// 空のまま失敗したときに「読み込み中…」で固まらせないため（01 の「ブランチ一覧」）。
+///
+/// **通知は `Error`。** 元はリポジトリ情報の失敗を `Warn`、ブランチ一覧の失敗を `Error`
+/// にしていた。1 つの返信になったので、失敗すると Branches ペインが空のまま失敗表示に
+/// なり、`P` も PR の取り出しも断る（`remote::repo_unread`）—— 続けられるのはグラフだけで、
+/// 黙って隠せる軽さではない。
 pub(super) fn repo_info_loaded(
     state: &mut AppState,
     result: Result<RepoSnapshot, GitReadError>,
@@ -203,6 +210,7 @@ pub(super) fn repo_info_loaded(
             state.repo.remotes = info.remotes;
             state.repo.head = Some(info.head);
             state.graph.refs = info.refs;
+            state.branches.loaded(info.branches);
             // **`Ok` のときだけ。** `Err` の直後は `remotes` が前のまま（起動時なら
             // 空）で、`jobs.finish` は上で済んでいるから「まだ読めていません」の
             // 腕にも入らない。呼ぶと**読めなかっただけ**の一回を
@@ -218,7 +226,8 @@ pub(super) fn repo_info_loaded(
             Cmd::batch([resolve_target(state), prs::reload(state)])
         }
         Err(err) => {
-            state.push_notice(NoticeLevel::Warn, err.to_string(), None);
+            state.branches.failed();
+            state.push_notice(NoticeLevel::Error, err.to_string(), None);
             Cmd::None
         }
     };
@@ -254,7 +263,7 @@ fn resolve_target(state: &mut AppState) -> Cmd {
         return Cmd::None;
     }
     // **[`default_remote`] ではない。** あちらの 1 段目（`branch.<HEAD>.remote`）を
-    // 通すと、`Msg::BranchesLoaded` が先に届いたかどうかで答えが変わる（あちらの doc）。
+    // 通すと、起動時にたまたま居たブランチの追跡先が latch される（あちらの doc）。
     let Ok(remote) = conventional_remote(state) else {
         state.repo.target = TargetState::Unavailable;
         return Cmd::None;
@@ -365,22 +374,22 @@ fn leave_account(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, commit, exec_done_of, fake_output, fetched_remote, issued, press, press_code,
-        remotes_of, state, state_with_commits, tracking_branch, with_branches, HEADS_MAIN,
+        cells, commit, deliver_branches, exec_done_of, fake_output, fetched_remote, issued, press,
+        press_code, remotes_of, state, state_with_commits, tracking_branch, HEADS_MAIN,
         NOTICE_CELLS,
     };
     use super::super::{init, update};
     use super::*;
-    use crate::app::{KeyCode, Modal, Msg};
+    use crate::app::{KeyCode, ListLoad, Modal, Msg};
     use crate::auth::{AccountSource, GhLogin};
 
     use crate::git_exec::ExecError;
     use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote};
 
     use crate::test_util::{
-        fake_account, fake_ambiguous, fake_attempt, fake_configured_unavailable, fake_denied,
-        fake_logins, fake_no_access, fake_pull_request, fake_repo_snapshot, fake_target,
-        pr_list_loaded, reply,
+        fake_account, fake_ambiguous, fake_attempt, fake_branch, fake_configured_unavailable,
+        fake_denied, fake_logins, fake_no_access, fake_pull_request, fake_repo_snapshot,
+        fake_target, pr_list_loaded, reply,
     };
 
     /// リモートを載せた `RepoInfoLoaded` を 1 通届ける。
@@ -413,23 +422,21 @@ mod tests {
 
     #[test]
     fn the_target_ignores_the_branch_tracking_remote() {
-        // **`f` とは別の規則**（`conventional_remote`）。1 段目を通すと、
-        // `Msg::BranchesLoaded` と `Msg::RepoInfoLoaded` のどちらが先に届くかで
-        // `target` が変わり、latch されるので二度と直らない。
+        // **`f` とは別の規則**（`conventional_remote`）。1 段目を通すと、起動時に
+        // たまたま居たブランチの追跡先が latch される —— ブランチを切り替えても
+        // `target` は変わらない（04 の「既定リモート」）。
         //
         // fork 運用（`origin` = 自分、`upstream` = 本家、HEAD が `upstream` 追跡）で
-        // **`f` は `upstream` を、`target` は `origin` を選ぶ**。
+        // **`f` は `upstream` を、`target` は `origin` を選ぶ**。リモート一覧と
+        // ブランチ一覧は同じ返信で届く（`deliver_branches` が今のリモート一覧を写す）。
         let mut state = state_with_commits(2);
-        let _ = with_branches(
+        state.repo.remotes = remotes_of(&[
+            ("origin", "git@github.com:me/x.git"),
+            ("upstream", "git@github.com:them/x.git"),
+        ]);
+        let cmd = deliver_branches(
             &mut state,
             Ok(vec![tracking_branch("main", "upstream", HEADS_MAIN)]),
-        );
-        let cmd = deliver_repo_info(
-            &mut state,
-            &[
-                ("origin", "git@github.com:me/x.git"),
-                ("upstream", "git@github.com:them/x.git"),
-            ],
         );
         let Cmd::ResolveTarget(url) = cmd else {
             panic!("target を頼んでいない: {cmd:?}");
@@ -476,27 +483,6 @@ mod tests {
         assert_eq!(
             cmd,
             Cmd::ResolveTarget(RemoteUrl::parse(ORIGIN_SSH).unwrap())
-        );
-    }
-
-    #[test]
-    fn f_waits_when_the_branch_list_arrives_before_the_remotes() {
-        // **`f_works_before_the_branch_list_arrives` の逆順。** 一覧が空のまま
-        // 1 段目を通すと、追跡先が見つからないのは当たり前なので「追跡先の origin が
-        // リモートにありません」——**設定が壊れていると言ってしまう**。
-        let mut state = state_with_commits(2);
-        let _ = state.issue(Cmd::LoadRepoInfo);
-        let _ = with_branches(
-            &mut state,
-            Ok(vec![tracking_branch("main", "origin", HEADS_MAIN)]),
-        );
-
-        assert_eq!(press(&mut state, 'f'), Cmd::None);
-        let notice = state.notices.back().expect("通知が出ていない");
-        assert!(
-            notice.message.contains("まだ読めていません"),
-            "{}",
-            notice.message
         );
     }
 
@@ -1228,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_info_fills_in_the_remotes_head_and_ref_labels() {
+    fn repo_info_fills_in_the_remotes_head_ref_labels_and_branches() {
         let mut state = state();
         let _ = init(&mut state);
         let oid = commit(1).oid;
@@ -1250,6 +1236,8 @@ mod tests {
                     is_head: true,
                 },
             )]),
+            // **ブランチ一覧も同じ返信に乗る**（02 の「ブランチ一覧」）。
+            branches: vec![fake_branch("main", true), fake_branch("topic", false)],
         };
 
         let _ = update(&mut state, Msg::RepoInfoLoaded(Box::new(Ok(info))));
@@ -1257,6 +1245,9 @@ mod tests {
         assert_eq!(state.repo.remotes.len(), 1);
         assert!(state.repo.head.is_some());
         assert_eq!(state.graph.refs.labels(oid).len(), 1);
+        assert_eq!(state.branches.branches.len(), 2);
+        assert_eq!(state.branches.load(), ListLoad::Loaded);
+        // 通らないとジョブが走ったまま残り、以後の `LoadRepoInfo` が黙って落ちる。
         assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
     }
 
@@ -1271,7 +1262,10 @@ mod tests {
             Msg::RepoInfoLoaded(Box::new(Err(GitReadError::NonUtf8Head))),
         );
 
-        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Warn);
+        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
+        // **「読み込み中…」のまま固まらせない。** ブランチ一覧も同じ返信なので、
+        // 印は `ui` が文言を出し分けるのに要る。
+        assert_eq!(state.branches.load(), ListLoad::Failed);
         assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
     }
 }

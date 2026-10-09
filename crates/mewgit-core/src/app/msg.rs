@@ -96,10 +96,13 @@ pub enum Msg {
         oid: Oid,
         result: Box<Result<String, GitReadError>>,
     },
-    /// リポジトリの概要。起動時と、ref が変わったあと（M3）に読む。
+    /// リポジトリの概要とブランチ一覧。起動時と、ref が変わったあと（M3）に読む。
     ///
-    /// 3 つを 1 通にまとめるのは、どれもリポジトリの ref から導かれる値で、
-    /// fetch の後には揃って古くなるため。`Box` は `Msg` を小さく保つため。
+    /// 1 通にまとめるのは、どれもリポジトリの ref と config から導かれる値で、
+    /// 書き込みの後には揃って古くなるため。**ブランチ一覧も同じ返信に乗せる**（02 の
+    /// 「ブランチ一覧」）—— 別の返信にすると、行の追跡設定とリモート一覧のどちらが先に
+    /// 届くかで `f` / `P` の答えが変わる。`StatusLoaded` と同じ理由で `Result` を運び、
+    /// **要求した内容は運ばない**（リポジトリ全体で 1 つ）。`Box` は `Msg` を小さく保つため。
     RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),
     /// ワーキングツリーの状態。`LogLoaded` と同じ理由で `Result` を運ぶ。失敗の
     /// 通り道が無いと `JobKind::LoadStatus` が走ったまま残り、以後の
@@ -109,14 +112,7 @@ pub enum Msg {
     /// 外の変更を見張る指紋（01 の「外部の変更の検知」）。`StatusLoaded` と同じ理由で
     /// `Result` を運ぶ。
     FingerprintLoaded(Box<Result<RepoFingerprint, GitReadError>>),
-    /// ローカルブランチの一覧。`StatusLoaded` と同じ理由で `Result` を運ぶ。失敗の
-    /// 通り道が無いと `JobKind::LoadBranches` が走ったまま残り、以後の
-    /// `Cmd::LoadBranches` が黙って落ちる。
-    ///
-    /// **要求した内容は運ばない。** 一覧はリポジトリ全体で 1 つなので、
-    /// `CommitDetailLoaded` の `oid` に当たる「どれを頼んだか」が無い。
-    BranchesLoaded(Box<Result<Vec<Branch>, GitReadError>>),
-    /// stash の一覧。`BranchesLoaded` と同じ理由で `Result` を運び、要求した内容は
+    /// stash の一覧。`RepoInfoLoaded` と同じ理由で `Result` を運び、要求した内容は
     /// 運ばない。
     StashesLoaded(Box<Result<Vec<StashEntry>, GitReadError>>),
     /// 対象の diff。`LogLoaded` と同じ理由で `Result` を運ぶ。失敗の通り道が無いと
@@ -237,6 +233,8 @@ pub struct RepoSnapshot {
     pub remotes: Vec<Remote>,
     pub head: HeadInfo,
     pub refs: RefIndex,
+    /// ローカルブランチの一覧（02 の「ブランチ一覧」）。
+    pub branches: Vec<Branch>,
 }
 
 /// [`Msg::ExecFinished`] の中身。

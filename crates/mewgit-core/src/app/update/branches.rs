@@ -1,12 +1,10 @@
 //! Branches ペインのキー処理と一覧の受け取り（07 の「Branches ペイン」）。
 
 use crate::git_exec::GitOp;
-use crate::git_read::{short_oid, Branch, GitReadError, Oid};
+use crate::git_read::{short_oid, Oid};
 
 use super::{confirm, focus, input};
-use crate::app::{
-    AppState, Cmd, InputIntent, JobKind, Key, KeyCode, NoticeLevel, Pane, TextBuffer,
-};
+use crate::app::{AppState, Cmd, InputIntent, Key, KeyCode, Pane, TextBuffer};
 
 /// Branches ペインのキー処理。
 pub(super) fn branches_key(state: &mut AppState, key: Key) -> Cmd {
@@ -125,78 +123,14 @@ fn rename_branch(state: &mut AppState) -> Cmd {
     )
 }
 
-/// ブランチ一覧が届いた。
-///
-/// **成功も失敗も `jobs.finish` を通る。** 通らないと `JobKind::LoadBranches` が走った
-/// まま残り、以後の `Cmd::LoadBranches` が黙って落ちる（`status_loaded` と同じ）。
-pub(super) fn branches_loaded(
-    state: &mut AppState,
-    result: Result<Vec<Branch>, GitReadError>,
-) -> Cmd {
-    let asked = state.jobs.finish(JobKind::LoadBranches);
-
-    match result {
-        Ok(branches) => state.branches.loaded(branches),
-        // 読めていた一覧は捨てない（`status_loaded` と同じ理由）。空のまま失敗した
-        // ときに「読み込み中…」で固まらないよう、印だけ立てる（01 の「ブランチ一覧」）。
-        Err(err) => {
-            state.branches.failed();
-            state.push_notice(NoticeLevel::Error, err.to_string(), None);
-        }
-    }
-
-    // 続きを頼む: 落とされたぶんのブランチ一覧の追いつき。
-    if state.jobs.is_fresh(JobKind::LoadBranches, asked) {
-        Cmd::None
-    } else {
-        Cmd::LoadBranches
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        branch_delete_confirm, open_input, press, press_code, state, state_on_branches,
-        state_with_commits, type_text, with_branches,
+        branch_delete_confirm, open_input, press, press_code, state_on_branches,
+        state_with_commits, type_text,
     };
     use super::*;
     use crate::app::ListLoad;
-
-    use crate::test_util::fake_branch;
-
-    #[test]
-    fn branches_loaded_fills_in_the_list_and_ends_the_job() {
-        let mut state = state();
-        let _ = state.issue(Cmd::LoadBranches);
-
-        let cmd = with_branches(
-            &mut state,
-            Ok(vec![fake_branch("main", true), fake_branch("topic", false)]),
-        );
-
-        assert_eq!(cmd, Cmd::None);
-        // 通らないとジョブが走ったまま残り、以後の `LoadBranches` が黙って落ちる。
-        assert!(!state.jobs.is_running(JobKind::LoadBranches));
-        assert_eq!(state.branches.branches.len(), 2);
-        assert_eq!(state.branches.load(), ListLoad::Loaded);
-    }
-
-    #[test]
-    fn branches_loaded_marks_the_failure_and_tells_the_user() {
-        let mut state = state();
-        let _ = state.issue(Cmd::LoadBranches);
-
-        let cmd = with_branches(&mut state, Err(GitReadError::ReaderGone));
-
-        assert_eq!(cmd, Cmd::None);
-        assert!(!state.jobs.is_running(JobKind::LoadBranches));
-        // **「読み込み中…」のまま固まらせない。** 印は `ui` が文言を出し分けるのに要る。
-        assert_eq!(state.branches.load(), ListLoad::Failed);
-        assert_eq!(
-            state.notices.back().map(|notice| notice.level),
-            Some(NoticeLevel::Error)
-        );
-    }
 
     #[test]
     fn j_and_k_move_the_branch_cursor_without_touching_the_graph() {

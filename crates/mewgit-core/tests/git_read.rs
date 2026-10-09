@@ -331,48 +331,39 @@ fn head_reports_the_current_branch() {
         HeadInfo::Branch {
             name: "main".to_string(),
             oid: first,
-            upstream: None,
         }
     );
 }
 
 #[test]
-fn head_reads_the_tracking_remote_only_once_the_merge_ref_is_there() {
+fn branches_reads_the_tracking_config_of_an_unregistered_remote() {
     // **`app` はこの値で fork から出した PR を当てる**（01 の「現ブランチの PR」）。
-    // リモートを登録しないのは、`head` が読むのが config だけだから（リモート名を
-    // URL に直すのは `app` の仕事）。
+    // リモートを登録しないのは、読むのが config だけだから（リモート名を URL に直すのは
+    // `app` の仕事。`gh pr checkout` は名前ではなく URL を書く）。
     //
     // **`None` の側だけを見ない。** あれは設定を 1 行も書かなくても自明に通るので、
     // 入力を踏んだ証拠にならない（`merge` を足すと `Some` に変わるところまで見る）。
-    // `upstream_config` をそのまま呼ぶので、片方だけの設定は `None`（02 の「head」）。
     let repo = TestRepo::init();
-    let first = repo.commit("first");
+    repo.commit("first");
     repo.git(&["config", "branch.main.remote", "fork"]);
 
     // **開き直す。** git2 の config は変更を stat で見るので、同じ `RepoReader` を
     // 使い回すと 1 秒以内の書き換えを拾わないことがある。
-    assert_eq!(
-        RepoReader::open(repo.path()).unwrap().head().unwrap(),
-        HeadInfo::Branch {
-            name: "main".to_string(),
-            oid: first,
-            upstream: None,
-        },
-        "`merge` が無いのに追跡先を返している"
-    );
+    let tracking = || {
+        let branches = RepoReader::open(repo.path()).unwrap().branches().unwrap();
+        let main = branches.into_iter().find(|b| b.name == "main").unwrap();
+        main.upstream_config
+    };
+    assert_eq!(tracking(), None, "`merge` が無いのに追跡先を返している");
 
     repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
 
     assert_eq!(
-        RepoReader::open(repo.path()).unwrap().head().unwrap(),
-        HeadInfo::Branch {
-            name: "main".to_string(),
-            oid: first,
-            upstream: Some(UpstreamConfig {
-                remote: "fork".to_string(),
-                merge: "refs/heads/main".to_string(),
-            }),
-        }
+        tracking(),
+        Some(UpstreamConfig {
+            remote: "fork".to_string(),
+            merge: "refs/heads/main".to_string(),
+        })
     );
 }
 

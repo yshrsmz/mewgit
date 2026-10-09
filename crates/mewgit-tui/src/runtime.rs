@@ -758,7 +758,6 @@ mod tests {
             Some(HeadInfo::Branch {
                 name: "main".to_string(),
                 oid,
-                upstream: None,
             })
         );
         let labels: Vec<&str> = state

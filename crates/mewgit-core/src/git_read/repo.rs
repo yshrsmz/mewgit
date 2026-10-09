@@ -346,10 +346,8 @@ impl RepoReader {
 
     /// HEAD の状態。
     ///
-    /// **`branch.<HEAD>.remote` もここで読む**（02 の「head」）。ブランチ一覧の HEAD の行と
-    /// 同じ値で、同じ `Cmd::LoadRepoInfo` に乗る。重複を残しているのは、読み手（01 の
-    /// 「現ブランチの PR」）が `RepoInfo` の上にあって `BranchState` を見ないから
-    /// （`docs/plan.md` の M6）。
+    /// **追跡設定は読まない**（02 の「head」）。読み手は [`RepoReader::branches`] の HEAD の
+    /// 行の [`Branch::upstream_config`] を読む。
     pub fn head(&self) -> Result<HeadInfo, GitReadError> {
         let head = match self.repo.head() {
             Ok(head) => head,
@@ -371,15 +369,9 @@ impl RepoReader {
         // git2 0.21 の `shorthand()` は `Err` が非 UTF-8 そのものなので、`Option` を
         // 経由していた 0.20 より意図に近い。
         let name = head.shorthand().map_err(|_| GitReadError::NonUtf8Head)?;
-        // `name()` の `Err` は名前が非 UTF-8 のときで、非 ASCII が入りうるのは
-        // `refs/heads/` の後ろ——`shorthand()` が既に見た側——だけ。**それでも
-        // 握り潰す**：ここで落ちても「追跡設定を引く鍵が無い」だけで、HEAD そのものは
-        // 返せる（`upstream_config` が `None` を返す場合と同じ扱いになる）。
-        let upstream = head.name().ok().and_then(|full| self.upstream_config(full));
         Ok(HeadInfo::Branch {
             name: name.to_string(),
             oid,
-            upstream,
         })
     }
 

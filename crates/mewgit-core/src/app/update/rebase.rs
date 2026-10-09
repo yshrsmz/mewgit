@@ -335,7 +335,6 @@ mod tests {
         state.repo.head = Some(HeadInfo::Branch {
             name: "main".to_string(),
             oid: fake_oid(0),
-            upstream: None,
         });
         status(&mut state, fake_snapshot(&[], &[], &[]));
         state

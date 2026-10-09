@@ -320,22 +320,17 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 
 ### head
 
-- 通常は `Branch { name, oid, upstream }`、detached HEAD は `Detached(oid)`
+- 通常は `Branch { name, oid }`、detached HEAD は `Detached(oid)`
 - コミットが 1 つも無い（unborn）ときは `repo.head()` が `ErrorCode::UnbornBranch` を返すので、
   `HEAD` の symbolic target からブランチ名を取って `Unborn { name }` にする
-- **`upstream` は `branch.<HEAD>.remote` / `.merge` の対**（`UpstreamConfig`）。読み手は
-  `app` の「現ブランチの PR」（**fork のブランチから出した PR を当てる**）と
-  PR 作成の `head` の候補。**どちらも `merge` を読むのは追跡先が fork の URL のときで**、
-  そこに在るブランチの名前はローカルの名前ではなく `merge` のほう（01 の「現ブランチの
-  PR」の「比べる名前」）。`upstream_config` をそのまま
-  呼ぶので、**片方でも欠けていれば `None`** —— 同じ設定の読み方を 2 通り持たないため
-- **ブランチ一覧が読む `Branch::upstream_config` と同じ値を、もう一度読む。** 元は別の
-  ジョブだったので、**読み手が 1 回きりの座り直し**であるこちらに載せる必要があった
-  （`Cmd::LoadBranches` の返信と PR 一覧のどちらが先に届くかで答えが変わる。01 の
-  「現ブランチの PR」）。**いまは同じ `Cmd::LoadRepoInfo` の返信に乗る**（上の
-  「ブランチ一覧」）ので順序の理由は消えたが、重複はまだ残している —— 読み手の
-  `RepoInfo::url_tracked` / `head_homes` は `RepoInfo` の上にあって `BranchState` を
-  見ないので、消すとそちらの置き場所から動かすことになる（`docs/plan.md` の M6）
+- **追跡設定（`branch.<HEAD>.remote` / `.merge`）は載せない。** 読み手（`app` の
+  「現ブランチの PR」と PR 作成の `head` の候補）は、ブランチ一覧の HEAD の行の
+  `Branch::upstream_config` を読む（上の「ブランチ一覧」）。元は `upstream` として
+  ここにも同じ値を載せていた —— ブランチ一覧が別のジョブだった頃は、**読み手が 1 回きりの
+  座り直し**なので、PR 一覧との到着順で答えが変わらないようこちらに置く必要があった
+  （01 の「現ブランチの PR」）。同じ `Cmd::LoadRepoInfo` の返信に畳んだ（#180）ので
+  順序の理由が消え、**同じ設定を同じ返信が 2 回運ぶだけになった**ので消した。
+  unborn の HEAD は一覧に行が無いが、追跡設定を持たないのは元の `Unborn` と同じ
 
 ## ログ列挙
 

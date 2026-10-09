@@ -1643,7 +1643,7 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
 
 ### 現ブランチの PR
 
-**一覧の 1 行として出す。** `RepoInfo.head` がブランチに居て、`head.repo` が
+**一覧の 1 行として出す。** HEAD がブランチに居て（ブランチ一覧に HEAD の行があり）、`head.repo` が
 **そのブランチの head が在りうるリポジトリ**と一致し、`head.branch` が**そのリポジトリでの
 ブランチ名**と一致する PR がそれ（名前は候補ごとに決まる。下の「比べる名前」）。
 **起動直後のカーソルはその行に座る。**
@@ -1663,9 +1663,9 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
 落とすのは、1 行目の形（他人の fork を基に作って origin へ push した）で
 **一覧に出ている自分の PR に座らなくなる**のを防ぐため。
 
-- **状態に持たない。** `list` と `RepoInfo.head` から毎回導ける。持つと、どちらかが
+- **状態に持たない。** `list` とブランチ一覧の HEAD の行から毎回導ける。持つと、どちらかが
   更新されたときに片方だけ古くなる（**導出できる値を、元から離れた場所に置かない**）
-- **追跡先は `HeadInfo::Branch.upstream` の `remote`（`branch.<HEAD>.remote`）の URL から
+- **追跡先は HEAD の行の `Branch::upstream_config` の `remote`（`branch.<HEAD>.remote`）の URL から
   出す。** 一覧には fork からの PR も出る（05）ので、`target` とだけ比べると
   **fork のブランチでは合致しない**。**値はリモート名でも URL でもよい**（git の仕様）
   ので、`RepoInfo.remotes` で引けたらその URL を、引けなければ値そのものを
@@ -1697,11 +1697,14 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
   （座る行が変わるだけで通知は出さない）。**残る穴**は、fork 運用で upstream 側にも
   同名のブランチの PR があり、しかも**自分の fork の PR が無い**とき ——
   そのとき他人の行に座る
-- **材料は `Cmd::LoadRepoInfo` に載せる**（02 の「head」）。**座り直しは 1 回きり**
+- **材料は `Cmd::LoadRepoInfo` に載せる**（02 の「ブランチ一覧」）。**座り直しは 1 回きり**
   （一覧が 1 度届くと以後は選んでいる番号で座るので、この導出は二度と走らない）なので、
   **別のジョブから届く値を混ぜると到着順で答えが変わり、二度と直らない**。
-  `BranchState` にも同じ設定があり、いまは同じ返信に乗る（02 の「ブランチ一覧」）が、
-  あちらは `RepoInfo` の外にある
+  **HEAD の行（`BranchState::head`）から読んでよいのは、ブランチ一覧が同じ返信に乗る
+  から**（経緯は 02 の「head」）。**名前も oid も追跡設定も、PR 作成の「ブランチに
+  乗っているか」も HEAD の行から取り、`RepoInfo.head` と混ぜない** —— 混ぜると、対応の取れない組（`Detached` な
+  `repo.head` と HEAD の行）を読み手が 1 つずつ数えることになる。unborn の HEAD は
+  一覧に行が無いので候補は空（コミットが無ければ PR も無い）
 - **host は比べない。** `target.host` は `ssh -G` で正規化済み、こちらは URL に書かれた
   ままなので、生のまま比べると **fork だけ別のエイリアス（`gh-me:owner/repo`）を使う
   多アカウント運用**——04 が想定している形——で逆に落ちる。**正規化をもう 1 回頼むと、
@@ -1820,7 +1823,7 @@ git 2.55、`env -i` の一時リポジトリ。`push.default` は既定の `simp
 
 - **同名の remote-tracking ref が在るリモート** —— 各リモートの
   `refs/remotes/<r>/<branch>` を `graph.refs`（`RefIndex::remote_oid`。02 の「refs と
-  ラベル」）から引く。**読み取りを足さない** —— 索引は `repo.head` と同じ
+  ラベル」）から引く。**読み取りを足さない** —— 索引は HEAD の行と同じ
   `Msg::RepoInfoLoaded` で届くので、2 つのあいだに順序は無い。**在ることは
   「そのリモートにそのブランチが在った」の証拠**で、`branch.<name>.remote`（何を
   基にしたか）と違って push の結果そのものが残る（上の表の 2 行目で `origin/feat` が
@@ -1832,8 +1835,8 @@ git 2.55、`env -i` の一時リポジトリ。`push.default` は既定の `simp
   衝突を避けてローカルを `bob/main` にし、`merge` に `refs/heads/main` を書く（05 の
   「ブランチ名」）ので、ローカルの名前で組むと fork に無い `bob:bob/main` を指す
   （`/code-review` が拾った）。`refs/heads/` の下に無い `merge`（`refs/pull/<n>/head`）は
-  ブランチではないので候補にしない。材料は `HeadInfo::Branch.upstream`（remote と
-  merge の対。02 の「head」）。**読み方は座り直しと同じ `RepoInfo::url_tracked`**
+  ブランチではないので候補にしない。材料は HEAD の行の `Branch::upstream_config`（remote と
+  merge の対。02 の「ブランチ一覧」）。**読み方は座り直しと同じ `RepoInfo::url_tracked`**
   （上の「比べる名前」）
 - **GitHub の形として読めないリモートは候補にしない**（`RemoteUrl::parse`）。
   **host は比べない**（上の「現ブランチの PR」と同じ理由）
@@ -2381,7 +2384,7 @@ mewgit には無い —— 押されたときに読み直す以外にない。
 
 決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る** ——
 行き先の材料（追跡 ref の位置、ahead / behind、`push_remote`）を運ぶのは `Branch` の
-行だけで、`RepoInfo.head` が持つのは名前と oid と追跡設定だけ（#22 の「キャッシュした
+行だけで、`RepoInfo.head` が持つのは名前と oid だけ（#22 の「キャッシュした
 状態から破壊的操作を選ばない」）。**鮮度の差ではない** —— どちらも同じ
 `Cmd::LoadRepoInfo` の返信に乗る（02 の「ブランチ一覧」）。
 

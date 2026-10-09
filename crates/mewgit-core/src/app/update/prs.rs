@@ -12,10 +12,9 @@ use super::remote::{conventional_remote, repo_unread, NoRemote};
 use super::{edit_key, focus, multiline_edit_key, submit};
 use crate::app::state::current_row;
 use crate::app::{
-    AppState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHeads, RepoInfo,
+    AppState, BranchState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHeads,
     TextBuffer,
 };
-use crate::git_read::HeadInfo;
 use crate::github::CreatePr;
 
 /// PRs ペインのキー処理。
@@ -206,7 +205,7 @@ fn open_pr_create(state: &mut AppState) -> Cmd {
     // **問うのは確定と同じ関数**で、2 本の判定に割ると開く側だけが通して閉じられない
     // 確定へ人を運ぶ。欄に写す候補（ブランチ名を含む）は確定のときに組み直すので、
     // 開いているあいだに HEAD が動いても古い名前では送らない（[`pr_create_submit`]）。
-    if !on_branch(&state.repo) {
+    if !on_branch(&state.branches) {
         state.push_notice(NoticeLevel::Warn, OFF_BRANCH.to_string(), None);
         return Cmd::None;
     }
@@ -432,7 +431,7 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
     let Some(target) = github_ready(state) else {
         return Cmd::None;
     };
-    if !on_branch(&state.repo) {
+    if !on_branch(&state.branches) {
         // 開いたあとに HEAD が動いた形。**閉じない** —— 打った本文を返せない。
         state.push_notice(NoticeLevel::Warn, OFF_BRANCH.to_string(), None);
         return Cmd::None;
@@ -472,8 +471,9 @@ const OFF_BRANCH: &str = "ブランチに乗っていないので PR を作れ�
 ///
 /// `head` に載せる名前は [`AppState::head_candidates`] の候補が持つ（01 の
 /// 「head の組み立て」）。ここは「乗っていない」を候補が空と区別して案内するためだけ。
-fn on_branch(repo: &RepoInfo) -> bool {
-    matches!(repo.head, Some(HeadInfo::Branch { .. }))
+/// **候補と同じく HEAD の行から読む**（`repo.head` と混ぜない。01 の「現ブランチの PR」）。
+fn on_branch(branches: &BranchState) -> bool {
+    branches.head().is_some()
 }
 
 /// どのリモートにもこのブランチが無いときの案内。**開く側と確定する側で同じ字を出す。**
@@ -585,12 +585,12 @@ pub(super) fn pr_list_loaded(
         // いる PR が消えていたときの行き先」だけで、それは新しい一覧といまの HEAD から
         // 決まる（01 の「現ブランチの PR」）。
         Ok(list) => {
-            // **`repo` だけを借りる。** `state.prs` を書き換えながら `state.repo` を
-            // 読むので、閉包が掴むのを 1 フィールドに絞る（Rust 2021 の分割キャプチャ）。
-            let repo = &state.repo;
-            state
-                .prs
-                .loaded(list, |list| current_row(repo, list).map(|pr| pr.number))
+            // **`repo` と `branches` だけを借りる。** `state.prs` を書き換えながら読むので、
+            // 閉包が掴むのをその 2 フィールドに絞る（Rust 2021 の分割キャプチャ）。
+            let (repo, branches) = (&state.repo, &state.branches);
+            state.prs.loaded(list, |list| {
+                current_row(repo, branches, list).map(|pr| pr.number)
+            })
         }
         Err(err) => state.prs.failed(err),
     }
@@ -743,7 +743,8 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 mod tests {
     use super::super::test_support::{
         cells, deliver_branches, enter_with, github_disabled_state, issued, load_branches, press,
-        press_code, remotes_of, state, state_with_commits, tab_to, type_text, ALT, NOTICE_CELLS,
+        press_code, remotes_of, state, state_with_commits, tab_to, tracking_branch, type_text, ALT,
+        NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -782,15 +783,15 @@ mod tests {
 
     /// HEAD のブランチの追跡設定を置き直す。
     ///
-    /// **`put_on_branch` が置いた `head` に足す。** あちらは追跡設定を持たない形
-    /// （`upstream: None`）なので、そのままでは追跡先の腕に入らない。
-    /// **組み直さない** —— `HeadInfo::Branch` のリテラルを写すと、フィールドが増える
+    /// **`put_on_branch` が置いた HEAD の行に足す。** あちらは追跡設定を持たない形
+    /// （`upstream_config: None`）なので、そのままでは追跡先の腕に入らない。
+    /// **組み直さない** —— `Branch` のリテラルを写すと、フィールドが増える
     /// たびに直す構築サイトが 1 つ増える。
     fn track(state: &mut AppState, remote: &str, merge: &str) {
-        let Some(HeadInfo::Branch { upstream, .. }) = &mut state.repo.head else {
-            unreachable!("put_on_branch がブランチに置いている");
+        let Some(head) = state.branches.branches.iter_mut().find(|b| b.is_head) else {
+            unreachable!("put_on_branch が HEAD の行を置いている");
         };
-        *upstream = Some(UpstreamConfig {
+        head.upstream_config = Some(UpstreamConfig {
             remote: remote.to_string(),
             merge: merge.to_string(),
         });
@@ -838,13 +839,13 @@ mod tests {
     /// HEAD のブランチと同名の remote-tracking ref を置き直す
     /// （`graph.refs`。`(リモート名, HEAD と同じ位置か)`）。
     fn set_copies(state: &mut AppState, copies: &[(&str, bool)]) {
-        state.graph.refs = copies_of(&state.repo, copies);
+        state.graph.refs = copies_of(&state.branches, copies);
     }
 
     /// [`set_copies`] の索引。`Msg::RepoInfoLoaded` で届ける形のテストも同じものを使う。
-    fn copies_of(repo: &RepoInfo, copies: &[(&str, bool)]) -> RefIndex {
-        let Some(HeadInfo::Branch { name, oid, .. }) = &repo.head else {
-            unreachable!("put_on_branch がブランチに置いている");
+    fn copies_of(branches: &BranchState, copies: &[(&str, bool)]) -> RefIndex {
+        let Some(Branch { name, oid, .. }) = branches.head() else {
+            unreachable!("put_on_branch が HEAD の行を置いている");
         };
         copies
             .iter()
@@ -993,12 +994,16 @@ mod tests {
     #[test]
     fn n_refuses_off_a_branch_and_while_github_is_unavailable() {
         // **どちらもリクエストを組めない形**（01 の表）。
+        // 実物の detached はブランチ一覧に HEAD の行も無い（判定はそちらを読む）。
         let mut state = state_for_create("feat/x");
         state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
+        state.branches.branches[0].is_head = false;
         let cmd = press(&mut state, 'N');
         assert_eq!(cmd, Cmd::None);
         assert!(state.modal.is_none(), "detached で開いた");
-        assert!(last_notice(&state).contains("ブランチ"), "{state:?}");
+        // **文言まで見る。** 候補も空になるので、`on_branch` を素通りしても「どのリモートにも
+        // この**ブランチ**がありません」で断られ、`contains("ブランチ")` では区別できない。
+        assert_eq!(last_notice(&state), OFF_BRANCH);
 
         // **理由は `github_block` が値で答える**（`r` と同じ。消去法で組まない）。
         let mut state = state_for_create("feat/x");
@@ -1375,7 +1380,7 @@ mod tests {
             snapshot.remotes = state.repo.remotes.clone();
             snapshot.head = state.repo.head.clone().expect("ブランチに乗っている");
             snapshot.branches = state.branches.branches.clone();
-            snapshot.refs = copies_of(&state.repo, copies);
+            snapshot.refs = copies_of(&state.branches, copies);
             let _ = update(state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
             assert!(state.github_block().is_none(), "GitHub 側で先に断られる");
         };
@@ -1716,7 +1721,6 @@ mod tests {
                 head: HeadInfo::Branch {
                     name: "feat/x".to_string(),
                     oid: fake_oid(0),
-                    upstream: None,
                 },
                 // HEAD と一覧を揃える（実物では同じ返信が同じ HEAD を運ぶ）。
                 branches: vec![fake_branch("feat/x", true)],
@@ -1921,6 +1925,78 @@ mod tests {
         assert_eq!(
             last_notice(&state),
             "このブランチの PR は既にあります（#82）"
+        );
+    }
+
+    #[test]
+    fn the_tracking_config_is_read_from_the_head_row() {
+        // **追跡設定は一覧の HEAD の行から読む**（01 の「現ブランチの PR」）。HEAD でない行を
+        // 一覧の先頭に置き、別の fork の URL を追跡させる —— `put_on_branch` の一覧は
+        // HEAD の 1 行だけなので、先頭の行や選択の行を読む実装でも答えが同じになり、
+        // 見張りが空振りする。
+        let mut state = state_for_create("bob/main");
+        set_copies(&mut state, &[]);
+        track(
+            &mut state,
+            "git@github.com:bob/mewgit.git",
+            "refs/heads/main",
+        );
+        let other = Branch {
+            is_head: false,
+            ..tracking_branch(
+                "alice/main",
+                "git@github.com:alice/mewgit.git",
+                "refs/heads/main",
+            )
+        };
+        state.branches.branches.insert(0, other);
+        state.branches.cursor = 0;
+
+        deliver(
+            &mut state,
+            vec![pr_from(90, "main", "alice"), pr_from(82, "main", "bob")],
+        );
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(
+            state.head_candidates(),
+            [PrHead {
+                owner: "bob".to_string(),
+                branch: "main".to_string(),
+            }]
+        );
+
+        // **名前の追跡先と ref の候補も見る。** URL の腕は `url_tracked` が HEAD の行を
+        // 引き直すので、`head_homes` / `head_candidates` が名前を別の行から取っても
+        // 上では答えが変わらない。こちらは名前（ローカルの名前）で当てる腕。
+        let mut state = state_tracking(
+            "feat",
+            "fork",
+            &[
+                ("fork", "git@github.com:bob/mewgit.git"),
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+            ],
+        );
+        set_copies(&mut state, &[("fork", true)]);
+        state
+            .branches
+            .branches
+            .insert(0, fake_branch("alpha", false));
+        state.branches.cursor = 0;
+        // **`repo.head` とも混ぜない**（01 の「現ブランチの PR」）。土台は 2 つを揃えて置くので、
+        // `repo.head` から名前を読む実装でも答えが同じになる。別の名前にずらして見張る。
+        state.repo.head = Some(HeadInfo::Branch {
+            name: "alpha".to_string(),
+            oid: fake_oid(9),
+        });
+
+        deliver(&mut state, vec![pr_from(82, "feat", "bob")]);
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(
+            state.head_candidates(),
+            [PrHead {
+                owner: "bob".to_string(),
+                branch: "feat".to_string(),
+            }]
         );
     }
 

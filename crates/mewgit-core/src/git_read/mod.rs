@@ -348,28 +348,14 @@ impl RefLabel {
 }
 
 /// HEAD の状態。
+///
+/// **追跡設定は持たない。** 読み手はブランチ一覧の HEAD の行の
+/// [`Branch::upstream_config`] を読む（`app` では同じ返信に乗る。02 の「head」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeadInfo {
     Branch {
         name: String,
         oid: Oid,
-        /// `branch.<name>.remote` / `branch.<name>.merge`（02 の「head」）。
-        ///
-        /// **[`Branch::upstream_config`] と同じ設定を、同じ返信がもう一度運ぶ。**
-        /// 読み手は `app` の「現ブランチの PR」で、**fork から出した PR を当てる**のに
-        /// 要る（01）。元はブランチ一覧が別の返信だったので、そちらから取ると PR 一覧との
-        /// 到着順で座り直しの答えが変わった。いまは同じ `Msg::RepoInfoLoaded` に乗るが、
-        /// 読み手が `RepoInfo` の上にあって `BranchState` を見ないので重複を残している
-        /// （02 の「head」、`docs/plan.md` の M6）。
-        ///
-        /// **対で載せる。** `merge` の読み手は PR 作成の `head` の候補と「現ブランチの
-        /// PR」で、どちらも追跡設定が fork の URL のときだけ読む —— そこに在るブランチの
-        /// 名前は**ローカルの名前ではなく `merge` のほう**（01 の「現ブランチの PR」の
-        /// 「比べる名前」）。
-        /// `RepoReader::upstream_config`（private なのでリンクにできない）をそのまま
-        /// 呼ぶので、**片方でも欠けていれば `None`**（同じ設定の読み方を 2 通り持たない
-        /// ため）。
-        upstream: Option<UpstreamConfig>,
     },
     Detached(Oid),
     /// コミットが 1 つも無いリポジトリ。

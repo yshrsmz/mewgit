@@ -585,12 +585,12 @@ pub(super) fn pr_list_loaded(
         // いる PR が消えていたときの行き先」だけで、それは新しい一覧といまの HEAD から
         // 決まる（01 の「現ブランチの PR」）。
         Ok(list) => {
-            // **`repo` だけを借りる。** `state.prs` を書き換えながら `state.repo` を
-            // 読むので、閉包が掴むのを 1 フィールドに絞る（Rust 2021 の分割キャプチャ）。
-            let repo = &state.repo;
-            state
-                .prs
-                .loaded(list, |list| current_row(repo, list).map(|pr| pr.number))
+            // **`repo` と `branches` だけを借りる。** `state.prs` を書き換えながら読むので、
+            // 閉包が掴むのをその 2 フィールドに絞る（Rust 2021 の分割キャプチャ）。
+            let (repo, branches) = (&state.repo, &state.branches);
+            state.prs.loaded(list, |list| {
+                current_row(repo, branches, list).map(|pr| pr.number)
+            })
         }
         Err(err) => state.prs.failed(err),
     }
@@ -782,15 +782,15 @@ mod tests {
 
     /// HEAD のブランチの追跡設定を置き直す。
     ///
-    /// **`put_on_branch` が置いた `head` に足す。** あちらは追跡設定を持たない形
-    /// （`upstream: None`）なので、そのままでは追跡先の腕に入らない。
-    /// **組み直さない** —— `HeadInfo::Branch` のリテラルを写すと、フィールドが増える
+    /// **`put_on_branch` が置いた HEAD の行に足す。** あちらは追跡設定を持たない形
+    /// （`upstream_config: None`）なので、そのままでは追跡先の腕に入らない。
+    /// **組み直さない** —— `Branch` のリテラルを写すと、フィールドが増える
     /// たびに直す構築サイトが 1 つ増える。
     fn track(state: &mut AppState, remote: &str, merge: &str) {
-        let Some(HeadInfo::Branch { upstream, .. }) = &mut state.repo.head else {
-            unreachable!("put_on_branch がブランチに置いている");
+        let Some(head) = state.branches.branches.iter_mut().find(|b| b.is_head) else {
+            unreachable!("put_on_branch が HEAD の行を置いている");
         };
-        *upstream = Some(UpstreamConfig {
+        head.upstream_config = Some(UpstreamConfig {
             remote: remote.to_string(),
             merge: merge.to_string(),
         });
@@ -1716,7 +1716,6 @@ mod tests {
                 head: HeadInfo::Branch {
                     name: "feat/x".to_string(),
                     oid: fake_oid(0),
-                    upstream: None,
                 },
                 // HEAD と一覧を揃える（実物では同じ返信が同じ HEAD を運ぶ）。
                 branches: vec![fake_branch("feat/x", true)],
@@ -1921,6 +1920,69 @@ mod tests {
         assert_eq!(
             last_notice(&state),
             "このブランチの PR は既にあります（#82）"
+        );
+    }
+
+    #[test]
+    fn the_tracking_config_is_read_from_the_head_row() {
+        // **追跡設定は一覧の HEAD の行から読む**（01 の「現ブランチの PR」）。HEAD でない行を
+        // 一覧の先頭に置き、別の fork の URL を追跡させる —— `put_on_branch` の一覧は
+        // HEAD の 1 行だけなので、先頭の行や選択の行を読む実装でも答えが同じになり、
+        // 見張りが空振りする。
+        let mut state = state_for_create("bob/main");
+        set_copies(&mut state, &[]);
+        track(
+            &mut state,
+            "git@github.com:bob/mewgit.git",
+            "refs/heads/main",
+        );
+        let mut other = fake_branch("alice/main", false);
+        other.upstream_config = Some(UpstreamConfig {
+            remote: "git@github.com:alice/mewgit.git".to_string(),
+            merge: "refs/heads/main".to_string(),
+        });
+        state.branches.branches.insert(0, other);
+        state.branches.cursor = 0;
+
+        deliver(
+            &mut state,
+            vec![pr_from(90, "main", "alice"), pr_from(82, "main", "bob")],
+        );
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(
+            state.head_candidates(),
+            [PrHead {
+                owner: "bob".to_string(),
+                branch: "main".to_string(),
+            }]
+        );
+
+        // **名前の追跡先と ref の候補も見る。** URL の腕は `url_tracked` が HEAD の行を
+        // 引き直すので、`head_homes` / `head_candidates` が名前を別の行から取っても
+        // 上では答えが変わらない。こちらは名前（ローカルの名前）で当てる腕。
+        let mut state = state_tracking(
+            "feat",
+            "fork",
+            &[
+                ("fork", "git@github.com:bob/mewgit.git"),
+                ("origin", "git@github.com:yshrsmz/mewgit.git"),
+            ],
+        );
+        set_copies(&mut state, &[("fork", true)]);
+        state
+            .branches
+            .branches
+            .insert(0, fake_branch("alpha", false));
+        state.branches.cursor = 0;
+
+        deliver(&mut state, vec![pr_from(82, "feat", "bob")]);
+        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
+        assert_eq!(
+            state.head_candidates(),
+            [PrHead {
+                owner: "bob".to_string(),
+                branch: "feat".to_string(),
+            }]
         );
     }
 

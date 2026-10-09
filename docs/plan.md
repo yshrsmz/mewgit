@@ -569,13 +569,13 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       分けて残っていたのは到着順の問いだけだった（`/simplify` の altitude が拾った）。
       `f` も push も `BranchState` から取り、リモート一覧と同じ返信に乗る。**払うのは
       ラベルと `target` の遅れ**で、ふつうは 1ms 前後、ローカル 300 本の合成で 0.4 秒
-- [ ] `HeadInfo::Branch.upstream` を消して `Branch.upstream_config` の 1 本にする。
-      **同じ設定を同じ返信が 2 回運んでいる**（上のタスクで 1 つの読み取りに畳んだ。
-      02 の「head」）。残したのは読み手の `RepoInfo::url_tracked` と `head_homes`
-      （`&RepoInfo` を取る自由関数）が `BranchState` を見ないから —— 消すならこの 2 つに
-      HEAD の行（`BranchState::head()`）を渡す形にし、`AppState::head_candidates` も
-      そちらから読む。**unborn の HEAD は一覧に行が無い**ので、追跡設定を持たないことを数える
-      （いまの `HeadInfo::Unborn` も持たない）
+- [x] `HeadInfo::Branch.upstream` を消して `Branch.upstream_config` の 1 本にする。
+      **同じ設定を同じ返信が 2 回運んでいた**（上のタスクで 1 つの読み取りに畳んだ。
+      02 の「head」）。読み手の `RepoInfo::url_tracked` と `head_homes`、
+      `AppState::head_candidates` は `&BranchState` を取り、中で HEAD の行
+      （`BranchState::head()`）を引く —— **名前も oid も追跡設定も行から取り、`repo.head` と
+      混ぜない**（01 の「現ブランチの PR」）。**unborn の HEAD は一覧に行が無い**ので候補は空
+      （元の `HeadInfo::Unborn` も追跡設定を持たなかった）
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

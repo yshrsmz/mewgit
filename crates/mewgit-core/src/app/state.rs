@@ -607,11 +607,11 @@ impl AppState {
     /// **状態に持たない。** `prs.list` と `repo` から毎回導く —— 写しを置くと、
     /// どちらかが更新されたときに片方だけ古くなる。
     pub fn current_pr(&self) -> Option<&PullRequest> {
-        current_row(&self.repo, &self.prs.list)
+        current_row(&self.repo, &self.branches, &self.prs.list)
     }
 
-    /// PR 作成の `head` の候補（01 の「head の組み立て」）。HEAD がブランチに
-    /// 乗っていなければ空。
+    /// PR 作成の `head` の候補（01 の「head の組み立て」）。ブランチ一覧に HEAD の行が
+    /// 無ければ（detached / unborn / まだ届いていない）空。
     ///
     /// **[`head_homes`] とは読み手が違う。** あちらは「PR の head が**在りうる**
     /// リポジトリ」を返す寛容な照合（座り直し）で、追跡先（何を基にしたか）も入れる。
@@ -622,7 +622,7 @@ impl AppState {
     ///   [`RefIndex::remote_oid`]）。在ることが「そのリモートにそのブランチが在った」の
     ///   証拠で、`branch.<name>.remote`（何を基にしたか）と違って push の結果そのものが
     ///   残る。**名前はリモートの一覧から組む**（ref 名から切り出すと `/` を含む
-    ///   リモート名で割り方が決まらない。02）。索引は `repo.head` と同じ
+    ///   リモート名で割り方が決まらない。02）。索引は HEAD の行と同じ
     ///   `Msg::RepoInfoLoaded` で届くので、2 つのあいだに順序は無い
     /// - 追跡設定の URL（`branch.<name>.remote` が URL のとき）。`gh pr checkout` と
     ///   mewgit の取り出しは fork の URL を書き、**remote-tracking ref を作らない**（05）。
@@ -638,7 +638,7 @@ impl AppState {
     /// リポジトリは区別できない（[`PrHead`]）。**GitHub の形として読めない
     /// リモートは入れない**。host は比べない（[`head_homes`] と同じ理由）。
     pub(super) fn head_candidates(&self) -> Vec<PrHead> {
-        let Some(HeadInfo::Branch { name, oid, .. }) = self.repo.head.as_ref() else {
+        let Some(Branch { name, oid, .. }) = self.branches.head() else {
             return Vec::new();
         };
         let owner_of = |url: &str| RemoteUrl::parse(url).ok().map(|url| url.owner);
@@ -664,7 +664,7 @@ impl AppState {
         // 材料（ref）で拾えている。
         let from_url = self
             .repo
-            .url_tracked()
+            .url_tracked(&self.branches)
             .and_then(|(url, branch)| Some((owner_of(url)?, branch.to_string())));
 
         let mut heads: Vec<PrHead> = Vec::new();
@@ -796,6 +796,10 @@ impl RepoInfo {
     /// HEAD のブランチの追跡先が URL のとき、その URL と **fork でのブランチ名**
     /// （`merge` から `refs/heads/` を外したもの）。
     ///
+    /// **追跡設定は `branches` の HEAD の行から読む**（[`BranchState::head`]）。HEAD の行を
+    /// 呼ぶ側で選ばせないのは、HEAD でない行を渡す形が型で組めるから（`head_homes` と
+    /// 同じ理由）。
+    ///
     /// **名前は `merge` から取る。** URL を書くのは PR の取り出し（mewgit と
     /// `gh pr checkout`）と `git push -u <URL> <local>:<remote>` で、どれもローカルと
     /// 違う名前を `merge` に書きうる（取り出しは衝突を避けてローカルを `bob/main` に
@@ -804,14 +808,11 @@ impl RepoInfo {
     /// 書くと、片方だけ直ったときに「取り出した PR に座らない」と「fork に無い
     /// ブランチを送る」が片側だけで起きる。`refs/heads/` の下に無い `merge` は
     /// ブランチではないので `None`（取り出しは URL と一緒には書かない。05）。
-    pub(super) fn url_tracked(&self) -> Option<(&str, &str)> {
-        let Some(HeadInfo::Branch {
-            upstream: Some(upstream),
-            ..
-        }) = self.head.as_ref()
-        else {
-            return None;
-        };
+    pub(super) fn url_tracked<'a>(
+        &'a self,
+        branches: &'a BranchState,
+    ) -> Option<(&'a str, &'a str)> {
+        let upstream = branches.head()?.upstream_config.as_ref()?;
         let Tracked::Url(url) = self.tracked(&upstream.remote) else {
             return None;
         };
@@ -1892,31 +1893,37 @@ impl StashState {
 /// **fork のブランチも当てる。** 照合する相手（リポジトリと、そこでのブランチ名）は
 /// [`head_homes`] が確からしい順に出す（`branch.<HEAD>.remote` の URL → `target`）。
 ///
-/// **到着順に依らない。** 材料の `head` と `remotes` はどちらも
+/// **到着順に依らない。** 材料の HEAD の行（`branches`）と `remotes` はどちらも
 /// [`Msg::RepoInfoLoaded`](super::Msg::RepoInfoLoaded) に乗って**同時に**届き、
 /// `target` はその返信から始まる鎖（`Cmd::ResolveTarget` → `Cmd::ResolveAccount` →
-/// 一覧）の途中なので、**一覧が届いた時点でどれも揃っている**。`BranchState` から
-/// 追跡設定を取るとこれが崩れる（01 の「現ブランチの PR」）ので、**順序を回す
-/// テストは要らない**。
-pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Option<&'a PullRequest> {
+/// 一覧）の途中なので、**一覧が届いた時点でどれも揃っている**。ブランチ一覧が別の
+/// 返信だった頃はこれが崩れたので同じ設定を `HeadInfo` にも載せていた（01 の
+/// 「現ブランチの PR」）が、いまは同じ返信に乗るので、**順序を回すテストは要らない**。
+pub(super) fn current_row<'a>(
+    repo: &RepoInfo,
+    branches: &BranchState,
+    list: &'a [PullRequest],
+) -> Option<&'a PullRequest> {
     // **リポジトリ名まで見る**（`RepoRef` 丸ごとの比較）。owner だけだと、同じ owner の
     // 下に作った fork（`acme/app` → `acme/app-fork`）から出た他人の PR が
     // 「現ブランチの PR」に当たる。
-    head_homes(repo).into_iter().find_map(|(home, branch)| {
-        list.iter().find(|pr| {
-            pr.head.branch == branch
-                && pr
-                    .head
-                    .repo
-                    .as_ref()
-                    .is_some_and(|repo| repo.same_as(&home))
+    head_homes(repo, branches)
+        .into_iter()
+        .find_map(|(home, branch)| {
+            list.iter().find(|pr| {
+                pr.head.branch == branch
+                    && pr
+                        .head
+                        .repo
+                        .as_ref()
+                        .is_some_and(|repo| repo.same_as(&home))
+            })
         })
-    })
 }
 
 /// HEAD のブランチから出した PR の head が在りうるリポジトリと、そこでのブランチ名を、
-/// **確からしい順**に返す（01 の「現ブランチの PR」）。HEAD がブランチに乗って
-/// いなければ空（`Detached` にも `Unborn` にも PR は無い）。
+/// **確からしい順**に返す（01 の「現ブランチの PR」）。ブランチ一覧に HEAD の行が
+/// 無ければ空（detached にも unborn にも PR は無い）。
 ///
 /// **名前は、追跡先が URL の腕だけ `merge` から取る**（[`RepoInfo::url_tracked`]）。
 /// 名前の追跡先と `target` の腕はローカルの名前のまま —— 理由は 01 の「比べる名前」。
@@ -1934,9 +1941,11 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 /// 値はそのまま URL として読む。ここを落とすと、**fork の PR をローカルに出す
 /// いちばんふつうの経路**が当たらない。
 ///
-/// **材料は引数に取らない。** 追跡設定は `repo.head` から導けるので、
-/// 別々に渡すと対応の取れない組（`Detached` な `head` に `Some("origin")`）が型で
-/// 組める（`.claude/rules/rust-coding.md` の「導出できる値を引数に取らせない」）。
+/// **HEAD の行は引数に取らない。** 名前も追跡設定も `branches` の HEAD の行
+/// （[`BranchState::head`]）から導けるので、呼ぶ側に選ばせると対応の取れない組
+/// （HEAD でない行、`Detached` な `repo.head` と並べた行）が型で組める
+/// （`.claude/rules/rust-coding.md` の「導出できる値を引数に取らせない」）。
+/// **`repo.head` とも混ぜない** —— 追跡設定を運ぶのは行だけなので、名前もそちらから取る。
 ///
 /// **読めない追跡設定は候補にしない**（設定が無い / `.`（ローカル追跡）/ リモートが
 /// 消えている / URL が GitHub の形でない / URL の `merge` がブランチでない）。
@@ -1947,17 +1956,22 @@ pub(super) fn current_row<'a>(repo: &RepoInfo, list: &'a [PullRequest]) -> Optio
 /// URL に書かれたままなので、生のまま比べると **fork だけ別のエイリアスを使う
 /// 多アカウント運用**（04）で逆に落ちる。残る穴は、別ホストの同名 `owner/repo` に
 /// 同名のブランチがあり、その PR が一覧に居るとき（01）。
-fn head_homes(repo: &RepoInfo) -> Vec<(RepoRef, &str)> {
-    let Some(HeadInfo::Branch { name, upstream, .. }) = repo.head.as_ref() else {
+fn head_homes<'a>(repo: &'a RepoInfo, branches: &'a BranchState) -> Vec<(RepoRef, &'a str)> {
+    let Some(Branch {
+        name,
+        upstream_config,
+        ..
+    }) = branches.head()
+    else {
         return Vec::new();
     };
     // 名前で引ければその URL、URL ならそのもの。
-    let tracked = match upstream
+    let tracked = match upstream_config
         .as_ref()
         .map(|upstream| repo.tracked(&upstream.remote))
     {
         Some(Tracked::Named(remote)) => Some((remote.url.as_str(), name.as_str())),
-        _ => repo.url_tracked(),
+        _ => repo.url_tracked(branches),
     };
     let tracked = tracked.and_then(|(url, branch)| {
         let url = RemoteUrl::parse(url).ok()?;

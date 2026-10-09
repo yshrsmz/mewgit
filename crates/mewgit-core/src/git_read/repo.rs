@@ -371,15 +371,9 @@ impl RepoReader {
         // git2 0.21 の `shorthand()` は `Err` が非 UTF-8 そのものなので、`Option` を
         // 経由していた 0.20 より意図に近い。
         let name = head.shorthand().map_err(|_| GitReadError::NonUtf8Head)?;
-        // `name()` の `Err` は名前が非 UTF-8 のときで、非 ASCII が入りうるのは
-        // `refs/heads/` の後ろ——`shorthand()` が既に見た側——だけ。**それでも
-        // 握り潰す**：ここで落ちても「追跡設定を引く鍵が無い」だけで、HEAD そのものは
-        // 返せる（`upstream_config` が `None` を返す場合と同じ扱いになる）。
-        let upstream = head.name().ok().and_then(|full| self.upstream_config(full));
         Ok(HeadInfo::Branch {
             name: name.to_string(),
             oid,
-            upstream,
         })
     }
 

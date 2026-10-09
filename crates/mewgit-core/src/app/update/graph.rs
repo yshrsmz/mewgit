@@ -1364,7 +1364,6 @@ mod tests {
         state.repo.head = Some(HeadInfo::Branch {
             name: "main".to_string(),
             oid: fake_oid(9),
-            upstream: None,
         });
     }
 

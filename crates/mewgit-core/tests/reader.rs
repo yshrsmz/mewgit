@@ -152,7 +152,6 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
         HeadInfo::Branch {
             name: "main".to_string(),
             oid,
-            upstream: None,
         }
     );
     let labels: Vec<&str> = refs.labels(oid).iter().map(|l| l.name()).collect();

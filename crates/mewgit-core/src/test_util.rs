@@ -881,7 +881,6 @@ pub fn fake_repo_snapshot() -> RepoSnapshot {
         head: HeadInfo::Branch {
             name: "main".to_string(),
             oid: fake_oid(1),
-            upstream: None,
         },
         refs: RefIndex::from_iter([]),
         branches: vec![Branch {
@@ -1186,6 +1185,10 @@ pub fn start_pr_details(
 
 /// アカウントと対象が決まり、HEAD が `branch` に居る状態にする。
 ///
+/// **ブランチ一覧にも HEAD の行を 1 本置く**（追跡設定は無し）。現ブランチの PR と
+/// `head` の候補は名前を HEAD の行から読む（01 の「現ブランチの PR」）ので、`repo.head`
+/// だけでは HEAD がブランチに居ることにならない。一覧の読み込みの段階は進めない。
+///
 /// **`Msg` を通さずに置く。** ここまで運ぶには `Msg::RepoInfoLoaded` と
 /// `Msg::AccountResolved` の両方が要り、**その 2 本の順序そのものを見張るテストが
 /// `app::update::prs` にある**。土台が片方の順序を焼き込むと、そちらが空振りする。
@@ -1195,16 +1198,16 @@ pub fn put_on_branch(state: &mut AppState, branch: &str) {
     state.repo.head = Some(HeadInfo::Branch {
         name: branch.to_string(),
         oid: fake_oid(0),
-        upstream: None,
     });
+    state.branches.branches = vec![fake_branch(branch, true)];
 }
 
 /// ブランチ一覧を、それを運ぶ `Msg::RepoInfoLoaded` で届ける（02 の「ブランチ一覧」）。
 ///
 /// **ほかの値はいまの状態から写す**（リモート一覧、ref の索引）。ブランチ一覧は
 /// リポジトリ情報と同じ返信に乗るので、**一覧だけを届ける返信は実物に無い** —— 写さずに
-/// 空で届けると、先に置いたリモート一覧を消す。HEAD は一覧の HEAD の行から作り
-/// （追跡設定も写す。実物では同じ config を読む）、HEAD の行が無ければ detached にする
+/// 空で届けると、先に置いたリモート一覧を消す。HEAD は一覧の HEAD の行から作り、
+/// HEAD の行が無ければ detached にする
 /// —— **先に置いた `repo.head` は上書きされる**。`Err` はそのまま届ける。`reply` を通す
 /// （ランタイムでは `Cmd` が必ず `issue` を通る）。
 ///
@@ -1219,7 +1222,6 @@ pub fn deliver_branches(state: &mut AppState, result: Result<Vec<Branch>, GitRea
             |head| HeadInfo::Branch {
                 name: head.name.clone(),
                 oid: head.oid,
-                upstream: head.upstream_config.clone(),
             },
         ),
         refs: state.graph.refs.clone(),

@@ -1374,6 +1374,7 @@ mod tests {
             let mut snapshot = fake_repo_snapshot();
             snapshot.remotes = state.repo.remotes.clone();
             snapshot.head = state.repo.head.clone().expect("ブランチに乗っている");
+            snapshot.branches = state.branches.branches.clone();
             snapshot.refs = copies_of(&state.repo, copies);
             let _ = update(state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
             assert!(state.github_block().is_none(), "GitHub 側で先に断られる");
@@ -1587,6 +1588,8 @@ mod tests {
 
         let mut snapshot = fake_repo_snapshot();
         snapshot.head = HeadInfo::Detached(fake_oid(1));
+        // detached ではどの行にも HEAD の印が付かない（実物では同じ返信が運ぶ）。
+        snapshot.branches = vec![fake_branch("feat/x", false)];
         snapshot.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
         let _ = update(&mut state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
         assert!(
@@ -1715,6 +1718,8 @@ mod tests {
                     oid: fake_oid(0),
                     upstream: None,
                 },
+                // HEAD と一覧を揃える（実物では同じ返信が同じ HEAD を運ぶ）。
+                branches: vec![fake_branch("feat/x", true)],
                 ..fake_repo_snapshot()
             }))),
         );

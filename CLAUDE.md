@@ -80,7 +80,8 @@ CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace -
 
 ## Git 運用
 
-- ブランチ: `feat/<topic>`、`fix/<topic>`。`github:git-workflow` スキルは `<type>-<subject>` を指示するが、こちらを優先する。main へは PR 経由
+- ブランチ: `feat/<topic>`、`fix/<topic>`。`github:git-workflow` スキルは `<type>-<subject>` を指示するが、こちらを優先する。main へは PR 経由。
+  refactor / test / docs の変更も `feat/` か `fix/` に載せる —— commit の type とブランチの接頭辞は別（#181 で `refactor/` と付けて改名した）
 - コミットメッセージ: Conventional Commits（`feat(graph): ...`、`fix(git_exec): ...`）。scope はモジュール名
 - `docs/plan.md` のタスクを完了したらチェックを付けて同じコミットに含める
 - **リリースは release-please の release PR をマージして切る。** タグを手で打たない、

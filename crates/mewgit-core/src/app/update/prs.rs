@@ -12,10 +12,9 @@ use super::remote::{conventional_remote, repo_unread, NoRemote};
 use super::{edit_key, focus, multiline_edit_key, submit};
 use crate::app::state::current_row;
 use crate::app::{
-    AppState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHeads, RepoInfo,
+    AppState, BranchState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHeads,
     TextBuffer,
 };
-use crate::git_read::HeadInfo;
 use crate::github::CreatePr;
 
 /// PRs ペインのキー処理。
@@ -206,7 +205,7 @@ fn open_pr_create(state: &mut AppState) -> Cmd {
     // **問うのは確定と同じ関数**で、2 本の判定に割ると開く側だけが通して閉じられない
     // 確定へ人を運ぶ。欄に写す候補（ブランチ名を含む）は確定のときに組み直すので、
     // 開いているあいだに HEAD が動いても古い名前では送らない（[`pr_create_submit`]）。
-    if !on_branch(&state.repo) {
+    if !on_branch(&state.branches) {
         state.push_notice(NoticeLevel::Warn, OFF_BRANCH.to_string(), None);
         return Cmd::None;
     }
@@ -432,7 +431,7 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
     let Some(target) = github_ready(state) else {
         return Cmd::None;
     };
-    if !on_branch(&state.repo) {
+    if !on_branch(&state.branches) {
         // 開いたあとに HEAD が動いた形。**閉じない** —— 打った本文を返せない。
         state.push_notice(NoticeLevel::Warn, OFF_BRANCH.to_string(), None);
         return Cmd::None;
@@ -472,8 +471,9 @@ const OFF_BRANCH: &str = "ブランチに乗っていないので PR を作れ�
 ///
 /// `head` に載せる名前は [`AppState::head_candidates`] の候補が持つ（01 の
 /// 「head の組み立て」）。ここは「乗っていない」を候補が空と区別して案内するためだけ。
-fn on_branch(repo: &RepoInfo) -> bool {
-    matches!(repo.head, Some(HeadInfo::Branch { .. }))
+/// **候補と同じく HEAD の行から読む**（`repo.head` と混ぜない。01 の「現ブランチの PR」）。
+fn on_branch(branches: &BranchState) -> bool {
+    branches.head().is_some()
 }
 
 /// どのリモートにもこのブランチが無いときの案内。**開く側と確定する側で同じ字を出す。**
@@ -743,7 +743,8 @@ pub(super) fn open_pr_finished(state: &mut AppState, result: Result<(), AuthErro
 mod tests {
     use super::super::test_support::{
         cells, deliver_branches, enter_with, github_disabled_state, issued, load_branches, press,
-        press_code, remotes_of, state, state_with_commits, tab_to, type_text, ALT, NOTICE_CELLS,
+        press_code, remotes_of, state, state_with_commits, tab_to, tracking_branch, type_text, ALT,
+        NOTICE_CELLS,
     };
     use super::super::update;
     use super::*;
@@ -838,13 +839,13 @@ mod tests {
     /// HEAD のブランチと同名の remote-tracking ref を置き直す
     /// （`graph.refs`。`(リモート名, HEAD と同じ位置か)`）。
     fn set_copies(state: &mut AppState, copies: &[(&str, bool)]) {
-        state.graph.refs = copies_of(&state.repo, copies);
+        state.graph.refs = copies_of(&state.branches, copies);
     }
 
     /// [`set_copies`] の索引。`Msg::RepoInfoLoaded` で届ける形のテストも同じものを使う。
-    fn copies_of(repo: &RepoInfo, copies: &[(&str, bool)]) -> RefIndex {
-        let Some(HeadInfo::Branch { name, oid, .. }) = &repo.head else {
-            unreachable!("put_on_branch がブランチに置いている");
+    fn copies_of(branches: &BranchState, copies: &[(&str, bool)]) -> RefIndex {
+        let Some(Branch { name, oid, .. }) = branches.head() else {
+            unreachable!("put_on_branch が HEAD の行を置いている");
         };
         copies
             .iter()
@@ -993,8 +994,10 @@ mod tests {
     #[test]
     fn n_refuses_off_a_branch_and_while_github_is_unavailable() {
         // **どちらもリクエストを組めない形**（01 の表）。
+        // 実物の detached はブランチ一覧に HEAD の行も無い（判定はそちらを読む）。
         let mut state = state_for_create("feat/x");
         state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
+        state.branches.branches[0].is_head = false;
         let cmd = press(&mut state, 'N');
         assert_eq!(cmd, Cmd::None);
         assert!(state.modal.is_none(), "detached で開いた");
@@ -1375,7 +1378,7 @@ mod tests {
             snapshot.remotes = state.repo.remotes.clone();
             snapshot.head = state.repo.head.clone().expect("ブランチに乗っている");
             snapshot.branches = state.branches.branches.clone();
-            snapshot.refs = copies_of(&state.repo, copies);
+            snapshot.refs = copies_of(&state.branches, copies);
             let _ = update(state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
             assert!(state.github_block().is_none(), "GitHub 側で先に断られる");
         };
@@ -1936,11 +1939,14 @@ mod tests {
             "git@github.com:bob/mewgit.git",
             "refs/heads/main",
         );
-        let mut other = fake_branch("alice/main", false);
-        other.upstream_config = Some(UpstreamConfig {
-            remote: "git@github.com:alice/mewgit.git".to_string(),
-            merge: "refs/heads/main".to_string(),
-        });
+        let other = Branch {
+            is_head: false,
+            ..tracking_branch(
+                "alice/main",
+                "git@github.com:alice/mewgit.git",
+                "refs/heads/main",
+            )
+        };
         state.branches.branches.insert(0, other);
         state.branches.cursor = 0;
 

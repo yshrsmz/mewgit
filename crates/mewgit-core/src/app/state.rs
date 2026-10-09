@@ -796,9 +796,7 @@ impl RepoInfo {
     /// HEAD のブランチの追跡先が URL のとき、その URL と **fork でのブランチ名**
     /// （`merge` から `refs/heads/` を外したもの）。
     ///
-    /// **追跡設定は `branches` の HEAD の行から読む**（[`BranchState::head`]）。HEAD の行を
-    /// 呼ぶ側で選ばせないのは、HEAD でない行を渡す形が型で組めるから（`head_homes` と
-    /// 同じ理由）。
+    /// **追跡設定は `branches` の HEAD の行から読む**（理由は `head_homes` の doc）。
     ///
     /// **名前は `merge` から取る。** URL を書くのは PR の取り出し（mewgit と
     /// `gh pr checkout`）と `git push -u <URL> <local>:<remote>` で、どれもローカルと
@@ -1809,7 +1807,7 @@ impl BranchState {
     ///
     /// **push と fetch の行き先も、断られたことの記憶も、HEAD はここからしか取らない。**
     /// あちらの材料（追跡 ref の位置、ahead / behind、`push_remote`）を運ぶのは
-    /// [`Branch`] の行だけで、`RepoInfo.head` が持つのは名前と oid と追跡設定だけ
+    /// [`Branch`] の行だけで、`RepoInfo.head` が持つのは名前と oid だけ
     /// （#22 の「キャッシュした状態から破壊的操作を選ばない」）。**鮮度の差ではない**
     /// —— どちらも同じ `Cmd::LoadRepoInfo` の返信に乗る（02 の「ブランチ一覧」）。
     pub fn head(&self) -> Option<&Branch> {
@@ -1896,9 +1894,8 @@ impl StashState {
 /// **到着順に依らない。** 材料の HEAD の行（`branches`）と `remotes` はどちらも
 /// [`Msg::RepoInfoLoaded`](super::Msg::RepoInfoLoaded) に乗って**同時に**届き、
 /// `target` はその返信から始まる鎖（`Cmd::ResolveTarget` → `Cmd::ResolveAccount` →
-/// 一覧）の途中なので、**一覧が届いた時点でどれも揃っている**。ブランチ一覧が別の
-/// 返信だった頃はこれが崩れたので同じ設定を `HeadInfo` にも載せていた（01 の
-/// 「現ブランチの PR」）が、いまは同じ返信に乗るので、**順序を回すテストは要らない**。
+/// 一覧）の途中なので、**一覧が届いた時点でどれも揃っている**（経緯は 02 の「head」）。
+/// **順序を回すテストは要らない**。
 pub(super) fn current_row<'a>(
     repo: &RepoInfo,
     branches: &BranchState,

@@ -284,9 +284,15 @@ fn confirm_revert(
 
 /// 確認の本文に出す積む先。**表示だけに使う**（git は HEAD に積むので、ここが古くても
 /// 積む先は変わらない）。
+///
+/// ブランチの名前は HEAD の行から読む（02 の「head」）。
 fn head_name(state: &AppState) -> &str {
     match &state.repo.head {
-        Some(HeadInfo::Branch { name, .. } | HeadInfo::Unborn { name }) => name.as_str(),
+        Some(HeadInfo::Branch) => state
+            .branches
+            .head()
+            .map_or("HEAD", |branch| branch.name.as_str()),
+        Some(HeadInfo::Unborn { name }) => name.as_str(),
         Some(HeadInfo::Detached(_)) | None => "HEAD",
     }
 }
@@ -573,7 +579,9 @@ mod tests {
 
     use crate::git_read::{DiffTarget, FileStatus};
     use crate::graph::LaneState;
-    use crate::test_util::{fake_commit_with_parents, fake_entry, fake_oid, fake_snapshot, reply};
+    use crate::test_util::{
+        fake_branch, fake_commit_with_parents, fake_entry, fake_oid, fake_snapshot, reply,
+    };
 
     #[test]
     fn log_loaded_appends_lines_and_finishes_the_job() {
@@ -1359,12 +1367,11 @@ mod tests {
 
     // ---- commit / amend ----
 
-    /// HEAD を `main` にする。確認の本文が積む先の名前を出すかを見るため。
+    /// HEAD を `main` にする。確認の本文が積む先の名前を出すかを見るため。名前は
+    /// HEAD の行から読む（02 の「head」）。
     fn on_main(state: &mut AppState) {
-        state.repo.head = Some(HeadInfo::Branch {
-            name: "main".to_string(),
-            oid: fake_oid(9),
-        });
+        state.repo.head = Some(HeadInfo::Branch);
+        state.branches.branches = vec![fake_branch("main", true)];
     }
 
     #[test]

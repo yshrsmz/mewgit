@@ -1224,10 +1224,7 @@ mod tests {
                 url: "git@github.com:owner/repo.git".to_string(),
                 head_branch: None,
             }],
-            head: HeadInfo::Branch {
-                name: "main".to_string(),
-                oid,
-            },
+            head: HeadInfo::Branch,
             refs: RefIndex::from_iter([(
                 oid,
                 RefLabel::Local {

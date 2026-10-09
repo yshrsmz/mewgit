@@ -59,10 +59,13 @@ fn plan_to(state: &AppState, selected: &Commit) -> Result<(Oid, RebasePlan), &'s
     if selected.parents.is_empty() {
         return Err("root コミットからは rebase できません");
     }
+    // ブランチの oid は HEAD の行から読む（02 の「head」）。
     let head = match &state.repo.head {
-        Some(HeadInfo::Branch { oid, .. } | HeadInfo::Detached(oid)) => *oid,
-        Some(HeadInfo::Unborn { .. }) | None => return Err("HEAD のコミットがまだありません"),
-    };
+        Some(HeadInfo::Branch) => state.branches.head().map(|branch| branch.oid),
+        Some(HeadInfo::Detached(oid)) => Some(*oid),
+        Some(HeadInfo::Unborn { .. }) | None => None,
+    }
+    .ok_or("HEAD のコミットがまだありません")?;
     let loaded: HashMap<Oid, &Commit> = state
         .graph
         .lines
@@ -318,8 +321,9 @@ mod tests {
     };
     use super::*;
     use crate::app::{update, Msg};
+    use crate::git_read::Branch;
     use crate::git_read::{InProgressOp, WorktreeSnapshot};
-    use crate::test_util::{fake_oid, fake_snapshot, reply, reword};
+    use crate::test_util::{fake_branch, fake_oid, fake_snapshot, reply, reword};
 
     /// `n` 件の 1 列の履歴（`commit i` の親は `commit i+1`、最後が root）。HEAD は
     /// `commit 0` のブランチで、作業ツリーは鮮度のある空の snapshot。
@@ -332,10 +336,11 @@ mod tests {
                 Vec::new()
             };
         }
-        state.repo.head = Some(HeadInfo::Branch {
-            name: "main".to_string(),
+        state.repo.head = Some(HeadInfo::Branch);
+        state.branches.branches = vec![Branch {
             oid: fake_oid(0),
-        });
+            ..fake_branch("main", true)
+        }];
         status(&mut state, fake_snapshot(&[], &[], &[]));
         state
     }
@@ -473,6 +478,17 @@ mod tests {
         let _ = press_i_on(&mut state, 1);
 
         refused(&state, NoticeLevel::Warn, "HEAD");
+    }
+
+    #[test]
+    fn a_branch_head_without_its_row_is_refused() {
+        // ブランチの oid は HEAD の行から読む（02 の「head」）。行が無ければ辿り始められない。
+        let mut state = linear(3);
+        state.branches.branches.clear();
+
+        let _ = press_i_on(&mut state, 1);
+
+        refused(&state, NoticeLevel::Warn, "HEAD のコミットがまだありません");
     }
 
     #[test]

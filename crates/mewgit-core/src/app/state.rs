@@ -1808,7 +1808,7 @@ impl BranchState {
     ///
     /// **push と fetch の行き先も、断られたことの記憶も、HEAD はここからしか取らない。**
     /// あちらの材料（追跡 ref の位置、ahead / behind、`push_remote`）を運ぶのは
-    /// [`Branch`] の行だけで、`RepoInfo.head` が持つのは名前と oid だけ
+    /// [`Branch`] の行だけで、`RepoInfo.head` が持つのはブランチに居るかの判別だけ
     /// （#22 の「キャッシュした状態から破壊的操作を選ばない」）。**鮮度の差ではない**
     /// —— どちらも同じ `Cmd::LoadRepoInfo` の返信に乗る（02 の「ブランチ一覧」）。
     pub fn head(&self) -> Option<&Branch> {
@@ -1943,7 +1943,7 @@ pub(super) fn current_row<'a>(
 /// （[`BranchState::head`]）から導けるので、呼ぶ側に選ばせると対応の取れない組
 /// （HEAD でない行、`Detached` な `repo.head` と並べた行）が型で組める
 /// （`.claude/rules/rust-coding.md` の「導出できる値を引数に取らせない」）。
-/// **`repo.head` とも混ぜない** —— 追跡設定を運ぶのは行だけなので、名前もそちらから取る。
+/// **`repo.head` とも混ぜない** —— あちらはブランチの名前を持たない（02 の「head」）。
 ///
 /// **読めない追跡設定は候補にしない**（設定が無い / `.`（ローカル追跡）/ リモートが
 /// 消えている / URL が GitHub の形でない / URL の `merge` がブランチでない）。

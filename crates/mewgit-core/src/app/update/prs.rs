@@ -1718,10 +1718,7 @@ mod tests {
         let cmd = update(
             &mut state,
             Msg::RepoInfoLoaded(Box::new(Ok(RepoSnapshot {
-                head: HeadInfo::Branch {
-                    name: "feat/x".to_string(),
-                    oid: fake_oid(0),
-                },
+                head: HeadInfo::Branch,
                 // HEAD と一覧を揃える（実物では同じ返信が同じ HEAD を運ぶ）。
                 branches: vec![fake_branch("feat/x", true)],
                 ..fake_repo_snapshot()
@@ -1982,12 +1979,6 @@ mod tests {
             .branches
             .insert(0, fake_branch("alpha", false));
         state.branches.cursor = 0;
-        // **`repo.head` とも混ぜない**（01 の「現ブランチの PR」）。土台は 2 つを揃えて置くので、
-        // `repo.head` から名前を読む実装でも答えが同じになる。別の名前にずらして見張る。
-        state.repo.head = Some(HeadInfo::Branch {
-            name: "alpha".to_string(),
-            oid: fake_oid(9),
-        });
 
         deliver(&mut state, vec![pr_from(82, "feat", "bob")]);
         assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));

@@ -326,12 +326,13 @@ fn head_reports_the_current_branch() {
     let first = repo.commit("first");
     let reader = RepoReader::open(repo.path()).unwrap();
 
+    assert_eq!(reader.head().unwrap(), HeadInfo::Branch);
+    // 名前と oid は載せず、ブランチ一覧の HEAD の行が運ぶ（02 の「head」）。
+    let branches = reader.branches().unwrap();
+    let head = branches.iter().find(|branch| branch.is_head);
     assert_eq!(
-        reader.head().unwrap(),
-        HeadInfo::Branch {
-            name: "main".to_string(),
-            oid: first,
-        }
+        head.map(|branch| (branch.name.as_str(), branch.oid)),
+        Some(("main", first))
     );
 }
 

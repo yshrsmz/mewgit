@@ -604,7 +604,8 @@ impl AppState {
 
     /// 一覧のうち、いま居るブランチの PR（01 の「現ブランチの PR」）。
     ///
-    /// **状態に持たない。** `prs.list` と `repo` から毎回導く —— 写しを置くと、
+    /// **状態に持たない。** `prs.list` と `repo`、ブランチ一覧の HEAD の行から毎回導く ——
+    /// 写しを置くと、
     /// どちらかが更新されたときに片方だけ古くなる。
     pub fn current_pr(&self) -> Option<&PullRequest> {
         current_row(&self.repo, &self.branches, &self.prs.list)

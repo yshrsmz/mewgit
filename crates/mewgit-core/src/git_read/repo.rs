@@ -346,10 +346,8 @@ impl RepoReader {
 
     /// HEAD の状態。
     ///
-    /// **`branch.<HEAD>.remote` もここで読む**（02 の「head」）。ブランチ一覧の HEAD の行と
-    /// 同じ値で、同じ `Cmd::LoadRepoInfo` に乗る。重複を残しているのは、読み手（01 の
-    /// 「現ブランチの PR」）が `RepoInfo` の上にあって `BranchState` を見ないから
-    /// （`docs/plan.md` の M6）。
+    /// **追跡設定は読まない**（02 の「head」）。読み手は [`RepoReader::branches`] の HEAD の
+    /// 行の [`Branch::upstream_config`] を読む。
     pub fn head(&self) -> Result<HeadInfo, GitReadError> {
         let head = match self.repo.head() {
             Ok(head) => head,

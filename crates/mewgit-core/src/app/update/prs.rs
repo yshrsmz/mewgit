@@ -1001,7 +1001,9 @@ mod tests {
         let cmd = press(&mut state, 'N');
         assert_eq!(cmd, Cmd::None);
         assert!(state.modal.is_none(), "detached で開いた");
-        assert!(last_notice(&state).contains("ブランチ"), "{state:?}");
+        // **文言まで見る。** 候補も空になるので、`on_branch` を素通りしても「どのリモートにも
+        // この**ブランチ**がありません」で断られ、`contains("ブランチ")` では区別できない。
+        assert_eq!(last_notice(&state), OFF_BRANCH);
 
         // **理由は `github_block` が値で答える**（`r` と同じ。消去法で組まない）。
         let mut state = state_for_create("feat/x");
@@ -1980,6 +1982,12 @@ mod tests {
             .branches
             .insert(0, fake_branch("alpha", false));
         state.branches.cursor = 0;
+        // **`repo.head` とも混ぜない**（01 の「現ブランチの PR」）。土台は 2 つを揃えて置くので、
+        // `repo.head` から名前を読む実装でも答えが同じになる。別の名前にずらして見張る。
+        state.repo.head = Some(HeadInfo::Branch {
+            name: "alpha".to_string(),
+            oid: fake_oid(9),
+        });
 
         deliver(&mut state, vec![pr_from(82, "feat", "bob")]);
         assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));

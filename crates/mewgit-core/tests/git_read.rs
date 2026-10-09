@@ -321,18 +321,13 @@ fn refs_is_empty_before_the_first_commit() {
 }
 
 #[test]
-fn head_reports_the_current_branch() {
+fn head_reports_a_branch() {
+    // 名前と oid は載せず、ブランチ一覧の HEAD の行が運ぶ（02 の「head」）。
     let repo = TestRepo::init();
-    let first = repo.commit("first");
+    repo.commit("first");
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    assert_eq!(
-        reader.head().unwrap(),
-        HeadInfo::Branch {
-            name: "main".to_string(),
-            oid: first,
-        }
-    );
+    assert_eq!(reader.head().unwrap(), HeadInfo::Branch);
 }
 
 #[test]
@@ -407,6 +402,20 @@ fn head_errors_when_the_branch_name_is_not_utf8() {
         matches!(err, GitReadError::NonUtf8Head),
         "非 UTF-8 のブランチ名を検出していません: {err:?}"
     );
+}
+
+#[test]
+fn head_errors_when_the_branch_does_not_point_at_a_commit() {
+    // `branches` は peel できない行を落とす。`head` が通すと「ブランチに居るのに HEAD の
+    // 行が無い」が、壊れたリポジトリで黙って届く（02 の「head」）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let tree = repo.rev_parse("HEAD^{tree}");
+    repo.write_git_file("refs/heads/main", format!("{tree}\n").as_bytes());
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    assert!(reader.branches().unwrap().is_empty());
+    assert!(reader.head().is_err());
 }
 
 #[test]
@@ -802,7 +811,7 @@ fn commit_detail_fails_for_an_oid_that_is_not_in_the_repository() {
 #[test]
 fn branches_lists_local_branches_by_name_with_the_head_marked() {
     let repo = TestRepo::init();
-    repo.commit("first");
+    let first = repo.commit("first");
     repo.git(&["branch", "topic"]);
     repo.git(&["branch", "another"]);
     // `/` を含む名前も落とさない（列挙の絞り込みが `refs/heads/*` なので）。
@@ -821,6 +830,8 @@ fn branches_lists_local_branches_by_name_with_the_head_marked() {
         .map(|b| b.name.as_str())
         .collect();
     assert_eq!(head, ["main"]);
+    // HEAD の oid も行が運ぶ（`head` は載せない。02 の「head」）。
+    assert!(branches.iter().all(|b| b.oid == first));
     // upstream が無ければ ahead / behind は出さない。
     assert!(branches.iter().all(|b| b.upstream.is_none()));
 }

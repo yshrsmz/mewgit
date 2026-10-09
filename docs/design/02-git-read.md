@@ -26,7 +26,7 @@ impl RepoReader {
     pub fn workdir(&self) -> &Path;                                 // ワークツリーのルート
     pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;     // name, url（生の値）, head_branch
     pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>
-    pub fn head(&self) -> Result<HeadInfo, GitReadError>;           // branch name or detached Oid
+    pub fn head(&self) -> Result<HeadInfo, GitReadError>;           // ブランチに居るか / detached の Oid / unborn の名前
     pub fn branches(&self) -> Result<Vec<Branch>, GitReadError>;    // ローカルブランチ + upstream の ahead/behind
     pub fn log(&self) -> Result<LogSession<'_>, GitReadError>;   // ページングは LogSession が持つ
     pub fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;  // 選択時に遅延取得
@@ -316,11 +316,12 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 - **表示にしか使わない文字列**（リモート URL、コミットの summary や署名）は lossy 変換して
   残す。読めない文字が混ざるほうが、その項目ごと消えるより情報が多い
 - 例外は HEAD が指すブランチ名で、これだけは落とさず `GitReadError::NonUtf8Head` にする。
-  落とすと detached と区別が付かなくなり、上位が別の状態として扱ってしまう
+  `head` は名前を載せないが、ブランチ一覧はその行を落とすので、通すと「ブランチに居るのに
+  HEAD の行が無い」になり、上位が detached と区別できない
 
 ### head
 
-- 通常は `Branch { name, oid }`、detached HEAD は `Detached(oid)`
+- 通常は `Branch`（判別だけ）、detached HEAD は `Detached(oid)`
 - コミットが 1 つも無い（unborn）ときは `repo.head()` が `ErrorCode::UnbornBranch` を返すので、
   `HEAD` の symbolic target からブランチ名を取って `Unborn { name }` にする
 - **追跡設定（`branch.<HEAD>.remote` / `.merge`）は載せない。** 読み手（`app` の
@@ -331,6 +332,21 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
   （01 の「現ブランチの PR」）。同じ `Cmd::LoadRepoInfo` の返信に畳んだ（#180）ので
   順序の理由が消え、**同じ設定を同じ返信が 2 回運ぶだけになった**ので消した。
   unborn の HEAD は一覧に行が無いが、追跡設定を持たないのは元の `Unborn` と同じ
+- **ブランチに居るときは名前も oid も載せない。** 追跡設定を消したのと同じ理由で、同じ
+  返信が HEAD の行の名前と oid を 2 回運んでいた（#181 の `/simplify` が拾った）。
+  `Detached` の oid と `Unborn` の名前は一覧に行が無いので残す。**載せなくてもブランチの
+  腕で peel はする** —— コミットを指さない ref（壊れたリポジトリ）は一覧が行ごと落とす
+  ので、通すと「ブランチに居るのに HEAD の行が無い」が `Err` にならずに届く（`NonUtf8Head`
+  を残したのと同じ理由。`/code-review` が一時リポジトリで再現した）
+- **読み手は HEAD の行を先に読み、行が無いときだけ `RepoInfo.head` を見る**
+  （cherry-pick / revert の確認に出す積む先の名前、`i` の plan を辿り始める oid）。
+  `Branch` の腕で行を引きに行く形にすると、「`Branch` なのに HEAD の行が無い」組の
+  扱いを読み手ごとに決めることになる（名前と oid を畳んだ PR の `/simplify` が拾った）。**その組は実際に
+  作れる** —— `head` と `branches` は HEAD をそれぞれ解決し、ランタイムの `repo_info` は
+  2 つを順に await するので、あいだに外で HEAD が動けば片方だけが新しい。行を先に
+  読む形では、名前が `HEAD` になる / `i` が断る（逆向きなら古い行を読む）のが次の
+  読み直しまで続くだけで、HEAD の解決を `branches` の 1 回に寄せるのは plan.md の M6 に
+  送った
 
 ## ログ列挙
 

@@ -59,9 +59,11 @@ fn plan_to(state: &AppState, selected: &Commit) -> Result<(Oid, RebasePlan), &'s
     if selected.parents.is_empty() {
         return Err("root コミットからは rebase できません");
     }
-    let head = match &state.repo.head {
-        Some(HeadInfo::Branch { oid, .. } | HeadInfo::Detached(oid)) => *oid,
-        Some(HeadInfo::Unborn { .. }) | None => return Err("HEAD のコミットがまだありません"),
+    // **HEAD の行を先に読む**（02 の「head」）。行が無いときだけ detached の oid を見る。
+    let head = match (state.branches.head(), &state.repo.head) {
+        (Some(branch), _) => branch.oid,
+        (None, Some(HeadInfo::Detached(oid))) => *oid,
+        (None, _) => return Err("HEAD のコミットがまだありません"),
     };
     let loaded: HashMap<Oid, &Commit> = state
         .graph
@@ -319,10 +321,11 @@ mod tests {
     use super::*;
     use crate::app::{update, Msg};
     use crate::git_read::{InProgressOp, WorktreeSnapshot};
-    use crate::test_util::{fake_oid, fake_snapshot, reply, reword};
+    use crate::test_util::{fake_branch, fake_oid, fake_snapshot, reply, reword};
 
     /// `n` 件の 1 列の履歴（`commit i` の親は `commit i+1`、最後が root）。HEAD は
-    /// `commit 0` のブランチで、作業ツリーは鮮度のある空の snapshot。
+    /// `commit 0` のブランチ（HEAD の行。`fake_branch` の oid が `commit 0`）で、作業ツリーは
+    /// 鮮度のある空の snapshot。
     fn linear(n: usize) -> AppState {
         let mut state = state_with_commits(n);
         for (i, line) in state.graph.lines.iter_mut().enumerate() {
@@ -332,10 +335,7 @@ mod tests {
                 Vec::new()
             };
         }
-        state.repo.head = Some(HeadInfo::Branch {
-            name: "main".to_string(),
-            oid: fake_oid(0),
-        });
+        state.branches.branches = vec![fake_branch("main", true)];
         status(&mut state, fake_snapshot(&[], &[], &[]));
         state
     }
@@ -407,6 +407,28 @@ mod tests {
     }
 
     #[test]
+    fn i_reads_head_from_its_row_and_falls_back_to_a_detached_head() {
+        // HEAD の行を先に読み、行が無いときだけ `repo.head` を見る（02 の「head」）。
+        // 取り違えを見張るため、行と `repo.head` に別のコミットを持たせる。
+        let mut state = linear(4);
+        state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
+        let _ = press_i_on(&mut state, 2);
+        let Some(Modal::RebaseEditor { head, .. }) = &state.modal else {
+            panic!("RebaseEditor が開いていません: {:?}", state.modal);
+        };
+        assert_eq!(*head, fake_oid(0));
+
+        let mut state = linear(4);
+        state.branches.branches.clear();
+        state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
+        let _ = press_i_on(&mut state, 2);
+        let Some(Modal::RebaseEditor { head, .. }) = &state.modal else {
+            panic!("RebaseEditor が開いていません: {:?}", state.modal);
+        };
+        assert_eq!(*head, fake_oid(1));
+    }
+
+    #[test]
     fn i_walks_first_parents_not_the_rows_between() {
         // HEAD（commit 0）の親は commit 2。あいだの行（commit 1）は別の枝で、
         // 表示行の並びで切ると混ざる（01）。
@@ -465,7 +487,9 @@ mod tests {
 
     #[test]
     fn an_unborn_head_is_refused() {
+        // unborn の HEAD は一覧に行が無い（02 の「ブランチ一覧」）。
         let mut state = linear(3);
+        state.branches.branches.clear();
         state.repo.head = Some(HeadInfo::Unborn {
             name: "main".to_string(),
         });

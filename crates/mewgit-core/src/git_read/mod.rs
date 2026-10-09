@@ -349,14 +349,12 @@ impl RefLabel {
 
 /// HEAD の状態。
 ///
-/// **追跡設定は持たない。** 読み手はブランチ一覧の HEAD の行の
-/// [`Branch::upstream_config`] を読む（`app` では同じ返信に乗る。02 の「head」）。
+/// **ブランチに居るときは判別だけを持つ。** 名前も oid も追跡設定も、読み手はブランチ
+/// 一覧の HEAD の行（`is_head` の [`Branch`]）から読む（`app` では同じ返信に乗る。
+/// 02 の「head」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeadInfo {
-    Branch {
-        name: String,
-        oid: Oid,
-    },
+    Branch,
     Detached(Oid),
     /// コミットが 1 つも無いリポジトリ。
     Unborn {

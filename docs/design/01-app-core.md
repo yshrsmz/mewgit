@@ -702,8 +702,8 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 - **確認モーダルを挟む**（2026-09-29 にユーザーと決めた）。`CLAUDE.md` の確認対象
   （force push、`branch -D`、discard、abort 系）には入らないが、積んだコミットを戻す手
   （reset）が mewgit に無い。本文は「`abc1234 <summary>` を `<ブランチ>` に積みます。」で、
-  **どのコミットをどこへ積むかを押す前に見せる**。積む先の名前は `RepoInfo.head` から
-  取る表示だけの値（detached なら `HEAD`）で、git は HEAD に積むので古くても行き先は変わらない
+  **どのコミットをどこへ積むかを押す前に見せる**。積む先の名前は HEAD の行（`BranchState::head`。
+  行が無く unborn なら `RepoInfo.head` の名前）から取る表示だけの値（detached なら `HEAD`）で、git は HEAD に積むので古くても行き先は変わらない
 - **WIP 行では断る**（積むコミットが無い）。通知で行を選ぶよう言う
 - **merge コミットは確認を開く前に断る。** git は `-m` が無いと exit 128 で断り
   （03 の「cherry-pick の開始」）、`GitOp::CherryPick` は mainline を運ばない
@@ -821,7 +821,8 @@ pub enum RewordInput {
   切らない —— 行はレーンをまたいだ topo-order なので、HEAD の行と選択の行のあいだに
   ある行が HEAD の祖先とは限らない。**読み足さない**（`MainlinePicker` と同じ）。
   辿れなかったら断る（下の表）
-- **HEAD は `RepoInfo.head`**（`Branch` の `oid` か `Detached`）。mewgit の書き込みの
+- **HEAD は HEAD の行の `oid`、行が無ければ `RepoInfo.head` の `Detached` の oid**
+  （02 の「head」）。mewgit の書き込みの
   あとは `Reload::Refs` で読み直される（上の「ログの読み直し」）。**端末で積んだ
   コミットには probe（下の「外部の変更の検知」）が拾うまで最大 2 秒追いつかない**。**追いつかない HEAD で組んだ
   plan は git に渡った時点で断られる** —— `Modal::RebaseEditor` が plan を組んだ HEAD を
@@ -1702,8 +1703,10 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
   **別のジョブから届く値を混ぜると到着順で答えが変わり、二度と直らない**。
   **HEAD の行（`BranchState::head`）から読んでよいのは、ブランチ一覧が同じ返信に乗る
   から**（経緯は 02 の「head」）。**名前も oid も追跡設定も、PR 作成の「ブランチに
-  乗っているか」も HEAD の行から取り、`RepoInfo.head` と混ぜない** —— 混ぜると、対応の取れない組（`Detached` な
-  `repo.head` と HEAD の行）を読み手が 1 つずつ数えることになる。unborn の HEAD は
+  乗っているか」も HEAD の行から取り、`RepoInfo.head` と混ぜない** —— `RepoInfo.head` の
+  `Branch` は判別だけで名前を持たない（02 の「head」）。「乗っているか」だけをあちらから
+  取ると、対応の取れない組（`Branch` な `repo.head` と HEAD の行の無い一覧）を読み手が
+  1 つずつ数えることになる。unborn の HEAD は
   一覧に行が無いので候補は空（コミットが無ければ PR も無い）
 - **host は比べない。** `target.host` は `ssh -G` で正規化済み、こちらは URL に書かれた
   ままなので、生のまま比べると **fork だけ別のエイリアス（`gh-me:owner/repo`）を使う
@@ -2384,7 +2387,7 @@ mewgit には無い —— 押されたときに読み直す以外にない。
 
 決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る** ——
 行き先の材料（追跡 ref の位置、ahead / behind、`push_remote`）を運ぶのは `Branch` の
-行だけで、`RepoInfo.head` が持つのは名前と oid だけ（#22 の「キャッシュした
+行だけで、`RepoInfo.head` が持つのはブランチに居るかの判別だけ（#22 の「キャッシュした
 状態から破壊的操作を選ばない」）。**鮮度の差ではない** —— どちらも同じ
 `Cmd::LoadRepoInfo` の返信に乗る（02 の「ブランチ一覧」）。
 

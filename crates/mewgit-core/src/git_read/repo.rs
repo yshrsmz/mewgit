@@ -346,8 +346,8 @@ impl RepoReader {
 
     /// HEAD の状態。
     ///
-    /// **追跡設定は読まない**（02 の「head」）。読み手は [`RepoReader::branches`] の HEAD の
-    /// 行の [`Branch::upstream_config`] を読む。
+    /// **ブランチに居るときは名前も oid も載せない**（02 の「head」）。読み手は
+    /// [`RepoReader::branches`] の HEAD の行を読む。
     pub fn head(&self) -> Result<HeadInfo, GitReadError> {
         let head = match self.repo.head() {
             Ok(head) => head,
@@ -360,19 +360,16 @@ impl RepoReader {
             Err(err) => return Err(err.into()),
         };
 
+        // ブランチの腕でも peel する。コミットを指さない ref は `branches` が行ごと落とすので、
+        // 通すと「ブランチに居るのに HEAD の行が無い」が黙って届く（02 の「head」）。
         let oid = head.peel_to_commit()?.id();
         if !head.is_branch() {
             return Ok(HeadInfo::Detached(oid));
         }
-        // ブランチに乗っているのに名前を落とすと detached と区別が付かなくなるので、
-        // ここだけは非 UTF-8 を握りつぶさずエラーにする（02 の「非 UTF-8 の扱い」）。
-        // git2 0.21 の `shorthand()` は `Err` が非 UTF-8 そのものなので、`Option` を
-        // 経由していた 0.20 より意図に近い。
-        let name = head.shorthand().map_err(|_| GitReadError::NonUtf8Head)?;
-        Ok(HeadInfo::Branch {
-            name: name.to_string(),
-            oid,
-        })
+        // 名前は載せないが、非 UTF-8 も同じ理由でエラーにする（02 の「非 UTF-8 の扱い」）。
+        // git2 0.21 の `shorthand()` は `Err` が非 UTF-8 そのもの。
+        head.shorthand().map_err(|_| GitReadError::NonUtf8Head)?;
+        Ok(HeadInfo::Branch)
     }
 
     /// HEAD のコミットメッセージ全文。コミットが 1 つも無ければ `None`。
@@ -385,9 +382,10 @@ impl RepoReader {
     /// unborn を `Err` にしないのは、「読めなかった」と「amend する相手がいない」で
     /// 上位の出し分けが違うため。
     pub fn head_message(&self) -> Result<Option<String>, GitReadError> {
-        let oid = match self.head()? {
-            HeadInfo::Unborn { .. } => return Ok(None),
-            HeadInfo::Branch { oid, .. } | HeadInfo::Detached(oid) => oid,
+        let oid = match self.repo.head() {
+            Ok(head) => head.peel_to_commit()?.id(),
+            Err(err) if err.code() == ErrorCode::UnbornBranch => return Ok(None),
+            Err(err) => return Err(err.into()),
         };
         Ok(Some(self.commit_detail(oid)?.message))
     }

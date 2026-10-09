@@ -147,13 +147,7 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
     let refs = reader.refs().await.unwrap();
     let remotes = reader.remotes().await.unwrap();
 
-    assert_eq!(
-        head,
-        HeadInfo::Branch {
-            name: "main".to_string(),
-            oid,
-        }
-    );
+    assert_eq!(head, HeadInfo::Branch);
     let labels: Vec<&str> = refs.labels(oid).iter().map(|l| l.name()).collect();
     assert_eq!(labels, ["main", "v1.0"]);
     assert_eq!(remotes.len(), 1);

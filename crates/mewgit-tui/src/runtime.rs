@@ -753,13 +753,7 @@ mod tests {
         let _ = update(&mut state, msg);
 
         assert_eq!(state.repo.remotes.len(), 1);
-        assert_eq!(
-            state.repo.head,
-            Some(HeadInfo::Branch {
-                name: "main".to_string(),
-                oid,
-            })
-        );
+        assert_eq!(state.repo.head, Some(HeadInfo::Branch));
         let labels: Vec<&str> = state
             .graph
             .refs
@@ -771,8 +765,11 @@ mod tests {
         // **ブランチ一覧も同じ返信で届く**（02 の「ブランチ一覧」）。
         assert_eq!(state.branches.load(), ListLoad::Loaded);
         assert_eq!(
-            state.branches.head().map(|head| head.name.as_str()),
-            Some("main")
+            state
+                .branches
+                .head()
+                .map(|head| (head.name.as_str(), head.oid)),
+            Some(("main", oid))
         );
     }
 

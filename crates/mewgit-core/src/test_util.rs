@@ -878,10 +878,7 @@ pub fn fake_entry(path: &str, status: FileStatus) -> FileEntry {
 pub fn fake_repo_snapshot() -> RepoSnapshot {
     RepoSnapshot {
         remotes: Vec::new(),
-        head: HeadInfo::Branch {
-            name: "main".to_string(),
-            oid: fake_oid(1),
-        },
+        head: HeadInfo::Branch,
         refs: RefIndex::from_iter([]),
         branches: vec![Branch {
             oid: fake_oid(1),
@@ -1185,9 +1182,9 @@ pub fn start_pr_details(
 
 /// アカウントと対象が決まり、HEAD が `branch` に居る状態にする。
 ///
-/// **ブランチ一覧にも HEAD の行を 1 本置く**（追跡設定は無し）。現ブランチの PR と
-/// `head` の候補は名前を HEAD の行から読む（01 の「現ブランチの PR」）ので、`repo.head`
-/// だけでは HEAD がブランチに居ることにならない。一覧の読み込みの段階は進めない。
+/// **名前はブランチ一覧の HEAD の行に置く**（追跡設定は無し）。`repo.head` は判別しか
+/// 持たず、読み手は名前を HEAD の行から読む（02 の「head」）。一覧の読み込みの段階は
+/// 進めない。
 ///
 /// **`Msg` を通さずに置く。** ここまで運ぶには `Msg::RepoInfoLoaded` と
 /// `Msg::AccountResolved` の両方が要り、**その 2 本の順序そのものを見張るテストが
@@ -1195,10 +1192,7 @@ pub fn start_pr_details(
 pub fn put_on_branch(state: &mut AppState, branch: &str) {
     state.repo.target = TargetState::Resolved(fake_target());
     state.account = AccountState::Resolved(fake_account("taro"));
-    state.repo.head = Some(HeadInfo::Branch {
-        name: branch.to_string(),
-        oid: fake_oid(0),
-    });
+    state.repo.head = Some(HeadInfo::Branch);
     state.branches.branches = vec![fake_branch(branch, true)];
 }
 
@@ -1217,13 +1211,11 @@ pub fn put_on_branch(state: &mut AppState, branch: &str) {
 pub fn deliver_branches(state: &mut AppState, result: Result<Vec<Branch>, GitReadError>) -> Cmd {
     let result = result.map(|branches| RepoSnapshot {
         remotes: state.repo.remotes.clone(),
-        head: branches.iter().find(|branch| branch.is_head).map_or(
-            HeadInfo::Detached(fake_oid(0)),
-            |head| HeadInfo::Branch {
-                name: head.name.clone(),
-                oid: head.oid,
-            },
-        ),
+        head: if branches.iter().any(|branch| branch.is_head) {
+            HeadInfo::Branch
+        } else {
+            HeadInfo::Detached(fake_oid(0))
+        },
         refs: state.graph.refs.clone(),
         branches,
     });

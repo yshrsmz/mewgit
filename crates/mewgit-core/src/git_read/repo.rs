@@ -264,28 +264,9 @@ impl RepoReader {
         let head = match head_target {
             None => HeadInfo::Detached(head.peel_to_commit()?.id()),
             Some(_) if branches.iter().any(|branch| branch.is_head) => HeadInfo::Branch,
-            Some(target) => self.rowless_head(target)?,
+            Some(target) => rowless_head(&head, target)?,
         };
         Ok(BranchList { head, branches })
-    }
-
-    /// HEAD が symbolic なのに、一覧に HEAD の行が無いときの状態。
-    ///
-    /// 指す ref が無ければ unborn。在るのにコミットまで peel できなければ `Err` —— 一覧が
-    /// HEAD の行を落とした形で、通すと「ブランチに居るのに HEAD の行が無い」が `Err` に
-    /// ならずに届く（02 の「head」）。**peel できるなら `refs/heads/` の外を指している**
-    /// （`git symbolic-ref HEAD refs/remotes/origin/main` は通る。git 2.56.0 で確認）ので、
-    /// 行を持たない点で detached と同じに扱う（`repo.head()` の `is_branch()` で分けて
-    /// いた頃と同じ答え）。列挙のあとに外でブランチが作られた形もここに落ち、次の
-    /// 読み直しまで `Detached` に見えるが、**行と判別は食い違わない**（02 の「head」）。
-    fn rowless_head(&self, target: &str) -> Result<HeadInfo, GitReadError> {
-        match self.repo.find_reference(target) {
-            Ok(reference) => Ok(HeadInfo::Detached(reference.peel_to_commit()?.id())),
-            Err(err) if err.code() == ErrorCode::NotFound => Ok(HeadInfo::Unborn {
-                name: target.strip_prefix("refs/heads/").unwrap_or(target).into(),
-            }),
-            Err(err) => Err(err.into()),
-        }
     }
 
     /// stash の一覧。`stash@{0}`（いちばん新しいもの）から順に並ぶ。
@@ -394,6 +375,27 @@ impl RepoReader {
             Err(err) => return Err(err.into()),
         };
         Ok(Some(self.commit_detail(oid)?.message))
+    }
+}
+
+/// HEAD が symbolic（target は `target`）なのに、一覧に HEAD の行が無いときの状態。
+///
+/// **HEAD を `resolve()` で辿る**（symbolic の連鎖も辿る。`repo.head()` と同じ）。辿った
+/// 先が無ければ unborn —— `refs/heads/a` → `refs/heads/missing` のような連鎖も含む。
+/// 在るのにコミットまで peel できなければ `Err` —— 一覧が HEAD の行を落とした形で、
+/// 通すと「ブランチに居るのに HEAD の行が無い」が `Err` にならずに届く（02 の「head」）。
+/// **peel できれば `Detached`**。一覧の行と綴りが合わない HEAD がここに落ちる ——
+/// `refs/heads/` の外を指す（`git symbolic-ref HEAD refs/remotes/origin/main` は通る）、
+/// 大文字小文字を区別しない FS で `git switch Main` した（`main` の loose ref に当たる）、
+/// 列挙のあとに外でブランチが作られた、のどれも行を持たない点で detached と同じに扱い、
+/// **行と判別は食い違わない**（実測は 02 の「head」。git 2.56.0）。
+fn rowless_head(head: &Reference<'_>, target: &str) -> Result<HeadInfo, GitReadError> {
+    match head.resolve() {
+        Ok(resolved) => Ok(HeadInfo::Detached(resolved.peel_to_commit()?.id())),
+        Err(err) if err.code() == ErrorCode::NotFound => Ok(HeadInfo::Unborn {
+            name: target.strip_prefix("refs/heads/").unwrap_or(target).into(),
+        }),
+        Err(err) => Err(err.into()),
     }
 }
 

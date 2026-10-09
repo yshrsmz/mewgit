@@ -330,20 +330,6 @@ fn head_rows(list: &BranchList) -> Vec<&str> {
 }
 
 #[test]
-fn branches_reports_a_branch_head_together_with_its_row() {
-    // 名前と oid は載せず、同じ答えの HEAD の行が運ぶ（02 の「head」）。
-    let repo = TestRepo::init();
-    repo.commit("first");
-    repo.git(&["branch", "topic"]);
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let list = reader.branches().unwrap();
-
-    assert_eq!(list.head, HeadInfo::Branch);
-    assert_eq!(head_rows(&list), ["main"]);
-}
-
-#[test]
 fn branches_reads_the_tracking_config_of_an_unregistered_remote() {
     // **`app` はこの値で fork から出した PR を当てる**（01 の「現ブランチの PR」）。
     // リモートを登録しないのは、読むのが config だけだから（リモート名を URL に直すのは
@@ -458,7 +444,33 @@ fn branches_errors_when_the_head_branch_does_not_point_at_a_commit() {
 
     repo.git(&["symbolic-ref", "HEAD", "refs/heads/topic"]);
 
-    assert!(RepoReader::open(repo.path()).unwrap().branches().is_err());
+    let err = RepoReader::open(repo.path())
+        .unwrap()
+        .branches()
+        .unwrap_err();
+    assert!(matches!(err, GitReadError::Git(_)), "{err:?}");
+}
+
+#[test]
+fn branches_follows_a_dangling_symbolic_chain_to_an_unborn_head() {
+    // HEAD → `alias` → 無い ref。`find_reference("refs/heads/alias")` は在るので、
+    // 連鎖を辿らずに判別すると peel で落ちて読み取りごと失われる（`repo.head()` は
+    // unborn と答えていた）。**`Branch` を「target の ref が在るか」で決める形も
+    // ここで落ちる** —— 判別は一覧の行から決める（02 の「head」）。
+    let repo = TestRepo::init();
+    repo.git(&["symbolic-ref", "refs/heads/alias", "refs/heads/missing"]);
+    repo.git(&["symbolic-ref", "HEAD", "refs/heads/alias"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let list = reader.branches().unwrap();
+
+    assert_eq!(
+        list.head,
+        HeadInfo::Unborn {
+            name: "alias".to_string(),
+        }
+    );
+    assert_eq!(head_rows(&list), Vec::<&str>::new());
 }
 
 /// 本文付きのメッセージを持つコミットが 1 つあるリポジトリ。
@@ -847,18 +859,15 @@ fn branches_lists_local_branches_by_name_with_the_head_marked() {
     repo.git(&["branch", "feat/nested"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches;
+    let list = reader.branches().unwrap();
+    let branches = &list.branches;
 
     // git2 の列挙順には依存しない。名前順に並べ替えて返す。
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["another", "feat/nested", "main", "topic"]);
-    // HEAD の印は 1 本だけ。
-    let head: Vec<&str> = branches
-        .iter()
-        .filter(|b| b.is_head)
-        .map(|b| b.name.as_str())
-        .collect();
-    assert_eq!(head, ["main"]);
+    // HEAD の印は 1 本だけで、判別も同じ答えに乗る（02 の「head」）。
+    assert_eq!(head_rows(&list), ["main"]);
+    assert_eq!(list.head, HeadInfo::Branch);
     // HEAD の oid も行が運ぶ（`HeadInfo` は載せない。02 の「head」）。
     assert!(branches.iter().all(|b| b.oid == first));
     // upstream が無ければ ahead / behind は出さない。

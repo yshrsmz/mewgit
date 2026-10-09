@@ -250,9 +250,9 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
 **書き込みのたびの PR 一覧の引き直し**（`repo_info_loaded` が出す）で、ふつうの
 リポジトリでは 1ms 前後、極端な形で 0.4 秒。**畳むのはユーザーと決めた**（2026-10-09）
 
-**一部だけ成功という形にしない**（01 の「Msg」）。代わりに、4 つのどれか 1 つの失敗が
-全部を落とす —— 非 UTF-8 の HEAD 名（`branches()` の `NonUtf8Head`）でラベルとリモートも
-前のまま残り、逆に壊れた loose ref で `branches()` が落ちるとラベルとリモートも
+**一部だけ成功という形にしない**（01 の「Msg」）。代わりに、3 つの読み取りのどれか 1 つの
+失敗が全部を落とす —— 非 UTF-8 の HEAD 名（`branches()` の `NonUtf8Head`）でも、壊れた
+loose ref で `branches()` が落ちても、ブランチ一覧は失敗の表示になり、ラベルとリモートは
 前のまま残る。どちらも壊れたリポジトリの形なので受け入れた
 
 ### stash 一覧
@@ -341,16 +341,27 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
   | symbolic target が非 UTF-8 | `Err(NonUtf8Head)`（下の「非 UTF-8 の扱い」） |
   | target が一覧の行に当たる | `Branch` |
   | target の行を peel できずに落とした | `Err`（下） |
-  | 行が無く、target の ref も無い | `Unborn { name }` |
-  | 行が無いが、target の ref は在る | `Detached(peel した oid)` |
+  | 行が無く、HEAD を `resolve()` で辿った先が無い | `Unborn { name }`（名前は HEAD の直の target） |
+  | 行が無いが、辿った先は在る | `Detached(peel した oid)` |
 
-  最後の行は **`refs/heads/` の外を指す HEAD**（`git symbolic-ref HEAD
-  refs/remotes/origin/main` は exit 0 で通り、`git status` は `On branch
-  refs/remotes/origin/main` と言う。2026-10-10、git 2.56.0）。一覧に行が無いので、行を
-  持たない点で detached と同じに扱う（`repo.head()` の `is_branch()` で分けていた頃と同じ
-  答え）。**列挙のあとに外でブランチが作られた形もここに落ちる** —— 次の読み直しまで
-  `Detached` / `Unborn` に見えるが、行と判別は食い違わない。libgit2 は refdb の
-  スナップショットを取れないので、窓そのものは無くせない
+  **行が無いときは HEAD を `resolve()` で辿る**（symbolic の連鎖も辿る。`repo.head()` と
+  同じ）。target の ref を名前で引くだけだと、HEAD → `refs/heads/alias` →
+  `refs/heads/missing` の連鎖で `alias` が在るので peel で落ち、読み取りごと失われた
+  （元の `head()` は unborn と答えていた。`/code-review` が一時リポジトリで再現した）。
+  最後の行に落ちるのは、**一覧の行と綴りが合わない HEAD**（実測 2026-10-10、git 2.56.0、
+  macOS）:
+
+  | 形 | 作り方 | `git status` | 判別 |
+  |---|---|---|---|
+  | `refs/heads/` の外を指す | `git symbolic-ref HEAD refs/remotes/origin/main`（exit 0） | `On branch refs/remotes/origin/main` | `Detached`（元の `head()` も同じ） |
+  | 大文字小文字だけ違う | `main` だけがあるところで `git switch Main`（exit 0。HEAD は `ref: refs/heads/Main`、loose の `main` に当たる） | `## Main` | `Detached`（元の `head()` は `Branch` で、行が無い組だった）。`git pack-refs --all` のあとは `Unborn { name: "Main" }` |
+  | 列挙のあとに外でブランチが作られた | — | — | 次の読み直しまで `Detached` |
+
+  どれも行を持たない点で detached と同じに扱い、**行と判別は食い違わない**（大文字小文字の
+  形では、積む先の名前が `HEAD` になる）。libgit2 は refdb のスナップショットを取れないので、
+  最後の窓そのものは無くせない。逆に **symbolic なブランチの ref は行になる**（一覧は peel
+  して行を作る）ので、`refs/heads/alias` → `refs/remotes/origin/main` を HEAD が指す形は
+  `Branch` で、行は `alias`（元の `head()` は `Detached` と答えていた。行と揃うこちらを採る）
 - **追跡設定（`branch.<HEAD>.remote` / `.merge`）は載せない。** 読み手（`app` の
   「現ブランチの PR」と PR 作成の `head` の候補）は、ブランチ一覧の HEAD の行の
   `Branch::upstream_config` を読む（上の「ブランチ一覧」）。元は `upstream` として
@@ -372,7 +383,8 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
   上の作りで「`Branch` なのに HEAD の行が無い」組はもう届かないが、**型は組を許す**
   （`HeadInfo` と `Vec<Branch>` は別のフィールド）。`Branch` の腕で行を引きに行く形に
   すると、届かない組の扱いを読み手ごとに書くことになるので、行を先に読む形のまま残す
-  （名前と oid を畳んだ PR の `/simplify` が拾った）
+  （名前と oid を畳んだ PR の `/simplify` が拾った）。型で閉じる（`RepoInfo.head` を消す）のは
+  plan.md の M6 に送った
 
 ## ログ列挙
 

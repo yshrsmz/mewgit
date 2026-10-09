@@ -592,10 +592,24 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `BranchList { head, branches }` を返す —— **`Branch` かどうかは一覧の行から決める**ので、
       `Branch` ⇔ `is_head` の行が作りから成り立つ。`NonUtf8Head` と「HEAD の行を peel
       できない」の `Err` も `branches()` へ移った。`RepoSnapshot` / `RepoInfo` の型は変えず、
-      `runtime::repo_info` が分けて詰める。**HEAD が `refs/heads/` の外を指す形**
-      （`git symbolic-ref HEAD refs/remotes/origin/main` が通る）は元の `head()` と同じく
-      `Detached`。判別の表は 02 の「head」。`refs()` のラベルの `is_head` は別の解決のまま
-      （描画だけ。02 の「refs とラベル」）
+      `runtime::repo_info` が分けて詰める。行が無いときは HEAD を `resolve()` で辿り、先が
+      無ければ `Unborn`、在れば `Detached`（`refs/heads/` の外を指す HEAD、大文字小文字だけ
+      違う `git switch Main`）。判別の表と実測は 02 の「head」。`refs()` のラベルの `is_head` は
+      別の解決のまま（描画だけ。02 の「refs とラベル」）
+- [ ] HEAD の状態とブランチ一覧を型で 1 つに持ち、`RepoInfo.head` を消す。**上のタスクで
+      「`Branch` ⇔ `is_head` の行がちょうど 1 つ」は `branches()` の出口で成り立つように
+      なったが、`RepoSnapshot` で `head` と `branches` に分け、`RepoInfo.head` と
+      `BranchState` に入れ直す**ので、`app` では散文の約束に戻る —— 読み手（`update::graph`
+      の `head_name`、`update::rebase` の `plan_to`）は「行を先に読み、無ければ `repo.head`」の
+      形で届かない組を抱え、それを見張るテスト 2 本が届かない組をわざわざ組んでいる（上の
+      タスクの `/simplify` の altitude と simplification が独立に拾い、2026-10-10 にユーザーと
+      決めて送った）。塞ぐには `RepoSnapshot.branches` を `BranchList` のまま運んで
+      `BranchState` に持たせ、フィールドを private にして `head()` が
+      `Branch(&Branch) | Detached(Oid) | Unborn(&str)` を導出する（`HeadInfo::Branch` の腕は
+      導出できる値になる）。テストで `state.repo.head` / `snapshot.head` を直に組んでいる
+      箇所（`test_util`、`prs` / `rebase` / `graph` / `worktree` / `account`、`runtime`）は
+      テスト用の組み立てに寄せる。02 の「head」の「型は組を許す」と 01 の「現ブランチの PR」も
+      揃える
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

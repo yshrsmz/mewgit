@@ -59,13 +59,12 @@ fn plan_to(state: &AppState, selected: &Commit) -> Result<(Oid, RebasePlan), &'s
     if selected.parents.is_empty() {
         return Err("root コミットからは rebase できません");
     }
-    // ブランチの oid は HEAD の行から読む（02 の「head」）。
-    let head = match &state.repo.head {
-        Some(HeadInfo::Branch) => state.branches.head().map(|branch| branch.oid),
-        Some(HeadInfo::Detached(oid)) => Some(*oid),
-        Some(HeadInfo::Unborn { .. }) | None => None,
-    }
-    .ok_or("HEAD のコミットがまだありません")?;
+    // **HEAD の行を先に読む**（02 の「head」）。行が無いときだけ detached の oid を見る。
+    let head = match (state.branches.head(), &state.repo.head) {
+        (Some(branch), _) => branch.oid,
+        (None, Some(HeadInfo::Detached(oid))) => *oid,
+        (None, _) => return Err("HEAD のコミットがまだありません"),
+    };
     let loaded: HashMap<Oid, &Commit> = state
         .graph
         .lines
@@ -321,12 +320,12 @@ mod tests {
     };
     use super::*;
     use crate::app::{update, Msg};
-    use crate::git_read::Branch;
     use crate::git_read::{InProgressOp, WorktreeSnapshot};
     use crate::test_util::{fake_branch, fake_oid, fake_snapshot, reply, reword};
 
     /// `n` 件の 1 列の履歴（`commit i` の親は `commit i+1`、最後が root）。HEAD は
-    /// `commit 0` のブランチで、作業ツリーは鮮度のある空の snapshot。
+    /// `commit 0` のブランチ（HEAD の行。`fake_branch` の oid が `commit 0`）で、作業ツリーは
+    /// 鮮度のある空の snapshot。
     fn linear(n: usize) -> AppState {
         let mut state = state_with_commits(n);
         for (i, line) in state.graph.lines.iter_mut().enumerate() {
@@ -336,11 +335,7 @@ mod tests {
                 Vec::new()
             };
         }
-        state.repo.head = Some(HeadInfo::Branch);
-        state.branches.branches = vec![Branch {
-            oid: fake_oid(0),
-            ..fake_branch("main", true)
-        }];
+        state.branches.branches = vec![fake_branch("main", true)];
         status(&mut state, fake_snapshot(&[], &[], &[]));
         state
     }
@@ -470,7 +465,9 @@ mod tests {
 
     #[test]
     fn an_unborn_head_is_refused() {
+        // unborn の HEAD は一覧に行が無い（02 の「ブランチ一覧」）。
         let mut state = linear(3);
+        state.branches.branches.clear();
         state.repo.head = Some(HeadInfo::Unborn {
             name: "main".to_string(),
         });
@@ -478,17 +475,6 @@ mod tests {
         let _ = press_i_on(&mut state, 1);
 
         refused(&state, NoticeLevel::Warn, "HEAD");
-    }
-
-    #[test]
-    fn a_branch_head_without_its_row_is_refused() {
-        // ブランチの oid は HEAD の行から読む（02 の「head」）。行が無ければ辿り始められない。
-        let mut state = linear(3);
-        state.branches.branches.clear();
-
-        let _ = press_i_on(&mut state, 1);
-
-        refused(&state, NoticeLevel::Warn, "HEAD のコミットがまだありません");
     }
 
     #[test]

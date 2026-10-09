@@ -285,15 +285,14 @@ fn confirm_revert(
 /// 確認の本文に出す積む先。**表示だけに使う**（git は HEAD に積むので、ここが古くても
 /// 積む先は変わらない）。
 ///
-/// ブランチの名前は HEAD の行から読む（02 の「head」）。
+/// **HEAD の行を先に読む**（02 の「head」）。行が無いときだけ unborn の名前を見る。
 fn head_name(state: &AppState) -> &str {
+    if let Some(branch) = state.branches.head() {
+        return &branch.name;
+    }
     match &state.repo.head {
-        Some(HeadInfo::Branch) => state
-            .branches
-            .head()
-            .map_or("HEAD", |branch| branch.name.as_str()),
-        Some(HeadInfo::Unborn { name }) => name.as_str(),
-        Some(HeadInfo::Detached(_)) | None => "HEAD",
+        Some(HeadInfo::Unborn { name }) => name,
+        _ => "HEAD",
     }
 }
 
@@ -1370,7 +1369,6 @@ mod tests {
     /// HEAD を `main` にする。確認の本文が積む先の名前を出すかを見るため。名前は
     /// HEAD の行から読む（02 の「head」）。
     fn on_main(state: &mut AppState) {
-        state.repo.head = Some(HeadInfo::Branch);
         state.branches.branches = vec![fake_branch("main", true)];
     }
 

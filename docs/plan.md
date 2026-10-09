@@ -583,7 +583,17 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       の名前（`Unborn` と共用）と `update::rebase` の oid（`Detached` と共用）は、ブランチの
       腕だけ HEAD の行から取る。`RepoReader::head_message` は `repo.head()` を直に peel する。
       **`NonUtf8Head` は残した** —— 一覧がその行を落とすので、通すと「ブランチに居るのに
-      HEAD の行が無い」になる（02 の「head」）
+      HEAD の行が無い」になる（02 の「head」）。読み手は HEAD の行を先に読み、行が無い
+      ときだけ `repo.head` を見る（`/simplify` が拾い、2026-10-10 にユーザーと決めた）
+- [ ] HEAD の解決を `RepoReader::branches` の 1 回に寄せる。**いまは `head` と `branches` が
+      HEAD をそれぞれ解決し、ランタイムの `repo_info` が 2 つを順に await する**ので、
+      あいだに外で HEAD が動くと「`Branch` なのに HEAD の行が無い」（逆向きなら
+      「`Detached` なのに `is_head` の行がある」）組が届く。読み手は行を先に読むので、
+      崩れるのは次の読み直しまで（積む先の名前が `HEAD`、`i` が断る / 古い行から辿る）
+      （02 の「head」）。塞ぐには `branches` が `find_reference("HEAD")` の 1 回から
+      detached の oid と unborn の名前も返し（`head` を消す）、`NonUtf8Head` を行を落とす
+      `branches` 側へ移す。`RepoSnapshot.head` と `RepoInfo.head` の型、02 の「head」と
+      「ブランチ一覧」も揃える
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

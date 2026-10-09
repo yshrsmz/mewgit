@@ -703,7 +703,7 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   （force push、`branch -D`、discard、abort 系）には入らないが、積んだコミットを戻す手
   （reset）が mewgit に無い。本文は「`abc1234 <summary>` を `<ブランチ>` に積みます。」で、
   **どのコミットをどこへ積むかを押す前に見せる**。積む先の名前は HEAD の行（`BranchState::head`。
-  unborn なら `RepoInfo.head` の名前）から取る表示だけの値（detached なら `HEAD`）で、git は HEAD に積むので古くても行き先は変わらない
+  行が無く unborn なら `RepoInfo.head` の名前）から取る表示だけの値（detached なら `HEAD`）で、git は HEAD に積むので古くても行き先は変わらない
 - **WIP 行では断る**（積むコミットが無い）。通知で行を選ぶよう言う
 - **merge コミットは確認を開く前に断る。** git は `-m` が無いと exit 128 で断り
   （03 の「cherry-pick の開始」）、`GitOp::CherryPick` は mainline を運ばない
@@ -821,8 +821,8 @@ pub enum RewordInput {
   切らない —— 行はレーンをまたいだ topo-order なので、HEAD の行と選択の行のあいだに
   ある行が HEAD の祖先とは限らない。**読み足さない**（`MainlinePicker` と同じ）。
   辿れなかったら断る（下の表）
-- **HEAD は `RepoInfo.head`**（`Detached` の oid か、`Branch` なら HEAD の行の `oid`。
-  02 の「head」）。mewgit の書き込みの
+- **HEAD は HEAD の行の `oid`、行が無ければ `RepoInfo.head` の `Detached` の oid**
+  （02 の「head」）。mewgit の書き込みの
   あとは `Reload::Refs` で読み直される（上の「ログの読み直し」）。**端末で積んだ
   コミットには probe（下の「外部の変更の検知」）が拾うまで最大 2 秒追いつかない**。**追いつかない HEAD で組んだ
   plan は git に渡った時点で断られる** —— `Modal::RebaseEditor` が plan を組んだ HEAD を

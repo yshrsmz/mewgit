@@ -402,8 +402,9 @@ pub enum RowlessHead { Detached(Oid), Unborn { name: String } }  // 行が無い
   いたので、`git_read` の出口で成り立つ組が `app` では散文の約束に戻り、読み手（cherry-pick /
   revert の確認に出す積む先の名前、`i` の plan を辿り始める oid）が「行を先に読み、無ければ
   `RepoInfo.head`」の形で届かない組を抱えていた（#184 の `/simplify` が拾った）。いまは
-  `BranchState::head()` を網羅 `match` する。**`None` は「一覧がまだ届いていない」だけ**で、
-  detached / unborn は `Some`
+  `BranchState::head()` を網羅 `match` する。**`None` は「一覧を一度も読めていない」**
+  （未着か、最初の読み込みの失敗。読み手にとってはどちらも「HEAD が判らない」で、出し分けは
+  `BranchState::load` が持つ）で、detached / unborn は `Some`
 
 ## ログ列挙
 

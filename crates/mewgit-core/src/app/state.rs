@@ -1736,7 +1736,7 @@ pub struct DiffCursor {
 /// ブランチペインの状態（01 の「ブランチ一覧」）。HEAD の状態もここが持つ（02 の「head」）。
 #[derive(Debug, Default)]
 pub struct BranchState {
-    /// `git_read::branches` の戻り値そのまま。`None` はまだ一度も届いていない。
+    /// `git_read::branches` の戻り値そのまま。`None` はまだ一度も読めていない。
     ///
     /// **HEAD を別の置き場に写さない。** 元は `RepoInfo.head` に判別を分けて持っていたので、
     /// 「`Branch` なのに HEAD の行が無い」組が `app` で組め、読み手ごとに「行を先に読み、
@@ -1817,13 +1817,14 @@ impl BranchState {
         self.list.as_ref().map_or(&[], BranchList::branches)
     }
 
-    /// HEAD の状態。**`None` はまだ届いていないことだけを言う**（detached / unborn は
-    /// `Some`）。
+    /// HEAD の状態。**`None` は一覧を一度も読めていないこと**（まだ届いていないか、最初の
+    /// 読み込みが失敗した。どちらかは [`BranchState::load`] が答える）。detached / unborn は
+    /// `Some`。
     pub fn head(&self) -> Option<Head<'_>> {
         self.list.as_ref().map(BranchList::head)
     }
 
-    /// HEAD が指しているブランチ。detached / unborn / まだ届いていないときは `None`。
+    /// HEAD が指しているブランチ。detached / unborn / まだ読めていないときは `None`。
     ///
     /// **push と fetch の行き先も、断られたことの記憶も、HEAD はここからしか取らない**
     /// （#22 の「キャッシュした状態から破壊的操作を選ばない」）。材料（追跡 ref の位置、
@@ -1957,7 +1958,7 @@ pub(super) fn current_row<'a>(
 /// いちばんふつうの経路**が当たらない。
 ///
 /// **HEAD の行は引数に取らない。** 名前も追跡設定も `branches` の HEAD の行
-/// （[`BranchState::head`]）から導けるので、呼ぶ側に選ばせると対応の取れない組
+/// （[`BranchState::head_branch`]）から導けるので、呼ぶ側に選ばせると対応の取れない組
 /// （HEAD でない行）が型で組める（`.claude/rules/rust-coding.md` の「導出できる値を
 /// 引数に取らせない」）。
 ///

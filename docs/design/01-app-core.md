@@ -1164,14 +1164,14 @@ untracked の中身を出すようにしてあるので、これで新規ファ�
 
 ```rust
 pub struct BranchState {
-    list: Option<BranchList>,  // 02 の branches() の戻り値そのまま。None はまだ届いていない
+    list: Option<BranchList>,  // 02 の branches() の戻り値そのまま。None はまだ一度も読めていない
     pub cursor: usize,
     load: ListLoad,            // Pending | Loaded | Failed
 }
 
 impl BranchState {
     pub fn branches(&self) -> &[Branch];        // 名前順。届く前は空
-    pub fn head(&self) -> Option<Head<'_>>;     // None はまだ届いていない（02 の「head」）
+    pub fn head(&self) -> Option<Head<'_>>;     // None はまだ一度も読めていない（02 の「head」）
     pub fn head_branch(&self) -> Option<&Branch>;  // HEAD の行。detached / unborn では None
 }
 ```
@@ -1712,7 +1712,7 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
 - **材料は `Cmd::LoadRepoInfo` に載せる**（02 の「ブランチ一覧」）。**座り直しは 1 回きり**
   （一覧が 1 度届くと以後は選んでいる番号で座るので、この導出は二度と走らない）なので、
   **別のジョブから届く値を混ぜると到着順で答えが変わり、二度と直らない**。
-  **HEAD の行（`BranchState::head`）から読んでよいのは、ブランチ一覧が同じ返信に乗る
+  **HEAD の行（`BranchState::head_branch`）から読んでよいのは、ブランチ一覧が同じ返信に乗る
   から**（経緯は 02 の「head」）。**名前も oid も追跡設定も、PR 作成の「ブランチに
   乗っているか」も HEAD の行（`BranchState::head_branch`）から取る** —— HEAD の状態は
   一覧と同じ `BranchList` が持ち、`Branch` の腕は行そのもの（02 の「head」）なので、

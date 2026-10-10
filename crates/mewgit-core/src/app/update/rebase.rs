@@ -411,8 +411,9 @@ mod tests {
 
     #[test]
     fn i_starts_from_the_head_row_or_the_detached_commit() {
-        // HEAD の状態ごとに 1 つ（02 の「head」）。HEAD でない行を先頭に置き、別の
-        // コミットを持たせる（一覧の先頭やカーソル行から oid を取る変異も落とす）。
+        // HEAD の状態ごとに 1 つ（02 の「head」）。HEAD でない行を先頭に置いて別の
+        // コミットを持たせ、Branches のカーソルもそこへ動かす（`loaded` は HEAD の行に座る
+        // ので、動かさないとカーソル行から oid を取る変異が生き残る）。
         let other = || Branch {
             oid: fake_oid(1),
             ..fake_branch("another", false)
@@ -420,6 +421,7 @@ mod tests {
         let head_with = |list: BranchList| {
             let mut state = linear(4);
             state.branches.loaded(list);
+            state.branches.cursor = 0;
             let _ = press_i_on(&mut state, 2);
             let Some(Modal::RebaseEditor { head, .. }) = &state.modal else {
                 panic!("RebaseEditor が開いていません: {:?}", state.modal);

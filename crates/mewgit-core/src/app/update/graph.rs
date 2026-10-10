@@ -1375,12 +1375,14 @@ mod tests {
 
     #[test]
     fn the_target_name_follows_each_state_of_head() {
-        // HEAD の状態ごとに 1 つ（02 の「head」）。HEAD でない行を先頭に置き、名前を
-        // 一覧の先頭やカーソル行から取る変異も落とす。
+        // HEAD の状態ごとに 1 つ（02 の「head」）。HEAD でない行を先頭に置き、Branches の
+        // カーソルもそこへ動かす（`loaded` は HEAD の行に座るので、動かさないとカーソル行から
+        // 名前を取る変異が生き残る）。一覧の先頭やカーソル行から取る変異を落とす。
         let body_with = |list: Option<BranchList>| {
             let mut state = state_with_commits(3);
             if let Some(list) = list {
                 state.branches.loaded(list);
+                state.branches.cursor = 0;
             }
             let _ = press(&mut state, 'j');
             let _ = press(&mut state, 'y');

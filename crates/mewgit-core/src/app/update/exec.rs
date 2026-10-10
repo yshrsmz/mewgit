@@ -724,9 +724,10 @@ mod tests {
 
     use crate::git_exec::{ExecErrorKind, HunkApply, LocalBranch, PrSource, PullMode, RebasePlan};
     use crate::git_read::{GitReadError, LogPage, WorktreeSection};
-    use crate::test_util::{fake_pr_checkout, fake_repo_snapshot};
-
-    use crate::test_util::{fake_detail, fake_oid, fake_snapshot, fake_stamp};
+    use crate::test_util::{
+        fake_detail, fake_oid, fake_pr_checkout, fake_repo_snapshot, fake_snapshot, fake_stamp,
+        status_arrived,
+    };
 
     #[test]
     fn exec_finished_reloads_the_status() {
@@ -1308,19 +1309,13 @@ mod tests {
         assert_eq!(cmd, Cmd::None);
 
         // 書き込みより前に頼まれた一覧が届く。出しはするが、いまの世代ではない。
-        let cmd = update(
-            &mut state,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &[], &[])))),
-        );
+        let cmd = update(&mut state, status_arrived(Ok(fake_snapshot(&[], &[], &[]))));
 
         assert_eq!(cmd, Cmd::LoadStatus);
         assert!(!state.worktree_is_current());
 
         // 頼み直したぶんが届いて追いつく。
-        let cmd = update(
-            &mut state,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &[], &[])))),
-        );
+        let cmd = update(&mut state, status_arrived(Ok(fake_snapshot(&[], &[], &[]))));
 
         assert_eq!(cmd, Cmd::None);
         assert!(state.worktree_is_current());
@@ -1335,10 +1330,7 @@ mod tests {
         // 書き込みが `Cmd::LoadStatus` を出す（走っているものは無いので通る）。
         let _ = update(&mut state, exec_done(Ok(fake_output())));
 
-        let cmd = update(
-            &mut state,
-            Msg::StatusLoaded(Box::new(Err(GitReadError::ReaderGone))),
-        );
+        let cmd = update(&mut state, status_arrived(Err(GitReadError::ReaderGone)));
 
         assert_eq!(cmd, Cmd::None);
         // 一覧は古いままで、次の読み込みはユーザーの操作から始まる。

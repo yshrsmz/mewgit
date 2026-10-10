@@ -327,10 +327,12 @@ mod tests {
     };
     use super::super::update;
     use super::*;
-    use crate::app::{Cmd, KeyCode, Modal, Msg};
+    use crate::app::{Cmd, KeyCode, Modal};
     use crate::git_exec::{LocalBranch, PrSource, PullMode};
-    use crate::git_read::{RefusedReword, Step, WorktreeSection};
-    use crate::test_util::{fake_oid, fake_pr_checkout, fake_snapshot, reply};
+    use crate::git_read::{RefusedReword, Step, WorktreeSection, WorktreeSnapshot};
+    use crate::test_util::{
+        deliver_status, fake_oid, fake_pr_checkout, fake_snapshot, status_arrived,
+    };
 
     fn rebase() -> InProgressOp {
         InProgressOp::Rebase {
@@ -372,13 +374,15 @@ mod tests {
 
     /// 進行中操作を載せた status を届ける（鮮度のある snapshot になる）。
     fn arrive(state: &mut AppState, progress: Option<InProgressOp>) {
+        let _ = deliver_status(state, Ok(progressing(progress)));
+    }
+
+    /// 進行中操作を載せた status。キーが `Cmd::LoadStatus` を発行済みの経路では
+    /// これを `update` に直に渡す。
+    fn progressing(progress: Option<InProgressOp>) -> WorktreeSnapshot {
         let mut snapshot = fake_snapshot(&["a.txt"], &[], &[]);
         snapshot.progress = progress;
-        let _ = reply(
-            state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(snapshot))),
-        );
+        snapshot
     }
 
     /// ステータスバーに出ている通知の文言。
@@ -676,14 +680,7 @@ mod tests {
         assert_eq!(state.modal, None);
         assert_eq!(shown(&state), "進行中の操作は見つかりませんでした");
 
-        let _ = update(
-            &mut state,
-            Msg::StatusLoaded(Box::new(Ok({
-                let mut snapshot = fake_snapshot(&["a.txt"], &[], &[]);
-                snapshot.progress = Some(rebase());
-                snapshot
-            }))),
-        );
+        let _ = update(&mut state, status_arrived(Ok(progressing(Some(rebase())))));
         let _ = press(&mut state, 'm');
 
         assert_eq!(menu_ops(&state)[0], GitOp::RebaseContinue { reword: None });
@@ -826,9 +823,7 @@ mod tests {
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::LoadStatus);
 
         // 読み直した status には進行中操作が無い（外で終えた）。
-        let mut snapshot = fake_snapshot(&["a.txt"], &[], &[]);
-        snapshot.progress = None;
-        let _ = update(&mut state, Msg::StatusLoaded(Box::new(Ok(snapshot))));
+        let _ = update(&mut state, status_arrived(Ok(progressing(None))));
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
@@ -856,7 +851,7 @@ mod tests {
             "書き込みのあとの読み直しは落ちるはず: {after:?}"
         );
         let stale = fake_snapshot(&["a.txt"], &[], &[]);
-        let again = update(&mut state, Msg::StatusLoaded(Box::new(Ok(stale))));
+        let again = update(&mut state, status_arrived(Ok(stale)));
 
         assert!(format!("{again:?}").contains("LoadStatus"), "{again:?}");
         assert!(!state.worktree_is_current());

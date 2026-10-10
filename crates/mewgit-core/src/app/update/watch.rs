@@ -167,7 +167,7 @@ mod tests {
     use crate::app::{Msg, Region};
     use crate::git_exec::GitOp;
     use crate::git_read::{FileStamp, PathStamp, Timestamp, WorktreeSnapshot};
-    use crate::test_util::{fake_oid, fake_snapshot, reply, FAKE_NOW};
+    use crate::test_util::{deliver_status, fake_oid, fake_snapshot, reply, FAKE_NOW};
 
     const PROBE: i64 = WatchState::PROBE_INTERVAL;
 
@@ -228,11 +228,7 @@ mod tests {
         let mut state = state();
         let interval = i64::try_from(state.config.general.refresh_interval).unwrap();
         state.now.seconds += interval - 1;
-        let _ = reply(
-            &mut state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(WorktreeSnapshot::default()))),
-        );
+        let _ = deliver_status(&mut state, Ok(WorktreeSnapshot::default()));
 
         assert_eq!(update(&mut state, tick_after(interval)), Cmd::Probe);
     }
@@ -377,18 +373,10 @@ mod tests {
         // probe は捨てない —— status の差は世代を進めない（`diff_is_current` が
         // `DiffView::stamp` で比べる）。
         let mut state = watching(print(1));
-        let _ = reply(
-            &mut state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&["a.txt"], &[], &[])))),
-        );
+        let _ = deliver_status(&mut state, Ok(fake_snapshot(&["a.txt"], &[], &[])));
         let _ = state.issue(Cmd::Probe);
         let worktree = state.jobs.epoch(Region::Worktree);
-        let _ = reply(
-            &mut state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(WorktreeSnapshot::default()))),
-        );
+        let _ = deliver_status(&mut state, Ok(WorktreeSnapshot::default()));
         assert_eq!(state.jobs.epoch(Region::Worktree), worktree);
 
         let cmd = update(&mut state, probed(print(2)));
@@ -437,7 +425,7 @@ mod tests {
     }
 
     /// 指紋（ワークツリーの mtime が `worktree` 秒、index の blob が `index`）の付いた status。
-    fn stamped(staged: &[&str], unstaged: &[&str], worktree: u64, index: u8) -> Msg {
+    fn stamped(staged: &[&str], unstaged: &[&str], worktree: u64, index: u8) -> WorktreeSnapshot {
         let mut snapshot = fake_snapshot(staged, unstaged, &[]);
         snapshot.stamps.insert(
             PathBuf::from("a.txt"),
@@ -450,7 +438,7 @@ mod tests {
                 head: None,
             },
         );
-        Msg::StatusLoaded(Box::new(Ok(snapshot)))
+        snapshot
     }
 
     #[test]
@@ -460,19 +448,19 @@ mod tests {
         let target = state.wanted_diff().expect("対象がありません");
         // stamp の無い snapshot から stamp のあるものへ変わったので読み直す（前提）。
         assert_eq!(
-            reply(&mut state, Cmd::LoadStatus, stamped(&[], &["a.txt"], 1, 1)),
+            deliver_status(&mut state, Ok(stamped(&[], &["a.txt"], 1, 1))),
             Cmd::LoadDiff(target.clone())
         );
         let _ = update(&mut state, diff_ok(target.clone(), Vec::new()));
         assert!(state.diff_is_current());
 
         // 同じ stamp なら何も読み直さない。
-        let same = reply(&mut state, Cmd::LoadStatus, stamped(&[], &["a.txt"], 1, 1));
+        let same = deliver_status(&mut state, Ok(stamped(&[], &["a.txt"], 1, 1)));
         assert_eq!(same, Cmd::None);
         assert!(state.diff_is_current());
 
         // 外で書き換えた。status は頼み直さず、diff だけを読み直す。
-        let edited = reply(&mut state, Cmd::LoadStatus, stamped(&[], &["a.txt"], 2, 1));
+        let edited = deliver_status(&mut state, Ok(stamped(&[], &["a.txt"], 2, 1)));
         assert_eq!(edited, Cmd::LoadDiff(target));
         assert!(!state.diff_is_current());
         assert!(state.worktree_is_current());
@@ -484,15 +472,11 @@ mod tests {
         // （`/code-review` が拾った形）。
         let mut state = diff_state(&["a.txt"], 2);
         let target = state.wanted_diff().expect("対象がありません");
-        let _ = reply(&mut state, Cmd::LoadStatus, stamped(&[], &["a.txt"], 1, 1));
+        let _ = deliver_status(&mut state, Ok(stamped(&[], &["a.txt"], 1, 1)));
         let _ = update(&mut state, diff_ok(target.clone(), Vec::new()));
         assert!(state.diff_is_current());
 
-        let staged = reply(
-            &mut state,
-            Cmd::LoadStatus,
-            stamped(&["a.txt"], &["a.txt"], 1, 2),
-        );
+        let staged = deliver_status(&mut state, Ok(stamped(&["a.txt"], &["a.txt"], 1, 2)));
 
         assert_eq!(staged, Cmd::LoadDiff(target));
     }

@@ -899,11 +899,15 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       言っていた（#180 の `/simplify` の altitude が拾った）。未着と失敗は言い分ける。
       `default_remote` の `remotes.is_empty()` は未着の守りではなくなった（空の
       `RemotePicker` を開かないため。01 の「既定リモート」）
-- [ ] テストで status を届ける 3 行（`reply(state, Cmd::LoadStatus, Msg::StatusLoaded(..))`）を
-      `test_support` のヘルパ 1 本に寄せ、`worktree_state` もそれを呼ぶ形にする。いまは
-      diff / graph / exec / worktree / mod / progress の各テストにインラインで散っている
-      （#120 の `/simplify` が拾い、範囲外として見送った）。`WorktreeSnapshot` に
-      フィールドが増えたときに直す場所が 1 つになる
+- [x] テストで status を届ける 3 行（`reply(state, Cmd::LoadStatus, Msg::StatusLoaded(..))`）を
+      ヘルパ 1 本に寄せ、`worktree_state` もそれを呼ぶ形にする。diff / graph / watch / rebase /
+      worktree / mod / progress の各テストにインラインで散っていた（#120 の `/simplify` が拾い、
+      範囲外として見送った）。**置き場所は `test_support` ではなく `crate::test_util`** ——
+      `mewgit-tui` の `state_with_status` も同じ 3 行を持っていたので（`reply` の doc の
+      「tui からも呼ぶヘルパはここが唯一の置き場所」）。**寄せたのは発行と包みの 2 つ** ——
+      `deliver_status` が `reply` を通し、`status_arrived` が `Msg` を組む（発行済みの経路で
+      `update` に直に渡すテストはこちらだけを使う）。`Msg::StatusLoaded` の形が変わっても
+      直す場所は `status_arrived` の 1 つ。graph の 2 本は発行せずに届けていた（`/simplify` が拾った）
 - [x] README、リリースワークフロー。**release-please + 手書きのビルド、private のまま自分用、
       `aarch64-apple-darwin` と `aarch64-unknown-linux-gnu`、crates.io には上げない
       （`publish = false`）**（2026-10-04 にユーザーと決めた）。**`release-type: rust` は

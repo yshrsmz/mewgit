@@ -1244,6 +1244,18 @@ pub fn deliver_branches(state: &mut AppState, result: Result<BranchList, GitRead
     )
 }
 
+/// ワーキングツリーの一覧の返信。`Cmd::LoadStatus` が発行済みの経路（書き込みやキーが
+/// 出したあと、テストが `issue` したあと）では `update` に直に渡し、そうでなければ
+/// [`deliver_status`] で届ける。
+pub fn status_arrived(result: Result<WorktreeSnapshot, GitReadError>) -> Msg {
+    Msg::StatusLoaded(Box::new(result))
+}
+
+/// ワーキングツリーの一覧を、それを運ぶ `Msg::StatusLoaded` で届ける。[`reply`] を通す。
+pub fn deliver_status(state: &mut AppState, result: Result<WorktreeSnapshot, GitReadError>) -> Cmd {
+    reply(state, Cmd::LoadStatus, status_arrived(result))
+}
+
 /// `cmd` を発行してから、その返信を届ける。
 ///
 /// **ランタイムでは `Cmd` が必ず [`AppState::issue`] を通る**（`update` の出口）。

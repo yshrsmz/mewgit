@@ -569,7 +569,7 @@ mod tests {
 
     use crate::git_read::RowlessHead;
 
-    use crate::test_util::{fake_branch_list_or, fake_entry, fake_snapshot, reply};
+    use crate::test_util::{deliver_status, fake_branch_list_or, fake_entry, fake_snapshot};
 
     #[test]
     fn status_loaded_replaces_the_snapshot_and_reseats_the_cursor() {
@@ -580,11 +580,7 @@ mod tests {
         state.worktree.cursor = 1;
 
         // b.txt を stage した後の状態が届く。
-        let _ = reply(
-            &mut state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&["b.txt"], &["a.txt"], &[])))),
-        );
+        let _ = deliver_status(&mut state, fake_snapshot(&["b.txt"], &["a.txt"], &[]));
 
         assert!(!state.jobs.is_running(JobKind::LoadStatus));
         // 選んでいた行は消えているので、選べる行へ寄る。

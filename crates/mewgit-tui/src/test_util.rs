@@ -7,8 +7,8 @@ use mewgit_core::git_read::{
     Commit, FileEntry, GitReadError, LogPage, StashEntry, WorktreeSnapshot,
 };
 use mewgit_core::test_util::{
-    deliver_branches, fake_branch, fake_commit, fake_commit_with_parents, fake_head_list, reply,
-    FAKE_NOW,
+    deliver_branches, deliver_status, fake_branch, fake_commit, fake_commit_with_parents,
+    fake_head_list, reply, FAKE_NOW,
 };
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -310,11 +310,7 @@ pub fn state_on_first_commit(summaries: &[&str]) -> AppState {
 /// 「書き込みより前に頼まれたもの」として頼み直す（01 の「実行中ジョブ › 世代」）。
 pub fn state_with_status(snapshot: WorktreeSnapshot) -> AppState {
     let mut state = state_at("/repo");
-    let _ = reply(
-        &mut state,
-        Cmd::LoadStatus,
-        Msg::StatusLoaded(Box::new(Ok(snapshot))),
-    );
+    let _ = deliver_status(&mut state, snapshot);
     state
 }
 

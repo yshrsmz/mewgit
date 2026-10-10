@@ -589,8 +589,8 @@ mod tests {
 
     use crate::git_read::Timestamp;
     use crate::test_util::{
-        fake_pull_request, fake_snapshot, fake_target, pr_list_loaded, put_on_branch, reply,
-        FAKE_NOW,
+        deliver_status, fake_pull_request, fake_snapshot, fake_target, pr_list_loaded,
+        put_on_branch, reply, FAKE_NOW,
     };
 
     /// 最新の通知の文言。下ろしていれば `None`。
@@ -648,11 +648,7 @@ mod tests {
         );
         // **非同期の完了も回す。** 通知を積まない成功の返信で、失敗のあとに必ず届く
         // 形（書き込みのあとの読み直し）。
-        let _ = reply(
-            &mut state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
-        );
+        let _ = deliver_status(&mut state, fake_snapshot(&[], &["a.txt"], &[]));
         assert_eq!(state.notices.len(), 1, "返信が通知を積んでいる");
 
         assert_eq!(shown(&state), Some("push に失敗しました"));

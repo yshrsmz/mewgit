@@ -190,7 +190,7 @@ mod tests {
     use crate::git_read::{FileStatus, Hunk, LineOrigin, WorktreeSection, WorktreeSnapshot};
 
     use crate::test_util::{
-        fake_entry, fake_file_diff, fake_hunk, fake_snapshot, fake_stamp, reply,
+        deliver_status, fake_entry, fake_file_diff, fake_hunk, fake_snapshot, fake_stamp, reply,
     };
 
     /// ワーキングツリー側の diff の対象。`assert_eq!` を短くするため。
@@ -358,11 +358,7 @@ mod tests {
         // 判定は `clamp` のあとでないと、古い区画で対象を決めてしまう。
         let mut state = diff_state(&["a.txt"], 1);
 
-        let cmd = reply(
-            &mut state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&["a.txt"], &[], &[])))),
-        );
+        let cmd = deliver_status(&mut state, fake_snapshot(&["a.txt"], &[], &[]));
 
         assert_eq!(
             cmd,

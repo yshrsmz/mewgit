@@ -18,9 +18,9 @@ use crate::git_read::{
     Remote, StashEntry, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
 };
 use crate::test_util::{
-    fake_branch, fake_branch_list, fake_commit, fake_detail, fake_entry, fake_file_diff,
-    fake_head_list, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_stash, fake_upstream,
-    reply, FAKE_NOW,
+    deliver_status, fake_branch, fake_branch_list, fake_commit, fake_detail, fake_entry,
+    fake_file_diff, fake_head_list, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_stash,
+    fake_upstream, reply, FAKE_NOW,
 };
 
 /// グラフに使える行数。`ui` が決めた値が [`Msg::Layout`] で来る想定。
@@ -136,11 +136,7 @@ pub(super) fn only_staged() -> AppState {
 /// worktree ペインにフォーカスし、その区画の先頭を選んだ状態。
 pub(super) fn worktree_state(snapshot: WorktreeSnapshot, section: WorktreeSection) -> AppState {
     let mut state = state();
-    let _ = reply(
-        &mut state,
-        Cmd::LoadStatus,
-        Msg::StatusLoaded(Box::new(Ok(snapshot))),
-    );
+    let _ = deliver_status(&mut state, snapshot);
     state.focus = Pane::Worktree;
     state.worktree.section = section;
     state.worktree.cursor = 0;

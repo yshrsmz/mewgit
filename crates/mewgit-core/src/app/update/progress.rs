@@ -330,7 +330,7 @@ mod tests {
     use crate::app::{Cmd, KeyCode, Modal, Msg};
     use crate::git_exec::{LocalBranch, PrSource, PullMode};
     use crate::git_read::{RefusedReword, Step, WorktreeSection};
-    use crate::test_util::{fake_oid, fake_pr_checkout, fake_snapshot, reply};
+    use crate::test_util::{deliver_status, fake_oid, fake_pr_checkout, fake_snapshot};
 
     fn rebase() -> InProgressOp {
         InProgressOp::Rebase {
@@ -374,11 +374,7 @@ mod tests {
     fn arrive(state: &mut AppState, progress: Option<InProgressOp>) {
         let mut snapshot = fake_snapshot(&["a.txt"], &[], &[]);
         snapshot.progress = progress;
-        let _ = reply(
-            state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(snapshot))),
-        );
+        let _ = deliver_status(state, snapshot);
     }
 
     /// ステータスバーに出ている通知の文言。

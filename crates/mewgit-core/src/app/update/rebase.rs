@@ -319,10 +319,10 @@ mod tests {
     };
     use super::*;
     use crate::app::{update, Msg};
-    use crate::git_read::{Branch, BranchList, InProgressOp, RowlessHead, WorktreeSnapshot};
+    use crate::git_read::{Branch, BranchList, InProgressOp, RowlessHead};
     use crate::test_util::{
-        fake_branch, fake_branch_list, fake_branch_list_or, fake_head_list, fake_oid,
-        fake_snapshot, reply, reword,
+        deliver_status, fake_branch, fake_branch_list, fake_branch_list_or, fake_head_list,
+        fake_oid, fake_snapshot, reply, reword,
     };
 
     /// `n` 件の 1 列の履歴（`commit i` の親は `commit i+1`、最後が root）。HEAD は
@@ -338,16 +338,8 @@ mod tests {
             };
         }
         state.branches.loaded(fake_head_list(fake_branch("main")));
-        status(&mut state, fake_snapshot(&[], &[], &[]));
+        let _ = deliver_status(&mut state, fake_snapshot(&[], &[], &[]));
         state
-    }
-
-    fn status(state: &mut AppState, snapshot: WorktreeSnapshot) {
-        let _ = reply(
-            state,
-            Cmd::LoadStatus,
-            Msg::StatusLoaded(Box::new(Ok(snapshot))),
-        );
     }
 
     /// カーソルを `commit index` の行に乗せて `i` を押す（0 行目は WIP 行）。
@@ -517,7 +509,7 @@ mod tests {
     fn tracked_changes_are_refused_before_the_editor_opens_but_untracked_ones_are_not() {
         // 開いてから断ると、並べ替えた plan が消える（01）。
         let mut state = linear(3);
-        status(&mut state, fake_snapshot(&[], &["a.txt"], &[]));
+        let _ = deliver_status(&mut state, fake_snapshot(&[], &["a.txt"], &[]));
 
         let _ = press_i_on(&mut state, 1);
 
@@ -525,7 +517,7 @@ mod tests {
 
         // untracked だけなら git は通す（01 の実測）。
         let mut state = linear(3);
-        status(&mut state, fake_snapshot(&[], &[], &["new.txt"]));
+        let _ = deliver_status(&mut state, fake_snapshot(&[], &[], &["new.txt"]));
 
         let _ = press_i_on(&mut state, 1);
 
@@ -549,7 +541,7 @@ mod tests {
         snapshot.progress = Some(InProgressOp::CherryPick {
             oid: Some(fake_oid(9)),
         });
-        status(&mut state, snapshot);
+        let _ = deliver_status(&mut state, snapshot);
 
         let _ = press_i_on(&mut state, 1);
 

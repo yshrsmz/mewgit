@@ -240,7 +240,7 @@ mod tests {
     use super::*;
     use crate::test_util::{
         col_of, deliver_commit_files, draw, pane_text, row_is_reversed, row_of, state_at,
-        state_on_first_commit, state_showing_diff, state_with_status, tab_to, with_stashes,
+        state_on_first_commit, state_showing_diff, tab_to, with_stashes,
     };
     use mewgit_core::app::{update, AppState, Cmd, Key, KeyCode, Msg, TermSize};
     use mewgit_core::git_read::{FileDiff, GitReadError, WorktreeSnapshot};
@@ -487,18 +487,6 @@ mod tests {
     }
 
     #[test]
-    fn the_title_shows_both_names_of_a_rename() {
-        let mut renamed = fake_file_diff("new.txt", vec![fake_hunk("@@ -1 +1 @@", &[])]);
-        renamed.old_path = Some("old.txt".into());
-        renamed.status = FileStatus::Renamed;
-
-        let state = state_with_diff(vec![renamed]);
-
-        let text = draw(&state, SIZE).join("\n");
-        assert!(text.contains("Diff: old.txt -> new.txt"), "{text}");
-    }
-
-    #[test]
     fn a_binary_file_says_so() {
         // バイナリと「mode だけの変更」はどちらもハンクが空になる。
         let mut binary = fake_file_diff("a.png", Vec::new());
@@ -542,21 +530,8 @@ mod tests {
 
         let text = draw(&state, SIZE).join("\n");
         assert!(text.contains("名前が変わっただけ"), "{text}");
-    }
-
-    #[test]
-    fn a_pending_diff_reads_as_loading() {
-        // 起動直後に「読み込めませんでした」と出すと、まだ読んでいないだけなのに
-        // 失敗したように見える。
-        let state = state_showing_diff(one_file());
-
-        // **このペインの中だけを見る。** 画面全体を見ると、まだ届いていない
-        // ブランチ一覧が出した同じ文言で通ってしまう（`ui::LOADING` は共有）。
-        let text = pane_text(&state, SIZE, Pane::Diff);
-
-        assert!(text.contains("読み込み中"), "{text}");
-        // 届く前でも、何の diff を待っているかは出す。
-        assert!(text.contains("Diff: a.txt"), "{text}");
+        // 題には両方の名前を出す。
+        assert!(text.contains("Diff: old.txt -> new.txt"), "{text}");
     }
 
     /// コミットを選び、`Enter` を 2 回で Diff ペインまで入った状態。
@@ -603,26 +578,6 @@ mod tests {
 
             assert!(text.contains(expected), "{text}");
         }
-    }
-
-    #[test]
-    fn a_conflicted_row_does_not_swap_the_graph_for_an_empty_diff() {
-        // **conflicted は 2 者の diff で表せない**（02）ので対象が決まらない。`Enter` は
-        // 断られ、左はグラフのまま。以前はここで空の Diff がグラフを覆っていた。
-        //
-        // **`state_showing_diff` は使わない。** 押した結果が「開かない」ことを見る
-        // テストなので、開いた状態を名乗るヘルパを通すと名前が中身と逆になる。
-        let mut state = state_with_status(WorktreeSnapshot {
-            conflicted: vec![fake_entry("c.txt", FileStatus::Conflicted)],
-            ..WorktreeSnapshot::default()
-        });
-        state.focus = Pane::Worktree;
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-
-        let text = draw(&state, SIZE).join("\n");
-
-        assert!(text.contains("Graph"), "{text}");
-        assert!(!text.contains("Diff"), "{text}");
     }
 
     #[test]

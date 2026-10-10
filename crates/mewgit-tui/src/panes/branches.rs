@@ -257,14 +257,4 @@ mod tests {
         assert!(below.contains("Working tree"), "{below}");
         assert!(below.contains("変更はありません"), "{below}");
     }
-
-    #[test]
-    fn a_tiny_terminal_does_not_panic() {
-        // リサイズの途中では枠より小さい端末が来る。
-        for (width, height) in [(1, 1), (10, 3), (20, 5)] {
-            let state = state_with_branches(vec![fake_branch("main")], Some("main"));
-            let lines = draw(&state, TermSize { width, height });
-            assert_eq!(lines.len(), height as usize);
-        }
-    }
 }

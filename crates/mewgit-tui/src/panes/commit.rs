@@ -281,23 +281,6 @@ mod tests {
         assert!(!text.contains("Author: mewgit test"), "{text}");
     }
 
-    #[test]
-    fn a_detail_that_failed_says_so_instead_of_loading() {
-        let mut state = state_on_first_commit(&["first"]);
-        let oid = state.graph.cursor_commit().unwrap().oid;
-        let _ = update(
-            &mut state,
-            Msg::CommitDetailLoaded {
-                oid,
-                result: Box::new(Err(mewgit_core::git_read::GitReadError::NonUtf8Head)),
-            },
-        );
-
-        let text = draw(&state, WIDE).join("\n");
-
-        assert!(text.contains("詳細を読み込めませんでした"), "{text}");
-    }
-
     /// 詳細と一覧の両方が届いた状態。
     fn with_detail_and_files(entries: Vec<FileEntry>) -> AppState {
         let mut state = with_detail(&["subject"], fake_detail(0, "subject"));

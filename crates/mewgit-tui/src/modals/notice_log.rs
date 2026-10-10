@@ -296,6 +296,17 @@ mod tests {
     #[test]
     fn a_detail_too_long_for_the_box_ends_with_an_ellipsis() {
         // 黙って切ると、stderr の続きがあることが画面から判らない（07）。
+        // 収まる detail には付けない —— 否定だけだと「`…` を一切付けない」実装でも
+        // 通るので、同じ 1 本で付く側まで見る。
+        let fits = log_of(&[(NoticeLevel::Error, "失敗しました", Some("stderr 0"))]);
+        let text = draw(&fits, SIZE).join("\n");
+        assert!(text.contains("stderr 0"), "{text}");
+        // **箱の内側の行頭だけを見る。** 下のペインの「読み込み中…」も `…` を持つ。
+        let marked = modal_text(&fits, SIZE)
+            .lines()
+            .any(|line| line.starts_with('…'));
+        assert!(!marked, "{text}");
+
         let detail: String = (0..40).map(|i| format!("stderr {i}\n")).collect();
         let state = log_of(&[(NoticeLevel::Error, "失敗しました", Some(&detail))]);
 
@@ -326,21 +337,6 @@ mod tests {
         // message、空行、detail の 2 行。
         assert_eq!(text.lines.len(), 4, "{text:?}");
         assert_eq!(text.lines[3].to_string(), "stderr 1");
-    }
-
-    #[test]
-    fn a_detail_that_fits_has_no_ellipsis() {
-        let state = log_of(&[(NoticeLevel::Error, "失敗しました", Some("stderr 0"))]);
-
-        let lines = draw(&state, SIZE);
-        let text = lines.join("\n");
-
-        assert!(text.contains("stderr 0"), "{text}");
-        // **箱の内側の行頭だけを見る。** 下のペインの「読み込み中…」も `…` を持つ。
-        let marked = modal_text(&state, SIZE)
-            .lines()
-            .any(|line| line.starts_with('…'));
-        assert!(!marked, "{text}");
     }
 
     #[test]

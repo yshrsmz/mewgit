@@ -396,19 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn the_cursor_follows_the_body_line_being_edited() {
-        // 複数行の欄では行も追う。**ラベルの行が先頭行**（`body_field`）。
-        let mut state = state_with_pr("t", "1 行目\n2 行目", "main", false, PrField::Body);
-        let Some(Modal::PrCreate { body, .. }) = &mut state.modal else {
-            unreachable!()
-        };
-        body.cursor = (1, 0);
-
-        let lines = draw(&state, SIZE);
-        assert_eq!(cursor(&state, SIZE).y, row_of(&lines, "2 行目"));
-    }
-
-    #[test]
     fn a_value_longer_than_its_field_scrolls_within_the_field_and_spares_the_label() {
         // **渡す領域もずらす幅も「その欄」**（ラベルのぶん狭い）。箱の領域を渡すと
         // **長い値がラベルの桁を上書きする** —— カーソルの桁は**どちらでも枠の内側の

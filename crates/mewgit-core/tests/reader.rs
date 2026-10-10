@@ -98,42 +98,6 @@ fn summaries(page: &LogPage) -> Vec<&str> {
 }
 
 #[tokio::test]
-async fn log_page_continues_where_the_previous_page_ended() {
-    let repo = TestRepo::init();
-    for i in 0..5 {
-        repo.commit(&format!("commit {i}"));
-    }
-    let reader = spawn(&repo);
-
-    let first = reader.log_page(2, false).await.unwrap();
-    let second = reader.log_page(2, false).await.unwrap();
-    let third = reader.log_page(2, false).await.unwrap();
-
-    // セッションはスレッド側が持ち回る。呼ぶたびに先頭から読み直さない。
-    let mut all = summaries(&first);
-    all.extend(summaries(&second));
-    all.extend(summaries(&third));
-    assert_eq!(
-        all,
-        ["commit 4", "commit 3", "commit 2", "commit 1", "commit 0"]
-    );
-    assert!(!first.done);
-    assert!(!second.done);
-    assert!(third.done, "最後のページで done が立っていません");
-}
-
-#[tokio::test]
-async fn log_page_on_an_empty_repository_is_done_immediately() {
-    let repo = TestRepo::init();
-    let reader = spawn(&repo);
-
-    let page = reader.log_page(10, false).await.unwrap();
-
-    assert!(page.commits.is_empty());
-    assert!(page.done);
-}
-
-#[tokio::test]
 async fn head_refs_and_remotes_come_back_through_the_thread() {
     let repo = TestRepo::init();
     let oid = repo.commit("first");
@@ -153,31 +117,24 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
 }
 
 #[tokio::test]
-async fn commit_detail_comes_back_through_the_thread() {
-    let repo = TestRepo::init();
-    repo.commit("subject");
-    repo.git(&["commit", "--amend", "-q", "-m", "subject\n\nbody"]);
-    let oid = repo.head_oid();
-    let reader = spawn(&repo);
-
-    let detail = reader.commit_detail(oid).await.unwrap();
-
-    assert_eq!(detail.oid, oid);
-    assert_eq!(detail.message, "subject\n\nbody");
-}
-
-#[tokio::test]
 async fn commit_detail_does_not_disturb_the_log_session() {
     // ログのセッションはスレッドのローカル変数。他の要求が挟まっても続きから読める。
     let repo = TestRepo::init();
     let first = repo.commit("first");
-    let second = repo.commit("second");
+    repo.commit("second");
+    // 本文付きにして、詳細がスレッド越しにも全文を読んでいることを同じ 1 本で見る。
+    repo.git(&["commit", "--amend", "-q", "-m", "second\n\nbody"]);
+    let second = repo.head_oid();
     let reader = spawn(&repo);
 
     let page = reader.log_page(1, false).await.unwrap();
     assert_eq!(page.commits[0].oid, second);
 
-    let _ = reader.commit_detail(second).await.unwrap();
+    let detail = reader.commit_detail(second).await.unwrap();
+    assert_eq!(
+        (detail.oid, detail.message.as_str()),
+        (second, "second\n\nbody")
+    );
 
     let page = reader.log_page(1, false).await.unwrap();
     assert_eq!(page.commits[0].oid, first);

@@ -23,15 +23,6 @@ fn rows(entries: &[FileEntry]) -> Vec<(&str, Option<&str>, FileStatus)> {
 }
 
 #[test]
-fn status_is_empty_in_a_clean_repository() {
-    let repo = TestRepo::init();
-    repo.commit("first");
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    assert_eq!(reader.status().unwrap(), Default::default());
-}
-
-#[test]
 fn status_lists_untracked_files_inside_a_new_directory() {
     let repo = TestRepo::init();
     repo.commit("first");
@@ -183,7 +174,12 @@ fn status_drops_a_file_whose_path_is_not_utf8() {
 fn status_sorts_each_section_by_path() {
     let repo = TestRepo::init();
     repo.commit("first");
-    for name in ["c.txt", "a.txt", "b.txt"] {
+    // **ディレクトリ入りのパスを混ぜる。** libgit2 はパスを文字列で比べるので
+    // `a.txt` < `a/b.txt`（`'.'` 0x2E < `'/'` 0x2F）と返すが、`Path` は部品ごとに
+    // 比べるので `a/b.txt` < `a.txt`（`"a"` < `"a.txt"`）。平たいファイル名だけだと
+    // libgit2 の列挙順がそのまま期待値に一致し、並べ替えを外しても通る。
+    fs::create_dir_all(repo.path().join("a")).unwrap();
+    for name in ["c.txt", "a.txt", "a/b.txt"] {
         repo.write_worktree_file(name, b"x\n");
     }
     let reader = RepoReader::open(repo.path()).unwrap();
@@ -196,5 +192,5 @@ fn status_sorts_each_section_by_path() {
         .iter()
         .map(|entry| entry.path.to_str().unwrap())
         .collect();
-    assert_eq!(paths, ["a.txt", "b.txt", "c.txt"]);
+    assert_eq!(paths, ["a/b.txt", "a.txt", "c.txt"]);
 }

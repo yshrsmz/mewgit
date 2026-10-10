@@ -176,7 +176,7 @@ impl RepoReader {
     /// 「`Branch` なのに HEAD の行が無い」組が届く。
     pub fn branches(&self) -> Result<BranchList, GitReadError> {
         // `git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直すので、ブランチの
-        // 本数だけファイル読みが増える（`refs` と同じ）。
+        // 本数だけファイル読みが増える。HEAD はここで 1 回だけ解決する。
         let head = self.repo.find_reference("HEAD")?;
         // git2 0.21 から `Err`（target が非 UTF-8）と `Ok(None)`（symbolic でない）が
         // 分かれた。**前者はエラーにする** —— 他の ref と同じく行を落とすと、ブランチに

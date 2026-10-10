@@ -642,7 +642,12 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       か `repo_info_loaded` か —— は着手時に決める）。名前の突き合わせの規則（`shorthand()`
       と `refs/heads/` を外した名前）と `refs/heads/*` の二重走査も消える。`refs_*` の統合
       テストと、`RefIndex` を組むテスト（tui の `panes::graph`、core の `account`）を組み直す
-      （02 の「refs とラベル」）
+      （02 の「refs とラベル」）。**着手時に決めること** —— `branches()` は
+      `references_glob("refs/heads/*")` で symbolic ref を落としておらず、`ref_label` は落として
+      いる（`git symbolic-ref refs/heads/alias refs/heads/main` で `git branch` は `alias -> main`
+      を出す。git 側だけ確かめ、git2 側は未実測）。そのまま一覧から組むと同じコミットに
+      `[alias]` と `[main]` が並ぶので、「symbolic ref は載せない」を一覧の側でも守るかを決める
+      （`/code-review` が拾った）
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

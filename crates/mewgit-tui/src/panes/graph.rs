@@ -416,17 +416,23 @@ mod tests {
 
     #[test]
     fn no_label_is_emphasised_when_head_is_detached() {
-        let state = state_with_two_local_labels(None);
+        // 否定だけだと「強調を一切しない」実装でも通るので、同じラベルで HEAD を
+        // `main` に置いた側が強調に変わるところまで 1 本で見る。
+        let bold = |head: Option<&str>| {
+            let state = state_with_two_local_labels(head);
+            let line = &draw(&state, TermSize::default())[FIRST_ROW];
+            let terminal = terminal_with(&state, TermSize::default());
+            let buffer = terminal.backend().buffer();
+            let y = FIRST_ROW as u16;
+            ["[main]", "[a-first]"].map(|label| {
+                buffer[(col_of(line, label), y)]
+                    .modifier
+                    .contains(Modifier::BOLD)
+            })
+        };
 
-        let line = &draw(&state, TermSize::default())[FIRST_ROW];
-        let terminal = terminal_with(&state, TermSize::default());
-        let buffer = terminal.backend().buffer();
-
-        let y = FIRST_ROW as u16;
-        for label in ["[main]", "[a-first]"] {
-            let x = col_of(line, label);
-            assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD), "{label}");
-        }
+        assert_eq!(bold(None), [false, false]);
+        assert_eq!(bold(Some("main")), [true, false]);
     }
 
     #[test]

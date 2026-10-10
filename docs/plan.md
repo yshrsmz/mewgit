@@ -608,6 +608,15 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `plan_to`）は `BranchState::head()` の網羅 `match` 1 本。テストは
       `test_util::fake_branch_list` / `fake_branch_list_or` で組む（02 の「head」、01 の
       「ブランチ一覧」）
+- [ ] `Branch.is_head` を消し、どの行が HEAD かを `BranchList` だけに持たせる。**上のタスクで
+      HEAD の状態は `BranchList` に閉じたが、「どの行か」は公開の `Branch.is_head` と private な
+      添字の 2 箇所に残った**（`BranchList::new` が旗から添字を導くので食い違わないが、旗が
+      2 本立った一覧は組めて「先の行を採る」規則が要る）。読み手も割れている ——
+      `BranchState::loaded` の座り直しと `ui::panes::branches` の印は旗を、残りは `head()` を
+      読む（上のタスクの `/simplify` の altitude が拾った）。塞ぐには `BranchList` に
+      `is_head(&Branch)` か `(bool, &Branch)` を返す行の列挙を足し、`new` は HEAD の名前
+      （`Option<&str>`）で行を決める。`fake_branch(name, is_head)` の引数と、それを使う
+      テスト（`remote` / `prs` / `ui::panes::branches` など）を組み直すことになる
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

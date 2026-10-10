@@ -886,7 +886,8 @@ fn branches_reports_the_upstream_and_how_far_it_diverged() {
     repo.commit("third");
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches().to_vec();
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     // 名前と、force push の lease に渡す位置。**位置はローカルの先端ではなく
@@ -920,7 +921,8 @@ fn branches_keeps_a_branch_whose_upstream_ref_is_gone() {
     repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches().to_vec();
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     // 一覧ごと `Err` にしない。
     let main = branches.iter().find(|b| b.name == "main").unwrap();
@@ -946,7 +948,8 @@ fn branches_has_no_upstream_config_when_nothing_is_configured() {
     repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches().to_vec();
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     assert_eq!(main.upstream_config, None);
@@ -963,7 +966,8 @@ fn branches_reads_the_push_remote_before_the_push_default() {
     repo.git(&["config", "branch.topic.pushRemote", "fork"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches().to_vec();
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let push_remote = |name: &str| {
         branches
@@ -986,7 +990,8 @@ fn branches_has_no_push_remote_when_neither_is_configured() {
     repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches().to_vec();
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     assert_eq!(main.push_remote, None);
@@ -1002,7 +1007,8 @@ fn branches_needs_both_halves_of_the_tracking_config() {
     repo.git(&["config", "branch.main.remote", "origin"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches().to_vec();
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     assert_eq!(main.upstream_config, None);
@@ -1028,7 +1034,8 @@ fn branches_survives_a_broken_tracking_ref() {
     );
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches().to_vec();
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["main", "topic"]);
@@ -1053,7 +1060,8 @@ fn branches_drops_a_non_utf8_name() {
     repo.write_git_file("packed-refs", &packed);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches().to_vec();
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     // 識別子として使えないので落とす。残すと切替も削除もできない行が出る（02）。
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();

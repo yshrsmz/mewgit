@@ -570,7 +570,6 @@ impl Runtime {
 async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> {
     let remotes = reader.remotes().await?;
     let refs = reader.refs().await?;
-    // **HEAD はブランチ一覧と同じ読み取りから取る**（02 の「head」）。
     let branches = reader.branches().await?;
     Ok(RepoSnapshot {
         remotes,

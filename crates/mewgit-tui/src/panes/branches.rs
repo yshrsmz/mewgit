@@ -14,7 +14,7 @@ use crate::ui::{self, theme};
 
 /// タブ見出しに出すこのペインの名前。件数は出せるときだけ添える（[`super::counted`]）。
 pub(super) fn title(state: &AppState) -> Cow<'static, str> {
-    super::counted("Branches", state.branches.branches.len())
+    super::counted("Branches", state.branches.branches().len())
 }
 
 /// 一覧の行と、カーソルが何行目か。
@@ -23,7 +23,7 @@ pub(super) fn title(state: &AppState) -> Cow<'static, str> {
 /// 割く高さもこの行数から出す（`panes::commit::files_rows` と同じ）。枠と高さの
 /// 規則は `Prs` と共有する（[`super::TopPane`]）。
 pub(super) fn lines(state: &AppState) -> Rows {
-    let branches = &state.branches.branches;
+    let branches = state.branches.branches();
     if branches.is_empty() {
         return Rows {
             lines: vec![Line::raw(placeholder(state))],

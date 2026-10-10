@@ -208,7 +208,6 @@ pub(super) fn repo_info_loaded(
     let resolve = match result {
         Ok(info) => {
             state.repo.remotes = info.remotes;
-            state.repo.head = Some(info.head);
             state.graph.refs = info.refs;
             state.branches.loaded(info.branches);
             // **`Ok` のときだけ。** `Err` の直後は `remotes` が前のまま（起動時なら
@@ -220,7 +219,7 @@ pub(super) fn repo_info_loaded(
             // ない）。`/code-review` が拾った。
             // **PR の一覧も引き直す**（`prs::reload` の doc）。ref が動いたあとは
             // GitHub 側の PR も CI も動いており、マージされていれば open から消える。
-            // **`Ok` のときだけ** —— `Err` の直後は `head` を更新していないので、
+            // **`Ok` のときだけ** —— `Err` の直後は HEAD（ブランチ一覧）を更新していないので、
             // 引き直しても同じ答えを 1 往復ぶん買うだけになる（`resolve_target` を
             // `Ok` の側だけで呼ぶのと同じ理由）。
             Cmd::batch([resolve_target(state), prs::reload(state)])
@@ -384,12 +383,12 @@ mod tests {
     use crate::auth::{AccountSource, GhLogin};
 
     use crate::git_exec::ExecError;
-    use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote};
+    use crate::git_read::{RefIndex, RefLabel, Remote};
 
     use crate::test_util::{
-        fake_account, fake_ambiguous, fake_attempt, fake_branch, fake_configured_unavailable,
-        fake_denied, fake_logins, fake_no_access, fake_pull_request, fake_repo_snapshot,
-        fake_target, pr_list_loaded, reply,
+        fake_account, fake_ambiguous, fake_attempt, fake_branch, fake_branch_list,
+        fake_configured_unavailable, fake_denied, fake_logins, fake_no_access, fake_pull_request,
+        fake_repo_snapshot, fake_target, pr_list_loaded, reply,
     };
 
     /// リモートを載せた `RepoInfoLoaded` を 1 通届ける。
@@ -1224,7 +1223,6 @@ mod tests {
                 url: "git@github.com:owner/repo.git".to_string(),
                 head_branch: None,
             }],
-            head: HeadInfo::Branch,
             refs: RefIndex::from_iter([(
                 oid,
                 RefLabel::Local {
@@ -1233,15 +1231,21 @@ mod tests {
                 },
             )]),
             // **ブランチ一覧も同じ返信に乗る**（02 の「ブランチ一覧」）。
-            branches: vec![fake_branch("main", true), fake_branch("topic", false)],
+            branches: fake_branch_list(vec![
+                fake_branch("main", true),
+                fake_branch("topic", false),
+            ]),
         };
 
         let _ = update(&mut state, Msg::RepoInfoLoaded(Box::new(Ok(info))));
 
         assert_eq!(state.repo.remotes.len(), 1);
-        assert!(state.repo.head.is_some());
+        assert_eq!(
+            state.branches.head_branch().map(|b| b.name.as_str()),
+            Some("main")
+        );
         assert_eq!(state.graph.refs.labels(oid).len(), 1);
-        assert_eq!(state.branches.branches.len(), 2);
+        assert_eq!(state.branches.branches().len(), 2);
         assert_eq!(state.branches.load(), ListLoad::Loaded);
         // 通らないとジョブが走ったまま残り、以後の `LoadRepoInfo` が黙って落ちる。
         assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));

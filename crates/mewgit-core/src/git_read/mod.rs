@@ -347,30 +347,89 @@ impl RefLabel {
     }
 }
 
-/// HEAD の状態。[`BranchList::head`] として、ブランチ一覧と同じ読み取りから出る。
+/// HEAD の状態。[`BranchList::head`] が一覧から導く。
 ///
-/// **ブランチに居るときは判別だけを持つ。** 名前も oid も追跡設定も、読み手はブランチ
-/// 一覧の HEAD の行（`is_head` の [`Branch`]）から読む（02 の「head」）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HeadInfo {
-    Branch,
+/// **ブランチに居るときは HEAD の行そのものを指す。** 名前も oid も追跡設定も、別の
+/// 置き場に写さない（02 の「head」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Head<'a> {
+    Branch(&'a Branch),
     Detached(Oid),
-    /// コミットが 1 つも無いリポジトリ。
-    Unborn {
-        name: String,
-    },
+    /// コミットが 1 つも無いリポジトリ。名前は `HEAD` の symbolic target から取る。
+    Unborn(&'a str),
+}
+
+impl<'a> Head<'a> {
+    /// HEAD の行。detached / unborn では `None`。
+    pub fn branch(self) -> Option<&'a Branch> {
+        match self {
+            Head::Branch(branch) => Some(branch),
+            Head::Detached(_) | Head::Unborn(_) => None,
+        }
+    }
+}
+
+/// 一覧に HEAD の行が無いときの HEAD。[`BranchList::new`] が、行が無いときだけ求める。
+///
+/// **`Branch` の腕を持たない。** ブランチに居ることは HEAD の行があることから導けるので、
+/// 腕を持たせると「`Branch` なのに行が無い」組が型で組める（02 の「head」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowlessHead {
+    Detached(Oid),
+    Unborn { name: String },
 }
 
 /// [`RepoReader::branches`] の答え。ローカルブランチの一覧と HEAD の状態。
 ///
-/// **HEAD の解決を 1 回にするため、2 つを 1 つの読み取りで返す**（02 の「head」）。
-/// `head` は `branches` の HEAD の行から決めるので、`HeadInfo::Branch` なら
-/// `is_head` の行がちょうど 1 つあり、それ以外なら 1 つも無い。
+/// **フィールドは private で、組み立ては [`BranchList::new`] だけ。** HEAD の状態は
+/// `is_head` の行から導くので、「`Branch` ⇔ `is_head` の行がある」が作りから成り立つ
+/// （02 の「head」）。読み手は [`BranchList::head`] を網羅 `match` する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchList {
-    pub head: HeadInfo,
     /// 名前順（02 の「ブランチ一覧」）。
-    pub branches: Vec<Branch>,
+    branches: Vec<Branch>,
+    head: HeadSlot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HeadSlot {
+    /// `branches` の添字。
+    Row(usize),
+    Rowless(RowlessHead),
+}
+
+impl BranchList {
+    /// 一覧から組む。**`is_head` の行があればそれが HEAD で、`rowless` は呼ばない。**
+    /// 行が無いときだけ `rowless` で HEAD を求める。
+    ///
+    /// **行無しの HEAD を値ではなく closure で受ける。** 値で受けると「行があるのに
+    /// `Detached` も渡された」組が引数で書ける（`.claude/rules/rust-coding.md` の
+    /// 「導出できる値を引数に取らせない」）。`is_head` の行が 2 つあれば先の行を採る
+    /// （HEAD の target は 1 つなので、`git_read` の列挙からは起きない）。
+    pub fn new<E>(
+        branches: Vec<Branch>,
+        rowless: impl FnOnce() -> Result<RowlessHead, E>,
+    ) -> Result<Self, E> {
+        let head = match branches.iter().position(|branch| branch.is_head) {
+            Some(row) => HeadSlot::Row(row),
+            None => HeadSlot::Rowless(rowless()?),
+        };
+        Ok(BranchList { branches, head })
+    }
+
+    /// 名前順の一覧。
+    pub fn branches(&self) -> &[Branch] {
+        &self.branches
+    }
+
+    /// HEAD の状態。
+    pub fn head(&self) -> Head<'_> {
+        match &self.head {
+            HeadSlot::Row(row) => Head::Branch(&self.branches[*row]),
+            HeadSlot::Rowless(RowlessHead::Detached(oid)) => Head::Detached(*oid),
+            HeadSlot::Rowless(RowlessHead::Unborn { name }) => Head::Unborn(name),
+        }
+    }
 }
 
 /// ローカルブランチ 1 件。
@@ -772,7 +831,30 @@ pub struct Step {
 
 #[cfg(test)]
 mod tests {
-    use super::{short_oid, Oid, SHORT_OID};
+    use std::convert::Infallible;
+
+    use super::{short_oid, BranchList, Head, Oid, RowlessHead, SHORT_OID};
+    use crate::test_util::{fake_branch, fake_oid};
+
+    #[test]
+    fn a_branch_list_takes_head_from_its_head_row_and_asks_only_without_one() {
+        // HEAD の行は先頭ではない（添字を取り違える変異を落とす）。行があれば行無しの
+        // HEAD は求めない —— 求めると「行があるのに `Detached`」の組を値で渡せる（02 の「head」）。
+        let rows = vec![fake_branch("another", false), fake_branch("main", true)];
+        let list = BranchList::new(rows, || -> Result<RowlessHead, Infallible> {
+            panic!("HEAD の行があるのに行無しの HEAD を求めた")
+        })
+        .unwrap();
+        assert!(matches!(list.head(), Head::Branch(b) if b.name == "main"));
+
+        let rows = vec![fake_branch("main", false)];
+        let list = BranchList::new(rows, || {
+            Ok::<_, Infallible>(RowlessHead::Detached(fake_oid(7)))
+        })
+        .unwrap();
+        assert_eq!(list.head(), Head::Detached(fake_oid(7)));
+        assert_eq!(list.head().branch(), None);
+    }
 
     #[test]
     fn a_short_oid_is_the_first_seven_hex_digits() {

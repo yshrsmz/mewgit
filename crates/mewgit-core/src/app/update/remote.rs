@@ -67,7 +67,7 @@ pub(super) fn push_rejection(
             ..
         }) => state
             .branches
-            .branches
+            .branches()
             .iter()
             .find(|branch| branch.name == src)
             .map(|branch| PushRejection {
@@ -97,10 +97,9 @@ enum PushPlan {
 /// HEAD のブランチと登録済みのリモートから push の行き先を決める（01 の
 /// 「push の行き先」）。
 ///
-/// **HEAD のブランチは一覧から取る。** 行き先の材料（追跡 ref の位置、ahead / behind、
-/// `push_remote`）を運ぶのは `Branch` の行だけで、`RepoInfo.head` が持つのはブランチに
-/// 居るかの判別だけ（#22 の「キャッシュした状態から破壊的操作を選ばない」）。**鮮度の差では
-/// ない** —— どちらも同じ `Msg::RepoInfoLoaded` に乗る。
+/// **HEAD のブランチは一覧の HEAD の行から取る**（`BranchState::head_branch`）。行き先の
+/// 材料（追跡 ref の位置、ahead / behind、`push_remote`）を運ぶのは `Branch` の行だけ
+/// （#22 の「キャッシュした状態から破壊的操作を選ばない」）。
 ///
 /// **拒否の出口はここ 1 本。** 「一覧が届いていない」だけを呼び出し側の早期 return に
 /// すると、同じ「Warn を出して `Cmd::None`」が 2 箇所に割れる。
@@ -117,7 +116,7 @@ fn push_plan(state: &AppState) -> PushPlan {
     if let Some(unread) = repo_unread(state) {
         return PushPlan::Refused(unread.to_string());
     }
-    let Some(head) = branches.head() else {
+    let Some(head) = branches.head_branch() else {
         return PushPlan::Refused("HEAD がブランチを指していません".to_string());
     };
 
@@ -251,7 +250,7 @@ pub(super) fn pushed_elsewhere(state: &AppState, op: &GitOp) -> bool {
     };
     state
         .branches
-        .branches
+        .branches()
         .iter()
         .find(|branch| &branch.name == src)
         // **一覧に無いブランチは追跡先へ送ったものとして扱う**（従来の案内と記憶）。
@@ -401,7 +400,7 @@ fn default_remote(state: &AppState) -> Result<&Remote, NoRemote> {
     // 落とすと、リモートが 1 本のふつうのリポジトリで detached の `f` が断られる。
     if let Some(config) = state
         .branches
-        .head()
+        .head_branch()
         .and_then(|head| head.upstream_config.as_ref())
     {
         match state.repo.tracked(&config.remote) {
@@ -558,7 +557,7 @@ mod tests {
     use crate::app::{Key, KeyCode, Modal, Msg, Pane};
 
     use crate::git_exec::PullMode;
-    use crate::git_read::{Branch, GitReadError};
+    use crate::git_read::{Branch, GitReadError, Head};
 
     use crate::test_util::{fake_branch, fake_oid, fake_upstream};
 
@@ -803,7 +802,11 @@ mod tests {
         // 決まらないに落とすと、リモートが 1 本のふつうのリポジトリで `f` が断られる
         // （01 の「既定リモート」）。
         let mut state = state_for_push(&["origin"], fake_branch("main", false));
-        assert!(state.branches.head().is_none(), "HEAD の行がある");
+        assert!(
+            matches!(state.branches.head(), Some(Head::Detached(_))),
+            "detached ではない: {:?}",
+            state.branches.head()
+        );
         let cmd = press(&mut state, 'f');
         assert_eq!(fetched_remote(&cmd).as_deref(), Some("origin"), "{cmd:?}");
     }

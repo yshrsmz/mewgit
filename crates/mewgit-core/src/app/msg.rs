@@ -3,7 +3,7 @@
 use crate::auth::{Account, AuthError, DegradedReason, GhLogin, ResolvedTarget};
 use crate::git_exec::{ExecError, ExecOutput, GitOp};
 use crate::git_read::{
-    Branch, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, HeadInfo, LogPage, Oid,
+    BranchList, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, LogPage, Oid,
     RefIndex, Remote, RepoFingerprint, StashEntry, Timestamp, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
@@ -231,10 +231,9 @@ pub enum Msg {
 #[derive(Debug)]
 pub struct RepoSnapshot {
     pub remotes: Vec<Remote>,
-    pub head: HeadInfo,
     pub refs: RefIndex,
-    /// ローカルブランチの一覧（02 の「ブランチ一覧」）。
-    pub branches: Vec<Branch>,
+    /// ローカルブランチの一覧と HEAD の状態（02 の「ブランチ一覧」と「head」）。
+    pub branches: BranchList,
 }
 
 /// [`Msg::ExecFinished`] の中身。

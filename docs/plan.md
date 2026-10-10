@@ -596,20 +596,27 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       無ければ `Unborn`、在れば `Detached`（`refs/heads/` の外を指す HEAD、大文字小文字だけ
       違う `git switch Main`）。判別の表と実測は 02 の「head」。`refs()` のラベルの `is_head` は
       別の解決のまま（描画だけ。02 の「refs とラベル」）
-- [ ] HEAD の状態とブランチ一覧を型で 1 つに持ち、`RepoInfo.head` を消す。**上のタスクで
+- [x] HEAD の状態とブランチ一覧を型で 1 つに持ち、`RepoInfo.head` を消す。**上のタスクで
       「`Branch` ⇔ `is_head` の行がちょうど 1 つ」は `branches()` の出口で成り立つように
-      なったが、`RepoSnapshot` で `head` と `branches` に分け、`RepoInfo.head` と
-      `BranchState` に入れ直す**ので、`app` では散文の約束に戻る —— 読み手（`update::graph`
-      の `head_name`、`update::rebase` の `plan_to`）は「行を先に読み、無ければ `repo.head`」の
-      形で届かない組を抱え、それを見張るテスト 2 本が届かない組をわざわざ組んでいる（上の
-      タスクの `/simplify` の altitude と simplification が独立に拾い、2026-10-10 にユーザーと
-      決めて送った）。塞ぐには `RepoSnapshot.branches` を `BranchList` のまま運んで
-      `BranchState` に持たせ、フィールドを private にして `head()` が
-      `Branch(&Branch) | Detached(Oid) | Unborn(&str)` を導出する（`HeadInfo::Branch` の腕は
-      導出できる値になる）。テストで `state.repo.head` / `snapshot.head` を直に組んでいる
-      箇所（`test_util`、`prs` / `rebase` / `graph` / `worktree` / `account`、`runtime`）は
-      テスト用の組み立てに寄せる。02 の「head」の「型は組を許す」と 01 の「現ブランチの PR」も
-      揃える
+      なったが、`RepoSnapshot` で `head` と `branches` に分けて入れ直していた**ので、`app` では
+      散文の約束に戻っていた（上のタスクの `/simplify` の altitude と simplification が独立に
+      拾い、2026-10-10 にユーザーと決めて送った）。`BranchList` のフィールドを private にして
+      組み立てを `BranchList::new` 1 本にし（行無しの HEAD は行が無いときだけ closure で
+      求める）、`head()` が `Branch(&Branch) | Detached(Oid) | Unborn(&str)` を導出する。
+      `RepoSnapshot.branches` は `BranchList` のまま `BranchState` に運び、`RepoInfo.head` と
+      `HeadInfo` を消した。読み手（`update::graph` の `head_name`、`update::rebase` の
+      `plan_to`）は `BranchState::head()` の網羅 `match` 1 本。テストは
+      `test_util::fake_branch_list` / `fake_branch_list_or` で組む（02 の「head」、01 の
+      「ブランチ一覧」）
+- [ ] `Branch.is_head` を消し、どの行が HEAD かを `BranchList` だけに持たせる。**上のタスクで
+      HEAD の状態は `BranchList` に閉じたが、「どの行か」は公開の `Branch.is_head` と private な
+      添字の 2 箇所に残った**（`BranchList::new` が旗から添字を導くので食い違わないが、旗が
+      2 本立った一覧は組めて「先の行を採る」規則が要る）。読み手も割れている ——
+      `BranchState::loaded` の座り直しと `ui::panes::branches` の印は旗を、残りは `head()` を
+      読む（上のタスクの `/simplify` の altitude が拾った）。塞ぐには `BranchList` に
+      `is_head(&Branch)` か `(bool, &Branch)` を返す行の列挙を足し、`new` は HEAD の名前
+      （`Option<&str>`）で行を決める。`fake_branch(name, is_head)` の引数と、それを使う
+      テスト（`remote` / `prs` / `ui::panes::branches` など）を組み直すことになる
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

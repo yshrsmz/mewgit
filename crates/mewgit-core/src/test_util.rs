@@ -14,6 +14,7 @@
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::future::Future;
@@ -78,9 +79,9 @@ use crate::auth::{
 use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Runner};
 use crate::git_exec::{RebaseAction, RebaseEntry};
 use crate::git_read::{
-    Branch, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, GitReadError, HeadInfo, Hunk,
-    HunkLine, LineOrigin, Oid, PathStamp, RefIndex, Remote, RepoReader, Signature, StashEntry,
-    Timestamp, Upstream, WorktreeSnapshot,
+    Branch, BranchList, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, GitReadError, Hunk,
+    HunkLine, LineOrigin, Oid, PathStamp, RefIndex, Remote, RepoReader, RowlessHead, Signature,
+    StashEntry, Timestamp, Upstream, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PrStatus, PullRequest, RateLimit, RefSpec, RepoRef};
 use secrecy::SecretString;
@@ -878,13 +879,26 @@ pub fn fake_entry(path: &str, status: FileStatus) -> FileEntry {
 pub fn fake_repo_snapshot() -> RepoSnapshot {
     RepoSnapshot {
         remotes: Vec::new(),
-        head: HeadInfo::Branch,
         refs: RefIndex::from_iter([]),
-        branches: vec![Branch {
+        branches: fake_branch_list(vec![Branch {
             oid: fake_oid(1),
             ..fake_branch("main", true)
-        }],
+        }]),
     }
+}
+
+/// ブランチ一覧を組む。HEAD は `is_head` の行、無ければ detached（`fake_oid(0)`）。
+///
+/// **[`BranchList::new`] を通す**（フィールドは private）ので、HEAD の状態と行は
+/// 食い違わない（02 の「head」）。行の無い HEAD を選ぶなら [`fake_branch_list_or`]。
+pub fn fake_branch_list(branches: Vec<Branch>) -> BranchList {
+    fake_branch_list_or(branches, RowlessHead::Detached(fake_oid(0)))
+}
+
+/// ブランチ一覧を組む。`is_head` の行が無ければ HEAD は `rowless`。
+pub fn fake_branch_list_or(branches: Vec<Branch>, rowless: RowlessHead) -> BranchList {
+    BranchList::new(branches, || Ok::<_, Infallible>(rowless))
+        .unwrap_or_else(|never| match never {})
 }
 
 /// 各区画にファイルを並べたスナップショット。中身は `path` だけが違う `Modified`。
@@ -1182,9 +1196,8 @@ pub fn start_pr_details(
 
 /// アカウントと対象が決まり、HEAD が `branch` に居る状態にする。
 ///
-/// **名前はブランチ一覧の HEAD の行に置く**（追跡設定は無し）。`repo.head` は判別しか
-/// 持たず、読み手は名前を HEAD の行から読む（02 の「head」）。一覧の読み込みの段階は
-/// 進めない。
+/// **名前はブランチ一覧の HEAD の行に置く**（追跡設定は無し）。一覧は届いたことにする
+/// （[`BranchState`](crate::app::BranchState) の座り直しも走る）。
 ///
 /// **`Msg` を通さずに置く。** ここまで運ぶには `Msg::RepoInfoLoaded` と
 /// `Msg::AccountResolved` の両方が要り、**その 2 本の順序そのものを見張るテストが
@@ -1192,17 +1205,17 @@ pub fn start_pr_details(
 pub fn put_on_branch(state: &mut AppState, branch: &str) {
     state.repo.target = TargetState::Resolved(fake_target());
     state.account = AccountState::Resolved(fake_account("taro"));
-    state.repo.head = Some(HeadInfo::Branch);
-    state.branches.branches = vec![fake_branch(branch, true)];
+    state
+        .branches
+        .loaded(fake_branch_list(vec![fake_branch(branch, true)]));
 }
 
 /// ブランチ一覧を、それを運ぶ `Msg::RepoInfoLoaded` で届ける（02 の「ブランチ一覧」）。
 ///
 /// **ほかの値はいまの状態から写す**（リモート一覧、ref の索引）。ブランチ一覧は
 /// リポジトリ情報と同じ返信に乗るので、**一覧だけを届ける返信は実物に無い** —— 写さずに
-/// 空で届けると、先に置いたリモート一覧を消す。HEAD は一覧の HEAD の行から作り、
-/// HEAD の行が無ければ detached にする
-/// —— **先に置いた `repo.head` は上書きされる**。`Err` はそのまま届ける。`reply` を通す
+/// 空で届けると、先に置いたリモート一覧を消す。HEAD は一覧の HEAD の行、無ければ
+/// detached（[`fake_branch_list`]）。`Err` はそのまま届ける。`reply` を通す
 /// （ランタイムでは `Cmd` が必ず `issue` を通る）。
 ///
 /// **実物の返信と同じ副作用が走る**（`repo_info_loaded` の `resolve_target` と PR 一覧の
@@ -1211,13 +1224,8 @@ pub fn put_on_branch(state: &mut AppState, branch: &str) {
 pub fn deliver_branches(state: &mut AppState, result: Result<Vec<Branch>, GitReadError>) -> Cmd {
     let result = result.map(|branches| RepoSnapshot {
         remotes: state.repo.remotes.clone(),
-        head: if branches.iter().any(|branch| branch.is_head) {
-            HeadInfo::Branch
-        } else {
-            HeadInfo::Detached(fake_oid(0))
-        },
         refs: state.graph.refs.clone(),
-        branches,
+        branches: fake_branch_list(branches),
     });
     reply(
         state,

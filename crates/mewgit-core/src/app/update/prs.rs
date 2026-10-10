@@ -82,7 +82,7 @@ fn checkout(state: &mut AppState) -> Cmd {
         // **`target` を決めたのと同じ規則でリモートを選ぶ**（PR 作成の base と同じ）。
         // 一覧はそのリポジトリの PR なので、そこを指しているリモートから取る。
         (Ok(remote), Some(target)) if repo_unread(state).is_none() => {
-            let plan = checkout_plan(pr, remote, target, &state.branches.branches);
+            let plan = checkout_plan(pr, remote, target, state.branches.branches());
             return Cmd::Exec(GitOp::CheckoutPr(Box::new(plan)));
         }
         // **診断だけを出す。** `NoRemote::into_notice` が足す「追跡先を設定して
@@ -471,9 +471,9 @@ const OFF_BRANCH: &str = "ブランチに乗っていないので PR を作れ�
 ///
 /// `head` に載せる名前は [`AppState::head_candidates`] の候補が持つ（01 の
 /// 「head の組み立て」）。ここは「乗っていない」を候補が空と区別して案内するためだけ。
-/// **候補と同じく HEAD の行から読む**（`repo.head` と混ぜない。01 の「現ブランチの PR」）。
+/// **候補と同じく HEAD の行から読む**（[`BranchState::head_branch`]。01 の「現ブランチの PR」）。
 fn on_branch(branches: &BranchState) -> bool {
-    branches.head().is_some()
+    branches.head_branch().is_some()
 }
 
 /// どのリモートにもこのブランチが無いときの案内。**開く側と確定する側で同じ字を出す。**
@@ -755,13 +755,13 @@ mod tests {
     use crate::auth::{AccountState, DegradedReason};
     use crate::git_exec::GitOp;
     use crate::git_read::GitReadError;
-    use crate::git_read::{HeadInfo, RefIndex, RefLabel, Remote, UpstreamConfig};
+    use crate::git_read::{RefIndex, RefLabel, Remote, RowlessHead, UpstreamConfig};
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
-        deliver_pr_details, fake_account, fake_branch, fake_logins, fake_oid, fake_pull_request,
-        fake_rate_limit, fake_repo_snapshot, fake_target, fetch_pr_details,
-        pr_list_loaded as list_msg, put_on_branch, reply, start_pr_details,
+        deliver_pr_details, fake_account, fake_branch, fake_branch_list, fake_branch_list_or,
+        fake_logins, fake_oid, fake_pull_request, fake_rate_limit, fake_repo_snapshot, fake_target,
+        fetch_pr_details, pr_list_loaded as list_msg, put_on_branch, reply, start_pr_details,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -785,16 +785,26 @@ mod tests {
     ///
     /// **`put_on_branch` が置いた HEAD の行に足す。** あちらは追跡設定を持たない形
     /// （`upstream_config: None`）なので、そのままでは追跡先の腕に入らない。
-    /// **組み直さない** —— `Branch` のリテラルを写すと、フィールドが増える
-    /// たびに直す構築サイトが 1 つ増える。
+    /// **いまの行を書き換えて組み直す** —— `Branch` のリテラルを写すと、フィールドが
+    /// 増えるたびに直す構築サイトが 1 つ増える。
     fn track(state: &mut AppState, remote: &str, merge: &str) {
-        let Some(head) = state.branches.branches.iter_mut().find(|b| b.is_head) else {
-            unreachable!("put_on_branch が HEAD の行を置いている");
-        };
-        head.upstream_config = Some(UpstreamConfig {
-            remote: remote.to_string(),
-            merge: merge.to_string(),
+        edit_rows(state, |rows| {
+            let Some(head) = rows.iter_mut().find(|b| b.is_head) else {
+                unreachable!("put_on_branch が HEAD の行を置いている");
+            };
+            head.upstream_config = Some(UpstreamConfig {
+                remote: remote.to_string(),
+                merge: merge.to_string(),
+            });
         });
+    }
+
+    /// ブランチ一覧の行を書き換えて届け直す。HEAD は `is_head` の行から導き直す
+    /// （[`fake_branch_list`]。一覧のフィールドは private で、行だけを書き換えられない）。
+    fn edit_rows(state: &mut AppState, edit: impl FnOnce(&mut Vec<Branch>)) {
+        let mut rows = state.branches.branches().to_vec();
+        edit(&mut rows);
+        state.branches.loaded(fake_branch_list(rows));
     }
 
     /// `owner` の fork から出た、同じブランチ名の PR。
@@ -844,7 +854,7 @@ mod tests {
 
     /// [`set_copies`] の索引。`Msg::RepoInfoLoaded` で届ける形のテストも同じものを使う。
     fn copies_of(branches: &BranchState, copies: &[(&str, bool)]) -> RefIndex {
-        let Some(Branch { name, oid, .. }) = branches.head() else {
+        let Some(Branch { name, oid, .. }) = branches.head_branch() else {
             unreachable!("put_on_branch が HEAD の行を置いている");
         };
         copies
@@ -996,8 +1006,10 @@ mod tests {
         // **どちらもリクエストを組めない形**（01 の表）。
         // 実物の detached はブランチ一覧に HEAD の行も無い（判定はそちらを読む）。
         let mut state = state_for_create("feat/x");
-        state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
-        state.branches.branches[0].is_head = false;
+        state.branches.loaded(fake_branch_list_or(
+            vec![fake_branch("feat/x", false)],
+            RowlessHead::Detached(fake_oid(1)),
+        ));
         let cmd = press(&mut state, 'N');
         assert_eq!(cmd, Cmd::None);
         assert!(state.modal.is_none(), "detached で開いた");
@@ -1373,13 +1385,12 @@ mod tests {
         assert_eq!(heads_of(&state).0, ["me:feat/x"]);
 
         // fork の ref が消え（`fetch --prune`）、origin に在った。**`Msg` で届ける**
-        // —— 画面の外で読み直された形そのもの。HEAD はいまの値を持ち越す
+        // —— 画面の外で読み直された形そのもの。一覧はいまの行を持ち越す
         // （組み直すと `put_on_branch` の値に黙って依存する）。
         let deliver_copies = |state: &mut AppState, copies: &[(&str, bool)]| {
             let mut snapshot = fake_repo_snapshot();
             snapshot.remotes = state.repo.remotes.clone();
-            snapshot.head = state.repo.head.clone().expect("ブランチに乗っている");
-            snapshot.branches = state.branches.branches.clone();
+            snapshot.branches = fake_branch_list(state.branches.branches().to_vec());
             snapshot.refs = copies_of(&state.branches, copies);
             let _ = update(state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
             assert!(state.github_block().is_none(), "GitHub 側で先に断られる");
@@ -1592,9 +1603,11 @@ mod tests {
         type_text(&mut state, "fix");
 
         let mut snapshot = fake_repo_snapshot();
-        snapshot.head = HeadInfo::Detached(fake_oid(1));
         // detached ではどの行にも HEAD の印が付かない（実物では同じ返信が運ぶ）。
-        snapshot.branches = vec![fake_branch("feat/x", false)];
+        snapshot.branches = fake_branch_list_or(
+            vec![fake_branch("feat/x", false)],
+            RowlessHead::Detached(fake_oid(1)),
+        );
         snapshot.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
         let _ = update(&mut state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
         assert!(
@@ -1682,16 +1695,22 @@ mod tests {
         // **HEAD は材料ではない。** 一覧はブランチに紐づかないので、detached でも
         // unborn でも同じものが出る（#83 の「HEAD のブランチの PR 1 件」との違い）。
         let mut state = state_on_branch("feat/x");
-        state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
+        state.branches.loaded(fake_branch_list_or(
+            vec![fake_branch("feat/x", false)],
+            RowlessHead::Detached(fake_oid(1)),
+        ));
         assert_eq!(reload(&state), Cmd::FetchPrList);
 
-        state.repo.head = Some(HeadInfo::Unborn {
-            name: "main".to_string(),
-        });
+        state.branches.loaded(fake_branch_list_or(
+            Vec::new(),
+            RowlessHead::Unborn {
+                name: "main".to_string(),
+            },
+        ));
         assert_eq!(reload(&state), Cmd::FetchPrList);
 
         // HEAD がまだ届いていなくても頼む。
-        state.repo.head = None;
+        state.branches = BranchState::default();
         assert_eq!(reload(&state), Cmd::FetchPrList);
     }
 
@@ -1718,9 +1737,7 @@ mod tests {
         let cmd = update(
             &mut state,
             Msg::RepoInfoLoaded(Box::new(Ok(RepoSnapshot {
-                head: HeadInfo::Branch,
-                // HEAD と一覧を揃える（実物では同じ返信が同じ HEAD を運ぶ）。
-                branches: vec![fake_branch("feat/x", true)],
+                branches: fake_branch_list(vec![fake_branch("feat/x", true)]),
                 ..fake_repo_snapshot()
             }))),
         );
@@ -1946,7 +1963,7 @@ mod tests {
                 "refs/heads/main",
             )
         };
-        state.branches.branches.insert(0, other);
+        edit_rows(&mut state, |rows| rows.insert(0, other));
         state.branches.cursor = 0;
 
         deliver(
@@ -1974,10 +1991,9 @@ mod tests {
             ],
         );
         set_copies(&mut state, &[("fork", true)]);
-        state
-            .branches
-            .branches
-            .insert(0, fake_branch("alpha", false));
+        edit_rows(&mut state, |rows| {
+            rows.insert(0, fake_branch("alpha", false))
+        });
         state.branches.cursor = 0;
 
         deliver(&mut state, vec![pr_from(82, "feat", "bob")]);

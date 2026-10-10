@@ -19,7 +19,7 @@ use mewgit_core::auth::AccountState;
 use mewgit_core::auth::Backend as _;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
-use mewgit_core::git_read::{BranchList, GitReadError, ReaderHandle, Timestamp};
+use mewgit_core::git_read::{GitReadError, ReaderHandle, Timestamp};
 use mewgit_core::github::{AccountBackend, GithubClient, GithubError};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
@@ -570,11 +570,9 @@ impl Runtime {
 async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> {
     let remotes = reader.remotes().await?;
     let refs = reader.refs().await?;
-    // **HEAD はブランチ一覧と同じ読み取りから取る**（02 の「head」）。
-    let BranchList { head, branches } = reader.branches().await?;
+    let branches = reader.branches().await?;
     Ok(RepoSnapshot {
         remotes,
-        head,
         refs,
         branches,
     })
@@ -666,7 +664,7 @@ mod tests {
     };
     use mewgit_core::auth::{AccountSource, AccountState, DegradedReason};
     use mewgit_core::git_exec::GitOp;
-    use mewgit_core::git_read::{HeadInfo, InProgressOp};
+    use mewgit_core::git_read::InProgressOp;
     use mewgit_core::github::CreatePr;
     use mewgit_core::test_util::{fake_account, fake_target, wait_for_pid, BareRepo, TestRepo};
     use ratatui::backend::TestBackend;
@@ -738,7 +736,7 @@ mod tests {
 
         assert_eq!(state.repo.path, repo.path());
         assert!(state.repo.remotes.is_empty());
-        assert!(state.repo.head.is_none());
+        assert!(state.branches.head().is_none());
         assert!(state.notices.is_empty());
     }
 
@@ -757,7 +755,6 @@ mod tests {
         let _ = update(&mut state, msg);
 
         assert_eq!(state.repo.remotes.len(), 1);
-        assert_eq!(state.repo.head, Some(HeadInfo::Branch));
         let labels: Vec<&str> = state
             .graph
             .refs
@@ -771,7 +768,7 @@ mod tests {
         assert_eq!(
             state
                 .branches
-                .head()
+                .head_branch()
                 .map(|head| (head.name.as_str(), head.oid)),
             Some(("main", oid))
         );

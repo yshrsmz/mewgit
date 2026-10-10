@@ -44,7 +44,7 @@ pub enum Cmd {
     LoadCommitFiles(Oid),
     /// amend の初期値にする HEAD のメッセージ全文（02 の `head_message`）。
     ///
-    /// `RepoInfo.head` からは取らない。書き込みのあとに読み直されるが、返るまでの
+    /// ブランチ一覧の HEAD の行からは取らない。書き込みのあとに読み直されるが、返るまでの
     /// あいだは古い。古い初期値は「1 つ前のコミットのメッセージで HEAD を上書き
     /// する」になる（01 の「commit」）。
     LoadHeadMessage,

@@ -58,8 +58,8 @@ pub enum GitOp {
     /// なり、しかも HEAD の有無に依らない（03）。
     ///
     /// **HEAD にあるファイルへ掛けてはいけない。** 変更ではなくファイルそのものが消える。
-    /// 「HEAD に無いか」は `FileStatus::Added` で判る。`RepoInfo.head` は起動時に読んだ
-    /// きりで古くなりうるので、そちらでは判断しない。
+    /// 「HEAD に無いか」は `FileStatus::Added` で判る。ブランチ一覧の HEAD は読み直しが
+    /// 返るまで古くなりうるので、そちらでは判断しない。
     ///
     /// [`FileStatus::Added`]: crate::git_read::FileStatus::Added
     DiscardAdded(Vec<PathBuf>),

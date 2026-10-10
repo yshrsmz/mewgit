@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
-    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex,
-    RefLabel, Remote, StashEntry, Upstream, UpstreamConfig, STASH_REF,
+    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, Oid, RefIndex, RefLabel,
+    Remote, RowlessHead, StashEntry, Upstream, UpstreamConfig, STASH_REF,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -261,12 +261,11 @@ impl RepoReader {
 
         // git2 の列挙順は安定していない（`RefIndex::new` と同じ理由）。
         branches.sort_by(|a, b| a.name.cmp(&b.name));
-        let head = match head_target {
-            None => HeadInfo::Detached(head.peel_to_commit()?.id()),
-            Some(_) if branches.iter().any(|branch| branch.is_head) => HeadInfo::Branch,
-            Some(target) => rowless_head(&head, target)?,
-        };
-        Ok(BranchList { head, branches })
+        // symbolic でない HEAD はどの行とも比べられないので、必ずここへ落ちる。
+        BranchList::new(branches, || match head_target {
+            None => Ok(RowlessHead::Detached(head.peel_to_commit()?.id())),
+            Some(target) => rowless_head(&head, target),
+        })
     }
 
     /// stash の一覧。`stash@{0}`（いちばん新しいもの）から順に並ぶ。
@@ -389,10 +388,10 @@ impl RepoReader {
 /// 大文字小文字を区別しない FS で `git switch Main` した（`main` の loose ref に当たる）、
 /// 列挙のあとに外でブランチが作られた、のどれも行を持たない点で detached と同じに扱い、
 /// **行と判別は食い違わない**（実測は 02 の「head」。git 2.56.0）。
-fn rowless_head(head: &Reference<'_>, target: &str) -> Result<HeadInfo, GitReadError> {
+fn rowless_head(head: &Reference<'_>, target: &str) -> Result<RowlessHead, GitReadError> {
     match head.resolve() {
-        Ok(resolved) => Ok(HeadInfo::Detached(resolved.peel_to_commit()?.id())),
-        Err(err) if err.code() == ErrorCode::NotFound => Ok(HeadInfo::Unborn {
+        Ok(resolved) => Ok(RowlessHead::Detached(resolved.peel_to_commit()?.id())),
+        Err(err) if err.code() == ErrorCode::NotFound => Ok(RowlessHead::Unborn {
             name: target.strip_prefix("refs/heads/").unwrap_or(target).into(),
         }),
         Err(err) => Err(err.into()),

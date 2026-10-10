@@ -3,7 +3,7 @@
 use std::fs;
 
 use mewgit_core::git_read::{
-    BranchList, GitReadError, HeadInfo, InProgressOp, LogPage, Oid, RefLabel, RepoReader, Step,
+    BranchList, GitReadError, Head, InProgressOp, LogPage, Oid, RefLabel, RepoReader, Step,
     Upstream, UpstreamConfig,
 };
 use mewgit_core::test_util::{BareRepo, TestRepo};
@@ -322,7 +322,7 @@ fn refs_is_empty_before_the_first_commit() {
 
 /// HEAD の行の名前（`is_head` の行を全部）。判別と行を同じ答えから見るため。
 fn head_rows(list: &BranchList) -> Vec<&str> {
-    list.branches
+    list.branches()
         .iter()
         .filter(|b| b.is_head)
         .map(|b| b.name.as_str())
@@ -348,7 +348,8 @@ fn branches_reads_the_tracking_config_of_an_unregistered_remote() {
             .unwrap()
             .branches()
             .unwrap()
-            .branches;
+            .branches()
+            .to_vec();
         let main = branches.into_iter().find(|b| b.name == "main").unwrap();
         main.upstream_config
     };
@@ -375,10 +376,10 @@ fn branches_reports_a_detached_head_without_a_head_row() {
 
     let list = reader.branches().unwrap();
 
-    assert_eq!(list.head, HeadInfo::Detached(first));
+    assert_eq!(list.head(), Head::Detached(first));
     assert_eq!(head_rows(&list), Vec::<&str>::new());
     // 行は HEAD の印が付かないだけで残る。
-    assert_eq!(list.branches.len(), 1);
+    assert_eq!(list.branches().len(), 1);
 }
 
 #[test]
@@ -393,7 +394,7 @@ fn branches_reports_a_head_outside_refs_heads_as_detached() {
 
     let list = reader.branches().unwrap();
 
-    assert_eq!(list.head, HeadInfo::Detached(first));
+    assert_eq!(list.head(), Head::Detached(first));
     assert_eq!(head_rows(&list), Vec::<&str>::new());
 }
 
@@ -440,7 +441,7 @@ fn branches_errors_when_the_head_branch_does_not_point_at_a_commit() {
     // **HEAD でない行は黙って落とす**（エラーにするのは HEAD の行だけ）。
     let list = RepoReader::open(repo.path()).unwrap().branches().unwrap();
     assert_eq!(head_rows(&list), ["main"]);
-    assert_eq!(list.branches.len(), 1);
+    assert_eq!(list.branches().len(), 1);
 
     repo.git(&["symbolic-ref", "HEAD", "refs/heads/topic"]);
 
@@ -464,12 +465,7 @@ fn branches_follows_a_dangling_symbolic_chain_to_an_unborn_head() {
 
     let list = reader.branches().unwrap();
 
-    assert_eq!(
-        list.head,
-        HeadInfo::Unborn {
-            name: "alias".to_string(),
-        }
-    );
+    assert_eq!(list.head(), Head::Unborn("alias"));
     assert_eq!(head_rows(&list), Vec::<&str>::new());
 }
 
@@ -860,15 +856,15 @@ fn branches_lists_local_branches_by_name_with_the_head_marked() {
 
     let reader = RepoReader::open(repo.path()).unwrap();
     let list = reader.branches().unwrap();
-    let branches = &list.branches;
+    let branches = list.branches();
 
     // git2 の列挙順には依存しない。名前順に並べ替えて返す。
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["another", "feat/nested", "main", "topic"]);
     // HEAD の印は 1 本だけで、判別も同じ答えに乗る（02 の「head」）。
     assert_eq!(head_rows(&list), ["main"]);
-    assert_eq!(list.head, HeadInfo::Branch);
-    // HEAD の oid も行が運ぶ（`HeadInfo` は載せない。02 の「head」）。
+    assert!(matches!(list.head(), Head::Branch(b) if b.name == "main"));
+    // HEAD の oid も行が運ぶ（02 の「head」）。
     assert!(branches.iter().all(|b| b.oid == first));
     // upstream が無ければ ahead / behind は出さない。
     assert!(branches.iter().all(|b| b.upstream.is_none()));
@@ -890,7 +886,8 @@ fn branches_reports_the_upstream_and_how_far_it_diverged() {
     repo.commit("third");
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches;
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     // 名前と、force push の lease に渡す位置。**位置はローカルの先端ではなく
@@ -924,7 +921,8 @@ fn branches_keeps_a_branch_whose_upstream_ref_is_gone() {
     repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches;
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     // 一覧ごと `Err` にしない。
     let main = branches.iter().find(|b| b.name == "main").unwrap();
@@ -950,7 +948,8 @@ fn branches_has_no_upstream_config_when_nothing_is_configured() {
     repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches;
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     assert_eq!(main.upstream_config, None);
@@ -967,7 +966,8 @@ fn branches_reads_the_push_remote_before_the_push_default() {
     repo.git(&["config", "branch.topic.pushRemote", "fork"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches;
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let push_remote = |name: &str| {
         branches
@@ -990,7 +990,8 @@ fn branches_has_no_push_remote_when_neither_is_configured() {
     repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches;
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     assert_eq!(main.push_remote, None);
@@ -1006,7 +1007,8 @@ fn branches_needs_both_halves_of_the_tracking_config() {
     repo.git(&["config", "branch.main.remote", "origin"]);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches;
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     assert_eq!(main.upstream_config, None);
@@ -1032,7 +1034,8 @@ fn branches_survives_a_broken_tracking_ref() {
     );
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches;
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["main", "topic"]);
@@ -1057,7 +1060,8 @@ fn branches_drops_a_non_utf8_name() {
     repo.write_git_file("packed-refs", &packed);
 
     let reader = RepoReader::open(repo.path()).unwrap();
-    let branches = reader.branches().unwrap().branches;
+    let list = reader.branches().unwrap();
+    let branches = list.branches();
 
     // 識別子として使えないので落とす。残すと切替も削除もできない行が出る（02）。
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
@@ -1072,15 +1076,9 @@ fn branches_is_empty_and_the_head_unborn_before_the_first_commit() {
 
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    assert_eq!(
-        reader.branches().unwrap(),
-        BranchList {
-            head: HeadInfo::Unborn {
-                name: "main".to_string(),
-            },
-            branches: Vec::new(),
-        }
-    );
+    let list = reader.branches().unwrap();
+    assert_eq!(list.head(), Head::Unborn("main"));
+    assert!(list.branches().is_empty());
 }
 
 // ---- 進行中操作（02 の「進行中操作の検出」）。表の実測を実物の git で踏む。

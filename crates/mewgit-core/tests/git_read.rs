@@ -876,6 +876,45 @@ fn branches_list_a_symbolic_branch_like_git_branch() {
 }
 
 #[test]
+fn branches_error_on_a_head_whose_symbolic_chain_loops() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    // git も `git branch` が `failed to resolve HEAD` で落ちる（git 2.56.0 で確認）。
+    repo.git(&["symbolic-ref", "refs/heads/a", "refs/heads/b"]);
+    repo.git(&["symbolic-ref", "refs/heads/b", "refs/heads/a"]);
+    repo.git(&["symbolic-ref", "HEAD", "refs/heads/a"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let result = reader.branches();
+
+    assert!(result.is_err(), "輪になった連鎖が通りました: {result:?}");
+}
+
+#[test]
+fn branches_read_the_tracking_config_of_where_a_symbolic_head_points() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["symbolic-ref", "refs/heads/alias", "refs/heads/main"]);
+    repo.git(&["switch", "-q", "alias"]);
+    // `git push -u origin alias` は `alias -> main` として送り、`branch.main.*` を書く
+    // （git 2.56.0 で確認）。HEAD の行がそれを読む。
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let list = reader.branches().unwrap();
+
+    let head = list.head().branch().expect("HEAD の行がありません");
+    assert_eq!(
+        head.upstream_config,
+        Some(UpstreamConfig {
+            remote: "origin".to_string(),
+            merge: "refs/heads/main".to_string(),
+        })
+    );
+}
+
+#[test]
 fn branches_stop_following_the_head_where_the_chain_leaves_refs_heads() {
     let repo = TestRepo::init();
     let first = repo.commit("first");

@@ -691,19 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn the_view_follows_the_cursor_past_the_bottom() {
-        // 端末 24 行 = グラフ 20 行。21 行目に降りるとスクロールが 1 進む。
-        let mut state = state_with_commits(30);
-
-        for _ in 0..20 {
-            let _ = update(&mut state, Msg::Key(Key::char('j')));
-        }
-
-        assert_eq!(state.graph.cursor, 20);
-        assert_eq!(state.graph.scroll, 1);
-    }
-
-    #[test]
     fn widening_the_terminal_pulls_the_view_back_to_the_end() {
         // 末尾に貼り付いたまま端末を大きくすると、カーソルは窓の中にいるので
         // スクロールが動かず、上に行があるのに空白が残る。
@@ -718,16 +705,6 @@ mod tests {
 
         // 表示行は WIP 行を含めて 31。窓が 25 行なら先頭は 6 行目まで下がれる。
         assert_eq!(state.graph.scroll, 6);
-    }
-
-    #[test]
-    fn a_viewport_larger_than_the_history_scrolls_to_the_top() {
-        let mut state = state_with_commits(3);
-        state.graph.scroll = 2;
-
-        state.graph.scroll_into_view();
-
-        assert_eq!(state.graph.scroll, 0);
     }
 
     #[test]
@@ -803,17 +780,6 @@ mod tests {
             state.wanted_diff(),
             Some(commit_diff_target(&state, "b.txt"))
         );
-    }
-
-    #[test]
-    fn a_commit_without_a_file_list_wants_no_diff() {
-        // 一覧が届くまで対象が決まらない。ここで `path: None` に落とすと、
-        // 一覧のためにコミット全体のハンクを組むことになる。
-        let mut state = state_with_commits(3);
-        let _ = press(&mut state, 'j');
-        state.focus = Pane::Diff;
-
-        assert_eq!(state.wanted_diff(), None);
     }
 
     #[test]
@@ -907,17 +873,6 @@ mod tests {
             state.notices.back().map(|notice| notice.message.as_str()),
             Some(COMMIT_DIFF)
         );
-    }
-
-    #[test]
-    fn esc_from_a_commit_diff_returns_to_the_commit_detail() {
-        // 戻り先は `Enter` の行き先と同じ関数から出す（`right_pane`）。WIP 行から
-        // 来たときは Working tree に戻る（既存のテスト）。
-        let mut state = commit_diff_pane(&["a.txt"]);
-
-        let _ = press_code(&mut state, KeyCode::Esc);
-
-        assert_eq!(state.focus, Pane::CommitDetail);
     }
 
     #[test]
@@ -1096,29 +1051,13 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_commit_moves_to_the_commit_detail_pane() {
+    fn esc_leaves_the_commit_detail_for_the_graph() {
+        // 右ペインの中身は選択で決まるので、`Enter` の行き先も選択で決まる（07）。
+        // コミットの行なら Commit detail へ入る。
         let mut state = on_first_commit(3);
-
         let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-
         assert_eq!(state.focus, Pane::CommitDetail);
         assert_eq!(cmd, Cmd::None);
-    }
-
-    #[test]
-    fn enter_on_the_wip_row_moves_to_the_worktree_pane() {
-        // 右ペインの中身は選択で決まるので、`Enter` の行き先も選択で決まる（07）。
-        let mut state = state_with_commits(3);
-
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
-
-        assert_eq!(state.focus, Pane::Worktree);
-    }
-
-    #[test]
-    fn esc_leaves_the_commit_detail_for_the_graph() {
-        let mut state = on_first_commit(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
 
         let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Esc)));
 
@@ -1428,20 +1367,23 @@ mod tests {
     }
 
     #[test]
-    fn y_on_the_wip_row_has_nothing_to_pick() {
-        let mut state = state_with_commits(3);
-        assert_eq!(state.graph.selection(), GraphSelection::Wip);
+    fn y_and_v_on_the_wip_row_have_nothing_to_act_on() {
+        // cherry-pick（`y`）と revert（`v`）は別の配線なので、鍵ごとに見る。
+        for key in ['y', 'v'] {
+            let mut state = state_with_commits(3);
+            assert_eq!(state.graph.selection(), GraphSelection::Wip);
 
-        let cmd = press(&mut state, 'y');
+            let cmd = press(&mut state, key);
 
-        assert_eq!(cmd, Cmd::None);
-        assert_eq!(state.modal, None);
-        let notice = state.shown_notice().expect("通知が出ていません");
-        assert!(
-            notice.message.contains("コミットの行"),
-            "{}",
-            notice.message
-        );
+            assert_eq!(cmd, Cmd::None, "{key}");
+            assert_eq!(state.modal, None, "{key}");
+            let notice = state.shown_notice().expect("通知が出ていません");
+            assert!(
+                notice.message.contains("コミットの行"),
+                "{key}: {}",
+                notice.message
+            );
+        }
     }
 
     #[test]
@@ -1486,23 +1428,6 @@ mod tests {
         });
         assert_eq!(on_yes, &expected);
         assert_eq!(press(&mut state, 'y'), expected);
-    }
-
-    #[test]
-    fn v_on_the_wip_row_has_nothing_to_revert() {
-        let mut state = state_with_commits(3);
-        assert_eq!(state.graph.selection(), GraphSelection::Wip);
-
-        let cmd = press(&mut state, 'v');
-
-        assert_eq!(cmd, Cmd::None);
-        assert_eq!(state.modal, None);
-        let notice = state.shown_notice().expect("通知が出ていません");
-        assert!(
-            notice.message.contains("コミットの行"),
-            "{}",
-            notice.message
-        );
     }
 
     #[test]

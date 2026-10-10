@@ -410,16 +410,6 @@ mod tests {
     const ORIGIN_SSH: &str = "git@github.com:yshrsmz/mewgit.git";
 
     #[test]
-    fn the_repo_info_asks_to_resolve_the_target() {
-        let mut state = state();
-        let cmd = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
-        assert_eq!(
-            cmd,
-            Cmd::ResolveTarget(RemoteUrl::parse(ORIGIN_SSH).unwrap())
-        );
-    }
-
-    #[test]
     fn the_target_ignores_the_branch_tracking_remote() {
         // **`f` とは別の規則**（`conventional_remote`）。1 段目を通すと、起動時に
         // たまたま居たブランチの追跡先が latch される —— ブランチを切り替えても
@@ -445,6 +435,7 @@ mod tests {
         assert_eq!(url.owner, "me", "追跡先のリモートを見ている");
 
         // 同じ状態で `f` は追跡先を採る（規則が 2 つに割れていることの見張り）。
+        // **`f` の 1 段目（追跡先が `origin` に勝つ）の唯一の見張りでもある。**
         let cmd = press(&mut state, 'f');
         assert_eq!(fetched_remote(&cmd).as_deref(), Some("upstream"), "{cmd:?}");
     }
@@ -478,6 +469,12 @@ mod tests {
         );
         assert_eq!(cmd, Cmd::None);
         assert_eq!(state.repo.target, TargetState::Unasked, "諦めている");
+        // ラベルもリモートも無いままグラフは出せる。起動は止めずに通知だけ出す。
+        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
+        // **「読み込み中…」のまま固まらせない。** ブランチ一覧も同じ返信なので、
+        // 印は `ui` が文言を出し分けるのに要る。
+        assert_eq!(state.branches.load(), ListLoad::Failed);
+        assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
 
         // 読み直しが通れば target は決まる。
         let cmd = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
@@ -519,6 +516,10 @@ mod tests {
         assert_eq!(state.repo.target, TargetState::Unavailable);
         assert!(state.notices.is_empty(), "{:?}", state.notices);
         assert_eq!(cmd, Cmd::None, "頼む相手がいないのに頼んでいる");
+        // **`Cmd::ResolveAccount` は `target` が決まっていないと出ない。** アカウントは
+        // 一度も頼まれず `Resolving` のまま残る（ヘッダは何も出さない。07）。
+        assert!(matches!(state.account, AccountState::Resolving));
+        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
     }
 
     #[test]
@@ -539,20 +540,6 @@ mod tests {
         assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
         assert_eq!(state.repo.target, TargetState::Resolved(fake_target()));
         assert_eq!(state.notices.len(), 1, "{:?}", state.notices);
-    }
-
-    #[test]
-    fn a_repository_that_is_not_on_github_never_asks_for_an_account() {
-        // **`Cmd::ResolveAccount` は `target` が決まっていないと出ない**（`target_resolved`
-        // はその返信そのもの、`resolve_again` は `resolved()` で断る）。既定リモートが
-        // 決まらないリポジトリでは `target` が `Unavailable` に落ちるので、アカウントは
-        // 一度も頼まれず `Resolving` のまま残る（ヘッダは何も出さない。07）。
-        let mut state = state();
-        let cmd = deliver_repo_info(&mut state, &[]);
-
-        assert_eq!(cmd, Cmd::None);
-        assert!(matches!(state.account, AccountState::Resolving));
-        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
     }
 
     #[test]
@@ -1249,24 +1236,6 @@ mod tests {
         assert_eq!(state.branches.branches().len(), 2);
         assert_eq!(state.branches.load(), ListLoad::Loaded);
         // 通らないとジョブが走ったまま残り、以後の `LoadRepoInfo` が黙って落ちる。
-        assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
-    }
-
-    #[test]
-    fn a_failed_repo_info_notices_and_keeps_going() {
-        // ラベルもリモートも無いままグラフは出せる。起動は止めない。
-        let mut state = state();
-        let _ = init(&mut state);
-
-        let _ = update(
-            &mut state,
-            Msg::RepoInfoLoaded(Box::new(Err(GitReadError::NonUtf8Head))),
-        );
-
-        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
-        // **「読み込み中…」のまま固まらせない。** ブランチ一覧も同じ返信なので、
-        // 印は `ui` が文言を出し分けるのに要る。
-        assert_eq!(state.branches.load(), ListLoad::Failed);
         assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
     }
 }

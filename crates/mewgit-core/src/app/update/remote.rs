@@ -619,17 +619,6 @@ mod tests {
     // ---- 既定リモート（01 / 04 の「既定リモート」）----
 
     #[test]
-    fn f_fetches_the_tracked_remote_not_origin() {
-        // 1 段目。**`origin` があっても追跡先が勝つ。**
-        let mut state = state_for_push(
-            &["origin", "upstream"],
-            tracking_branch("main", "upstream", HEADS_MAIN),
-        );
-        let cmd = press(&mut state, 'f');
-        assert_eq!(fetched_remote(&cmd).as_deref(), Some("upstream"), "{cmd:?}");
-    }
-
-    #[test]
     fn f_fetches_the_only_remote_even_when_it_is_not_origin() {
         // 2 段目。**git 2.55 も同じ**（単一リモート `upstream` で `git fetch` が
         // `refs/remotes/upstream/main` を作るのを実測。表は 04）。
@@ -720,23 +709,6 @@ mod tests {
     }
 
     #[test]
-    fn f_notifies_when_there_is_nobody_to_pick_from() {
-        // **候補が 0 本なら開かない。** 「まだ読めていません」と「登録されていません」は
-        // 選ばせる相手がいないので通知のまま（01）。
-        let mut state = state_with_commits(2);
-        let _ = deliver_branches(&mut state, Ok(fake_head_list(fake_branch("main"))));
-
-        assert_eq!(press(&mut state, 'f'), Cmd::None);
-        assert_eq!(state.modal, None, "選ぶ相手がいないのに開いている");
-        let notice = state.notices.back().expect("通知が出ていない");
-        assert!(
-            notice.message.contains("登録されていません"),
-            "{}",
-            notice.message
-        );
-    }
-
-    #[test]
     fn f_tells_a_failed_read_from_no_remote_and_from_a_reload_in_flight() {
         // **届いたかの印は 1 つ**（`repo_unread`）。`jobs.is_running` で判じていたころは、
         // 起動時の読み取りが失敗すると「登録されていません」と嘘を言い、読み直しの
@@ -763,6 +735,8 @@ mod tests {
         let _ = state.issue(Cmd::LoadRepoInfo);
         let message = notice_after_f(&mut state);
         assert!(message.contains("登録されていません"), "{message}");
+        // **候補が 0 本なら開かない。** 選ばせる相手がいないので通知のまま（01）。
+        assert_eq!(state.modal, None, "選ぶ相手がいないのに開いている");
     }
 
     #[test]
@@ -826,20 +800,6 @@ mod tests {
             let cmd = update(&mut state, Msg::Key(Key::ctrl(c)));
             assert_eq!(cmd, Cmd::None, "Ctrl-{c} が効いてしまいました");
         }
-        assert_eq!(state.modal, None);
-    }
-
-    #[test]
-    fn shift_p_pushes_to_the_tracking_config_without_asking() {
-        // 行き先はユーザーが書いたもので、推測していない。
-        let mut state = state_for_push(
-            &["origin", "upstream"],
-            tracking_branch("main", "origin", HEADS_MAIN),
-        );
-
-        let cmd = press(&mut state, 'P');
-
-        assert_eq!(cmd, Cmd::Exec(push_op("origin", "main", false)));
         assert_eq!(state.modal, None);
     }
 

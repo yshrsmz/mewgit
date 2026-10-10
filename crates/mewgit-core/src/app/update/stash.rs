@@ -671,42 +671,31 @@ mod tests {
     }
 
     #[test]
-    fn capital_z_on_a_rename_is_refused_before_the_input_opens() {
-        // 新しいパスだけでは元のパスの削除が残り、両方では stash を作ってから exit 1
-        // （03 の「stash push のパス指定」）。どちらの区画の rename でも断る。
-        let renamed = || vec![fake_entry("a.txt", FileStatus::Renamed)];
-        for (section, snapshot) in [
-            (
-                WorktreeSection::Staged,
-                WorktreeSnapshot {
-                    staged: renamed(),
-                    ..WorktreeSnapshot::default()
-                },
-            ),
-            (
-                WorktreeSection::Unstaged,
-                WorktreeSnapshot {
-                    unstaged: renamed(),
-                    ..WorktreeSnapshot::default()
-                },
-            ),
-        ] {
-            let mut state = worktree_state(snapshot, section);
-
-            let cmd = press(&mut state, 'Z');
-
-            assert_eq!(cmd, Cmd::None, "{section:?}");
-            assert_eq!(state.modal, None, "{section:?}");
-            assert_eq!(message(&state), Some(SPLITS), "{section:?}");
-        }
-    }
-
-    #[test]
     fn capital_z_on_a_file_git_would_split_is_refused() {
         // どれも git が stash を作ってから exit 1 か、rename を割る（03 の「stash push の
         // パス指定」）。カーソルは `a` の行に置く。
+        //
+        // rename は新しいパスだけでは元のパスの削除が残り、両方では stash を作ってから
+        // exit 1。**どちらの区画の rename でも断る**（unstaged の rename が無いと、
+        // staged の区画しか見ない実装が通る）。
         let entry = fake_entry;
         let cases = [
+            (
+                "staged の rename",
+                WorktreeSection::Staged,
+                WorktreeSnapshot {
+                    staged: vec![entry("a", FileStatus::Renamed)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
+            (
+                "unstaged の rename",
+                WorktreeSection::Unstaged,
+                WorktreeSnapshot {
+                    unstaged: vec![entry("a", FileStatus::Renamed)],
+                    ..WorktreeSnapshot::default()
+                },
+            ),
             (
                 "staged の削除",
                 WorktreeSection::Staged,

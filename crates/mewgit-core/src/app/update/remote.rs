@@ -548,8 +548,9 @@ fn push_dst(local: &str, merge: &str) -> Option<String> {
 mod tests {
     use super::super::test_support::{
         cells, deliver_branches, fake_output, fetched_remote, finish_exec, forced_push_op,
-        open_confirm, press, press_code, push_op, reject_non_fast_forward, state_for_push,
-        state_with_commits, tracked_head, tracking_branch, with_remotes, HEADS_MAIN, NOTICE_CELLS,
+        load_branches, open_confirm, press, press_code, push_op, reject_non_fast_forward,
+        state_for_push, state_with_commits, tracked_head, tracking_branch, with_remotes,
+        HEADS_MAIN, NOTICE_CELLS,
     };
     use super::super::update;
 
@@ -805,10 +806,7 @@ mod tests {
         // （01 の「既定リモート」）。
         let mut state = state_with_commits(2);
         with_remotes(&mut state, &["origin"]);
-        let _ = deliver_branches(
-            &mut state,
-            Ok(fake_branch_list(vec![fake_branch("main")], None)),
-        );
+        load_branches(&mut state, &["main"], None);
         assert!(
             matches!(state.branches.head(), Some(Head::Detached(_))),
             "detached ではない: {:?}",

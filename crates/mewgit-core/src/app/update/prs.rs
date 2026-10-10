@@ -755,7 +755,7 @@ mod tests {
     use crate::auth::{AccountState, DegradedReason};
     use crate::git_exec::GitOp;
     use crate::git_read::GitReadError;
-    use crate::git_read::{RefIndex, RefLabel, Remote, RowlessHead, UpstreamConfig};
+    use crate::git_read::{BranchList, RefIndex, RefLabel, Remote, RowlessHead, UpstreamConfig};
     use crate::github::RepoRef;
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
@@ -789,10 +789,13 @@ mod tests {
     /// **いまの行を書き換えて組み直す** —— `Branch` のリテラルを写すと、フィールドが
     /// 増えるたびに直す構築サイトが 1 つ増える。
     fn track(state: &mut AppState, remote: &str, merge: &str) {
-        edit_rows(state, |rows, name| {
-            let Some(head) = rows.iter_mut().find(|b| b.name == name) else {
-                unreachable!("put_on_branch が HEAD の行を置いている");
-            };
+        let name = state
+            .branches
+            .head_branch()
+            .expect("put_on_branch が HEAD の行を置いている");
+        let name = name.name.clone();
+        edit_rows(state, |rows| {
+            let head = rows.iter_mut().find(|b| b.name == name).expect("HEAD の行");
             head.upstream_config = Some(UpstreamConfig {
                 remote: remote.to_string(),
                 merge: merge.to_string(),
@@ -800,20 +803,20 @@ mod tests {
         });
     }
 
-    /// ブランチ一覧の行を書き換えて届け直す。HEAD はいまの HEAD の名前を持ち越す
-    /// （[`fake_branch_list`]。一覧のフィールドは private で、行だけを書き換えられない）。
-    /// `edit` にはその名前も渡す。
-    fn edit_rows(state: &mut AppState, edit: impl FnOnce(&mut Vec<Branch>, &str)) {
-        let head = head_name(state);
+    /// ブランチ一覧の行を書き換えて届け直す（一覧のフィールドは private で、行だけを
+    /// 書き換えられない）。
+    fn edit_rows(state: &mut AppState, edit: impl FnOnce(&mut Vec<Branch>)) {
         let mut rows = state.branches.branches().to_vec();
-        edit(&mut rows, &head);
-        state.branches.loaded(fake_branch_list(rows, Some(&head)));
+        edit(&mut rows);
+        let list = relist(state, rows);
+        state.branches.loaded(list);
     }
 
-    /// いまの HEAD の行の名前。一覧を組み直すときに持ち越す。
-    fn head_name(state: &AppState) -> String {
+    /// `rows` で一覧を組み直す。**HEAD はいまの HEAD の行の名前を持ち越す**
+    /// （[`fake_branch_list`]）。
+    fn relist(state: &AppState, rows: Vec<Branch>) -> BranchList {
         let head = state.branches.head_branch().expect("HEAD の行がありません");
-        head.name.clone()
+        fake_branch_list(rows, Some(&head.name))
     }
 
     /// `owner` の fork から出た、同じブランチ名の PR。
@@ -1399,8 +1402,7 @@ mod tests {
         let deliver_copies = |state: &mut AppState, copies: &[(&str, bool)]| {
             let mut snapshot = fake_repo_snapshot();
             snapshot.remotes = state.repo.remotes.clone();
-            snapshot.branches =
-                fake_branch_list(state.branches.branches().to_vec(), Some(&head_name(state)));
+            snapshot.branches = relist(state, state.branches.branches().to_vec());
             snapshot.refs = copies_of(&state.branches, copies);
             let _ = update(state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
             assert!(state.github_block().is_none(), "GitHub 側で先に断られる");
@@ -1970,7 +1972,7 @@ mod tests {
             "git@github.com:alice/mewgit.git",
             "refs/heads/main",
         );
-        edit_rows(&mut state, |rows, _| rows.insert(0, other));
+        edit_rows(&mut state, |rows| rows.insert(0, other));
         state.branches.cursor = 0;
 
         deliver(
@@ -1998,7 +2000,7 @@ mod tests {
             ],
         );
         set_copies(&mut state, &[("fork", true)]);
-        edit_rows(&mut state, |rows, _| rows.insert(0, fake_branch("alpha")));
+        edit_rows(&mut state, |rows| rows.insert(0, fake_branch("alpha")));
         state.branches.cursor = 0;
 
         deliver(&mut state, vec![pr_from(82, "feat", "bob")]);

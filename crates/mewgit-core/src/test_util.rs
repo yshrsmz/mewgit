@@ -836,7 +836,7 @@ pub fn fake_stash(index: usize) -> StashEntry {
 
 /// ブランチ 1 件。upstream は持たない（要るテストは戻り値のフィールドを足す）。
 ///
-/// oid は [`fake_oid`] の 0 番。ブランチの一覧は名前と印だけで読めるので、
+/// oid は [`fake_oid`] の 0 番。ブランチの一覧は名前だけで読めるので、
 /// テストが oid を気にせずに済むようにする。**HEAD かどうかは持たない** —— 一覧を組む
 /// ときに [`fake_branch_list`] へ名前で渡す（02 の「head」）。
 pub fn fake_branch(name: &str) -> Branch {

@@ -117,7 +117,7 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
 }
 
 #[tokio::test]
-async fn commit_detail_does_not_disturb_the_log_session() {
+async fn commit_detail_reads_the_whole_message_without_disturbing_the_log_session() {
     // ログのセッションはスレッドのローカル変数。他の要求が挟まっても続きから読める。
     let repo = TestRepo::init();
     let first = repo.commit("first");

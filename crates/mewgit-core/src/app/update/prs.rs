@@ -2804,7 +2804,7 @@ mod tests {
     }
 
     #[test]
-    fn losing_the_account_drops_the_list_it_was_fetched_with() {
+    fn losing_the_account_drops_the_list_and_summaries_it_was_fetched_with() {
         // **印（`*` / `R`）は login で決まる。** 残すと、印だけが黙って消えた
         // 前のアカウントの一覧が出たままになる（`PrState::forget`）。
         // **`Degraded` では `reload` が `Cmd::None` を返す**ので、落とす経路は

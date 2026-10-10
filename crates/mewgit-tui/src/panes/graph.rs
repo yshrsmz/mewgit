@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn no_label_is_emphasised_when_head_is_detached() {
+    fn only_the_head_label_is_emphasised_and_it_keeps_its_place() {
         // 否定だけだと「強調を一切しない」実装でも通るので、同じラベルで HEAD を
         // `main` に置いた側が強調に変わるところまで 1 本で見る。既定の `theme.graph_head` は
         // "bold"。色として読むと強調がまるごと消える。**HEAD はブランチ一覧の HEAD の行から

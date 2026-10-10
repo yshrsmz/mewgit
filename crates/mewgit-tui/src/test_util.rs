@@ -171,6 +171,29 @@ pub fn pane_row_is_reversed(state: &AppState, size: TermSize, pane: Pane, needle
     (area.x..area.right()).any(|x| buffer[(x, row)].modifier.contains(Modifier::REVERSED))
 }
 
+/// 表示中のモーダルの枠の内側で、`matches` に当たる最初の行が反転しているか。
+/// 当たる行が無ければ panic する。
+///
+/// **[`pane_row_is_reversed`] のモーダル版**（桁を枠の内側に絞る）。行は `needle` の
+/// `contains` ではなく述語で選ぶ —— 選択モーダルの理由の本文が一覧の項目名を並べる
+/// ことがあり、`contains` では本文の行に当たる。
+pub fn modal_row_is_reversed(
+    state: &AppState,
+    size: TermSize,
+    matches: impl Fn(&str) -> bool,
+) -> bool {
+    let (modal, inner) = draw_modal(state, size);
+    let text = region_text(&modal, inner);
+    let row = text
+        .lines()
+        .position(matches)
+        .unwrap_or_else(|| panic!("モーダルに当たる行がありません:\n{text}"));
+    let y = inner.y + u16::try_from(row).unwrap();
+    let terminal = terminal_with(state, size);
+    let buffer = terminal.backend().buffer();
+    (inner.x..inner.right()).any(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED))
+}
+
 /// そのペインの中で `needle` を含む 1 行。無ければ panic する。
 ///
 /// **[`row_of`] と対にする**（あちらは索引、こちらは本文）。行の本文を見る見張りは

@@ -827,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn r_while_the_message_is_being_read_does_nothing() {
+    fn r_opens_the_full_message_on_its_row_and_a_second_r_while_reading_does_nothing() {
         let mut state = linear(3);
         let _ = press_i_on(&mut state, 1);
         let _ = press(&mut state, 'r');

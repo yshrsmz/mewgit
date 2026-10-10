@@ -577,11 +577,9 @@ fn submit(state: &mut AppState, cmd: Cmd) -> Cmd {
 mod tests {
 
     use super::test_support::{
-        commit_loads, cursor, detail_ok, diff_state, exec_done_of, finish_exec,
-        github_disabled_state, more, on_first_commit, on_first_commit_with_files, press,
-        press_code, push_op, reject_non_fast_forward, state, state_for_push, state_on_branches,
-        state_on_stashes, state_with_commits, state_with_page, tab_to, tick, tracked_head,
-        worktree_state, HEADS_MAIN, ROWS,
+        commit_loads, cursor, detail_ok, diff_state, exec_done_of, github_disabled_state, more,
+        on_first_commit, on_first_commit_with_files, press, press_code, state, state_on_branches,
+        state_on_stashes, state_with_commits, state_with_page, tab_to, tick, worktree_state, ROWS,
     };
     use super::*;
     use crate::app::{keys, Modal, RightTab, TermSize};
@@ -591,7 +589,7 @@ mod tests {
 
     use crate::git_read::Timestamp;
     use crate::test_util::{
-        deliver_status, fake_oid, fake_pull_request, fake_snapshot, fake_target, pr_list_loaded,
+        deliver_status, fake_pull_request, fake_snapshot, fake_target, pr_list_loaded,
         put_on_branch, reply, FAKE_NOW,
     };
 
@@ -974,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn q_quits() {
+    fn q_quits_but_ctrl_q_does_not() {
         let mut state = state();
         // 終了は修飾なしの `q` だけ。Ctrl-q で落ちると事故になる。
         assert_eq!(update(&mut state, Msg::Key(Key::ctrl('q'))), Cmd::None);
@@ -1078,34 +1076,6 @@ mod tests {
 
         let after = &state.notices.back().expect("通知がありません").message;
         assert!(after.contains("Ctrl-C で終了"), "{after}");
-    }
-
-    #[test]
-    fn a_canceled_push_does_not_arm_force() {
-        // force に上げてよいのは git が非 FF で断ったときだけ（01 の「force push」）。
-        // 中断は git の判断ではない。
-        // **追跡設定のある行で組む** —— ブランチ一覧が空の状態や追跡設定の無い行では、
-        // `push_rejection` が kind を見る前に `None` を返すので、中断を非 FF と同じに
-        // 扱っても緑のまま通る。同じ状態で非 FF なら立つことを続けて見る。
-        let mut state = state_for_push(
-            &["origin"],
-            tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(7))),
-        );
-        let op = push_op("origin", "main", false);
-        finish_exec(
-            &mut state,
-            op.clone(),
-            Err(ExecError::Canceled {
-                argv: vec!["push".into(), "origin".into(), "main".into()],
-            }),
-        );
-        assert_eq!(state.push_rejected, None);
-
-        reject_non_fast_forward(&mut state, op);
-        assert!(
-            state.push_rejected.is_some(),
-            "非 FF で記憶が立っていません"
-        );
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
 #[cfg(test)]
 mod tests {
     use crate::test_util::{
-        col_of, draw, row_of, state_with_commits, state_with_modal, terminal_with,
+        draw, modal_area, modal_text, row_of, state_with_commits, state_with_modal, terminal_with,
     };
     use mewgit_core::app::{AppState, Cmd, Modal, TermSize};
     use mewgit_core::git_exec::GitOp;
@@ -115,20 +115,17 @@ mod tests {
             state.modal = modal;
             state
         };
-        let open = with_modal(Some(Modal::Confirm {
-            title: "確認".to_string(),
-            body: "本文".to_string(),
-            on_yes: Cmd::None,
-        }));
-        // 本文の行の、箱の左右の枠に挟まれた升目。箱の外は透けていて当然。
-        let lines = draw(&open, SIZE);
-        let y = row_of(&lines, "本文");
-        let top = &lines[usize::from(row_of(&lines, "┌確認"))];
-        let (left, right) = (col_of(top, "┌確認"), col_of(top, "┐"));
+        let open = with_modal(state_with_confirm("確認", "本文").modal);
+        // 本文の行の、箱の内側の升目。箱の外は透けていて当然。
+        let inner = modal_area(&open, SIZE);
+        let body: Vec<String> = modal_text(&open, SIZE).lines().map(String::from).collect();
+        let y = inner.y + row_of(&body, "本文");
         let cells = |state: &AppState| -> String {
             let terminal = terminal_with(state, SIZE);
             let buffer = terminal.backend().buffer();
-            (left..=right).map(|x| buffer[(x, y)].symbol()).collect()
+            (inner.x..inner.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
         };
 
         // 閉じていれば、同じ升目に summary が見える（fixture が箱の下に届いている）。

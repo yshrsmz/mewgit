@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn the_branch_keys_do_nothing_while_the_list_is_empty() {
+    fn only_n_works_while_the_branch_list_is_empty() {
         // 読み込み中・失敗・コミットが 1 つも無いリポジトリ。カーソル行が描かれて
         // いないので、`branches[cursor]` を書くと添字が外れる。
         let mut state = state_with_commits(2);

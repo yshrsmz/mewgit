@@ -435,7 +435,6 @@ mod tests {
         assert_eq!(url.owner, "me", "追跡先のリモートを見ている");
 
         // 同じ状態で `f` は追跡先を採る（規則が 2 つに割れていることの見張り）。
-        // **`f` の 1 段目（追跡先が `origin` に勝つ）の唯一の見張りでもある。**
         let cmd = press(&mut state, 'f');
         assert_eq!(fetched_remote(&cmd).as_deref(), Some("upstream"), "{cmd:?}");
     }
@@ -469,12 +468,6 @@ mod tests {
         );
         assert_eq!(cmd, Cmd::None);
         assert_eq!(state.repo.target, TargetState::Unasked, "諦めている");
-        // ラベルもリモートも無いままグラフは出せる。起動は止めずに通知だけ出す。
-        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
-        // **「読み込み中…」のまま固まらせない。** ブランチ一覧も同じ返信なので、
-        // 印は `ui` が文言を出し分けるのに要る。
-        assert_eq!(state.branches.load(), ListLoad::Failed);
-        assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
 
         // 読み直しが通れば target は決まる。
         let cmd = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
@@ -508,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_without_remotes_says_nothing() {
+    fn a_repository_without_remotes_says_nothing_and_never_asks_for_an_account() {
         // リモートの無いローカルリポジトリで、起動のたびに警告を出さない。
         // 押したときに困るのは `f` なので、そちらが押された時点で言う（01）。
         let mut state = state();
@@ -1236,6 +1229,24 @@ mod tests {
         assert_eq!(state.branches.branches().len(), 2);
         assert_eq!(state.branches.load(), ListLoad::Loaded);
         // 通らないとジョブが走ったまま残り、以後の `LoadRepoInfo` が黙って落ちる。
+        assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
+    }
+
+    #[test]
+    fn a_failed_repo_info_notices_and_keeps_going() {
+        // ラベルもリモートも無いままグラフは出せる。起動は止めない。
+        let mut state = state();
+        let _ = init(&mut state);
+
+        let _ = update(
+            &mut state,
+            Msg::RepoInfoLoaded(Box::new(Err(GitReadError::NonUtf8Head))),
+        );
+
+        assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
+        // **「読み込み中…」のまま固まらせない。** ブランチ一覧も同じ返信なので、
+        // 印は `ui` が文言を出し分けるのに要る。
+        assert_eq!(state.branches.load(), ListLoad::Failed);
         assert!(!state.jobs.is_running(JobKind::LoadRepoInfo));
     }
 }

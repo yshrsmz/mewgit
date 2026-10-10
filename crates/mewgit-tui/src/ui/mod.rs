@@ -1272,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn the_right_area_swaps_between_the_worktree_and_the_commit_detail() {
+    fn the_right_area_follows_the_selection_not_the_focus() {
         // 右ペインの中身はグラフの選択だけで決まる。`focus` では決めない（07）。
         let state = crate::test_util::state_with_commits(&["first"]);
         let text = draw(&state, SPLIT_NARROWEST).join("\n");
@@ -1506,15 +1506,20 @@ mod tests {
         // `Tick` を 1 つまたぐ。またがないジョブはスピナーに出ない（`Job::since`）。
         // 1 周（駒の数）進めるので、描かれる駒は `tick` が 0 のときと同じ。
         state.tick += super::SPINNER.len() as u64;
+        see_quota(&mut state, remaining);
+        state
+    }
+
+    /// 今の世代の応答として、残量 `remaining` を届ける。
+    fn see_quota(state: &mut AppState, remaining: u32) {
         let epoch = state.prs.epoch();
         let _ = update(
-            &mut state,
+            state,
             Msg::RateLimitSeen {
                 epoch,
                 seen: fake_rate_limit(remaining, 1789703295),
             },
         );
-        state
     }
 
     #[test]
@@ -1568,19 +1573,13 @@ mod tests {
             height: 24,
         };
         let mut state = shipping_header_state();
+        state.account = resolved_account();
         let line = header(&state, size);
         assert!(!line.contains("[api:"), "header: {line:?}");
 
         // 同じ状態に最初の応答が届くと出る。否定が入力なしに通っていないことの
         // 証拠を兼ねる。
-        let epoch = state.prs.epoch();
-        let _ = update(
-            &mut state,
-            Msg::RateLimitSeen {
-                epoch,
-                seen: fake_rate_limit(4984, 1789703295),
-            },
-        );
+        see_quota(&mut state, 4984);
         let line = header(&state, size);
         assert!(line.contains("[api: 4984]"), "header: {line:?}");
     }

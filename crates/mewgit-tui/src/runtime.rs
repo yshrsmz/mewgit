@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resize_reaches_the_state_before_quitting() {
+    async fn resize_reaches_the_state_past_events_that_map_to_no_msg() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
         // 先頭の 2 つは `Msg` に写らないイベント。読み飛ばさずにループを抜けると、

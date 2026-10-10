@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_and_alt_survive_normalization() {
+    fn shift_is_dropped_but_ctrl_and_alt_survive() {
         // crossterm は `P` に SHIFT を立てて渡してくる。正規化しないと
         // `Key::char('P')` と等しくならず、keymap の引き当てが外れる。
         let from_terminal = Key::with_mods(

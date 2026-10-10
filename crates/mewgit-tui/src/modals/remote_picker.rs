@@ -39,10 +39,9 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], c
 #[cfg(test)]
 mod tests {
     use crate::test_util::{
-        draw, modal_area, modal_text, row_is_reversed, row_of, state_with_modal, terminal_with,
+        draw, modal_row_is_reversed, modal_text, row_is_reversed, row_of, state_with_modal,
     };
     use mewgit_core::app::{Modal, TermSize};
-    use ratatui::style::Modifier;
 
     const SIZE: TermSize = TermSize {
         width: 80,
@@ -141,18 +140,11 @@ mod tests {
         // 1 つも出ないまま `Enter` が効く状態を作らない。**画面全体の `contains` では
         // 見ない** —— 名前は理由の本文にも並ぶので、一覧が潰れても本文の側で通りうる。
         // 一覧の行は名前だけの行なので、行全体が名前に一致するものを探す。
-        let text = modal_text(&state, size);
-        let row = text
-            .lines()
-            .position(|line| line.trim() == "very-long-remote-name-29")
-            .unwrap_or_else(|| panic!("一覧の行に出ていません:\n{text}"));
-        let inner = modal_area(&state, size);
-        let y = inner.y + u16::try_from(row).unwrap();
-        let terminal = terminal_with(&state, size);
-        let buffer = terminal.backend().buffer();
         assert!(
-            (inner.x..inner.right()).any(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED)),
-            "カーソル行が反転していません:\n{text}"
+            modal_row_is_reversed(&state, size, |line| line.trim()
+                == "very-long-remote-name-29"),
+            "カーソル行が反転していません:\n{}",
+            modal_text(&state, size)
         );
     }
 

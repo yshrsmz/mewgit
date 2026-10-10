@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn a_detail_too_long_for_the_box_ends_with_an_ellipsis() {
+    fn only_a_detail_too_long_for_the_box_ends_with_an_ellipsis() {
         // 黙って切ると、stderr の続きがあることが画面から判らない（07）。
         // 収まる detail には付けない —— 否定だけだと「`…` を一切付けない」実装でも
         // 通るので、同じ 1 本で付く側まで見る。

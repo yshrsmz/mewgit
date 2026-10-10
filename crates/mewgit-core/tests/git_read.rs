@@ -100,7 +100,7 @@ fn remotes_returns_every_remote_sorted_by_name() {
 }
 
 #[test]
-fn remotes_read_the_default_branch_from_the_remote_head_symref() {
+fn remotes_read_the_default_branch_from_the_remote_head_symref_when_it_can_be_stripped() {
     // `refs/remotes/<name>/HEAD` が指すブランチを `head_branch` に入れる（02）。
     // **生の `refs/remotes/origin/main` のままでは PR の base に載せられない**ので、
     // 接頭辞を剥がす。
@@ -1075,7 +1075,7 @@ fn branches_drops_a_non_utf8_name() {
 }
 
 #[test]
-fn branches_is_empty_and_the_head_unborn_before_the_first_commit() {
+fn branches_is_empty_the_head_unborn_and_refs_readable_before_the_first_commit() {
     // unborn HEAD ではブランチの ref がまだ無い。**`Err` ではない。** 名前は HEAD の
     // symbolic target から取る。
     let repo = TestRepo::init();

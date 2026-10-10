@@ -619,6 +619,17 @@ mod tests {
     // ---- 既定リモート（01 / 04 の「既定リモート」）----
 
     #[test]
+    fn f_fetches_the_tracked_remote_not_origin() {
+        // 1 段目。**`origin` があっても追跡先が勝つ。**
+        let mut state = state_for_push(
+            &["origin", "upstream"],
+            tracking_branch("main", "upstream", HEADS_MAIN),
+        );
+        let cmd = press(&mut state, 'f');
+        assert_eq!(fetched_remote(&cmd).as_deref(), Some("upstream"), "{cmd:?}");
+    }
+
+    #[test]
     fn f_fetches_the_only_remote_even_when_it_is_not_origin() {
         // 2 段目。**git 2.55 も同じ**（単一リモート `upstream` で `git fetch` が
         // `refs/remotes/upstream/main` を作るのを実測。表は 04）。
@@ -1009,6 +1020,34 @@ mod tests {
             Cmd::Exec(push_op("origin", "main", false))
         );
         assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn a_canceled_push_does_not_arm_force() {
+        // force に上げてよいのは git が非 FF で断ったときだけ（01 の「force push」）。
+        // 中断は git の判断ではない。
+        // **追跡設定のある行で組む** —— ブランチ一覧が空の状態や追跡設定の無い行では、
+        // `push_rejection` が kind を見る前に `None` を返すので、中断を非 FF と同じに
+        // 扱っても緑のまま通る。同じ状態で非 FF なら立つことを続けて見る。
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(7))),
+        );
+        let op = push_op("origin", "main", false);
+        finish_exec(
+            &mut state,
+            op.clone(),
+            Err(ExecError::Canceled {
+                argv: vec!["push".into(), "origin".into(), "main".into()],
+            }),
+        );
+        assert_eq!(state.push_rejected, None);
+
+        reject_non_fast_forward(&mut state, op);
+        assert!(
+            state.push_rejected.is_some(),
+            "非 FF で記憶が立っていません"
+        );
     }
 
     #[test]

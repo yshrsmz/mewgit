@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn moved_refs_reload_like_a_write_that_moves_them() {
+    fn only_moved_refs_reload_like_a_write_that_moves_them() {
         let mut state = watching(print(1));
         // 変わっていなければ何も読み直さない。
         assert_eq!(reply(&mut state, Cmd::Probe, probed(print(1))), Cmd::None);

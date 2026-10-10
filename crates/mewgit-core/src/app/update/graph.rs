@@ -1051,9 +1051,9 @@ mod tests {
     }
 
     #[test]
-    fn esc_leaves_the_commit_detail_for_the_graph() {
-        // 右ペインの中身は選択で決まるので、`Enter` の行き先も選択で決まる（07）。
-        // コミットの行なら Commit detail へ入る。
+    fn enter_and_esc_move_between_the_graph_and_the_commit_detail() {
+        // コミットの行の `Enter` は Commit detail へ入り、`Esc` で Graph へ戻る
+        // （`Enter` の行き先は選択で決まる。07）。
         let mut state = on_first_commit(3);
         let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
         assert_eq!(state.focus, Pane::CommitDetail);

@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rebase_without_its_counters_is_still_in_progress() {
+    fn an_empty_gitdir_has_nothing_in_progress_but_a_rebase_without_its_counters_does() {
         let dir = git_dir();
         // 空の gitdir では何も進行中でない。`rebase-merge` を置くと進行中に変わる。
         assert_eq!(in_progress(dir.path()), None);

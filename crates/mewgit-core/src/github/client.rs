@@ -969,6 +969,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pr_list_comes_back_empty_when_there_is_no_open_pr() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+
+        assert!(client(&server).pr_list("o", "r").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn create_pr_posts_every_field_and_returns_the_new_pull_request() {
         // **本文をまるごと突き合わせる。** 1 つでも欠けると GitHub は 422 を返すので、
         // `contains` では「送っているつもりの欄」を見張れない。
@@ -1476,10 +1488,6 @@ mod tests {
 
     /// `repo` → `pr_list` と続けて叩いたあとに憶えた残量。**畳み方を見る形**で、
     /// 2 本目のほうが必ずあとに返る。
-    ///
-    /// `pr_list` の応答を空配列にしているのは、**空の一覧の見張りを兼ねる**
-    /// （空の一覧を `Err` に畳むと `expect("pr_list")` が落ちる）。PR を入れると
-    /// この見張りは黙って外れる。
     async fn rate_after_repo_then_list(
         repo: &[(&str, &str)],
         pulls: &[(&str, &str)],

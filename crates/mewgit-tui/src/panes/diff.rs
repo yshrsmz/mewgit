@@ -521,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rename_without_content_changes_says_so() {
+    fn a_rename_without_content_changes_says_so_and_names_both_paths() {
         let mut renamed = fake_file_diff("new.txt", Vec::new());
         renamed.old_path = Some("old.txt".into());
         renamed.status = FileStatus::Renamed;

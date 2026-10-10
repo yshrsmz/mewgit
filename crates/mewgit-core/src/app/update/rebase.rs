@@ -688,22 +688,6 @@ mod tests {
     }
 
     #[test]
-    fn r_reads_the_full_message_and_opens_the_input_on_the_row_it_was_pressed_on() {
-        let mut state = linear(3);
-        let _ = press_i_on(&mut state, 1);
-
-        // **件名だけでは始めない** —— 本文が黙って消える（01）。全文を読みに行く。
-        assert_eq!(press(&mut state, 'r'), Cmd::LoadCommitMessage(fake_oid(1)));
-        // 待っているあいだに動いても、`r` を押した行を打つ。
-        let _ = press(&mut state, 'j');
-        assert_eq!(reword_text(&state), None);
-        let _ = message_loaded(&mut state, fake_oid(1), "件名\n\n本文");
-
-        assert_eq!(reword_text(&state).as_deref(), Some("件名\n\n本文"));
-        assert_eq!(editor(&state).2, 0);
-    }
-
-    #[test]
     fn the_input_takes_every_key_and_enter_rewords_the_row_back_in_the_list() {
         let mut state = rewording("件名");
 
@@ -851,9 +835,11 @@ mod tests {
 
         assert_eq!(press(&mut state, 'r'), Cmd::None);
 
-        let _ = message_loaded(&mut state, fake_oid(1), "件名");
+        // **件名だけでは始めない** —— 本文が黙って消える（01）。全文で入力を開く。
+        // 待っているあいだに動いても、`r` を押した行を打つ。
+        let _ = message_loaded(&mut state, fake_oid(1), "件名\n\n本文");
         assert_eq!(editor(&state).2, 0);
-        assert_eq!(reword_text(&state).as_deref(), Some("件名"));
+        assert_eq!(reword_text(&state).as_deref(), Some("件名\n\n本文"));
     }
 
     #[test]

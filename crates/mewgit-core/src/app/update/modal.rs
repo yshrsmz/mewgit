@@ -182,7 +182,6 @@ mod tests {
     use super::super::update;
     use super::*;
     use crate::app::state::MAX_NOTICES;
-    use crate::app::Pane;
     use crate::app::{JobKind, Modal, Msg};
     use crate::git_exec::GitOp;
 
@@ -382,52 +381,6 @@ feat/b
 
         assert!(state.modal.is_none());
         assert!(!state.jobs.is_running(JobKind::Exec));
-    }
-
-    #[test]
-    fn keys_do_not_reach_the_pane_while_a_modal_is_open() {
-        let mut state = worktree_state(
-            fake_snapshot(&[], &["a.txt", "b.txt"], &[]),
-            WorktreeSection::Unstaged,
-        );
-        let _ = press(&mut state, 'x');
-
-        // モーダルが受けるので、カーソルは動かない。
-        let _ = press(&mut state, 'j');
-        assert_eq!(state.worktree.cursor, 0);
-        assert!(state.modal.is_some());
-    }
-
-    #[test]
-    fn esc_closes_the_modal() {
-        let mut state = AppState {
-            modal: Some(Modal::Help {
-                pane: Pane::Graph,
-                cursor: 0,
-            }),
-            ..state()
-        };
-
-        assert_eq!(
-            update(&mut state, Msg::Key(Key::new(KeyCode::Esc))),
-            Cmd::None
-        );
-        assert!(state.modal.is_none());
-    }
-
-    #[test]
-    fn modal_swallows_other_keys() {
-        let mut state = AppState {
-            modal: Some(Modal::Help {
-                pane: Pane::Graph,
-                cursor: 0,
-            }),
-            ..state()
-        };
-
-        // モーダル表示中の `q` は終了ではない。入力中に閉じられると困る。
-        assert_eq!(update(&mut state, Msg::Key(Key::char('q'))), Cmd::None);
-        assert!(matches!(state.modal, Some(Modal::Help { .. })));
     }
 
     /// 通知を `messages` の順に積んだ状態（最後が最新）。

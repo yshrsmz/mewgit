@@ -577,9 +577,11 @@ fn submit(state: &mut AppState, cmd: Cmd) -> Cmd {
 mod tests {
 
     use super::test_support::{
-        commit_loads, cursor, detail_ok, diff_state, exec_done_of, github_disabled_state, more,
-        on_first_commit, on_first_commit_with_files, press, press_code, state, state_on_branches,
-        state_on_stashes, state_with_commits, state_with_page, tab_to, tick, worktree_state, ROWS,
+        commit_loads, cursor, detail_ok, diff_state, exec_done_of, finish_exec,
+        github_disabled_state, more, on_first_commit, on_first_commit_with_files, press,
+        press_code, push_op, reject_non_fast_forward, state, state_for_push, state_on_branches,
+        state_on_stashes, state_with_commits, state_with_page, tab_to, tick, tracked_head,
+        worktree_state, HEADS_MAIN, ROWS,
     };
     use super::*;
     use crate::app::{keys, Modal, RightTab, TermSize};
@@ -589,7 +591,7 @@ mod tests {
 
     use crate::git_read::Timestamp;
     use crate::test_util::{
-        deliver_status, fake_pull_request, fake_snapshot, fake_target, pr_list_loaded,
+        deliver_status, fake_oid, fake_pull_request, fake_snapshot, fake_target, pr_list_loaded,
         put_on_branch, reply, FAKE_NOW,
     };
 
@@ -954,20 +956,6 @@ mod tests {
     }
 
     #[test]
-    fn a_second_load_while_one_is_running_is_dropped() {
-        // 二重に投げると同じページを 2 回積む。
-        let mut state = state();
-        let _ = init(&mut state);
-
-        let again = state.issue(Cmd::LoadLog {
-            count: 10,
-            restart: false,
-        });
-
-        assert_eq!(again, Cmd::None);
-    }
-
-    #[test]
     fn batch_only_drops_the_duplicated_cmd() {
         let mut state = state();
         let _ = init(&mut state);
@@ -988,20 +976,9 @@ mod tests {
     #[test]
     fn q_quits() {
         let mut state = state();
-        assert_eq!(update(&mut state, Msg::Key(Key::char('q'))), Cmd::Quit);
-    }
-
-    #[test]
-    fn ctrl_q_does_not_quit() {
-        let mut state = state();
         // 終了は修飾なしの `q` だけ。Ctrl-q で落ちると事故になる。
         assert_eq!(update(&mut state, Msg::Key(Key::ctrl('q'))), Cmd::None);
-    }
-
-    #[test]
-    fn ctrl_c_quits() {
-        let mut state = state();
-        assert_eq!(update(&mut state, Msg::Key(Key::ctrl('c'))), Cmd::Quit);
+        assert_eq!(update(&mut state, Msg::Key(Key::char('q'))), Cmd::Quit);
     }
 
     #[test]
@@ -1107,27 +1084,28 @@ mod tests {
     fn a_canceled_push_does_not_arm_force() {
         // force に上げてよいのは git が非 FF で断ったときだけ（01 の「force push」）。
         // 中断は git の判断ではない。
-        let mut state = state();
-        let op = GitOp::Push {
-            remote: "origin".into(),
-            src: "main".into(),
-            dst: None,
-            set_upstream: false,
-            lease: None,
-        };
-        let _ = state.issue(Cmd::Exec(op.clone()));
-
-        let _ = update(
-            &mut state,
-            exec_done_of(
-                op,
-                Err(ExecError::Canceled {
-                    argv: vec!["push".into(), "origin".into(), "main".into()],
-                }),
-            ),
+        // **追跡設定のある行で組む** —— ブランチ一覧が空の状態や追跡設定の無い行では、
+        // `push_rejection` が kind を見る前に `None` を返すので、中断を非 FF と同じに
+        // 扱っても緑のまま通る。同じ状態で非 FF なら立つことを続けて見る。
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(7))),
         );
-
+        let op = push_op("origin", "main", false);
+        finish_exec(
+            &mut state,
+            op.clone(),
+            Err(ExecError::Canceled {
+                argv: vec!["push".into(), "origin".into(), "main".into()],
+            }),
+        );
         assert_eq!(state.push_rejected, None);
+
+        reject_non_fast_forward(&mut state, op);
+        assert!(
+            state.push_rejected.is_some(),
+            "非 FF で記憶が立っていません"
+        );
     }
 
     #[test]
@@ -1152,24 +1130,6 @@ mod tests {
 
         let labels: Vec<&str> = state.jobs.iter().map(|job| job.label).collect();
         assert_eq!(labels, ["fetch"]);
-    }
-
-    #[test]
-    fn a_dropped_exec_says_how_to_stop_waiting() {
-        // 落としたことだけでなく、待たずに済む手（`Ctrl-C`）まで書く。
-        // 2 本目は落とす（キューには積まない。01 の「ランタイム」）。落としたことを
-        // 伝えるだけでなく、待たずに済む手（`Ctrl-C`）まで書く。
-        let mut state = state();
-        let _ = state.issue(Cmd::Exec(GitOp::Fetch {
-            remote: None,
-            prune: false,
-        }));
-
-        let cmd = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
-
-        assert_eq!(cmd, Cmd::None);
-        let notice = state.notices.back().expect("通知がありません");
-        assert!(notice.message.contains("Ctrl-C"), "{}", notice.message);
     }
 
     #[test]

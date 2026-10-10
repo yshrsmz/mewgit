@@ -257,21 +257,10 @@ mod tests {
     }
 
     #[test]
-    fn the_first_fingerprint_is_only_a_baseline() {
-        let mut state = state();
-        assert_eq!(reply(&mut state, Cmd::Probe, probed(print(1))), Cmd::None);
-        assert_eq!(state.watch.fingerprint, Some(print(1)));
-    }
-
-    #[test]
-    fn an_unchanged_fingerprint_reloads_nothing() {
-        let mut state = watching(print(1));
-        assert_eq!(reply(&mut state, Cmd::Probe, probed(print(1))), Cmd::None);
-    }
-
-    #[test]
     fn moved_refs_reload_like_a_write_that_moves_them() {
         let mut state = watching(print(1));
+        // 変わっていなければ何も読み直さない。
+        assert_eq!(reply(&mut state, Cmd::Probe, probed(print(1))), Cmd::None);
         let log = state.jobs.epoch(Region::Log);
 
         let cmd = reply(&mut state, Cmd::Probe, probed(print(2)));

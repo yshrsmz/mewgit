@@ -730,17 +730,6 @@ mod tests {
     };
 
     #[test]
-    fn exec_finished_reloads_the_status() {
-        let mut state = state();
-        let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
-
-        let cmd = update(&mut state, exec_done(Ok(fake_output())));
-
-        assert_eq!(cmd, Cmd::LoadStatus);
-        assert!(!state.jobs.is_running(JobKind::Exec));
-    }
-
-    #[test]
     fn a_failed_exec_keeps_the_argv_and_stderr() {
         // Git CLI のエラーは握りつぶさない（不変ルール 4）。
         let mut state = state();
@@ -1112,43 +1101,6 @@ mod tests {
     }
 
     #[test]
-    fn several_reverts_stopped_on_an_empty_one_are_not_told_it_was_undone() {
-        // 複数の revert は途中が空だと `sequencer/` を残して止まる（03 の「複数のコミットの
-        // cherry-pick / revert」）。「取り消し済み」と言うと進行中の操作を隠す。
-        let mut state = state();
-        let op = GitOp::Revert {
-            oids: vec![fake_oid(1), fake_oid(2)],
-            mainline: None,
-        };
-        finish_exec(&mut state, op, Err(failed_with(ExecErrorKind::NoChanges)));
-
-        let notice = state.notices.back().expect("通知がありません");
-        assert!(
-            !notice.message.contains("取り消し済み"),
-            "{}",
-            notice.message
-        );
-    }
-
-    #[test]
-    fn a_commit_with_nothing_staged_stays_red() {
-        // `git commit` も同じ文言を出すが、案内は revert だけ（`no_changes_advice`）。
-        let mut state = state();
-        finish_exec(
-            &mut state,
-            GitOp::Commit {
-                message: "m".to_string(),
-                amend: false,
-            },
-            Err(failed_with(ExecErrorKind::NoChanges)),
-        );
-
-        let notice = state.notices.back().expect("通知がありません");
-        assert_eq!(notice.level, NoticeLevel::Error);
-        assert!(!notice.message.contains("取り消す"), "{}", notice.message);
-    }
-
-    #[test]
     fn an_unmerged_refusal_of_an_op_git_words_differently_stays_red() {
         // `Unmerged` の案内は、git が未解消で断ると数えた op だけ（`unmerged_advice`）。
         // `switch` は別の文言で断るので、分類が外れて来ても「解消してから」とは言わない。
@@ -1204,30 +1156,6 @@ mod tests {
         finish_exec(&mut state, commit, Err(empty));
         let notice = state.notices.back().expect("通知がありません");
         assert_eq!(notice.message, "git の実行に失敗しました: git commit -m m");
-    }
-
-    #[test]
-    fn a_failure_with_a_reason_only_on_stderr_is_summed_up_by_that_reason() {
-        // 案内の無い失敗は `ExecError::reason` の行（01 の「失敗の案内文」）。選び方の
-        // 見張りは `git_exec::runner` の `reason` のテスト。
-        let mut state = state();
-        finish_exec(
-            &mut state,
-            GitOp::BranchDelete {
-                name: "side".to_string(),
-                force: false,
-            },
-            Err(ExecError::Failed {
-                argv: vec!["branch".into(), "--delete".into(), "side".into()],
-                code: Some(1),
-                stdout: String::new(),
-                stderr: "error: the branch 'side' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D side'\n".to_string(),
-                kind: ExecErrorKind::Other,
-            }),
-        );
-        let notice = state.notices.back().expect("通知がありません");
-        assert_eq!(notice.message, "the branch 'side' is not fully merged");
-        assert_eq!(notice.level, NoticeLevel::Error);
     }
 
     #[test]

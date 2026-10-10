@@ -130,21 +130,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn char_keys_drop_shift() {
-        // crossterm は `P` に SHIFT を立てて渡してくる。正規化しないと
-        // `Key::char('P')` と等しくならず、keymap の引き当てが外れる。
-        let from_terminal = Key::with_mods(
-            KeyCode::Char('P'),
-            Modifiers {
-                shift: true,
-                ..Modifiers::default()
-            },
-        );
-        assert_eq!(from_terminal, Key::char('P'));
-        assert!(!from_terminal.mods().shift);
-    }
-
-    #[test]
     fn shift_tab_normalizes_to_back_tab() {
         // 端末は Shift+Tab を BackTab + SHIFT として送ってくる。正規化しないと
         // Key::new(KeyCode::BackTab) と一致せず、ペインの逆順巡回が動かない。
@@ -187,6 +172,18 @@ mod tests {
 
     #[test]
     fn ctrl_and_alt_survive_normalization() {
+        // crossterm は `P` に SHIFT を立てて渡してくる。正規化しないと
+        // `Key::char('P')` と等しくならず、keymap の引き当てが外れる。
+        let from_terminal = Key::with_mods(
+            KeyCode::Char('P'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(from_terminal, Key::char('P'));
+
+        // 落とすのは shift だけで、ctrl / alt は残す。
         let key = Key::with_mods(
             KeyCode::Char('d'),
             Modifiers {

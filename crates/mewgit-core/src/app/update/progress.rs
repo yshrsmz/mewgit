@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn r_on_the_branch_being_rebased_is_refused_before_the_name_is_typed() {
         // #120 が残した穴。開いてから git に断られると、打った名前が消える（01）。
-        let mut state = state_on_branches(&[("topic", true)]);
+        let mut state = state_on_branches(&["topic"], Some("topic"));
         arrive(&mut state, Some(rebase()));
 
         let cmd = press(&mut state, 'r');
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn deleting_the_branch_being_rebased_is_refused_when_confirmed() {
-        let mut state = state_on_branches(&[("topic", true)]);
+        let mut state = state_on_branches(&["topic"], Some("topic"));
         arrive(&mut state, Some(rebase()));
         let _ = press(&mut state, 'D');
         assert!(matches!(state.modal, Some(Modal::Confirm { .. })));
@@ -638,7 +638,7 @@ mod tests {
             ),
         ];
         for (progress, expected) in cases {
-            let mut state = state_on_branches(&[("main", true)]);
+            let mut state = state_on_branches(&["main"], Some("main"));
             arrive(&mut state, Some(progress.clone()));
 
             let cmd = press(&mut state, 'm');
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn m_with_nothing_in_progress_reads_the_status_again() {
         // 端末で rebase を始めた直後は snapshot がまだ「無い」。読み直すので 2 回目は開く。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         arrive(&mut state, None);
 
         let cmd = press(&mut state, 'm');
@@ -691,7 +691,7 @@ mod tests {
 
     #[test]
     fn m_in_the_middle_of_an_am_points_to_the_terminal() {
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         arrive(&mut state, Some(InProgressOp::Am { step: None }));
 
         let cmd = press(&mut state, 'm');
@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn enter_on_continue_runs_it_and_closes_the_menu() {
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         arrive(&mut state, Some(rebase()));
         let _ = press(&mut state, 'm');
 
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn j_moves_to_skip_and_stops_at_the_last_item() {
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         arrive(&mut state, Some(rebase()));
         let _ = press(&mut state, 'm');
         let _ = press(&mut state, 'j');
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn abort_asks_before_running() {
         // 破壊的操作は `Modal::Confirm` を通す（不変ルール 5）。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         arrive(&mut state, Some(InProgressOp::Merge { oid: fake_oid(1) }));
         let _ = press(&mut state, 'm');
 
@@ -776,7 +776,7 @@ mod tests {
     fn a_busy_git_keeps_the_menu_open() {
         // 1 行入力の確定と同じ（`submit_exec`）。閉じてから落とすと、押した手が
         // 何も起こさずにメニューだけ消える。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         arrive(&mut state, Some(rebase()));
         let _ = state.issue(Cmd::Exec(GitOp::Fetch {
             remote: None,
@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn esc_closes_the_menu_without_running_anything() {
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         arrive(&mut state, Some(rebase()));
         let _ = press(&mut state, 'm');
 
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn switching_branches_in_the_middle_of_a_rebase_is_refused_before_git_runs() {
-        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        let mut state = state_on_branches(&["another", "main"], Some("main"));
         arrive(&mut state, Some(rebase()));
         let _ = press(&mut state, 'k');
 
@@ -820,7 +820,7 @@ mod tests {
         // 世代を進めるのは mewgit の書き込みだけなので、端末で `rebase --abort` しても
         // snapshot は「鮮度あり・途中」のまま。断ったときに読み直さないと、git を
         // 起動しないぶん断り続ける（`/code-review` が拾った。pty で再現した）。
-        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        let mut state = state_on_branches(&["another", "main"], Some("main"));
         arrive(&mut state, Some(rebase()));
         let _ = press(&mut state, 'k');
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::LoadStatus);
@@ -840,7 +840,7 @@ mod tests {
         // 走っている git のあいだに断ると、読み直しは書き込みより前の世代で刻まれ、
         // 書き込みのあとの `LoadStatus` は同種実行中で落ちる。届いた古い返りから
         // `status_loaded` が頼み直す（01 の「進行中操作があるときの書き込み」）。
-        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        let mut state = state_on_branches(&["another", "main"], Some("main"));
         arrive(&mut state, Some(rebase()));
         let fetch = GitOp::Fetch {
             remote: None,
@@ -879,7 +879,7 @@ mod tests {
     fn a_stale_snapshot_leaves_the_decision_to_git() {
         // abort した直後は status が届くまで古い。持っている「rebase の途中」を信じると、
         // 終わった rebase を理由に断る（01）。
-        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        let mut state = state_on_branches(&["another", "main"], Some("main"));
         arrive(&mut state, Some(rebase()));
         assert!(state.refuse_in_progress(&GitOp::Switch("another".to_string())));
         finish_exec(&mut state, GitOp::RebaseAbort, Ok(fake_output()));
@@ -893,7 +893,7 @@ mod tests {
 
     #[test]
     fn nothing_in_progress_refuses_nothing() {
-        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        let mut state = state_on_branches(&["another", "main"], Some("main"));
         arrive(&mut state, None);
         // 鮮度のある snapshot で「無い」と読めている（古くて git に任せた形ではない）。
         assert!(state.worktree_is_current());
@@ -907,7 +907,7 @@ mod tests {
     #[test]
     fn n_is_refused_before_the_name_is_typed() {
         // 打ち終えてから断ると、打った名前が消える（01）。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         arrive(&mut state, Some(rebase()));
 
         let cmd = press(&mut state, 'n');
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn r_still_opens_because_renaming_passes() {
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         arrive(&mut state, Some(rebase()));
 
         let _ = press(&mut state, 'r');
@@ -931,7 +931,7 @@ mod tests {
     fn submitting_a_name_after_a_rebase_started_keeps_the_input_open() {
         // 打っているあいだに status が届いて rebase の途中と判った。閉じると打った名前が
         // 消えるので、走っている git で断るときと同じく閉じずに断る。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         let _ = press(&mut state, 'n');
         type_text(&mut state, "topic");
         arrive(&mut state, Some(rebase()));

@@ -35,7 +35,12 @@ pub(super) fn lines(state: &AppState) -> Rows {
     let ascii = state.config.graph.ascii;
     // **カーソル行の反転はここで当てない。** [`super::TopPane::render`] が `cursor` を
     // 見て 1 箇所で当てる（`Prs` と共有）。
-    let lines = branches.iter().map(|branch| row(branch, ascii)).collect();
+    let head = state.branches.head_row();
+    let lines = branches
+        .iter()
+        .enumerate()
+        .map(|(i, branch)| row(branch, head == Some(i), ascii))
+        .collect();
     Rows {
         lines,
         cursor: Some(state.branches.cursor),
@@ -43,8 +48,8 @@ pub(super) fn lines(state: &AppState) -> Rows {
 }
 
 /// 1 行。`* main  ↑1`。印が付くのは HEAD のブランチだけ。
-fn row(branch: &Branch, ascii: bool) -> Line<'static> {
-    let mark = if branch.is_head { '*' } else { ' ' };
+fn row(branch: &Branch, is_head: bool, ascii: bool) -> Line<'static> {
+    let mark = if is_head { '*' } else { ' ' };
     Line::from(vec![
         Span::raw(format!(" {mark} {}", branch.name)),
         // 空なら何も描かれない（upstream が無いか、追いついている）。
@@ -95,12 +100,15 @@ mod tests {
     use crate::test_util::{draw, pane_text, row_is_reversed, row_of, state_at};
     use mewgit_core::app::{update, AppState, Key, Msg, Pane, TermSize};
     use mewgit_core::git_read::{Branch, GitReadError};
-    use mewgit_core::test_util::{deliver_branches, fake_branch, fake_oid, fake_upstream};
+    use mewgit_core::test_util::{
+        deliver_branches, fake_branch, fake_branch_list, fake_oid, fake_upstream,
+    };
 
-    /// 一覧が届いた状態。**`update` を通す**ので `JobTracker` も本番と同じ。
-    fn state_with_branches(branches: Vec<Branch>) -> AppState {
+    /// 一覧が届いた状態。HEAD は `head` の名前の行。**`update` を通す**ので `JobTracker` も
+    /// 本番と同じ。
+    fn state_with_branches(branches: Vec<Branch>, head: Option<&str>) -> AppState {
         let mut state = state_at("/repo");
-        let _ = deliver_branches(&mut state, Ok(branches));
+        let _ = deliver_branches(&mut state, Ok(fake_branch_list(branches, head)));
         state
     }
 
@@ -109,33 +117,42 @@ mod tests {
 
     #[test]
     fn the_list_marks_the_head_branch_and_counts_the_rest() {
-        let state = state_with_branches(vec![
-            fake_branch("another", false),
-            fake_branch("main", true),
-        ]);
+        // **HEAD は先頭でもカーソル行でもない**（印を先頭やカーソル行から取り違える変異を
+        // 落とす。`.claude/rules/testing.md` の「読み元を移すリファクタの見張り」）。
+        let mut state = state_with_branches(
+            vec![
+                fake_branch("another"),
+                fake_branch("main"),
+                fake_branch("topic"),
+            ],
+            Some("main"),
+        );
+        state.branches.cursor = 2;
 
         let lines = draw(&state, SIZE);
         let text = lines.join("\n");
 
-        assert!(text.contains("Branches (2)"), "{text}");
+        assert!(text.contains("Branches (3)"), "{text}");
         assert!(text.contains("* main"), "{text}");
         // 印が付くのは HEAD だけ。
-        let another = &lines[row_of(&lines, "another") as usize];
-        assert!(!another.contains('*'), "{another}");
+        for name in ["another", "topic"] {
+            let line = &lines[row_of(&lines, name) as usize];
+            assert!(!line.contains('*'), "{line}");
+        }
     }
 
     #[test]
     fn tracking_shows_only_the_side_that_is_not_zero() {
         // 追いついているブランチで `↑0 ↓0` を出しても桁が埋まるだけ（07）。
-        let mut ahead = fake_branch("ahead", false);
+        let mut ahead = fake_branch("ahead");
         ahead.upstream = Some(fake_upstream("origin/ahead", fake_oid(1)));
         ahead.ahead = 2;
-        let mut behind = fake_branch("behind", false);
+        let mut behind = fake_branch("behind");
         behind.upstream = Some(fake_upstream("origin/behind", fake_oid(1)));
         behind.behind = 3;
-        let mut synced = fake_branch("synced", true);
+        let mut synced = fake_branch("synced");
         synced.upstream = Some(fake_upstream("origin/synced", fake_oid(1)));
-        let state = state_with_branches(vec![ahead, behind, synced]);
+        let state = state_with_branches(vec![ahead, behind, synced], Some("synced"));
 
         let lines = draw(&state, SIZE);
 
@@ -149,11 +166,11 @@ mod tests {
     #[test]
     fn the_ascii_setting_swaps_the_arrows() {
         // 罫線だけに効かせると、同じ端末で矢印だけが化ける（07）。
-        let mut branch = fake_branch("topic", false);
+        let mut branch = fake_branch("topic");
         branch.upstream = Some(fake_upstream("origin/topic", fake_oid(1)));
         branch.ahead = 1;
         branch.behind = 2;
-        let mut state = state_with_branches(vec![branch]);
+        let mut state = state_with_branches(vec![branch], None);
         state.config.graph.ascii = true;
 
         let text = draw(&state, SIZE).join("\n");
@@ -168,11 +185,14 @@ mod tests {
         // **一覧の先頭行は見ない。** `row_is_reversed` は行の全幅を見るので、
         // 右列の 1 行目はグラフの WIP 行（カーソル行なので反転している）と同じ
         // 端末行に来る。そこを見ると、反転していなくても真になる。
-        let mut state = state_with_branches(vec![
-            fake_branch("alpha", false),
-            fake_branch("bravo", true),
-            fake_branch("charlie", false),
-        ]);
+        let mut state = state_with_branches(
+            vec![
+                fake_branch("alpha"),
+                fake_branch("bravo"),
+                fake_branch("charlie"),
+            ],
+            Some("bravo"),
+        );
         state.focus = Pane::Branches;
         // カーソルは HEAD の行に座る（01 の「ブランチ一覧」）。
         assert!(row_is_reversed(&state, SIZE, "bravo"));
@@ -188,7 +208,7 @@ mod tests {
     fn a_repository_without_branches_says_so_instead_of_loading() {
         // `git init` の直後はブランチが 1 本も無い。正常な状態なので「読み込み中…」と
         // 同じ見た目にしない（07）。
-        let state = state_with_branches(Vec::new());
+        let state = state_with_branches(Vec::new(), None);
 
         // **このペインの中だけを見る**（`ui::LOADING` は他のペインも出す）。
         let text = pane_text(&state, SIZE, Pane::Branches);
@@ -224,9 +244,9 @@ mod tests {
         // 上限が無いと、ブランチの多いリポジトリで下のペインが潰れる（07）。
         // **既定の 80x24 のまま見る。** 広げて緑にすると見張りが効かない（#22）。
         let branches = (0..40)
-            .map(|n| fake_branch(&format!("feat/branch-{n:02}"), n == 0))
+            .map(|n| fake_branch(&format!("feat/branch-{n:02}")))
             .collect();
-        let state = state_with_branches(branches);
+        let state = state_with_branches(branches, Some("feat/branch-00"));
 
         let text = draw(&state, SIZE).join("\n");
 
@@ -242,7 +262,7 @@ mod tests {
     fn a_tiny_terminal_does_not_panic() {
         // リサイズの途中では枠より小さい端末が来る。
         for (width, height) in [(1, 1), (10, 3), (20, 5)] {
-            let state = state_with_branches(vec![fake_branch("main", true)]);
+            let state = state_with_branches(vec![fake_branch("main")], Some("main"));
             let lines = draw(&state, TermSize { width, height });
             assert_eq!(lines.len(), height as usize);
         }

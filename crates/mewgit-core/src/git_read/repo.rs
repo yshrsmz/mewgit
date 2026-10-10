@@ -217,9 +217,6 @@ impl RepoReader {
                 continue;
             };
             let full = reference.name().ok();
-            // `full` が無いときに `head_target` も無い（detached / unborn）と、
-            // `None == None` で HEAD になってしまう。名前が引けた行だけを比べる。
-            let is_head = full.is_some_and(|full| head_target == Some(full));
             // 指す先が commit でない ref（ありえないが、壊れたリポジトリでは起きる）は
             // 落とす。`refs` が peel できないタグを落とすのと同じ扱い。HEAD の行を落とした
             // ときは `rowless_head` が peel し直して `Err` にする。
@@ -255,14 +252,17 @@ impl RepoReader {
                 push_remote,
                 ahead: tracking.ahead,
                 behind: tracking.behind,
-                is_head,
             });
         }
 
         // git2 の列挙順は安定していない（`RefIndex::new` と同じ理由）。
         branches.sort_by(|a, b| a.name.cmp(&b.name));
-        // symbolic でない HEAD はどの行とも比べられないので、必ずここへ落ちる。
-        BranchList::new(branches, || match head_target {
+        // **どの行が HEAD かは名前で決める**（`Branch` に旗を持たせない。02 の「head」）。
+        // 列挙は `refs/heads/*` だけなので、行の名前は target から接頭辞を外したものと
+        // 比べられる。外れなければ（`refs/heads/` の外を指す symref）どの行でもない。
+        // symbolic でない HEAD は名前を持たないので、必ず `rowless` へ落ちる。
+        let head_name = head_target.and_then(|target| target.strip_prefix("refs/heads/"));
+        BranchList::new(branches, head_name, || match head_target {
             None => Ok(RowlessHead::Detached(head.peel_to_commit()?.id())),
             Some(target) => rowless_head(&head, target),
         })

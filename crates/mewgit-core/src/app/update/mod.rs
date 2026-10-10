@@ -779,8 +779,7 @@ mod tests {
                 state
             }
             Pane::Branches => {
-                let mut state =
-                    state_on_branches(&[("main", true), ("topic", false), ("x", false)]);
+                let mut state = state_on_branches(&["main", "topic", "x"], Some("main"));
                 let _ = press(&mut state, 'j');
                 state
             }

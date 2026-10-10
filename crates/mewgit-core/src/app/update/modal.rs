@@ -194,7 +194,7 @@ mod tests {
     fn a_blank_name_is_refused_without_closing_the_input() {
         // `git switch --create ""` は落ちるが、その時点でモーダルは閉じていて
         // 打った文字が戻らない（01 の「1 行入力」）。空白だけも同じ。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         let _ = press(&mut state, 'n');
         let _ = press(&mut state, ' ');
 
@@ -213,7 +213,7 @@ mod tests {
     fn a_busy_git_keeps_the_input_and_what_was_typed() {
         // 閉じてから `Cmd` を返すと、`issue` に落とされたときに打った文字ごと消える
         // （`commit_submit` と同じ。01 の「1 行入力」）。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         let _ = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
         let _ = press(&mut state, 'n');
         type_text(&mut state, "feat/x");
@@ -229,7 +229,7 @@ mod tests {
     fn the_input_never_grows_a_second_line() {
         // 行が 2 本になると `text()` に `\n` が混ざり、そのままブランチ名になる
         // （01 の「1 行入力」）。`Ctrl-J` は `CommitMessage` では改行のキー。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         let _ = press(&mut state, 'n');
         let _ = press(&mut state, 'a');
 
@@ -245,7 +245,7 @@ mod tests {
     fn a_modified_enter_confirms_like_a_plain_one() {
         // `CommitMessage` のつもりで `Alt+Enter` を打った人に「何も起きない」を
         // 返さない。こちらに改行の意味は無い（01 の「1 行入力」）。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         let _ = press(&mut state, 'n');
         let _ = press(&mut state, 'x');
 
@@ -265,7 +265,7 @@ mod tests {
         // **`Msg::Paste` を受けるモーダルが 2 つ目。** 腕が無いと貼り付けが
         // 1 文字ずつ `Msg::Key` として届く形に戻り、最初の改行で確定して残りが
         // ペインのキーになる（#34 で踏んだ形）。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         let _ = press(&mut state, 'n');
 
         let cmd = update(
@@ -286,7 +286,7 @@ feat/b
 
     #[test]
     fn esc_closes_the_input_without_running_anything() {
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         let _ = press(&mut state, 'n');
         let _ = press(&mut state, 'x');
 
@@ -335,12 +335,12 @@ feat/b
         let _ = press(&mut forced, 'P');
         bodies.push(open_confirm(&forced).0.to_string());
 
-        let mut proposed = state_for_push(&["origin"], fake_branch("main", true));
+        let mut proposed = state_for_push(&["origin"], fake_branch("main"));
         let _ = press(&mut proposed, 'P');
         bodies.push(open_confirm(&proposed).0.to_string());
 
         // `m` のメニューの abort（`progress::progress_picked`）。
-        let mut aborting = state_on_branches(&[("main", true)]);
+        let mut aborting = state_on_branches(&["main"], Some("main"));
         aborting.worktree.snapshot.progress = Some(InProgressOp::Merge { oid: fake_oid(1) });
         let _ = press(&mut aborting, 'm');
         let _ = press_code(&mut aborting, KeyCode::Enter);

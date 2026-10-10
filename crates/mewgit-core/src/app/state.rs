@@ -1782,8 +1782,8 @@ impl BranchState {
         self.cursor = selected
             .and_then(|name| branches.iter().position(|branch| branch.name == name))
             // 選んでいたものが消えた（削除 / リネーム）か、まだ何も選んでいない。
-            .or_else(|| branches.iter().position(|branch| branch.is_head))
-            // detached / unborn ではどの行にも印が付かないので先頭に座る。
+            .or_else(|| list.head_row())
+            // detached / unborn では HEAD の行が無い（`head_row` が `None`）ので先頭に座る。
             .unwrap_or(0);
         self.list = Some(list);
         self.load = ListLoad::Loaded;
@@ -1822,6 +1822,12 @@ impl BranchState {
     /// `Some`。
     pub fn head(&self) -> Option<Head<'_>> {
         self.list.as_ref().map(BranchList::head)
+    }
+
+    /// HEAD の行の位置（[`BranchState::branches`] の添字）。detached / unborn / まだ
+    /// 読めていないときは `None`。行ごとに印を付ける読み手のため（[`BranchList::head_row`]）。
+    pub fn head_row(&self) -> Option<usize> {
+        self.list.as_ref().and_then(BranchList::head_row)
     }
 
     /// HEAD が指しているブランチ。detached / unborn / まだ読めていないときは `None`。
@@ -3427,7 +3433,9 @@ mod tests {
 
     use crate::app::Msg;
     use crate::git_read::LogPage;
-    use crate::test_util::{fake_branch, fake_branch_list, fake_snapshot, FAKE_NOW};
+    use crate::test_util::{
+        fake_branch, fake_branch_list, fake_head_list, fake_snapshot, FAKE_NOW,
+    };
 
     /// 指定した区画にファイルを並べ、staged の先頭を選んだ状態。
     fn worktree(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> WorktreeState {
@@ -3780,11 +3788,14 @@ mod tests {
     fn a_loaded_branch_list_seats_the_cursor_on_the_head() {
         let mut branches = BranchState::default();
 
-        branches.loaded(fake_branch_list(vec![
-            fake_branch("another", false),
-            fake_branch("main", true),
-            fake_branch("topic", false),
-        ]));
+        branches.loaded(fake_branch_list(
+            vec![
+                fake_branch("another"),
+                fake_branch("main"),
+                fake_branch("topic"),
+            ],
+            Some("main"),
+        ));
 
         assert_eq!(cursor_name(&branches), Some("main"));
         assert_eq!(branches.load(), ListLoad::Loaded);
@@ -3792,13 +3803,13 @@ mod tests {
 
     #[test]
     fn a_detached_head_seats_the_branch_cursor_on_the_first_row() {
-        // detached / unborn ではどの行にも印が付かない（02 の「ブランチ一覧」）。
+        // detached / unborn では HEAD の行が無い（02 の「head」）。
         let mut branches = BranchState::default();
 
-        branches.loaded(fake_branch_list(vec![
-            fake_branch("another", false),
-            fake_branch("main", false),
-        ]));
+        branches.loaded(fake_branch_list(
+            vec![fake_branch("another"), fake_branch("main")],
+            None,
+        ));
 
         assert_eq!(cursor_name(&branches), Some("another"));
     }
@@ -3808,19 +3819,22 @@ mod tests {
         // 読み直しは commit のたびに来る（01 の `update::Reload`）。HEAD へ戻すだけだと、
         // 別のブランチを見ながら commit した人のカーソルが毎回飛ぶ。
         let mut branches = BranchState::default();
-        branches.loaded(fake_branch_list(vec![
-            fake_branch("main", true),
-            fake_branch("topic", false),
-        ]));
+        branches.loaded(fake_branch_list(
+            vec![fake_branch("main"), fake_branch("topic")],
+            Some("main"),
+        ));
         branches.move_cursor(1);
         assert_eq!(cursor_name(&branches), Some("topic"));
 
         // ブランチが 1 本増えて添字がずれる（一覧は名前順）。
-        branches.loaded(fake_branch_list(vec![
-            fake_branch("alpha", false),
-            fake_branch("main", true),
-            fake_branch("topic", false),
-        ]));
+        branches.loaded(fake_branch_list(
+            vec![
+                fake_branch("alpha"),
+                fake_branch("main"),
+                fake_branch("topic"),
+            ],
+            Some("main"),
+        ));
 
         assert_eq!(cursor_name(&branches), Some("topic"));
     }
@@ -3829,13 +3843,13 @@ mod tests {
     fn a_reload_that_loses_the_selected_branch_falls_back_to_the_head() {
         // 消えた（削除 / リネーム）ときの行き先。
         let mut branches = BranchState::default();
-        branches.loaded(fake_branch_list(vec![
-            fake_branch("main", true),
-            fake_branch("topic", false),
-        ]));
+        branches.loaded(fake_branch_list(
+            vec![fake_branch("main"), fake_branch("topic")],
+            Some("main"),
+        ));
         branches.move_cursor(1);
 
-        branches.loaded(fake_branch_list(vec![fake_branch("main", true)]));
+        branches.loaded(fake_head_list(fake_branch("main")));
 
         assert_eq!(cursor_name(&branches), Some("main"));
     }
@@ -3843,10 +3857,10 @@ mod tests {
     #[test]
     fn the_branch_cursor_stops_at_both_ends() {
         let mut branches = BranchState::default();
-        branches.loaded(fake_branch_list(vec![
-            fake_branch("a", false),
-            fake_branch("b", false),
-        ]));
+        branches.loaded(fake_branch_list(
+            vec![fake_branch("a"), fake_branch("b")],
+            None,
+        ));
 
         branches.move_cursor(-1);
         assert_eq!(branches.cursor, 0);
@@ -3872,7 +3886,7 @@ mod tests {
         let mut branches = BranchState::default();
         assert_eq!(branches.head(), None);
 
-        branches.loaded(fake_branch_list(vec![fake_branch("main", false)]));
+        branches.loaded(fake_branch_list(vec![fake_branch("main")], None));
 
         assert!(matches!(branches.head(), Some(Head::Detached(_))));
         assert_eq!(branches.head_branch(), None);
@@ -3882,7 +3896,7 @@ mod tests {
     fn a_failed_branch_list_keeps_what_was_already_there() {
         // 読めていた一覧は捨てない（`status_loaded` と同じ理由）。
         let mut branches = BranchState::default();
-        branches.loaded(fake_branch_list(vec![fake_branch("main", true)]));
+        branches.loaded(fake_head_list(fake_branch("main")));
 
         branches.failed();
 

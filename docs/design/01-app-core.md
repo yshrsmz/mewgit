@@ -1173,6 +1173,7 @@ impl BranchState {
     pub fn branches(&self) -> &[Branch];        // 名前順。届く前は空
     pub fn head(&self) -> Option<Head<'_>>;     // None はまだ一度も読めていない（02 の「head」）
     pub fn head_branch(&self) -> Option<&Branch>;  // HEAD の行。detached / unborn では None
+    pub fn head_row(&self) -> Option<usize>;    // HEAD の行の添字。座り直しと行ごとの印のため
 }
 ```
 

@@ -18,8 +18,9 @@ use crate::git_read::{
     Remote, StashEntry, UpstreamConfig, WorktreeSection, WorktreeSnapshot,
 };
 use crate::test_util::{
-    fake_branch, fake_commit, fake_detail, fake_entry, fake_file_diff, fake_hunk, fake_oid,
-    fake_remote, fake_snapshot, fake_stash, fake_upstream, reply, FAKE_NOW,
+    fake_branch, fake_branch_list, fake_commit, fake_detail, fake_entry, fake_file_diff,
+    fake_head_list, fake_hunk, fake_oid, fake_remote, fake_snapshot, fake_stash, fake_upstream,
+    reply, FAKE_NOW,
 };
 
 /// グラフに使える行数。`ui` が決めた値が [`Msg::Layout`] で来る想定。
@@ -256,20 +257,18 @@ pub(super) fn diff_ok(target: DiffTarget, files: Vec<FileDiff>) -> Msg {
 pub(super) use crate::test_util::deliver_branches;
 
 /// Branches ペインにフォーカスを置き、一覧が届いた状態。
-pub(super) fn state_on_branches(names: &[(&str, bool)]) -> AppState {
+pub(super) fn state_on_branches(names: &[&str], head: Option<&str>) -> AppState {
     let mut state = state_with_commits(2);
     state.focus = Pane::Branches;
-    load_branches(&mut state, names);
+    load_branches(&mut state, names, head);
     state
 }
 
-/// `(名前, HEAD か)` のブランチ一覧を届ける。
-pub(super) fn load_branches(state: &mut AppState, names: &[(&str, bool)]) {
-    let branches = names
-        .iter()
-        .map(|(name, is_head)| fake_branch(name, *is_head))
-        .collect();
-    let _ = deliver_branches(state, Ok(branches));
+/// ブランチ一覧を届ける。HEAD は `head` の名前の行、`None` なら detached
+/// （[`fake_branch_list`]）。
+pub(super) fn load_branches(state: &mut AppState, names: &[&str], head: Option<&str>) {
+    let branches = names.iter().map(|name| fake_branch(name)).collect();
+    let _ = deliver_branches(state, Ok(fake_branch_list(branches, head)));
 }
 
 /// stash 一覧の返信を届ける。**発行してから届ける**（`test_util::reply`）。
@@ -300,7 +299,7 @@ pub(super) fn state_on_stashes(n: usize) -> AppState {
 /// `confirm_key` の見張り（`confirming_runs_the_command_and_closes_the_modal`）が
 /// このテストに紛れ込む。
 pub(super) fn branch_delete_confirm(force: bool) -> (String, Cmd) {
-    let mut state = state_on_branches(&[("topic", false)]);
+    let mut state = state_on_branches(&["topic"], None);
 
     let cmd = press(&mut state, if force { 'D' } else { 'd' });
 
@@ -357,7 +356,7 @@ pub(super) fn tracking_branch(name: &str, remote: &str, merge: &str) -> Branch {
             remote: remote.to_string(),
             merge: merge.to_string(),
         }),
-        ..fake_branch(name, true)
+        ..fake_branch(name)
     }
 }
 
@@ -365,7 +364,7 @@ pub(super) fn tracking_branch(name: &str, remote: &str, merge: &str) -> Branch {
 pub(super) fn state_for_push(remotes: &[&str], head: Branch) -> AppState {
     let mut state = state_with_commits(2);
     with_remotes(&mut state, remotes);
-    let _ = deliver_branches(&mut state, Ok(vec![head]));
+    let _ = deliver_branches(&mut state, Ok(fake_head_list(head)));
     state
 }
 

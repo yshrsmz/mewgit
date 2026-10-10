@@ -93,8 +93,9 @@ struct View<'a> {
     /// HEAD のブランチラベルのスタイル。
     head: Style,
     /// HEAD のブランチ名。detached / unborn / 一覧がまだ無いときは `None`。
-    /// **ブランチ一覧の HEAD の行から引く** —— ラベルと同じ `RepoSnapshot` で届くので、
-    /// Branches ペインの `*` と食い違わない（02 の「refs とラベル」）。
+    /// **ブランチ一覧の HEAD の行から引く** —— Branches ペインの `*` と同じ値なので、
+    /// 強調する名前は食い違わない。ラベルの集合は `refs()` の別の列挙から来るので、
+    /// その名前のラベルがまだ無いことはある（02 の「refs とラベル」）。
     head_name: Option<&'a str>,
     /// 罫線に使うレーン数。
     lanes: usize,
@@ -218,7 +219,7 @@ fn brackets(label: &RefLabel) -> (&'static str, &'static str) {
 mod tests {
     use super::*;
     use crate::test_util::{
-        draw, graph_rows, state_at, state_with_commits, state_with_history, terminal_with,
+        col_of, draw, graph_rows, state_at, state_with_commits, state_with_history, terminal_with,
     };
     use mewgit_core::app::{init, update, Msg, TermSize};
     use mewgit_core::git_read::{GitReadError, RefIndex, RefLabel};
@@ -372,17 +373,6 @@ mod tests {
         );
     }
 
-    /// `label` が描かれた桁。ラベルは 1 セル 1 字なので、桁ごとの字を繋いで探す。
-    fn label_column(buffer: &Buffer, y: u16, label: &str) -> Option<u16> {
-        let row: Vec<&str> = (0..buffer.area.width)
-            .map(|x| buffer[(x, y)].symbol())
-            .collect();
-        let width = label.chars().count();
-        (0..row.len().saturating_sub(width))
-            .find(|&x| row[x..x + width].concat() == label)
-            .map(|x| x as u16)
-    }
-
     /// 同じコミットに `a-first` と `main` のラベルを載せ、ブランチ一覧を `head` で届けた状態。
     ///
     /// **HEAD でない `a-first` を一覧の先頭（= 選択中の行）とラベルの先頭に置く**
@@ -412,12 +402,13 @@ mod tests {
         // **HEAD はブランチ一覧の HEAD の行から引く**（02 の「refs とラベル」）。
         let state = state_with_two_local_labels(Some("main"));
 
+        let line = &draw(&state, TermSize::default())[FIRST_ROW];
         let terminal = terminal_with(&state, TermSize::default());
         let buffer = terminal.backend().buffer();
 
         let y = FIRST_ROW as u16;
-        let head = label_column(buffer, y, "[main]").expect("ラベルが描かれていません");
-        let other = label_column(buffer, y, "[a-first]").expect("ラベルが描かれていません");
+        let head = col_of(line, "[main]");
+        let other = col_of(line, "[a-first]");
         assert!(other < head, "並びが Local の名前順ではありません");
         assert!(buffer[(head, y)].modifier.contains(Modifier::BOLD));
         assert!(!buffer[(other, y)].modifier.contains(Modifier::BOLD));
@@ -427,12 +418,13 @@ mod tests {
     fn no_label_is_emphasised_when_head_is_detached() {
         let state = state_with_two_local_labels(None);
 
+        let line = &draw(&state, TermSize::default())[FIRST_ROW];
         let terminal = terminal_with(&state, TermSize::default());
         let buffer = terminal.backend().buffer();
 
         let y = FIRST_ROW as u16;
         for label in ["[main]", "[a-first]"] {
-            let x = label_column(buffer, y, label).expect("ラベルが描かれていません");
+            let x = col_of(line, label);
             assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD), "{label}");
         }
     }

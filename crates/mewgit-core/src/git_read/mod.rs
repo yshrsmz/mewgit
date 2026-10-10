@@ -873,12 +873,21 @@ mod tests {
         // 名前が行に当たらなければ（unborn）、名前があっても行無しの HEAD を求める。
         let rows = vec![fake_branch("main")];
         let list = BranchList::new(rows, Some("unborn"), || {
+            Ok::<_, Infallible>(RowlessHead::Unborn {
+                name: "unborn".to_string(),
+            })
+        })
+        .unwrap();
+        assert_eq!(list.head(), Head::Unborn("unborn"));
+        assert_eq!(list.head_row(), None);
+
+        // 名前が無ければ（detached）行は探さない。
+        let list = BranchList::new(vec![fake_branch("main")], None, || {
             Ok::<_, Infallible>(RowlessHead::Detached(fake_oid(7)))
         })
         .unwrap();
         assert_eq!(list.head(), Head::Detached(fake_oid(7)));
         assert_eq!(list.head().branch(), None);
-        assert_eq!(list.head_row(), None);
     }
 
     #[test]

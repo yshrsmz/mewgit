@@ -789,14 +789,12 @@ mod tests {
     /// **いまの行を書き換えて組み直す** —— `Branch` のリテラルを写すと、フィールドが
     /// 増えるたびに直す構築サイトが 1 つ増える。
     fn track(state: &mut AppState, remote: &str, merge: &str) {
-        let name = state
+        let row = state
             .branches
-            .head_branch()
+            .head_row()
             .expect("put_on_branch が HEAD の行を置いている");
-        let name = name.name.clone();
         edit_rows(state, |rows| {
-            let head = rows.iter_mut().find(|b| b.name == name).expect("HEAD の行");
-            head.upstream_config = Some(UpstreamConfig {
+            rows[row].upstream_config = Some(UpstreamConfig {
                 remote: remote.to_string(),
                 merge: merge.to_string(),
             });
@@ -1615,7 +1613,7 @@ mod tests {
         type_text(&mut state, "fix");
 
         let mut snapshot = fake_repo_snapshot();
-        // detached ではどの行にも HEAD の印が付かない（実物では同じ返信が運ぶ）。
+        // detached では HEAD の行が無い（実物では同じ返信が運ぶ）。
         snapshot.branches = fake_branch_list_or(
             vec![fake_branch("feat/x")],
             RowlessHead::Detached(fake_oid(1)),

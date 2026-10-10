@@ -394,13 +394,14 @@ pub enum RowlessHead { Detached(Oid), Unborn { name: String } }  // 行が無い
   | 列挙のあとに外でブランチが作られた | — | — | 次の読み直しまで `Detached` |
 
   どれも行を持たない点で detached と同じに扱い、**行と判別は食い違わない**（大文字小文字の
-  形では、積む先の名前が `HEAD` になる）。**`refs/heads/` を外せない target は名前として
-  渡さない**（`new` の `head` は `None`）—— `git branch refs/remotes/origin/main` は
-  `refs/heads/refs/remotes/origin/main` を作るので（exit 0。2026-10-10、git 2.56.0）、
-  target をそのまま渡すと 1 つ目の形でその行を HEAD と取り違える。libgit2 は refdb のスナップショットを取れないので、
+  形では、積む先の名前が `HEAD` になる）。libgit2 は refdb のスナップショットを取れないので、
   最後の窓そのものは無くせない。逆に **symbolic なブランチの ref は行になる**（一覧は peel
   して行を作る）ので、`refs/heads/alias` → `refs/remotes/origin/main` を HEAD が指す形は
   `Branch` で、行は `alias`（元の `head()` は `Detached` と答えていた。行と揃うこちらを採る）
+- **`refs/heads/` を外せない target は名前として渡さない**（`new` の `head` は `None`）——
+  `git branch refs/remotes/origin/main` は `refs/heads/refs/remotes/origin/main` を作るので
+  （exit 0。2026-10-10、git 2.56.0）、target をそのまま渡すと上の表の 1 つ目の形でその行を
+  HEAD と取り違える
 - **追跡設定（`branch.<HEAD>.remote` / `.merge`）は載せない。** 読み手（`app` の
   「現ブランチの PR」と PR 作成の `head` の候補）は、ブランチ一覧の HEAD の行の
   `Branch::upstream_config` を読む（上の「ブランチ一覧」）。元は `upstream` として

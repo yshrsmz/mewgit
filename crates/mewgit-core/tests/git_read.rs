@@ -375,7 +375,7 @@ fn branches_reports_a_detached_head_without_a_head_row() {
 
     assert_eq!(list.head(), Head::Detached(first));
     assert_eq!(head_row_name(&list), None);
-    // 行は HEAD の印が付かないだけで残る。
+    // 行は HEAD にならないだけで残る。
     assert_eq!(list.branches().len(), 1);
 }
 

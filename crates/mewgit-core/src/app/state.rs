@@ -1783,7 +1783,7 @@ impl BranchState {
             .and_then(|name| branches.iter().position(|branch| branch.name == name))
             // 選んでいたものが消えた（削除 / リネーム）か、まだ何も選んでいない。
             .or_else(|| list.head_row())
-            // detached / unborn ではどの行にも印が付かないので先頭に座る。
+            // detached / unborn では HEAD の行が無い（`head_row` が `None`）ので先頭に座る。
             .unwrap_or(0);
         self.list = Some(list);
         self.load = ListLoad::Loaded;
@@ -3803,7 +3803,7 @@ mod tests {
 
     #[test]
     fn a_detached_head_seats_the_branch_cursor_on_the_first_row() {
-        // detached / unborn ではどの行にも印が付かない（02 の「ブランチ一覧」）。
+        // detached / unborn では HEAD の行が無い（02 の「head」）。
         let mut branches = BranchState::default();
 
         branches.loaded(fake_branch_list(

@@ -1215,7 +1215,7 @@ mod tests {
         // **一覧が届く前**。空の `Vec` からは detached と区別できないので `load` を見る
         // （01 の「ブランチ一覧」）。
         assert!(refusal(&["origin"], None).contains("読めていません"));
-        // **detached / unborn**。一覧は届いているが、どの行にも印が付いていない。
+        // **detached / unborn**。一覧は届いているが、HEAD の行が無い。
         assert!(refusal(
             &["origin"],
             Some(fake_branch_list(vec![fake_branch("main")], None))

@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     BranchList, CommitDetail, DiffTarget, FileDiff, FileEntry, GitReadError, LogPage, LogSession,
-    Oid, RefIndex, Remote, RepoFingerprint, RepoReader, StashEntry, WorktreeSnapshot,
+    Oid, OtherRefs, Remote, RepoFingerprint, RepoReader, StashEntry, WorktreeSnapshot,
 };
 
 /// リーダースレッドへの窓口。
@@ -48,7 +48,7 @@ enum Request {
         oid: Oid,
         reply: Reply<Vec<FileEntry>>,
     },
-    Refs(Reply<RefIndex>),
+    OtherRefs(Reply<OtherRefs>),
     Branches(Reply<BranchList>),
     Stashes(Reply<Vec<StashEntry>>),
     HeadMessage(Reply<Option<String>>),
@@ -148,15 +148,16 @@ impl ReaderHandle {
             .await
     }
 
-    /// ref の索引（Oid → ラベル）。
-    pub async fn refs(&self) -> Result<RefIndex, GitReadError> {
-        self.request(Request::Refs).await
+    /// ローカルブランチ以外のラベル（[`RepoReader::other_refs`]）。グラフの索引は
+    /// [`RefIndex::new`](super::RefIndex::new) でブランチ一覧と合わせて組む。
+    pub async fn other_refs(&self) -> Result<OtherRefs, GitReadError> {
+        self.request(Request::OtherRefs).await
     }
 
     /// ローカルブランチの一覧と HEAD の状態（02 の「ブランチ一覧」と「head」）。
     ///
     /// ブランチの本数だけ upstream の解決と `graph_ahead_behind` の walk を行う重い読み。
-    /// `Cmd::LoadRepoInfo` が `refs` などと同じ返信で運び、最後に読む（02 の「ブランチ
+    /// `Cmd::LoadRepoInfo` が `other_refs` などと同じ返信で運び、最後に読む（02 の「ブランチ
     /// 一覧」）。
     pub async fn branches(&self) -> Result<BranchList, GitReadError> {
         self.request(Request::Branches).await
@@ -256,8 +257,8 @@ fn reader_loop(reader: RepoReader, mut rx: mpsc::UnboundedReceiver<Request>) {
             Request::CommitFiles { oid, reply } => {
                 let _ = reply.send(reader.commit_files(oid));
             }
-            Request::Refs(reply) => {
-                let _ = reply.send(reader.refs());
+            Request::OtherRefs(reply) => {
+                let _ = reply.send(reader.other_refs());
             }
             Request::Branches(reply) => {
                 let _ = reply.send(reader.branches());

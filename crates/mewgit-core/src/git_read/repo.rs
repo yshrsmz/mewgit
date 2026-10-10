@@ -1,12 +1,11 @@
 //! リポジトリを開いて ref / リモート / HEAD を読む。設計は `docs/design/02-git-read.md`。
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
-    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, Oid, RefIndex, RefLabel,
+    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, Oid, OtherRefs, RefLabel,
     Remote, RowlessHead, StashEntry, Upstream, UpstreamConfig, STASH_REF,
 };
 
@@ -143,33 +142,41 @@ impl RepoReader {
             .map(str::to_string)
     }
 
-    /// Oid → ラベルの索引。グラフの各行の右に出す ref を引くのに使う（06）。
-    pub fn refs(&self) -> Result<RefIndex, GitReadError> {
-        // `refs/*` を 1 パスで走査して種別に振り分ける。`branches()` も内部では全 ref を
-        // 列挙してから接頭辞で捨てるので、種別ごとに呼ぶと同じ走査を繰り返すことになる。
-        let mut labels: HashMap<Oid, Vec<RefLabel>> = HashMap::new();
-        for reference in self.repo.references()? {
-            let reference = reference?;
-            let Some(label) = ref_label(&reference) else {
-                continue;
-            };
-            // annotated tag は tag オブジェクトを指すので、commit まで peel してから引く。
-            // peel できない ref（tree や blob を指すタグ）はグラフのどの行にも乗らないので
-            // 落とす。ラベルが 1 つ減るだけなので `refs()` 全体は失敗させない。
-            let Ok(commit) = reference.peel_to_commit() else {
-                continue;
-            };
-            labels.entry(commit.id()).or_default().push(label);
+    /// ローカルブランチ以外のラベル（リモート追跡ブランチとタグ）。グラフの各行の右に
+    /// 出す ref を引くのに使う（06）。
+    ///
+    /// **`refs/heads/*` は読まない。** Local ラベルは [`RepoReader::branches`] の行から
+    /// [`RefIndex::new`](super::RefIndex::new) で組む（02 の「refs とラベル」）。
+    /// こちらでも列挙すると、2 つの読み取りのあいだに外で作られたブランチが一覧と
+    /// グラフの片方にしか出ない。
+    pub fn other_refs(&self) -> Result<OtherRefs, GitReadError> {
+        let mut labels = Vec::new();
+        // **接頭辞ごとのグロブで読む。** `references()` で全部辿ってから捨てると、loose
+        // ref のリポジトリで `refs/heads/*` のファイルまで読む（`branches()` の列挙と同じ
+        // 理由。libgit2 は接頭辞のあるグロブでディレクトリの走査を絞る）。
+        for glob in ["refs/remotes/*", "refs/tags/*"] {
+            for reference in self.repo.references_glob(glob)? {
+                let reference = reference?;
+                let Some(label) = ref_label(&reference) else {
+                    continue;
+                };
+                // annotated tag は tag オブジェクトを指すので、commit まで peel してから
+                // 引く。peel できない ref（tree や blob を指すタグ）はグラフのどの行にも
+                // 乗らないので落とす。ラベルが 1 つ減るだけなので全体は失敗させない。
+                let Ok(commit) = reference.peel_to_commit() else {
+                    continue;
+                };
+                labels.push((commit.id(), label));
+            }
         }
 
-        Ok(RefIndex::new(labels))
+        Ok(OtherRefs { labels })
     }
 
     /// ローカルブランチの一覧（名前順）と HEAD の状態。
     ///
-    /// [`RepoReader::refs`] とは別の読み取り（02 の「ブランチ一覧」）。あちらが返す
-    /// [`RefIndex`] は Oid → ラベルの索引で、**upstream も ahead / behind も持たない**
-    /// ので、Branches ペインはそこからは組めない。
+    /// グラフの Local ラベルもこの行から組む（[`RefIndex::new`](super::RefIndex::new)）。
+    /// **`refs/heads/*` を列挙するのはここだけ**（02 の「refs とラベル」）。
     ///
     /// **HEAD はここで 1 回だけ解決し、`Branch` かどうかは一覧の行から決める**（02 の
     /// 「head」）。HEAD を別の読み取りで解決すると、あいだに外で HEAD が動いたとき
@@ -243,7 +250,7 @@ impl RepoReader {
             });
         }
 
-        // git2 の列挙順は安定していない（`RefIndex::new` と同じ理由）。
+        // git2 の列挙順は安定していない（`RefIndex` の並べ替えと同じ理由）。
         branches.sort_by(|a, b| a.name.cmp(&b.name));
         // **どの行が HEAD かは名前で決める**（`Branch` に旗を持たせない。02 の「head」）。
         // 列挙は `refs/heads/*` だけなので、行の名前は target から接頭辞を外したものと
@@ -386,9 +393,12 @@ fn rowless_head(head: &Reference<'_>, target: &str) -> Result<RowlessHead, GitRe
     }
 }
 
-/// グラフのラベルにする ref を選び、種別を決める。載せないものは `None`。
+/// グラフのラベルにするリモート追跡ブランチとタグを選び、種別を決める。載せないものは
+/// `None`。ローカルブランチはここを通らない（[`RepoReader::other_refs`]）。
 fn ref_label(reference: &Reference<'_>) -> Option<RefLabel> {
     // symbolic ref（`refs/remotes/origin/HEAD`）は解決すると指す先のラベルと重複する。
+    // **`refs/heads/` の下の symbolic ref はこの規則の外** —— ブランチ一覧の行として
+    // 出し、ラベルもそこから組む（`git log --decorate` と同じ。02 の「refs とラベル」）。
     if reference.kind() != Some(ReferenceType::Direct) {
         return None;
     }
@@ -397,11 +407,7 @@ fn ref_label(reference: &Reference<'_>) -> Option<RefLabel> {
     // （HEAD だけは `branches()` でエラーにする）なので `.ok()?` が移行先。
     let name = reference.shorthand().ok()?.to_string();
 
-    // 載せるのはローカル / リモート追跡ブランチとタグだけ。`refs/stash` や
-    // `refs/notes/*` はそれぞれ別のペインの担当で、グラフのラベルにはしない。
-    if reference.is_branch() {
-        Some(RefLabel::Local { name })
-    } else if reference.is_remote() {
+    if reference.is_remote() {
         Some(RefLabel::Remote { name })
     } else if reference.is_tag() {
         Some(RefLabel::Tag { name })

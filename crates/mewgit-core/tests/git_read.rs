@@ -3,8 +3,8 @@
 use std::fs;
 
 use mewgit_core::git_read::{
-    BranchList, GitReadError, Head, InProgressOp, LogPage, Oid, RefLabel, RepoReader, Step,
-    Upstream, UpstreamConfig,
+    BranchList, GitReadError, Head, InProgressOp, LogPage, Oid, RefIndex, RefLabel, RepoReader,
+    Step, Upstream, UpstreamConfig,
 };
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
@@ -168,6 +168,12 @@ fn remotes_is_empty_without_any_remote() {
     assert_eq!(reader.remotes().unwrap(), []);
 }
 
+/// `runtime::repo_info` と同じ組み方の索引。Local ラベルはブランチ一覧の行から来る。
+fn ref_index(reader: &RepoReader) -> RefIndex {
+    let others = reader.other_refs().unwrap();
+    RefIndex::new(&reader.branches().unwrap(), others)
+}
+
 #[test]
 fn refs_labels_local_branches() {
     let repo = TestRepo::init();
@@ -175,7 +181,7 @@ fn refs_labels_local_branches() {
     repo.git(&["branch", "topic"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = reader.refs().unwrap();
+    let index = ref_index(&reader);
 
     assert_eq!(
         index.labels(first),
@@ -191,6 +197,41 @@ fn refs_labels_local_branches() {
 }
 
 #[test]
+fn refs_take_local_labels_only_from_the_branch_list() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    let reader = RepoReader::open(repo.path()).unwrap();
+    // `runtime::repo_info` と同じ順（ラベル → 一覧）で読み、あいだに外でブランチを作る。
+    let others = reader.other_refs().unwrap();
+    repo.git(&["branch", "feat"]);
+    let list = reader.branches().unwrap();
+
+    let index = RefIndex::new(&list, others);
+
+    // 一覧に在るブランチはグラフにも在り、Local は一覧の行の数だけ並ぶ。`other_refs` が
+    // `refs/heads/*` も読んでいれば、`feat` を作る前の列挙から `main` がもう 1 つ混ざる。
+    let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
+    assert_eq!(names, ["feat", "main"]);
+    assert!(list.branches().iter().any(|b| b.name == "feat"));
+}
+
+#[test]
+fn refs_label_a_symbolic_branch_like_git_log_decorate() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    // `git branch` は `alias -> main` と 1 行で出し、`git log --decorate` は
+    // `(HEAD -> main, alias)` と両方を出す（git 2.56.0 で確認）。一覧にもラベルにも出す
+    // （02 の「refs とラベル」）。
+    repo.git(&["symbolic-ref", "refs/heads/alias", "refs/heads/main"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let index = ref_index(&reader);
+
+    let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
+    assert_eq!(names, ["alias", "main"]);
+}
+
+#[test]
 fn refs_peels_annotated_tags_to_the_commit() {
     let repo = TestRepo::init();
     let first = repo.commit("first");
@@ -199,7 +240,7 @@ fn refs_peels_annotated_tags_to_the_commit() {
     repo.git(&["tag", "-a", "heavy", "-m", "annotated"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = reader.refs().unwrap();
+    let index = ref_index(&reader);
 
     let tags: Vec<&str> = index
         .labels(first)
@@ -223,7 +264,7 @@ fn refs_keeps_remote_branches_without_duplicating_the_symbolic_head() {
     ]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = reader.refs().unwrap();
+    let index = ref_index(&reader);
 
     // origin/HEAD を解決すると origin/main が 2 つになる。
     let remotes: Vec<&str> = index
@@ -250,7 +291,7 @@ fn refs_are_sorted_by_kind_then_name() {
     repo.git(&["update-ref", "refs/remotes/origin/main", &first.to_string()]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = reader.refs().unwrap();
+    let index = ref_index(&reader);
 
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
     assert_eq!(names, ["alpha", "main", "origin/main", "v1", "v2"]);
@@ -264,7 +305,7 @@ fn refs_ignores_the_stash() {
     repo.git(&["stash", "push", "-m", "wip"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = reader.refs().unwrap();
+    let index = ref_index(&reader);
 
     // stash コミットは first を親に持つ別コミットなので、first の行にも自分の行にも
     // ラベルは付かない（stash は stash ペインの担当）。
@@ -282,7 +323,7 @@ fn refs_skips_a_tag_that_cannot_be_peeled_to_a_commit() {
     repo.git(&["tag", "treetag", "HEAD^{tree}"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = reader.refs().unwrap();
+    let index = ref_index(&reader);
 
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
     assert_eq!(names, ["main"]);
@@ -294,7 +335,7 @@ fn refs_is_empty_before_the_first_commit() {
     let repo = TestRepo::init();
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = reader.refs().unwrap();
+    let index = ref_index(&reader);
 
     assert_eq!(index.labels(Oid::ZERO_SHA1), []);
 }

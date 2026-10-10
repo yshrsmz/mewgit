@@ -3227,7 +3227,7 @@ pub enum Cmd {
     LoadHeadMessage,                   // amend の初期値。HEAD の解決ごとリーダーで行う
     LoadCommitMessage(Oid),            // RebaseEditor の reword の初期値（上の「interactive rebase の開始」）
     LoadStatus, LoadDiff(DiffTarget),
-    LoadRepoInfo,                      // remotes / head / refs / ブランチ一覧。起動時と ref 変更後（02）
+    LoadRepoInfo,                      // remotes / refs / ブランチ一覧（HEAD を含む）。起動時と ref 変更後（02）
     Probe,                             // 外の変更を見張る指紋（下の「外部の変更の検知」）
     Exec(GitOp),                       // git CLI 実行（03 参照）
     CancelExec,                        // 走っている Exec を中断する（上の「キャンセル」）

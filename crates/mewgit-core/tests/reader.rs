@@ -7,7 +7,9 @@
 //! `GitReadError::ReaderGone` はテストしていない。スレッドを外から落とす手段が無く
 //! （ハンドルが送信側を持つ限りループは終わらない）、公開 API から到達できないため。
 
-use mewgit_core::git_read::{DiffTarget, FileStatus, GitReadError, Head, LogPage, ReaderHandle};
+use mewgit_core::git_read::{
+    DiffTarget, FileStatus, GitReadError, Head, LogPage, ReaderHandle, RefIndex,
+};
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
 /// テストリポジトリに対してリーダースレッドを起こす。
@@ -142,8 +144,9 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
     let reader = spawn(&repo);
 
     let list = reader.branches().await.unwrap();
-    let refs = reader.refs().await.unwrap();
+    let others = reader.other_refs().await.unwrap();
     let remotes = reader.remotes().await.unwrap();
+    let refs = RefIndex::new(&list, others);
 
     assert!(matches!(list.head(), Head::Branch(b) if b.name == "main"));
     let labels: Vec<&str> = refs.labels(oid).iter().map(|l| l.name()).collect();

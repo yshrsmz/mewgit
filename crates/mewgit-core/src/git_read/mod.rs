@@ -270,9 +270,27 @@ pub struct RefIndex {
 }
 
 impl RefIndex {
+    /// ブランチ一覧と、それ以外の ref から組む。
+    ///
+    /// **Local ラベルは一覧の行から作る**（02 の「refs とラベル」）。`refs/heads/*` を
+    /// 別に列挙すると、あいだに外で `git switch -c feat` が走ったとき Branches ペインの
+    /// `* feat` に対してグラフに `[feat]` が無い形が届く。[`OtherRefs`] は Local を
+    /// 持たないので、Local の欠けた索引はこの関数を通らずには組めない。
+    pub fn new(branches: &BranchList, others: OtherRefs) -> Self {
+        let locals = branches.branches().iter().map(|branch| {
+            (
+                branch.oid,
+                RefLabel::Local {
+                    name: branch.name.clone(),
+                },
+            )
+        });
+        locals.chain(others.labels).collect()
+    }
+
     /// 並び順の確定はここでやる。索引を組む経路が増えても並べ替えを忘れられないように
     /// するため（git2 の ref の列挙順は安定していない）。
-    pub(crate) fn new(mut labels: HashMap<Oid, Vec<RefLabel>>) -> Self {
+    fn sorted(mut labels: HashMap<Oid, Vec<RefLabel>>) -> Self {
         for labels in labels.values_mut() {
             labels.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
         }
@@ -301,24 +319,36 @@ impl RefIndex {
 
 /// `(Oid, RefLabel)` の並びから索引を組む。同じ Oid のラベルはまとめられる。
 ///
-/// `refs()` を通さずに索引を作れるようにしてあるのは、`ui` のテストがラベルの
-/// 描画を実リポジトリ無しで表現できるようにするため。並べ替えは [`RefIndex::new`]
-/// を通るので、どちらの経路でも順序は同じになる。
+/// リポジトリを読まずに索引を作れるようにしてあるのは、`ui` のテストがラベルの
+/// 描画を実リポジトリ無しで表現できるようにするため。[`RefIndex::new`] もここを通る
+/// ので、どちらの経路でも並べ替えは同じになる。
 impl FromIterator<(Oid, RefLabel)> for RefIndex {
     fn from_iter<I: IntoIterator<Item = (Oid, RefLabel)>>(iter: I) -> Self {
         let mut labels: HashMap<Oid, Vec<RefLabel>> = HashMap::new();
         for (oid, label) in iter {
             labels.entry(oid).or_default().push(label);
         }
-        RefIndex::new(labels)
+        RefIndex::sorted(labels)
     }
+}
+
+/// [`RepoReader::other_refs`] の答え。ローカルブランチ以外のラベル（リモート追跡
+/// ブランチとタグ）。
+///
+/// **[`RefIndex`] とは別の型にしてある。** 同じ型で返すと、Local の欠けた索引を
+/// そのまま `graph.refs` へ入れられる。読み手は [`RefIndex::new`] でブランチ一覧と
+/// 合わせるしかない。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OtherRefs {
+    labels: Vec<(Oid, RefLabel)>,
 }
 
 /// ref 1 件の表示用ラベル。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefLabel {
-    /// ローカルブランチ。`main`。**HEAD かどうかは持たない** —— どの行が HEAD かは
-    /// [`BranchList`] だけが答える（02 の「refs とラベル」）。
+    /// ローカルブランチ。`main`。**[`BranchList`] の行から作る**（[`RefIndex::new`]）。
+    /// **HEAD かどうかは持たない** —— どの行が HEAD かは [`BranchList`] だけが答える
+    /// （02 の「refs とラベル」）。
     Local { name: String },
     /// リモート追跡ブランチ。`origin/main`。remote 名とブランチ名を分けないのは、
     /// `ui` が `{origin/main}` と一続きで描くだけのため。

@@ -19,7 +19,7 @@ use mewgit_core::auth::AccountState;
 use mewgit_core::auth::Backend as _;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
-use mewgit_core::git_read::{GitReadError, ReaderHandle, Timestamp};
+use mewgit_core::git_read::{GitReadError, ReaderHandle, RefIndex, Timestamp};
 use mewgit_core::github::{AccountBackend, GithubClient, GithubError};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
@@ -567,13 +567,17 @@ impl Runtime {
 /// リーダースレッドは要求を届いた順に捌くので、前の 2 つを待っているあいだに積まれた
 /// log と status の要求は walk を待たずに通る（どちらが先に届くかは決まらないので、
 /// 確実ではなく寄せるだけ）。
+///
+/// **グラフの索引はブランチ一覧と合わせてここで組む**（`RefIndex::new`）。Local ラベルを
+/// 一覧の行から作るので、一覧とグラフのラベルは同じ 1 回の列挙を見る（02 の「refs と
+/// ラベル」）。
 async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> {
     let remotes = reader.remotes().await?;
-    let refs = reader.refs().await?;
+    let others = reader.other_refs().await?;
     let branches = reader.branches().await?;
     Ok(RepoSnapshot {
         remotes,
-        refs,
+        refs: RefIndex::new(&branches, others),
         branches,
     })
 }

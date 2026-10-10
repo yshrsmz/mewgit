@@ -25,7 +25,7 @@ impl RepoReader {
     pub fn open(path: &Path) -> Result<Self, GitReadError>;
     pub fn workdir(&self) -> &Path;                                 // ワークツリーのルート
     pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;     // name, url（生の値）, head_branch
-    pub fn other_refs(&self) -> Result<OtherRefs, GitReadError>;    // リモート追跡ブランチとタグ。Local は一覧から（下の「refs とラベル」）
+    pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>。リモート追跡ブランチとタグだけ
     pub fn branches(&self) -> Result<BranchList, GitReadError>;     // ローカルブランチ + upstream の ahead/behind + HEAD の状態
     pub fn log(&self) -> Result<LogSession<'_>, GitReadError>;   // ページングは LogSession が持つ
     pub fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;  // 選択時に遅延取得
@@ -74,19 +74,16 @@ fork の PR を取り出すときのブランチ名（05 の「ブランチ名�
 ### refs とラベル
 
 ```rust
-pub struct RefIndex { /* Oid → Vec<RefLabel> */ }
-pub struct OtherRefs { /* Local を持たない (Oid, RefLabel) の並び。組めるのは git_read だけ */ }
+pub struct RefIndex { /* Oid → Vec<RefLabel>。ローカルブランチは持たない */ }
 
 impl RefIndex {
-    pub fn new(branches: &BranchList, others: OtherRefs) -> Self;  // Local は一覧の行から
     pub fn labels(&self, oid: Oid) -> &[RefLabel];
     pub fn remote_oid(&self, name: &str) -> Option<Oid>;   // "origin/main" → Oid
 }
 
-impl FromIterator<(Oid, RefLabel)> for RefIndex { /* 並べ替えは new を通る */ }
+impl FromIterator<(Oid, RefLabel)> for RefIndex { /* 並べ替えはここ。refs() もここを通る */ }
 
 pub enum RefLabel {
-    Local { name: String },                  // "main"。BranchList の行から作る。HEAD かどうかは持たない
     Remote { name: String },                 // "origin/main"
     Tag { name: String },                    // "v1.0"
 }
@@ -103,47 +100,44 @@ pub enum RefLabel {
   索引は Oid で引く形なので全件を舐めるが、引くのは `N` と確定のときだけ
 - annotated tag は `target()` が tag オブジェクトの Oid なので、commit まで peel してから引く。
   peel しないとラベルがどのグラフ行にも乗らない
-- 載せるのはローカルブランチ・リモート追跡ブランチ・タグだけ（ホワイトリスト）。
+- **ローカルブランチのラベルは索引に持たない。** グラフペインが 1 フレームに 1 回
+  `BranchState::branches()` から oid → 名前の表を作り、行ごとに `[main]` を先に並べる
+  （06 の「ラベル」）。元は `refs()` が `branches()` とは別に `refs/heads/*` を列挙して
+  `RefLabel::Local` を持っていた。`runtime::repo_info` が 2 つを順に呼ぶあいだに外で
+  `git switch -c feat` が走ると、次の読み直しまで Branches ペインに `* feat` があるのに
+  グラフに `[feat]` が無かった（2026-10-10 に塞いだ）。**一覧から写して `RefIndex` に
+  合成する形も一度書いた**が、同じ返信で入れ替わる写しを状態に 2 つ持つことになり、
+  テストの fixture が「一覧にあるのにラベルが無い」組を作れたままだった（`/simplify` の
+  altitude が拾った）。**読み元を一覧の 1 つにした** —— `refs/heads/*` を列挙するのは
+  `branches()` だけで、名前の突き合わせの規則も 1 本になる
+- 索引に載せるのはリモート追跡ブランチとタグだけ（ホワイトリスト）。
   `refs/stash` や `refs/notes/*` は他のペインの担当なのでグラフのラベルにしない。
-  `other_refs()` の側では symbolic ref（`refs/remotes/*/HEAD`）を落とす。解決すると
-  指す先の ref とラベルが 2 重になる
+  symbolic ref（`refs/remotes/*/HEAD`）は落とす。解決すると指す先の ref とラベルが
+  2 重になる
 - **`refs/heads/` の下の symbolic ref（`git symbolic-ref refs/heads/alias refs/heads/main`）は
   一覧にもラベルにも出す。** git 自身が両方に出す —— `git branch -v` は `alias` を 1 行と
   して並べ、`git log --decorate` は `(HEAD -> main, alias)` と出す。`git switch alias` は HEAD を
   `refs/heads/main` にし（main に居る扱い）、`git branch -d alias` は symref だけを消す。
   `branches()` は `references_glob("refs/heads/*")` で symref も行にする（git2 0.21）ので、
-  一覧から組むラベルにも `[alias] [main]` が並ぶ。ラベルだけ落とすには `Branch` に
+  一覧から引くラベルにも `[alias] [main]` が並ぶ。ラベルだけ落とすには `Branch` に
   symbolic かどうかを持たせることになり、一覧とラベルの規則が再び 2 つに割れる
   （実測 2026-10-10、git 2.56.0。決めたのは同じ日）
-- `other_refs()` の列挙は `references_glob` を `refs/remotes/*` と `refs/tags/*` の 2 回。
+- `refs()` の列挙は `references_glob` を `refs/remotes/*` と `refs/tags/*` の 2 回。
   `references()` で全部辿ってから捨てると、loose ref のリポジトリで `refs/heads/*` の
-  ファイルまで読む（下の「ブランチ一覧」の列挙と同じ理由）。種別は `is_remote()` /
-  `is_tag()`（ref 名の接頭辞判定）で決める
-- **ラベルは HEAD かどうかを持たない。** グラフの `[main]` の強調は、`ui` が
-  `BranchState::head_branch()` の名前と `Local` の名前を比べて決める。元は `refs()` が
+  ファイルまで読む（下の「ブランチ一覧」の列挙と同じ理由）。種別はグロブで決まる
+- **HEAD の強調も一覧から引く。** グラフの `[main]` の強調は、`ui` が
+  `BranchState::head_branch()` の名前とラベルの名前を比べて決める。元は `refs()` が
   `HEAD` をもう一度解決して `is_head` の旗を付けていたが、`branches()` とは別の読み取り
   だったので、あいだに外で HEAD が動くとラベルの強調と Branches ペインの `*` が次の
   読み直しまで食い違い、判定の規則も割れていた（こちらは ref の完全名、`branches()` は
   `refs/heads/` を外した名前で比べる）。一覧の HEAD の行から引けば、HEAD の解決と判定の規則は
   1 本になる（下の「head」の「どの行が HEAD かは `BranchList` だけが持つ」と同じ形）。
   比べる名前はどちらも `refs/heads/` を外した短縮名
-- **Local ラベルの集合も `BranchList` の行（`name` と `oid`）から組む**（`RefIndex::new`）。
-  元は `refs()` が `branches()` とは別に `refs/heads/*` を列挙していて、`runtime::repo_info` が
-  順に呼ぶあいだに外で `git switch -c feat` が走ると、次の読み直しまで Branches ペインに
-  `* feat` があるのにグラフに `[feat]` が無かった（強調する名前は一覧から来るので食い違わ
-  ないが、強調する相手のラベルが無い）。`refs/heads/*` を列挙するのは `branches()` だけに
-  なり、名前の突き合わせの規則（`shorthand()` と `refs/heads/` を外した名前）も 1 本になる
-- **読み取りは Local を持たない別の型（`OtherRefs`）で返す。** `RefIndex` で返すと、Local の
-  欠けた索引をそのまま `graph.refs` へ入れられる。`RefIndex` を組めるのは `new`（一覧と
-  合わせる）と、テスト用の `FromIterator` だけ
-- **合わせるのは `runtime::repo_info`**（`branches()` が返ったあと）。`branches()` を最後に
-  読む理由（下の「ブランチ一覧」）は変わらないので、一覧を `other_refs()` に渡して中で
-  組む形は採れない。`repo_info_loaded` で合わせると `RepoSnapshot.refs` が「Local 抜き」と
-  いう別の意味の値になるので、届いた時点で完全な索引にしておく
-- ラベルの並べ替え（種別 Local → Remote → Tag、同種内は名前順）は `RefIndex` を作る
-  ところに置く。git2 の列挙順は安定しておらず、索引を組む経路が増えたときに
+- ラベルの並べ替え（種別 Remote → Tag、同種内は名前順）は `RefIndex` を作る
+  ところ（`FromIterator`）に置く。ローカルブランチは一覧が名前順なので、その順のまま
+  先頭に並ぶ。git2 の列挙順は安定しておらず、索引を組む経路が増えたときに
   並べ替えを忘れると描画順とテストの期待値だけが静かにずれる
-- `FromIterator` を実装してリポジトリを読まずにも索引を組めるようにする。`ui` のテストが
+- `FromIterator` を実装して `refs()` を通さずにも索引を組めるようにする。`ui` のテストが
   ラベルの描画を実リポジトリ無しで表現できるようにするため。どちらの経路でも
   並べ替えは同じところを通る
 
@@ -171,8 +165,8 @@ pub struct UpstreamConfig {
 }
 ```
 
-Branches ペイン（07）が使い、グラフの Local ラベルもこの行から組む（上の「refs と
-ラベル」）。**`refs/heads/*` を列挙するのはここだけ。**
+Branches ペイン（07）が使い、グラフのローカルブランチのラベルもこの行から引く（上の
+「refs とラベル」）。**`refs/heads/*` を列挙するのはここだけ。**
 
 - **列挙は `references_glob("refs/heads/*")`。** `references()` で全部辿ってから捨てると、
   loose ref のリポジトリで `refs/remotes/*` と `refs/tags/*` のファイルまで読む
@@ -183,7 +177,7 @@ Branches ペイン（07）が使い、グラフの Local ラベルもこの行�
   1 回だけ解決する（`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直す）。unborn と
   detached はどちらも「どの行も HEAD ではない」に落ちる。**HEAD の状態もこの 1 回の解決から
   出す**（`BranchList::head`。下の「head」）
-- **非 UTF-8 のブランチ名は落とす**（`other_refs()` と同じ。識別子は `git_exec` の argv に
+- **非 UTF-8 のブランチ名は落とす**（`refs()` と同じ。識別子は `git_exec` の argv に
   載せられないので、出しても切替も削除もできない行になる）
 - **並べ替えは名前順**。git2 の列挙順は安定していない（`RefIndex` と同じ理由）
 - **upstream が引けないブランチは `upstream: None` にして一覧に残す。** 理由は 4 つある。
@@ -194,7 +188,7 @@ Branches ペイン（07）が使い、グラフの Local ラベルもこの行�
   「まだ届いていない」を同じ `None` にして、ファイル全体を stage する事故になった）。
   数えた結果、**この一覧の読み手（Branches ペイン）にとっては 4 つとも同じ**
   ——「ahead / behind を出す相手がいない」。`NotFound` 以外の `Err` はそのまま返す
-  （壊れたリポジトリなので `other_refs()` と同じ扱い）
+  （壊れたリポジトリなので `refs()` と同じ扱い）
 - **`Branch.upstream` から push の `-u` を決めない。** 「upstream が無い」と
   「upstream はあるがこの一覧では出せない」が同じ `None` に落ちているので、`-u` を
   付けるかは `branch.<name>.merge` を読んで決める。ここは表示のための値
@@ -246,7 +240,7 @@ Branches ペイン（07）が使い、グラフの Local ラベルもこの行�
   取るようになった**ので、畳むときはこの 2 本もその snapshot から引く形にする（#148 の
   `/simplify` が挙げた。効果は未計測）
 
-**`other_refs()` / `remotes` と 1 通にまとめる**（`Cmd::LoadRepoInfo` の
+**`refs()` / `remotes` と 1 通にまとめる**（`Cmd::LoadRepoInfo` の
 `RepoSnapshot.branches`）。**元は分けていた** —— ブランチの本数だけ upstream の解決と
 `graph_ahead_behind` の walk が要り、グラフのラベルと HEAD だけが欲しい経路にそのコストを
 払わせないため（`commit_files` を `commit_detail` と分けたのと同じ理由）。**ところが
@@ -470,7 +464,7 @@ pub struct LogPage {
   載せる行が無くなるため
 - push は `push_glob` を使う。単体の `push_ref` と違い、commit まで peel できない ref
   （tree を指すタグなど）を黙って飛ばすので、その 1 本のために列挙全体が失敗しない。
-  `other_refs()` が peel できない ref を落とすのと同じ扱いになる
+  `refs()` が peel できない ref を落とすのと同じ扱いになる
 - HEAD の push は `head_detached()` が真のときだけにする。ブランチに乗っていれば
   `refs/heads/*` で既に入っているので、個別に要るのは detached だけ。
   `Revwalk::push_head` を無条件に呼ぶと、コミットが 1 つも無いリポジトリで返る
@@ -960,7 +954,7 @@ impl ReaderHandle {
     pub async fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;
     pub async fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;
     pub async fn head_message(&self) -> Result<Option<String>, GitReadError>;
-    pub async fn other_refs(&self) -> Result<OtherRefs, GitReadError>;
+    pub async fn refs(&self) -> Result<RefIndex, GitReadError>;
     pub async fn branches(&self) -> Result<BranchList, GitReadError>;
     pub async fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;
     pub async fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;

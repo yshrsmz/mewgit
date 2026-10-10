@@ -3,8 +3,8 @@
 use std::fs;
 
 use mewgit_core::git_read::{
-    BranchList, GitReadError, Head, InProgressOp, LogPage, Oid, RefIndex, RefLabel, RepoReader,
-    Step, Upstream, UpstreamConfig,
+    BranchList, GitReadError, Head, InProgressOp, LogPage, Oid, RefLabel, RepoReader, Step,
+    Upstream, UpstreamConfig,
 };
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
@@ -168,67 +168,20 @@ fn remotes_is_empty_without_any_remote() {
     assert_eq!(reader.remotes().unwrap(), []);
 }
 
-/// `runtime::repo_info` と同じ組み方の索引。Local ラベルはブランチ一覧の行から来る。
-fn ref_index(reader: &RepoReader) -> RefIndex {
-    let others = reader.other_refs().unwrap();
-    RefIndex::new(&reader.branches().unwrap(), others)
-}
-
 #[test]
-fn refs_labels_local_branches() {
+fn refs_leave_local_branches_to_the_branch_list() {
     let repo = TestRepo::init();
     let first = repo.commit("first");
     repo.git(&["branch", "topic"]);
+    repo.git(&["tag", "v1"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = ref_index(&reader);
+    let index = reader.refs().unwrap();
 
-    assert_eq!(
-        index.labels(first),
-        [
-            RefLabel::Local {
-                name: "main".to_string(),
-            },
-            RefLabel::Local {
-                name: "topic".to_string(),
-            },
-        ]
-    );
-}
-
-#[test]
-fn refs_take_local_labels_only_from_the_branch_list() {
-    let repo = TestRepo::init();
-    let first = repo.commit("first");
-    let reader = RepoReader::open(repo.path()).unwrap();
-    // `runtime::repo_info` と同じ順（ラベル → 一覧）で読み、あいだに外でブランチを作る。
-    let others = reader.other_refs().unwrap();
-    repo.git(&["branch", "feat"]);
-    let list = reader.branches().unwrap();
-
-    let index = RefIndex::new(&list, others);
-
-    // 一覧に在るブランチはグラフにも在り、Local は一覧の行の数だけ並ぶ。`other_refs` が
-    // `refs/heads/*` も読んでいれば、`feat` を作る前の列挙から `main` がもう 1 つ混ざる。
+    // ローカルブランチのラベルは `ui` が一覧の行から引く（02 の「refs とラベル」）。
+    // 同じコミットのタグは載るので、索引が空なだけでは通らない。
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
-    assert_eq!(names, ["feat", "main"]);
-    assert!(list.branches().iter().any(|b| b.name == "feat"));
-}
-
-#[test]
-fn refs_label_a_symbolic_branch_like_git_log_decorate() {
-    let repo = TestRepo::init();
-    let first = repo.commit("first");
-    // `git branch` は `alias -> main` と 1 行で出し、`git log --decorate` は
-    // `(HEAD -> main, alias)` と両方を出す（git 2.56.0 で確認）。一覧にもラベルにも出す
-    // （02 の「refs とラベル」）。
-    repo.git(&["symbolic-ref", "refs/heads/alias", "refs/heads/main"]);
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let index = ref_index(&reader);
-
-    let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
-    assert_eq!(names, ["alias", "main"]);
+    assert_eq!(names, ["v1"]);
 }
 
 #[test]
@@ -240,7 +193,7 @@ fn refs_peels_annotated_tags_to_the_commit() {
     repo.git(&["tag", "-a", "heavy", "-m", "annotated"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = ref_index(&reader);
+    let index = reader.refs().unwrap();
 
     let tags: Vec<&str> = index
         .labels(first)
@@ -264,7 +217,7 @@ fn refs_keeps_remote_branches_without_duplicating_the_symbolic_head() {
     ]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = ref_index(&reader);
+    let index = reader.refs().unwrap();
 
     // origin/HEAD を解決すると origin/main が 2 つになる。
     let remotes: Vec<&str> = index
@@ -285,34 +238,34 @@ fn refs_keeps_remote_branches_without_duplicating_the_symbolic_head() {
 fn refs_are_sorted_by_kind_then_name() {
     let repo = TestRepo::init();
     let first = repo.commit("first");
-    repo.git(&["branch", "alpha"]);
     repo.git(&["tag", "v2"]);
     repo.git(&["tag", "v1"]);
     repo.git(&["update-ref", "refs/remotes/origin/main", &first.to_string()]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = ref_index(&reader);
+    let index = reader.refs().unwrap();
 
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
-    assert_eq!(names, ["alpha", "main", "origin/main", "v1", "v2"]);
+    assert_eq!(names, ["origin/main", "v1", "v2"]);
 }
 
 #[test]
 fn refs_ignores_the_stash() {
     let repo = TestRepo::init();
     let first = repo.commit("first");
+    repo.git(&["tag", "v1"]);
     repo.write_worktree_file("file.txt", b"dirty\n");
     repo.git(&["stash", "push", "-m", "wip"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = ref_index(&reader);
+    let index = reader.refs().unwrap();
 
     // stash コミットは first を親に持つ別コミットなので、first の行にも自分の行にも
     // ラベルは付かない（stash は stash ペインの担当）。
     let stash = repo.rev_parse("refs/stash");
     assert_eq!(index.labels(stash), []);
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
-    assert_eq!(names, ["main"]);
+    assert_eq!(names, ["v1"]);
 }
 
 #[test]
@@ -321,12 +274,13 @@ fn refs_skips_a_tag_that_cannot_be_peeled_to_a_commit() {
     let first = repo.commit("first");
     // tree を直接指すタグ。commit まで辿れないのでグラフのどの行にも乗らない。
     repo.git(&["tag", "treetag", "HEAD^{tree}"]);
+    repo.git(&["tag", "v1"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = ref_index(&reader);
+    let index = reader.refs().unwrap();
 
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
-    assert_eq!(names, ["main"]);
+    assert_eq!(names, ["v1"]);
     assert_eq!(index.labels(repo.rev_parse("HEAD^{tree}")), []);
 }
 
@@ -335,7 +289,7 @@ fn refs_is_empty_before_the_first_commit() {
     let repo = TestRepo::init();
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let index = ref_index(&reader);
+    let index = reader.refs().unwrap();
 
     assert_eq!(index.labels(Oid::ZERO_SHA1), []);
 }
@@ -897,6 +851,28 @@ fn branches_lists_local_branches_by_name_with_the_head_marked() {
     assert!(branches.iter().all(|b| b.oid == first));
     // upstream が無ければ ahead / behind は出さない。
     assert!(branches.iter().all(|b| b.upstream.is_none()));
+}
+
+#[test]
+fn branches_list_a_symbolic_branch_like_git_branch() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    // `git branch` は `alias -> main` を 1 行として並べ、`git log --decorate` は
+    // `(HEAD -> main, alias)` と両方を出す（git 2.56.0 で確認）。グラフのラベルも
+    // この一覧から引くので、どちらにも出る（02 の「refs とラベル」）。
+    repo.git(&["symbolic-ref", "refs/heads/alias", "refs/heads/main"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let list = reader.branches().unwrap();
+
+    let rows: Vec<(&str, Oid)> = list
+        .branches()
+        .iter()
+        .map(|b| (b.name.as_str(), b.oid))
+        .collect();
+    assert_eq!(rows, [("alias", first), ("main", first)]);
+    // HEAD は symref ではなく指す先の行。
+    assert_eq!(head_row_name(&list), Some("main"));
 }
 
 #[test]

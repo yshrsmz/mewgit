@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
-    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, Oid, OtherRefs, RefLabel,
+    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, Oid, RefIndex, RefLabel,
     Remote, RowlessHead, StashEntry, Upstream, UpstreamConfig, STASH_REF,
 };
 
@@ -142,22 +142,24 @@ impl RepoReader {
             .map(str::to_string)
     }
 
-    /// ローカルブランチ以外のラベル（リモート追跡ブランチとタグ）。グラフの各行の右に
-    /// 出す ref を引くのに使う（06）。
+    /// Oid → ラベルの索引（リモート追跡ブランチとタグ）。グラフの各行の右に出す ref を
+    /// 引くのに使う（06）。
     ///
-    /// **`refs/heads/*` は読まない。** Local ラベルは [`RepoReader::branches`] の行から
-    /// [`RefIndex::new`](super::RefIndex::new) で組む（02 の「refs とラベル」）。
-    /// こちらでも列挙すると、2 つの読み取りのあいだに外で作られたブランチが一覧と
-    /// グラフの片方にしか出ない。
-    pub fn other_refs(&self) -> Result<OtherRefs, GitReadError> {
+    /// **`refs/heads/*` は読まない。** ローカルブランチのラベルは `ui` が
+    /// [`RepoReader::branches`] の行から引く（02 の「refs とラベル」）。
+    pub fn refs(&self) -> Result<RefIndex, GitReadError> {
         let mut labels = Vec::new();
-        // **接頭辞ごとのグロブで読む。** `references()` で全部辿ってから捨てると、loose
-        // ref のリポジトリで `refs/heads/*` のファイルまで読む（`branches()` の列挙と同じ
-        // 理由。libgit2 は接頭辞のあるグロブでディレクトリの走査を絞る）。
-        for glob in ["refs/remotes/*", "refs/tags/*"] {
+        // **接頭辞ごとのグロブで読む**（`branches()` の列挙と同じ理由）。種別もグロブで
+        // 決まるので、ラベルの作り方を対にして回す。
+        type Label = fn(String) -> RefLabel;
+        let kinds: [(&str, Label); 2] = [
+            ("refs/remotes/*", |name| RefLabel::Remote { name }),
+            ("refs/tags/*", |name| RefLabel::Tag { name }),
+        ];
+        for (glob, label) in kinds {
             for reference in self.repo.references_glob(glob)? {
                 let reference = reference?;
-                let Some(label) = ref_label(&reference) else {
+                let Some(name) = label_name(&reference) else {
                     continue;
                 };
                 // annotated tag は tag オブジェクトを指すので、commit まで peel してから
@@ -166,17 +168,16 @@ impl RepoReader {
                 let Ok(commit) = reference.peel_to_commit() else {
                     continue;
                 };
-                labels.push((commit.id(), label));
+                labels.push((commit.id(), label(name)));
             }
         }
 
-        Ok(OtherRefs { labels })
+        Ok(labels.into_iter().collect())
     }
 
     /// ローカルブランチの一覧（名前順）と HEAD の状態。
     ///
-    /// グラフの Local ラベルもこの行から組む（[`RefIndex::new`](super::RefIndex::new)）。
-    /// **`refs/heads/*` を列挙するのはここだけ**（02 の「refs とラベル」）。
+    /// グラフのローカルブランチのラベルも `ui` がこの行から引く（02 の「refs とラベル」）。
     ///
     /// **HEAD はここで 1 回だけ解決し、`Branch` かどうかは一覧の行から決める**（02 の
     /// 「head」）。HEAD を別の読み取りで解決すると、あいだに外で HEAD が動いたとき
@@ -250,7 +251,7 @@ impl RepoReader {
             });
         }
 
-        // git2 の列挙順は安定していない（`RefIndex` の並べ替えと同じ理由）。
+        // git2 の列挙順は安定していない（`RefIndex::from_iter` と同じ理由）。
         branches.sort_by(|a, b| a.name.cmp(&b.name));
         // **どの行が HEAD かは名前で決める**（`Branch` に旗を持たせない。02 の「head」）。
         // 列挙は `refs/heads/*` だけなので、行の名前は target から接頭辞を外したものと
@@ -393,25 +394,14 @@ fn rowless_head(head: &Reference<'_>, target: &str) -> Result<RowlessHead, GitRe
     }
 }
 
-/// グラフのラベルにするリモート追跡ブランチとタグを選び、種別を決める。載せないものは
-/// `None`。ローカルブランチはここを通らない（[`RepoReader::other_refs`]）。
-fn ref_label(reference: &Reference<'_>) -> Option<RefLabel> {
+/// グラフのラベルに載せる ref の名前。載せないものは `None`。
+fn label_name(reference: &Reference<'_>) -> Option<String> {
     // symbolic ref（`refs/remotes/origin/HEAD`）は解決すると指す先のラベルと重複する。
-    // **`refs/heads/` の下の symbolic ref はこの規則の外** —— ブランチ一覧の行として
-    // 出し、ラベルもそこから組む（`git log --decorate` と同じ。02 の「refs とラベル」）。
     if reference.kind() != Some(ReferenceType::Direct) {
         return None;
     }
     // 非 UTF-8 の ref 名は識別子として扱えないので落とす（02 の「非 UTF-8 の扱い」）。
     // git2 0.21 の `shorthand()` は `Err` が非 UTF-8 そのもの。落とすのがここの方針
     // （HEAD だけは `branches()` でエラーにする）なので `.ok()?` が移行先。
-    let name = reference.shorthand().ok()?.to_string();
-
-    if reference.is_remote() {
-        Some(RefLabel::Remote { name })
-    } else if reference.is_tag() {
-        Some(RefLabel::Tag { name })
-    } else {
-        None
-    }
+    Some(reference.shorthand().ok()?.to_string())
 }

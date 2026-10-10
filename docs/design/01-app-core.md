@@ -440,7 +440,7 @@ impl TextBuffer {
 pub struct GraphState {
     pub lines: Vec<GraphLine>,
     pub lanes: LaneState,       // 末尾行の直後の状態。追加ページはここから再開（06）
-    pub refs: RefIndex,         // 行の右に並べるラベル（02）
+    pub refs: RefIndex,         // 行の右に並べるリモートとタグのラベル。ローカルはブランチ一覧から（02）
     pub cursor: usize,          // 表示行の添字。0 は WIP 行、1.. が `lines`
     pub scroll: usize,          // 画面最上部に出す行
     pub detail: Option<CommitDetail>,  // 遅延取得した選択コミットの詳細（02）

@@ -647,12 +647,14 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       いる（`git symbolic-ref refs/heads/alias refs/heads/main` で `git branch` は `alias -> main`
       を出す。git 側だけ確かめ、git2 側は未実測）。そのまま一覧から組むと同じコミットに
       `[alias]` と `[main]` が並ぶので、「symbolic ref は載せない」を一覧の側でも守るかを決める
-      （`/code-review` が拾った）。**決めた形** —— 読み取りは `other_refs()` が Local を持たない
-      `OtherRefs` を返し、`RefIndex::new(&BranchList, OtherRefs)` を `runtime::repo_info` で呼ぶ
-      （`branches()` を最後に読む順序を保つため）。symref は一覧にもラベルにも出す（git2 も
-      `alias` を行にすると実測し、`git log --decorate` と同じ見え方。2026-10-10 にユーザーと
-      決めた）。テストは 2 つの読み取りのあいだに外でブランチを作る形で、`other_refs` が
-      `refs/heads/*` も読む変異が落ちることを確かめた
+      （`/code-review` が拾った）。**決めた形** —— `RefIndex` からローカルブランチを外し
+      （`RefLabel::Local` も消した）、グラフペインが 1 フレームに 1 回ブランチ一覧から
+      oid → 名前の表を作って `[main]` を先に並べる。`refs()` は `refs/remotes/*` と `refs/tags/*`
+      だけを読む。一覧から写して `RefIndex` に合成する形を一度書いたが、`/simplify` の altitude
+      が「同じ値を状態に 2 つ持つ」と拾い、ユーザーと決めて読み元を一覧の 1 つにした
+      （2026-10-10）。symref は一覧にもラベルにも出す（git2 も `alias` を行にすると実測し、
+      `git log --decorate` と同じ見え方。同じ日にユーザーと決めた）。テストは `refs()` が
+      `refs/heads/*` も読む変異と、ラベルを HEAD の行だけから引く変異が落ちることを確かめた
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

@@ -19,7 +19,7 @@ use mewgit_core::auth::AccountState;
 use mewgit_core::auth::Backend as _;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
-use mewgit_core::git_read::{GitReadError, ReaderHandle, RefIndex, Timestamp};
+use mewgit_core::git_read::{GitReadError, ReaderHandle, Timestamp};
 use mewgit_core::github::{AccountBackend, GithubClient, GithubError};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
@@ -567,17 +567,13 @@ impl Runtime {
 /// リーダースレッドは要求を届いた順に捌くので、前の 2 つを待っているあいだに積まれた
 /// log と status の要求は walk を待たずに通る（どちらが先に届くかは決まらないので、
 /// 確実ではなく寄せるだけ）。
-///
-/// **グラフの索引はブランチ一覧と合わせてここで組む**（`RefIndex::new`）。Local ラベルを
-/// 一覧の行から作るので、一覧とグラフのラベルは同じ 1 回の列挙を見る（02 の「refs と
-/// ラベル」）。
 async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> {
     let remotes = reader.remotes().await?;
-    let others = reader.other_refs().await?;
+    let refs = reader.refs().await?;
     let branches = reader.branches().await?;
     Ok(RepoSnapshot {
         remotes,
-        refs: RefIndex::new(&branches, others),
+        refs,
         branches,
     })
 }
@@ -748,6 +744,7 @@ mod tests {
     async fn load_repo_info_fills_in_the_remotes_head_ref_labels_and_branches() {
         let repo = TestRepo::init();
         let oid = repo.commit("first");
+        repo.git(&["tag", "v1"]);
         repo.git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
         let (mut state, reader) = opened(&repo);
         let (mut runtime, mut msgs) = runtime_for(&repo, reader);
@@ -766,7 +763,7 @@ mod tests {
             .iter()
             .map(|label| label.name())
             .collect();
-        assert_eq!(labels, ["main"]);
+        assert_eq!(labels, ["v1"]);
         // **ブランチ一覧も同じ返信で届く**（02 の「ブランチ一覧」）。
         assert_eq!(state.branches.load(), ListLoad::Loaded);
         assert_eq!(

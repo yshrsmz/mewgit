@@ -136,7 +136,7 @@ pub(super) fn only_staged() -> AppState {
 /// worktree ペインにフォーカスし、その区画の先頭を選んだ状態。
 pub(super) fn worktree_state(snapshot: WorktreeSnapshot, section: WorktreeSection) -> AppState {
     let mut state = state();
-    let _ = deliver_status(&mut state, snapshot);
+    let _ = deliver_status(&mut state, Ok(snapshot));
     state.focus = Pane::Worktree;
     state.worktree.section = section;
     state.worktree.cursor = 0;

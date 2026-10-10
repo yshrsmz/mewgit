@@ -580,7 +580,7 @@ mod tests {
         state.worktree.cursor = 1;
 
         // b.txt を stage した後の状態が届く。
-        let _ = deliver_status(&mut state, fake_snapshot(&["b.txt"], &["a.txt"], &[]));
+        let _ = deliver_status(&mut state, Ok(fake_snapshot(&["b.txt"], &["a.txt"], &[])));
 
         assert!(!state.jobs.is_running(JobKind::LoadStatus));
         // 選んでいた行は消えているので、選べる行へ寄る。
@@ -591,12 +591,7 @@ mod tests {
     #[test]
     fn status_loaded_keeps_the_previous_list_when_it_fails() {
         let mut state = only_staged();
-        let _ = state.issue(Cmd::LoadStatus);
-
-        let cmd = update(
-            &mut state,
-            Msg::StatusLoaded(Box::new(Err(GitReadError::ReaderGone))),
-        );
+        let cmd = deliver_status(&mut state, Err(GitReadError::ReaderGone));
 
         // 失敗の通り道が無いとジョブが走ったまま残り、以後の LoadStatus が黙って落ちる。
         assert!(!state.jobs.is_running(JobKind::LoadStatus));

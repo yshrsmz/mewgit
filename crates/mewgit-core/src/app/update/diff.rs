@@ -191,6 +191,7 @@ mod tests {
 
     use crate::test_util::{
         deliver_status, fake_entry, fake_file_diff, fake_hunk, fake_snapshot, fake_stamp, reply,
+        status_arrived,
     };
 
     /// ワーキングツリー側の diff の対象。`assert_eq!` を短くするため。
@@ -358,7 +359,7 @@ mod tests {
         // 判定は `clamp` のあとでないと、古い区画で対象を決めてしまう。
         let mut state = diff_state(&["a.txt"], 1);
 
-        let cmd = deliver_status(&mut state, fake_snapshot(&["a.txt"], &[], &[]));
+        let cmd = deliver_status(&mut state, Ok(fake_snapshot(&["a.txt"], &[], &[])));
 
         assert_eq!(
             cmd,
@@ -378,7 +379,7 @@ mod tests {
         let _ = update(&mut state, exec_done(Ok(fake_output())));
         let _ = update(
             &mut state,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+            status_arrived(Ok(fake_snapshot(&[], &["a.txt"], &[]))),
         );
         let _ = update(
             &mut state,
@@ -669,7 +670,7 @@ mod tests {
         let _ = update(&mut state, exec_done(Ok(fake_output())));
         let asked = update(
             &mut state,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+            status_arrived(Ok(fake_snapshot(&[], &["a.txt"], &[]))),
         );
         assert_eq!(asked, Cmd::LoadDiff(unstaged_diff("a.txt")), "頼んではいる");
 
@@ -722,7 +723,7 @@ mod tests {
         let _ = update(&mut state, exec_done(Ok(fake_output())));
         let _ = update(
             &mut state,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+            status_arrived(Ok(fake_snapshot(&[], &["a.txt"], &[]))),
         );
 
         let cmd = update(&mut state, diff_err(unstaged_diff("a.txt")));
@@ -754,7 +755,7 @@ mod tests {
 
         let cmd = update(
             &mut state,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+            status_arrived(Ok(fake_snapshot(&[], &["a.txt"], &[]))),
         );
 
         assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
@@ -773,7 +774,7 @@ mod tests {
         let _ = update(&mut state, exec_done(Ok(fake_output())));
         let dropped = update(
             &mut state,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["a.txt"], &[])))),
+            status_arrived(Ok(fake_snapshot(&[], &["a.txt"], &[]))),
         );
         assert_eq!(dropped, Cmd::None, "走っているので落とされる");
         assert!(!state.diff_is_current(), "落とされたので、まだ頼めていない");

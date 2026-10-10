@@ -577,8 +577,8 @@ mod tests {
     use crate::git_read::{BranchList, DiffTarget, FileStatus, RowlessHead};
     use crate::graph::LaneState;
     use crate::test_util::{
-        fake_branch, fake_branch_list, fake_branch_list_or, fake_commit_with_parents, fake_entry,
-        fake_head_list, fake_oid, fake_snapshot, reply,
+        deliver_status, fake_branch, fake_branch_list, fake_branch_list_or,
+        fake_commit_with_parents, fake_entry, fake_head_list, fake_oid, fake_snapshot, reply,
     };
 
     #[test]
@@ -895,10 +895,7 @@ mod tests {
         let _ = update(&mut state, detail_ok(0));
         let _ = press_code(&mut state, KeyCode::Enter);
         let _ = press_code(&mut state, KeyCode::Enter);
-        let _ = update(
-            &mut state,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&[], &["u.txt"], &[])))),
-        );
+        let _ = deliver_status(&mut state, Ok(fake_snapshot(&[], &["u.txt"], &[])));
         assert_eq!(state.focus, Pane::Diff);
         assert_eq!(state.wanted_diff(), None);
         assert!(state.worktree.selected().is_some());
@@ -930,10 +927,7 @@ mod tests {
         // ワーキングツリー側にも選択を用意する。用意しないと `act` の
         // 「選択が無い」腕で戻ってしまい、この見張りを踏まない。
         let mut state = commit_diff_pane(&["a.txt"]);
-        let _ = update(
-            &mut state,
-            Msg::StatusLoaded(Box::new(Ok(fake_snapshot(&["s.txt"], &["u.txt"], &[])))),
-        );
+        let _ = deliver_status(&mut state, Ok(fake_snapshot(&["s.txt"], &["u.txt"], &[])));
         assert!(state.worktree.selected().is_some());
 
         for key in ['s', 'u', 'x'] {

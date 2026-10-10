@@ -310,7 +310,7 @@ pub fn state_on_first_commit(summaries: &[&str]) -> AppState {
 /// 「書き込みより前に頼まれたもの」として頼み直す（01 の「実行中ジョブ › 世代」）。
 pub fn state_with_status(snapshot: WorktreeSnapshot) -> AppState {
     let mut state = state_at("/repo");
-    let _ = deliver_status(&mut state, snapshot);
+    let _ = deliver_status(&mut state, Ok(snapshot));
     state
 }
 

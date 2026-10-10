@@ -338,7 +338,7 @@ mod tests {
             };
         }
         state.branches.loaded(fake_head_list(fake_branch("main")));
-        let _ = deliver_status(&mut state, fake_snapshot(&[], &[], &[]));
+        let _ = deliver_status(&mut state, Ok(fake_snapshot(&[], &[], &[])));
         state
     }
 
@@ -509,7 +509,7 @@ mod tests {
     fn tracked_changes_are_refused_before_the_editor_opens_but_untracked_ones_are_not() {
         // 開いてから断ると、並べ替えた plan が消える（01）。
         let mut state = linear(3);
-        let _ = deliver_status(&mut state, fake_snapshot(&[], &["a.txt"], &[]));
+        let _ = deliver_status(&mut state, Ok(fake_snapshot(&[], &["a.txt"], &[])));
 
         let _ = press_i_on(&mut state, 1);
 
@@ -517,7 +517,7 @@ mod tests {
 
         // untracked だけなら git は通す（01 の実測）。
         let mut state = linear(3);
-        let _ = deliver_status(&mut state, fake_snapshot(&[], &[], &["new.txt"]));
+        let _ = deliver_status(&mut state, Ok(fake_snapshot(&[], &[], &["new.txt"])));
 
         let _ = press_i_on(&mut state, 1);
 
@@ -541,7 +541,7 @@ mod tests {
         snapshot.progress = Some(InProgressOp::CherryPick {
             oid: Some(fake_oid(9)),
         });
-        let _ = deliver_status(&mut state, snapshot);
+        let _ = deliver_status(&mut state, Ok(snapshot));
 
         let _ = press_i_on(&mut state, 1);
 

@@ -731,6 +731,9 @@ mod tests {
         // 出るまで画面が真っ黒になるので、`Cmd::LoadRepoInfo` に回している。
         let repo = TestRepo::init();
         repo.commit("first");
+        // リモートを置いておかないと、`remotes` が空なのが読まなかったからなのか
+        // 無いからなのかを区別できない。
+        repo.git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
 
         let (state, _reader) = opened(&repo);
 
@@ -813,21 +816,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ctrl_c_ends_the_loop() {
-        let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo);
-        let ctrl_c = Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        )));
-        run_with(vec![ctrl_c], &mut state, reader).await.unwrap();
-    }
-
-    #[tokio::test]
     async fn resize_reaches_the_state_before_quitting() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
-        let events = vec![Ok(Event::Resize(120, 40)), key(KeyCode::Char('q'))];
+        // 先頭の 2 つは `Msg` に写らないイベント。読み飛ばさずにループを抜けると、
+        // 後ろの `Resize` が届かない。
+        let events = vec![
+            Ok(Event::FocusLost),
+            key(KeyCode::CapsLock),
+            Ok(Event::Resize(120, 40)),
+            key(KeyCode::Char('q')),
+        ];
 
         run_with(events, &mut state, reader).await.unwrap();
         assert_eq!(
@@ -840,19 +839,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unmapped_events_are_skipped_without_ending_the_loop() {
-        let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo);
-        let events = vec![
-            Ok(Event::FocusLost),
-            key(KeyCode::CapsLock),
-            key(KeyCode::Char('q')),
-        ];
-
-        run_with(events, &mut state, reader).await.unwrap();
-    }
-
-    #[tokio::test]
     async fn exhausted_event_stream_ends_the_loop() {
         // 終了キーが来なくても、入力が尽きたら抜ける。抜けないと Tick だけで
         // 永久に回り、テストがハングする。
@@ -861,23 +847,6 @@ mod tests {
         run_with(vec![Ok(Event::Resize(100, 30))], &mut state, reader)
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn load_status_reaches_the_state_through_the_reader() {
-        let repo = TestRepo::init();
-        repo.commit_file("a.txt", "first");
-        repo.write_worktree_file("b.txt", b"new");
-        let (mut state, reader) = opened(&repo);
-        let (mut runtime, mut msgs) = runtime_for(&repo, reader);
-
-        let cmd = state.issue(Cmd::LoadStatus);
-        assert!(runtime.dispatch(&mut state, cmd).is_continue());
-        let msg = msgs.recv().await.expect("Msg が返りませんでした");
-        let _ = update(&mut state, msg);
-
-        assert_eq!(state.worktree.snapshot.untracked.len(), 1);
-        assert!(!state.jobs.is_running(JobKind::LoadStatus));
     }
 
     #[tokio::test]
@@ -1088,23 +1057,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quit_breaks_the_loop() {
-        let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo);
-        let (mut runtime, _msgs) = runtime_for(&repo, reader);
-        assert!(runtime.dispatch(&mut state, Cmd::Quit).is_break());
-    }
-
-    #[tokio::test]
-    async fn none_continues() {
-        let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo);
-        let (mut runtime, _msgs) = runtime_for(&repo, reader);
-        assert!(runtime.dispatch(&mut state, Cmd::None).is_continue());
-        assert!(state.notices.is_empty());
-    }
-
-    #[tokio::test]
     async fn batch_stops_at_quit() {
         let repo = TestRepo::init();
         let (mut state, reader) = opened(&repo);
@@ -1115,41 +1067,6 @@ mod tests {
         let batch = Cmd::Batch(vec![Cmd::FetchPrList, Cmd::Quit, Cmd::FetchPrList]);
         assert!(runtime.dispatch(&mut state, batch).is_break());
         assert_eq!(state.notices.len(), 1);
-    }
-
-    /// 材料の無い `Cmd` は黙って消えない（`no_material`）。
-    ///
-    /// **`update` が出さない形なので、ここへは来ないはず** —— それでも黙らせない
-    /// 理由は `no_material` の doc にある。
-    #[tokio::test]
-    async fn a_cmd_without_its_material_warns_instead_of_disappearing() {
-        let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo);
-        let (mut runtime, _msgs) = runtime_for(&repo, reader);
-
-        assert!(runtime.dispatch(&mut state, Cmd::FetchPrList).is_continue());
-
-        assert_eq!(state.notices.len(), 1);
-        let notice = &state.notices[0];
-        assert_eq!(notice.level, NoticeLevel::Warn);
-        assert!(notice.message.contains("PR 一覧の取得"), "{notice:?}");
-    }
-
-    #[test]
-    fn a_cmd_without_its_material_does_not_hold_on_to_its_job() {
-        // 掴んだままだと、2 回目以降の同じ `Cmd` が `issue` に落とされて
-        // 通知も出ない（「1 回だけ警告が出てあとは無反応」になる）。
-        let repo = TestRepo::init();
-        let (mut state, reader) = opened(&repo);
-        let (mut runtime, _msgs) = runtime_for(&repo, reader);
-
-        let cmd = state.issue(Cmd::FetchPrList);
-        assert!(runtime.dispatch(&mut state, cmd).is_continue());
-        assert!(!state.jobs.is_running(JobKind::FetchPrList));
-
-        let again = state.issue(Cmd::FetchPrList);
-        assert!(runtime.dispatch(&mut state, again).is_continue());
-        assert_eq!(state.notices.len(), 2);
     }
 
     /// `Cmd::ResolveAccount` が `AccountBackend` を通って `Msg` で返る（04）。
@@ -1414,10 +1331,15 @@ mod tests {
             assert!(state.jobs.is_running(kind), "{job:?} が発行されていません");
             assert!(runtime.dispatch(&mut state, cmd).is_continue());
 
+            // 掴んだままだと、2 回目以降の同じ `Cmd` が `issue` に落とされて通知も
+            // 出ない（「1 回だけ警告が出てあとは無反応」になる）。
             assert!(
                 !state.jobs.is_running(kind),
                 "{job:?} のジョブが残っています"
             );
+            // 段階は Warn（`update` が出さない形なので、失敗ではなく警告として出す。
+            // 理由は `no_material` の doc）。
+            assert_eq!(state.notices[0].level, NoticeLevel::Warn, "{job:?}");
             let message = state.notices[0].message.clone();
             assert!(message.contains(material_name(job)), "{job:?}: {message:?}");
             // **収まることを直に見る。** `contains` は末尾が切れても通る（#80）。

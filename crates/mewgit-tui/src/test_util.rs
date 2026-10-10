@@ -434,7 +434,9 @@ mod tests {
         // なり、`contains` を見る見張りが静かに素通りする。
         let state = state_with_commits(&["日本語のコミットメッセージ"]);
 
-        let text = pane_text(&state, TermSize::default(), Pane::Graph);
+        // 右列を出す幅で見る。80 桁では右列を描かないので、ペインの端で止めずに
+        // 全画面を読んでも下の否定が通ってしまう。
+        let text = pane_text(&state, SPLIT_NARROWEST, Pane::Graph);
 
         assert!(text.contains("日本語のコミットメッセージ"), "{text}");
         // 右のペインの中身は入らない。

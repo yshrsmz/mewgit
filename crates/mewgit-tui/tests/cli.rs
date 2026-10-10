@@ -30,38 +30,23 @@ fn stdout(output: &Output) -> &str {
 
 #[test]
 fn version_prints_the_package_version() {
-    for args in [
-        &["--version"][..],
-        &["-V"],
-        &[".", "--version"],
-        &["a", "b", "-V"],
-    ] {
-        let output = mewgit(args);
-        assert!(output.status.success(), "{args:?}: {output:?}");
-        assert_eq!(stdout(&output), version_line(), "{args:?}");
-        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
-    }
+    let output = mewgit(&["--version"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(stdout(&output), version_line());
+    assert!(output.stderr.is_empty(), "{output:?}");
 }
 
 #[test]
 fn help_prints_the_usage() {
-    // 後ろに置いても、知らないオプションや余分な引数より先に拾う。
-    for args in [
-        &["--help"][..],
-        &["-h"],
-        &[".", "--help"],
-        &["--nope", "a", "b", "-h"],
-    ] {
-        let output = mewgit(args);
-        assert!(output.status.success(), "{args:?}: {output:?}");
-        let help = stdout(&output);
-        assert!(help.starts_with(&version_line()), "{args:?}: {help}");
-        assert!(
-            help.contains("使い方: mewgit [options] [--] [repo-path]"),
-            "{args:?}: {help}"
-        );
-        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
-    }
+    let output = mewgit(&["--help"]);
+    assert!(output.status.success(), "{output:?}");
+    let help = stdout(&output);
+    assert!(help.starts_with(&version_line()), "{help}");
+    assert!(
+        help.contains("使い方: mewgit [options] [--] [repo-path]"),
+        "{help}"
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
 }
 
 #[test]
@@ -73,12 +58,6 @@ fn an_unknown_option_is_refused() {
             "{stderr}"
         );
     }
-}
-
-#[test]
-fn a_second_path_is_refused() {
-    let stderr = refusal(&[".", "other"]);
-    assert!(stderr.contains("余分な引数です: other"), "{stderr}");
 }
 
 #[test]

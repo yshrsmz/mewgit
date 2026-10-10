@@ -127,20 +127,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_modifier_name_is_not_read_as_a_color() {
-        // `graph_head` の既定値は "bold"。色として読むと既定色に落ちて、
-        // 強調がまるごと消える。
-        let style = style("bold");
-        assert!(style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(style.fg, None);
-    }
-
-    #[test]
-    fn a_color_name_becomes_a_foreground() {
-        assert_eq!(style("green").fg, Some(Color::Green));
-    }
-
-    #[test]
     fn colors_and_modifiers_can_be_mixed() {
         let style = style("bold green");
         assert!(style.add_modifier.contains(Modifier::BOLD));
@@ -149,7 +135,9 @@ mod tests {
 
     #[test]
     fn unknown_tokens_are_ignored() {
-        // 設定の 1 語のミスで起動を止めない（08）。
+        // 設定の 1 語のミスで起動を止めない（08）。修飾の名前は色として読まない
+        // —— `graph_head` の既定値は "bold" で、色として読むと既定色に落ちて
+        // 強調がまるごと消える。
         let style = style("sparkly bold");
         assert!(style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(style.fg, None);

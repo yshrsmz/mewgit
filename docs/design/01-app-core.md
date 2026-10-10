@@ -376,8 +376,8 @@ impl TextBuffer {
   git2 の読みは commit（pre-commit hook や署名を含む）より先に返るのが普通で、その
   時点の刻印は「最新」。断り方は確定時（`submit_exec`）と同じ `JobKind::Exec` の
   `drop_notice` で、判定は `exec_busy` の 1 箇所
-- **amend の初期値は `Cmd::LoadHeadMessage` で読む。** `RepoInfo.head` からは取らない。
-  あれは書き込みのあとに読み直されるが、返るまでのあいだは古い（`Cmd::LoadRepoInfo` が
+- **amend の初期値は `Cmd::LoadHeadMessage` で読む。** ブランチ一覧の HEAD の行からは
+  取らない。あれは書き込みのあとに読み直されるが、返るまでのあいだは古い（`Cmd::LoadRepoInfo` が
   `issue` に落とされていれば、追いつきが返るまで commit の前のまま）。**古い初期値は「1 つ前の
   コミットのメッセージで HEAD を上書きする」になる。** HEAD の解決と本文の取得は
   リーダースレッドの中で 1 回で行い、途中で HEAD が動く隙を作らない
@@ -603,7 +603,7 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 - **読み直しを組む関数にも「出すか」の判断を置かない。** 呼び出し元は 2 つあり、
   どちらも出すと決めたあとで呼ぶ。置くと、やはり踏めない偽の腕が残る
 - **`Cmd::LoadRepoInfo` も一緒に出す。** ref のラベル（`main` が新しいコミットへ動く）と
-  `RepoInfo.head` とブランチ一覧が古くなるため。こちらが `issue` に落ちたときの追いつきは持たない。
+  ブランチ一覧（HEAD の状態を含む）が古くなるため。こちらが `issue` に落ちたときの追いつきは持たない。
   発行元が起動時とここの 2 つしかなく重なる窓が実質無いので長らく塞いでいなかったが、
   世代を入れたときに塞いだ（下の「実行中ジョブ › 世代」）
 
@@ -702,8 +702,8 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
 - **確認モーダルを挟む**（2026-09-29 にユーザーと決めた）。`CLAUDE.md` の確認対象
   （force push、`branch -D`、discard、abort 系）には入らないが、積んだコミットを戻す手
   （reset）が mewgit に無い。本文は「`abc1234 <summary>` を `<ブランチ>` に積みます。」で、
-  **どのコミットをどこへ積むかを押す前に見せる**。積む先の名前は HEAD の行（`BranchState::head`。
-  行が無く unborn なら `RepoInfo.head` の名前）から取る表示だけの値（detached なら `HEAD`）で、git は HEAD に積むので古くても行き先は変わらない
+  **どのコミットをどこへ積むかを押す前に見せる**。積む先の名前は `BranchState::head`（HEAD の行の名前、
+  unborn ならその名前）から取る表示だけの値（detached と一覧が届く前は `HEAD`）で、git は HEAD に積むので古くても行き先は変わらない
 - **WIP 行では断る**（積むコミットが無い）。通知で行を選ぶよう言う
 - **merge コミットは確認を開く前に断る。** git は `-m` が無いと exit 128 で断り
   （03 の「cherry-pick の開始」）、`GitOp::CherryPick` は mainline を運ばない
@@ -821,7 +821,7 @@ pub enum RewordInput {
   切らない —— 行はレーンをまたいだ topo-order なので、HEAD の行と選択の行のあいだに
   ある行が HEAD の祖先とは限らない。**読み足さない**（`MainlinePicker` と同じ）。
   辿れなかったら断る（下の表）
-- **HEAD は HEAD の行の `oid`、行が無ければ `RepoInfo.head` の `Detached` の oid**
+- **HEAD は `BranchState::head` の `Branch` の行の `oid` か `Detached` の oid**
   （02 の「head」）。mewgit の書き込みの
   あとは `Reload::Refs` で読み直される（上の「ログの読み直し」）。**端末で積んだ
   コミットには probe（下の「外部の変更の検知」）が拾うまで最大 2 秒追いつかない**。**追いつかない HEAD で組んだ
@@ -951,7 +951,8 @@ pub struct WorktreeState {
 - discard は区画と変更種別で `GitOp` が変わる（03 の「discard は 3 変種」）。
   Untracked なら `DiscardUntracked`、staged の `Added`（= HEAD に無い）なら
   `DiscardAdded`、それ以外は `Discard`。**判断はここにしか無い。**`to_commands` は
-  純粋関数でどちらも見られない。**`RepoInfo.head` では判断しない。** あれは外部で
+  純粋関数でどちらも見られない。**ブランチ一覧の HEAD（`BranchState::head`）では
+  判断しない。** あれは外部で
   コミットされると読み直しが返るまで古く、古い `Unborn` を信じると HEAD にある
   ファイルを `git rm --force` で消してしまう。`FileStatus` なら `LoadStatus` が
   毎回運んでくる
@@ -1163,11 +1164,21 @@ untracked の中身を出すようにしてあるので、これで新規ファ�
 
 ```rust
 pub struct BranchState {
-    pub branches: Vec<Branch>,   // 名前順。02 の branches() の戻り値そのまま
+    list: Option<BranchList>,  // 02 の branches() の戻り値そのまま。None はまだ届いていない
     pub cursor: usize,
     load: ListLoad,            // Pending | Loaded | Failed
 }
+
+impl BranchState {
+    pub fn branches(&self) -> &[Branch];        // 名前順。届く前は空
+    pub fn head(&self) -> Option<Head<'_>>;     // None はまだ届いていない（02 の「head」）
+    pub fn head_branch(&self) -> Option<&Branch>;  // HEAD の行。detached / unborn では None
+}
 ```
+
+- **HEAD の状態もここが持つ。** `BranchList` のまま持ち、`RepoInfo` に HEAD を写さない
+  （02 の「head」）。元は `RepoInfo.head` に判別を分けて持っていて、読み手ごとに「行を
+  先に読み、無ければ `RepoInfo.head`」と書いていた
 
 - **`load` は 3 状態の enum。** 一覧が空でも、それが `git init` 直後（ブランチが 1 本も
   無い）なのか、まだ届いていないのかは `Vec` からは判らない。`ui` はこの 3 つを
@@ -1429,7 +1440,7 @@ unborn でも同じものが出る。
 テストを書く。#63 の `RepoInfo.target` はまさにこの 2 本の順序で答えが変わり、
 latch したせいで二度と直らなかった。**こちらは latch しない。**
 
-**`Msg::RepoInfoLoaded` の側は `Ok` の腕だけが頼む。** `Err` の直後は `head` を
+**`Msg::RepoInfoLoaded` の側は `Ok` の腕だけが頼む。** `Err` の直後は HEAD（ブランチ一覧）を
 更新していないので、引き直しても同じ答えを 1 往復ぶん買うだけになる
 （`resolve_target` を `Ok` の側だけで呼ぶのと同じ理由）。
 
@@ -1703,10 +1714,9 @@ GitHub API の残量をヘッダに出す（07 の「ヘッダ」）。**産出�
   **別のジョブから届く値を混ぜると到着順で答えが変わり、二度と直らない**。
   **HEAD の行（`BranchState::head`）から読んでよいのは、ブランチ一覧が同じ返信に乗る
   から**（経緯は 02 の「head」）。**名前も oid も追跡設定も、PR 作成の「ブランチに
-  乗っているか」も HEAD の行から取り、`RepoInfo.head` と混ぜない** —— `RepoInfo.head` の
-  `Branch` は判別だけで名前を持たない（02 の「head」）。「乗っているか」だけをあちらから
-  取ると、対応の取れない組（`Branch` な `repo.head` と HEAD の行の無い一覧）を読み手が
-  1 つずつ数えることになる。unborn の HEAD は
+  乗っているか」も HEAD の行（`BranchState::head_branch`）から取る** —— HEAD の状態は
+  一覧と同じ `BranchList` が持ち、`Branch` の腕は行そのもの（02 の「head」）なので、
+  対応の取れない組は組めない。unborn の HEAD は
   一覧に行が無いので候補は空（コミットが無ければ PR も無い）
 - **host は比べない。** `target.host` は `ssh -G` で正規化済み、こちらは URL に書かれた
   ままなので、生のまま比べると **fork だけ別のエイリアス（`gh-me:owner/repo`）を使う
@@ -2385,11 +2395,9 @@ mewgit には無い —— 押されたときに読み直す以外にない。
 `src` / `dst` に割って持つ理由は 03 の「argv への変換」（refspec と lease で同じ名前を
 別の位置に置くので、1 本の文字列に畳むと lease が壊れる）。
 
-決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState` から取る** ——
+決めるのは `app` の純粋関数。**HEAD のブランチは `BranchState::head_branch` から取る** ——
 行き先の材料（追跡 ref の位置、ahead / behind、`push_remote`）を運ぶのは `Branch` の
-行だけで、`RepoInfo.head` が持つのはブランチに居るかの判別だけ（#22 の「キャッシュした
-状態から破壊的操作を選ばない」）。**鮮度の差ではない** —— どちらも同じ
-`Cmd::LoadRepoInfo` の返信に乗る（02 の「ブランチ一覧」）。
+行だけ（#22 の「キャッシュした状態から破壊的操作を選ばない」）。
 
 1. HEAD のブランチが無い（detached / unborn）→ 通知して何も出さない
 2. **`Branch.push_remote`（`pushRemote` / `pushDefault`）があり、追跡先と違うなら、
@@ -3115,7 +3123,7 @@ pub enum Msg {
     CommitFilesLoaded { oid: Oid, result: Box<Result<Vec<FileEntry>, GitReadError>> },
     HeadMessageLoaded(Result<Option<String>, GitReadError>),  // amend の初期値。None は unborn
     CommitMessageLoaded { oid: Oid, result: Box<Result<String, GitReadError>> },  // reword の初期値
-    RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, head, refs, branches }
+    RepoInfoLoaded(Box<Result<RepoSnapshot, GitReadError>>),  // { remotes, refs, branches: BranchList }
     StatusLoaded(Box<Result<WorktreeSnapshot, GitReadError>>),
     FingerprintLoaded(Box<Result<RepoFingerprint, GitReadError>>),  // 下の「外部の変更の検知」
     DiffLoaded { target: DiffTarget, result: Box<Result<Vec<FileDiff>, GitReadError>> },

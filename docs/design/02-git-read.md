@@ -157,8 +157,8 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
   git2 の `branches()` は使わない — 内部は絞り込みの無い `references()` と同じ
 - **`is_head` は `HEAD` の symbolic target との比較**で決め、HEAD は 1 回だけ解決する
   （`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直す）。unborn と detached は
-  どちらも「どのブランチも HEAD ではない」に落ちる。`refs()` と同じ形。**`HeadInfo` も
-  この 1 回の解決から出す**（`BranchList.head`。下の「head」）
+  どちらも「どのブランチも HEAD ではない」に落ちる。`refs()` と同じ形。**HEAD の状態も
+  この 1 回の解決から出す**（`BranchList::head`。下の「head」）
 - **非 UTF-8 のブランチ名は落とす**（`refs()` と同じ。識別子は `git_exec` の argv に
   載せられないので、出しても切替も削除もできない行になる）
 - **並べ替えは名前順**。git2 の列挙順は安定していない（`RefIndex` と同じ理由）
@@ -324,22 +324,41 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 
 ### head
 
-`branches()` が `BranchList { head: HeadInfo, branches }` として一覧と一緒に返す。
+`branches()` が一覧と一緒に返す（`BranchList`）。
 
-- 通常は `Branch`（判別だけ）、detached HEAD は `Detached(oid)`、コミットが 1 つも無い
-  （unborn）ときは `Unborn { name }`（名前は `HEAD` の symbolic target から取る）
+```rust
+pub struct BranchList { /* private */ }
+
+impl BranchList {
+    pub fn new<E>(branches: Vec<Branch>, rowless: impl FnOnce() -> Result<RowlessHead, E>)
+        -> Result<Self, E>;
+    pub fn branches(&self) -> &[Branch];
+    pub fn head(&self) -> Head<'_>;
+}
+
+pub enum Head<'a> { Branch(&'a Branch), Detached(Oid), Unborn(&'a str) }
+pub enum RowlessHead { Detached(Oid), Unborn { name: String } }  // 行が無いときだけ
+```
+
+- 通常は `Branch`（HEAD の行そのもの）、detached HEAD は `Detached(oid)`、コミットが 1 つも
+  無い（unborn）ときは `Unborn`（名前は `HEAD` の symbolic target から取る）
+- **フィールドは private で、組み立ては `new` だけ。** `is_head` の行があればそれが HEAD で、
+  無いときだけ `rowless` を呼ぶ。**行無しの HEAD を値ではなく closure で受ける** —— 値で
+  受けると「行があるのに `Detached` も渡された」組が引数で書ける。元は `head: HeadInfo` と
+  `branches: Vec<Branch>` を公開フィールドで並べていて、`HeadInfo::Branch` の腕は判別だけ
+  だった（行から導ける値を別に持っていた）
 - **HEAD は一覧と同じ 1 回の `find_reference("HEAD")` で解決し、`Branch` かどうかは一覧の
   行から決める。** 元は `head()` を別の読み取りにしていて、ランタイムの `repo_info` が
   2 つを順に await していたので、あいだに外で HEAD が動くと「`Branch` なのに HEAD の
   行が無い」（逆向きなら「`Detached` なのに `is_head` の行がある」）組が届いた（#183 の
-  あとに寄せた）。いまは **`Branch` ⇔ `is_head` の行がちょうど 1 つ**が作りから成り立つ。
+  あとに寄せた）。いまは **`Branch` ⇔ `is_head` の行がある**が型で成り立つ（上の `new`）。
   判別は次の順:
 
   | HEAD | 判別 |
   |---|---|
   | symbolic でない | `Detached(peel した oid)` |
   | symbolic target が非 UTF-8 | `Err(NonUtf8Head)`（下の「非 UTF-8 の扱い」） |
-  | target が一覧の行に当たる | `Branch` |
+  | target が一覧の行に当たる | `Branch`（その行） |
   | target の行を peel できずに落とした | `Err`（下） |
   | 行が無く、HEAD を `resolve()` で辿った先が無い | `Unborn { name }`（名前は HEAD の直の target） |
   | 行が無いが、辿った先は在る | `Detached(peel した oid)` |
@@ -378,13 +397,13 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
   HEAD の行が無い」が `Err` にならずに届く（`NonUtf8Head` と同じ理由。`/code-review` が一時
   リポジトリで再現した）。列挙の中では特別扱いせず、行が無いときの解決（表の最後の 2 行）が
   target を peel し直すところで落ちる
-- **読み手は HEAD の行を先に読み、行が無いときだけ `RepoInfo.head` を見る**
-  （cherry-pick / revert の確認に出す積む先の名前、`i` の plan を辿り始める oid）。
-  上の作りで「`Branch` なのに HEAD の行が無い」組はもう届かないが、**型は組を許す**
-  （`HeadInfo` と `Vec<Branch>` は別のフィールド）。`Branch` の腕で行を引きに行く形に
-  すると、届かない組の扱いを読み手ごとに書くことになるので、行を先に読む形のまま残す
-  （名前と oid を畳んだ PR の `/simplify` が拾った）。型で閉じる（`RepoInfo.head` を消す）のは
-  plan.md の M6 に送った
+- **`app` も `BranchList` のまま持つ**（`BranchState`。01 の「ブランチ一覧」）。元は
+  `RepoSnapshot` で `head` と `branches` に分け、`RepoInfo.head` と `BranchState` に入れ直して
+  いたので、`git_read` の出口で成り立つ組が `app` では散文の約束に戻り、読み手（cherry-pick /
+  revert の確認に出す積む先の名前、`i` の plan を辿り始める oid）が「行を先に読み、無ければ
+  `RepoInfo.head`」の形で届かない組を抱えていた（#184 の `/simplify` が拾った）。いまは
+  `BranchState::head()` を網羅 `match` する。**`None` は「一覧がまだ届いていない」だけ**で、
+  detached / unborn は `Some`
 
 ## ログ列挙
 
@@ -899,9 +918,8 @@ impl ReaderHandle {
     pub async fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;
     pub async fn head_message(&self) -> Result<Option<String>, GitReadError>;
     pub async fn refs(&self) -> Result<RefIndex, GitReadError>;
-    pub async fn branches(&self) -> Result<Vec<Branch>, GitReadError>;
+    pub async fn branches(&self) -> Result<BranchList, GitReadError>;
     pub async fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError>;
-    pub async fn head(&self) -> Result<HeadInfo, GitReadError>;
     pub async fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;
     pub async fn status(&self) -> Result<WorktreeSnapshot, GitReadError>;
     pub async fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>, GitReadError>;

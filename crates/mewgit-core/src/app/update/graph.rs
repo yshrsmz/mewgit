@@ -6,7 +6,7 @@
 
 use crate::git_exec::GitOp;
 use crate::git_read::{
-    short_oid, Commit, CommitDetail, FileEntry, GitReadError, HeadInfo, LogPage, Oid,
+    short_oid, Commit, CommitDetail, FileEntry, GitReadError, Head, LogPage, Oid,
 };
 
 use super::branches::open_branch_create;
@@ -285,14 +285,12 @@ fn confirm_revert(
 /// 確認の本文に出す積む先。**表示だけに使う**（git は HEAD に積むので、ここが古くても
 /// 積む先は変わらない）。
 ///
-/// **HEAD の行を先に読む**（02 の「head」）。行が無いときだけ unborn の名前を見る。
+/// detached と、一覧がまだ届いていないときは `HEAD`。
 fn head_name(state: &AppState) -> &str {
-    if let Some(branch) = state.branches.head() {
-        return &branch.name;
-    }
-    match &state.repo.head {
-        Some(HeadInfo::Unborn { name }) => name,
-        _ => "HEAD",
+    match state.branches.head() {
+        Some(Head::Branch(branch)) => &branch.name,
+        Some(Head::Unborn(name)) => name,
+        Some(Head::Detached(_)) | None => "HEAD",
     }
 }
 
@@ -576,10 +574,11 @@ mod tests {
     use super::*;
     use crate::app::{GraphSelection, Msg};
 
-    use crate::git_read::{DiffTarget, FileStatus};
+    use crate::git_read::{BranchList, DiffTarget, FileStatus, RowlessHead};
     use crate::graph::LaneState;
     use crate::test_util::{
-        fake_branch, fake_commit_with_parents, fake_entry, fake_oid, fake_snapshot, reply,
+        fake_branch, fake_branch_list, fake_branch_list_or, fake_commit_with_parents, fake_entry,
+        fake_oid, fake_snapshot, reply,
     };
 
     #[test]
@@ -1369,36 +1368,48 @@ mod tests {
     /// HEAD を `main` にする。確認の本文が積む先の名前を出すかを見るため。名前は
     /// HEAD の行から読む（02 の「head」）。
     fn on_main(state: &mut AppState) {
-        state.branches.branches = vec![fake_branch("main", true)];
+        state
+            .branches
+            .loaded(fake_branch_list(vec![fake_branch("main", true)]));
     }
 
     #[test]
-    fn the_target_name_comes_from_the_head_row_and_falls_back_to_repo_head() {
-        // HEAD の行を先に読み、行が無いときだけ `repo.head` を見る（02 の「head」）。
-        // 取り違えを見張るため、行と `repo.head` に別の名前を持たせる（行と `Unborn` の
-        // 組は `branches()` からは届かないが、読み元を取り違える変異はこれで落ちる）。
-        let body_with = |row: Option<&str>, head: Option<HeadInfo>| {
+    fn the_target_name_follows_each_state_of_head() {
+        // HEAD の状態ごとに 1 つ（02 の「head」）。HEAD でない行を先頭に置き、名前を
+        // 一覧の先頭やカーソル行から取る変異も落とす。
+        let body_with = |list: Option<BranchList>| {
             let mut state = state_with_commits(3);
-            state.branches.branches = row
-                .map(|name| fake_branch(name, true))
-                .into_iter()
-                .collect();
-            state.repo.head = head;
+            if let Some(list) = list {
+                state.branches.loaded(list);
+            }
             let _ = press(&mut state, 'j');
             let _ = press(&mut state, 'y');
             open_confirm(&state).0.to_string()
         };
-        let unborn = || {
-            Some(HeadInfo::Unborn {
-                name: "fresh".to_string(),
-            })
-        };
+        let other = || fake_branch("another", false);
 
-        let body = body_with(Some("main"), unborn());
-        assert!(body.contains("main") && !body.contains("fresh"), "{body}");
-        let body = body_with(None, unborn());
+        let body = body_with(Some(fake_branch_list(vec![
+            other(),
+            fake_branch("main", true),
+        ])));
+        assert!(body.contains("main") && !body.contains("another"), "{body}");
+        let body = body_with(Some(fake_branch_list_or(
+            Vec::new(),
+            RowlessHead::Unborn {
+                name: "fresh".to_string(),
+            },
+        )));
         assert!(body.contains("fresh"), "{body}");
-        let body = body_with(None, Some(HeadInfo::Detached(fake_oid(9))));
+        let body = body_with(Some(fake_branch_list_or(
+            vec![other()],
+            RowlessHead::Detached(fake_oid(9)),
+        )));
+        assert!(
+            body.contains("を HEAD に") && !body.contains("another"),
+            "{body}"
+        );
+        // 一覧がまだ届いていない。
+        let body = body_with(None);
         assert!(body.contains("を HEAD に"), "{body}");
     }
 

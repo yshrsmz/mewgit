@@ -113,9 +113,12 @@ pub enum RefLabel {
   symbolic target の指す ref がまだ無く、detached は HEAD が symbolic ではないので、
   どちらも「どのブランチも HEAD ではない」に落ちる
 - **この HEAD の解決は `branches()` とは別の読み取り。** あいだに外で HEAD が動くと、
-  ラベルの `is_head` とブランチ一覧の HEAD の行が次の読み直しまで食い違う。ラベルは
-  描画だけに使い、HEAD の判別を読む手は無いので寄せていない（下の「head」）。
-  **`Branch` には同じ旗を持たせない** —— あちらは「どの行か」を `BranchList` が持つ
+  ラベルの `is_head` とブランチ一覧の HEAD の行が次の読み直しまで食い違う。判定の規則も
+  割れている（こちらは ref の完全名、`branches()` は `refs/heads/` を外した名前で比べる）。
+  **これは寄せていないだけで、残す理由は無い** —— Branches ペインの `*` は描画だけの
+  印でも `BranchList::head_row` に寄せた（下の「head」）。グラフの強調も
+  `head_branch()` の名前とラベルを比べれば同じ返信（`RepoSnapshot`）から引けるので、
+  旗ごと消すタスクを `docs/plan.md` の M6 に置いた
 - ラベルの並べ替え（種別 Local → Remote → Tag、同種内は名前順）は `RefIndex` を作る
   ところに置く。git2 の列挙順は安定しておらず、索引を組む経路が増えたときに
   並べ替えを忘れると描画順とテストの期待値だけが静かにずれる

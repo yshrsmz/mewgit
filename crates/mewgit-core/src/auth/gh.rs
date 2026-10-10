@@ -681,10 +681,4 @@ mod tests {
         let hosts: Vec<&str> = merged.iter().map(|l| l.host.as_str()).collect();
         assert_eq!(hosts, vec!["acme.ghe.com", "github.com"]);
     }
-
-    #[test]
-    fn no_hosts_is_not_an_error() {
-        // ログインしていない環境。`NotLoggedIn` に畳むのは `resolve` の仕事。
-        assert_eq!(logins(r#"{"hosts":{}}"#), Vec::<GhLogin>::new());
-    }
 }

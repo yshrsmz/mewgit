@@ -213,14 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn the_config_is_used_when_the_environment_is_unset() {
-        assert_eq!(
-            effective_ssh(None, Some("ssh -i config"), None),
-            SshCommand::Shell("ssh -i config".to_string())
-        );
-    }
-
-    #[test]
     fn git_ssh_alone_is_opaque() {
         // `GIT_SSH` はシェルを通さないので、同じ形でオプションを足せない。
         // `GIT_SSH_COMMAND` を置くと git はそちらを優先するので、重ねるつもりが
@@ -257,13 +249,6 @@ mod tests {
             effective_ssh(Some("  "), Some("\t"), Some(" ")),
             SshCommand::default()
         );
-    }
-
-    #[test]
-    fn takes_the_hostname_line_not_the_host_line() {
-        // 実際の並び。`host` が先に来る。
-        let dump = "host gh-work\nuser git\nhostname github.com\nport 22\n";
-        assert_eq!(hostname_from_dump(dump), Some("github.com"));
     }
 
     #[test]

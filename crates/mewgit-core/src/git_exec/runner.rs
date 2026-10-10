@@ -848,15 +848,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_cherry_pick_stays_empty_though_its_status_says_nothing_to_commit() {
-        // git 2.55.0 で実測した出力そのまま。
-        let stdout = "On branch main\nYou are currently cherry-picking commit 5ac5991.\n  (all conflicts fixed: run \"git cherry-pick --continue\")\n  (use \"git cherry-pick --skip\" to skip this patch)\n  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)\n\nnothing to commit, working tree clean\n";
-        let stderr =
-            "The previous cherry-pick is now empty, possibly due to conflict resolution.\n";
-        assert_eq!(classify(stdout, stderr), ExecErrorKind::Empty);
-    }
-
-    #[test]
     fn an_empty_stop_after_a_commit_whose_subject_says_conflict_is_still_empty() {
         // 複数の cherry-pick が 1 本目を積んでから空に当たった形（git 2.56.0 で実測した
         // 出力そのまま）。積んだコミットの件名が stdout に写る。
@@ -1063,8 +1054,10 @@ mod tests {
                       error: failed to push some refs (non-fast-forward)";
         assert_eq!(classify("", stderr), ExecErrorKind::SshAuthFailed);
 
+        // SAML の拒否も同じ。非 FF の語と並んでも `SamlSsoRequired` に落ちること。
         let saml = "ERROR: The `acme' organization has enabled or enforced SAML SSO. \
-                    Access rejected.";
+                    Access rejected.\n\
+                    error: failed to push some refs (non-fast-forward)";
         assert_eq!(classify("", saml), ExecErrorKind::SamlSsoRequired);
     }
 

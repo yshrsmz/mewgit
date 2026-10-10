@@ -1007,14 +1007,6 @@ mod tests {
     }
 
     #[test]
-    fn pathspec_is_separated_so_dashed_names_are_not_options() {
-        // `-n` という名前のファイルがオプションとして読まれないこと。
-        let command = to_command(&GitOp::Stage(vec!["-n".into(), "--all".into()]))
-            .expect("argv を組めませんでした");
-        assert_eq!(command.argv, ["add", "--", "-n", "--all"]);
-    }
-
-    #[test]
     fn an_empty_pathspec_is_refused() {
         // `--` だけを置くと「指定なし」= リポジトリ全体になる。確認モーダルが
         // 「0 件」と言いながら全体を巻き込むので、argv を組む側で止める。

@@ -169,7 +169,7 @@ fn remotes_is_empty_without_any_remote() {
 }
 
 #[test]
-fn refs_labels_local_branches_and_marks_head() {
+fn refs_labels_local_branches() {
     let repo = TestRepo::init();
     let first = repo.commit("first");
     repo.git(&["branch", "topic"]);
@@ -182,11 +182,9 @@ fn refs_labels_local_branches_and_marks_head() {
         [
             RefLabel::Local {
                 name: "main".to_string(),
-                is_head: true,
             },
             RefLabel::Local {
                 name: "topic".to_string(),
-                is_head: false,
             },
         ]
     );
@@ -289,25 +287,6 @@ fn refs_skips_a_tag_that_cannot_be_peeled_to_a_commit() {
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
     assert_eq!(names, ["main"]);
     assert_eq!(index.labels(repo.rev_parse("HEAD^{tree}")), []);
-}
-
-#[test]
-fn refs_marks_no_branch_as_head_when_detached() {
-    let repo = TestRepo::init();
-    let first = repo.commit("first");
-    repo.git(&["checkout", "--detach", &first.to_string()]);
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let index = reader.refs().unwrap();
-
-    // HEAD が symbolic でないので、どのブランチも HEAD ではない。
-    assert_eq!(
-        index.labels(first),
-        [RefLabel::Local {
-            name: "main".to_string(),
-            is_head: false,
-        }]
-    );
 }
 
 #[test]

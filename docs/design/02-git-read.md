@@ -84,7 +84,7 @@ impl RefIndex {
 impl FromIterator<(Oid, RefLabel)> for RefIndex { /* 並べ替えは new を通る */ }
 
 pub enum RefLabel {
-    Local { name: String, is_head: bool },   // "main"
+    Local { name: String },                  // "main"。HEAD かどうかは持たない
     Remote { name: String },                 // "origin/main"
     Tag { name: String },                    // "v1.0"
 }
@@ -108,17 +108,22 @@ pub enum RefLabel {
 - 列挙は `references()` の 1 パスで、種別は `is_branch()` / `is_remote()` / `is_tag()`
   （どれも ref 名の接頭辞判定）で振り分ける。`branches()` も内部では全 ref を列挙して
   から接頭辞で捨てるので、種別ごとに呼ぶと同じ走査を繰り返すことになる
-- `is_head` は `HEAD` の symbolic target と ref 名の比較で決める。`Branch::is_head()` は
-  呼ぶたびに HEAD を解決し直すのでブランチの本数だけファイル読みが増える。unborn は
-  symbolic target の指す ref がまだ無く、detached は HEAD が symbolic ではないので、
-  どちらも「どのブランチも HEAD ではない」に落ちる
-- **この HEAD の解決は `branches()` とは別の読み取り。** あいだに外で HEAD が動くと、
-  ラベルの `is_head` とブランチ一覧の HEAD の行が次の読み直しまで食い違う。判定の規則も
-  割れている（こちらは ref の完全名、`branches()` は `refs/heads/` を外した名前で比べる）。
-  **これは寄せていないだけで、残す理由は無い** —— Branches ペインの `*` は描画だけの
-  印でも `BranchList::head_row` に寄せた（下の「head」）。グラフの強調も
-  `head_branch()` の名前とラベルを比べれば同じ返信（`RepoSnapshot`）から引けるので、
-  旗ごと消すタスクを `docs/plan.md` の M6 に置いた
+- **ラベルは HEAD かどうかを持たない。** グラフの `[main]` の強調は、`ui` が
+  `BranchState::head_branch()` の名前と `Local` の名前を比べて決める。元は `refs()` が
+  `HEAD` をもう一度解決して `is_head` の旗を付けていたが、`branches()` とは別の読み取り
+  だったので、あいだに外で HEAD が動くとラベルの強調と Branches ペインの `*` が次の
+  読み直しまで食い違い、判定の規則も割れていた（こちらは ref の完全名、`branches()` は
+  `refs/heads/` を外した名前で比べる）。一覧の HEAD の行から引けば、HEAD の解決と判定の規則は
+  1 本になる（下の「head」の「どの行が HEAD かは `BranchList` だけが持つ」と同じ形）。
+  比べる名前はどちらも `refs/heads/` を外した短縮名
+- **ただし Local ラベルの集合は、まだ一覧とは別の列挙。** `refs()` と `branches()` はどちらも
+  `refs/heads/*` を読み、`runtime::repo_info` が順に呼ぶ。同じ `RepoSnapshot` で届くのは
+  順序だけで、読み取りは 2 回なので、あいだに外で `git switch -c feat` が走ると、次の
+  読み直しまで Branches ペインに `* feat` があるのにグラフに `[feat]` が無い（強調する名前は
+  一覧から来るので食い違わないが、強調する相手のラベルが無い）。塞ぐには Local ラベルを
+  `BranchList` の行（`name` と `oid`）から組み、`refs()` はリモート追跡ブランチとタグだけを
+  列挙する。`branches()` から分けていた理由（重い読みをラベルに払わせない。下の
+  「ブランチ一覧」）は 1 通にまとめた時点で消えている。`docs/plan.md` の M6 に置いた
 - ラベルの並べ替え（種別 Local → Remote → Tag、同種内は名前順）は `RefIndex` を作る
   ところに置く。git2 の列挙順は安定しておらず、索引を組む経路が増えたときに
   並べ替えを忘れると描画順とテストの期待値だけが静かにずれる

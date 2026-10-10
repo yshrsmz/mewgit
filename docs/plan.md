@@ -595,7 +595,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `runtime::repo_info` が分けて詰める。行が無いときは HEAD を `resolve()` で辿り、先が
       無ければ `Unborn`、在れば `Detached`（`refs/heads/` の外を指す HEAD、大文字小文字だけ
       違う `git switch Main`）。判別の表と実測は 02 の「head」。`refs()` のラベルの `is_head` は
-      別の解決のまま（描画だけ。02 の「refs とラベル」）
+      別の解決のまま残した（描画だけ。下の「グラフのラベルの `RefLabel::Local.is_head` を消し」で消した）
 - [x] HEAD の状態とブランチ一覧を型で 1 つに持ち、`RepoInfo.head` を消す。**上のタスクで
       「`Branch` ⇔ `is_head` の行がちょうど 1 つ」は `branches()` の出口で成り立つように
       なったが、`RepoSnapshot` で `head` と `branches` に分けて入れ直していた**ので、`app` では
@@ -619,7 +619,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       別に足すと判定が 2 本になるので採らなかった。テストの一覧は `fake_branch(name)` と
       `fake_branch_list(rows, head)`（名前に行が無ければ落とす）/ `fake_head_list(row)` で組む
       （02 の「head」）
-- [ ] グラフのラベルの `RefLabel::Local.is_head` を消し、HEAD の強調も `BranchList` から引く。
+- [x] グラフのラベルの `RefLabel::Local.is_head` を消し、HEAD の強調も `BranchList` から引く。
       **上のタスクで「どの行が HEAD か」は `BranchList` に閉じたが、グラフの `[main]` の強調は
       `refs()` が HEAD をもう一度解決して付けた旗を読んでいる**（上のタスクの `/simplify` の
       altitude が拾った）。`refs()` と `branches()` は順に読むので、あいだに外で HEAD が動くと
@@ -628,7 +628,26 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `ui::panes::graph` の `label_style` が `state.branches.head_branch()` の名前と
       `RefLabel::Local` の名前を比べる（同じ `RepoSnapshot` で届くので窓も消える）。
       ラベルを組むテスト（tui の `panes::graph`、core の `account`、`tests/git_read.rs` の
-      `refs_*`）を組み直すことになる（02 の「refs とラベル」）
+      `refs_*`）を組み直すことになる（02 の「refs とラベル」）。**決めた形** —— `label_style`
+      は `View` に載せ、`head_name` を 1 フレームに 1 回 `head_branch()` から引く。テストは
+      HEAD でない `a-first` を一覧の先頭・選択中の行・ラベルの先頭に置き、一覧の先頭や
+      選択中の行から名前を取る変異が落ちることを確かめた。detached では強調しない
+- [ ] グラフの Local ラベルを `BranchList` の行から組み、`refs()` はリモート追跡ブランチと
+      タグだけを列挙する。**上のタスクで HEAD の解決は 1 本になったが、Local ラベルの集合は
+      `refs()` が `branches()` とは別に `refs/heads/*` を列挙している**（上のタスクの `/simplify`
+      の altitude が拾い、2026-10-10 にユーザーと決めて送った）。`runtime::repo_info` は 2 つを
+      順に読むので、あいだに外で `git switch -c feat` が走ると、次の読み直しまで Branches
+      ペインの `* feat` に対してグラフに `[feat]` が無い。塞ぐには、`RefIndex` の Local を
+      `BranchList::branches()` の `(oid, name)` から合成する（どこで合わせるか —— `repo_info`
+      か `repo_info_loaded` か —— は着手時に決める）。名前の突き合わせの規則（`shorthand()`
+      と `refs/heads/` を外した名前）と `refs/heads/*` の二重走査も消える。`refs_*` の統合
+      テストと、`RefIndex` を組むテスト（tui の `panes::graph`、core の `account`）を組み直す
+      （02 の「refs とラベル」）。**着手時に決めること** —— `branches()` は
+      `references_glob("refs/heads/*")` で symbolic ref を落としておらず、`ref_label` は落として
+      いる（`git symbolic-ref refs/heads/alias refs/heads/main` で `git branch` は `alias -> main`
+      を出す。git 側だけ確かめ、git2 側は未実測）。そのまま一覧から組むと同じコミットに
+      `[alias]` と `[main]` が並ぶので、「symbolic ref は載せない」を一覧の側でも守るかを決める
+      （`/code-review` が拾った）
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

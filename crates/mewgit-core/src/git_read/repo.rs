@@ -145,24 +145,12 @@ impl RepoReader {
 
     /// Oid → ラベルの索引。グラフの各行の右に出す ref を引くのに使う（06）。
     pub fn refs(&self) -> Result<RefIndex, GitReadError> {
-        // HEAD は 1 回だけ解決する。`Branch::is_head()` は呼ぶたびに `.git/HEAD` と
-        // その参照先を読み直すので、ブランチの本数だけファイル読みが増える。
-        // unborn なら symbolic target の指す ref が存在せず、detached なら HEAD が
-        // symbolic ではないので、どちらも「どのブランチも HEAD ではない」に落ちる。
-        let head = self.repo.find_reference("HEAD")?;
-        // git2 0.21 から `Err`（target が非 UTF-8）と `Ok(None)`（symbolic でない）が
-        // 分かれた。**ここでは畳んでよい。** 使い道は下の `ref_label` での ref 名との
-        // 一致判定だけで、比較相手は UTF-8 の `&str` なので、非 UTF-8 の target は
-        // どの ref とも一致しない。つまり「どのブランチも HEAD ではない」に落ちる点で
-        // unborn / detached と同じ。
-        let head_target = head.symbolic_target().ok().flatten();
-
         // `refs/*` を 1 パスで走査して種別に振り分ける。`branches()` も内部では全 ref を
         // 列挙してから接頭辞で捨てるので、種別ごとに呼ぶと同じ走査を繰り返すことになる。
         let mut labels: HashMap<Oid, Vec<RefLabel>> = HashMap::new();
         for reference in self.repo.references()? {
             let reference = reference?;
-            let Some(label) = ref_label(&reference, head_target) else {
+            let Some(label) = ref_label(&reference) else {
                 continue;
             };
             // annotated tag は tag オブジェクトを指すので、commit まで peel してから引く。
@@ -188,7 +176,7 @@ impl RepoReader {
     /// 「`Branch` なのに HEAD の行が無い」組が届く。
     pub fn branches(&self) -> Result<BranchList, GitReadError> {
         // `git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直すので、ブランチの
-        // 本数だけファイル読みが増える（`refs` と同じ）。
+        // 本数だけファイル読みが増える。HEAD はここで 1 回だけ解決する。
         let head = self.repo.find_reference("HEAD")?;
         // git2 0.21 から `Err`（target が非 UTF-8）と `Ok(None)`（symbolic でない）が
         // 分かれた。**前者はエラーにする** —— 他の ref と同じく行を落とすと、ブランチに
@@ -399,9 +387,7 @@ fn rowless_head(head: &Reference<'_>, target: &str) -> Result<RowlessHead, GitRe
 }
 
 /// グラフのラベルにする ref を選び、種別を決める。載せないものは `None`。
-///
-/// `head_target` は `HEAD` の symbolic target（`refs/heads/main`）。
-fn ref_label(reference: &Reference<'_>, head_target: Option<&str>) -> Option<RefLabel> {
+fn ref_label(reference: &Reference<'_>) -> Option<RefLabel> {
     // symbolic ref（`refs/remotes/origin/HEAD`）は解決すると指す先のラベルと重複する。
     if reference.kind() != Some(ReferenceType::Direct) {
         return None;
@@ -414,8 +400,7 @@ fn ref_label(reference: &Reference<'_>, head_target: Option<&str>) -> Option<Ref
     // 載せるのはローカル / リモート追跡ブランチとタグだけ。`refs/stash` や
     // `refs/notes/*` はそれぞれ別のペインの担当で、グラフのラベルにはしない。
     if reference.is_branch() {
-        let is_head = reference.name().is_ok_and(|full| head_target == Some(full));
-        Some(RefLabel::Local { name, is_head })
+        Some(RefLabel::Local { name })
     } else if reference.is_remote() {
         Some(RefLabel::Remote { name })
     } else if reference.is_tag() {

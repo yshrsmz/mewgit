@@ -58,6 +58,7 @@ pub fn render(frame: &mut Frame, outer: Rect, state: &AppState) {
     let view = View {
         state,
         head: theme::style(&state.config.theme.graph_head),
+        head_name: state.branches.head_branch().map(|b| b.name.as_str()),
         // 罫線の桁は、いま描く行の最大レーン数に揃える（07）。読み込み済みの
         // 全行で最大を取ると、複雑な履歴で桁が育ち続ける。
         lanes: shown()
@@ -91,6 +92,11 @@ struct View<'a> {
     state: &'a AppState,
     /// HEAD のブランチラベルのスタイル。
     head: Style,
+    /// HEAD のブランチ名。detached / unborn / 一覧がまだ無いときは `None`。
+    /// **ブランチ一覧の HEAD の行から引く** —— Branches ペインの `*` と同じ値なので、
+    /// 強調する名前は食い違わない。ラベルの集合は `refs()` の別の列挙から来るので、
+    /// その名前のラベルがまだ無いことはある（02 の「refs とラベル」）。
+    head_name: Option<&'a str>,
     /// 罫線に使うレーン数。
     lanes: usize,
     palette: Vec<Color>,
@@ -173,7 +179,7 @@ impl<'a> View<'a> {
         for label in labels {
             // 飾りは組み立てずに 3 つのスパンに分ける。毎フレーム全行ぶん `format!` する
             // 必要が無く、HEAD の強調も括弧まで掛かる。
-            let style = label_style(label, self.head);
+            let style = self.label_style(label);
             let (open, close) = brackets(label);
             spans.push(Span::styled(open, style));
             spans.push(Span::styled(label.name(), style));
@@ -184,6 +190,14 @@ impl<'a> View<'a> {
         spans.push(Span::raw(line.commit.summary.as_str()));
 
         Line::from(spans)
+    }
+
+    /// ラベルの見た目。HEAD のブランチだけ強調する。
+    fn label_style(&self, label: &RefLabel) -> Style {
+        match label {
+            RefLabel::Local { name } if Some(name.as_str()) == self.head_name => self.head,
+            _ => Style::default(),
+        }
     }
 }
 
@@ -201,22 +215,15 @@ fn brackets(label: &RefLabel) -> (&'static str, &'static str) {
     }
 }
 
-/// ラベルの見た目。HEAD のブランチだけ強調する。
-fn label_style(label: &RefLabel, head_style: Style) -> Style {
-    match label {
-        RefLabel::Local { is_head: true, .. } => head_style,
-        _ => Style::default(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::{
-        draw, graph_rows, state_at, state_with_commits, state_with_history, terminal_with,
+        col_of, draw, graph_rows, state_at, state_with_commits, state_with_history, terminal_with,
     };
     use mewgit_core::app::{init, update, Msg, TermSize};
     use mewgit_core::git_read::{GitReadError, RefIndex, RefLabel};
+    use mewgit_core::test_util::{deliver_branches, fake_branch, fake_branch_list};
     use ratatui::buffer::Buffer;
     use ratatui::style::Modifier;
 
@@ -334,7 +341,6 @@ mod tests {
                 oid,
                 RefLabel::Local {
                     name: "main".to_string(),
-                    is_head: true,
                 },
             ),
             (
@@ -367,25 +373,66 @@ mod tests {
         );
     }
 
+    /// 同じコミットに `a-first` と `main` のラベルを載せ、ブランチ一覧を `head` で届けた状態。
+    ///
+    /// **HEAD でない `a-first` を一覧の先頭（= 選択中の行）とラベルの先頭に置く**
+    /// （`.claude/rules/testing.md` の「読み元を移すリファクタの見張り」）—— HEAD の名前を
+    /// 一覧の先頭や選択中の行から取る形、最初の Local ラベルを強調する形を落とす。
+    fn state_with_two_local_labels(head: Option<&str>) -> AppState {
+        let mut state = state_with_commits(&["first"]);
+        let oid = state.graph.lines[0].commit.oid;
+        state.graph.refs = RefIndex::from_iter(["main", "a-first"].map(|name| {
+            (
+                oid,
+                RefLabel::Local {
+                    name: name.to_string(),
+                },
+            )
+        }));
+        let branches = fake_branch_list(vec![fake_branch("a-first"), fake_branch("main")], head);
+        let _ = deliver_branches(&mut state, Ok(branches));
+        // 読み込みはカーソルを HEAD の行へ座らせるので、先頭へ戻して HEAD でない行を選ぶ。
+        state.branches.cursor = 0;
+        state
+    }
+
     #[test]
     fn the_head_branch_label_is_emphasised() {
         // 既定の `theme.graph_head` は "bold"。色として読むと強調がまるごと消える。
-        let mut state = state_with_commits(&["first"]);
-        let oid = state.graph.lines[0].commit.oid;
-        state.graph.refs = RefIndex::from_iter([(
-            oid,
-            RefLabel::Local {
-                name: "main".to_string(),
-                is_head: true,
-            },
-        )]);
+        // **HEAD はブランチ一覧の HEAD の行から引く**（02 の「refs とラベル」）。
+        let state = state_with_two_local_labels(Some("main"));
 
+        let line = &draw(&state, TermSize::default())[FIRST_ROW];
         let terminal = terminal_with(&state, TermSize::default());
         let buffer = terminal.backend().buffer();
 
         let y = FIRST_ROW as u16;
-        let x = column_of(buffer, y, "[").expect("ラベルが描かれていません");
-        assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
+        let head = col_of(line, "[main]");
+        let other = col_of(line, "[a-first]");
+        assert!(other < head, "並びが Local の名前順ではありません");
+        assert!(buffer[(head, y)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer[(other, y)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn no_label_is_emphasised_when_head_is_detached() {
+        // 否定だけだと「強調を一切しない」実装でも通るので、同じラベルで HEAD を
+        // `main` に置いた側が強調に変わるところまで 1 本で見る。
+        let bold = |head: Option<&str>| {
+            let state = state_with_two_local_labels(head);
+            let line = &draw(&state, TermSize::default())[FIRST_ROW];
+            let terminal = terminal_with(&state, TermSize::default());
+            let buffer = terminal.backend().buffer();
+            let y = FIRST_ROW as u16;
+            ["[main]", "[a-first]"].map(|label| {
+                buffer[(col_of(line, label), y)]
+                    .modifier
+                    .contains(Modifier::BOLD)
+            })
+        };
+
+        assert_eq!(bold(None), [false, false]);
+        assert_eq!(bold(Some("main")), [true, false]);
     }
 
     #[test]

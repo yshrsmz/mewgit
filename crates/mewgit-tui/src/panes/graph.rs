@@ -58,6 +58,7 @@ pub fn render(frame: &mut Frame, outer: Rect, state: &AppState) {
     let view = View {
         state,
         head: theme::style(&state.config.theme.graph_head),
+        head_name: state.branches.head_branch().map(|b| b.name.as_str()),
         // 罫線の桁は、いま描く行の最大レーン数に揃える（07）。読み込み済みの
         // 全行で最大を取ると、複雑な履歴で桁が育ち続ける。
         lanes: shown()
@@ -91,6 +92,10 @@ struct View<'a> {
     state: &'a AppState,
     /// HEAD のブランチラベルのスタイル。
     head: Style,
+    /// HEAD のブランチ名。detached / unborn / 一覧がまだ無いときは `None`。
+    /// **ブランチ一覧の HEAD の行から引く** —— ラベルと同じ `RepoSnapshot` で届くので、
+    /// Branches ペインの `*` と食い違わない（02 の「refs とラベル」）。
+    head_name: Option<&'a str>,
     /// 罫線に使うレーン数。
     lanes: usize,
     palette: Vec<Color>,
@@ -173,7 +178,7 @@ impl<'a> View<'a> {
         for label in labels {
             // 飾りは組み立てずに 3 つのスパンに分ける。毎フレーム全行ぶん `format!` する
             // 必要が無く、HEAD の強調も括弧まで掛かる。
-            let style = label_style(label, self.head);
+            let style = self.label_style(label);
             let (open, close) = brackets(label);
             spans.push(Span::styled(open, style));
             spans.push(Span::styled(label.name(), style));
@@ -184,6 +189,14 @@ impl<'a> View<'a> {
         spans.push(Span::raw(line.commit.summary.as_str()));
 
         Line::from(spans)
+    }
+
+    /// ラベルの見た目。HEAD のブランチだけ強調する。
+    fn label_style(&self, label: &RefLabel) -> Style {
+        match label {
+            RefLabel::Local { name } if Some(name.as_str()) == self.head_name => self.head,
+            _ => Style::default(),
+        }
     }
 }
 
@@ -201,14 +214,6 @@ fn brackets(label: &RefLabel) -> (&'static str, &'static str) {
     }
 }
 
-/// ラベルの見た目。HEAD のブランチだけ強調する。
-fn label_style(label: &RefLabel, head_style: Style) -> Style {
-    match label {
-        RefLabel::Local { is_head: true, .. } => head_style,
-        _ => Style::default(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +222,7 @@ mod tests {
     };
     use mewgit_core::app::{init, update, Msg, TermSize};
     use mewgit_core::git_read::{GitReadError, RefIndex, RefLabel};
+    use mewgit_core::test_util::{deliver_branches, fake_branch, fake_branch_list};
     use ratatui::buffer::Buffer;
     use ratatui::style::Modifier;
 
@@ -334,7 +340,6 @@ mod tests {
                 oid,
                 RefLabel::Local {
                     name: "main".to_string(),
-                    is_head: true,
                 },
             ),
             (
@@ -367,25 +372,69 @@ mod tests {
         );
     }
 
+    /// `label` が描かれた桁。ラベルは 1 セル 1 字なので、桁ごとの字を繋いで探す。
+    fn label_column(buffer: &Buffer, y: u16, label: &str) -> Option<u16> {
+        let row: Vec<&str> = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect();
+        let width = label.chars().count();
+        (0..row.len().saturating_sub(width))
+            .find(|&x| row[x..x + width].concat() == label)
+            .map(|x| x as u16)
+    }
+
+    /// 同じコミットに `a-first` と `main` のラベルを載せ、ブランチ一覧を `head` で届けた状態。
+    ///
+    /// **HEAD でない `a-first` を一覧の先頭（= 選択中の行）とラベルの先頭に置く**
+    /// （`.claude/rules/testing.md` の「読み元を移すリファクタの見張り」）—— HEAD の名前を
+    /// 一覧の先頭や選択中の行から取る形、最初の Local ラベルを強調する形を落とす。
+    fn state_with_two_local_labels(head: Option<&str>) -> AppState {
+        let mut state = state_with_commits(&["first"]);
+        let oid = state.graph.lines[0].commit.oid;
+        state.graph.refs = RefIndex::from_iter(["main", "a-first"].map(|name| {
+            (
+                oid,
+                RefLabel::Local {
+                    name: name.to_string(),
+                },
+            )
+        }));
+        let branches = fake_branch_list(vec![fake_branch("a-first"), fake_branch("main")], head);
+        let _ = deliver_branches(&mut state, Ok(branches));
+        // 読み込みはカーソルを HEAD の行へ座らせるので、先頭へ戻して HEAD でない行を選ぶ。
+        state.branches.cursor = 0;
+        state
+    }
+
     #[test]
     fn the_head_branch_label_is_emphasised() {
         // 既定の `theme.graph_head` は "bold"。色として読むと強調がまるごと消える。
-        let mut state = state_with_commits(&["first"]);
-        let oid = state.graph.lines[0].commit.oid;
-        state.graph.refs = RefIndex::from_iter([(
-            oid,
-            RefLabel::Local {
-                name: "main".to_string(),
-                is_head: true,
-            },
-        )]);
+        // **HEAD はブランチ一覧の HEAD の行から引く**（02 の「refs とラベル」）。
+        let state = state_with_two_local_labels(Some("main"));
 
         let terminal = terminal_with(&state, TermSize::default());
         let buffer = terminal.backend().buffer();
 
         let y = FIRST_ROW as u16;
-        let x = column_of(buffer, y, "[").expect("ラベルが描かれていません");
-        assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
+        let head = label_column(buffer, y, "[main]").expect("ラベルが描かれていません");
+        let other = label_column(buffer, y, "[a-first]").expect("ラベルが描かれていません");
+        assert!(other < head, "並びが Local の名前順ではありません");
+        assert!(buffer[(head, y)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer[(other, y)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn no_label_is_emphasised_when_head_is_detached() {
+        let state = state_with_two_local_labels(None);
+
+        let terminal = terminal_with(&state, TermSize::default());
+        let buffer = terminal.backend().buffer();
+
+        let y = FIRST_ROW as u16;
+        for label in ["[main]", "[a-first]"] {
+            let x = label_column(buffer, y, label).expect("ラベルが描かれていません");
+            assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD), "{label}");
+        }
     }
 
     #[test]

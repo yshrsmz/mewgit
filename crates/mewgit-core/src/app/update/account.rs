@@ -1229,7 +1229,6 @@ mod tests {
                 oid,
                 RefLabel::Local {
                     name: "main".to_string(),
-                    is_head: true,
                 },
             )]),
             // **ブランチ一覧も同じ返信に乗る**（02 の「ブランチ一覧」）。

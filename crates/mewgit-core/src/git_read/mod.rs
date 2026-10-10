@@ -317,8 +317,9 @@ impl FromIterator<(Oid, RefLabel)> for RefIndex {
 /// ref 1 件の表示用ラベル。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefLabel {
-    /// ローカルブランチ。`main`。
-    Local { name: String, is_head: bool },
+    /// ローカルブランチ。`main`。**HEAD かどうかは持たない** —— どの行が HEAD かは
+    /// [`BranchList`] だけが答える（02 の「refs とラベル」）。
+    Local { name: String },
     /// リモート追跡ブランチ。`origin/main`。remote 名とブランチ名を分けないのは、
     /// `ui` が `{origin/main}` と一続きで描くだけのため。
     Remote { name: String },
@@ -330,9 +331,7 @@ impl RefLabel {
     /// 表示名。種別ごとの飾り（`[main]` / `{origin/main}` / `<v1.0>`）は `ui` が付ける。
     pub fn name(&self) -> &str {
         match self {
-            RefLabel::Local { name, .. } | RefLabel::Remote { name } | RefLabel::Tag { name } => {
-                name
-            }
+            RefLabel::Local { name } | RefLabel::Remote { name } | RefLabel::Tag { name } => name,
         }
     }
 

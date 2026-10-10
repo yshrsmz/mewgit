@@ -619,7 +619,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       別に足すと判定が 2 本になるので採らなかった。テストの一覧は `fake_branch(name)` と
       `fake_branch_list(rows, head)`（名前に行が無ければ落とす）/ `fake_head_list(row)` で組む
       （02 の「head」）
-- [ ] グラフのラベルの `RefLabel::Local.is_head` を消し、HEAD の強調も `BranchList` から引く。
+- [x] グラフのラベルの `RefLabel::Local.is_head` を消し、HEAD の強調も `BranchList` から引く。
       **上のタスクで「どの行が HEAD か」は `BranchList` に閉じたが、グラフの `[main]` の強調は
       `refs()` が HEAD をもう一度解決して付けた旗を読んでいる**（上のタスクの `/simplify` の
       altitude が拾った）。`refs()` と `branches()` は順に読むので、あいだに外で HEAD が動くと
@@ -628,7 +628,10 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `ui::panes::graph` の `label_style` が `state.branches.head_branch()` の名前と
       `RefLabel::Local` の名前を比べる（同じ `RepoSnapshot` で届くので窓も消える）。
       ラベルを組むテスト（tui の `panes::graph`、core の `account`、`tests/git_read.rs` の
-      `refs_*`）を組み直すことになる（02 の「refs とラベル」）
+      `refs_*`）を組み直すことになる（02 の「refs とラベル」）。**決めた形** —— `label_style`
+      は `View` に載せ、`head_name` を 1 フレームに 1 回 `head_branch()` から引く。テストは
+      HEAD でない `a-first` を一覧の先頭・選択中の行・ラベルの先頭に置き、一覧の先頭や
+      選択中の行から名前を取る変異が落ちることを確かめた。detached では強調しない
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

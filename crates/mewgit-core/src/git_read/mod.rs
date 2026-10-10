@@ -349,7 +349,8 @@ impl RefLabel {
 pub enum Head<'a> {
     Branch(&'a Branch),
     Detached(Oid),
-    /// コミットが 1 つも無いリポジトリ。名前は `HEAD` の symbolic target から取る。
+    /// コミットが 1 つも無いリポジトリ。名前は `HEAD` の symbolic target（symref の連鎖を
+    /// 辿った先）から取る。
     Unborn(&'a str),
 }
 
@@ -531,7 +532,7 @@ pub enum WorktreeSection {
 impl WorktreeSnapshot {
     /// 各区画を `path` 順に並べ替える。
     ///
-    /// libgit2 の列挙順には依存しない（[`RefIndex::new`] と同じ理由）。区画を手で
+    /// libgit2 の列挙順には依存しない（`RefIndex` の `FromIterator` と同じ理由）。区画を手で
     /// 並べる代わりに分解束縛にしてあるのは、区画を足したときに並べ替え漏れが
     /// コンパイルエラーになるようにするため（[`section`](Self::section) と同じ狙い）。
     pub(crate) fn sort_sections(&mut self) {

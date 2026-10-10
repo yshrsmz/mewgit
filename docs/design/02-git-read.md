@@ -116,8 +116,9 @@ pub enum RefLabel {
   2 重になる
 - **`refs/heads/` の下の symbolic ref（`git symbolic-ref refs/heads/alias refs/heads/main`）は
   一覧にもラベルにも出す。** git 自身が両方に出す —— `git branch -v` は `alias` を 1 行と
-  して並べ、`git log --decorate` は `(HEAD -> main, alias)` と出す。`git switch alias` は HEAD を
-  `refs/heads/main` にし（main に居る扱い）、`git branch -d alias` は symref だけを消す。
+  して並べ、`git log --decorate` は `(HEAD -> main, alias)` と出す。`git switch alias` のあと
+  `.git/HEAD` は `ref: refs/heads/alias` だが、git は `On branch main` / `* main` と読む（HEAD の
+  名前は連鎖を辿った先。下の「head」）。`git branch -d alias` は symref だけを消す。
   `branches()` は `references_glob("refs/heads/*")` で symref も行にする（git2 0.21）ので、
   一覧から引くラベルにも `[alias] [main]` が並ぶ。ラベルだけ落とすには `Branch` に
   symbolic かどうかを持たせることになり、一覧とラベルの規則が再び 2 つに割れる
@@ -173,7 +174,7 @@ Branches ペイン（07）が使い、グラフのローカルブランチのラ
   （libgit2 は接頭辞のあるグロブでディレクトリの走査を絞る。`refdb_fs.c` の
   `iter_load_optimize_prefix`）。`*` は `/` も跨ぐので `feat/x` も入る。
   git2 の `branches()` は使わない — 内部は絞り込みの無い `references()` と同じ
-- **HEAD の行は `HEAD` の symbolic target から `refs/heads/` を外した名前**で決め、HEAD は
+- **HEAD の行は `HEAD` の symbolic target（symref の連鎖を辿った先）から `refs/heads/` を外した名前**で決め、HEAD は
   1 回だけ解決する（`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直す）。unborn と
   detached はどちらも「どの行も HEAD ではない」に落ちる。**HEAD の状態もこの 1 回の解決から
   出す**（`BranchList::head`。下の「head」）
@@ -363,7 +364,7 @@ pub enum RowlessHead { Detached(Oid), Unborn { name: String } }  // 行が無い
 ```
 
 - 通常は `Branch`（HEAD の行そのもの）、detached HEAD は `Detached(oid)`、コミットが 1 つも
-  無い（unborn）ときは `Unborn`（名前は `HEAD` の symbolic target から取る）
+  無い（unborn）ときは `Unborn`（名前は `HEAD` の symbolic target を辿った先から取る）
 - **フィールドは private で、組み立ては `new` だけ。** `head` の名前の行があればそれが HEAD で、
   無いときだけ `rowless` を呼ぶ。**行無しの HEAD を値ではなく closure で受ける** —— 値で
   受けると「行があるのに `Detached` も渡された」組が引数で書ける。元は `head: HeadInfo` と
@@ -392,8 +393,18 @@ pub enum RowlessHead { Detached(Oid), Unborn { name: String } }  // 行が無い
   | symbolic target が非 UTF-8 | `Err(NonUtf8Head)`（下の「非 UTF-8 の扱い」） |
   | target が一覧の行に当たる | `Branch`（その行） |
   | target の行を peel できずに落とした | `Err`（下） |
-  | 行が無く、HEAD を `resolve()` で辿った先が無い | `Unborn { name }`（名前は HEAD の直の target） |
+  | 行が無く、HEAD を `resolve()` で辿った先が無い | `Unborn { name }`（名前は下の「target」） |
   | 行が無いが、辿った先は在る | `Detached(peel した oid)` |
+
+  **表の「target」は、HEAD の symbolic target から `refs/heads/` の中で symref の連鎖を辿った
+  先**（`symbolic_end`）。git は HEAD → `refs/heads/alias` → `refs/heads/main` を `On branch main`、
+  HEAD → `alias` → 無い `refs/heads/missing` を `On branch missing`（unborn）と読む（実測
+  2026-10-10、git 2.56.0）。元は 1 段で止めていたので、`git switch alias` のあと `alias` の行が
+  HEAD になり、グラフの強調も `-u` の提案も別のブランチのものになった（`/code-review` が
+  拾った）。`refs/heads/` の外へ出る段は辿らない（表の下の `alias` → `refs/remotes/origin/main`
+  の形を `alias` の行のままにするため）。輪になった連鎖は段数で打ち切り、止まった名前の行は
+  peel できずに落ちているので `Err` になる（git も `git branch` が `failed to resolve HEAD` で
+  落ちる）
 
   **行が無いときは HEAD を `resolve()` で辿る**（symbolic の連鎖も辿る。`repo.head()` と
   同じ）。target の ref を名前で引くだけだと、HEAD → `refs/heads/alias` →

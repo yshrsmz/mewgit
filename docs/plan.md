@@ -654,7 +654,10 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       が「同じ値を状態に 2 つ持つ」と拾い、ユーザーと決めて読み元を一覧の 1 つにした
       （2026-10-10）。symref は一覧にもラベルにも出す（git2 も `alias` を行にすると実測し、
       `git log --decorate` と同じ見え方。同じ日にユーザーと決めた）。テストは `refs()` が
-      `refs/heads/*` も読む変異と、ラベルを HEAD の行だけから引く変異が落ちることを確かめた
+      `refs/heads/*` も読む変異と、ラベルを HEAD の行だけから引く変異が落ちることを確かめた。
+      **同じ PR で HEAD の名前も symref の連鎖を辿った先にした** —— `git switch alias` のあと
+      `.git/HEAD` は `alias` を指すが git は `On branch main` と読む。1 段で止めていたので
+      `[alias]` が強調されていた（`/code-review` が拾った。02 の「head」）
 - [x] `-u` の提案を git の push の規則に揃える。**fetch の既定リモート
       （`update::default_remote`）とは別の規則**で、git は
       `branch.<name>.pushRemote` > `remote.pushDefault` > fetch の規則の順に見る。

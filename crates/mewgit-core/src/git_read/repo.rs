@@ -192,6 +192,13 @@ impl RepoReader {
         let head_target = head
             .symbolic_target()
             .map_err(|_| GitReadError::NonUtf8Head)?;
+        // **symbolic ref の連鎖は最後まで辿る**（02 の「head」）。`refs/heads/alias` →
+        // `refs/heads/main` を指す HEAD を、git は `On branch main` と読む。1 段で止めると
+        // `alias` の行が HEAD になり、強調も追跡設定も別のブランチのものになる。
+        let head_target = head_target
+            .map(|target| self.symbolic_end(target))
+            .transpose()?;
+        let head_target = head_target.as_deref();
 
         // **`refs/heads/*` だけを列挙する。** `references()` で全部辿ってから捨てると、
         // loose ref のリポジトリで `refs/remotes/*` と `refs/tags/*` のファイルまで
@@ -262,6 +269,35 @@ impl RepoReader {
             None => Ok(RowlessHead::Detached(head.peel_to_commit()?.id())),
             Some(target) => rowless_head(&head, target),
         })
+    }
+
+    /// symbolic ref `target` から、`refs/heads/` の中で連鎖を辿った先の ref 名。行き止まり
+    /// （指す先の ref が無い）ならそこで止まる —— git は HEAD → `alias` → 無い ref を
+    /// `On branch <無い名前>` と読む（unborn。実測 2026-10-10、git 2.56.0）。
+    ///
+    /// **`refs/heads/` の外へ出る段は辿らない。** `refs/heads/alias` →
+    /// `refs/remotes/origin/main` は `alias` の行のままにする（02 の「head」の表）。
+    ///
+    /// **輪になった連鎖でも止まるように段数を打ち切る。** そこで止まった名前の行は peel
+    /// できずに一覧から落ちているので、HEAD は `rowless_head` が `Err` にする（git も
+    /// `git branch` が `failed to resolve HEAD` で落ちる）。
+    fn symbolic_end(&self, target: &str) -> Result<String, GitReadError> {
+        let mut name = target.to_string();
+        for _ in 0..SYMBOLIC_DEPTH {
+            let reference = match self.repo.find_reference(&name) {
+                Ok(reference) => reference,
+                Err(err) if err.code() == ErrorCode::NotFound => break,
+                Err(err) => return Err(err.into()),
+            };
+            match reference
+                .symbolic_target()
+                .map_err(|_| GitReadError::NonUtf8Head)?
+            {
+                Some(next) if next.starts_with("refs/heads/") => name = next.to_string(),
+                _ => break,
+            }
+        }
+        Ok(name)
     }
 
     /// stash の一覧。`stash@{0}`（いちばん新しいもの）から順に並ぶ。
@@ -373,7 +409,11 @@ impl RepoReader {
     }
 }
 
-/// HEAD が symbolic（target は `target`）なのに、一覧に HEAD の行が無いときの状態。
+/// [`RepoReader::symbolic_end`] が辿る段数の上限。
+const SYMBOLIC_DEPTH: usize = 10;
+
+/// HEAD が symbolic（target は連鎖を辿った先の `target`）なのに、一覧に HEAD の行が
+/// 無いときの状態。
 ///
 /// **HEAD を `resolve()` で辿る**（symbolic の連鎖も辿る。`repo.head()` と同じ）。辿った
 /// 先が無ければ unborn —— `refs/heads/a` → `refs/heads/missing` のような連鎖も含む。

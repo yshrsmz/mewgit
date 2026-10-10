@@ -448,7 +448,8 @@ fn branches_follows_a_dangling_symbolic_chain_to_an_unborn_head() {
 
     let list = reader.branches().unwrap();
 
-    assert_eq!(list.head(), Head::Unborn("alias"));
+    // 名前は連鎖を辿った先。git も `On branch missing` と読む（git 2.56.0 で確認）。
+    assert_eq!(list.head(), Head::Unborn("missing"));
     assert_eq!(head_row_name(&list), None);
 }
 
@@ -871,8 +872,50 @@ fn branches_list_a_symbolic_branch_like_git_branch() {
         .map(|b| (b.name.as_str(), b.oid))
         .collect();
     assert_eq!(rows, [("alias", first), ("main", first)]);
-    // HEAD は symref ではなく指す先の行。
     assert_eq!(head_row_name(&list), Some("main"));
+}
+
+#[test]
+fn branches_stop_following_the_head_where_the_chain_leaves_refs_heads() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    repo.git(&["update-ref", "refs/remotes/origin/main", &first.to_string()]);
+    repo.git(&[
+        "symbolic-ref",
+        "refs/heads/alias",
+        "refs/remotes/origin/main",
+    ]);
+    repo.git(&["symbolic-ref", "HEAD", "refs/heads/alias"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let list = reader.branches().unwrap();
+
+    // `refs/heads/` の外までは辿らず、`alias` の行のまま（02 の「head」の表）。辿ると
+    // 行の無い名前になって `Detached` に落ちる。
+    assert_eq!(head_row_name(&list), Some("alias"));
+}
+
+#[test]
+fn branches_follow_a_head_on_a_symbolic_branch_to_where_it_points() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["symbolic-ref", "refs/heads/alias", "refs/heads/main"]);
+    repo.git(&["branch", "side"]);
+    repo.git(&["switch", "-q", "side"]);
+    // `.git/HEAD` は `ref: refs/heads/alias` になるが、git は `On branch main` と読み、
+    // `git branch` も `* main` を出す（git 2.56.0 で確認）。
+    repo.git(&["switch", "-q", "alias"]);
+    assert_eq!(
+        fs::read_to_string(repo.path().join(".git/HEAD")).unwrap(),
+        "ref: refs/heads/alias\n"
+    );
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let list = reader.branches().unwrap();
+
+    // 1 段で止めると `alias` の行が HEAD になる。
+    assert_eq!(head_row_name(&list), Some("main"));
+    assert!(matches!(list.head(), Head::Branch(b) if b.name == "main"));
 }
 
 #[test]

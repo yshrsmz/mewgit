@@ -67,7 +67,7 @@ mod tests {
     };
     use mewgit_core::app::{update, AppState, Cmd, Key, Msg, Pane, TermSize};
     use mewgit_core::git_read::{GitReadError, StashEntry};
-    use mewgit_core::test_util::{deliver_branches, fake_branch, fake_stash};
+    use mewgit_core::test_util::{deliver_branches, fake_branch, fake_branch_list, fake_stash};
 
     /// 一覧が届き、Stash のタブを出した状態。
     fn on_stash_tab(entries: Vec<StashEntry>) -> AppState {
@@ -163,9 +163,9 @@ mod tests {
             .collect();
         with_stashes(&mut state, Ok(stashes));
         let branches = (0..1234)
-            .map(|n| fake_branch(&format!("b{n:04}"), n == 0))
+            .map(|n| fake_branch(&format!("b{n:04}")))
             .collect();
-        let _ = deliver_branches(&mut state, Ok(branches));
+        let _ = deliver_branches(&mut state, Ok(fake_branch_list(branches, Some("b0000"))));
 
         let lines = draw(&state, SIZE);
         let header = &lines[row_of(&lines, "Branches (1234)") as usize];

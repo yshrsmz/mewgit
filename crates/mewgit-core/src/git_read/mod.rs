@@ -381,9 +381,10 @@ pub enum RowlessHead {
 
 /// [`RepoReader::branches`] の答え。ローカルブランチの一覧と HEAD の状態。
 ///
-/// **フィールドは private で、組み立ては [`BranchList::new`] だけ。** HEAD の状態は
-/// `is_head` の行から導くので、「`Branch` ⇔ `is_head` の行がある」が作りから成り立つ
-/// （02 の「head」）。読み手は [`BranchList::head`] を網羅 `match` する。
+/// **フィールドは private で、組み立ては [`BranchList::new`] だけ。** どの行が HEAD かは
+/// ここだけが持ち（`Branch` に旗を持たせない）、HEAD の状態もそこから導くので、
+/// 「`Branch` ⇔ HEAD の行がある」が作りから成り立つ（02 の「head」）。読み手は
+/// [`BranchList::head`] を網羅 `match` し、行の位置が要るときだけ [`BranchList::head_row`] を読む。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchList {
     /// 名前順（02 の「ブランチ一覧」）。
@@ -399,18 +400,24 @@ enum HeadSlot {
 }
 
 impl BranchList {
-    /// 一覧から組む。**`is_head` の行があればそれが HEAD で、`rowless` は呼ばない。**
-    /// 行が無いときだけ `rowless` で HEAD を求める。
+    /// 一覧から組む。**`head`（HEAD の指すブランチの名前）の行があればそれが HEAD で、
+    /// `rowless` は呼ばない。** 行が無いときだけ `rowless` で HEAD を求める。
     ///
     /// **行無しの HEAD を値ではなく closure で受ける。** 値で受けると「行があるのに
     /// `Detached` も渡された」組が引数で書ける（`.claude/rules/rust-coding.md` の
-    /// 「導出できる値を引数に取らせない」）。`is_head` の行が 2 つあれば先の行を採る
-    /// （HEAD の target は 1 つなので、`git_read` の列挙からは起きない）。
+    /// 「導出できる値を引数に取らせない」）。
+    ///
+    /// **`head` を受けても `rowless` は畳めない。** 名前があるのに行が無い理由は unborn
+    /// だけではなく、HEAD の行を peel できずに落とした形もある（`git_read` はそこを
+    /// `Err` にする）。どちらかを決められるのは ref を持っている呼び手だけなので、
+    /// `RowlessHead::Unborn` の名前は `head` と同じ値でも closure の側が組む。
     pub fn new<E>(
         branches: Vec<Branch>,
+        head: Option<&str>,
         rowless: impl FnOnce() -> Result<RowlessHead, E>,
     ) -> Result<Self, E> {
-        let head = match branches.iter().position(|branch| branch.is_head) {
+        let row = head.and_then(|head| branches.iter().position(|branch| branch.name == head));
+        let head = match row {
             Some(row) => HeadSlot::Row(row),
             None => HeadSlot::Rowless(rowless()?),
         };
@@ -420,6 +427,17 @@ impl BranchList {
     /// 名前順の一覧。
     pub fn branches(&self) -> &[Branch] {
         &self.branches
+    }
+
+    /// HEAD の行の位置（[`BranchList::branches`] の添字）。detached / unborn では `None`。
+    ///
+    /// [`BranchList::head`] の `Branch` の腕と同じ添字から導く。位置が要る読み手
+    /// （カーソルの座り直し、行ごとの印）のためにある。
+    pub fn head_row(&self) -> Option<usize> {
+        match self.head {
+            HeadSlot::Row(row) => Some(row),
+            HeadSlot::Rowless(_) => None,
+        }
     }
 
     /// HEAD の状態。
@@ -459,7 +477,6 @@ pub struct Branch {
     /// upstream に対する ahead / behind。
     pub ahead: usize,
     pub behind: usize,
-    pub is_head: bool,
 }
 
 /// 追跡 ref から読めた値。
@@ -838,22 +855,30 @@ mod tests {
 
     #[test]
     fn a_branch_list_takes_head_from_its_head_row_and_asks_only_without_one() {
-        // HEAD の行は先頭ではない（添字を取り違える変異を落とす）。行があれば行無しの
-        // HEAD は求めない —— 求めると「行があるのに `Detached`」の組を値で渡せる（02 の「head」）。
-        let rows = vec![fake_branch("another", false), fake_branch("main", true)];
-        let list = BranchList::new(rows, || -> Result<RowlessHead, Infallible> {
+        // HEAD の行は先頭でも末尾でもない（添字を取り違える変異を落とす）。行があれば
+        // 行無しの HEAD は求めない —— 求めると「行があるのに `Detached`」の組を値で渡せる
+        // （02 の「head」）。
+        let rows = vec![
+            fake_branch("another"),
+            fake_branch("main"),
+            fake_branch("zzz"),
+        ];
+        let list = BranchList::new(rows, Some("main"), || -> Result<RowlessHead, Infallible> {
             panic!("HEAD の行があるのに行無しの HEAD を求めた")
         })
         .unwrap();
         assert!(matches!(list.head(), Head::Branch(b) if b.name == "main"));
+        assert_eq!(list.head_row(), Some(1));
 
-        let rows = vec![fake_branch("main", false)];
-        let list = BranchList::new(rows, || {
+        // 名前が行に当たらなければ（unborn）、名前があっても行無しの HEAD を求める。
+        let rows = vec![fake_branch("main")];
+        let list = BranchList::new(rows, Some("unborn"), || {
             Ok::<_, Infallible>(RowlessHead::Detached(fake_oid(7)))
         })
         .unwrap();
         assert_eq!(list.head(), Head::Detached(fake_oid(7)));
         assert_eq!(list.head().branch(), None);
+        assert_eq!(list.head_row(), None);
     }
 
     #[test]

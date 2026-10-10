@@ -760,8 +760,9 @@ mod tests {
     use crate::github::{CheckSummary, ReviewSummary};
     use crate::test_util::{
         deliver_pr_details, fake_account, fake_branch, fake_branch_list, fake_branch_list_or,
-        fake_logins, fake_oid, fake_pull_request, fake_rate_limit, fake_repo_snapshot, fake_target,
-        fetch_pr_details, pr_list_loaded as list_msg, put_on_branch, reply, start_pr_details,
+        fake_head_list, fake_logins, fake_oid, fake_pull_request, fake_rate_limit,
+        fake_repo_snapshot, fake_target, fetch_pr_details, pr_list_loaded as list_msg,
+        put_on_branch, reply, start_pr_details,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -788,8 +789,8 @@ mod tests {
     /// **いまの行を書き換えて組み直す** —— `Branch` のリテラルを写すと、フィールドが
     /// 増えるたびに直す構築サイトが 1 つ増える。
     fn track(state: &mut AppState, remote: &str, merge: &str) {
-        edit_rows(state, |rows| {
-            let Some(head) = rows.iter_mut().find(|b| b.is_head) else {
+        edit_rows(state, |rows, name| {
+            let Some(head) = rows.iter_mut().find(|b| b.name == name) else {
                 unreachable!("put_on_branch が HEAD の行を置いている");
             };
             head.upstream_config = Some(UpstreamConfig {
@@ -799,12 +800,20 @@ mod tests {
         });
     }
 
-    /// ブランチ一覧の行を書き換えて届け直す。HEAD は `is_head` の行から導き直す
+    /// ブランチ一覧の行を書き換えて届け直す。HEAD はいまの HEAD の名前を持ち越す
     /// （[`fake_branch_list`]。一覧のフィールドは private で、行だけを書き換えられない）。
-    fn edit_rows(state: &mut AppState, edit: impl FnOnce(&mut Vec<Branch>)) {
+    /// `edit` にはその名前も渡す。
+    fn edit_rows(state: &mut AppState, edit: impl FnOnce(&mut Vec<Branch>, &str)) {
+        let head = head_name(state);
         let mut rows = state.branches.branches().to_vec();
-        edit(&mut rows);
-        state.branches.loaded(fake_branch_list(rows));
+        edit(&mut rows, &head);
+        state.branches.loaded(fake_branch_list(rows, Some(&head)));
+    }
+
+    /// いまの HEAD の行の名前。一覧を組み直すときに持ち越す。
+    fn head_name(state: &AppState) -> String {
+        let head = state.branches.head_branch().expect("HEAD の行がありません");
+        head.name.clone()
     }
 
     /// `owner` の fork から出た、同じブランチ名の PR。
@@ -1007,7 +1016,7 @@ mod tests {
         // 実物の detached はブランチ一覧に HEAD の行も無い（判定はそちらを読む）。
         let mut state = state_for_create("feat/x");
         state.branches.loaded(fake_branch_list_or(
-            vec![fake_branch("feat/x", false)],
+            vec![fake_branch("feat/x")],
             RowlessHead::Detached(fake_oid(1)),
         ));
         let cmd = press(&mut state, 'N');
@@ -1390,7 +1399,8 @@ mod tests {
         let deliver_copies = |state: &mut AppState, copies: &[(&str, bool)]| {
             let mut snapshot = fake_repo_snapshot();
             snapshot.remotes = state.repo.remotes.clone();
-            snapshot.branches = fake_branch_list(state.branches.branches().to_vec());
+            snapshot.branches =
+                fake_branch_list(state.branches.branches().to_vec(), Some(&head_name(state)));
             snapshot.refs = copies_of(&state.branches, copies);
             let _ = update(state, Msg::RepoInfoLoaded(Box::new(Ok(snapshot))));
             assert!(state.github_block().is_none(), "GitHub 側で先に断られる");
@@ -1605,7 +1615,7 @@ mod tests {
         let mut snapshot = fake_repo_snapshot();
         // detached ではどの行にも HEAD の印が付かない（実物では同じ返信が運ぶ）。
         snapshot.branches = fake_branch_list_or(
-            vec![fake_branch("feat/x", false)],
+            vec![fake_branch("feat/x")],
             RowlessHead::Detached(fake_oid(1)),
         );
         snapshot.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
@@ -1696,7 +1706,7 @@ mod tests {
         // unborn でも同じものが出る（#83 の「HEAD のブランチの PR 1 件」との違い）。
         let mut state = state_on_branch("feat/x");
         state.branches.loaded(fake_branch_list_or(
-            vec![fake_branch("feat/x", false)],
+            vec![fake_branch("feat/x")],
             RowlessHead::Detached(fake_oid(1)),
         ));
         assert_eq!(reload(&state), Cmd::FetchPrList);
@@ -1737,7 +1747,7 @@ mod tests {
         let cmd = update(
             &mut state,
             Msg::RepoInfoLoaded(Box::new(Ok(RepoSnapshot {
-                branches: fake_branch_list(vec![fake_branch("feat/x", true)]),
+                branches: fake_head_list(fake_branch("feat/x")),
                 ..fake_repo_snapshot()
             }))),
         );
@@ -1955,15 +1965,12 @@ mod tests {
             "git@github.com:bob/mewgit.git",
             "refs/heads/main",
         );
-        let other = Branch {
-            is_head: false,
-            ..tracking_branch(
-                "alice/main",
-                "git@github.com:alice/mewgit.git",
-                "refs/heads/main",
-            )
-        };
-        edit_rows(&mut state, |rows| rows.insert(0, other));
+        let other = tracking_branch(
+            "alice/main",
+            "git@github.com:alice/mewgit.git",
+            "refs/heads/main",
+        );
+        edit_rows(&mut state, |rows, _| rows.insert(0, other));
         state.branches.cursor = 0;
 
         deliver(
@@ -1991,9 +1998,7 @@ mod tests {
             ],
         );
         set_copies(&mut state, &[("fork", true)]);
-        edit_rows(&mut state, |rows| {
-            rows.insert(0, fake_branch("alpha", false))
-        });
+        edit_rows(&mut state, |rows, _| rows.insert(0, fake_branch("alpha")));
         state.branches.cursor = 0;
 
         deliver(&mut state, vec![pr_from(82, "feat", "bob")]);
@@ -2612,10 +2617,10 @@ mod tests {
     /// PR の取り出しの前提（01 の「PR チェックアウト（`Enter`）」）。リモートは
     /// `origin` 1 本（`target` と同じ `yshrsmz/mewgit`）、ローカルのブランチは
     /// `branches`、PRs ペインにフォーカス。**一覧はまだ届けない**（届けるのは各テスト）。
-    fn state_for_checkout(branches: &[(&str, bool)]) -> AppState {
+    fn state_for_checkout(branches: &[&str]) -> AppState {
         let mut state = state_on_branch("main");
         state.repo.remotes = remotes_of(&[("origin", "git@github.com:yshrsmz/mewgit.git")]);
-        load_branches(&mut state, branches);
+        load_branches(&mut state, branches, Some("main"));
         assert_eq!(state.branches.load(), ListLoad::Loaded);
         state.focus = Pane::Prs;
         state
@@ -2635,7 +2640,7 @@ mod tests {
         // 在るのと同じ扱い**（一覧の「いま居る」は外の `git switch` で古くなる。05）。
         // **いま居る行を先頭に置く** —— 起動直後のカーソルは現ブランチの PR に座るので、
         // そこから `j` で下る。
-        let mut state = state_for_checkout(&[("main", true), ("feat/b", false)]);
+        let mut state = state_for_checkout(&["main", "feat/b"]);
         deliver(
             &mut state,
             vec![
@@ -2672,7 +2677,7 @@ mod tests {
 
     #[test]
     fn a_fork_pr_is_tracked_at_the_fork_url_in_the_shape_of_the_remote() {
-        let mut state = state_for_checkout(&[("main", true)]);
+        let mut state = state_for_checkout(&["main"]);
         deliver(&mut state, vec![pr_from(7, "fix", "bob")]);
 
         let plan = checkout_of(press_code(&mut state, KeyCode::Enter));
@@ -2699,7 +2704,7 @@ mod tests {
     fn the_same_repo_is_recognised_whatever_the_case_of_its_name() {
         // GitHub の名前は大文字小文字を区別しない。URL の綴りが API と違っても
         // fork 扱いにしない（fork 扱いだと `refs/pull` から取り、URL を追跡先に書く）。
-        let mut state = state_for_checkout(&[("main", true)]);
+        let mut state = state_for_checkout(&["main"]);
         let mut pr = fake_pull_request(1, "feat", "a");
         pr.head.repo = Some(RepoRef {
             owner: "YSHRSMZ".into(),
@@ -2735,7 +2740,7 @@ mod tests {
             (None, "main", "main", "bob/main"),
             (Some("develop"), "fix", "main", "fix"),
         ] {
-            let mut state = state_for_checkout(&[("main", true)]);
+            let mut state = state_for_checkout(&["main"]);
             state.repo.remotes[0].head_branch = head_branch.map(str::to_string);
             let mut pr = pr_from(7, pr_branch, "bob");
             pr.base.branch = base.into();
@@ -2754,7 +2759,7 @@ mod tests {
         // URL を組む相手が無い（gh と同じ形。05 の「追跡先」）。名前が重なるときは
         // owner も分からないので番号を付ける。
         for (branch, expected) in [("fix", "fix"), ("main", "pr-7/main")] {
-            let mut state = state_for_checkout(&[("main", true)]);
+            let mut state = state_for_checkout(&["main"]);
             let mut pr = pr_from(7, branch, "bob");
             pr.head.repo = None;
             deliver(&mut state, vec![pr]);
@@ -2777,7 +2782,7 @@ mod tests {
     #[test]
     fn enter_refuses_what_it_cannot_decide_and_says_why() {
         // 一覧が空。**`N` を案内する**（`o` と同じ）。
-        let mut state = state_for_checkout(&[("main", true)]);
+        let mut state = state_for_checkout(&["main"]);
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
         let message = &state.notices.back().expect("通知が無い").message;
         assert!(message.contains("N で作成"), "{message}");
@@ -2794,13 +2799,13 @@ mod tests {
         let message = &state.notices.back().expect("通知が無い").message;
         assert_eq!(message, "リポジトリ情報を読めませんでした");
         // **届いたら取り出せる** —— 断ったのが一覧の有無だったことの裏返し。
-        let _ = deliver_branches(&mut state, Ok(vec![fake_branch("main", true)]));
+        let _ = deliver_branches(&mut state, Ok(fake_head_list(fake_branch("main"))));
         let plan = checkout_of(press_code(&mut state, KeyCode::Enter));
         assert_eq!(plan.branch, "feat");
 
         // fetch するリモートが決まらない（2 本あって origin が無い）。**診断だけ** ——
         // 「追跡先を設定してください」は取り出しには当たらない。
-        let mut state = state_for_checkout(&[("main", true)]);
+        let mut state = state_for_checkout(&["main"]);
         state.repo.remotes = remotes_of(&[
             ("a", "git@github.com:x/y.git"),
             ("b", "git@github.com:z/w.git"),

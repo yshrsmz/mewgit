@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn j_and_k_move_the_branch_cursor_without_touching_the_graph() {
-        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        let mut state = state_on_branches(&["another", "main"], Some("main"));
         // カーソルは HEAD の行に座っている。
         assert_eq!(state.branches.cursor, 1);
 
@@ -149,7 +149,7 @@ mod tests {
     fn esc_leaves_the_branches_pane_for_the_graph() {
         // **`Tab` でしか入れないペインにも出口を用意する**（07）。戻り先は
         // `right_pane()` ではない。このペインは左の選択と無関係なので。
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
 
         let _ = press_code(&mut state, KeyCode::Esc);
 
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn enter_switches_to_the_branch_under_the_cursor() {
-        let mut state = state_on_branches(&[("another", false), ("main", true)]);
+        let mut state = state_on_branches(&["another", "main"], Some("main"));
         let _ = press(&mut state, 'k');
 
         let cmd = press_code(&mut state, KeyCode::Enter);
@@ -171,11 +171,11 @@ mod tests {
 
     #[test]
     fn enter_on_the_head_branch_still_asks_git() {
-        // **押せるかを手前で判定しない**（不変ルール 4）。`is_head` は最後に読んだ
-        // 一覧の値でしかないので、これで「切り替えなくてよい」と決めると、別の端末で
+        // **押せるかを手前で判定しない**（不変ルール 4）。一覧の HEAD の行は最後に読んだ
+        // 値でしかないので、これで「切り替えなくてよい」と決めると、別の端末で
         // 切り替えられていたときに `Enter` が何も起こさなくなる（07 の「Branches ペイン」）。
-        let mut state = state_on_branches(&[("another", false), ("main", true)]);
-        assert!(state.branches.selected().expect("空です").is_head);
+        let mut state = state_on_branches(&["another", "main"], Some("main"));
+        assert_eq!(state.branches.head_row(), Some(state.branches.cursor));
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn n_on_the_branches_pane_opens_an_empty_input_for_a_branch_from_head() {
-        let mut state = state_on_branches(&[("main", true), ("topic", false)]);
+        let mut state = state_on_branches(&["main", "topic"], Some("main"));
         let _ = press(&mut state, 'k');
 
         let cmd = press(&mut state, 'n');
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn r_prefills_the_current_name_and_says_which_branch_is_being_renamed() {
-        let mut state = state_on_branches(&[("main", true), ("topic", false)]);
+        let mut state = state_on_branches(&["main", "topic"], Some("main"));
         assert_eq!(state.branches.selected().expect("空です").name, "main");
 
         let cmd = press(&mut state, 'r');
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn enter_creates_the_branch_and_switches_to_it() {
-        let mut state = state_on_branches(&[("main", true)]);
+        let mut state = state_on_branches(&["main"], Some("main"));
         let _ = press(&mut state, 'n');
         type_text(&mut state, "feat/x");
 
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn enter_renames_the_branch_under_the_cursor() {
-        let mut state = state_on_branches(&[("topic", false)]);
+        let mut state = state_on_branches(&["topic"], None);
         let _ = press(&mut state, 'r');
         // 末尾に足す（初期値がそのまま残っている）。
         type_text(&mut state, "-2");

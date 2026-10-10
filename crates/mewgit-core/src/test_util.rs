@@ -837,8 +837,9 @@ pub fn fake_stash(index: usize) -> StashEntry {
 /// ブランチ 1 件。upstream は持たない（要るテストは戻り値のフィールドを足す）。
 ///
 /// oid は [`fake_oid`] の 0 番。ブランチの一覧は名前と印だけで読めるので、
-/// テストが oid を気にせずに済むようにする。
-pub fn fake_branch(name: &str, is_head: bool) -> Branch {
+/// テストが oid を気にせずに済むようにする。**HEAD かどうかは持たない** —— 一覧を組む
+/// ときに [`fake_branch_list`] へ名前で渡す（02 の「head」）。
+pub fn fake_branch(name: &str) -> Branch {
     Branch {
         name: name.to_string(),
         oid: fake_oid(0),
@@ -847,7 +848,6 @@ pub fn fake_branch(name: &str, is_head: bool) -> Branch {
         push_remote: None,
         ahead: 0,
         behind: 0,
-        is_head,
     }
 }
 
@@ -880,24 +880,36 @@ pub fn fake_repo_snapshot() -> RepoSnapshot {
     RepoSnapshot {
         remotes: Vec::new(),
         refs: RefIndex::from_iter([]),
-        branches: fake_branch_list(vec![Branch {
+        branches: fake_head_list(Branch {
             oid: fake_oid(1),
-            ..fake_branch("main", true)
-        }]),
+            ..fake_branch("main")
+        }),
     }
 }
 
-/// ブランチ一覧を組む。HEAD は `is_head` の行、無ければ detached（`fake_oid(0)`）。
+/// ブランチ一覧を組む。HEAD は `head` の名前の行、`None` なら detached（`fake_oid(0)`）。
 ///
 /// **[`BranchList::new`] を通す**（フィールドは private）ので、HEAD の状態と行は
-/// 食い違わない（02 の「head」）。行の無い HEAD を選ぶなら [`fake_branch_list_or`]。
-pub fn fake_branch_list(branches: Vec<Branch>) -> BranchList {
-    fake_branch_list_or(branches, RowlessHead::Detached(fake_oid(0)))
+/// 食い違わない（02 の「head」）。**`head` に行の無い名前を渡すと落とす** —— 黙って
+/// detached に倒すと、名前の打ち間違いが「HEAD の行が無い」テストとして通る。
+/// 行の無い HEAD を選ぶなら [`fake_branch_list_or`]。
+pub fn fake_branch_list(branches: Vec<Branch>, head: Option<&str>) -> BranchList {
+    BranchList::new(branches, head, || {
+        assert!(head.is_none(), "HEAD の名前 {head:?} の行がありません");
+        Ok::<_, Infallible>(RowlessHead::Detached(fake_oid(0)))
+    })
+    .unwrap_or_else(|never| match never {})
 }
 
-/// ブランチ一覧を組む。`is_head` の行が無ければ HEAD は `rowless`。
+/// `head` 1 本だけの一覧。その行が HEAD。
+pub fn fake_head_list(head: Branch) -> BranchList {
+    let name = head.name.clone();
+    fake_branch_list(vec![head], Some(&name))
+}
+
+/// HEAD の行が無い一覧。HEAD は `rowless`。
 pub fn fake_branch_list_or(branches: Vec<Branch>, rowless: RowlessHead) -> BranchList {
-    BranchList::new(branches, || Ok::<_, Infallible>(rowless))
+    BranchList::new(branches, None, || Ok::<_, Infallible>(rowless))
         .unwrap_or_else(|never| match never {})
 }
 
@@ -1205,27 +1217,25 @@ pub fn start_pr_details(
 pub fn put_on_branch(state: &mut AppState, branch: &str) {
     state.repo.target = TargetState::Resolved(fake_target());
     state.account = AccountState::Resolved(fake_account("taro"));
-    state
-        .branches
-        .loaded(fake_branch_list(vec![fake_branch(branch, true)]));
+    state.branches.loaded(fake_head_list(fake_branch(branch)));
 }
 
 /// ブランチ一覧を、それを運ぶ `Msg::RepoInfoLoaded` で届ける（02 の「ブランチ一覧」）。
 ///
 /// **ほかの値はいまの状態から写す**（リモート一覧、ref の索引）。ブランチ一覧は
 /// リポジトリ情報と同じ返信に乗るので、**一覧だけを届ける返信は実物に無い** —— 写さずに
-/// 空で届けると、先に置いたリモート一覧を消す。HEAD は一覧の HEAD の行、無ければ
-/// detached（[`fake_branch_list`]）。`Err` はそのまま届ける。`reply` を通す
+/// 空で届けると、先に置いたリモート一覧を消す。一覧は呼び手が組む（[`fake_branch_list`]）。
+/// `Err` はそのまま届ける。`reply` を通す
 /// （ランタイムでは `Cmd` が必ず `issue` を通る）。
 ///
 /// **実物の返信と同じ副作用が走る**（`repo_info_loaded` の `resolve_target` と PR 一覧の
 /// 引き直し）。リモートを先に置いていれば `Cmd::ResolveTarget` が返り、その返信は
 /// 届けない —— 要るテストは戻り値を見て自分で届ける。
-pub fn deliver_branches(state: &mut AppState, result: Result<Vec<Branch>, GitReadError>) -> Cmd {
+pub fn deliver_branches(state: &mut AppState, result: Result<BranchList, GitReadError>) -> Cmd {
     let result = result.map(|branches| RepoSnapshot {
         remotes: state.repo.remotes.clone(),
         refs: state.graph.refs.clone(),
-        branches: fake_branch_list(branches),
+        branches,
     });
     reply(
         state,

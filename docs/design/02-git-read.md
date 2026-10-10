@@ -114,7 +114,8 @@ pub enum RefLabel {
   どちらも「どのブランチも HEAD ではない」に落ちる
 - **この HEAD の解決は `branches()` とは別の読み取り。** あいだに外で HEAD が動くと、
   ラベルの `is_head` とブランチ一覧の HEAD の行が次の読み直しまで食い違う。ラベルは
-  描画だけに使い、HEAD の判別を読む手は無いので寄せていない（下の「head」）
+  描画だけに使い、HEAD の判別を読む手は無いので寄せていない（下の「head」）。
+  **`Branch` には同じ旗を持たせない** —— あちらは「どの行か」を `BranchList` が持つ
 - ラベルの並べ替え（種別 Local → Remote → Tag、同種内は名前順）は `RefIndex` を作る
   ところに置く。git2 の列挙順は安定しておらず、索引を組む経路が増えたときに
   並べ替えを忘れると描画順とテストの期待値だけが静かにずれる
@@ -133,8 +134,7 @@ pub struct Branch {
     pub push_remote: Option<String>,  // branch.<name>.pushRemote、無ければ remote.pushDefault
     pub ahead: usize,            // upstream に対する ahead / behind
     pub behind: usize,
-    pub is_head: bool,
-}
+}                                // HEAD かどうかは持たない（下の「head」）
 
 pub struct Upstream {
     pub name: String,  // "origin/feat/x"。表示用
@@ -155,10 +155,10 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
   （libgit2 は接頭辞のあるグロブでディレクトリの走査を絞る。`refdb_fs.c` の
   `iter_load_optimize_prefix`）。`*` は `/` も跨ぐので `feat/x` も入る。
   git2 の `branches()` は使わない — 内部は絞り込みの無い `references()` と同じ
-- **`is_head` は `HEAD` の symbolic target との比較**で決め、HEAD は 1 回だけ解決する
-  （`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直す）。unborn と detached は
-  どちらも「どのブランチも HEAD ではない」に落ちる。`refs()` と同じ形。**HEAD の状態も
-  この 1 回の解決から出す**（`BranchList::head`。下の「head」）
+- **HEAD の行は `HEAD` の symbolic target から `refs/heads/` を外した名前**で決め、HEAD は
+  1 回だけ解決する（`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直す）。unborn と
+  detached はどちらも「どの行も HEAD ではない」に落ちる。**HEAD の状態もこの 1 回の解決から
+  出す**（`BranchList::head`。下の「head」）
 - **非 UTF-8 のブランチ名は落とす**（`refs()` と同じ。識別子は `git_exec` の argv に
   載せられないので、出しても切替も削除もできない行になる）
 - **並べ替えは名前順**。git2 の列挙順は安定していない（`RefIndex` と同じ理由）
@@ -330,10 +330,14 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 pub struct BranchList { /* private */ }
 
 impl BranchList {
-    pub fn new<E>(branches: Vec<Branch>, rowless: impl FnOnce() -> Result<RowlessHead, E>)
-        -> Result<Self, E>;
+    pub fn new<E>(
+        branches: Vec<Branch>,
+        head: Option<&str>,  // HEAD の指すブランチの名前（`refs/heads/` を外したもの）
+        rowless: impl FnOnce() -> Result<RowlessHead, E>,
+    ) -> Result<Self, E>;
     pub fn branches(&self) -> &[Branch];
     pub fn head(&self) -> Head<'_>;
+    pub fn head_row(&self) -> Option<usize>;  // HEAD の行の添字。detached / unborn では None
 }
 
 pub enum Head<'a> { Branch(&'a Branch), Detached(Oid), Unborn(&'a str) }
@@ -342,16 +346,26 @@ pub enum RowlessHead { Detached(Oid), Unborn { name: String } }  // 行が無い
 
 - 通常は `Branch`（HEAD の行そのもの）、detached HEAD は `Detached(oid)`、コミットが 1 つも
   無い（unborn）ときは `Unborn`（名前は `HEAD` の symbolic target から取る）
-- **フィールドは private で、組み立ては `new` だけ。** `is_head` の行があればそれが HEAD で、
+- **フィールドは private で、組み立ては `new` だけ。** `head` の名前の行があればそれが HEAD で、
   無いときだけ `rowless` を呼ぶ。**行無しの HEAD を値ではなく closure で受ける** —— 値で
   受けると「行があるのに `Detached` も渡された」組が引数で書ける。元は `head: HeadInfo` と
   `branches: Vec<Branch>` を公開フィールドで並べていて、`HeadInfo::Branch` の腕は判別だけ
   だった（行から導ける値を別に持っていた）
+- **どの行が HEAD かは `BranchList` だけが持つ。** 元は `Branch.is_head` の旗から添字を導いて
+  いて、「どの行か」が公開の旗と private な添字の 2 箇所にあった。旗が 2 本立った一覧も
+  組めたので「先の行を採る」規則が要り、読み手も旗を読むもの（カーソルの座り直し、
+  Branches ペインの印）と `head()` を読むものに割れていた。いまは名前で行を決め、位置が
+  要る読み手は `head_row()` を読む（`head()` の `Branch` の腕と同じ添字から導く）。
+  ref 名は一意なので、名前が当たる行は 1 つしかない
+- **`head` を受けても `rowless` は畳めない。** 名前があるのに行が無い理由は unborn だけでは
+  なく、HEAD の行を peel できずに落とした形もある（下の表。`Err` にする）。どちらかを
+  決められるのは ref を持っている `branches()` だけなので、`Unborn` の名前は `head` と
+  同じ値でも closure の側が組む
 - **HEAD は一覧と同じ 1 回の `find_reference("HEAD")` で解決し、`Branch` かどうかは一覧の
   行から決める。** 元は `head()` を別の読み取りにしていて、ランタイムの `repo_info` が
   2 つを順に await していたので、あいだに外で HEAD が動くと「`Branch` なのに HEAD の
-  行が無い」（逆向きなら「`Detached` なのに `is_head` の行がある」）組が届いた（#183 の
-  あとに寄せた）。いまは **`Branch` ⇔ `is_head` の行がある**が型で成り立つ（上の `new`）。
+  行が無い」（逆向きなら「`Detached` なのに HEAD の印が付いた行がある」）組が届いた（#183 の
+  あとに寄せた）。いまは **`Branch` ⇔ HEAD の行がある**が型で成り立つ（上の `new`）。
   判別は次の順:
 
   | HEAD | 判別 |
@@ -377,7 +391,10 @@ pub enum RowlessHead { Detached(Oid), Unborn { name: String } }  // 行が無い
   | 列挙のあとに外でブランチが作られた | — | — | 次の読み直しまで `Detached` |
 
   どれも行を持たない点で detached と同じに扱い、**行と判別は食い違わない**（大文字小文字の
-  形では、積む先の名前が `HEAD` になる）。libgit2 は refdb のスナップショットを取れないので、
+  形では、積む先の名前が `HEAD` になる）。**`refs/heads/` を外せない target は名前として
+  渡さない**（`new` の `head` は `None`）—— `git branch refs/remotes/origin/main` は
+  `refs/heads/refs/remotes/origin/main` を作るので（exit 0。2026-10-10、git 2.56.0）、
+  target をそのまま渡すと 1 つ目の形でその行を HEAD と取り違える。libgit2 は refdb のスナップショットを取れないので、
   最後の窓そのものは無くせない。逆に **symbolic なブランチの ref は行になる**（一覧は peel
   して行を作る）ので、`refs/heads/alias` → `refs/remotes/origin/main` を HEAD が指す形は
   `Branch` で、行は `alias`（元の `head()` は `Detached` と答えていた。行と揃うこちらを採る）

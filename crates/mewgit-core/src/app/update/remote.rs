@@ -557,9 +557,11 @@ mod tests {
     use crate::app::{Key, KeyCode, Modal, Msg, Pane};
 
     use crate::git_exec::PullMode;
-    use crate::git_read::{Branch, GitReadError, Head};
+    use crate::git_read::{Branch, BranchList, GitReadError, Head};
 
-    use crate::test_util::{fake_branch, fake_oid, fake_upstream};
+    use crate::test_util::{
+        fake_branch, fake_branch_list, fake_head_list, fake_oid, fake_upstream,
+    };
 
     /// ローカル名と違う行き先への push（argv では `<src>:<dst>`）。
     fn renamed_push_op(remote: &str, src: &str, dst: &str) -> GitOp {
@@ -630,7 +632,7 @@ mod tests {
     fn f_fetches_the_only_remote_even_when_it_is_not_origin() {
         // 2 段目。**git 2.55 も同じ**（単一リモート `upstream` で `git fetch` が
         // `refs/remotes/upstream/main` を作るのを実測。表は 04）。
-        let mut state = state_for_push(&["upstream"], fake_branch("main", true));
+        let mut state = state_for_push(&["upstream"], fake_branch("main"));
         let cmd = press(&mut state, 'f');
         assert_eq!(fetched_remote(&cmd).as_deref(), Some("upstream"), "{cmd:?}");
     }
@@ -654,7 +656,7 @@ mod tests {
         // 返り、stderr が空なので不変ルール 4 の経路も効かない）。通知で断るだけだと
         // **mewgit にリモートを指定する操作が無い**ので行き止まりだった（01 の
         // 「決まらないときの逃げ道」）。守っているのは今も「**mewgit が黙って選ばない**」。
-        let mut state = state_for_push(&["fork", "upstream"], fake_branch("main", true));
+        let mut state = state_for_push(&["fork", "upstream"], fake_branch("main"));
 
         assert_eq!(press(&mut state, 'f'), Cmd::None, "黙って fetch している");
         let (reason, remotes, _) = open_picker(&state);
@@ -721,7 +723,7 @@ mod tests {
         // **候補が 0 本なら開かない。** 「まだ読めていません」と「登録されていません」は
         // 選ばせる相手がいないので通知のまま（01）。
         let mut state = state_with_commits(2);
-        let _ = deliver_branches(&mut state, Ok(vec![fake_branch("main", true)]));
+        let _ = deliver_branches(&mut state, Ok(fake_head_list(fake_branch("main"))));
 
         assert_eq!(press(&mut state, 'f'), Cmd::None);
         assert_eq!(state.modal, None, "選ぶ相手がいないのに開いている");
@@ -756,7 +758,7 @@ mod tests {
 
         // 届いた一覧が空で、いま読み直している。
         let mut state = state_with_commits(2);
-        let _ = deliver_branches(&mut state, Ok(vec![fake_branch("main", true)]));
+        let _ = deliver_branches(&mut state, Ok(fake_head_list(fake_branch("main"))));
         let _ = state.issue(Cmd::LoadRepoInfo);
         let message = notice_after_f(&mut state);
         assert!(message.contains("登録されていません"), "{message}");
@@ -764,7 +766,7 @@ mod tests {
 
     #[test]
     fn picking_a_remote_fetches_it_and_closes_the_modal() {
-        let mut state = state_for_push(&["fork", "upstream"], fake_branch("main", true));
+        let mut state = state_for_push(&["fork", "upstream"], fake_branch("main"));
         let _ = press(&mut state, 'f');
 
         // `j` で 2 本目へ。端の扱いはペインのカーソルと同じ規則。
@@ -789,7 +791,7 @@ mod tests {
 
     #[test]
     fn esc_closes_the_remote_picker_without_fetching() {
-        let mut state = state_for_push(&["fork", "upstream"], fake_branch("main", true));
+        let mut state = state_for_push(&["fork", "upstream"], fake_branch("main"));
         let _ = press(&mut state, 'f');
 
         assert_eq!(press_code(&mut state, KeyCode::Esc), Cmd::None);
@@ -801,7 +803,12 @@ mod tests {
         // **1 段目だけ飛ばす。** 追跡設定を持つ行が無い（detached / unborn）ときに
         // 決まらないに落とすと、リモートが 1 本のふつうのリポジトリで `f` が断られる
         // （01 の「既定リモート」）。
-        let mut state = state_for_push(&["origin"], fake_branch("main", false));
+        let mut state = state_with_commits(2);
+        with_remotes(&mut state, &["origin"]);
+        let _ = deliver_branches(
+            &mut state,
+            Ok(fake_branch_list(vec![fake_branch("main")], None)),
+        );
         assert!(
             matches!(state.branches.head(), Some(Head::Detached(_))),
             "detached ではない: {:?}",
@@ -915,10 +922,10 @@ mod tests {
         // pull が通って先端が動いた。
         let _ = deliver_branches(
             &mut state,
-            Ok(vec![Branch {
+            Ok(fake_head_list(Branch {
                 oid: fake_oid(3),
                 ..head
-            }]),
+            })),
         );
 
         assert_eq!(
@@ -939,12 +946,12 @@ mod tests {
         // 別のブランチへ切り替わった（一覧の読み直しで届く形）。
         let _ = deliver_branches(
             &mut state,
-            Ok(vec![tracked_head(
+            Ok(fake_head_list(tracked_head(
                 "topic",
                 "origin",
                 "refs/heads/topic",
                 Some(lease),
-            )]),
+            ))),
         );
 
         assert_eq!(
@@ -1011,12 +1018,12 @@ mod tests {
         // 押したのは main。返るまでに HEAD が topic へ移った。
         let _ = deliver_branches(
             &mut state,
-            Ok(vec![tracked_head(
+            Ok(fake_head_list(tracked_head(
                 "topic",
                 "origin",
                 "refs/heads/topic",
                 Some(lease),
-            )]),
+            ))),
         );
         reject_non_fast_forward(&mut state, push_op("origin", "main", false));
 
@@ -1069,12 +1076,12 @@ mod tests {
         // 追跡 ref だけが進んでいる。
         let _ = deliver_branches(
             &mut state,
-            Ok(vec![tracked_head(
+            Ok(fake_head_list(tracked_head(
                 "main",
                 "origin",
                 HEADS_MAIN,
                 Some(fresh),
-            )]),
+            ))),
         );
 
         assert_eq!(press(&mut state, 'P'), Cmd::None);
@@ -1135,7 +1142,7 @@ mod tests {
     #[test]
     fn a_branch_without_a_tracking_config_proposes_set_upstream() {
         // **行き先を推測しているのはこの経路だけ**なので、確認モーダルに出す（01）。
-        let mut state = state_for_push(&["upstream"], fake_branch("topic", true));
+        let mut state = state_for_push(&["upstream"], fake_branch("topic"));
 
         let cmd = press(&mut state, 'P');
 
@@ -1154,7 +1161,7 @@ mod tests {
         // **force に上げられない経路の拒否は憶えない**（01 の「force push」）。憶えると
         // 読む側が使えない印になり、あとから追跡設定が外で入ったときに、追跡して
         // いない push の拒否を根拠に force の腕が立つ。
-        let mut state = state_for_push(&["origin"], fake_branch("topic", true));
+        let mut state = state_for_push(&["origin"], fake_branch("topic"));
         reject_non_fast_forward(&mut state, push_op("origin", "topic", true));
 
         assert_eq!(state.push_rejected, None);
@@ -1168,7 +1175,7 @@ mod tests {
 
     #[test]
     fn several_remotes_fall_back_to_origin() {
-        let mut state = state_for_push(&["fork", "origin"], fake_branch("topic", true));
+        let mut state = state_for_push(&["fork", "origin"], fake_branch("topic"));
 
         let _ = press(&mut state, 'P');
 
@@ -1178,7 +1185,7 @@ mod tests {
 
     /// `push_plan` が断った理由。断る腕が複数あるので、キーを押す形ではなく
     /// 純粋関数を直に呼ぶ（`Refused` を返した理由がそのまま読める）。
-    fn refusal(remotes: &[&str], branches: Option<Vec<Branch>>) -> String {
+    fn refusal(remotes: &[&str], branches: Option<BranchList>) -> String {
         let mut state = state_with_commits(2);
         with_remotes(&mut state, remotes);
         if let Some(branches) = branches {
@@ -1211,22 +1218,26 @@ mod tests {
         // （01 の「ブランチ一覧」）。
         assert!(refusal(&["origin"], None).contains("読めていません"));
         // **detached / unborn**。一覧は届いているが、どの行にも印が付いていない。
-        assert!(refusal(&["origin"], Some(vec![fake_branch("main", false)])).contains("HEAD"));
+        assert!(refusal(
+            &["origin"],
+            Some(fake_branch_list(vec![fake_branch("main")], None))
+        )
+        .contains("HEAD"));
         // **リモートが 1 本も無い。**
-        let none = refusal(&[], Some(vec![fake_branch("topic", true)]));
+        let none = refusal(&[], Some(fake_head_list(fake_branch("topic"))));
         assert!(none.contains("リモート"), "{none}");
         // **複数あって origin が無い。** 適当に選ぶと、fork 運用のリポジトリで
         // 他人のリポジトリへ push する形になる。名前を出して選ばせる。
         let many = refusal(
             &["fork", "upstream"],
-            Some(vec![fake_branch("topic", true)]),
+            Some(fake_head_list(fake_branch("topic"))),
         );
         assert!(many.contains("fork") && many.contains("upstream"), "{many}");
     }
 
     #[test]
     fn a_refused_push_opens_no_modal_and_warns() {
-        let mut state = state_for_push(&[], fake_branch("topic", true));
+        let mut state = state_for_push(&[], fake_branch("topic"));
 
         assert_eq!(press(&mut state, 'P'), Cmd::None);
         assert_eq!(state.modal, None);
@@ -1297,7 +1308,7 @@ mod tests {
         // 付けると `branch.<b>.remote` が書き換わり、以後の `p` がそこから取り込む。
         let mut state = state_for_push(
             &["fork", "origin"],
-            pushing_to(fake_branch("topic", true), "fork"),
+            pushing_to(fake_branch("topic"), "fork"),
         );
 
         assert_eq!(
@@ -1311,7 +1322,7 @@ mod tests {
     fn a_push_remote_url_is_pushed_to_as_is() {
         // git も URL の `pushRemote` へそのまま送る（01 の表の K）。
         let url = "git@github.com:me/x.git";
-        let mut state = state_for_push(&["origin"], pushing_to(fake_branch("topic", true), url));
+        let mut state = state_for_push(&["origin"], pushing_to(fake_branch("topic"), url));
 
         assert_eq!(
             press(&mut state, 'P'),
@@ -1371,12 +1382,12 @@ mod tests {
         // **`origin` へ落とさない** —— ユーザーが書いた行き先とは別のリモートへ送る。
         let local = refusal(
             &["origin"],
-            Some(vec![pushing_to(fake_branch("topic", true), ".")]),
+            Some(fake_head_list(pushing_to(fake_branch("topic"), "."))),
         );
         assert!(local.contains("ローカル"), "{local}");
         let missing = refusal(
             &["origin"],
-            Some(vec![pushing_to(fake_branch("topic", true), "nosuch")]),
+            Some(fake_head_list(pushing_to(fake_branch("topic"), "nosuch"))),
         );
         assert!(missing.contains("nosuch"), "{missing}");
     }

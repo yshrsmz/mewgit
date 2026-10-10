@@ -578,7 +578,7 @@ mod tests {
     use crate::graph::LaneState;
     use crate::test_util::{
         fake_branch, fake_branch_list, fake_branch_list_or, fake_commit_with_parents, fake_entry,
-        fake_oid, fake_snapshot, reply,
+        fake_head_list, fake_oid, fake_snapshot, reply,
     };
 
     #[test]
@@ -1368,9 +1368,7 @@ mod tests {
     /// HEAD を `main` にする。確認の本文が積む先の名前を出すかを見るため。名前は
     /// HEAD の行から読む（02 の「head」）。
     fn on_main(state: &mut AppState) {
-        state
-            .branches
-            .loaded(fake_branch_list(vec![fake_branch("main", true)]));
+        state.branches.loaded(fake_head_list(fake_branch("main")));
     }
 
     #[test]
@@ -1388,12 +1386,12 @@ mod tests {
             let _ = press(&mut state, 'y');
             open_confirm(&state).0.to_string()
         };
-        let other = || fake_branch("another", false);
+        let other = || fake_branch("another");
 
-        let body = body_with(Some(fake_branch_list(vec![
-            other(),
-            fake_branch("main", true),
-        ])));
+        let body = body_with(Some(fake_branch_list(
+            vec![other(), fake_branch("main")],
+            Some("main"),
+        )));
         assert!(body.contains("main") && !body.contains("another"), "{body}");
         let body = body_with(Some(fake_branch_list_or(
             Vec::new(),

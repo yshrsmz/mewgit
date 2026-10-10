@@ -387,8 +387,8 @@ mod tests {
 
     use crate::test_util::{
         fake_account, fake_ambiguous, fake_attempt, fake_branch, fake_branch_list,
-        fake_configured_unavailable, fake_denied, fake_logins, fake_no_access, fake_pull_request,
-        fake_repo_snapshot, fake_target, pr_list_loaded, reply,
+        fake_configured_unavailable, fake_denied, fake_head_list, fake_logins, fake_no_access,
+        fake_pull_request, fake_repo_snapshot, fake_target, pr_list_loaded, reply,
     };
 
     /// リモートを載せた `RepoInfoLoaded` を 1 通届ける。
@@ -435,7 +435,9 @@ mod tests {
         ]);
         let cmd = deliver_branches(
             &mut state,
-            Ok(vec![tracking_branch("main", "upstream", HEADS_MAIN)]),
+            Ok(fake_head_list(tracking_branch(
+                "main", "upstream", HEADS_MAIN,
+            ))),
         );
         let Cmd::ResolveTarget(url) = cmd else {
             panic!("target を頼んでいない: {cmd:?}");
@@ -1231,10 +1233,10 @@ mod tests {
                 },
             )]),
             // **ブランチ一覧も同じ返信に乗る**（02 の「ブランチ一覧」）。
-            branches: fake_branch_list(vec![
-                fake_branch("main", true),
-                fake_branch("topic", false),
-            ]),
+            branches: fake_branch_list(
+                vec![fake_branch("main"), fake_branch("topic")],
+                Some("main"),
+            ),
         };
 
         let _ = update(&mut state, Msg::RepoInfoLoaded(Box::new(Ok(info))));

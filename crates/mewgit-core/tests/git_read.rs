@@ -320,13 +320,10 @@ fn refs_is_empty_before_the_first_commit() {
     assert_eq!(index.labels(Oid::ZERO_SHA1), []);
 }
 
-/// HEAD の行の名前（`is_head` の行を全部）。判別と行を同じ答えから見るため。
-fn head_rows(list: &BranchList) -> Vec<&str> {
-    list.branches()
-        .iter()
-        .filter(|b| b.is_head)
-        .map(|b| b.name.as_str())
-        .collect()
+/// `head_row` の指す行の名前。判別（`head()`）と行の位置を別々の答えから見るため。
+fn head_row_name(list: &BranchList) -> Option<&str> {
+    list.head_row()
+        .map(|row| list.branches()[row].name.as_str())
 }
 
 #[test]
@@ -377,7 +374,7 @@ fn branches_reports_a_detached_head_without_a_head_row() {
     let list = reader.branches().unwrap();
 
     assert_eq!(list.head(), Head::Detached(first));
-    assert_eq!(head_rows(&list), Vec::<&str>::new());
+    assert_eq!(head_row_name(&list), None);
     // 行は HEAD の印が付かないだけで残る。
     assert_eq!(list.branches().len(), 1);
 }
@@ -386,16 +383,28 @@ fn branches_reports_a_detached_head_without_a_head_row() {
 fn branches_reports_a_head_outside_refs_heads_as_detached() {
     // `git symbolic-ref` は `refs/heads/` の外も指せる（git 2.56.0 で確認）。一覧に行が
     // 無いので、行を持たない点で detached と同じに扱う（`RepoReader::branches`）。
+    //
+    // **target と同じ名前のローカルブランチも置く**（`git branch refs/remotes/origin/main`
+    // は `refs/heads/refs/remotes/origin/main` を作る。git 2.56.0 で確認）。行は名前で
+    // 決めるので、`refs/heads/` を外せなかった target をそのまま名前として渡すと、
+    // この行を HEAD と取り違える。
     let repo = TestRepo::init();
     let first = repo.commit("first");
     repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["branch", "refs/remotes/origin/main"]);
     repo.git(&["symbolic-ref", "HEAD", "refs/remotes/origin/main"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let list = reader.branches().unwrap();
 
     assert_eq!(list.head(), Head::Detached(first));
-    assert_eq!(head_rows(&list), Vec::<&str>::new());
+    assert_eq!(head_row_name(&list), None);
+    assert!(
+        list.branches()
+            .iter()
+            .any(|b| b.name == "refs/remotes/origin/main"),
+        "取り違えうる行が一覧にありません"
+    );
 }
 
 #[test]
@@ -440,7 +449,7 @@ fn branches_errors_when_the_head_branch_does_not_point_at_a_commit() {
 
     // **HEAD でない行は黙って落とす**（エラーにするのは HEAD の行だけ）。
     let list = RepoReader::open(repo.path()).unwrap().branches().unwrap();
-    assert_eq!(head_rows(&list), ["main"]);
+    assert_eq!(head_row_name(&list), Some("main"));
     assert_eq!(list.branches().len(), 1);
 
     repo.git(&["symbolic-ref", "HEAD", "refs/heads/topic"]);
@@ -466,7 +475,7 @@ fn branches_follows_a_dangling_symbolic_chain_to_an_unborn_head() {
     let list = reader.branches().unwrap();
 
     assert_eq!(list.head(), Head::Unborn("alias"));
-    assert_eq!(head_rows(&list), Vec::<&str>::new());
+    assert_eq!(head_row_name(&list), None);
 }
 
 /// 本文付きのメッセージを持つコミットが 1 つあるリポジトリ。
@@ -862,7 +871,7 @@ fn branches_lists_local_branches_by_name_with_the_head_marked() {
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["another", "feat/nested", "main", "topic"]);
     // HEAD の印は 1 本だけで、判別も同じ答えに乗る（02 の「head」）。
-    assert_eq!(head_rows(&list), ["main"]);
+    assert_eq!(head_row_name(&list), Some("main"));
     assert!(matches!(list.head(), Head::Branch(b) if b.name == "main"));
     // HEAD の oid も行が運ぶ（02 の「head」）。
     assert!(branches.iter().all(|b| b.oid == first));

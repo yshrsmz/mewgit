@@ -321,7 +321,8 @@ mod tests {
     use crate::app::{update, Msg};
     use crate::git_read::{Branch, BranchList, InProgressOp, RowlessHead, WorktreeSnapshot};
     use crate::test_util::{
-        fake_branch, fake_branch_list, fake_branch_list_or, fake_oid, fake_snapshot, reply, reword,
+        fake_branch, fake_branch_list, fake_branch_list_or, fake_head_list, fake_oid,
+        fake_snapshot, reply, reword,
     };
 
     /// `n` 件の 1 列の履歴（`commit i` の親は `commit i+1`、最後が root）。HEAD は
@@ -336,9 +337,7 @@ mod tests {
                 Vec::new()
             };
         }
-        state
-            .branches
-            .loaded(fake_branch_list(vec![fake_branch("main", true)]));
+        state.branches.loaded(fake_head_list(fake_branch("main")));
         status(&mut state, fake_snapshot(&[], &[], &[]));
         state
     }
@@ -416,7 +415,7 @@ mod tests {
         // ので、動かさないとカーソル行から oid を取る変異が生き残る）。
         let other = || Branch {
             oid: fake_oid(1),
-            ..fake_branch("another", false)
+            ..fake_branch("another")
         };
         let head_with = |list: BranchList| {
             let mut state = linear(4);
@@ -429,12 +428,12 @@ mod tests {
             *head
         };
 
-        let on_main = fake_branch_list(vec![other(), fake_branch("main", true)]);
+        let on_main = fake_branch_list(vec![other(), fake_branch("main")], Some("main"));
         assert_eq!(head_with(on_main), fake_oid(0));
         let detached = fake_branch_list_or(
             vec![Branch {
                 oid: fake_oid(0),
-                ..fake_branch("another", false)
+                ..fake_branch("another")
             }],
             RowlessHead::Detached(fake_oid(1)),
         );

@@ -724,9 +724,10 @@ mod tests {
 
     use crate::git_exec::{ExecErrorKind, HunkApply, LocalBranch, PrSource, PullMode, RebasePlan};
     use crate::git_read::{GitReadError, LogPage, WorktreeSection};
-    use crate::test_util::{fake_pr_checkout, fake_repo_snapshot, status_arrived};
-
-    use crate::test_util::{fake_detail, fake_oid, fake_snapshot, fake_stamp};
+    use crate::test_util::{
+        fake_detail, fake_oid, fake_pr_checkout, fake_repo_snapshot, fake_snapshot, fake_stamp,
+        status_arrived,
+    };
 
     #[test]
     fn exec_finished_reloads_the_status() {

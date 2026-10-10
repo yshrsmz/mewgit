@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
-    lossy, signature, Branch, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex, RefLabel,
-    Remote, StashEntry, Upstream, UpstreamConfig, STASH_REF,
+    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, HeadInfo, Oid, RefIndex,
+    RefLabel, Remote, StashEntry, Upstream, UpstreamConfig, STASH_REF,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -177,16 +177,25 @@ impl RepoReader {
         Ok(RefIndex::new(labels))
     }
 
-    /// ローカルブランチの一覧。名前順。
+    /// ローカルブランチの一覧（名前順）と HEAD の状態。
     ///
     /// [`RepoReader::refs`] とは別の読み取り（02 の「ブランチ一覧」）。あちらが返す
     /// [`RefIndex`] は Oid → ラベルの索引で、**upstream も ahead / behind も持たない**
     /// ので、Branches ペインはそこからは組めない。
-    pub fn branches(&self) -> Result<Vec<Branch>, GitReadError> {
-        // HEAD は 1 回だけ解決する。`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を
-        // 読み直すので、ブランチの本数だけファイル読みが増える（`refs` と同じ）。
+    ///
+    /// **HEAD はここで 1 回だけ解決し、`Branch` かどうかは一覧の行から決める**（02 の
+    /// 「head」）。HEAD を別の読み取りで解決すると、あいだに外で HEAD が動いたとき
+    /// 「`Branch` なのに HEAD の行が無い」組が届く。
+    pub fn branches(&self) -> Result<BranchList, GitReadError> {
+        // `git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直すので、ブランチの
+        // 本数だけファイル読みが増える（`refs` と同じ）。
         let head = self.repo.find_reference("HEAD")?;
-        let head_target = head.symbolic_target().ok().flatten();
+        // git2 0.21 から `Err`（target が非 UTF-8）と `Ok(None)`（symbolic でない）が
+        // 分かれた。**前者はエラーにする** —— 他の ref と同じく行を落とすと、ブランチに
+        // 居るのに HEAD の行が無くなり、detached と区別が付かない（02 の「非 UTF-8 の扱い」）。
+        let head_target = head
+            .symbolic_target()
+            .map_err(|_| GitReadError::NonUtf8Head)?;
 
         // **`refs/heads/*` だけを列挙する。** `references()` で全部辿ってから捨てると、
         // loose ref のリポジトリで `refs/remotes/*` と `refs/tags/*` のファイルまで
@@ -212,7 +221,8 @@ impl RepoReader {
             // `None == None` で HEAD になってしまう。名前が引けた行だけを比べる。
             let is_head = full.is_some_and(|full| head_target == Some(full));
             // 指す先が commit でない ref（ありえないが、壊れたリポジトリでは起きる）は
-            // 落とす。`refs` が peel できないタグを落とすのと同じ扱い。
+            // 落とす。`refs` が peel できないタグを落とすのと同じ扱い。HEAD の行を落とした
+            // ときは `rowless_head` が peel し直して `Err` にする。
             let Ok(oid) = reference.peel_to_commit().map(|commit| commit.id()) else {
                 continue;
             };
@@ -251,7 +261,12 @@ impl RepoReader {
 
         // git2 の列挙順は安定していない（`RefIndex::new` と同じ理由）。
         branches.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(branches)
+        let head = match head_target {
+            None => HeadInfo::Detached(head.peel_to_commit()?.id()),
+            Some(_) if branches.iter().any(|branch| branch.is_head) => HeadInfo::Branch,
+            Some(target) => rowless_head(&head, target)?,
+        };
+        Ok(BranchList { head, branches })
     }
 
     /// stash の一覧。`stash@{0}`（いちばん新しいもの）から順に並ぶ。
@@ -344,38 +359,10 @@ impl RepoReader {
         })
     }
 
-    /// HEAD の状態。
-    ///
-    /// **ブランチに居るときは名前も oid も載せない**（02 の「head」）。読み手は
-    /// [`RepoReader::branches`] の HEAD の行を読む。
-    pub fn head(&self) -> Result<HeadInfo, GitReadError> {
-        let head = match self.repo.head() {
-            Ok(head) => head,
-            // コミットが 1 つも無いリポジトリ。ブランチ名は HEAD の symbolic target から取る。
-            Err(err) if err.code() == ErrorCode::UnbornBranch => {
-                return Ok(HeadInfo::Unborn {
-                    name: self.unborn_branch_name()?,
-                });
-            }
-            Err(err) => return Err(err.into()),
-        };
-
-        // ブランチの腕でも peel する。コミットを指さない ref は `branches` が行ごと落とすので、
-        // 通すと「ブランチに居るのに HEAD の行が無い」が黙って届く（02 の「head」）。
-        let oid = head.peel_to_commit()?.id();
-        if !head.is_branch() {
-            return Ok(HeadInfo::Detached(oid));
-        }
-        // 名前は載せないが、非 UTF-8 も同じ理由でエラーにする（02 の「非 UTF-8 の扱い」）。
-        // git2 0.21 の `shorthand()` は `Err` が非 UTF-8 そのもの。
-        head.shorthand().map_err(|_| GitReadError::NonUtf8Head)?;
-        Ok(HeadInfo::Branch)
-    }
-
     /// HEAD のコミットメッセージ全文。コミットが 1 つも無ければ `None`。
     ///
     /// amend の初期値に使う（01 の「commit」）。**HEAD の解決とメッセージの取得を
-    /// 1 回で行う。** 呼び出し側が [`RepoReader::head`] と
+    /// 1 回で行う。** 呼び出し側が HEAD の解決（[`RepoReader::branches`]）と
     /// [`RepoReader::commit_detail`] を 2 回に分けて呼ぶと、そのあいだに HEAD が
     /// 動く隙ができ、1 つ前のコミットのメッセージで HEAD を上書きすることになる。
     ///
@@ -389,21 +376,26 @@ impl RepoReader {
         };
         Ok(Some(self.commit_detail(oid)?.message))
     }
+}
 
-    /// unborn な HEAD が指しているブランチ名。
-    ///
-    /// unborn は「HEAD が symbolic で、指す先の ref がまだ無い」状態。git2 0.21 から
-    /// `symbolic_target()` は `Err`（target が非 UTF-8）と `Ok(None)`（HEAD が symbolic
-    /// でない）を分けて返すが、**呼ぶのは [`RepoReader::head`] が `UnbornBranch` を
-    /// 受けたあとだけ**なので後者は起きない。腕を分けても踏めないので、
-    /// 「ブランチ名を出せない」という同じ結果に畳む。
-    fn unborn_branch_name(&self) -> Result<String, GitReadError> {
-        let head = self.repo.find_reference("HEAD")?;
-        let target = head
-            .symbolic_target()
-            .map_err(|_| GitReadError::NonUtf8Head)?
-            .ok_or(GitReadError::NonUtf8Head)?;
-        Ok(target.strip_prefix("refs/heads/").unwrap_or(target).into())
+/// HEAD が symbolic（target は `target`）なのに、一覧に HEAD の行が無いときの状態。
+///
+/// **HEAD を `resolve()` で辿る**（symbolic の連鎖も辿る。`repo.head()` と同じ）。辿った
+/// 先が無ければ unborn —— `refs/heads/a` → `refs/heads/missing` のような連鎖も含む。
+/// 在るのにコミットまで peel できなければ `Err` —— 一覧が HEAD の行を落とした形で、
+/// 通すと「ブランチに居るのに HEAD の行が無い」が `Err` にならずに届く（02 の「head」）。
+/// **peel できれば `Detached`**。一覧の行と綴りが合わない HEAD がここに落ちる ——
+/// `refs/heads/` の外を指す（`git symbolic-ref HEAD refs/remotes/origin/main` は通る）、
+/// 大文字小文字を区別しない FS で `git switch Main` した（`main` の loose ref に当たる）、
+/// 列挙のあとに外でブランチが作られた、のどれも行を持たない点で detached と同じに扱い、
+/// **行と判別は食い違わない**（実測は 02 の「head」。git 2.56.0）。
+fn rowless_head(head: &Reference<'_>, target: &str) -> Result<HeadInfo, GitReadError> {
+    match head.resolve() {
+        Ok(resolved) => Ok(HeadInfo::Detached(resolved.peel_to_commit()?.id())),
+        Err(err) if err.code() == ErrorCode::NotFound => Ok(HeadInfo::Unborn {
+            name: target.strip_prefix("refs/heads/").unwrap_or(target).into(),
+        }),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -417,7 +409,7 @@ fn ref_label(reference: &Reference<'_>, head_target: Option<&str>) -> Option<Ref
     }
     // 非 UTF-8 の ref 名は識別子として扱えないので落とす（02 の「非 UTF-8 の扱い」）。
     // git2 0.21 の `shorthand()` は `Err` が非 UTF-8 そのもの。落とすのがここの方針
-    // （HEAD だけは `head()` でエラーにする）なので `.ok()?` が移行先。
+    // （HEAD だけは `branches()` でエラーにする）なので `.ok()?` が移行先。
     let name = reference.shorthand().ok()?.to_string();
 
     // 載せるのはローカル / リモート追跡ブランチとタグだけ。`refs/stash` や

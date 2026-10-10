@@ -409,7 +409,8 @@ mod tests {
     #[test]
     fn i_reads_head_from_its_row_and_falls_back_to_a_detached_head() {
         // HEAD の行を先に読み、行が無いときだけ `repo.head` を見る（02 の「head」）。
-        // 取り違えを見張るため、行と `repo.head` に別のコミットを持たせる。
+        // 取り違えを見張るため、行と `repo.head` に別のコミットを持たせる（行と `Detached`
+        // の組は `branches()` からは届かないが、読み元を取り違える変異はこれで落ちる）。
         let mut state = linear(4);
         state.repo.head = Some(HeadInfo::Detached(fake_oid(1)));
         let _ = press_i_on(&mut state, 2);

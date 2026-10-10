@@ -26,8 +26,7 @@ impl RepoReader {
     pub fn workdir(&self) -> &Path;                                 // ワークツリーのルート
     pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;     // name, url（生の値）, head_branch
     pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>
-    pub fn head(&self) -> Result<HeadInfo, GitReadError>;           // ブランチに居るか / detached の Oid / unborn の名前
-    pub fn branches(&self) -> Result<Vec<Branch>, GitReadError>;    // ローカルブランチ + upstream の ahead/behind
+    pub fn branches(&self) -> Result<BranchList, GitReadError>;     // ローカルブランチ + upstream の ahead/behind + HEAD の状態
     pub fn log(&self) -> Result<LogSession<'_>, GitReadError>;   // ページングは LogSession が持つ
     pub fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;  // 選択時に遅延取得
     pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;  // 同上（一覧だけ）
@@ -96,7 +95,7 @@ pub enum RefLabel {
 - **`remote_oid` は名前から位置を引く。** 読み手は PR 作成の `head` の候補（01 の
   「head の組み立て」）で、**「どのリモートにそのブランチが在るか」を git が残して
   いるのは remote-tracking ref だけ**（追跡設定は「何を基にしたか」しか答えない）。
-  **別の読み取りを足さない** —— 索引は `head` と同じ `Cmd::LoadRepoInfo` で届くので、
+  **別の読み取りを足さない** —— 索引はブランチ一覧と同じ `Cmd::LoadRepoInfo` で届くので、
   2 つのあいだに順序が無い。引く側は**リモートの一覧から `<remote>/<branch>` を組む**
   （ref 名からリモート名を切り出すと、`/` を含むリモート名で割り方が決まらない）。
   索引は Oid で引く形なので全件を舐めるが、引くのは `N` と確定のときだけ
@@ -113,6 +112,9 @@ pub enum RefLabel {
   呼ぶたびに HEAD を解決し直すのでブランチの本数だけファイル読みが増える。unborn は
   symbolic target の指す ref がまだ無く、detached は HEAD が symbolic ではないので、
   どちらも「どのブランチも HEAD ではない」に落ちる
+- **この HEAD の解決は `branches()` とは別の読み取り。** あいだに外で HEAD が動くと、
+  ラベルの `is_head` とブランチ一覧の HEAD の行が次の読み直しまで食い違う。ラベルは
+  描画だけに使い、HEAD の判別を読む手は無いので寄せていない（下の「head」）
 - ラベルの並べ替え（種別 Local → Remote → Tag、同種内は名前順）は `RefIndex` を作る
   ところに置く。git2 の列挙順は安定しておらず、索引を組む経路が増えたときに
   並べ替えを忘れると描画順とテストの期待値だけが静かにずれる
@@ -155,7 +157,8 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
   git2 の `branches()` は使わない — 内部は絞り込みの無い `references()` と同じ
 - **`is_head` は `HEAD` の symbolic target との比較**で決め、HEAD は 1 回だけ解決する
   （`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直す）。unborn と detached は
-  どちらも「どのブランチも HEAD ではない」に落ちる。`refs()` と同じ形
+  どちらも「どのブランチも HEAD ではない」に落ちる。`refs()` と同じ形。**`HeadInfo` も
+  この 1 回の解決から出す**（`BranchList.head`。下の「head」）
 - **非 UTF-8 のブランチ名は落とす**（`refs()` と同じ。識別子は `git_exec` の argv に
   載せられないので、出しても切替も削除もできない行になる）
 - **並べ替えは名前順**。git2 の列挙順は安定していない（`RefIndex` と同じ理由）
@@ -219,7 +222,7 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
   取るようになった**ので、畳むときはこの 2 本もその snapshot から引く形にする（#148 の
   `/simplify` が挙げた。効果は未計測）
 
-**`refs()` / `head` / `remotes` と 1 通にまとめる**（`Cmd::LoadRepoInfo` の
+**`refs()` / `remotes` と 1 通にまとめる**（`Cmd::LoadRepoInfo` の
 `RepoSnapshot.branches`）。**元は分けていた** —— ブランチの本数だけ upstream の解決と
 `graph_ahead_behind` の walk が要り、グラフのラベルと HEAD だけが欲しい経路にそのコストを
 払わせないため（`commit_files` を `commit_detail` と分けたのと同じ理由）。**ところが
@@ -234,7 +237,7 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
 **払うのはラベルと `target` の遅れ。** 実測（2026-10-09、release ビルド、
 `RepoReader` を直に呼んで 3 回の 2 回目以降）:
 
-| リポジトリ | `remotes` + `head` + `refs` | `branches` |
+| リポジトリ | `remotes` + `head` + `refs`（`head` は当時の別の読み取り） | `branches` |
 |---|---|---|
 | 合成（ローカル 301 本、それぞれ追跡 ref から 300 コミット遅れ、6500 コミット） | 10ms | 410ms（debug ビルドで 700ms） |
 | 手元のクローン（12 本） | 0.4ms | 1.3ms |
@@ -247,9 +250,9 @@ upstream も ahead / behind も無い**ので、そちらからは組めない�
 **書き込みのたびの PR 一覧の引き直し**（`repo_info_loaded` が出す）で、ふつうの
 リポジトリでは 1ms 前後、極端な形で 0.4 秒。**畳むのはユーザーと決めた**（2026-10-09）
 
-**一部だけ成功という形にしない**（01 の「Msg」）。代わりに、4 つのどれか 1 つの失敗が
-全部を落とす —— 非 UTF-8 の HEAD 名（`head()` の `NonUtf8Head`）でブランチ一覧も
-出なくなり、逆に壊れた loose ref で `branches()` が落ちるとラベルとリモートも
+**一部だけ成功という形にしない**（01 の「Msg」）。代わりに、3 つの読み取りのどれか 1 つの
+失敗が全部を落とす —— 非 UTF-8 の HEAD 名（`branches()` の `NonUtf8Head`）でも、壊れた
+loose ref で `branches()` が落ちても、ブランチ一覧は失敗の表示になり、ラベルとリモートは
 前のまま残る。どちらも壊れたリポジトリの形なので受け入れた
 
 ### stash 一覧
@@ -315,15 +318,50 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
   一覧から落とす。`git_exec` の argv に載せられず、UI で選べても操作できないため
 - **表示にしか使わない文字列**（リモート URL、コミットの summary や署名）は lossy 変換して
   残す。読めない文字が混ざるほうが、その項目ごと消えるより情報が多い
-- 例外は HEAD が指すブランチ名で、これだけは落とさず `GitReadError::NonUtf8Head` にする。
-  `head` は名前を載せないが、ブランチ一覧はその行を落とすので、通すと「ブランチに居るのに
-  HEAD の行が無い」になり、上位が detached と区別できない
+- 例外は HEAD が指すブランチ名で、これだけは落とさず `branches()` 全体を
+  `GitReadError::NonUtf8Head` にする。その行を落とすと「ブランチに居るのに HEAD の行が
+  無い」になり、上位が detached と区別できない
 
 ### head
 
-- 通常は `Branch`（判別だけ）、detached HEAD は `Detached(oid)`
-- コミットが 1 つも無い（unborn）ときは `repo.head()` が `ErrorCode::UnbornBranch` を返すので、
-  `HEAD` の symbolic target からブランチ名を取って `Unborn { name }` にする
+`branches()` が `BranchList { head: HeadInfo, branches }` として一覧と一緒に返す。
+
+- 通常は `Branch`（判別だけ）、detached HEAD は `Detached(oid)`、コミットが 1 つも無い
+  （unborn）ときは `Unborn { name }`（名前は `HEAD` の symbolic target から取る）
+- **HEAD は一覧と同じ 1 回の `find_reference("HEAD")` で解決し、`Branch` かどうかは一覧の
+  行から決める。** 元は `head()` を別の読み取りにしていて、ランタイムの `repo_info` が
+  2 つを順に await していたので、あいだに外で HEAD が動くと「`Branch` なのに HEAD の
+  行が無い」（逆向きなら「`Detached` なのに `is_head` の行がある」）組が届いた（#183 の
+  あとに寄せた）。いまは **`Branch` ⇔ `is_head` の行がちょうど 1 つ**が作りから成り立つ。
+  判別は次の順:
+
+  | HEAD | 判別 |
+  |---|---|
+  | symbolic でない | `Detached(peel した oid)` |
+  | symbolic target が非 UTF-8 | `Err(NonUtf8Head)`（下の「非 UTF-8 の扱い」） |
+  | target が一覧の行に当たる | `Branch` |
+  | target の行を peel できずに落とした | `Err`（下） |
+  | 行が無く、HEAD を `resolve()` で辿った先が無い | `Unborn { name }`（名前は HEAD の直の target） |
+  | 行が無いが、辿った先は在る | `Detached(peel した oid)` |
+
+  **行が無いときは HEAD を `resolve()` で辿る**（symbolic の連鎖も辿る。`repo.head()` と
+  同じ）。target の ref を名前で引くだけだと、HEAD → `refs/heads/alias` →
+  `refs/heads/missing` の連鎖で `alias` が在るので peel で落ち、読み取りごと失われた
+  （元の `head()` は unborn と答えていた。`/code-review` が一時リポジトリで再現した）。
+  最後の行に落ちるのは、**一覧の行と綴りが合わない HEAD**（実測 2026-10-10、git 2.56.0、
+  macOS）:
+
+  | 形 | 作り方 | `git status` | 判別 |
+  |---|---|---|---|
+  | `refs/heads/` の外を指す | `git symbolic-ref HEAD refs/remotes/origin/main`（exit 0） | `On branch refs/remotes/origin/main` | `Detached`（元の `head()` も同じ） |
+  | 大文字小文字だけ違う | `main` だけがあるところで `git switch Main`（exit 0。HEAD は `ref: refs/heads/Main`、loose の `main` に当たる） | `## Main` | `Detached`（元の `head()` は `Branch` で、行が無い組だった）。`git pack-refs --all` のあとは `Unborn { name: "Main" }` |
+  | 列挙のあとに外でブランチが作られた | — | — | 次の読み直しまで `Detached` |
+
+  どれも行を持たない点で detached と同じに扱い、**行と判別は食い違わない**（大文字小文字の
+  形では、積む先の名前が `HEAD` になる）。libgit2 は refdb のスナップショットを取れないので、
+  最後の窓そのものは無くせない。逆に **symbolic なブランチの ref は行になる**（一覧は peel
+  して行を作る）ので、`refs/heads/alias` → `refs/remotes/origin/main` を HEAD が指す形は
+  `Branch` で、行は `alias`（元の `head()` は `Detached` と答えていた。行と揃うこちらを採る）
 - **追跡設定（`branch.<HEAD>.remote` / `.merge`）は載せない。** 読み手（`app` の
   「現ブランチの PR」と PR 作成の `head` の候補）は、ブランチ一覧の HEAD の行の
   `Branch::upstream_config` を読む（上の「ブランチ一覧」）。元は `upstream` として
@@ -334,19 +372,19 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
   unborn の HEAD は一覧に行が無いが、追跡設定を持たないのは元の `Unborn` と同じ
 - **ブランチに居るときは名前も oid も載せない。** 追跡設定を消したのと同じ理由で、同じ
   返信が HEAD の行の名前と oid を 2 回運んでいた（#181 の `/simplify` が拾った）。
-  `Detached` の oid と `Unborn` の名前は一覧に行が無いので残す。**載せなくてもブランチの
-  腕で peel はする** —— コミットを指さない ref（壊れたリポジトリ）は一覧が行ごと落とす
-  ので、通すと「ブランチに居るのに HEAD の行が無い」が `Err` にならずに届く（`NonUtf8Head`
-  を残したのと同じ理由。`/code-review` が一時リポジトリで再現した）
+  `Detached` の oid と `Unborn` の名前は一覧に行が無いので残す
+- **HEAD の行を peel できずに落としたときは `Err` にする。** 一覧はコミットを指さない
+  ref（壊れたリポジトリ）を黙って落とすが、HEAD の行まで黙って落とすと「ブランチに居るのに
+  HEAD の行が無い」が `Err` にならずに届く（`NonUtf8Head` と同じ理由。`/code-review` が一時
+  リポジトリで再現した）。列挙の中では特別扱いせず、行が無いときの解決（表の最後の 2 行）が
+  target を peel し直すところで落ちる
 - **読み手は HEAD の行を先に読み、行が無いときだけ `RepoInfo.head` を見る**
   （cherry-pick / revert の確認に出す積む先の名前、`i` の plan を辿り始める oid）。
-  `Branch` の腕で行を引きに行く形にすると、「`Branch` なのに HEAD の行が無い」組の
-  扱いを読み手ごとに決めることになる（名前と oid を畳んだ PR の `/simplify` が拾った）。**その組は実際に
-  作れる** —— `head` と `branches` は HEAD をそれぞれ解決し、ランタイムの `repo_info` は
-  2 つを順に await するので、あいだに外で HEAD が動けば片方だけが新しい。行を先に
-  読む形では、名前が `HEAD` になる / `i` が断る（逆向きなら古い行を読む）のが次の
-  読み直しまで続くだけで、HEAD の解決を `branches` の 1 回に寄せるのは plan.md の M6 に
-  送った
+  上の作りで「`Branch` なのに HEAD の行が無い」組はもう届かないが、**型は組を許す**
+  （`HeadInfo` と `Vec<Branch>` は別のフィールド）。`Branch` の腕で行を引きに行く形に
+  すると、届かない組の扱いを読み手ごとに書くことになるので、行を先に読む形のまま残す
+  （名前と oid を畳んだ PR の `/simplify` が拾った）。型で閉じる（`RepoInfo.head` を消す）のは
+  plan.md の M6 に送った
 
 ## ログ列挙
 
@@ -895,14 +933,14 @@ impl ReaderHandle {
   消えていたら読まない、という判定は競合を狭めるだけで無くせない（`send` が成功した直後に
   受け側が消える窓が残る）ので、ランタイム側の規約にする。**ログ読み込みのタスクは abort
   しない。** 中断が効くのは `Cmd::Exec` だけ（01 の「キャンセル」）。状態を持たない
-  `refs` / `head` / `remotes` / `status` / `diff` は drop されても捨ててよい
+  `refs` / `branches` / `remotes` / `status` / `diff` は drop されても捨ててよい
 - **`log_page(count, restart)` の `restart` はセッションを捨ててから読む。** commit や
   fetch で HEAD が動くと積んだ行が丸ごと古くなり、続きを読む経路では直せない（新しい
   コミットは末尾ではなく先頭に付く）。`Live` も `Exhausted` も `Idle` に落としてから
   読むので、先頭の 1 ページが返る。**別のメソッドに分けず引数にする。** 分けると
   「セッションを取り出して成功したときだけ戻す」契約を 2 箇所で守ることになる
 - **`head_message` は HEAD の解決とメッセージの取得をスレッドの中で 1 回で行う。**
-  amend の初期値に使う（01 の「commit」）。`head()` と `commit_detail()` の 2 回に
+  amend の初期値に使う（01 の「commit」）。HEAD の解決と `commit_detail()` の 2 回に
   分けると、そのあいだに HEAD が動く隙ができ、**1 つ前のコミットのメッセージで HEAD を
   上書きする**ことになる。コミットが 1 つも無い（unborn）ときは `Ok(None)`。
   「読めなかった」と「amend する相手がいない」は上位の出し分けが違う

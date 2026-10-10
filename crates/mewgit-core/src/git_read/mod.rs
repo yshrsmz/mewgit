@@ -148,7 +148,7 @@ pub enum GitReadError {
     #[error("{} は bare リポジトリです。ワークツリーのあるリポジトリを指定してください", .path.display())]
     BareRepository { path: PathBuf },
     /// HEAD が非 UTF-8 のブランチを指している。他の ref と違って落とすと
-    /// detached と区別が付かなくなるので、ここだけはエラーにする。
+    /// detached と区別が付かなくなるので、ここだけはエラーにする（`branches` が返す）。
     #[error("HEAD が指すブランチ名が UTF-8 ではありません")]
     NonUtf8Head,
     /// リーダースレッドが応答しない。チャネルが切れたら待たずにこれを返す。
@@ -347,11 +347,10 @@ impl RefLabel {
     }
 }
 
-/// HEAD の状態。
+/// HEAD の状態。[`BranchList::head`] として、ブランチ一覧と同じ読み取りから出る。
 ///
 /// **ブランチに居るときは判別だけを持つ。** 名前も oid も追跡設定も、読み手はブランチ
-/// 一覧の HEAD の行（`is_head` の [`Branch`]）から読む（`app` では同じ返信に乗る。
-/// 02 の「head」）。
+/// 一覧の HEAD の行（`is_head` の [`Branch`]）から読む（02 の「head」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeadInfo {
     Branch,
@@ -360,6 +359,18 @@ pub enum HeadInfo {
     Unborn {
         name: String,
     },
+}
+
+/// [`RepoReader::branches`] の答え。ローカルブランチの一覧と HEAD の状態。
+///
+/// **HEAD の解決を 1 回にするため、2 つを 1 つの読み取りで返す**（02 の「head」）。
+/// `head` は `branches` の HEAD の行から決めるので、`HeadInfo::Branch` なら
+/// `is_head` の行がちょうど 1 つあり、それ以外なら 1 つも無い。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchList {
+    pub head: HeadInfo,
+    /// 名前順（02 の「ブランチ一覧」）。
+    pub branches: Vec<Branch>,
 }
 
 /// ローカルブランチ 1 件。

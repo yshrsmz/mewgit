@@ -19,7 +19,7 @@ use mewgit_core::auth::AccountState;
 use mewgit_core::auth::Backend as _;
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::Runner;
-use mewgit_core::git_read::{GitReadError, ReaderHandle, Timestamp};
+use mewgit_core::git_read::{BranchList, GitReadError, ReaderHandle, Timestamp};
 use mewgit_core::github::{AccountBackend, GithubClient, GithubError};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
@@ -559,20 +559,24 @@ impl Runtime {
     }
 }
 
-/// リモート・HEAD・ref とブランチ一覧をまとめて読む。
+/// リモート・ref とブランチ一覧（HEAD の状態を含む）をまとめて読む。
 ///
 /// リーダースレッドは 1 本なので、並行にしても待ち時間は変わらない。
 ///
 /// **ブランチ一覧を最後に読む**（02 の「ブランチ一覧」）。本数だけ walk が要る重い読みで、
-/// リーダースレッドは要求を届いた順に捌くので、前の 3 つを待っているあいだに積まれた
+/// リーダースレッドは要求を届いた順に捌くので、前の 2 つを待っているあいだに積まれた
 /// log と status の要求は walk を待たずに通る（どちらが先に届くかは決まらないので、
 /// 確実ではなく寄せるだけ）。
 async fn repo_info(reader: &ReaderHandle) -> Result<RepoSnapshot, GitReadError> {
+    let remotes = reader.remotes().await?;
+    let refs = reader.refs().await?;
+    // **HEAD はブランチ一覧と同じ読み取りから取る**（02 の「head」）。
+    let BranchList { head, branches } = reader.branches().await?;
     Ok(RepoSnapshot {
-        remotes: reader.remotes().await?,
-        head: reader.head().await?,
-        refs: reader.refs().await?,
-        branches: reader.branches().await?,
+        remotes,
+        head,
+        refs,
+        branches,
     })
 }
 

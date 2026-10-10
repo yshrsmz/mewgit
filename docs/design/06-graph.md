@@ -121,7 +121,9 @@ pub enum Horizontal {
 
 ## ラベル
 
-- `RefIndex`（02）から `oid → Vec<RefLabel>` を引き、`GraphRow` の右に並べる
+- ローカルブランチはブランチ一覧（`BranchState::branches()`）の行の oid から、リモート
+  追跡ブランチとタグは `RefIndex`（02）から引き、`GraphRow` の右にローカル → リモート →
+  タグの順で並べる。`RefIndex` にローカルブランチを持たせない理由は 02 の「refs とラベル」
 - 種別ごとの見た目: ローカル `[main]`、リモート `{origin/main}`、タグ `<v1.0>`、HEAD は太字、PR は `#123` を PR 状態の色で
 - 幅が足りないときはラベル → summary の順で省略
 

@@ -440,7 +440,7 @@ impl TextBuffer {
 pub struct GraphState {
     pub lines: Vec<GraphLine>,
     pub lanes: LaneState,       // 末尾行の直後の状態。追加ページはここから再開（06）
-    pub refs: RefIndex,         // 行の右に並べるラベル（02）
+    pub refs: RefIndex,         // 行の右に並べるリモートとタグのラベル。ローカルはブランチ一覧から（02）
     pub cursor: usize,          // 表示行の添字。0 は WIP 行、1.. が `lines`
     pub scroll: usize,          // 画面最上部に出す行
     pub detail: Option<CommitDetail>,  // 遅延取得した選択コミットの詳細（02）
@@ -3227,7 +3227,7 @@ pub enum Cmd {
     LoadHeadMessage,                   // amend の初期値。HEAD の解決ごとリーダーで行う
     LoadCommitMessage(Oid),            // RebaseEditor の reword の初期値（上の「interactive rebase の開始」）
     LoadStatus, LoadDiff(DiffTarget),
-    LoadRepoInfo,                      // remotes / head / refs / ブランチ一覧。起動時と ref 変更後（02）
+    LoadRepoInfo,                      // remotes / refs / ブランチ一覧（HEAD を含む）。起動時と ref 変更後（02）
     Probe,                             // 外の変更を見張る指紋（下の「外部の変更の検知」）
     Exec(GitOp),                       // git CLI 実行（03 参照）
     CancelExec,                        // 走っている Exec を中断する（上の「キャンセル」）

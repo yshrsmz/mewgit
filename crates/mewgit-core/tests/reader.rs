@@ -147,7 +147,7 @@ async fn head_refs_and_remotes_come_back_through_the_thread() {
 
     assert!(matches!(list.head(), Head::Branch(b) if b.name == "main"));
     let labels: Vec<&str> = refs.labels(oid).iter().map(|l| l.name()).collect();
-    assert_eq!(labels, ["main", "v1.0"]);
+    assert_eq!(labels, ["v1.0"]);
     assert_eq!(remotes.len(), 1);
     assert_eq!(remotes[0].name, "origin");
 }

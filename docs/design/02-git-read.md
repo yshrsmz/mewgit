@@ -25,7 +25,7 @@ impl RepoReader {
     pub fn open(path: &Path) -> Result<Self, GitReadError>;
     pub fn workdir(&self) -> &Path;                                 // ワークツリーのルート
     pub fn remotes(&self) -> Result<Vec<Remote>, GitReadError>;     // name, url（生の値）, head_branch
-    pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>
+    pub fn refs(&self) -> Result<RefIndex, GitReadError>;           // Oid → Vec<RefLabel>。リモート追跡ブランチとタグだけ
     pub fn branches(&self) -> Result<BranchList, GitReadError>;     // ローカルブランチ + upstream の ahead/behind + HEAD の状態
     pub fn log(&self) -> Result<LogSession<'_>, GitReadError>;   // ページングは LogSession が持つ
     pub fn commit_detail(&self, oid: Oid) -> Result<CommitDetail, GitReadError>;  // 選択時に遅延取得
@@ -74,17 +74,16 @@ fork の PR を取り出すときのブランチ名（05 の「ブランチ名�
 ### refs とラベル
 
 ```rust
-pub struct RefIndex { /* Oid → Vec<RefLabel> */ }
+pub struct RefIndex { /* Oid → Vec<RefLabel>。ローカルブランチは持たない */ }
 
 impl RefIndex {
     pub fn labels(&self, oid: Oid) -> &[RefLabel];
     pub fn remote_oid(&self, name: &str) -> Option<Oid>;   // "origin/main" → Oid
 }
 
-impl FromIterator<(Oid, RefLabel)> for RefIndex { /* 並べ替えは new を通る */ }
+impl FromIterator<(Oid, RefLabel)> for RefIndex { /* 並べ替えはここ。refs() もここを通る */ }
 
 pub enum RefLabel {
-    Local { name: String },                  // "main"。HEAD かどうかは持たない
     Remote { name: String },                 // "origin/main"
     Tag { name: String },                    // "v1.0"
 }
@@ -101,31 +100,43 @@ pub enum RefLabel {
   索引は Oid で引く形なので全件を舐めるが、引くのは `N` と確定のときだけ
 - annotated tag は `target()` が tag オブジェクトの Oid なので、commit まで peel してから引く。
   peel しないとラベルがどのグラフ行にも乗らない
-- 載せるのはローカルブランチ・リモート追跡ブランチ・タグだけ（ホワイトリスト）。
+- **ローカルブランチのラベルは索引に持たない。** グラフペインが 1 フレームに 1 回
+  `BranchState::branches()` から oid → 名前の表を作り、行ごとに `[main]` を先に並べる
+  （06 の「ラベル」）。元は `refs()` が `branches()` とは別に `refs/heads/*` を列挙して
+  `RefLabel::Local` を持っていた。`runtime::repo_info` が 2 つを順に呼ぶあいだに外で
+  `git switch -c feat` が走ると、次の読み直しまで Branches ペインに `* feat` があるのに
+  グラフに `[feat]` が無かった（2026-10-10 に塞いだ）。**一覧から写して `RefIndex` に
+  合成する形も一度書いた**が、同じ返信で入れ替わる写しを状態に 2 つ持つことになり、
+  テストの fixture が「一覧にあるのにラベルが無い」組を作れたままだった（`/simplify` の
+  altitude が拾った）。**読み元を一覧の 1 つにした** —— `refs/heads/*` を列挙するのは
+  `branches()` だけで、名前の突き合わせの規則も 1 本になる
+- 索引に載せるのはリモート追跡ブランチとタグだけ（ホワイトリスト）。
   `refs/stash` や `refs/notes/*` は他のペインの担当なのでグラフのラベルにしない。
-  加えて symbolic ref（`refs/remotes/*/HEAD`）は種別を問わず落とす。解決すると
-  指す先の ref とラベルが 2 重になる
-- 列挙は `references()` の 1 パスで、種別は `is_branch()` / `is_remote()` / `is_tag()`
-  （どれも ref 名の接頭辞判定）で振り分ける。`branches()` も内部では全 ref を列挙して
-  から接頭辞で捨てるので、種別ごとに呼ぶと同じ走査を繰り返すことになる
-- **ラベルは HEAD かどうかを持たない。** グラフの `[main]` の強調は、`ui` が
-  `BranchState::head_branch()` の名前と `Local` の名前を比べて決める。元は `refs()` が
+  symbolic ref（`refs/remotes/*/HEAD`）は落とす。解決すると指す先の ref とラベルが
+  2 重になる
+- **`refs/heads/` の下の symbolic ref（`git symbolic-ref refs/heads/alias refs/heads/main`）は
+  一覧にもラベルにも出す。** git 自身が両方に出す —— `git branch -v` は `alias` を 1 行と
+  して並べ、`git log --decorate` は `(HEAD -> main, alias)` と出す。`git switch alias` のあと
+  `.git/HEAD` は `ref: refs/heads/alias` だが、git は `On branch main` / `* main` と読む（HEAD の
+  名前は連鎖を辿った先。下の「head」）。`git branch -d alias` は symref だけを消す。
+  `branches()` は `references_glob("refs/heads/*")` で symref も行にする（git2 0.21）ので、
+  一覧から引くラベルにも `[alias] [main]` が並ぶ。ラベルだけ落とすには `Branch` に
+  symbolic かどうかを持たせることになり、一覧とラベルの規則が再び 2 つに割れる
+  （実測 2026-10-10、git 2.56.0。決めたのは同じ日）
+- `refs()` の列挙は `references_glob` を `refs/remotes/*` と `refs/tags/*` の 2 回。
+  `references()` で全部辿ってから捨てると、loose ref のリポジトリで `refs/heads/*` の
+  ファイルまで読む（下の「ブランチ一覧」の列挙と同じ理由）。種別はグロブで決まる
+- **HEAD の強調も一覧から引く。** グラフの `[main]` の強調は、`ui` が
+  `BranchState::head_branch()` の名前とラベルの名前を比べて決める。元は `refs()` が
   `HEAD` をもう一度解決して `is_head` の旗を付けていたが、`branches()` とは別の読み取り
   だったので、あいだに外で HEAD が動くとラベルの強調と Branches ペインの `*` が次の
   読み直しまで食い違い、判定の規則も割れていた（こちらは ref の完全名、`branches()` は
   `refs/heads/` を外した名前で比べる）。一覧の HEAD の行から引けば、HEAD の解決と判定の規則は
   1 本になる（下の「head」の「どの行が HEAD かは `BranchList` だけが持つ」と同じ形）。
   比べる名前はどちらも `refs/heads/` を外した短縮名
-- **ただし Local ラベルの集合は、まだ一覧とは別の列挙。** `refs()` と `branches()` はどちらも
-  `refs/heads/*` を読み、`runtime::repo_info` が順に呼ぶ。同じ `RepoSnapshot` で届くのは
-  順序だけで、読み取りは 2 回なので、あいだに外で `git switch -c feat` が走ると、次の
-  読み直しまで Branches ペインに `* feat` があるのにグラフに `[feat]` が無い（強調する名前は
-  一覧から来るので食い違わないが、強調する相手のラベルが無い）。塞ぐには Local ラベルを
-  `BranchList` の行（`name` と `oid`）から組み、`refs()` はリモート追跡ブランチとタグだけを
-  列挙する。`branches()` から分けていた理由（重い読みをラベルに払わせない。下の
-  「ブランチ一覧」）は 1 通にまとめた時点で消えている。`docs/plan.md` の M6 に置いた
-- ラベルの並べ替え（種別 Local → Remote → Tag、同種内は名前順）は `RefIndex` を作る
-  ところに置く。git2 の列挙順は安定しておらず、索引を組む経路が増えたときに
+- ラベルの並べ替え（種別 Remote → Tag、同種内は名前順）は `RefIndex` を作る
+  ところ（`FromIterator`）に置く。ローカルブランチは一覧が名前順なので、その順のまま
+  先頭に並ぶ。git2 の列挙順は安定しておらず、索引を組む経路が増えたときに
   並べ替えを忘れると描画順とテストの期待値だけが静かにずれる
 - `FromIterator` を実装して `refs()` を通さずにも索引を組めるようにする。`ui` のテストが
   ラベルの描画を実リポジトリ無しで表現できるようにするため。どちらの経路でも
@@ -155,15 +166,15 @@ pub struct UpstreamConfig {
 }
 ```
 
-Branches ペイン（07）が使う。`refs()` が返すのは Oid → ラベルの索引で、**ラベルには
-upstream も ahead / behind も無い**ので、そちらからは組めない。
+Branches ペイン（07）が使い、グラフのローカルブランチのラベルもこの行から引く（上の
+「refs とラベル」）。**`refs/heads/*` を列挙するのはここだけ。**
 
 - **列挙は `references_glob("refs/heads/*")`。** `references()` で全部辿ってから捨てると、
   loose ref のリポジトリで `refs/remotes/*` と `refs/tags/*` のファイルまで読む
   （libgit2 は接頭辞のあるグロブでディレクトリの走査を絞る。`refdb_fs.c` の
   `iter_load_optimize_prefix`）。`*` は `/` も跨ぐので `feat/x` も入る。
   git2 の `branches()` は使わない — 内部は絞り込みの無い `references()` と同じ
-- **HEAD の行は `HEAD` の symbolic target から `refs/heads/` を外した名前**で決め、HEAD は
+- **HEAD の行は `HEAD` の symbolic target（symref の連鎖を辿った先）から `refs/heads/` を外した名前**で決め、HEAD は
   1 回だけ解決する（`git2::Branch::is_head()` は呼ぶたびに `.git/HEAD` を読み直す）。unborn と
   detached はどちらも「どの行も HEAD ではない」に落ちる。**HEAD の状態もこの 1 回の解決から
   出す**（`BranchList::head`。下の「head」）
@@ -353,7 +364,7 @@ pub enum RowlessHead { Detached(Oid), Unborn { name: String } }  // 行が無い
 ```
 
 - 通常は `Branch`（HEAD の行そのもの）、detached HEAD は `Detached(oid)`、コミットが 1 つも
-  無い（unborn）ときは `Unborn`（名前は `HEAD` の symbolic target から取る）
+  無い（unborn）ときは `Unborn`（名前は `HEAD` の symbolic target を辿った先から取る）
 - **フィールドは private で、組み立ては `new` だけ。** `head` の名前の行があればそれが HEAD で、
   無いときだけ `rowless` を呼ぶ。**行無しの HEAD を値ではなく closure で受ける** —— 値で
   受けると「行があるのに `Detached` も渡された」組が引数で書ける。元は `head: HeadInfo` と
@@ -382,8 +393,18 @@ pub enum RowlessHead { Detached(Oid), Unborn { name: String } }  // 行が無い
   | symbolic target が非 UTF-8 | `Err(NonUtf8Head)`（下の「非 UTF-8 の扱い」） |
   | target が一覧の行に当たる | `Branch`（その行） |
   | target の行を peel できずに落とした | `Err`（下） |
-  | 行が無く、HEAD を `resolve()` で辿った先が無い | `Unborn { name }`（名前は HEAD の直の target） |
+  | 行が無く、HEAD を `resolve()` で辿った先が無い | `Unborn { name }`（名前は下の「target」） |
   | 行が無いが、辿った先は在る | `Detached(peel した oid)` |
+
+  **表の「target」は、HEAD の symbolic target から `refs/heads/` の中で symref の連鎖を辿った
+  先**（`symbolic_end`）。git は HEAD → `refs/heads/alias` → `refs/heads/main` を `On branch main`、
+  HEAD → `alias` → 無い `refs/heads/missing` を `On branch missing`（unborn）と読む（実測
+  2026-10-10、git 2.56.0）。元は 1 段で止めていたので、`git switch alias` のあと `alias` の行が
+  HEAD になり、グラフの強調も `-u` の提案も別のブランチのものになった（`/code-review` が
+  拾った）。`refs/heads/` の外へ出る段は辿らない（表の下の `alias` → `refs/remotes/origin/main`
+  の形を `alias` の行のままにするため）。輪になった連鎖は段数で打ち切り、止まった名前の行は
+  peel できずに落ちているので `Err` になる（git も `git branch` が `failed to resolve HEAD` で
+  落ちる）
 
   **行が無いときは HEAD を `resolve()` で辿る**（symbolic の連鎖も辿る。`repo.head()` と
   同じ）。target の ref を名前で引くだけだと、HEAD → `refs/heads/alias` →

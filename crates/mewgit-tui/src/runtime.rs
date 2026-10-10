@@ -744,6 +744,7 @@ mod tests {
     async fn load_repo_info_fills_in_the_remotes_head_ref_labels_and_branches() {
         let repo = TestRepo::init();
         let oid = repo.commit("first");
+        repo.git(&["tag", "v1"]);
         repo.git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
         let (mut state, reader) = opened(&repo);
         let (mut runtime, mut msgs) = runtime_for(&repo, reader);
@@ -762,7 +763,7 @@ mod tests {
             .iter()
             .map(|label| label.name())
             .collect();
-        assert_eq!(labels, ["main"]);
+        assert_eq!(labels, ["v1"]);
         // **ブランチ一覧も同じ返信で届く**（02 の「ブランチ一覧」）。
         assert_eq!(state.branches.load(), ListLoad::Loaded);
         assert_eq!(

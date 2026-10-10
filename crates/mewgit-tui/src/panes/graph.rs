@@ -8,8 +8,10 @@
 //! `ui::graph_rows` と `Msg::Layout` が「詳細を出すか」を運んでいた。差し替えではなく
 //! 分割だったのが原因で、右へ移すとその引数ごと消えた（07 の「CommitDetail ペイン」）。
 
+use std::collections::HashMap;
+
 use mewgit_core::app::{AppState, GraphLine, GraphSelection, JobKind, Pane};
-use mewgit_core::git_read::{short_oid, RefLabel, SHORT_OID};
+use mewgit_core::git_read::{short_oid, Oid, RefLabel, SHORT_OID};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -59,6 +61,7 @@ pub fn render(frame: &mut Frame, outer: Rect, state: &AppState) {
         state,
         head: theme::style(&state.config.theme.graph_head),
         head_name: state.branches.head_branch().map(|b| b.name.as_str()),
+        branches: branches_by_oid(state),
         // 罫線の桁は、いま描く行の最大レーン数に揃える（07）。読み込み済みの
         // 全行で最大を取ると、複雑な履歴で桁が育ち続ける。
         lanes: shown()
@@ -94,9 +97,11 @@ struct View<'a> {
     head: Style,
     /// HEAD のブランチ名。detached / unborn / 一覧がまだ無いときは `None`。
     /// **ブランチ一覧の HEAD の行から引く** —— Branches ペインの `*` と同じ値なので、
-    /// 強調する名前は食い違わない。ラベルの集合は `refs()` の別の列挙から来るので、
-    /// その名前のラベルがまだ無いことはある（02 の「refs とラベル」）。
+    /// 強調する名前は食い違わない。
     head_name: Option<&'a str>,
+    /// コミットごとのローカルブランチ名（名前順）。**ラベルもブランチ一覧の行から引く**
+    /// —— `RefIndex` はローカルブランチを持たない（02 の「refs とラベル」）。
+    branches: HashMap<Oid, Vec<&'a str>>,
     /// 罫線に使うレーン数。
     lanes: usize,
     palette: Vec<Color>,
@@ -155,6 +160,10 @@ impl<'a> View<'a> {
     fn commit_line(&self, line: &'a GraphLine) -> Line<'a> {
         // `&self` より長い借用が要る。ラベルは `state` から借りて行に載せるため。
         let state = self.state;
+        let branches = self
+            .branches
+            .get(&line.commit.oid)
+            .map_or(&[][..], Vec::as_slice);
         let labels = state.graph.refs.labels(line.commit.oid);
         // 罫線をそのまま土台にする。Oid・空白・ラベル 1 件あたり 4 つ・summary の
         // ぶんを足して、詰め直しを起こさない大きさにする。
@@ -164,7 +173,7 @@ impl<'a> View<'a> {
             &self.palette,
             state.config.graph.ascii,
         );
-        spans.reserve(3 + labels.len() * 4);
+        spans.reserve(3 + (branches.len() + labels.len()) * 4);
 
         // **印は oid の見た目だけで出し、桁を足さない**（07）—— 印の桁を足すと、印の
         // 有無で summary の桁がずれる。
@@ -176,13 +185,27 @@ impl<'a> View<'a> {
         spans.push(Span::styled(short_oid(&line.commit.oid), oid_style));
         spans.push(Span::raw(" "));
 
-        for label in labels {
+        // 並びはローカル → リモート → タグ（06 の「ラベル」）。HEAD のブランチだけ強調する。
+        let labels = branches
+            .iter()
+            .map(|&name| {
+                let style = if Some(name) == self.head_name {
+                    self.head
+                } else {
+                    Style::default()
+                };
+                (("[", "]"), name, style)
+            })
+            .chain(
+                labels
+                    .iter()
+                    .map(|label| (brackets(label), label.name(), Style::default())),
+            );
+        for ((open, close), name, style) in labels {
             // 飾りは組み立てずに 3 つのスパンに分ける。毎フレーム全行ぶん `format!` する
             // 必要が無く、HEAD の強調も括弧まで掛かる。
-            let style = self.label_style(label);
-            let (open, close) = brackets(label);
             spans.push(Span::styled(open, style));
-            spans.push(Span::styled(label.name(), style));
+            spans.push(Span::styled(name, style));
             spans.push(Span::styled(close, style));
             spans.push(Span::raw(" "));
         }
@@ -191,14 +214,6 @@ impl<'a> View<'a> {
 
         Line::from(spans)
     }
-
-    /// ラベルの見た目。HEAD のブランチだけ強調する。
-    fn label_style(&self, label: &RefLabel) -> Style {
-        match label {
-            RefLabel::Local { name } if Some(name.as_str()) == self.head_name => self.head,
-            _ => Style::default(),
-        }
-    }
 }
 
 /// WIP 行の桁を詰める空白。詰めるのは罫線 + 短縮 Oid の桁ぶん（`2 * lanes + 8`）なので、
@@ -206,10 +221,18 @@ impl<'a> View<'a> {
 /// 左に寄るだけで、切れはしない（`min` で止める）。
 const SPACES: &str = "                                                                    ";
 
-/// 種別ごとの飾り（06 の「ラベル」）。
+/// コミットごとのローカルブランチ名。一覧が名前順なので、各コミットの名前も名前順に並ぶ。
+fn branches_by_oid(state: &AppState) -> HashMap<Oid, Vec<&str>> {
+    let mut by_oid: HashMap<Oid, Vec<&str>> = HashMap::new();
+    for branch in state.branches.branches() {
+        by_oid.entry(branch.oid).or_default().push(&branch.name);
+    }
+    by_oid
+}
+
+/// 種別ごとの飾り（06 の「ラベル」）。ローカルブランチの `[` `]` は `commit_line` が付ける。
 fn brackets(label: &RefLabel) -> (&'static str, &'static str) {
     match label {
-        RefLabel::Local { .. } => ("[", "]"),
         RefLabel::Remote { .. } => ("{", "}"),
         RefLabel::Tag { .. } => ("<", ">"),
     }
@@ -222,7 +245,7 @@ mod tests {
         col_of, draw, graph_rows, state_at, state_with_commits, state_with_history, terminal_with,
     };
     use mewgit_core::app::{init, update, Msg, TermSize};
-    use mewgit_core::git_read::{GitReadError, RefIndex, RefLabel};
+    use mewgit_core::git_read::{Branch, GitReadError, RefIndex, RefLabel};
     use mewgit_core::test_util::{deliver_branches, fake_branch, fake_branch_list};
     use ratatui::buffer::Buffer;
     use ratatui::style::Modifier;
@@ -259,10 +282,13 @@ mod tests {
             lines[FIRST_ROW + 1]
         );
         let oid = state.graph.lines[0].commit.oid.to_string();
+        // 2 件目を見る。1 件目には fixture の HEAD（`main`）のラベルが Oid と summary の
+        // あいだに載る。
+        let second = state.graph.lines[1].commit.oid.to_string();
         assert!(
-            lines[FIRST_ROW].contains(&format!("{} newest", &oid[..SHORT_OID])),
+            lines[FIRST_ROW + 1].contains(&format!("{} oldest", &second[..SHORT_OID])),
             "短縮 Oid が summary の前にありません: {:?}",
-            lines[FIRST_ROW]
+            lines[FIRST_ROW + 1]
         );
         assert!(
             !lines[FIRST_ROW].contains(&oid[..SHORT_OID + 1]),
@@ -339,12 +365,6 @@ mod tests {
         state.graph.refs = RefIndex::from_iter([
             (
                 oid,
-                RefLabel::Local {
-                    name: "main".to_string(),
-                },
-            ),
-            (
-                oid,
                 RefLabel::Remote {
                     name: "origin/main".to_string(),
                 },
@@ -356,6 +376,15 @@ mod tests {
                 },
             ),
         ]);
+        // ローカルブランチはブランチ一覧の行から引く（02 の「refs とラベル」）。
+        let branches = fake_branch_list(
+            vec![Branch {
+                oid,
+                ..fake_branch("main")
+            }],
+            None,
+        );
+        let _ = deliver_branches(&mut state, Ok(branches));
 
         let lines = draw(
             &state,
@@ -373,7 +402,7 @@ mod tests {
         );
     }
 
-    /// 同じコミットに `a-first` と `main` のラベルを載せ、ブランチ一覧を `head` で届けた状態。
+    /// 同じコミットに `a-first` と `main` を置いたブランチ一覧を、`head` で届けた状態。
     ///
     /// **HEAD でない `a-first` を一覧の先頭（= 選択中の行）とラベルの先頭に置く**
     /// （`.claude/rules/testing.md` の「読み元を移すリファクタの見張り」）—— HEAD の名前を
@@ -381,19 +410,54 @@ mod tests {
     fn state_with_two_local_labels(head: Option<&str>) -> AppState {
         let mut state = state_with_commits(&["first"]);
         let oid = state.graph.lines[0].commit.oid;
-        state.graph.refs = RefIndex::from_iter(["main", "a-first"].map(|name| {
-            (
-                oid,
-                RefLabel::Local {
-                    name: name.to_string(),
-                },
-            )
-        }));
-        let branches = fake_branch_list(vec![fake_branch("a-first"), fake_branch("main")], head);
+        let at = |name| Branch {
+            oid,
+            ..fake_branch(name)
+        };
+        let branches = fake_branch_list(vec![at("a-first"), at("main")], head);
         let _ = deliver_branches(&mut state, Ok(branches));
         // 読み込みはカーソルを HEAD の行へ座らせるので、先頭へ戻して HEAD でない行を選ぶ。
         state.branches.cursor = 0;
         state
+    }
+
+    #[test]
+    fn local_labels_follow_the_branch_list_onto_each_commit() {
+        // `RefIndex` にローカルブランチは無い。一覧の行の oid で、その行のコミットに載る。
+        let mut state = state_with_commits(&["newest", "oldest"]);
+        let [newest, oldest] = [0, 1].map(|i| state.graph.lines[i].commit.oid);
+        let branches = fake_branch_list(
+            vec![
+                Branch {
+                    oid: oldest,
+                    ..fake_branch("feat")
+                },
+                Branch {
+                    oid: newest,
+                    ..fake_branch("main")
+                },
+            ],
+            Some("main"),
+        );
+        let _ = deliver_branches(&mut state, Ok(branches));
+
+        let lines = draw(&state, TermSize::default());
+
+        assert!(
+            lines[FIRST_ROW].contains("[main] newest"),
+            "{:?}",
+            lines[FIRST_ROW]
+        );
+        assert!(
+            !lines[FIRST_ROW].contains("[feat]"),
+            "{:?}",
+            lines[FIRST_ROW]
+        );
+        assert!(
+            lines[FIRST_ROW + 1].contains("[feat] oldest"),
+            "{:?}",
+            lines[FIRST_ROW + 1]
+        );
     }
 
     #[test]
@@ -474,8 +538,9 @@ mod tests {
     #[test]
     fn a_marked_commit_underlines_its_oid_without_moving_the_summary() {
         // 07 の「Graph ペイン」—— 印は oid の見た目だけで出し、桁は足さない。
-        let mut state = state_with_commits(&["first", "second"]);
-        let marked = state.graph.lines[0].commit.oid;
+        // 1 件目は fixture の HEAD（`main`）のラベルで桁がずれるので、2 件目と 3 件目で比べる。
+        let mut state = state_with_commits(&["head", "first", "second"]);
+        let marked = state.graph.lines[1].commit.oid;
         state.graph.toggle_mark(marked);
 
         let terminal = terminal_with(&state, TermSize::default());
@@ -487,13 +552,13 @@ mod tests {
             let x = column_of(buffer, y, &text[..1]).expect("oid が描かれていません");
             &buffer[(x, y)]
         };
-        assert!(oid(FIRST_ROW).modifier.contains(Modifier::UNDERLINED));
-        assert_eq!(oid(FIRST_ROW).fg, theme::marked().fg.unwrap());
-        assert!(!oid(FIRST_ROW + 1).modifier.contains(Modifier::UNDERLINED));
+        assert!(oid(FIRST_ROW + 1).modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(oid(FIRST_ROW + 1).fg, theme::marked().fg.unwrap());
+        assert!(!oid(FIRST_ROW + 2).modifier.contains(Modifier::UNDERLINED));
         let lines = draw(&state, TermSize::default());
         assert_eq!(
-            lines[FIRST_ROW].find("first"),
-            lines[FIRST_ROW + 1].find("second"),
+            lines[FIRST_ROW + 1].find("first"),
+            lines[FIRST_ROW + 2].find("second"),
             "印の有無で summary の桁がずれています"
         );
     }

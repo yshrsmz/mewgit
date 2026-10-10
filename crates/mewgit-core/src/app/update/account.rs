@@ -1227,8 +1227,8 @@ mod tests {
             }],
             refs: RefIndex::from_iter([(
                 oid,
-                RefLabel::Local {
-                    name: "main".to_string(),
+                RefLabel::Remote {
+                    name: "origin/main".to_string(),
                 },
             )]),
             // **ブランチ一覧も同じ返信に乗る**（02 の「ブランチ一覧」）。

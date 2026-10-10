@@ -264,21 +264,16 @@ pub struct Remote {
 }
 
 /// Oid からその位置にある ref を引く索引。グラフ行の右にラベルを並べるのに使う（06）。
+///
+/// **リモート追跡ブランチとタグだけを持つ。** ローカルブランチのラベルは `ui` が
+/// [`BranchList`] の行から引く（02 の「refs とラベル」）。ここにも写すと、一覧と
+/// ラベルが別々の値になり、食い違った組を作れる。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RefIndex {
     labels: HashMap<Oid, Vec<RefLabel>>,
 }
 
 impl RefIndex {
-    /// 並び順の確定はここでやる。索引を組む経路が増えても並べ替えを忘れられないように
-    /// するため（git2 の ref の列挙順は安定していない）。
-    pub(crate) fn new(mut labels: HashMap<Oid, Vec<RefLabel>>) -> Self {
-        for labels in labels.values_mut() {
-            labels.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-        }
-        Self { labels }
-    }
-
     /// そのコミットに付いている ref。無ければ空。種別・名前順に並んでいる。
     pub fn labels(&self, oid: Oid) -> &[RefLabel] {
         self.labels.get(&oid).map_or(&[], Vec::as_slice)
@@ -302,24 +297,25 @@ impl RefIndex {
 /// `(Oid, RefLabel)` の並びから索引を組む。同じ Oid のラベルはまとめられる。
 ///
 /// `refs()` を通さずに索引を作れるようにしてあるのは、`ui` のテストがラベルの
-/// 描画を実リポジトリ無しで表現できるようにするため。並べ替えは [`RefIndex::new`]
-/// を通るので、どちらの経路でも順序は同じになる。
+/// 描画を実リポジトリ無しで表現できるようにするため。**並び順の確定はここでやる**
+/// （git2 の ref の列挙順は安定していない）—— `refs()` もここを通るので、どちらの
+/// 経路でも順序は同じになる。
 impl FromIterator<(Oid, RefLabel)> for RefIndex {
     fn from_iter<I: IntoIterator<Item = (Oid, RefLabel)>>(iter: I) -> Self {
         let mut labels: HashMap<Oid, Vec<RefLabel>> = HashMap::new();
         for (oid, label) in iter {
             labels.entry(oid).or_default().push(label);
         }
-        RefIndex::new(labels)
+        for labels in labels.values_mut() {
+            labels.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        }
+        RefIndex { labels }
     }
 }
 
-/// ref 1 件の表示用ラベル。
+/// ref 1 件の表示用ラベル。ローカルブランチは持たない（[`RefIndex`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefLabel {
-    /// ローカルブランチ。`main`。**HEAD かどうかは持たない** —— どの行が HEAD かは
-    /// [`BranchList`] だけが答える（02 の「refs とラベル」）。
-    Local { name: String },
     /// リモート追跡ブランチ。`origin/main`。remote 名とブランチ名を分けないのは、
     /// `ui` が `{origin/main}` と一続きで描くだけのため。
     Remote { name: String },
@@ -328,19 +324,18 @@ pub enum RefLabel {
 }
 
 impl RefLabel {
-    /// 表示名。種別ごとの飾り（`[main]` / `{origin/main}` / `<v1.0>`）は `ui` が付ける。
+    /// 表示名。種別ごとの飾り（`{origin/main}` / `<v1.0>`）は `ui` が付ける。
     pub fn name(&self) -> &str {
         match self {
-            RefLabel::Local { name } | RefLabel::Remote { name } | RefLabel::Tag { name } => name,
+            RefLabel::Remote { name } | RefLabel::Tag { name } => name,
         }
     }
 
-    /// 並び順。種別（ローカル → リモート → タグ）、同種内は名前順。
+    /// 並び順。種別（リモート → タグ）、同種内は名前順。
     fn sort_key(&self) -> (u8, &str) {
         let kind = match self {
-            RefLabel::Local { .. } => 0,
-            RefLabel::Remote { .. } => 1,
-            RefLabel::Tag { .. } => 2,
+            RefLabel::Remote { .. } => 0,
+            RefLabel::Tag { .. } => 1,
         };
         (kind, self.name())
     }
@@ -354,7 +349,8 @@ impl RefLabel {
 pub enum Head<'a> {
     Branch(&'a Branch),
     Detached(Oid),
-    /// コミットが 1 つも無いリポジトリ。名前は `HEAD` の symbolic target から取る。
+    /// コミットが 1 つも無いリポジトリ。名前は `HEAD` の symbolic target（symref の連鎖を
+    /// 辿った先）から取る。
     Unborn(&'a str),
 }
 
@@ -536,7 +532,7 @@ pub enum WorktreeSection {
 impl WorktreeSnapshot {
     /// 各区画を `path` 順に並べ替える。
     ///
-    /// libgit2 の列挙順には依存しない（[`RefIndex::new`] と同じ理由）。区画を手で
+    /// libgit2 の列挙順には依存しない（`RefIndex` の `FromIterator` と同じ理由）。区画を手で
     /// 並べる代わりに分解束縛にしてあるのは、区画を足したときに並べ替え漏れが
     /// コンパイルエラーになるようにするため（[`section`](Self::section) と同じ狙い）。
     pub(crate) fn sort_sections(&mut self) {

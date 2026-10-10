@@ -169,25 +169,19 @@ fn remotes_is_empty_without_any_remote() {
 }
 
 #[test]
-fn refs_labels_local_branches() {
+fn refs_leave_local_branches_to_the_branch_list() {
     let repo = TestRepo::init();
     let first = repo.commit("first");
     repo.git(&["branch", "topic"]);
+    repo.git(&["tag", "v1"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let index = reader.refs().unwrap();
 
-    assert_eq!(
-        index.labels(first),
-        [
-            RefLabel::Local {
-                name: "main".to_string(),
-            },
-            RefLabel::Local {
-                name: "topic".to_string(),
-            },
-        ]
-    );
+    // ローカルブランチのラベルは `ui` が一覧の行から引く（02 の「refs とラベル」）。
+    // 同じコミットのタグは載るので、索引が空なだけでは通らない。
+    let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
+    assert_eq!(names, ["v1"]);
 }
 
 #[test]
@@ -244,7 +238,6 @@ fn refs_keeps_remote_branches_without_duplicating_the_symbolic_head() {
 fn refs_are_sorted_by_kind_then_name() {
     let repo = TestRepo::init();
     let first = repo.commit("first");
-    repo.git(&["branch", "alpha"]);
     repo.git(&["tag", "v2"]);
     repo.git(&["tag", "v1"]);
     repo.git(&["update-ref", "refs/remotes/origin/main", &first.to_string()]);
@@ -253,13 +246,14 @@ fn refs_are_sorted_by_kind_then_name() {
     let index = reader.refs().unwrap();
 
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
-    assert_eq!(names, ["alpha", "main", "origin/main", "v1", "v2"]);
+    assert_eq!(names, ["origin/main", "v1", "v2"]);
 }
 
 #[test]
 fn refs_ignores_the_stash() {
     let repo = TestRepo::init();
     let first = repo.commit("first");
+    repo.git(&["tag", "v1"]);
     repo.write_worktree_file("file.txt", b"dirty\n");
     repo.git(&["stash", "push", "-m", "wip"]);
     let reader = RepoReader::open(repo.path()).unwrap();
@@ -271,7 +265,7 @@ fn refs_ignores_the_stash() {
     let stash = repo.rev_parse("refs/stash");
     assert_eq!(index.labels(stash), []);
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
-    assert_eq!(names, ["main"]);
+    assert_eq!(names, ["v1"]);
 }
 
 #[test]
@@ -280,12 +274,13 @@ fn refs_skips_a_tag_that_cannot_be_peeled_to_a_commit() {
     let first = repo.commit("first");
     // tree を直接指すタグ。commit まで辿れないのでグラフのどの行にも乗らない。
     repo.git(&["tag", "treetag", "HEAD^{tree}"]);
+    repo.git(&["tag", "v1"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let index = reader.refs().unwrap();
 
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
-    assert_eq!(names, ["main"]);
+    assert_eq!(names, ["v1"]);
     assert_eq!(index.labels(repo.rev_parse("HEAD^{tree}")), []);
 }
 
@@ -453,7 +448,8 @@ fn branches_follows_a_dangling_symbolic_chain_to_an_unborn_head() {
 
     let list = reader.branches().unwrap();
 
-    assert_eq!(list.head(), Head::Unborn("alias"));
+    // 名前は連鎖を辿った先。git も `On branch missing` と読む（git 2.56.0 で確認）。
+    assert_eq!(list.head(), Head::Unborn("missing"));
     assert_eq!(head_row_name(&list), None);
 }
 
@@ -856,6 +852,109 @@ fn branches_lists_local_branches_by_name_with_the_head_marked() {
     assert!(branches.iter().all(|b| b.oid == first));
     // upstream が無ければ ahead / behind は出さない。
     assert!(branches.iter().all(|b| b.upstream.is_none()));
+}
+
+#[test]
+fn branches_list_a_symbolic_branch_like_git_branch() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    // `git branch` は `alias -> main` を 1 行として並べ、`git log --decorate` は
+    // `(HEAD -> main, alias)` と両方を出す（git 2.56.0 で確認）。グラフのラベルも
+    // この一覧から引くので、どちらにも出る（02 の「refs とラベル」）。
+    repo.git(&["symbolic-ref", "refs/heads/alias", "refs/heads/main"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let list = reader.branches().unwrap();
+
+    let rows: Vec<(&str, Oid)> = list
+        .branches()
+        .iter()
+        .map(|b| (b.name.as_str(), b.oid))
+        .collect();
+    assert_eq!(rows, [("alias", first), ("main", first)]);
+    assert_eq!(head_row_name(&list), Some("main"));
+}
+
+#[test]
+fn branches_error_on_a_head_whose_symbolic_chain_loops() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    // git も `git branch` が `failed to resolve HEAD` で落ちる（git 2.56.0 で確認）。
+    repo.git(&["symbolic-ref", "refs/heads/a", "refs/heads/b"]);
+    repo.git(&["symbolic-ref", "refs/heads/b", "refs/heads/a"]);
+    repo.git(&["symbolic-ref", "HEAD", "refs/heads/a"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let result = reader.branches();
+
+    assert!(result.is_err(), "輪になった連鎖が通りました: {result:?}");
+}
+
+#[test]
+fn branches_read_the_tracking_config_of_where_a_symbolic_head_points() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["symbolic-ref", "refs/heads/alias", "refs/heads/main"]);
+    repo.git(&["switch", "-q", "alias"]);
+    // `git push -u origin alias` は `alias -> main` として送り、`branch.main.*` を書く
+    // （git 2.56.0 で確認）。HEAD の行がそれを読む。
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let list = reader.branches().unwrap();
+
+    let head = list.head().branch().expect("HEAD の行がありません");
+    assert_eq!(
+        head.upstream_config,
+        Some(UpstreamConfig {
+            remote: "origin".to_string(),
+            merge: "refs/heads/main".to_string(),
+        })
+    );
+}
+
+#[test]
+fn branches_stop_following_the_head_where_the_chain_leaves_refs_heads() {
+    let repo = TestRepo::init();
+    let first = repo.commit("first");
+    repo.git(&["update-ref", "refs/remotes/origin/main", &first.to_string()]);
+    repo.git(&[
+        "symbolic-ref",
+        "refs/heads/alias",
+        "refs/remotes/origin/main",
+    ]);
+    repo.git(&["symbolic-ref", "HEAD", "refs/heads/alias"]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let list = reader.branches().unwrap();
+
+    // `refs/heads/` の外までは辿らず、`alias` の行のまま（02 の「head」の表）。辿ると
+    // 行の無い名前になって `Detached` に落ちる。
+    assert_eq!(head_row_name(&list), Some("alias"));
+}
+
+#[test]
+fn branches_follow_a_head_on_a_symbolic_branch_to_where_it_points() {
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["symbolic-ref", "refs/heads/alias", "refs/heads/main"]);
+    repo.git(&["branch", "side"]);
+    repo.git(&["switch", "-q", "side"]);
+    // `.git/HEAD` は `ref: refs/heads/alias` になるが、git は `On branch main` と読み、
+    // `git branch` も `* main` を出す（git 2.56.0 で確認）。
+    repo.git(&["switch", "-q", "alias"]);
+    assert_eq!(
+        fs::read_to_string(repo.path().join(".git/HEAD")).unwrap(),
+        "ref: refs/heads/alias\n"
+    );
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let list = reader.branches().unwrap();
+
+    // 1 段で止めると `alias` の行が HEAD になる。
+    assert_eq!(head_row_name(&list), Some("main"));
+    assert!(matches!(list.head(), Head::Branch(b) if b.name == "main"));
 }
 
 #[test]

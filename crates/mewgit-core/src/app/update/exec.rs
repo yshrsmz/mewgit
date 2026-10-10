@@ -208,7 +208,8 @@ impl Reload {
             GitOp::MergeAbort => Reload::Stashes,
 
             // **ラベルと HEAD は動くが、行は動かない。** グラフのラベルは行に焼き込まず
-            // `GraphState.refs` から引く（07）ので、`Cmd::LoadRepoInfo` だけで足りる。
+            // `GraphState.refs` とブランチ一覧から引く（02 の「refs とラベル」）ので、
+            // `Cmd::LoadRepoInfo` だけで足りる。
             // ログの読み直しは `LogSession` の作り直しで履歴全体のコストが掛かる（02 の
             // 「セッションは作り直さず使い回す」）ので、要らないところでは払わない。
             //
@@ -1474,9 +1475,10 @@ mod tests {
 
     #[test]
     fn only_the_operations_that_change_the_walk_reload_the_log() {
-        // ラベルと HEAD はグラフの行に焼き込まず `GraphState.refs` から引く（07）ので、
-        // 既にあるコミットを指すだけの操作は `LoadRepoInfo` で足りる。読み直しは
-        // `LogSession` の作り直しで履歴全体のコストが掛かる（02）。
+        // ラベルと HEAD はグラフの行に焼き込まず `GraphState.refs` とブランチ一覧から引く
+        // （02 の「refs とラベル」）ので、既にあるコミットを指すだけの操作は
+        // `LoadRepoInfo` で足りる。読み直しは `LogSession` の作り直しで履歴全体のコストが
+        // 掛かる（02）。
         assert_eq!(Reload::after(&commit_op(), true), Reload::RefsAndLog);
         assert_eq!(
             Reload::after(

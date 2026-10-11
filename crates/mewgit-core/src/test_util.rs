@@ -547,20 +547,13 @@ fn shown<S: AsRef<OsStr>>(args: &[S]) -> String {
 }
 
 /// `FileEntry` を `(path, old_path, status)` に並べる。[`diff_rows`] と同じ形にして、
-/// status の区画と diff のファイルを直に比べられるようにする。
+/// diff のファイルと直に比べられるようにする。`FileEntry` を返す読み取りのどちらにも
+/// 使う —— status の区画（staged / unstaged / untracked / conflicted）と、
+/// `commit_files` の結果。
 pub fn entry_rows(entries: &[FileEntry]) -> Vec<(&str, Option<&str>, FileStatus)> {
     entries
         .iter()
-        .map(|entry| {
-            (
-                entry.path.to_str().expect("パスが UTF-8 ではありません"),
-                entry
-                    .old_path
-                    .as_deref()
-                    .map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
-                entry.status,
-            )
-        })
+        .map(|entry| row(&entry.path, entry.old_path.as_deref(), entry.status))
         .collect()
 }
 
@@ -568,16 +561,21 @@ pub fn entry_rows(entries: &[FileEntry]) -> Vec<(&str, Option<&str>, FileStatus)
 pub fn diff_rows(diffs: &[FileDiff]) -> Vec<(&str, Option<&str>, FileStatus)> {
     diffs
         .iter()
-        .map(|file| {
-            (
-                file.path.to_str().expect("パスが UTF-8 ではありません"),
-                file.old_path
-                    .as_deref()
-                    .map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
-                file.status,
-            )
-        })
+        .map(|file| row(&file.path, file.old_path.as_deref(), file.status))
         .collect()
+}
+
+/// [`entry_rows`] と [`diff_rows`] の 1 行。
+fn row<'a>(
+    path: &'a Path,
+    old: Option<&'a Path>,
+    status: FileStatus,
+) -> (&'a str, Option<&'a str>, FileStatus) {
+    (
+        path.to_str().expect("パスが UTF-8 ではありません"),
+        old.map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
+        status,
+    )
 }
 
 /// アカウント解決の対象。`app` の `update` と `auth::resolve` の両方が使う。

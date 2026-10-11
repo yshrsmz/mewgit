@@ -692,8 +692,9 @@ mod tests {
 
     #[test]
     fn widening_the_terminal_pulls_the_view_back_to_the_end() {
-        // 末尾に貼り付いたまま端末を大きくすると、カーソルは窓の中にいるので
-        // スクロールが動かず、上に行があるのに空白が残る。
+        // カーソルが窓の最下行にいるまま端末を大きくすると、カーソルは窓の中にいるので
+        // スクロールが動かず、上に行があるのに下に空白が残る。カーソル 29 は末尾
+        // （WIP 行を含めて 30）の 1 つ手前で、窓が 5 行なら末尾の 1 行は窓の下に隠れている。
         let mut state = state_with_commits(30);
         state.graph.cursor = 29;
         let _ = update(&mut state, Msg::Layout { graph_rows: 5 });
@@ -741,13 +742,14 @@ mod tests {
         // 貼り付いたまま中身だけが流れる。
         let mut state = state_with_commits(30);
         for _ in 0..20 {
-            let _ = update(&mut state, Msg::Key(Key::char('j')));
+            let _ = press(&mut state, 'j');
         }
+        assert_eq!(state.graph.scroll, 20 - ROWS + 1);
 
-        let _ = update(&mut state, Msg::Key(Key::char('k')));
+        let _ = press(&mut state, 'k');
 
         assert_eq!(state.graph.cursor, 19);
-        assert_eq!(state.graph.scroll, 1);
+        assert_eq!(state.graph.scroll, 20 - ROWS + 1);
     }
 
     /// 索引 `index` のコミットのファイル一覧が届いた [`Msg`]。中身は `a.txt` 1 件。

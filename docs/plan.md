@@ -885,8 +885,8 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `renames(true)` は `for_untracked` と冗長で、どちらのビットでも libgit2 は `diff.renames` を
       読まない**（02）。`false` にしても結果は変わらない。代わりに `diff.renames=false` のリポジトリで
       staged と commit の rename が対になる見張りを 2 本足した
-      （`a_rename_pairs_even_when_the_repository_turns_rename_detection_off` と
-      `a_commit_pairs_a_rename_even_when_the_repository_turns_rename_detection_off`。git CLI では
+      （`a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off` と
+      `a_committed_rename_pairs_even_when_the_repository_turns_rename_detection_off`。git CLI では
       対にならないことを同じテストで確かめる）。commit 側も設定を読まないことは 02 に理由を書いた
       （2026-10-11 にユーザーと決めた）
 - [x] 外部変更検知（1/2）— 検知と読み直し。**2 本に割った**（2026-10-01 にユーザーと決めた。

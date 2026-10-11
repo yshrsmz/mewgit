@@ -146,7 +146,8 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
         }
         Msg::Layout { graph_rows } => {
             state.graph.viewport = graph_rows;
-            // 縮んだ窓でカーソルが外に出たままにならないようにする。
+            // 縮んだ窓でカーソルが外に出たままにならないようにする。広がった窓では、
+            // 下に空白を残さないよう先に詰める（01）。
             state.graph.scroll_into_view();
             // 続きを頼む: 窓が広がって残りが 1 画面を切ったぶんのログの追加ページ。
             load_more(state)

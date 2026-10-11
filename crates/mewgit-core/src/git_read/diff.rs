@@ -71,8 +71,7 @@ impl RepoReader {
     pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError> {
         let mut opts = DiffOptions::new();
         let mut diff = self.commit_diff(oid, &mut opts)?;
-        // **`diff` と同じ設定で呼ぶ**（[`find_options`]）。ここだけ既定にすると、
-        // 一覧では 2 行の Deleted + Added、diff では 1 行の Renamed になる。
+        // **`diff` と同じ設定で呼ぶ。** 理由は [`find_options`] の doc。
         diff.find_similar(Some(&mut find_options()))?;
         Ok(diff
             .deltas()
@@ -142,7 +141,8 @@ impl RepoReader {
     }
 }
 
-/// rename 検出の設定。**`status` と同じ条件にするためのもの。**
+/// rename 検出の設定。**設定は `status` と同じもの。** そうする理由は staged / unstaged と
+/// commit 側で別（02 の diff の節）。
 ///
 /// `find_similar(None)` の既定とは、次の 2 つの振る舞いで違う。
 ///
@@ -154,12 +154,12 @@ impl RepoReader {
 /// - `diff.renames` の設定を読まない。`status` の側は `StatusOptions` で無条件に
 ///   有効にしているので、読むと設定で切っている環境だけ 2 つが食い違う。
 ///   `GIT_DIFF_FIND_ALL` の範囲のビットが 1 つでも立てば libgit2 は設定を読まない。
-///   `renames(true)` と `for_untracked` のどちらもそのビットで、互いに冗長。
-///   `renames(true)` は、`for_untracked` を外す変更があっても設定を読まないままに
-///   するために残している（実測と版は 02）
-///
-/// commit / Range / Stash も同じ設定で、一覧（`commit_files`）と中身（`diff`）が
-/// 1 つの設定で揃う（02）。
+///   `renames(true)` と `for_untracked` のどちらもそのビットで、`diff.renames` を
+///   読ませない点では互いに冗長（`for_untracked` には上のワークツリーの rename を対にする
+///   働きが別にある）。`renames(true)` は、`for_untracked` を外す変更があっても設定を
+///   読まないままにするための保険として残している。ただし 2 つが立っているあいだは
+///   `renames(true)` を外しても結果が変わらないので、変異で区別できず見張りが無い（実測と
+///   版は 02）
 fn find_options() -> DiffFindOptions {
     let mut options = DiffFindOptions::new();
     options.renames(true).for_untracked(true);

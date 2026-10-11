@@ -236,11 +236,34 @@ fn a_path_keeps_a_staged_rename_under_either_name() {
 }
 
 #[test]
-fn a_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
+fn a_path_keeps_a_worktree_rename_under_either_name() {
     let repo = TestRepo::init();
     repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");
-    repo.git(&["mv", "old.txt", "new.txt"]);
+    // `add` していない `git mv`。index からは消え、untracked が 1 つ増えた状態。
+    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt")).unwrap();
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    // ワーキングツリー側の rename は 2 つの delta を `for_untracked` で対にしている。
+    // pathspec で絞ると、対にする前に片方が落ちる。
+    for name in ["new.txt", "old.txt"] {
+        let diff = reader
+            .diff(DiffTarget::IndexVsWorktree(Some(name.into())))
+            .unwrap();
+
+        assert_eq!(
+            diff_rows(&diff),
+            [("new.txt", Some("old.txt"), FileStatus::Renamed)],
+            "絞り込み: {name}"
+        );
+    }
+}
+
+#[test]
+fn a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
+    let repo = TestRepo::init();
     repo.git(&["config", "diff.renames", "false"]);
+    repo.commit_file("old.txt", &twenty_lines());
+    repo.git(&["mv", "old.txt", "new.txt"]);
     // 設定が効いている証拠。git 自身はこの rename を対にしない。
     assert_eq!(
         repo.git(&["diff", "--cached", "--name-status"]),
@@ -250,17 +273,17 @@ fn a_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
 
     let status = reader.status().unwrap();
     let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
-    let staged = diff_rows(&diff);
 
-    assert_eq!(staged, [("new.txt", Some("old.txt"), FileStatus::Renamed)]);
-    assert_eq!(staged, entry_rows(&status.staged));
+    let renamed = [("new.txt", Some("old.txt"), FileStatus::Renamed)];
+    assert_eq!(entry_rows(&status.staged), renamed);
+    assert_eq!(diff_rows(&diff), renamed);
 }
 
 #[test]
-fn a_commit_pairs_a_rename_even_when_the_repository_turns_rename_detection_off() {
+fn a_committed_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
     let repo = TestRepo::init();
-    repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");
     repo.git(&["config", "diff.renames", "false"]);
+    repo.commit_file("old.txt", &twenty_lines());
     repo.git(&["mv", "old.txt", "new.txt"]);
     repo.git(&["commit", "-q", "-m", "rename"]);
     let commit = repo.head_oid();
@@ -282,29 +305,6 @@ fn a_commit_pairs_a_rename_even_when_the_repository_turns_rename_detection_off()
     let renamed = [("new.txt", Some("old.txt"), FileStatus::Renamed)];
     assert_eq!(entry_rows(&entries), renamed);
     assert_eq!(diff_rows(&diff), renamed);
-}
-
-#[test]
-fn a_path_keeps_a_worktree_rename_under_either_name() {
-    let repo = TestRepo::init();
-    repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");
-    // `add` していない `git mv`。index からは消え、untracked が 1 つ増えた状態。
-    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt")).unwrap();
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    // ワーキングツリー側の rename は 2 つの delta を `for_untracked` で対にしている。
-    // pathspec で絞ると、対にする前に片方が落ちる。
-    for name in ["new.txt", "old.txt"] {
-        let diff = reader
-            .diff(DiffTarget::IndexVsWorktree(Some(name.into())))
-            .unwrap();
-
-        assert_eq!(
-            diff_rows(&diff),
-            [("new.txt", Some("old.txt"), FileStatus::Renamed)],
-            "絞り込み: {name}"
-        );
-    }
 }
 
 #[test]
@@ -503,8 +503,10 @@ fn commit_files_and_the_commit_diff_see_the_same_files() {
     // 出口（`file_entry`）だけを共有しても揃わない（02、#18 と同じ形）。
     // `commit_files` 側で `find_similar` を呼ばないと、rename が Deleted + Added の
     // 2 行になって diff の 1 行と食い違う（既定の設定で呼んでもこの fixture では対に
-    // なるので、設定の差まではここでは見えない）。ずれは「一覧に出ているファイルを
-    // 選んだのに diff が空」という形で出るので、両方を同じリポジトリで突き合わせる。
+    // なるので、設定の差まではここでは見えない。`diff.renames=false` の差は
+    // `a_committed_rename_pairs_even_when_the_repository_turns_rename_detection_off` が
+    // 見る）。ずれは「一覧に出ているファイルを選んだのに diff が空」という形で出るので、
+    // 両方を同じリポジトリで突き合わせる。
     let repo = TestRepo::init();
     repo.commit_file("old.txt", &twenty_lines());
     repo.git(&["mv", "old.txt", "new.txt"]);

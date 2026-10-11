@@ -153,9 +153,8 @@ impl RepoReader {
 ///   `Deleted` + `Untracked` の 2 件になる
 /// - `diff.renames` の設定を読ませない。`status` の側は `StatusOptions` で無条件に
 ///   有効にしているので、読ませると設定で切っている環境だけ 2 つが食い違う。
-///   libgit2 が設定を読むのは検出のフラグが 1 つも立っていないときだけで、
-///   **いま効いているのは `for_untracked` のビット**。`renames(true)` は libgit2 1.9.7 では
-///   どこからも読まれず、意図を書くために残している（`false` にしても結果は変わらない。02）
+///   読ませないのは `for_untracked` のビットで、`renames(true)` は意図を書くために
+///   残している（実測と版は 02）
 fn find_options() -> DiffFindOptions {
     let mut options = DiffFindOptions::new();
     options.renames(true).for_untracked(true);

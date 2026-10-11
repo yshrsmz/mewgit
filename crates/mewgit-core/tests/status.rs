@@ -2,25 +2,8 @@
 
 use std::fs;
 
-use mewgit_core::git_read::{FileEntry, FileStatus, RepoReader, WorktreeSection};
-use mewgit_core::test_util::TestRepo;
-
-/// 区画の中身を `(path, old_path, status)` の並びにする。
-fn rows(entries: &[FileEntry]) -> Vec<(&str, Option<&str>, FileStatus)> {
-    entries
-        .iter()
-        .map(|entry| {
-            (
-                entry.path.to_str().expect("パスが UTF-8 ではありません"),
-                entry
-                    .old_path
-                    .as_deref()
-                    .map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
-                entry.status,
-            )
-        })
-        .collect()
-}
+use mewgit_core::git_read::{FileStatus, RepoReader, WorktreeSection};
+use mewgit_core::test_util::{entry_rows, TestRepo};
 
 #[test]
 fn status_lists_untracked_files_inside_a_new_directory() {
@@ -35,13 +18,13 @@ fn status_lists_untracked_files_inside_a_new_directory() {
 
     // `recurse_untracked_dirs` が効いていないと `a/` の 1 行にまとまる。
     assert_eq!(
-        rows(&status.untracked),
+        entry_rows(&status.untracked),
         [
             ("a/b/deep.txt", None, FileStatus::Untracked),
             ("top.txt", None, FileStatus::Untracked),
         ]
     );
-    assert_eq!(rows(&status.unstaged), []);
+    assert_eq!(entry_rows(&status.unstaged), []);
 }
 
 #[test]
@@ -57,11 +40,11 @@ fn status_puts_a_partially_staged_file_in_both_sections() {
 
     // 一部だけ stage した状態の正しい表現なので、どちらかに寄せない。
     assert_eq!(
-        rows(&status.staged),
+        entry_rows(&status.staged),
         [("file.txt", None, FileStatus::Modified)]
     );
     assert_eq!(
-        rows(&status.unstaged),
+        entry_rows(&status.unstaged),
         [("file.txt", None, FileStatus::Modified)]
     );
 }
@@ -79,11 +62,11 @@ fn status_reports_deleted_files_on_both_sides() {
     let status = reader.status().unwrap();
 
     assert_eq!(
-        rows(&status.staged),
+        entry_rows(&status.staged),
         [("staged.txt", None, FileStatus::Deleted)]
     );
     assert_eq!(
-        rows(&status.unstaged),
+        entry_rows(&status.unstaged),
         [("worktree.txt", None, FileStatus::Deleted)]
     );
 }
@@ -100,7 +83,7 @@ fn status_reports_a_staged_rename_with_both_paths() {
     // `StatusEntry::path()` は rename のとき旧パスを返すので、そのまま使うと
     // 一覧に新しい名前が出ない。
     assert_eq!(
-        rows(&status.staged),
+        entry_rows(&status.staged),
         [("new.txt", Some("old.txt"), FileStatus::Renamed)]
     );
 }
@@ -117,17 +100,17 @@ fn status_reports_a_file_replaced_by_a_symlink_as_a_typechange() {
     // 通常ファイル ↔ symlink の入れ替わり。削除 + 追加ではなく 1 行で出る。
     let unstaged = reader.status().unwrap();
     assert_eq!(
-        rows(&unstaged.unstaged),
+        entry_rows(&unstaged.unstaged),
         [("link", None, FileStatus::Typechange)]
     );
 
     repo.git(&["add", "link"]);
     let staged = reader.status().unwrap();
     assert_eq!(
-        rows(&staged.staged),
+        entry_rows(&staged.staged),
         [("link", None, FileStatus::Typechange)]
     );
-    assert_eq!(rows(&staged.unstaged), []);
+    assert_eq!(entry_rows(&staged.unstaged), []);
 }
 
 #[test]
@@ -147,12 +130,12 @@ fn status_puts_a_conflicted_file_only_in_the_conflicted_section() {
     let status = reader.status().unwrap();
 
     assert_eq!(
-        rows(&status.conflicted),
+        entry_rows(&status.conflicted),
         [("conflict.txt", None, FileStatus::Conflicted)]
     );
     // CONFLICTED は他のビットと同時に立つので、素直に分類すると両方に出る。
-    assert_eq!(rows(&status.staged), []);
-    assert_eq!(rows(&status.unstaged), []);
+    assert_eq!(entry_rows(&status.staged), []);
+    assert_eq!(entry_rows(&status.unstaged), []);
 }
 
 #[test]

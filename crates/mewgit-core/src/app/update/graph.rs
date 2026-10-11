@@ -695,13 +695,11 @@ mod tests {
         // 末尾に貼り付いたまま端末を大きくすると、カーソルは窓の中にいるので
         // スクロールが動かず、上に行があるのに空白が残る。
         let mut state = state_with_commits(30);
-        state.graph.viewport = 5;
         state.graph.cursor = 29;
-        state.graph.scroll_into_view();
+        let _ = update(&mut state, Msg::Layout { graph_rows: 5 });
         assert_eq!(state.graph.scroll, 25);
 
-        state.graph.viewport = 25;
-        state.graph.scroll_into_view();
+        let _ = update(&mut state, Msg::Layout { graph_rows: 25 });
 
         // 表示行は WIP 行を含めて 31。窓が 25 行なら先頭は 6 行目まで下がれる。
         assert_eq!(state.graph.scroll, 6);
@@ -712,13 +710,11 @@ mod tests {
         // 履歴が窓より短くなると詰め先は 0。カーソルは窓の中にいるので、
         // 詰めなければ上 2 行が隠れたまま残る。
         let mut state = state_with_commits(3);
-        state.graph.viewport = 2;
         state.graph.cursor = 3;
-        state.graph.scroll_into_view();
+        let _ = update(&mut state, Msg::Layout { graph_rows: 2 });
         assert_eq!(state.graph.scroll, 2);
 
-        state.graph.viewport = 20;
-        state.graph.scroll_into_view();
+        let _ = update(&mut state, Msg::Layout { graph_rows: 20 });
 
         assert_eq!(state.graph.scroll, 0);
     }
@@ -727,12 +723,12 @@ mod tests {
     fn moving_above_the_window_scrolls_up_to_the_cursor() {
         let mut state = state_with_commits(30);
         for _ in 0..25 {
-            let _ = update(&mut state, Msg::Key(Key::char('j')));
+            let _ = press(&mut state, 'j');
         }
-        assert_eq!(state.graph.scroll, 6);
+        assert_eq!(state.graph.scroll, 25 - ROWS + 1);
 
         for _ in 0..20 {
-            let _ = update(&mut state, Msg::Key(Key::char('k')));
+            let _ = press(&mut state, 'k');
         }
 
         assert_eq!(state.graph.cursor, 5);

@@ -546,6 +546,40 @@ fn shown<S: AsRef<OsStr>>(args: &[S]) -> String {
         .join(" ")
 }
 
+/// `FileEntry` を `(path, old_path, status)` に並べる。[`diff_rows`] と同じ形にして、
+/// status の区画と diff のファイルを直に比べられるようにする。
+pub fn entry_rows(entries: &[FileEntry]) -> Vec<(&str, Option<&str>, FileStatus)> {
+    entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.path.to_str().expect("パスが UTF-8 ではありません"),
+                entry
+                    .old_path
+                    .as_deref()
+                    .map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
+                entry.status,
+            )
+        })
+        .collect()
+}
+
+/// `FileDiff` を [`entry_rows`] と同じ `(path, old_path, status)` に並べる。
+pub fn diff_rows(diffs: &[FileDiff]) -> Vec<(&str, Option<&str>, FileStatus)> {
+    diffs
+        .iter()
+        .map(|file| {
+            (
+                file.path.to_str().expect("パスが UTF-8 ではありません"),
+                file.old_path
+                    .as_deref()
+                    .map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
+                file.status,
+            )
+        })
+        .collect()
+}
+
 /// アカウント解決の対象。`app` の `update` と `auth::resolve` の両方が使う。
 ///
 /// **owner / repo は実在のものに合わせてある** —— `[[repos]]` の glob を書く

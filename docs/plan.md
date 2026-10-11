@@ -872,17 +872,17 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の
       `ESC[<行>;<桁>H` を読んで回避している
-- [ ] `GraphState::scroll_into_view` に見張りを足す。**詰めの行（`scroll.min(rows - viewport)`）と
-      `cursor < scroll` の腕は、どちらを消しても core と tui のテストが全部通る**（#190 のテスト精査で
-      変異にかけた。消した `a_viewport_larger_than_the_history_scrolls_to_the_top` はカーソルが 0 で、
-      2 つの腕が互いを補うので元から空振りだった）。塞ぐには、窓の上端より上へ戻る形
-      （`cursor < scroll`）と、履歴が窓より短くカーソルが `scroll` より下にある形
-      （行 4・窓 20・cursor 3・scroll 2 → scroll 0）を `widening_the_terminal_…` の並びに 1 本ずつ
-- [ ] `git_read::diff::find_options` の `renames(true)` に見張りを足す。**`false` にしても
-      core と tui のテストが全部通る** —— どの fixture も既定の設定で rename が対になるので、
-      `find_options` と既定を区別できない（#190 で変異にかけた）。塞ぐには、`diff.renames=false` を
-      設定したリポジトリで rename が対になることを見る 1 本か、類似度の閾値付近の編集を
-      混ぜて既定の設定では対にならない fixture
+- [x] `GraphState::scroll_into_view` に見張りを足す。**`cursor < scroll` の腕は、消しても core と tui の
+      テストが全部通っていた**（#190 のテスト精査で変異にかけた）。詰めの行（`scroll.min(rows - viewport)`）は
+      丸ごと消せば `widening_the_terminal_…` が落ちるが、**履歴が窓より短い形（詰め先が 0）**は
+      見ていなかった。窓の上端より上へ戻る形と、行 4・窓 2 → 20 で scroll 2 → 0 になる形を 1 本ずつ足した
+      （腕を消す変異と「行が窓より多いときだけ詰める」変異が、それぞれ 1 本だけを落とす）
+- [x] `git_read::diff::find_options` の `renames(true)` に見張りを足す。**見張れなかった ——
+      `renames(true)` は libgit2 1.9.7 では何もしていない**。設定（`diff.renames`）を読ませないのは
+      `for_untracked` のビットで、`GIT_DIFF_FIND_RENAMES` は対を組む側から読まれない（02）。
+      代わりに `diff.renames=false` のリポジトリで staged / unstaged の rename が status と揃う
+      見張りを足した（git CLI では対にならないことを同じテストで確かめる）。staged 側だけ
+      既定に戻す変異は、core でこの 1 本だけが落とす
 - [x] 外部変更検知（1/2）— 検知と読み直し。**2 本に割った**（2026-10-01 にユーザーと決めた。
       理由は 01 の「外部の変更の検知 › 定期の status」—— 2 本目の守りは diff のキャッシュに
       手を入れる別の関心事で、比べる `(mtime, len)` はこちらが載せる）。**決めた形**（理由と

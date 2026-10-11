@@ -272,6 +272,37 @@ fn a_path_keeps_a_staged_rename_under_either_name() {
 }
 
 #[test]
+fn a_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
+    let repo = TestRepo::init();
+    repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");
+    repo.commit_file("moved.txt", "1\n2\n3\n4\n5");
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    std::fs::rename(repo.path().join("moved.txt"), repo.path().join("after.txt")).unwrap();
+    repo.git(&["config", "diff.renames", "false"]);
+    // 設定が効いている証拠。git 自身はこの rename を対にしない。
+    assert_eq!(
+        repo.git(&["diff", "--cached", "--name-status"]),
+        "A\tnew.txt\nD\told.txt"
+    );
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let status = reader.status().unwrap();
+    let staged = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
+    let unstaged = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
+
+    assert_eq!(
+        files(&staged),
+        [("new.txt", Some("old.txt"), FileStatus::Renamed)]
+    );
+    assert_eq!(files(&staged), rows(&status.staged));
+    assert_eq!(
+        files(&unstaged),
+        [("after.txt", Some("moved.txt"), FileStatus::Renamed)]
+    );
+    assert_eq!(files(&unstaged), rows(&status.unstaged));
+}
+
+#[test]
 fn a_path_keeps_a_worktree_rename_under_either_name() {
     let repo = TestRepo::init();
     repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");

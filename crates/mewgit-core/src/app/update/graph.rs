@@ -708,6 +708,38 @@ mod tests {
     }
 
     #[test]
+    fn widening_past_the_whole_history_scrolls_to_the_top() {
+        // 履歴が窓より短くなると詰め先は 0。カーソルは窓の中にいるので、
+        // 詰めなければ上 2 行が隠れたまま残る。
+        let mut state = state_with_commits(3);
+        state.graph.viewport = 2;
+        state.graph.cursor = 3;
+        state.graph.scroll_into_view();
+        assert_eq!(state.graph.scroll, 2);
+
+        state.graph.viewport = 20;
+        state.graph.scroll_into_view();
+
+        assert_eq!(state.graph.scroll, 0);
+    }
+
+    #[test]
+    fn moving_above_the_window_scrolls_up_to_the_cursor() {
+        let mut state = state_with_commits(30);
+        for _ in 0..25 {
+            let _ = update(&mut state, Msg::Key(Key::char('j')));
+        }
+        assert_eq!(state.graph.scroll, 6);
+
+        for _ in 0..20 {
+            let _ = update(&mut state, Msg::Key(Key::char('k')));
+        }
+
+        assert_eq!(state.graph.cursor, 5);
+        assert_eq!(state.graph.scroll, 5);
+    }
+
+    #[test]
     fn the_view_stays_put_while_the_cursor_is_visible() {
         // 下端から 1 つ戻ってもスクロールは動かない。動かすとカーソルが最下行に
         // 貼り付いたまま中身だけが流れる。

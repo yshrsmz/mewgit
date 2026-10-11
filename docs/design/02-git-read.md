@@ -702,8 +702,15 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
   `for_untracked` を立てないと、ワークツリー上の rename（まだ `add` していない `git mv`）が
   「index から消えた + untracked で増えた」の 2 つの delta のままになる。`status` は
   `renames_index_to_workdir` で 1 行の `Renamed` にするので、同じファイルの見え方が食い違う。
-  `renames` も明示する。既定は `diff.renames` の設定を読むが `status` 側は無条件に有効なので、
-  設定で切っている環境だけ 2 つがずれる
+  `diff.renames` の設定も読ませない。`status` 側は無条件に有効なので、読ませると設定で
+  切っている環境だけ 2 つがずれる。**libgit2（1.9.7）が設定を読むのは、検出のフラグ
+  （`GIT_DIFF_FIND_ALL` の範囲）が 1 つも立っていないときだけ**で、`for_untracked` を
+  立てた時点で読まなくなる。`GIT_DIFF_FIND_RENAMES` は設定から立てられるだけで、対を
+  組む側は読まない —— `renames(true)` を `false` にしても、`diff.renames=false` の
+  リポジトリで staged / unstaged の rename は対になった（2026-10-11 に実測。`diff_tform.c` の
+  `normalize_find_opts`）。`renames(true)` は意図を書くために残してある。見張りは
+  「設定で切ったリポジトリでも status と diff が揃う」こと（`tests/diff.rs`）で、
+  staged 側だけ既定に戻すと落ちる
 - `Delta::Unmodified` / `Ignored` / `Unreadable` の delta は落とす。`FileStatus` に対応する
   変種が無く、この UI では出しても操作できない。`Patch::from_diff` が `None` を返すのも
   libgit2 が「出さない」と判断した delta だけなので、パッチが作れない delta はそのまま飛ばす。

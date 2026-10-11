@@ -151,9 +151,11 @@ impl RepoReader {
 ///   これが無いと対にならない。`status` は `renames_index_to_workdir` で検出するため、
 ///   立てないと同じファイルが status では 1 行の `Renamed`、`diff` では
 ///   `Deleted` + `Untracked` の 2 件になる
-/// - `renames` を明示する。既定は `diff.renames` の設定を読むが、`status` の側は
-///   `StatusOptions` で無条件に有効にしている。設定で切っている環境だけ 2 つが
-///   食い違うことになる
+/// - `diff.renames` の設定を読ませない。`status` の側は `StatusOptions` で無条件に
+///   有効にしているので、読ませると設定で切っている環境だけ 2 つが食い違う。
+///   libgit2 が設定を読むのは検出のフラグが 1 つも立っていないときだけで、
+///   **いま効いているのは `for_untracked` のビット**。`renames(true)` は libgit2 1.9.7 では
+///   どこからも読まれず、意図を書くために残している（`false` にしても結果は変わらない。02）
 fn find_options() -> DiffFindOptions {
     let mut options = DiffFindOptions::new();
     options.renames(true).for_untracked(true);

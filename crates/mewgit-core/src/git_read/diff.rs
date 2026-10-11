@@ -56,7 +56,7 @@ impl RepoReader {
         };
 
         // `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの delta には効かない。
-        diff.find_similar(Some(&mut find_options()))?;
+        pair_renames(&mut diff)?;
         file_diffs(&diff, target.path(), stamp)
     }
 
@@ -71,8 +71,9 @@ impl RepoReader {
     pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError> {
         let mut opts = DiffOptions::new();
         let mut diff = self.commit_diff(oid, &mut opts)?;
-        // **`diff` と同じ設定で呼ぶ。** 理由は [`find_options`] の doc。
-        diff.find_similar(Some(&mut find_options()))?;
+        // **`diff` と同じ [`pair_renames`] を通す。** 片側だけ設定が違うと、一覧に出た
+        // rename を選んでも diff 側では Deleted + Added になる（02）。
+        pair_renames(&mut diff)?;
         Ok(diff
             .deltas()
             .filter_map(|delta| file_entry(&delta))
@@ -141,25 +142,17 @@ impl RepoReader {
     }
 }
 
-/// rename 検出の設定。**設定は `status` と同じもの。** そうする理由は staged / unstaged と
-/// commit 側で別（02 の diff の節）。
+/// rename を対にする。`diff` と `commit_files` の両方がここを通る。
+fn pair_renames(diff: &mut git2::Diff<'_>) -> Result<(), git2::Error> {
+    diff.find_similar(Some(&mut find_options()))
+}
+
+/// rename 検出の設定。理由と実測は 02 の diff の節。
 ///
-/// `find_similar(None)` の既定とは、次の 2 つの振る舞いで違う。
-///
-/// - ワークツリー上の rename を対にする（`for_untracked`）。ワークツリー上の rename
-///   （まだ `add` していない `git mv`）は「index から消えた + untracked で増えた」の
-///   2 つの delta なので、これが無いと対にならない。`status` は
-///   `renames_index_to_workdir` で検出するため、立てないと同じファイルが status では
-///   1 行の `Renamed`、`diff` では `Deleted` + `Untracked` の 2 件になる
-/// - `diff.renames` の設定を読まない。`status` の側は `StatusOptions` で無条件に
-///   有効にしているので、読むと設定で切っている環境だけ 2 つが食い違う。
-///   `GIT_DIFF_FIND_ALL` の範囲のビットが 1 つでも立てば libgit2 は設定を読まない。
-///   `renames(true)` と `for_untracked` のどちらもそのビットで、`diff.renames` を
-///   読ませない点では互いに冗長（`for_untracked` には上のワークツリーの rename を対にする
-///   働きが別にある）。`renames(true)` は、`for_untracked` を外す変更があっても設定を
-///   読まないままにするための保険として残している。ただし 2 つが立っているあいだは
-///   `renames(true)` を外しても結果が変わらないので、変異で区別できず見張りが無い（実測と
-///   版は 02）
+/// - ワークツリー上の rename（index から消えた + untracked で増えた）を `for_untracked` で
+///   対にする
+/// - ユーザーの `diff.renames` を読まない。設定に関わらず rename を対にする
+/// - `renames(true)` は `for_untracked` と冗長で、保険として残している
 fn find_options() -> DiffFindOptions {
     let mut options = DiffFindOptions::new();
     options.renames(true).for_untracked(true);

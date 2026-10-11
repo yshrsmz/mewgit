@@ -677,13 +677,13 @@ mod tests {
     fn j_and_k_move_the_graph_cursor() {
         let mut state = state_with_commits(3);
 
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let _ = press(&mut state, 'j');
         assert_eq!(state.graph.cursor, 1);
 
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Down)));
         assert_eq!(state.graph.cursor, 2);
 
-        let _ = update(&mut state, Msg::Key(Key::char('k')));
+        let _ = press(&mut state, 'k');
         assert_eq!(state.graph.cursor, 1);
 
         let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Up)));
@@ -692,9 +692,11 @@ mod tests {
 
     #[test]
     fn widening_the_terminal_pulls_the_view_back_to_the_end() {
-        // カーソルが窓の最下行にいるまま端末を大きくすると、カーソルは窓の中にいるので
-        // スクロールが動かず、上に行があるのに下に空白が残る。カーソル 29 は末尾
-        // （WIP 行を含めて 30）の 1 つ手前で、窓が 5 行なら末尾の 1 行は窓の下に隠れている。
+        // 広がった窓ではカーソルは窓の中のどこにいても窓の中に残るので、カーソルを追う
+        // 寄せは動かず、詰めなければ上に行があるのに下に空白が残る（01）。ここでは
+        // たとえば、カーソルが末尾近くの最下行にいるまま端末を大きくした形を踏む。
+        // カーソル 29 は末尾の添字 30 の 1 つ手前で、窓が 5 行なら末尾の 1 行は窓の下に
+        // 隠れている。
         let mut state = state_with_commits(30);
         state.graph.cursor = 29;
         let _ = update(&mut state, Msg::Layout { graph_rows: 5 });
@@ -726,7 +728,8 @@ mod tests {
         for _ in 0..25 {
             let _ = press(&mut state, 'j');
         }
-        assert_eq!(state.graph.scroll, 25 - ROWS + 1);
+        // カーソル 25 が窓（20 行）の最下行に来るので、先頭は 25 - 19 = 6。
+        assert_eq!(state.graph.scroll, 6);
 
         for _ in 0..20 {
             let _ = press(&mut state, 'k');
@@ -744,12 +747,13 @@ mod tests {
         for _ in 0..20 {
             let _ = press(&mut state, 'j');
         }
-        assert_eq!(state.graph.scroll, 20 - ROWS + 1);
+        // カーソル 20 が窓（20 行）の最下行に来るので、先頭は 20 - 19 = 1。
+        assert_eq!(state.graph.scroll, 1);
 
         let _ = press(&mut state, 'k');
 
         assert_eq!(state.graph.cursor, 19);
-        assert_eq!(state.graph.scroll, 20 - ROWS + 1);
+        assert_eq!(state.graph.scroll, 1);
     }
 
     /// 索引 `index` のコミットのファイル一覧が届いた [`Msg`]。中身は `a.txt` 1 件。
@@ -1051,7 +1055,7 @@ mod tests {
         // 起動直後は WIP 行。詳細は右ペインに出るので、乗った時点で読む。
         assert!(state.graph.cursor_commit().is_none());
 
-        let cmd = update(&mut state, Msg::Key(Key::char('j')));
+        let cmd = press(&mut state, 'j');
 
         assert_eq!(cmd, commit_loads(cursor(&state)));
         assert!(state.jobs.is_running(JobKind::LoadCommitDetail));
@@ -1062,7 +1066,7 @@ mod tests {
     fn moving_back_to_the_wip_row_asks_for_nothing_and_keeps_the_detail() {
         let mut state = on_first_commit(3);
 
-        let cmd = update(&mut state, Msg::Key(Key::char('k')));
+        let cmd = press(&mut state, 'k');
 
         assert_eq!(state.graph.selection(), GraphSelection::Wip);
         assert_eq!(cmd, Cmd::None);
@@ -1073,9 +1077,9 @@ mod tests {
     #[test]
     fn coming_back_to_the_same_commit_does_not_ask_again() {
         let mut state = on_first_commit(3);
-        let _ = update(&mut state, Msg::Key(Key::char('k')));
+        let _ = press(&mut state, 'k');
 
-        let cmd = update(&mut state, Msg::Key(Key::char('j')));
+        let cmd = press(&mut state, 'j');
 
         assert_eq!(cmd, Cmd::None);
     }
@@ -1114,18 +1118,15 @@ mod tests {
         // 捨てると、コミットに乗って戻るだけで同じものを読み直すことになる。
         let mut state = state_with_commits(3);
         // 1 件目に乗って頼み、返る前に WIP 行へ戻る。
-        assert_eq!(
-            update(&mut state, Msg::Key(Key::char('j'))),
-            commit_loads(fake_oid(0))
-        );
-        assert_eq!(update(&mut state, Msg::Key(Key::char('k'))), Cmd::None);
+        assert_eq!(press(&mut state, 'j'), commit_loads(fake_oid(0)));
+        assert_eq!(press(&mut state, 'k'), Cmd::None);
         assert_eq!(state.graph.selection(), GraphSelection::Wip);
 
         let cmd = update(&mut state, detail_ok(0));
 
         assert_eq!(cmd, Cmd::None);
         // 戻っても読み直しは出ない。
-        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+        assert_eq!(press(&mut state, 'j'), Cmd::None);
         assert!(state.graph.fresh_detail().is_some());
     }
 
@@ -1173,10 +1174,10 @@ mod tests {
         // 要求が飛んでいるあいだのカーソル移動は `JobTracker` に落とされる。
         // 追いつきはここで行う（01 の「コミット詳細の遅延取得」）。
         let mut state = state_with_commits(5);
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let _ = press(&mut state, 'j');
         // 読み込み中に 2 行動く。この 2 回は落とされる。
-        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
-        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+        assert_eq!(press(&mut state, 'j'), Cmd::None);
+        assert_eq!(press(&mut state, 'j'), Cmd::None);
 
         let cmd = update(&mut state, detail_ok(0));
 
@@ -1186,7 +1187,7 @@ mod tests {
     #[test]
     fn a_detail_for_the_current_commit_settles() {
         let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let _ = press(&mut state, 'j');
 
         let cmd = update(&mut state, detail_ok(0));
 
@@ -1199,7 +1200,7 @@ mod tests {
     fn a_failed_detail_notices_without_asking_again() {
         // 出すと、リポジトリが壊れているあいだ「失敗 → 再読込 → 失敗」を回し続ける。
         let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let _ = press(&mut state, 'j');
 
         let cmd = update(&mut state, detail_err(0));
 
@@ -1214,7 +1215,7 @@ mod tests {
         // ページを積んでもカーソルは動かない。ここから頼み直すと、
         // 「同じコミットの失敗からは頼み直さない」の判断が次のページで崩れる。
         let mut state = state_with_page(3, false);
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let _ = press(&mut state, 'j');
         let _ = update(&mut state, detail_err(0));
 
         let page = LogPage {
@@ -1232,7 +1233,7 @@ mod tests {
         // 行が 1 つも無くても WIP 行は選べる。読むものは無い。
         let mut state = state();
 
-        let cmd = update(&mut state, Msg::Key(Key::char('j')));
+        let cmd = press(&mut state, 'j');
 
         assert_eq!(cmd, more(&state));
         assert!(!state.jobs.is_running(JobKind::LoadCommitDetail));
@@ -1256,11 +1257,8 @@ mod tests {
         // 同じものをもう 1 回読みに行く。
         let mut state = on_first_commit(3);
         // 2 件目を頼んだ直後に戻る。戻りは `JobTracker` に落とされる。
-        assert_eq!(
-            update(&mut state, Msg::Key(Key::char('j'))),
-            commit_loads(fake_oid(1))
-        );
-        assert_eq!(update(&mut state, Msg::Key(Key::char('k'))), Cmd::None);
+        assert_eq!(press(&mut state, 'j'), commit_loads(fake_oid(1)));
+        assert_eq!(press(&mut state, 'k'), Cmd::None);
 
         let cmd = update(&mut state, detail_ok(1));
 
@@ -1274,9 +1272,9 @@ mod tests {
         // コミットはまだ一度も試していないので、放っておくと
         // 「詳細を読み込めませんでした」のまま止まる。
         let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::char('j')));
+        let _ = press(&mut state, 'j');
         // 読み込み中に 1 行動く。この移動は `JobTracker` に落とされる。
-        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), Cmd::None);
+        assert_eq!(press(&mut state, 'j'), Cmd::None);
 
         let cmd = update(&mut state, detail_err(0));
 
@@ -1306,7 +1304,7 @@ mod tests {
         let _ = init(&mut state);
         let _ = update(&mut state, page_loaded(Err(GitReadError::NonUtf8Head)));
 
-        assert_eq!(update(&mut state, Msg::Key(Key::char('j'))), more(&state));
+        assert_eq!(press(&mut state, 'j'), more(&state));
     }
 
     #[test]

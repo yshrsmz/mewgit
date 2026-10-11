@@ -550,7 +550,7 @@ pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;
   1 文字もそのまま使える。`FileDiff` を空の `hunks` で返す形にすると、一覧の行が
   「ハンクの無いファイル」（バイナリ・mode だけの変更）と区別できなくなる
 - **比べる 2 つのツリーと rename 検出の設定は `diff()` と同じものを使う**（第一親、ルート
-  コミットは空ツリー、`find_similar` は `status` と同じ設定。commit 側でそうする理由は
+  コミットは空ツリー、rename の検出は `diff()` と同じ `find_options`。commit 側でそうする理由は
   「diff とハンク」の節）。実装でも同じ関数を通す。
   **出口（delta → `FileEntry` の写像）だけを共有しても、入口の設定が 2 本あれば結果はずれる。**
   ずれは「一覧に出ているファイルを選んだのに diff が空」という形で出る
@@ -616,10 +616,11 @@ pub struct FileEntry {
   新しいディレクトリが 1 行にまとまり、中のファイルを個別に stage できない。ignored は含めない
 - rename 検出は `renames_head_to_index` / `renames_index_to_workdir` を有効にする。切ると
   `git mv` が「削除 + 追加」の 2 行になり、既定の設定の `git status` の見え方と食い違う。
-  `diff.renames=false` のユーザーでは逆に食い違う —— `git status` / `git diff --cached` は
-  A / D の 2 行を出すのに、mewgit は `Renamed` の 1 行を出す（git 2.56.0、2026-10-11 実測。
-  `git config diff.renames false` → `git mv` → `git status --short` が `A new.txt` /
-  `D old.txt`）
+  `diff.renames=false` のユーザーでは逆に食い違う —— `git diff --cached` と、`status.renames`
+  を別に立てていなければ `git status` も A / D の 2 行を出すのに、mewgit は `Renamed` の
+  1 行を出す（git 2.56.0、2026-10-11 実測。`git config diff.renames false` → `git mv` →
+  `git status --short` が `A new.txt` / `D old.txt`。同じリポジトリで
+  `git -c status.renames=true status --short` は `R old.txt -> new.txt` の 1 行を出した）
 - 区画は delta の有無で決める。`head_to_index()` があれば staged、`index_to_workdir()` が
   あれば unstaged（種別が `Untracked` ならそちら）。`CONFLICTED` が立っている entry だけは
   例外で、conflicted にだけ入れて他の区画には出さない（解消するまで stage も unstage も
@@ -717,30 +718,50 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
   staged / unstaged の rename は対になった（2026-10-11 に実測。`diff_tform.c` の
   `normalize_find_opts` と `git_diff_find_similar`）。libgit2 の status 自身も
   `FIND_RENAMES` を立てず、`findopt.flags = GIT_DIFF_FIND_FOR_UNTRACKED` だけで rename を
-  対にしている（`status.c`）。**`renames(true)` は、`for_untracked` を外す変更があっても
-  設定を読まないままにするために残す。** ただし `for_untracked` が立っているあいだは
-  `renames(true)` を外しても結果が変わらないので、この保険は変異で区別できず、見張りが無い
-- 見張りは、`diff.renames=false` のリポジトリで staged（`HeadVsIndex`）と commit
-  （`commit_files` と `DiffTarget::Commit`）の rename が対になることを見る（`tests/diff.rs` の
-  `a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off` と
-  `a_committed_rename_pairs_even_when_the_repository_turns_rename_detection_off`。どちらも
-  同じテストの中で git CLI では対にならないことを確かめる）。`diff()` は全種別で
-  `find_similar` の 1 行を共有している。種別ごとに分岐させて 1 つだけ `None` に戻す変異は、
-  その見張りだけが落とす。共有の行そのものを `None` にすると、新しい 2 本と worktree の
-  2 本が落ちる。unstaged 側は `for_untracked` 無しでは設定に関係なく対にならないので、
-  既存の worktree rename のテスト（`index_vs_worktree_agrees_with_status_on_a_worktree_rename`
-  と `a_path_keeps_a_worktree_rename_under_either_name`）が見張る
+  対にしている（`status.c`）
+- **`renames(true)` は保険として残す**（2026-10-11 にユーザーと決めた）。`for_untracked` を
+  外す変更があっても、`diff.renames` を読まないままにするため。**この保険には見張りが無い** ——
+  `for_untracked` が立っているあいだは `renames(true)` を外しても結果が変わらないので、
+  変異で区別できない（下の記録の `renames(false)` の行）
+- 見張りは、`diff.renames=false` のリポジトリで rename が対になることを見る（`tests/diff.rs`。
+  どれも同じテストの中で git CLI では対にならないことを確かめる）。staged（`HeadVsIndex`）は
+  `a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off`、Range は
+  `a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off`、Stash は
+  `a_stashed_rename_pairs_even_when_the_repository_turns_rename_detection_off`、commit
+  （`commit_files` と `DiffTarget::Commit`）は `commit_files_and_the_commit_diff_see_the_same_files`
+  （2 つの等しさに加えて、リテラルの行とも比べる）。unstaged 側は `for_untracked` 無しでは
+  設定に関係なく対にならないので、既存の worktree rename のテスト
+  （`index_vs_worktree_agrees_with_status_on_a_worktree_rename` と
+  `a_path_keeps_a_worktree_rename_under_either_name`）が見張る。`diff()` と `commit_files()` は
+  どちらも `pair_renames` を通して `find_similar` を呼ぶ
+- 変異で確かめた記録（`cargo test -p mewgit-core --no-fail-fast`。2026-10-11）
+
+  | 変異 | 落ちたテスト |
+  |---|---|
+  | `diff()` を種別で分岐させ、`HeadVsIndex` だけ `find_similar(None)` | staged の 1 本だけ |
+  | 同じく `Range` だけ | ranged の 1 本だけ |
+  | 同じく `Stash` だけ | stashed の 1 本だけ |
+  | 同じく `Commit` だけ | `commit_files_and_the_commit_diff_see_the_same_files` |
+  | 同じく `IndexVsWorktree` だけ | worktree の 2 本 |
+  | `commit_files` だけ `find_similar(None)` | `commit_files_and_the_commit_diff_see_the_same_files` |
+  | `diff()` の `Commit` と `commit_files` を同時に `find_similar(None)` | `commit_files_and_the_commit_diff_see_the_same_files`（リテラルの行との比較で） |
+  | `diff()` の呼び出し 1 行を `find_similar(None)`（全種別。`commit_files` はそのまま） | staged・ranged・stashed・`commit_files_and_the_commit_diff_see_the_same_files`・worktree の 2 本 |
+  | `pair_renames` の中身を `find_similar(None)`（`diff()` と `commit_files` の両方） | 上と同じ 6 本 |
+  | `find_options` を `renames(false)` | 0 本（全部通った） |
+
 - **commit / Range / Stash の diff も同じ設定で、ユーザーの `diff.renames` を読まない。**
   上の「`status` と揃える」は mewgit の status と diff を揃える理由で、commit 側には
   比べる status が無いので当てはまらない。**git CLI と揃えているわけではない** ——
-  staged / unstaged も、`diff.renames=false` のユーザーでは `git status` /
-  `git diff --cached` と食い違う（「ステータス」の節）。commit 側の理由は別にある
+  staged / unstaged も、`diff.renames=false` のユーザーでは `git diff --cached` と、
+  `status.renames` を別に立てていなければ `git status` とも食い違う（「ステータス」の節）。
+  commit 側の理由は別にある
   （2026-10-11 にユーザーと決めた）。(1) `commit_files` の一覧と `diff(DiffTarget::Commit)`
   の中身が 1 つの設定で必ず揃う —— 「コミットのファイル一覧」の「比べる 2 つのツリーと
   rename 検出の設定は `diff()` と同じものを使う」を、設定を読む・読まないで割らない。
   (2) git の既定でも rename 検出は有効。帰結として、`diff.renames=false` のユーザーには
   mewgit が `git show` と違って rename を 1 行の `Renamed` で出し（staged / unstaged が
-  `git status` と違うのと同じ形）、`diff.renames=copies` のユーザーにはコピー検出が効かない
+  `git status` と違うのと同じ形）、`diff.renames=copies` のユーザーにはコピー検出が効かない。
+  見張りは commit・Range・Stash のそれぞれに 1 本ずつある（上の見張りの項と変異の記録）
 - `Delta::Unmodified` / `Ignored` / `Unreadable` の delta は落とす。`FileStatus` に対応する
   変種が無く、この UI では出しても操作できない。`Patch::from_diff` が `None` を返すのも
   libgit2 が「出さない」と判断した delta だけなので、パッチが作れない delta はそのまま飛ばす。

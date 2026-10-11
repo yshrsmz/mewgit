@@ -258,12 +258,22 @@ fn a_path_keeps_a_worktree_rename_under_either_name() {
     }
 }
 
-#[test]
-fn a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
+/// `diff.renames=false` のリポジトリで、`old.txt` を `new.txt` へ `git mv` した
+/// （まだコミットしていない）状態。
+///
+/// **git 自身はこの rename を対にしない**ので、各テストは git CLI で A/D になることを
+/// 先に確かめてから、mewgit の読み取りが Renamed の 1 行にすることを見る。
+fn renamed_with_detection_off() -> TestRepo {
     let repo = TestRepo::init();
     repo.git(&["config", "diff.renames", "false"]);
     repo.commit_file("old.txt", &twenty_lines());
     repo.git(&["mv", "old.txt", "new.txt"]);
+    repo
+}
+
+#[test]
+fn a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
+    let repo = renamed_with_detection_off();
     // 設定が効いている証拠。git 自身はこの rename を対にしない。
     assert_eq!(
         repo.git(&["diff", "--cached", "--name-status"]),
@@ -280,31 +290,50 @@ fn a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
 }
 
 #[test]
-fn a_committed_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
-    let repo = TestRepo::init();
-    repo.git(&["config", "diff.renames", "false"]);
-    repo.commit_file("old.txt", &twenty_lines());
-    repo.git(&["mv", "old.txt", "new.txt"]);
+fn a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
+    let repo = renamed_with_detection_off();
+    let from = repo.head_oid();
     repo.git(&["commit", "-q", "-m", "rename"]);
-    let commit = repo.head_oid();
+    let to = repo.head_oid();
     // 設定が効いている証拠。git 自身はこの rename を対にしない。
     assert_eq!(
-        repo.git(&["show", "--name-status", "--format=", "HEAD"]),
+        repo.git(&["diff", "--name-status", &from.to_string(), &to.to_string()]),
         "A\tnew.txt\nD\told.txt"
     );
     let reader = RepoReader::open(repo.path()).unwrap();
 
-    let entries = reader.commit_files(commit).unwrap();
     let diff = reader
-        .diff(DiffTarget::Commit {
-            oid: commit,
+        .diff(DiffTarget::Range {
+            from,
+            to,
             path: None,
         })
         .unwrap();
 
-    let renamed = [("new.txt", Some("old.txt"), FileStatus::Renamed)];
-    assert_eq!(entry_rows(&entries), renamed);
-    assert_eq!(diff_rows(&diff), renamed);
+    assert_eq!(
+        diff_rows(&diff),
+        [("new.txt", Some("old.txt"), FileStatus::Renamed)]
+    );
+}
+
+#[test]
+fn a_stashed_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
+    let repo = renamed_with_detection_off();
+    repo.git(&["stash", "push", "-q"]);
+    let stash = repo.rev_parse("stash@{0}");
+    // 設定が効いている証拠。git 自身はこの rename を対にしない。
+    assert_eq!(
+        repo.git(&["stash", "show", "--name-status", "stash@{0}"]),
+        "A\tnew.txt\nD\told.txt"
+    );
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::Stash(stash)).unwrap();
+
+    assert_eq!(
+        diff_rows(&diff),
+        [("new.txt", Some("old.txt"), FileStatus::Renamed)]
+    );
 }
 
 #[test]
@@ -502,18 +531,20 @@ fn commit_files_and_the_commit_diff_see_the_same_files() {
     // **入口（比べる 2 つのツリーと `find_similar`）が 2 本あれば結果はずれる。**
     // 出口（`file_entry`）だけを共有しても揃わない（02、#18 と同じ形）。
     // `commit_files` 側で `find_similar` を呼ばないと、rename が Deleted + Added の
-    // 2 行になって diff の 1 行と食い違う（既定の設定で呼んでもこの fixture では対に
-    // なるので、設定の差まではここでは見えない。`diff.renames=false` の差は
-    // `a_committed_rename_pairs_even_when_the_repository_turns_rename_detection_off` が
-    // 見る）。ずれは「一覧に出ているファイルを選んだのに diff が空」という形で出るので、
-    // 両方を同じリポジトリで突き合わせる。
-    let repo = TestRepo::init();
-    repo.commit_file("old.txt", &twenty_lines());
-    repo.git(&["mv", "old.txt", "new.txt"]);
+    // 2 行になって diff の 1 行と食い違う。`diff.renames=false` のリポジトリで見るので、
+    // 片側だけ既定の設定（`find_similar(None)`。設定を読んで対にしない）で呼んだ形も
+    // ここで落ちる。ずれは「一覧に出ているファイルを選んだのに diff が空」という形で
+    // 出るので、両方を同じリポジトリで突き合わせる。
+    let repo = renamed_with_detection_off();
     repo.write_worktree_file("added.txt", b"added\n");
     repo.git(&["add", "-A"]);
     repo.git(&["commit", "-q", "-m", "rename and add"]);
     let commit = repo.head_oid();
+    // 設定が効いている証拠。git 自身はこの rename を対にしない。
+    assert_eq!(
+        repo.git(&["show", "--name-status", "--format=", "HEAD"]),
+        "A\tadded.txt\nA\tnew.txt\nD\told.txt"
+    );
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let entries = reader.commit_files(commit).unwrap();
@@ -524,6 +555,14 @@ fn commit_files_and_the_commit_diff_see_the_same_files() {
         })
         .unwrap();
 
+    // 等しさだけでは、両方を同時に `find_similar(None)` に戻した形（どちらも
+    // Deleted + Added の 3 行で揃う）が通る。リテラルの行とも比べる。
+    let expected = [
+        ("added.txt", None, FileStatus::Added),
+        ("new.txt", Some("old.txt"), FileStatus::Renamed),
+    ];
+    assert_eq!(entry_rows(&entries), expected);
+    assert_eq!(diff_rows(&diff), expected);
     assert_eq!(entry_rows(&entries), diff_rows(&diff));
 }
 

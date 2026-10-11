@@ -546,38 +546,6 @@ fn shown<S: AsRef<OsStr>>(args: &[S]) -> String {
         .join(" ")
 }
 
-/// `FileEntry` を `(path, old_path, status)` に並べる。[`diff_rows`] と同じ形にして、
-/// diff のファイルと直に比べられるようにする。`FileEntry` を返す読み取りのどちらにも
-/// 使う —— status の区画（staged / unstaged / untracked / conflicted）と、
-/// `commit_files` の結果。
-pub fn entry_rows(entries: &[FileEntry]) -> Vec<(&str, Option<&str>, FileStatus)> {
-    entries
-        .iter()
-        .map(|entry| row(&entry.path, entry.old_path.as_deref(), entry.status))
-        .collect()
-}
-
-/// `FileDiff` を [`entry_rows`] と同じ `(path, old_path, status)` に並べる。
-pub fn diff_rows(diffs: &[FileDiff]) -> Vec<(&str, Option<&str>, FileStatus)> {
-    diffs
-        .iter()
-        .map(|file| row(&file.path, file.old_path.as_deref(), file.status))
-        .collect()
-}
-
-/// [`entry_rows`] と [`diff_rows`] の 1 行。
-fn row<'a>(
-    path: &'a Path,
-    old: Option<&'a Path>,
-    status: FileStatus,
-) -> (&'a str, Option<&'a str>, FileStatus) {
-    (
-        path.to_str().expect("パスが UTF-8 ではありません"),
-        old.map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
-        status,
-    )
-}
-
 /// アカウント解決の対象。`app` の `update` と `auth::resolve` の両方が使う。
 ///
 /// **owner / repo は実在のものに合わせてある** —— `[[repos]]` の glob を書く
@@ -1004,6 +972,36 @@ pub fn fake_hunk(header: &str, lines: &[(LineOrigin, &str)]) -> Hunk {
             })
             .collect(),
     }
+}
+
+/// `FileEntry` を `(path, old_path, status)` に並べる。[`diff_rows`] と同じ形にして、
+/// diff のファイルと直に比べられるようにする。
+pub fn entry_rows(entries: &[FileEntry]) -> Vec<(&str, Option<&str>, FileStatus)> {
+    entries
+        .iter()
+        .map(|entry| row(&entry.path, entry.old_path.as_deref(), entry.status))
+        .collect()
+}
+
+/// `FileDiff` を [`entry_rows`] と同じ `(path, old_path, status)` に並べる。
+pub fn diff_rows(diffs: &[FileDiff]) -> Vec<(&str, Option<&str>, FileStatus)> {
+    diffs
+        .iter()
+        .map(|file| row(&file.path, file.old_path.as_deref(), file.status))
+        .collect()
+}
+
+/// [`entry_rows`] と [`diff_rows`] の 1 行。
+fn row<'a>(
+    path: &'a Path,
+    old: Option<&'a Path>,
+    status: FileStatus,
+) -> (&'a str, Option<&'a str>, FileStatus) {
+    (
+        path.to_str().expect("パスが UTF-8 ではありません"),
+        old.map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
+        status,
+    )
 }
 
 /// 中身を作り込んだ [`Commit`]。実リポジトリを作らずに一覧の描画を試すのに使う。

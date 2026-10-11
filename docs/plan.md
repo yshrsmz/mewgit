@@ -876,18 +876,26 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       テストが全部通っていた**（#190 のテスト精査で変異にかけた）。詰めの行（`scroll.min(rows - viewport)`）は
       丸ごと消せば `widening_the_terminal_…` が落ちるが、**履歴が窓より短い形（詰め先が 0）**は
       見ていなかった。窓の上端より上へ戻る形と、行 4・窓 2 → 20 で scroll 2 → 0 になる形を 1 本ずつ足した
-      （腕を消す変異と「行が窓より多いときだけ詰める」変異が、それぞれ 1 本だけを落とす）。
+      （2026-10-11 に core と tui の全テストで叩いた変異では、腕を消す変異は
+      `moving_above_the_window_scrolls_up_to_the_cursor` の 1 本だけを、「行が窓より多いときだけ
+      詰める」変異は `widening_past_the_whole_history_scrolls_to_the_top` の 1 本だけを落とした）。
       #190 の時点の記述（詰めの行も、どちらを消しても通る）は詰めの行について外れていた。
       足した `widening_past_the_whole_history_scrolls_to_the_top` は窓の変更を `Msg::Layout` で
       届ける（`viewport` を直に書いて `scroll_into_view` を呼ばない）。既存の
       `widening_the_terminal_pulls_the_view_back_to_the_end` も同じ形に揃えた
-- [x] `git_read::diff::find_options` の `renames(true)` に見張りを足す。**見張れなかった ——
-      `renames(true)` は `for_untracked` と冗長で、どちらのビットでも libgit2 は `diff.renames` を
-      読まない**（02）。`false` にしても結果は変わらない。代わりに `diff.renames=false` のリポジトリで
-      staged と commit の rename が対になる見張りを 2 本足した
-      （`a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off` と
-      `a_committed_rename_pairs_even_when_the_repository_turns_rename_detection_off`。git CLI では
-      対にならないことを同じテストで確かめる）。commit 側も設定を読まないことは 02 に理由を書いた
+- [x] `git_read::diff::find_options` が `diff.renames` を読まないことに見張りを足す。
+      **`renames(true)` 単体には見張りを置けない** —— `for_untracked` と冗長で、どちらのビットでも
+      libgit2 は `diff.renames` を読まないので、`false` にする変異と区別できない（libgit2 1.9.7 の
+      `diff_tform.c` の `normalize_find_opts` のソース。02）。`renames(true)` は保険として残すと
+      2026-10-11 にユーザーと決めた。見張りは `diff.renames=false` のリポジトリで rename が対になる
+      ことを、git CLI では対にならないことと同じテストで見る —— staged
+      （`a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off`）、ranged
+      （`a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off`）、stashed
+      （`a_stashed_rename_pairs_even_when_the_repository_turns_rename_detection_off`）、commit
+      （`commit_files_and_the_commit_diff_see_the_same_files`）。worktree は既存の
+      `index_vs_worktree_agrees_with_status_on_a_worktree_rename` と
+      `a_path_keeps_a_worktree_rename_under_either_name` が見る。変異ごとにどれが落ちたかの
+      記録（2026-10-11）は 02 の diff の節。commit 側も設定を読まないことは 02 に理由を書いた
       （2026-10-11 にユーザーと決めた）
 - [x] 外部変更検知（1/2）— 検知と読み直し。**2 本に割った**（2026-10-01 にユーザーと決めた。
       理由は 01 の「外部の変更の検知 › 定期の status」—— 2 本目の守りは diff のキャッシュに

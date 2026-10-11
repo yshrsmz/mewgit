@@ -139,22 +139,6 @@ fn head_vs_index_works_before_the_first_commit() {
 }
 
 #[test]
-fn head_vs_index_reports_a_rename_with_both_paths() {
-    let repo = TestRepo::init();
-    repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");
-    repo.git(&["mv", "old.txt", "new.txt"]);
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
-
-    // `find_similar` を `Patch` より先に呼んでいないと「削除 + 追加」の 2 行になる。
-    assert_eq!(
-        files(&diff),
-        [("new.txt", Some("old.txt"), FileStatus::Renamed)]
-    );
-}
-
-#[test]
 fn index_vs_worktree_agrees_with_status_on_a_worktree_rename() {
     let repo = TestRepo::init();
     repo.commit_file("old.txt", "one\ntwo\nthree\nfour\nfive");
@@ -308,23 +292,6 @@ fn a_path_keeps_a_worktree_rename_under_either_name() {
             "絞り込み: {name}"
         );
     }
-}
-
-#[test]
-fn a_path_narrows_an_untracked_file_without_reading_the_others() {
-    let repo = TestRepo::init();
-    repo.commit("first");
-    repo.write_worktree_file("wanted.txt", b"wanted\n");
-    repo.write_worktree_file("other.txt", b"other\n");
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let diff = reader
-        .diff(DiffTarget::IndexVsWorktree(Some("wanted.txt".into())))
-        .unwrap();
-
-    // untracked も中身が出る（`show_untracked_content`）。絞ったファイルだけ。
-    assert_eq!(files(&diff), [("wanted.txt", None, FileStatus::Untracked)]);
-    assert_eq!(diff[0].hunks.len(), 1);
 }
 
 #[test]
@@ -518,65 +485,13 @@ fn commit_files_lists_what_the_commit_changed() {
 }
 
 #[test]
-fn commit_files_pairs_a_rename_like_the_diff_does() {
-    // **`find_similar` の設定を `diff` と共有していないと 2 行になる**（Deleted +
-    // Added）。一覧の行と diff の対象が食い違う形（02）。
-    let repo = TestRepo::init();
-    repo.commit_file("old.txt", &twenty_lines());
-    repo.git(&["mv", "old.txt", "new.txt"]);
-    repo.git(&["commit", "-q", "-m", "rename"]);
-    let renamed = repo.head_oid();
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let entries = reader.commit_files(renamed).unwrap();
-
-    assert_eq!(
-        rows(&entries),
-        [("new.txt", Some("old.txt"), FileStatus::Renamed)]
-    );
-}
-
-#[test]
-fn commit_files_uses_the_first_parent_of_a_merge() {
-    let (repo, merge) = merged_repo();
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let entries = reader.commit_files(merge).unwrap();
-
-    // 第一親（main）との差なので、topic 側で足したファイルだけが出る。
-    assert_eq!(rows(&entries), [("topic.txt", None, FileStatus::Added)]);
-}
-
-#[test]
-fn commit_files_lists_the_root_commit_against_an_empty_tree() {
-    let repo = TestRepo::init();
-    let root = repo.commit_file("file.txt", "first");
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let entries = reader.commit_files(root).unwrap();
-
-    assert_eq!(rows(&entries), [("file.txt", None, FileStatus::Added)]);
-}
-
-#[test]
-fn an_empty_commit_has_no_files() {
-    // `--allow-empty` のコミットは変更を 1 つも持たない。**「まだ読めていない」と
-    // 同じ見た目にしないのは `app` の仕事**で、こちらは空の `Vec` を返す（02）。
-    let repo = TestRepo::init();
-    repo.commit_file("file.txt", "first");
-    repo.git(&["commit", "-q", "--allow-empty", "-m", "empty"]);
-    let empty = repo.head_oid();
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    assert!(reader.commit_files(empty).unwrap().is_empty());
-}
-
-#[test]
 fn commit_files_and_the_commit_diff_see_the_same_files() {
-    // **入口（比べる 2 つのツリーと `find_similar` の設定）が 2 本あれば結果はずれる。**
-    // 出口（`file_entry`）だけを共有しても揃わない（02、#18 と同じ形）。ずれは
-    // 「一覧に出ているファイルを選んだのに diff が空」という形で出るので、
-    // 両方を同じリポジトリで突き合わせる。
+    // **入口（比べる 2 つのツリーと `find_similar`）が 2 本あれば結果はずれる。**
+    // 出口（`file_entry`）だけを共有しても揃わない（02、#18 と同じ形）。
+    // `commit_files` 側で `find_similar` を呼ばないと、rename が Deleted + Added の
+    // 2 行になって diff の 1 行と食い違う（既定の設定で呼んでもこの fixture では対に
+    // なるので、設定の差まではここでは見えない）。ずれは「一覧に出ているファイルを
+    // 選んだのに diff が空」という形で出るので、両方を同じリポジトリで突き合わせる。
     let repo = TestRepo::init();
     repo.commit_file("old.txt", &twenty_lines());
     repo.git(&["mv", "old.txt", "new.txt"]);

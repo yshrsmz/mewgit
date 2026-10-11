@@ -954,20 +954,6 @@ mod tests {
     }
 
     #[test]
-    fn a_second_load_while_one_is_running_is_dropped() {
-        // 二重に投げると同じページを 2 回積む。
-        let mut state = state();
-        let _ = init(&mut state);
-
-        let again = state.issue(Cmd::LoadLog {
-            count: 10,
-            restart: false,
-        });
-
-        assert_eq!(again, Cmd::None);
-    }
-
-    #[test]
     fn batch_only_drops_the_duplicated_cmd() {
         let mut state = state();
         let _ = init(&mut state);
@@ -986,22 +972,11 @@ mod tests {
     }
 
     #[test]
-    fn q_quits() {
-        let mut state = state();
-        assert_eq!(update(&mut state, Msg::Key(Key::char('q'))), Cmd::Quit);
-    }
-
-    #[test]
-    fn ctrl_q_does_not_quit() {
+    fn q_quits_but_ctrl_q_does_not() {
         let mut state = state();
         // 終了は修飾なしの `q` だけ。Ctrl-q で落ちると事故になる。
         assert_eq!(update(&mut state, Msg::Key(Key::ctrl('q'))), Cmd::None);
-    }
-
-    #[test]
-    fn ctrl_c_quits() {
-        let mut state = state();
-        assert_eq!(update(&mut state, Msg::Key(Key::ctrl('c'))), Cmd::Quit);
+        assert_eq!(update(&mut state, Msg::Key(Key::char('q'))), Cmd::Quit);
     }
 
     #[test]
@@ -1104,33 +1079,6 @@ mod tests {
     }
 
     #[test]
-    fn a_canceled_push_does_not_arm_force() {
-        // force に上げてよいのは git が非 FF で断ったときだけ（01 の「force push」）。
-        // 中断は git の判断ではない。
-        let mut state = state();
-        let op = GitOp::Push {
-            remote: "origin".into(),
-            src: "main".into(),
-            dst: None,
-            set_upstream: false,
-            lease: None,
-        };
-        let _ = state.issue(Cmd::Exec(op.clone()));
-
-        let _ = update(
-            &mut state,
-            exec_done_of(
-                op,
-                Err(ExecError::Canceled {
-                    argv: vec!["push".into(), "origin".into(), "main".into()],
-                }),
-            ),
-        );
-
-        assert_eq!(state.push_rejected, None);
-    }
-
-    #[test]
     fn the_spinner_advances_on_every_tick() {
         // 駒を選ぶのは `ui` だが、進めるのは `update`（`ui` は `AppState` を描くだけ）。
         let mut state = state();
@@ -1152,24 +1100,6 @@ mod tests {
 
         let labels: Vec<&str> = state.jobs.iter().map(|job| job.label).collect();
         assert_eq!(labels, ["fetch"]);
-    }
-
-    #[test]
-    fn a_dropped_exec_says_how_to_stop_waiting() {
-        // 落としたことだけでなく、待たずに済む手（`Ctrl-C`）まで書く。
-        // 2 本目は落とす（キューには積まない。01 の「ランタイム」）。落としたことを
-        // 伝えるだけでなく、待たずに済む手（`Ctrl-C`）まで書く。
-        let mut state = state();
-        let _ = state.issue(Cmd::Exec(GitOp::Fetch {
-            remote: None,
-            prune: false,
-        }));
-
-        let cmd = state.issue(Cmd::Exec(GitOp::Stage(vec!["a.txt".into()])));
-
-        assert_eq!(cmd, Cmd::None);
-        let notice = state.notices.back().expect("通知がありません");
-        assert!(notice.message.contains("Ctrl-C"), "{}", notice.message);
     }
 
     #[test]

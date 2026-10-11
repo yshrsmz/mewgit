@@ -325,14 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn a_hint_that_fits_stays_on_one_row() {
-        assert_eq!(
-            fold_hint(&[&["[y] 実行", "[n] やめる"]], 21),
-            ["[y] 実行   [n] やめる"]
-        );
-    }
-
-    #[test]
     fn a_hint_wider_than_the_box_breaks_between_groups() {
         // **群の途中では割らない**（07 の「モーダルのキーの案内」）。`[Shift+Enter /
         // Ctrl-J] 改行` は中に空白を持つので、単語で割る `Wrap` に任せると割れる。
@@ -399,16 +391,6 @@ mod tests {
             wide.lines().count() + 1,
             "案内が 2 行にならない:\n{text}"
         );
-    }
-
-    #[test]
-    fn the_cursor_column_counts_display_width_not_characters() {
-        // `TextBuffer` の列は文字数なので、全角を含む行ではそのまま桁にできない
-        // （01 の `TextBuffer`）。桁で数えないと、全角のぶんだけ左にずれる。
-        let buf = TextBuffer::from_text("あいう");
-        assert_eq!(buf.cursor, (0, 3));
-
-        assert_eq!(cursor_col(&buf, 20), (6, 0));
     }
 
     #[test]

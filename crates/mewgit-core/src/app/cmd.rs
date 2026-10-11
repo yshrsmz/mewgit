@@ -317,14 +317,4 @@ mod tests {
             Some(JobKind::Exec)
         );
     }
-
-    #[test]
-    fn the_label_of_an_exec_is_the_git_subcommand() {
-        // スピナーに `git` とだけ出しても、何が走っているかは判らない（01）。
-        assert_eq!(
-            Cmd::Exec(GitOp::RebaseAbort).job(),
-            Some((JobKind::Exec, "rebase"))
-        );
-        assert_eq!(Cmd::LoadStatus.job(), Some((JobKind::LoadStatus, "status")));
-    }
 }

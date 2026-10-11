@@ -818,14 +818,6 @@ mod tests {
     }
 
     #[test]
-    fn self_hosted_uses_the_api_v3_path() {
-        assert_eq!(
-            base("ghe.example.com").unwrap().as_str(),
-            "https://ghe.example.com/api/v3/"
-        );
-    }
-
-    #[test]
     fn host_matching_ignores_case_and_the_url_lowercases_it() {
         // 比較は case-insensitive。組んだ URL の小文字化は `Url` に任せる。
         assert_eq!(
@@ -1096,21 +1088,6 @@ mod tests {
 
         let prs = client(&server).pr_list("o", "r").await.unwrap();
         assert_eq!(prs[0].requested_reviewers, vec!["hanako", "taro"]);
-    }
-
-    #[tokio::test]
-    async fn a_pull_without_requested_reviewers_carries_an_empty_list() {
-        // **`requested_reviewers` が無い応答でも落ちない**（`serde(default)`）。
-        // GHES の版差でフィールドが欠けても `Decode` にしない。
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/o/r/pulls"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([pull(5, "open", None)])))
-            .mount(&server)
-            .await;
-
-        let prs = client(&server).pr_list("o", "r").await.unwrap();
-        assert!(prs[0].requested_reviewers.is_empty());
     }
 
     #[tokio::test]
@@ -1414,8 +1391,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_403_with_no_quota_left_is_rate_limited_not_forbidden() {
-        // 残量ヘッダが 0 のときだけレート制限。無ければ `Forbidden` の 403。
+    async fn a_403_is_rate_limited_only_when_no_quota_is_left() {
+        // 残量ヘッダが 0 のときだけレート制限。無いか残っていれば `Forbidden` の 403。
+        let response = ResponseTemplate::new(403).insert_header("x-ratelimit-remaining", "4999");
+        assert!(
+            matches!(repo_err(response).await, GithubError::Forbidden { .. }),
+            "残量があるなら待っても直らない"
+        );
         let response = ResponseTemplate::new(403)
             .insert_header("x-ratelimit-remaining", "0")
             .insert_header("x-ratelimit-reset", "1789000000");
@@ -1424,15 +1406,6 @@ mod tests {
             GithubError::RateLimited {
                 reset_at: Some(1_789_000_000)
             }
-        );
-    }
-
-    #[tokio::test]
-    async fn a_403_with_quota_left_stays_forbidden() {
-        let response = ResponseTemplate::new(403).insert_header("x-ratelimit-remaining", "4999");
-        assert!(
-            matches!(repo_err(response).await, GithubError::Forbidden { .. }),
-            "残量があるなら待っても直らない"
         );
     }
 

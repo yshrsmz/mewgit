@@ -22,8 +22,10 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, row_of, state_with_modal};
-    use mewgit_core::app::{Cmd, Modal, TermSize};
+    use crate::test_util::{
+        draw, modal_area, modal_text, row_of, state_with_commits, state_with_modal, terminal_with,
+    };
+    use mewgit_core::app::{AppState, Cmd, Modal, TermSize};
     use mewgit_core::git_exec::GitOp;
 
     /// 既定の 80x24。
@@ -55,21 +57,6 @@ mod tests {
         assert!(text.contains("変更を破棄"), "{text}");
         // 対象をそのまま出す。「選択中のファイル」では何を消すか判らない（07）。
         assert!(text.contains("a.txt"), "{text}");
-        assert!(text.contains("[y] 実行"), "{text}");
-        assert!(text.contains("[n] やめる"), "{text}");
-    }
-
-    #[test]
-    fn a_wrapped_body_does_not_push_the_keys_out_of_the_box() {
-        // 本文とキーの案内を 1 つの Paragraph にまとめると、折り返した分だけ
-        // 案内が枠の外へ出る。押せるキーが見えないと確認にならない。
-        let state = state_with_confirm(
-            "変更を破棄",
-            "とても長いパスの一覧 aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccc.txt を HEAD の状態に戻します。\nstaged の内容も一緒に戻ります。元に戻せません。",
-        );
-
-        let text = draw(&state, SIZE).join("\n");
-
         assert!(text.contains("[y] 実行"), "{text}");
         assert!(text.contains("[n] やめる"), "{text}");
     }
@@ -119,14 +106,34 @@ mod tests {
 
     #[test]
     fn the_confirmation_covers_what_is_under_it() {
-        // 覆わずに重ねると下の文字が透けて読めなくなる。
-        let state = state_with_confirm("確認", "本文");
+        // 覆わずに重ねると下の文字が透けて読めなくなる。**本文の行の下にコミットの
+        // summary が来る fixture にする** —— `Block` も `Paragraph` も字を書かない升目を
+        // 消さないので、下に何も無い行を見ても、覆っていなくても通ってしまう。
+        let summary = format!("covered{}", "x".repeat(60));
+        let with_modal = |modal: Option<Modal>| {
+            let mut state = state_with_commits(&[summary.as_str(); 20]);
+            state.modal = modal;
+            state
+        };
+        let open = with_modal(state_with_confirm("確認", "本文").modal);
+        // 本文の行の、箱の内側の升目。箱の外は透けていて当然。
+        let inner = modal_area(&open, SIZE);
+        let body: Vec<String> = modal_text(&open, SIZE).lines().map(String::from).collect();
+        let y = inner.y + row_of(&body, "本文");
+        let cells = |state: &AppState| -> String {
+            let terminal = terminal_with(state, SIZE);
+            let buffer = terminal.backend().buffer();
+            (inner.x..inner.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        };
 
-        let lines = draw(&state, SIZE);
-        let body_row = &lines[row_of(&lines, "本文") as usize];
+        // 閉じていれば、同じ升目に summary が見える（fixture が箱の下に届いている）。
+        let bare = cells(&with_modal(None));
+        assert!(bare.contains("xxxx"), "{bare}");
 
-        assert!(!body_row.contains("first"), "{body_row}");
-        assert!(!body_row.contains("second"), "{body_row}");
+        let covered = cells(&open);
+        assert!(!covered.contains("xxxx"), "{covered}");
     }
 
     #[test]

@@ -38,7 +38,9 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], c
 
 #[cfg(test)]
 mod tests {
-    use crate::test_util::{draw, row_is_reversed, row_of, state_with_modal};
+    use crate::test_util::{
+        draw, modal_row_is_reversed, modal_text, row_is_reversed, row_of, state_with_modal,
+    };
     use mewgit_core::app::{Modal, TermSize};
 
     const SIZE: TermSize = TermSize {
@@ -110,29 +112,15 @@ mod tests {
     }
 
     #[test]
-    fn the_cursor_row_stays_visible_when_the_list_is_taller_than_the_box() {
-        // **窓を切り出さずに描くと、カーソルが枠の外へ出たまま `j` で動き続け、
-        // 見えていないリモートを `Enter` で fetch する。** 既存の 4 本はどちらでも
-        // 通るので、この見張りが無いと素の `Paragraph` に戻せてしまう。
-        let remotes: Vec<String> = (0..30).map(|i| format!("remote{i:02}")).collect();
-        let state = state_with_modal(Modal::RemotePicker {
-            reason: "origin がありません".to_string(),
-            remotes,
-            cursor: 29,
-        });
-
-        let text = draw(&state, SIZE).join("\n");
-
-        assert!(text.contains("remote29"), "{text}");
-    }
-
-    #[test]
     fn a_long_reason_never_squeezes_the_list_to_nothing() {
         // **`a_wrapped_reason_does_not_push_the_remotes_out_of_the_box` の狭い版。**
         // あちらは 80x24 に 4 行の理由なので、一覧が 0 行に潰れる形を踏まない。
         // 理由はリモート名を並べるので**本数が増えるほど長くなる**。実機で測った境目は
         // 30 本 × 80x14（直す前は一覧が **0 行**、直したあとは 1 行）。**8 本では
         // 同じ 80x14 でも 5 行出るので踏めない** —— 本数と高さの両方を効かせる。
+        // カーソルを末尾に置くので、**窓を切り出さずに素の `Paragraph` で描く形**
+        // （カーソルが枠の外へ出たまま、見えていないリモートを `Enter` で fetch する）も
+        // この 1 本が落とす。
         let remotes: Vec<String> = (0..30)
             .map(|i| format!("very-long-remote-name-{i:02}"))
             .collect();
@@ -143,18 +131,21 @@ mod tests {
             cursor: 29,
         });
 
-        let text = draw(
-            &state,
-            TermSize {
-                width: 80,
-                height: 14,
-            },
-        )
-        .join("\n");
+        let size = TermSize {
+            width: 80,
+            height: 14,
+        };
 
-        // カーソルが指している相手が画面に出ていること。1 つも出ないまま
-        // `Enter` が効く状態を作らない。
-        assert!(text.contains("very-long-remote-name-29"), "{text}");
+        // カーソルが指している相手が**一覧の行として**画面に出て、反転していること。
+        // 1 つも出ないまま `Enter` が効く状態を作らない。**画面全体の `contains` では
+        // 見ない** —— 名前は理由の本文にも並ぶので、一覧が潰れても本文の側で通りうる。
+        // 一覧の行は名前だけの行なので、行全体が名前に一致するものを探す。
+        assert!(
+            modal_row_is_reversed(&state, size, |line| line.trim()
+                == "very-long-remote-name-29"),
+            "カーソル行が反転していません:\n{}",
+            modal_text(&state, size)
+        );
     }
 
     #[test]

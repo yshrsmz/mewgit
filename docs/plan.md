@@ -872,6 +872,17 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の
       `ESC[<行>;<桁>H` を読んで回避している
+- [ ] `GraphState::scroll_into_view` に見張りを足す。**詰めの行（`scroll.min(rows - viewport)`）と
+      `cursor < scroll` の腕は、どちらを消しても core と tui のテストが全部通る**（#190 のテスト精査で
+      変異にかけた。消した `a_viewport_larger_than_the_history_scrolls_to_the_top` はカーソルが 0 で、
+      2 つの腕が互いを補うので元から空振りだった）。塞ぐには、窓の上端より上へ戻る形
+      （`cursor < scroll`）と、履歴が窓より短くカーソルが `scroll` より下にある形
+      （行 4・窓 20・cursor 3・scroll 2 → scroll 0）を `widening_the_terminal_…` の並びに 1 本ずつ
+- [ ] `git_read::diff::find_options` の `renames(true)` に見張りを足す。**`false` にしても
+      core と tui のテストが全部通る** —— どの fixture も既定の設定で rename が対になるので、
+      `find_options` と既定を区別できない（#190 で変異にかけた）。塞ぐには、`diff.renames=false` を
+      設定したリポジトリで rename が対になることを見る 1 本か、類似度の閾値付近の編集を
+      混ぜて既定の設定では対にならない fixture
 - [x] 外部変更検知（1/2）— 検知と読み直し。**2 本に割った**（2026-10-01 にユーザーと決めた。
       理由は 01 の「外部の変更の検知 › 定期の status」—— 2 本目の守りは diff のキャッシュに
       手を入れる別の関心事で、比べる `(mtime, len)` はこちらが載せる）。**決めた形**（理由と

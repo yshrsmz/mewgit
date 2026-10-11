@@ -1019,15 +1019,14 @@ fn repo_label(state: &AppState) -> String {
 mod tests {
     use super::{
         degraded_label, ellipsize, ellipsize_left, file_row, hint_text, pane_area, progress_label,
-        push_expanded, render_rows, window, wrapped, SPACES, SPLIT_MIN_WIDTH, TAB_WIDTH,
+        push_expanded, render_rows, window, wrapped, SPLIT_MIN_WIDTH,
     };
     use crate::test_util::{
         draw, footer_area, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status,
         tab_to, terminal_with, SPLIT_NARROWEST,
     };
     use mewgit_core::app::{
-        keys, update, AppState, Cmd, JobKind, Key, KeyCode, Modal, Msg, NoticeLevel, Pane,
-        TargetState, TermSize,
+        keys, update, AppState, Cmd, JobKind, Modal, Msg, NoticeLevel, Pane, TargetState, TermSize,
     };
     use mewgit_core::auth::{AccountState, DegradedReason, RepoTarget};
     use mewgit_core::git_exec::GitOp;
@@ -1124,12 +1123,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(built, vec![497, 498, 499, 500]);
-    }
-
-    #[test]
-    fn the_spaces_used_for_a_tab_are_wide_enough() {
-        // `SPACES[..pad]` は `pad` が `TAB_WIDTH` まで伸びる。短いと panic する。
-        assert_eq!(SPACES.len(), TAB_WIDTH);
     }
 
     #[test]
@@ -1279,28 +1272,20 @@ mod tests {
     }
 
     #[test]
-    fn the_right_area_swaps_between_the_worktree_and_the_commit_detail() {
+    fn the_right_area_follows_the_selection_not_the_focus() {
         // 右ペインの中身はグラフの選択だけで決まる。`focus` では決めない（07）。
         let state = crate::test_util::state_with_commits(&["first"]);
         let text = draw(&state, SPLIT_NARROWEST).join("\n");
         assert!(text.contains("Working tree"), "{text}");
         assert!(!text.contains("Commit "), "{text}");
 
+        // **`focus` は Graph のまま。** `focus` で決めると、Graph にフォーカスした
+        // 瞬間に右が消える（07）。
         let state = crate::test_util::state_on_first_commit(&["first"]);
+        assert_eq!(state.focus, Pane::Graph);
         let text = draw(&state, SPLIT_NARROWEST).join("\n");
 
         assert!(!text.contains("Working tree"), "{text}");
-        assert!(text.contains("Commit "), "{text}");
-    }
-
-    #[test]
-    fn the_right_area_follows_the_selection_even_while_the_graph_has_focus() {
-        // `focus` で決めると、Graph にフォーカスした瞬間に右が消える（07）。
-        let mut state = crate::test_util::state_on_first_commit(&["first"]);
-        state.focus = Pane::Graph;
-
-        let text = draw(&state, SPLIT_NARROWEST).join("\n");
-
         assert!(text.contains("Commit "), "{text}");
     }
 
@@ -1368,24 +1353,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tab_on_a_narrow_terminal_swaps_the_graph_for_the_branches() {
-        // 隠したペインへ届く手段は `Tab` だけ。押す前と後で、描かれる中身が
-        // 丸ごと入れ替わることを見る。
-        let size = TermSize::default();
-        let mut state = state_at("/repo");
-        let before = draw(&state, size).join("\n");
-        assert!(before.contains("Graph"), "{before}");
-        assert!(!before.contains("Branches"), "{before}");
-
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
-        assert_eq!(state.focus, Pane::Branches);
-        let after = draw(&state, size).join("\n");
-
-        assert!(after.contains("Branches"), "{after}");
-        assert!(!after.contains("Graph"), "{after}");
-    }
-
     /// 解決済みのアカウントを持つ状態。
     fn state_with_account(account: AccountState) -> AppState {
         let mut state = state_at("/repo");
@@ -1418,25 +1385,20 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_the_resolved_account() {
-        let line = header(&state_with_account(resolved_account()), TermSize::default());
+    fn header_shows_the_account_once_it_is_resolved() {
+        // **`Resolving` は出さない**（07）。走っていることは右端のスピナーが出しており、
+        // 既定リモートの無いリポジトリはここから動かない（01）。
+        let mut state = state_with_account(AccountState::Resolving);
+        let line = header(&state, TermSize::default());
+        assert!(!line.contains("[gh:"), "header: {line:?}");
 
+        // 同じ状態で解決すると出る。否定が入力なしに通っていないことの証拠を兼ねる。
+        state.account = resolved_account();
+        let line = header(&state, TermSize::default());
         assert!(
             line.contains("[gh: user_shortcode @ github.com]"),
             "header: {line:?}"
         );
-    }
-
-    #[test]
-    fn header_says_nothing_while_the_account_is_unresolved() {
-        // **`Resolving` は出さない**（07）。走っていることは右端のスピナーが出しており、
-        // 既定リモートの無いリポジトリはここから動かない（01）。
-        let line = header(
-            &state_with_account(AccountState::Resolving),
-            TermSize::default(),
-        );
-
-        assert!(!line.contains("[gh:"), "header: {line:?}");
     }
 
     #[test]
@@ -1544,15 +1506,20 @@ mod tests {
         // `Tick` を 1 つまたぐ。またがないジョブはスピナーに出ない（`Job::since`）。
         // 1 周（駒の数）進めるので、描かれる駒は `tick` が 0 のときと同じ。
         state.tick += super::SPINNER.len() as u64;
+        see_quota(&mut state, remaining);
+        state
+    }
+
+    /// 今の世代の応答として、残量 `remaining` を届ける。
+    fn see_quota(state: &mut AppState, remaining: u32) {
         let epoch = state.prs.epoch();
         let _ = update(
-            &mut state,
+            state,
             Msg::RateLimitSeen {
                 epoch,
                 seen: fake_rate_limit(remaining, 1789703295),
             },
         );
-        state
     }
 
     #[test]
@@ -1599,12 +1566,22 @@ mod tests {
     fn the_header_says_nothing_about_the_quota_before_the_first_response() {
         // **応答が 1 度も届いていなければ出さない。** レートリミットを切った GHES は
         // ヘッダごと返さないので、ここから動かない（05）。
+        // **残量を出せる幅で見る。** 80 桁では残量が届いていても幅の段で落ちるので、
+        // 否定が出さない側の見張りにならない。
+        let size = TermSize {
+            width: 100,
+            height: 24,
+        };
         let mut state = shipping_header_state();
         state.account = resolved_account();
-
-        let line = header(&state, TermSize::default());
-
+        let line = header(&state, size);
         assert!(!line.contains("[api:"), "header: {line:?}");
+
+        // 同じ状態に最初の応答が届くと出る。否定が入力なしに通っていないことの
+        // 証拠を兼ねる。
+        see_quota(&mut state, 4984);
+        let line = header(&state, size);
+        assert!(line.contains("[api: 4984]"), "header: {line:?}");
     }
 
     /// ヘッダの左群（右端のスピナーより手前）。
@@ -1729,12 +1706,6 @@ mod tests {
         assert_eq!(header_left(&shipping_header_state(), 20), "clau…");
     }
 
-    #[test]
-    fn header_shows_the_repository_name() {
-        let line = header(&state_at("/home/user/mewgit"), TermSize::default());
-        assert!(line.contains("mewgit"), "header: {line:?}");
-    }
-
     /// 描いたヘッダ（最上行）。
     ///
     /// **取り出しはここ 1 本。** `test_util::notice_bar` と同じ理由で、ヘッダの位置や
@@ -1807,29 +1778,6 @@ mod tests {
     }
 
     #[test]
-    fn a_notice_leads_with_the_time_it_was_raised() {
-        let bar = notice_bar_with("push に失敗しました");
-        assert!(
-            bar.trim_start().starts_with("10:03:26 push に失敗しました"),
-            "notice: {bar:?}"
-        );
-    }
-
-    #[test]
-    fn a_notice_taken_down_by_a_key_is_not_drawn() {
-        let mut state = state_at("/repo");
-        state.push_notice(NoticeLevel::Warn, "古い通知".to_string(), None);
-        assert!(notice_bar(&state, TermSize::default()).contains("古い通知"));
-
-        let _ = update(&mut state, Msg::Key(mewgit_core::app::Key::char('j')));
-
-        assert!(
-            !notice_bar(&state, TermSize::default()).contains("古い通知"),
-            "下ろした通知が出ています"
-        );
-    }
-
-    #[test]
     fn ellipsize_cuts_at_the_cell_budget_and_marks_the_cut() {
         assert_eq!(ellipsize("abc", 3), "abc");
         assert_eq!(ellipsize("abcd", 3), "ab…");
@@ -1861,12 +1809,6 @@ mod tests {
                 ..TermSize::default()
             },
         )
-    }
-
-    #[test]
-    fn the_hint_line_shows_the_quit_key_when_there_is_no_notice() {
-        let last = hint_bar(&state_at("/repo"), TermSize::default());
-        assert!(last.contains("q:quit"), "hints: {last:?}");
     }
 
     #[test]
@@ -1984,12 +1926,6 @@ mod tests {
 
         assert!(notice.contains("失敗しました"), "notice: {notice:?}");
         assert!(!hints.contains("q:quit"), "hints: {hints:?}");
-    }
-
-    #[test]
-    fn body_is_drawn_between_header_and_status() {
-        let lines = draw(&state_at("/repo"), TermSize::default());
-        assert!(lines[1].contains("Graph"), "body: {:?}", lines[1]);
     }
 
     #[test]

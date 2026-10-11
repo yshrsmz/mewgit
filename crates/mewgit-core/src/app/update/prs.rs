@@ -1822,30 +1822,6 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_branch_matches_the_current_branch_row() {
-        // 追跡先の URL が fork を指していれば、そこから出た PR に座る
-        // （01 の「現ブランチの PR」）。
-        let mut state = state_tracking(
-            "feat/x",
-            "fork",
-            &[
-                ("origin", "git@github.com:yshrsmz/mewgit.git"),
-                ("fork", "git@github.com:someone-else/mewgit.git"),
-            ],
-        );
-        deliver(
-            &mut state,
-            vec![
-                fake_pull_request(90, "other", "othersha"),
-                pr_from(82, "feat/x", "someone-else"),
-            ],
-        );
-
-        assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
-        assert_eq!(state.prs.cursor, 1);
-    }
-
-    #[test]
     fn the_fork_row_wins_over_the_one_from_the_target_repository() {
         // **候補は追跡先が先。** fork へ push しているブランチと同じ名前のブランチが
         // upstream 側にもあるのはよくある形で、そこから出た PR は**他人の PR**
@@ -2517,23 +2493,6 @@ mod tests {
     }
 
     #[test]
-    fn picking_another_account_forgets_the_summaries() {
-        // **集計もアカウントに紐づく。** 残すと、次のトークンで引き直した一覧に
-        // 前のトークンで見えた集計が番号だけで当たる。
-        let mut state = state_with_one_summary("feat/x");
-        assert!(state.prs.detail(82).is_some());
-
-        let _ = update(
-            &mut state,
-            Msg::AccountResolved(Err(DegradedReason::GhMissing)),
-        );
-        assert!(
-            state.prs.detail(82).is_none(),
-            "前のアカウントの集計が残った"
-        );
-    }
-
-    #[test]
     fn the_newer_quota_wins_whichever_order_it_arrives_in() {
         // **`Msg` の届く順は応答の新しさの順ではない。** 一覧と扇形は同時に走り、
         // 扇形の中でも 4 本が並ぶ（05 の `Semaphore`）。あとから届いた古い数で
@@ -2845,14 +2804,14 @@ mod tests {
     }
 
     #[test]
-    fn losing_the_account_drops_the_list_it_was_fetched_with() {
+    fn losing_the_account_drops_the_list_and_summaries_it_was_fetched_with() {
         // **印（`*` / `R`）は login で決まる。** 残すと、印だけが黙って消えた
         // 前のアカウントの一覧が出たままになる（`PrState::forget`）。
         // **`Degraded` では `reload` が `Cmd::None` を返す**ので、落とす経路は
         // `account_resolved` の `Err` しか無い。
-        let mut state = state_on_branch("feat/x");
-        deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
+        let mut state = state_with_one_summary("feat/x");
         assert_eq!(state.prs.list.len(), 1);
+        assert!(state.prs.detail(82).is_some());
 
         let cmd = update(
             &mut state,
@@ -2865,6 +2824,12 @@ mod tests {
         );
         assert_eq!(state.prs.load(), &PrLoad::Pending);
         assert_eq!(state.prs.cursor, 0);
+        // **集計もアカウントに紐づく。** 残すと、次のトークンで引き直した一覧に
+        // 前のトークンで見えた集計が番号だけで当たる。
+        assert!(
+            state.prs.detail(82).is_none(),
+            "前のアカウントの集計が残った"
+        );
     }
 
     #[test]
@@ -2975,13 +2940,6 @@ mod tests {
         assert_eq!(state.prs.cursor, 1);
         let _ = press(&mut state, 'k');
         assert_eq!(state.prs.cursor, 0);
-    }
-
-    #[test]
-    fn a_degraded_account_asks_for_nothing() {
-        let mut state = state_on_branch("feat/x");
-        state.account = AccountState::Degraded(DegradedReason::GhMissing);
-        assert_eq!(reload(&state), Cmd::None);
     }
 
     #[test]

@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn the_branch_keys_do_nothing_while_the_list_is_empty() {
+    fn only_n_works_while_the_branch_list_is_empty() {
         // 読み込み中・失敗・コミットが 1 つも無いリポジトリ。カーソル行が描かれて
         // いないので、`branches[cursor]` を書くと添字が外れる。
         let mut state = state_with_commits(2);
@@ -212,10 +212,15 @@ mod tests {
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::None);
         assert_eq!(press(&mut state, 'd'), Cmd::None);
         assert_eq!(press(&mut state, 'D'), Cmd::None);
-        // `r` も同じ。**`n` はここに入れない** — 作成はカーソル行を要らず、
-        // ブランチが 1 本も無い状態はまさに作りたい状態（下のテスト）。
         assert_eq!(press(&mut state, 'r'), Cmd::None);
         assert_eq!(state.modal, None);
+
+        // **`n` だけは開く** —— 作成はカーソル行を要らず、`git init` の直後（ブランチが
+        // 1 本も無い）はまさに作りたい状態。`switch --create` は unborn HEAD でも通る
+        // （git 2.55 で確認）。同じ状態でキーが Branches ペインに届いている証拠も兼ねる。
+        let _ = press(&mut state, 'n');
+        let (_, _, _, intent) = open_input(&state);
+        assert_eq!(intent, &InputIntent::BranchCreate { start: None });
     }
 
     #[test]
@@ -233,20 +238,6 @@ mod tests {
         // 起点が HEAD のときはタイトルに起点を書かない。
         assert!(!title.contains("から"), "{title}");
         assert_eq!(buf.text(), "");
-    }
-
-    #[test]
-    fn n_opens_even_when_the_branch_list_is_empty() {
-        // `git init` の直後（ブランチが 1 本も無い）はまさに作りたい状態。
-        // `switch --create` は unborn HEAD でも通る（git 2.55 で確認）。
-        let mut state = state_with_commits(2);
-        state.focus = Pane::Branches;
-        assert_eq!(state.branches.load(), ListLoad::Pending);
-
-        let _ = press(&mut state, 'n');
-
-        let (_, _, _, intent) = open_input(&state);
-        assert_eq!(intent, &InputIntent::BranchCreate { start: None });
     }
 
     #[test]

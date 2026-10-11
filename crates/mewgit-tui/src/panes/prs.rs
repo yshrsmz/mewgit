@@ -703,22 +703,6 @@ mod tests {
     }
 
     #[test]
-    fn the_status_column_lines_the_titles_up() {
-        // **桁は出す行から導く**（`lines`）。`OPEN` と `DRAFT` で 1 桁違うので、
-        // 揃えないとタイトルの開始位置がずれる。
-        let state = with_list(open_and_draft());
-
-        let open = pane_row(&state, SIZE, Pane::Prs, "#82");
-        let drafted = pane_row(&state, SIZE, Pane::Prs, "#90");
-
-        assert_eq!(
-            open.find("Lanes"),
-            drafted.find("Bump"),
-            "タイトルの桁がずれている:\n{open}\n{drafted}"
-        );
-    }
-
-    #[test]
     fn the_mark_tells_my_prs_from_the_ones_awaiting_my_review() {
         // 印は `*`（自分の PR）と `R`（レビュー依頼）。それ以外は空白（07）。
         let mut mine = fake_pull_request(82, "feat/x", "headsha");
@@ -743,19 +727,6 @@ mod tests {
         assert!(row("#91").contains(" #91"), "{}", row("#91"));
         assert!(!row("#91").contains("*#91"), "{}", row("#91"));
         assert!(!row("#91").contains("R#91"), "{}", row("#91"));
-    }
-
-    #[test]
-    fn a_team_review_request_gets_no_mark() {
-        // **受け入れた穴**（05 / 07）。`requested_teams` は運んでいないので、
-        // チーム宛ての依頼では `R` が付かない。
-        let mut team = fake_pull_request(90, "other", "othersha");
-        team.author = "hanako".to_string();
-        team.requested_reviewers = Vec::new();
-        let state = with_list(vec![team]);
-
-        let text = pane_text(&state, SIZE, Pane::Prs);
-        assert!(!text.contains("R#90"), "{text}");
     }
 
     #[test]
@@ -947,23 +918,6 @@ mod tests {
         assert!(!text.contains(ui::LOADING), "永久に待たせている: {text}");
     }
 
-    #[test]
-    fn the_tab_header_names_every_tab_and_drops_prs_when_github_is_off() {
-        let state = with_list(vec![fake_pull_request(82, "feat/x", "headsha")]);
-        let text = pane_text(&state, SIZE, Pane::Prs);
-        assert!(text.contains("Branches"), "{text}");
-        assert!(text.contains("PRs"), "{text}");
-
-        // 切ってあれば `Prs` は巡回候補から落ちるので、押しても切り替わらない
-        // 見出しを並べない（07 の「右上のタブ」）。
-        let mut off = state_at("/repo");
-        off.account = AccountState::Disabled;
-        let text = draw(&off, SIZE).join("\n");
-        assert!(text.contains("Branches"), "{text}");
-        assert!(text.contains("Stash"), "{text}");
-        assert!(!text.contains("PRs"), "{text}");
-    }
-
     /// 右上の見出しで `title` を描いた升目の修飾。**前後の空白 1 つずつを含める**
     /// （空白ごと反転する。07 の「右上のタブ」）。
     fn tab_modifiers(state: &AppState, title: &str) -> Vec<Modifier> {
@@ -1015,19 +969,9 @@ mod tests {
         let reversed = |m: &Modifier| m.contains(Modifier::REVERSED);
         assert!(tab_modifiers(&off, "Branches").iter().all(reversed));
         assert!(tab_modifiers(&off, "Stash").iter().all(|m| !reversed(m)));
-    }
-
-    #[test]
-    fn a_long_list_leaves_the_pane_below_visible() {
-        // 上限が無いと、PR の多いリポジトリで下のペインが潰れる（07）。
-        // **既定の 80x24 のまま見る。**
-        let list = (0..40)
-            .map(|n| fake_pull_request(n, &format!("feat/{n:02}"), "sha"))
-            .collect();
-        let state = with_list(list);
-
-        let text = draw(&state, SIZE).join("\n");
-
-        assert!(text.contains("Working tree"), "{text}");
+        // 切ってあれば `Prs` は巡回候補から落ちるので、押しても切り替わらない
+        // 見出しを並べない（07 の「右上のタブ」）。
+        let text = draw(&off, SIZE).join("\n");
+        assert!(!text.contains("PRs"), "{text}");
     }
 }

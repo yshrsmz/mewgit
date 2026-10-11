@@ -747,23 +747,6 @@ mod tests {
     }
 
     #[test]
-    fn a_write_makes_the_same_target_be_read_again() {
-        // ハンク 1 つを stage しても残りが unstaged なら区画は変わらない。**対象が
-        // 同じままなのでキャッシュが効いてしまう**のを世代が止める。
-        let mut state = diff_state(&["a.txt"], 2);
-        let _ = update(&mut state, exec_done(Ok(fake_output())));
-
-        let cmd = update(
-            &mut state,
-            status_arrived(Ok(fake_snapshot(&[], &["a.txt"], &[]))),
-        );
-
-        assert_eq!(cmd, Cmd::LoadDiff(unstaged_diff("a.txt")));
-        // **まだ新しくなっていない。** 頼んだだけで、出している diff は書き込みより前。
-        assert!(!state.diff_is_current());
-    }
-
-    #[test]
     fn a_reply_that_was_asked_for_before_the_write_is_asked_for_again() {
         // 書き込みの時点で `LoadDiff` が走っていると、`status_loaded` が出す
         // `Cmd::LoadDiff` は `issue` に落とされる。飛んでいた返信は書き込みより前の

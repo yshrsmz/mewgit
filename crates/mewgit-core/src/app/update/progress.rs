@@ -800,19 +800,6 @@ mod tests {
     }
 
     #[test]
-    fn switching_branches_in_the_middle_of_a_rebase_is_refused_before_git_runs() {
-        let mut state = state_on_branches(&["another", "main"], Some("main"));
-        arrive(&mut state, Some(rebase()));
-        let _ = press(&mut state, 'k');
-
-        let cmd = press_code(&mut state, KeyCode::Enter);
-
-        // git は起動せず、代わりに status を読み直す（下の「外で終えた」）。
-        assert_eq!(cmd, Cmd::LoadStatus);
-        assert!(shown(&state).starts_with("rebase の途中"));
-    }
-
-    #[test]
     fn a_rebase_finished_outside_is_noticed_on_the_next_press() {
         // 世代を進めるのは mewgit の書き込みだけなので、端末で `rebase --abort` しても
         // snapshot は「鮮度あり・途中」のまま。断ったときに読み直さないと、git を
@@ -820,10 +807,14 @@ mod tests {
         let mut state = state_on_branches(&["another", "main"], Some("main"));
         arrive(&mut state, Some(rebase()));
         let _ = press(&mut state, 'k');
+        // git は起動せず、何の途中かを案内して status を読み直す。
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::LoadStatus);
+        assert!(shown(&state).starts_with("rebase の途中"));
 
         // 読み直した status には進行中操作が無い（外で終えた）。
         let _ = update(&mut state, status_arrived(Ok(progressing(None))));
+        // 鮮度のある snapshot で「無い」と読めている（古くて git に任せた形ではない）。
+        assert!(state.worktree_is_current());
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 
@@ -879,19 +870,6 @@ mod tests {
         assert!(state.refuse_in_progress(&GitOp::Switch("another".to_string())));
         finish_exec(&mut state, GitOp::RebaseAbort, Ok(fake_output()));
         assert!(!state.worktree_is_current());
-        let _ = press(&mut state, 'k');
-
-        let cmd = press_code(&mut state, KeyCode::Enter);
-
-        assert_eq!(cmd, Cmd::Exec(GitOp::Switch("another".to_string())));
-    }
-
-    #[test]
-    fn nothing_in_progress_refuses_nothing() {
-        let mut state = state_on_branches(&["another", "main"], Some("main"));
-        arrive(&mut state, None);
-        // 鮮度のある snapshot で「無い」と読めている（古くて git に任せた形ではない）。
-        assert!(state.worktree_is_current());
         let _ = press(&mut state, 'k');
 
         let cmd = press_code(&mut state, KeyCode::Enter);

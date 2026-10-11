@@ -310,17 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn the_wip_row_is_there_even_with_no_changes_and_no_commits() {
-        // 件数で出し入れすると status が届くたびに表示行数が変わり、カーソルの
-        // 座り直しが要る（01 の「グラフの行」）。空のリポジトリでも 1 行目は WIP。
-        let state = state_with_commits(&[]);
-
-        let lines = draw(&state, TermSize::default());
-
-        assert!(lines[WIP_ROW].contains("WIP (0)"), "{:?}", lines[WIP_ROW]);
-    }
-
-    #[test]
     fn the_wip_row_has_no_lane_art_but_lines_up_with_the_summaries() {
         // 罫線は繋がない（06 の「責務」）。それでも本文の桁は下の行と揃える。
         let state = state_with_history(MERGE);
@@ -344,18 +333,6 @@ mod tests {
             "{:?} / {:?}",
             lines[WIP_ROW], lines[FIRST_ROW]
         );
-    }
-
-    #[test]
-    fn ascii_replaces_the_wip_glyph_too() {
-        // `◇` は罫線と同じ East Asian Ambiguous 幅。逃げ道は罫線と同じ `ascii`（06）。
-        let mut state = state_with_commits(&["first"]);
-        state.config.graph.ascii = true;
-
-        let lines = draw(&state, TermSize::default());
-
-        assert!(!lines[WIP_ROW].contains("◇"), "{:?}", lines[WIP_ROW]);
-        assert!(lines[WIP_ROW].contains("@ "), "{:?}", lines[WIP_ROW]);
     }
 
     #[test]
@@ -461,27 +438,11 @@ mod tests {
     }
 
     #[test]
-    fn the_head_branch_label_is_emphasised() {
-        // 既定の `theme.graph_head` は "bold"。色として読むと強調がまるごと消える。
-        // **HEAD はブランチ一覧の HEAD の行から引く**（02 の「refs とラベル」）。
-        let state = state_with_two_local_labels(Some("main"));
-
-        let line = &draw(&state, TermSize::default())[FIRST_ROW];
-        let terminal = terminal_with(&state, TermSize::default());
-        let buffer = terminal.backend().buffer();
-
-        let y = FIRST_ROW as u16;
-        let head = col_of(line, "[main]");
-        let other = col_of(line, "[a-first]");
-        assert!(other < head, "並びが Local の名前順ではありません");
-        assert!(buffer[(head, y)].modifier.contains(Modifier::BOLD));
-        assert!(!buffer[(other, y)].modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn no_label_is_emphasised_when_head_is_detached() {
+    fn only_the_head_label_is_emphasised_and_it_keeps_its_place() {
         // 否定だけだと「強調を一切しない」実装でも通るので、同じラベルで HEAD を
-        // `main` に置いた側が強調に変わるところまで 1 本で見る。
+        // `main` に置いた側が強調に変わるところまで 1 本で見る。既定の `theme.graph_head` は
+        // "bold"。色として読むと強調がまるごと消える。**HEAD はブランチ一覧の HEAD の行から
+        // 引く**（02 の「refs とラベル」）。
         let bold = |head: Option<&str>| {
             let state = state_with_two_local_labels(head);
             let line = &draw(&state, TermSize::default())[FIRST_ROW];
@@ -497,6 +458,14 @@ mod tests {
 
         assert_eq!(bold(None), [false, false]);
         assert_eq!(bold(Some("main")), [true, false]);
+
+        // 強調しても並びは動かさない。HEAD を先頭へ寄せず、Local の名前順のまま。
+        let state = state_with_two_local_labels(Some("main"));
+        let line = &draw(&state, TermSize::default())[FIRST_ROW];
+        assert!(
+            col_of(line, "[a-first]") < col_of(line, "[main]"),
+            "並びが Local の名前順ではありません: {line:?}"
+        );
     }
 
     #[test]
@@ -520,19 +489,22 @@ mod tests {
 
     #[test]
     fn the_cursor_line_is_highlighted() {
-        // `cursor` は表示行の添字。`1` は WIP 行の 1 つ下、つまり 1 件目のコミット。
         let mut state = state_with_commits(&["first", "second"]);
+        let reversed = |state: &AppState, row: usize| {
+            let terminal = terminal_with(state, TermSize::default());
+            terminal.backend().buffer()[(1, row as u16)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        // 既定のカーソルは WIP 行（`cursor == 0`）。
+        assert!(reversed(&state, WIP_ROW));
+        assert!(!reversed(&state, FIRST_ROW));
+
+        // `cursor` は表示行の添字。`1` は WIP 行の 1 つ下、つまり 1 件目のコミット。
         state.graph.cursor = 1;
 
-        let terminal = terminal_with(&state, TermSize::default());
-        let buffer = terminal.backend().buffer();
-
-        assert!(!buffer[(1, WIP_ROW as u16)]
-            .modifier
-            .contains(Modifier::REVERSED));
-        assert!(buffer[(1, FIRST_ROW as u16)]
-            .modifier
-            .contains(Modifier::REVERSED));
+        assert!(!reversed(&state, WIP_ROW));
+        assert!(reversed(&state, FIRST_ROW));
     }
 
     #[test]
@@ -578,19 +550,6 @@ mod tests {
     }
 
     #[test]
-    fn the_wip_row_is_highlighted_when_it_is_selected() {
-        // 既定のカーソルは WIP 行（`cursor == 0`）。
-        let state = state_with_commits(&["first"]);
-
-        let terminal = terminal_with(&state, TermSize::default());
-        let buffer = terminal.backend().buffer();
-
-        assert!(buffer[(1, WIP_ROW as u16)]
-            .modifier
-            .contains(Modifier::REVERSED));
-    }
-
-    #[test]
     fn scrolling_moves_the_first_visible_line() {
         let summaries: Vec<String> = (0..5).map(|i| format!("commit {i}")).collect();
         let refs: Vec<&str> = summaries.iter().map(String::as_str).collect();
@@ -626,6 +585,9 @@ mod tests {
 
         let lines = draw(&state, TermSize::default());
 
+        // 件数で出し入れすると status が届くたびに表示行数が変わり、カーソルの
+        // 座り直しが要る（01 の「グラフの行」）。空のリポジトリでも 1 行目は WIP。
+        assert!(lines[WIP_ROW].contains("WIP (0)"), "{:?}", lines[WIP_ROW]);
         assert!(
             lines[FIRST_ROW].contains("コミットがありません"),
             "{:?}",
@@ -665,19 +627,6 @@ mod tests {
 
         assert!(
             lines[FIRST_ROW].contains("読み込めませんでした"),
-            "{:?}",
-            lines[FIRST_ROW]
-        );
-    }
-
-    #[test]
-    fn a_wide_character_summary_is_not_split() {
-        let state = state_with_commits(&["日本語のコミットメッセージ"]);
-
-        let lines = draw(&state, TermSize::default());
-
-        assert!(
-            lines[FIRST_ROW].contains("日本語のコミットメッセージ"),
             "{:?}",
             lines[FIRST_ROW]
         );
@@ -741,6 +690,10 @@ mod tests {
         assert_eq!(art(&lines, FIRST_ROW), "o-\\ ");
         assert_eq!(art(&lines, FIRST_ROW + 1), "* | ");
         assert_eq!(art(&lines, FIRST_ROW + 3), "*-/ ");
+        // WIP 行の印は罫線とは別の配線で描く。`◇` は罫線と同じ East Asian Ambiguous 幅で、
+        // 逃げ道は罫線と同じ `ascii`（06）。
+        assert!(!lines[WIP_ROW].contains("◇"), "{:?}", lines[WIP_ROW]);
+        assert!(lines[WIP_ROW].contains("@ "), "{:?}", lines[WIP_ROW]);
     }
 
     #[test]

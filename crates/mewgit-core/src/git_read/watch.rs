@@ -272,13 +272,6 @@ mod tests {
     }
 
     #[test]
-    fn the_stamp_of_a_missing_file_is_none() {
-        let repo = committed();
-        assert!(FileStamp::of(&repo.path().join("nope")).is_none());
-        assert!(FileStamp::of(&repo.path().join("file.txt")).is_some());
-    }
-
-    #[test]
     fn a_long_lived_reader_sees_an_outside_add_in_the_path_stamp() {
         // リーダースレッドは同じ `RepoReader` を使い続ける。libgit2 の `Index` は
         // 自分からは読み直さないので、外の `git add` が指紋に出ることを同じ reader で見る。

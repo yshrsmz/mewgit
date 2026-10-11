@@ -720,23 +720,6 @@ mod tests {
     }
 
     #[test]
-    fn f_notifies_when_there_is_nobody_to_pick_from() {
-        // **候補が 0 本なら開かない。** 「まだ読めていません」と「登録されていません」は
-        // 選ばせる相手がいないので通知のまま（01）。
-        let mut state = state_with_commits(2);
-        let _ = deliver_branches(&mut state, Ok(fake_head_list(fake_branch("main"))));
-
-        assert_eq!(press(&mut state, 'f'), Cmd::None);
-        assert_eq!(state.modal, None, "選ぶ相手がいないのに開いている");
-        let notice = state.notices.back().expect("通知が出ていない");
-        assert!(
-            notice.message.contains("登録されていません"),
-            "{}",
-            notice.message
-        );
-    }
-
-    #[test]
     fn f_tells_a_failed_read_from_no_remote_and_from_a_reload_in_flight() {
         // **届いたかの印は 1 つ**（`repo_unread`）。`jobs.is_running` で判じていたころは、
         // 起動時の読み取りが失敗すると「登録されていません」と嘘を言い、読み直しの
@@ -763,6 +746,8 @@ mod tests {
         let _ = state.issue(Cmd::LoadRepoInfo);
         let message = notice_after_f(&mut state);
         assert!(message.contains("登録されていません"), "{message}");
+        // **候補が 0 本なら開かない。** 選ばせる相手がいないので通知のまま（01）。
+        assert_eq!(state.modal, None, "選ぶ相手がいないのに開いている");
     }
 
     #[test]
@@ -826,20 +811,6 @@ mod tests {
             let cmd = update(&mut state, Msg::Key(Key::ctrl(c)));
             assert_eq!(cmd, Cmd::None, "Ctrl-{c} が効いてしまいました");
         }
-        assert_eq!(state.modal, None);
-    }
-
-    #[test]
-    fn shift_p_pushes_to_the_tracking_config_without_asking() {
-        // 行き先はユーザーが書いたもので、推測していない。
-        let mut state = state_for_push(
-            &["origin", "upstream"],
-            tracking_branch("main", "origin", HEADS_MAIN),
-        );
-
-        let cmd = press(&mut state, 'P');
-
-        assert_eq!(cmd, Cmd::Exec(push_op("origin", "main", false)));
         assert_eq!(state.modal, None);
     }
 
@@ -1049,6 +1020,35 @@ mod tests {
             Cmd::Exec(push_op("origin", "main", false))
         );
         assert_eq!(state.modal, None);
+    }
+
+    #[test]
+    fn a_canceled_push_does_not_arm_force() {
+        // force に上げてよいのは git が非 FF で断ったときだけ（01 の「force push」）。
+        // 中断は git の判断ではない。
+        // **追跡設定のある行で組む** —— 追跡設定の無い行では `push_rejection` が kind を
+        // 見る前に、ブランチ一覧が空の状態では kind を見たあとの一覧引きで `None` を返す
+        // ので、中断を非 FF と同じに扱っても緑のまま通る。同じ状態で非 FF なら立つことを
+        // 続けて見る。
+        let mut state = state_for_push(
+            &["origin"],
+            tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(7))),
+        );
+        let op = push_op("origin", "main", false);
+        finish_exec(
+            &mut state,
+            op.clone(),
+            Err(ExecError::Canceled {
+                argv: vec!["push".into(), "origin".into(), "main".into()],
+            }),
+        );
+        assert_eq!(state.push_rejected, None);
+
+        reject_non_fast_forward(&mut state, op);
+        assert!(
+            state.push_rejected.is_some(),
+            "非 FF で記憶が立っていません"
+        );
     }
 
     #[test]

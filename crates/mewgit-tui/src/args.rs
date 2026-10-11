@@ -72,12 +72,6 @@ mod tests {
     }
 
     #[test]
-    fn help_and_version_are_found_anywhere() {
-        assert_eq!(parse_strs(&["repo", "--help"]), Ok(Launch::Help));
-        assert_eq!(parse_strs(&["repo", "-V"]), Ok(Launch::Version));
-    }
-
-    #[test]
     fn help_and_version_win_over_refusals() {
         assert_eq!(parse_strs(&["--nope", "a", "b", "-h"]), Ok(Launch::Help));
         assert_eq!(parse_strs(&["a", "b", "--version"]), Ok(Launch::Version));
@@ -87,6 +81,7 @@ mod tests {
     fn the_first_of_help_and_version_wins() {
         assert_eq!(parse_strs(&["-V", "--help"]), Ok(Launch::Version));
         assert_eq!(parse_strs(&["-h", "--version"]), Ok(Launch::Help));
+        assert_eq!(parse_strs(&["--help", "-V"]), Ok(Launch::Help));
     }
 
     #[test]

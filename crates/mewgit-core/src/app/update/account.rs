@@ -410,16 +410,6 @@ mod tests {
     const ORIGIN_SSH: &str = "git@github.com:yshrsmz/mewgit.git";
 
     #[test]
-    fn the_repo_info_asks_to_resolve_the_target() {
-        let mut state = state();
-        let cmd = deliver_repo_info(&mut state, &[("origin", ORIGIN_SSH)]);
-        assert_eq!(
-            cmd,
-            Cmd::ResolveTarget(RemoteUrl::parse(ORIGIN_SSH).unwrap())
-        );
-    }
-
-    #[test]
     fn the_target_ignores_the_branch_tracking_remote() {
         // **`f` とは別の規則**（`conventional_remote`）。1 段目を通すと、起動時に
         // たまたま居たブランチの追跡先が latch される —— ブランチを切り替えても
@@ -511,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_without_remotes_says_nothing() {
+    fn a_repository_without_remotes_says_nothing_and_never_asks_for_an_account() {
         // リモートの無いローカルリポジトリで、起動のたびに警告を出さない。
         // 押したときに困るのは `f` なので、そちらが押された時点で言う（01）。
         let mut state = state();
@@ -519,6 +509,10 @@ mod tests {
         assert_eq!(state.repo.target, TargetState::Unavailable);
         assert!(state.notices.is_empty(), "{:?}", state.notices);
         assert_eq!(cmd, Cmd::None, "頼む相手がいないのに頼んでいる");
+        // **`Cmd::ResolveAccount` は `target` が決まっていないと出ない。** アカウントは
+        // 一度も頼まれず `Resolving` のまま残る（ヘッダは何も出さない。07）。
+        assert!(matches!(state.account, AccountState::Resolving));
+        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
     }
 
     #[test]
@@ -539,20 +533,6 @@ mod tests {
         assert_eq!(cmd, Cmd::ResolveAccount(fake_target()));
         assert_eq!(state.repo.target, TargetState::Resolved(fake_target()));
         assert_eq!(state.notices.len(), 1, "{:?}", state.notices);
-    }
-
-    #[test]
-    fn a_repository_that_is_not_on_github_never_asks_for_an_account() {
-        // **`Cmd::ResolveAccount` は `target` が決まっていないと出ない**（`target_resolved`
-        // はその返信そのもの、`resolve_again` は `resolved()` で断る）。既定リモートが
-        // 決まらないリポジトリでは `target` が `Unavailable` に落ちるので、アカウントは
-        // 一度も頼まれず `Resolving` のまま残る（ヘッダは何も出さない。07）。
-        let mut state = state();
-        let cmd = deliver_repo_info(&mut state, &[]);
-
-        assert_eq!(cmd, Cmd::None);
-        assert!(matches!(state.account, AccountState::Resolving));
-        assert!(!state.jobs.is_running(JobKind::ResolveAccount));
     }
 
     #[test]

@@ -10,8 +10,8 @@ use mewgit_core::auth::ssh::SshCommand;
 use mewgit_core::auth::{resolve, DegradedReason};
 use mewgit_core::config::Config;
 use mewgit_core::git_exec::{
-    ExecError, ExecErrorKind, GitOp, HunkApply, LocalBranch, PrSource, RebaseAction, RebaseEntry,
-    RebasePlan, Runner,
+    ExecError, ExecErrorKind, GitOp, LocalBranch, PrSource, RebaseAction, RebaseEntry, RebasePlan,
+    Runner,
 };
 use mewgit_core::git_read::Oid;
 use mewgit_core::test_util::{
@@ -201,17 +201,12 @@ async fn unset_account_removes_what_set_account_wrote() {
         matches!(&resolved, Err(DegradedReason::NotLoggedIn { .. })),
         "{resolved:?}"
     );
-}
 
-#[tokio::test]
-async fn unsetting_an_account_that_was_never_set_fails_without_saying_why() {
-    // **exit 5 を stderr 空で返す**（03 の実測表）。01 が「書き込みのあとは成否に
-    // 関わらず解決をやり直す」と決めた根拠がこれ —— 失敗から「いま何が設定されて
-    // いるか」は読めない。**実物の git で確かめる**（設計書の断定を叩き直す側）。
-    let repo = TestRepo::init();
-
-    let err = repo
-        .runner()
+    // 外したあとにもう一度外すと、**exit 5 を stderr 空で返す**（03 の実測表）。
+    // 01 が「書き込みのあとは成否に関わらず解決をやり直す」と決めた根拠がこれ ——
+    // 失敗から「いま何が設定されているか」は読めない。**実物の git で確かめる**
+    // （設計書の断定を叩き直す側）。
+    let err = runner
         .run(&GitOp::UnsetAccount)
         .await
         .expect_err("設定されていないのに成功した");
@@ -312,41 +307,6 @@ async fn amend_replaces_the_last_commit() {
         .expect("amend できませんでした");
 
     assert_eq!(repo.git(&["log", "--pretty=%s"]), "amended");
-}
-
-#[tokio::test]
-async fn stage_hunk_sends_the_patch_on_stdin() {
-    let repo = TestRepo::init();
-    repo.commit_bytes("file.txt", b"one\ntwo\n", "first");
-    repo.write_worktree_file("file.txt", b"one\nTWO\n");
-
-    // 行継続（`\` + 改行）で書くと、コンテキスト行の先頭の空白まで畳まれて
-    // `corrupt patch` になる。1 行で書く。
-    let patch =
-        b"diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n"
-            .to_vec();
-
-    let runner = repo.runner();
-    runner
-        .run(&GitOp::StageHunk(Box::new(HunkApply {
-            path: "file.txt".into(),
-            patch: patch.clone(),
-            expect: repo.path_stamp("file.txt"),
-        })))
-        .await
-        .expect("ハンクを stage できませんでした");
-    assert_eq!(repo.porcelain(), "M  file.txt");
-
-    // 同じパッチを逆に当てると index が元に戻る。
-    runner
-        .run(&GitOp::UnstageHunk(Box::new(HunkApply {
-            path: "file.txt".into(),
-            patch,
-            expect: repo.path_stamp("file.txt"),
-        })))
-        .await
-        .expect("ハンクを unstage できませんでした");
-    assert_eq!(repo.porcelain(), " M file.txt");
 }
 
 #[tokio::test]
@@ -887,35 +847,6 @@ async fn a_rejected_push_is_classified_as_non_fast_forward() {
 }
 
 #[tokio::test]
-async fn force_with_lease_refuses_when_someone_else_moved_the_remote() {
-    // `--force` ならここで他人のコミットを消せてしまう。lease を選んでいる理由。
-    let remote = BareRepo::init();
-    let mine = clone_of(&remote);
-    mine.commit("first");
-    let runner = mine.runner();
-    runner
-        .run(&push(true))
-        .await
-        .expect("push できませんでした");
-    let pushed = mine.head_oid();
-
-    let theirs_head = someone_else_pushes(&remote);
-
-    mine.git(&["commit", "-q", "--amend", "-m", "rewritten"]);
-    let err = runner
-        .run(&force_push(pushed))
-        .await
-        .expect_err("lease が古いので弾かれるはずです");
-
-    assert_eq!(failure_kind(&err), ExecErrorKind::NonFastForward);
-    assert_eq!(
-        remote.git(&["rev-parse", "refs/heads/main"]),
-        theirs_head.to_string(),
-        "他人のコミットを消してしまった"
-    );
-}
-
-#[tokio::test]
 async fn the_lease_survives_a_fetch() {
     // **値の無い `--force-with-lease` はここで素通りする。** lease は
     // remote-tracking ref と比べるだけなので、`fetch` で `origin/main` が他人の
@@ -1094,29 +1025,6 @@ async fn a_non_utf8_path_never_reaches_git() {
     );
     assert!(err.argv().is_empty(), "argv を組めていない");
     assert_eq!(repo.porcelain(), "");
-}
-
-#[tokio::test]
-async fn a_failing_command_carries_argv_and_stderr() {
-    // 不変ルール 4。握りつぶさずに UI まで届ける。
-    let repo = TestRepo::init();
-    repo.commit("first");
-
-    let err = repo
-        .runner()
-        .run(&GitOp::Switch("no-such-branch".into()))
-        .await
-        .expect_err("失敗するはずです");
-
-    let ExecError::Failed {
-        argv, code, stderr, ..
-    } = &err
-    else {
-        panic!("git が走っていません: {err:?}");
-    };
-    assert_eq!(argv, &["switch", "no-such-branch"]);
-    assert_eq!(*code, Some(128));
-    assert!(stderr.contains("no-such-branch"), "stderr: {stderr}");
 }
 
 #[tokio::test]

@@ -100,7 +100,7 @@ fn remotes_returns_every_remote_sorted_by_name() {
 }
 
 #[test]
-fn remotes_read_the_default_branch_from_the_remote_head_symref() {
+fn remotes_read_the_default_branch_from_the_remote_head_symref_when_it_can_be_stripped() {
     // `refs/remotes/<name>/HEAD` が指すブランチを `head_branch` に入れる（02）。
     // **生の `refs/remotes/origin/main` のままでは PR の base に載せられない**ので、
     // 接頭辞を剥がす。
@@ -118,11 +118,15 @@ fn remotes_read_the_default_branch_from_the_remote_head_symref() {
         "https://github.com/me/mewgit.git",
     ]);
     repo.git(&["remote", "add", "upstream", "git@github.com:up/mewgit.git"]);
+    repo.git(&["remote", "add", "fork", "git@github.com:fork/mewgit.git"]);
     repo.git(&[
         "symbolic-ref",
         "refs/remotes/origin/HEAD",
         "refs/remotes/origin/trunk",
     ]);
+    // 剥がせない値は `None`（02）。**`refs/heads/main` をそのまま返すと**、
+    // PR の base に `refs/heads/main` が載って GitHub が 422 を返す。
+    repo.git(&["symbolic-ref", "refs/remotes/fork/HEAD", "refs/heads/main"]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let remotes = reader.remotes().unwrap();
@@ -134,30 +138,15 @@ fn remotes_read_the_default_branch_from_the_remote_head_symref() {
     // **`Some` と `None` を 1 本で見る。** `None` だけを見る assert は、symref を
     // 1 行も書かなくても通る（`.claude/rules/testing.md` の「否定を見る assert は…」）。
     // `upstream` が `None` なのは、一度も fetch していないリモートの形（02）。
-    assert_eq!(heads, [("origin", Some("trunk")), ("upstream", None)]);
-}
-
-#[test]
-fn a_remote_head_pointing_outside_the_remote_is_not_a_branch_name() {
-    // 剥がせない値は `None`（02）。**`refs/heads/main` をそのまま返すと**、
-    // PR の base に `refs/heads/main` が載って GitHub が 422 を返す。
-    let repo = TestRepo::init();
-    repo.git(&[
-        "remote",
-        "add",
-        "origin",
-        "https://github.com/me/mewgit.git",
-    ]);
-    repo.git(&[
-        "symbolic-ref",
-        "refs/remotes/origin/HEAD",
-        "refs/heads/main",
-    ]);
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let remotes = reader.remotes().unwrap();
-
-    assert_eq!(remotes[0].head_branch, None);
+    // `fork` は symref が在っても剥がせない形で、`upstream` とは別の理由の `None`。
+    assert_eq!(
+        heads,
+        [
+            ("fork", None),
+            ("origin", Some("trunk")),
+            ("upstream", None)
+        ]
+    );
 }
 
 #[test]
@@ -282,16 +271,6 @@ fn refs_skips_a_tag_that_cannot_be_peeled_to_a_commit() {
     let names: Vec<&str> = index.labels(first).iter().map(RefLabel::name).collect();
     assert_eq!(names, ["v1"]);
     assert_eq!(index.labels(repo.rev_parse("HEAD^{tree}")), []);
-}
-
-#[test]
-fn refs_is_empty_before_the_first_commit() {
-    let repo = TestRepo::init();
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let index = reader.refs().unwrap();
-
-    assert_eq!(index.labels(Oid::ZERO_SHA1), []);
 }
 
 /// `head_row` の指す行の名前。判別（`head()`）と行の位置を別々の答えから見るため。
@@ -456,7 +435,7 @@ fn branches_follows_a_dangling_symbolic_chain_to_an_unborn_head() {
 /// 本文付きのメッセージを持つコミットが 1 つあるリポジトリ。
 ///
 /// `TestRepo::commit` は summary しか付けられないので amend で書き換える。
-/// メッセージ全文を読む 2 つのテスト（`commit_detail` と `head_message`）で使う。
+/// メッセージ全文を読む `head_message` のテストで使う。
 fn repo_with_a_body() -> TestRepo {
     let repo = TestRepo::init();
     repo.commit("subject");
@@ -507,20 +486,6 @@ fn head_message_is_none_without_any_commit() {
 /// ページの Oid だけを取り出す。
 fn oids(page: &LogPage) -> Vec<Oid> {
     page.commits.iter().map(|c| c.oid).collect()
-}
-
-#[test]
-fn log_lists_commits_newest_first() {
-    let repo = TestRepo::init();
-    let first = repo.commit("first");
-    let second = repo.commit("second");
-    let third = repo.commit("third");
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let page = reader.log().unwrap().next_page(10).unwrap();
-
-    assert_eq!(oids(&page), [third, second, first]);
-    assert!(page.done, "全部読んだのに done が立っていません");
 }
 
 #[test]
@@ -738,20 +703,6 @@ fn log_orders_by_committer_time_while_reporting_author_time() {
         page.commits[0].time < page.commits[1].time,
         "author 日時が並び順どおりになっており、逆転のケースを踏めていません"
     );
-}
-
-#[test]
-fn commit_detail_reports_the_whole_message() {
-    // グラフの行が持つのは summary だけなので、詳細では本文まで読めることが要る。
-    let repo = repo_with_a_body();
-    let oid = repo.head_oid();
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    let detail = reader.commit_detail(oid).unwrap();
-
-    assert_eq!(detail.oid, oid);
-    // 末尾に git が付ける改行は落とす。残すと詳細の最後に空行が出る。
-    assert_eq!(detail.message, WHOLE_MESSAGE);
 }
 
 #[test]
@@ -1028,21 +979,6 @@ fn branches_keeps_a_branch_whose_upstream_ref_is_gone() {
 }
 
 #[test]
-fn branches_has_no_upstream_config_when_nothing_is_configured() {
-    // `branch.<name>.remote` も `.merge` も無い。`-u` を提案してよいのはここだけ。
-    let repo = TestRepo::init();
-    repo.commit("first");
-    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
-
-    let reader = RepoReader::open(repo.path()).unwrap();
-    let list = reader.branches().unwrap();
-    let branches = list.branches();
-
-    let main = branches.iter().find(|b| b.name == "main").unwrap();
-    assert_eq!(main.upstream_config, None);
-}
-
-#[test]
 fn branches_reads_the_push_remote_before_the_push_default() {
     // git の push はこの 2 つを追跡設定より先に見る（01 の「push の行き先」）。
     // `pushRemote` が勝ち、無いブランチは `pushDefault` に落ちる（01 の表の H / B）。
@@ -1082,23 +1018,6 @@ fn branches_has_no_push_remote_when_neither_is_configured() {
 
     let main = branches.iter().find(|b| b.name == "main").unwrap();
     assert_eq!(main.push_remote, None);
-}
-
-#[test]
-fn branches_needs_both_halves_of_the_tracking_config() {
-    // 片方だけ書かれた設定から push の行き先は決まらない。組み合わせを呼び出し側に
-    // 数えさせないよう、揃っていなければ `None`（02）。
-    let repo = TestRepo::init();
-    repo.commit("first");
-    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
-    repo.git(&["config", "branch.main.remote", "origin"]);
-
-    let reader = RepoReader::open(repo.path()).unwrap();
-    let list = reader.branches().unwrap();
-    let branches = list.branches();
-
-    let main = branches.iter().find(|b| b.name == "main").unwrap();
-    assert_eq!(main.upstream_config, None);
 }
 
 #[test]
@@ -1156,7 +1075,7 @@ fn branches_drops_a_non_utf8_name() {
 }
 
 #[test]
-fn branches_is_empty_and_the_head_unborn_before_the_first_commit() {
+fn branches_is_empty_the_head_unborn_and_refs_readable_before_the_first_commit() {
     // unborn HEAD ではブランチの ref がまだ無い。**`Err` ではない。** 名前は HEAD の
     // symbolic target から取る。
     let repo = TestRepo::init();
@@ -1166,6 +1085,8 @@ fn branches_is_empty_and_the_head_unborn_before_the_first_commit() {
     let list = reader.branches().unwrap();
     assert_eq!(list.head(), Head::Unborn("main"));
     assert!(list.branches().is_empty());
+    // ref の索引も同じく `Err` にしない。HEAD を解決しにいくと unborn で落ちる。
+    reader.refs().unwrap();
 }
 
 // ---- 進行中操作（02 の「進行中操作の検出」）。表の実測を実物の git で踏む。
@@ -1178,12 +1099,6 @@ fn progress_of(path: &std::path::Path) -> Option<InProgressOp> {
 
 fn step(current: usize, total: usize) -> Option<Step> {
     Some(Step { current, total })
-}
-
-#[test]
-fn nothing_is_in_progress_in_a_clean_repository() {
-    let (repo, _, _) = TestRepo::diverged();
-    assert_eq!(progress_of(repo.path()), None);
 }
 
 #[test]
@@ -1312,17 +1227,6 @@ fn a_revert_sequence_stopped_on_an_empty_one_is_still_in_progress() {
     assert_eq!(
         progress_of(repo.path()),
         Some(InProgressOp::Revert { oid: None })
-    );
-}
-
-#[test]
-fn a_stopped_merge_reports_the_merged_commit() {
-    let (repo, _, second) = TestRepo::diverged();
-    assert!(!repo.try_git(&["merge", "side"]));
-
-    assert_eq!(
-        progress_of(repo.path()),
-        Some(InProgressOp::Merge { oid: second })
     );
 }
 

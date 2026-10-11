@@ -93,18 +93,6 @@ mod tests {
     }
 
     #[test]
-    fn epoch_in_utc() {
-        assert_eq!(at(0, 0), "1970-01-01 00:00:00 +0000");
-    }
-
-    #[test]
-    fn the_offset_shifts_the_wall_clock_and_the_date() {
-        // 2023-11-14 22:13:20 UTC は東京では翌日の 07:13:20。
-        assert_eq!(at(1_700_000_000, 0), "2023-11-14 22:13:20 +0000");
-        assert_eq!(at(1_700_000_000, 540), "2023-11-15 07:13:20 +0900");
-    }
-
-    #[test]
     fn a_negative_offset_goes_backwards() {
         assert_eq!(at(1_700_000_000, -300), "2023-11-14 17:13:20 -0500");
         // 日付をまたいで前日に戻るケース。

@@ -168,18 +168,23 @@ mod tests {
 
     #[test]
     fn the_selected_row_is_highlighted() {
+        // **区画を 2 つにする。** 反転する行は見出しの行も数えて決まる
+        // （見出し(0) s.txt(1) 見出し(2) u.txt(3)）。1 区画だと、見出しを先頭の 1 行と
+        // 決め打ちして区画内の位置に 1 を足すだけの数え方でも通ってしまう。
         let mut state = state_with_status(WorktreeSnapshot {
-            unstaged: vec![
-                fake_entry("a.txt", FileStatus::Modified),
-                fake_entry("b.txt", FileStatus::Modified),
-            ],
+            staged: vec![fake_entry("s.txt", FileStatus::Added)],
+            unstaged: vec![fake_entry("u.txt", FileStatus::Modified)],
             ..WorktreeSnapshot::default()
         });
-        state.worktree.move_cursor(1);
-
-        assert!(row_is_reversed(&state, SIZE, "b.txt"));
+        // 起動時のカーソルは Unstaged。
+        assert!(row_is_reversed(&state, SIZE, "u.txt"));
         // 反転するのはカーソル行だけ。
-        assert!(!row_is_reversed(&state, SIZE, "a.txt"));
+        assert!(!row_is_reversed(&state, SIZE, "s.txt"));
+
+        state.worktree.move_cursor(-1);
+
+        assert!(row_is_reversed(&state, SIZE, "s.txt"));
+        assert!(!row_is_reversed(&state, SIZE, "u.txt"));
     }
 
     #[test]
@@ -203,18 +208,5 @@ mod tests {
         let text = pane_text(&state, SIZE, Pane::Worktree);
 
         assert!(text.contains("読み込み中"), "{text}");
-    }
-
-    #[test]
-    fn the_cursor_row_counts_the_headings() {
-        let mut state = state_with_status(WorktreeSnapshot {
-            staged: vec![fake_entry("s.txt", FileStatus::Added)],
-            unstaged: vec![fake_entry("u.txt", FileStatus::Modified)],
-            ..WorktreeSnapshot::default()
-        });
-        // 見出し(0) s.txt(1) 見出し(2) u.txt(3)。起動時のカーソルは Unstaged。
-        assert_eq!(rows(&state).1, 3);
-        state.worktree.move_cursor(-1);
-        assert_eq!(rows(&state).1, 1);
     }
 }

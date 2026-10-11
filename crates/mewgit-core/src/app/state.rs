@@ -3960,17 +3960,6 @@ mod tests {
     }
 
     #[test]
-    fn a_focus_that_is_still_a_candidate_is_left_alone() {
-        // WIP 行に戻るだけで右ペインのフォーカスを奪わない。
-        let mut state = state_with_a_commit();
-        state.focus = Pane::Worktree;
-
-        state.reseat_focus();
-
-        assert_eq!(state.focus, Pane::Worktree);
-    }
-
-    #[test]
     fn the_wip_row_is_a_display_row_of_its_own() {
         // 表示行 0 は WIP 行、1.. が `lines`（01 の「グラフの行」）。
         let mut state = state_with_a_commit();
@@ -4034,34 +4023,11 @@ mod tests {
     }
 
     #[test]
-    fn push_notice_keeps_level_and_detail() {
-        let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
-        state.push_notice(
-            NoticeLevel::Error,
-            "失敗".to_string(),
-            Some("git push origin main".to_string()),
-        );
-
-        let notice = state.notices.back().unwrap();
-        assert_eq!(notice.level, NoticeLevel::Error);
-        assert_eq!(notice.detail.as_deref(), Some("git push origin main"));
-    }
-
-    #[test]
     fn text_buffer_round_trips() {
         let buf = TextBuffer::from_text("first\nsecond");
         assert_eq!(buf.lines, ["first", "second"]);
         assert_eq!(buf.cursor, (1, 6));
         assert_eq!(buf.text(), "first\nsecond");
-    }
-
-    #[test]
-    fn default_text_buffer_has_one_empty_line() {
-        // cursor が指す行が必ず存在する必要がある。
-        let buf = TextBuffer::default();
-        assert_eq!(buf.lines, [""]);
-        assert_eq!(buf.cursor, (0, 0));
-        assert_eq!(buf.text(), "");
     }
 
     fn job(kind: JobKind) -> Job {

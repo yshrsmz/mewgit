@@ -194,14 +194,10 @@ mod tests {
     }
 
     #[test]
-    fn nothing_in_progress_in_an_empty_git_dir() {
+    fn an_empty_gitdir_has_nothing_in_progress_but_a_rebase_without_its_counters_does() {
         let dir = git_dir();
+        // 空の gitdir では何も進行中でない。`rebase-merge` を置くと進行中に変わる。
         assert_eq!(in_progress(dir.path()), None);
-    }
-
-    #[test]
-    fn a_rebase_without_its_counters_is_still_in_progress() {
-        let dir = git_dir();
         fs::create_dir(dir.path().join("rebase-merge")).unwrap();
 
         assert_eq!(

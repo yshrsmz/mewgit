@@ -807,7 +807,9 @@ mod tests {
         let mut state = state_on_branches(&["another", "main"], Some("main"));
         arrive(&mut state, Some(rebase()));
         let _ = press(&mut state, 'k');
+        // git は起動せず、何の途中かを案内して status を読み直す。
         assert_eq!(press_code(&mut state, KeyCode::Enter), Cmd::LoadStatus);
+        assert!(shown(&state).starts_with("rebase の途中"));
 
         // 読み直した status には進行中操作が無い（外で終えた）。
         let _ = update(&mut state, status_arrived(Ok(progressing(None))));

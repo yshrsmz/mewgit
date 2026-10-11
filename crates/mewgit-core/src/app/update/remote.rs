@@ -1026,9 +1026,10 @@ mod tests {
     fn a_canceled_push_does_not_arm_force() {
         // force に上げてよいのは git が非 FF で断ったときだけ（01 の「force push」）。
         // 中断は git の判断ではない。
-        // **追跡設定のある行で組む** —— ブランチ一覧が空の状態や追跡設定の無い行では、
-        // `push_rejection` が kind を見る前に `None` を返すので、中断を非 FF と同じに
-        // 扱っても緑のまま通る。同じ状態で非 FF なら立つことを続けて見る。
+        // **追跡設定のある行で組む** —— 追跡設定の無い行では `push_rejection` が kind を
+        // 見る前に、ブランチ一覧が空の状態では kind を見たあとの一覧引きで `None` を返す
+        // ので、中断を非 FF と同じに扱っても緑のまま通る。同じ状態で非 FF なら立つことを
+        // 続けて見る。
         let mut state = state_for_push(
             &["origin"],
             tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(7))),

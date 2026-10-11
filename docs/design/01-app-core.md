@@ -484,6 +484,9 @@ pub enum GraphSelection<'a> { Wip, Commit(&'a GraphLine) }
 `scroll` は状態として持つ。`cursor` と `viewport` から毎回導くと、下端から上へ戻る
 ときにカーソルが最下行に貼り付いたまま中身だけが流れる。更新は
 `GraphState::move_cursor(delta)` / `scroll_into_view()`。
+窓が広がったときは、カーソルが窓の中にいても `scroll` を `rows - viewport` まで先に
+詰める（履歴が窓より短ければ 0 まで）。末尾に貼り付いたまま端末を大きくすると、
+カーソルは窓の中にいるのでカーソルを追う寄せは動かず、上に行があるのに下に空白が残る。
 
 `viewport` は `ui` がレイアウトから出して `Msg::Layout` で運んでくる（07 の
 `ui::graph_rows`）。core にヘッダや枠の高さを持たせない。持たせると 07 のレイアウトを

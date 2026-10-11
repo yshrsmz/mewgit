@@ -876,13 +876,19 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       テストが全部通っていた**（#190 のテスト精査で変異にかけた）。詰めの行（`scroll.min(rows - viewport)`）は
       丸ごと消せば `widening_the_terminal_…` が落ちるが、**履歴が窓より短い形（詰め先が 0）**は
       見ていなかった。窓の上端より上へ戻る形と、行 4・窓 2 → 20 で scroll 2 → 0 になる形を 1 本ずつ足した
-      （腕を消す変異と「行が窓より多いときだけ詰める」変異が、それぞれ 1 本だけを落とす）
+      （腕を消す変異と「行が窓より多いときだけ詰める」変異が、それぞれ 1 本だけを落とす）。
+      #190 の時点の記述（詰めの行も、どちらを消しても通る）は詰めの行について外れていた。
+      足した `widening_past_the_whole_history_scrolls_to_the_top` は窓の変更を `Msg::Layout` で
+      届ける（`viewport` を直に書いて `scroll_into_view` を呼ばない）。既存の
+      `widening_the_terminal_pulls_the_view_back_to_the_end` も同じ形に揃えた
 - [x] `git_read::diff::find_options` の `renames(true)` に見張りを足す。**見張れなかった ——
-      `renames(true)` は libgit2 1.9.7 では何もしていない**。設定（`diff.renames`）を読ませないのは
-      `for_untracked` のビットで、`GIT_DIFF_FIND_RENAMES` は対を組む側から読まれない（02）。
-      代わりに `diff.renames=false` のリポジトリで staged / unstaged の rename が status と揃う
-      見張りを足した（git CLI では対にならないことを同じテストで確かめる）。staged 側だけ
-      既定に戻す変異は、core でこの 1 本だけが落とす
+      `renames(true)` は `for_untracked` と冗長で、どちらのビットでも libgit2 は `diff.renames` を
+      読まない**（02）。`false` にしても結果は変わらない。代わりに `diff.renames=false` のリポジトリで
+      staged と commit の rename が対になる見張りを 2 本足した
+      （`a_rename_pairs_even_when_the_repository_turns_rename_detection_off` と
+      `a_commit_pairs_a_rename_even_when_the_repository_turns_rename_detection_off`。git CLI では
+      対にならないことを同じテストで確かめる）。commit 側も設定を読まないことは 02 に理由を書いた
+      （2026-10-11 にユーザーと決めた）
 - [x] 外部変更検知（1/2）— 検知と読み直し。**2 本に割った**（2026-10-01 にユーザーと決めた。
       理由は 01 の「外部の変更の検知 › 定期の status」—— 2 本目の守りは diff のキャッシュに
       手を入れる別の関心事で、比べる `(mtime, len)` はこちらが載せる）。**決めた形**（理由と

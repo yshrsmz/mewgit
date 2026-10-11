@@ -144,17 +144,22 @@ impl RepoReader {
 
 /// rename 検出の設定。**`status` と同じ条件にするためのもの。**
 ///
-/// `find_similar(None)` の既定とは 2 点で違う。
+/// `find_similar(None)` の既定とは、次の 2 つの振る舞いで違う。
 ///
-/// - `for_untracked` を立てる。ワークツリー上の rename（まだ `add` していない
-///   `git mv`）は「index から消えた + untracked で増えた」の 2 つの delta なので、
-///   これが無いと対にならない。`status` は `renames_index_to_workdir` で検出するため、
-///   立てないと同じファイルが status では 1 行の `Renamed`、`diff` では
-///   `Deleted` + `Untracked` の 2 件になる
-/// - `diff.renames` の設定を読ませない。`status` の側は `StatusOptions` で無条件に
-///   有効にしているので、読ませると設定で切っている環境だけ 2 つが食い違う。
-///   読ませないのは `for_untracked` のビットで、`renames(true)` は意図を書くために
-///   残している（実測と版は 02）
+/// - ワークツリー上の rename を対にする（`for_untracked`）。ワークツリー上の rename
+///   （まだ `add` していない `git mv`）は「index から消えた + untracked で増えた」の
+///   2 つの delta なので、これが無いと対にならない。`status` は
+///   `renames_index_to_workdir` で検出するため、立てないと同じファイルが status では
+///   1 行の `Renamed`、`diff` では `Deleted` + `Untracked` の 2 件になる
+/// - `diff.renames` の設定を読まない。`status` の側は `StatusOptions` で無条件に
+///   有効にしているので、読むと設定で切っている環境だけ 2 つが食い違う。
+///   `GIT_DIFF_FIND_ALL` の範囲のビットが 1 つでも立てば libgit2 は設定を読まない。
+///   `renames(true)` と `for_untracked` のどちらもそのビットで、互いに冗長。
+///   `renames(true)` は、`for_untracked` を外す変更があっても設定を読まないままに
+///   するために残している（実測と版は 02）
+///
+/// commit / Range / Stash も同じ設定で、一覧（`commit_files`）と中身（`diff`）が
+/// 1 つの設定で揃う（02）。
 fn find_options() -> DiffFindOptions {
     let mut options = DiffFindOptions::new();
     options.renames(true).for_untracked(true);

@@ -704,13 +704,34 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
   `renames_index_to_workdir` で 1 行の `Renamed` にするので、同じファイルの見え方が食い違う。
   `diff.renames` の設定も読ませない。`status` 側は無条件に有効なので、読ませると設定で
   切っている環境だけ 2 つがずれる。**libgit2（1.9.7）が設定を読むのは、検出のフラグ
-  （`GIT_DIFF_FIND_ALL` の範囲）が 1 つも立っていないときだけ**で、`for_untracked` を
-  立てた時点で読まなくなる。`GIT_DIFF_FIND_RENAMES` は設定から立てられるだけで、対を
-  組む側は読まない —— `renames(true)` を `false` にしても、`diff.renames=false` の
-  リポジトリで staged / unstaged の rename は対になった（2026-10-11 に実測。`diff_tform.c` の
-  `normalize_find_opts`）。`renames(true)` は意図を書くために残してある。見張りは
-  「設定で切ったリポジトリでも status と diff が揃う」こと（`tests/diff.rs`）で、
-  staged 側だけ既定に戻すと落ちる
+  （`GIT_DIFF_FIND_ALL` の範囲）が 1 つも立っていないときだけ**で、`renames(true)`
+  （`GIT_DIFF_FIND_RENAMES`）と `for_untracked`（`GIT_DIFF_FIND_FOR_UNTRACKED`）は
+  どちらもその範囲のビット —— **どちらか片方が立っていれば設定は読まれず、2 つは
+  この点で冗長**。`GIT_DIFF_FIND_RENAMES` は設定から立てられるだけで、対を組む側は
+  読まない —— `renames(true)` を `false` にしても、`diff.renames=false` のリポジトリで
+  staged / unstaged の rename は対になった（2026-10-11 に実測。`diff_tform.c` の
+  `normalize_find_opts` と `git_diff_find_similar`）。libgit2 の status 自身も
+  `FIND_RENAMES` を立てず、`findopt.flags = GIT_DIFF_FIND_FOR_UNTRACKED` だけで rename を
+  対にしている（`status.c`）。**`renames(true)` は、`for_untracked` を外す変更があっても
+  設定を読まないままにするために残す。** 見張りは、`diff.renames=false` のリポジトリで
+  staged（`HeadVsIndex`）と commit（`commit_files` と `DiffTarget::Commit`）の rename が
+  対になることを見る（`tests/diff.rs` の
+  `a_rename_pairs_even_when_the_repository_turns_rename_detection_off` と
+  `a_commit_pairs_a_rename_even_when_the_repository_turns_rename_detection_off`。どちらも
+  同じテストの中で git CLI では対にならないことを確かめる）。`HeadVsIndex` /
+  `commit_files` / `Commit` のどれか 1 つを `find_similar(None)` に戻す変異は、core で
+  その見張りだけが落とす。unstaged 側は `for_untracked` 無しでは設定に関係なく対に
+  ならないので、既存の worktree rename のテスト
+  （`index_vs_worktree_agrees_with_status_on_a_worktree_rename` と
+  `a_path_keeps_a_worktree_rename_under_either_name`）が見張る
+- **commit / Range / Stash の diff も同じ設定で、ユーザーの `diff.renames` を読まない。**
+  上の「`status` と揃える」は staged / unstaged にしか当てはまらないので、こちらの理由は
+  別にある（2026-10-11 にユーザーと決めた）。(1) `commit_files` の一覧と
+  `diff(DiffTarget::Commit)` の中身が 1 つの設定で必ず揃う —— 「コミットのファイル一覧」の
+  「比べる 2 つのツリーと rename 検出の設定は `diff()` と同じものを使う」を、設定を読む・
+  読まないで割らない。(2) git の既定でも rename 検出は有効。帰結として、`diff.renames=false`
+  のユーザーには mewgit が `git show` と違って rename を 1 行の `Renamed` で出し、
+  `diff.renames=copies` のユーザーにはコピー検出が効かない
 - `Delta::Unmodified` / `Ignored` / `Unreadable` の delta は落とす。`FileStatus` に対応する
   変種が無く、この UI では出しても操作できない。`Patch::from_diff` が `None` を返すのも
   libgit2 が「出さない」と判断した delta だけなので、パッチが作れない delta はそのまま飛ばす。

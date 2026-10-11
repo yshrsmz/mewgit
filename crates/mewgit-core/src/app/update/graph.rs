@@ -680,19 +680,19 @@ mod tests {
         let _ = press(&mut state, 'j');
         assert_eq!(state.graph.cursor, 1);
 
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Down)));
+        let _ = press_code(&mut state, KeyCode::Down);
         assert_eq!(state.graph.cursor, 2);
 
         let _ = press(&mut state, 'k');
         assert_eq!(state.graph.cursor, 1);
 
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Up)));
+        let _ = press_code(&mut state, KeyCode::Up);
         assert_eq!(state.graph.cursor, 0);
     }
 
     #[test]
     fn widening_the_terminal_pulls_the_view_back_to_the_end() {
-        // 広がった窓ではカーソルは窓の中のどこにいても窓の中に残るので、カーソルを追う
+        // 広げる前に窓の中にいたカーソルは、広げた後も窓の中に残るので、カーソルを追う
         // 寄せは動かず、詰めなければ上に行があるのに下に空白が残る（01）。ここでは
         // たとえば、カーソルが末尾近くの最下行にいるまま端末を大きくした形を踏む。
         // カーソル 29 は末尾の添字 30 の 1 つ手前で、窓が 5 行なら末尾の 1 行は窓の下に
@@ -725,13 +725,13 @@ mod tests {
     #[test]
     fn moving_above_the_window_scrolls_up_to_the_cursor() {
         let mut state = state_with_commits(30);
-        for _ in 0..25 {
+        for _ in 0..ROWS + 5 {
             let _ = press(&mut state, 'j');
         }
-        // カーソル 25 が窓（20 行）の最下行に来るので、先頭は 25 - 19 = 6。
+        // カーソル `ROWS + 5` が窓（`ROWS` 行）の最下行に来るので、先頭は 6。
         assert_eq!(state.graph.scroll, 6);
 
-        for _ in 0..20 {
+        for _ in 0..ROWS {
             let _ = press(&mut state, 'k');
         }
 
@@ -744,15 +744,15 @@ mod tests {
         // 下端から 1 つ戻ってもスクロールは動かない。動かすとカーソルが最下行に
         // 貼り付いたまま中身だけが流れる。
         let mut state = state_with_commits(30);
-        for _ in 0..20 {
+        for _ in 0..ROWS {
             let _ = press(&mut state, 'j');
         }
-        // カーソル 20 が窓（20 行）の最下行に来るので、先頭は 20 - 19 = 1。
+        // カーソル `ROWS` が窓（`ROWS` 行）の最下行に来るので、先頭は 1。
         assert_eq!(state.graph.scroll, 1);
 
         let _ = press(&mut state, 'k');
 
-        assert_eq!(state.graph.cursor, 19);
+        assert_eq!(state.graph.cursor, ROWS - 1);
         assert_eq!(state.graph.scroll, 1);
     }
 

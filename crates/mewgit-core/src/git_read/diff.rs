@@ -112,8 +112,8 @@ impl RepoReader {
     /// **index 側（第 2 親）は出さない。** `git stash show` の既定と同じで、stage して
     /// いたかどうかは apply の `--index` の話になる。
     ///
-    /// `find_similar` は呼び出し側が混ぜたあとに 1 回だけ掛ける。混ぜる前に掛けると、
-    /// tracked の削除と untracked の追加が rename として対にならない。
+    /// rename の対は呼び出し側が混ぜたあとに [`pair_renames`] で 1 回だけ取る。混ぜる前に
+    /// 取ると、tracked の削除と untracked の追加が rename として対にならない。
     fn stash_diff(&self, oid: Oid, opts: &mut DiffOptions) -> Result<git2::Diff<'_>, GitReadError> {
         let stash = self.repo.find_commit(oid)?;
         let base = stash.parent(0)?.tree()?;
@@ -142,12 +142,13 @@ impl RepoReader {
     }
 }
 
-/// rename を対にする。`diff` と `commit_files` の両方がここを通る。
+/// rename を対にする。rename の検出はここを通す。呼び出しを散らすと、一覧と diff で
+/// 設定がずれる。
 fn pair_renames(diff: &mut git2::Diff<'_>) -> Result<(), git2::Error> {
     diff.find_similar(Some(&mut find_options()))
 }
 
-/// rename 検出の設定。理由と実測は 02 の diff の節。
+/// rename 検出の設定。理由と実測は 02 の「diff とハンク」。
 ///
 /// - ワークツリー上の rename（index から消えた + untracked で増えた）を `for_untracked` で
 ///   対にする

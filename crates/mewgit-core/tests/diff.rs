@@ -271,22 +271,30 @@ fn renamed_with_detection_off() -> TestRepo {
     repo
 }
 
+/// 設定が効いている証拠。git 自身はこの rename を対にしない。
+///
+/// `output` は git CLI の `--name-status` の出力。
+#[track_caller]
+fn assert_git_splits_the_rename(output: &str) {
+    assert_eq!(output, "A\tnew.txt\nD\told.txt");
+}
+
+/// mewgit の読み取りがこの rename を対にした 1 行。
+fn renamed_rows() -> [(&'static str, Option<&'static str>, FileStatus); 1] {
+    [("new.txt", Some("old.txt"), FileStatus::Renamed)]
+}
+
 #[test]
 fn a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
     let repo = renamed_with_detection_off();
-    // 設定が効いている証拠。git 自身はこの rename を対にしない。
-    assert_eq!(
-        repo.git(&["diff", "--cached", "--name-status"]),
-        "A\tnew.txt\nD\told.txt"
-    );
+    assert_git_splits_the_rename(&repo.git(&["diff", "--cached", "--name-status"]));
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let status = reader.status().unwrap();
     let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
 
-    let renamed = [("new.txt", Some("old.txt"), FileStatus::Renamed)];
-    assert_eq!(entry_rows(&status.staged), renamed);
-    assert_eq!(diff_rows(&diff), renamed);
+    assert_eq!(entry_rows(&status.staged), renamed_rows());
+    assert_eq!(diff_rows(&diff), renamed_rows());
 }
 
 #[test]
@@ -295,11 +303,12 @@ fn a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
     let from = repo.head_oid();
     repo.git(&["commit", "-q", "-m", "rename"]);
     let to = repo.head_oid();
-    // 設定が効いている証拠。git 自身はこの rename を対にしない。
-    assert_eq!(
-        repo.git(&["diff", "--name-status", &from.to_string(), &to.to_string()]),
-        "A\tnew.txt\nD\told.txt"
-    );
+    assert_git_splits_the_rename(&repo.git(&[
+        "diff",
+        "--name-status",
+        &from.to_string(),
+        &to.to_string(),
+    ]));
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let diff = reader
@@ -310,10 +319,7 @@ fn a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
         })
         .unwrap();
 
-    assert_eq!(
-        diff_rows(&diff),
-        [("new.txt", Some("old.txt"), FileStatus::Renamed)]
-    );
+    assert_eq!(diff_rows(&diff), renamed_rows());
 }
 
 #[test]
@@ -321,19 +327,12 @@ fn a_stashed_rename_pairs_even_when_the_repository_turns_rename_detection_off() 
     let repo = renamed_with_detection_off();
     repo.git(&["stash", "push", "-q"]);
     let stash = repo.rev_parse("stash@{0}");
-    // 設定が効いている証拠。git 自身はこの rename を対にしない。
-    assert_eq!(
-        repo.git(&["stash", "show", "--name-status", "stash@{0}"]),
-        "A\tnew.txt\nD\told.txt"
-    );
+    assert_git_splits_the_rename(&repo.git(&["stash", "show", "--name-status", "stash@{0}"]));
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let diff = reader.diff(DiffTarget::Stash(stash)).unwrap();
 
-    assert_eq!(
-        diff_rows(&diff),
-        [("new.txt", Some("old.txt"), FileStatus::Renamed)]
-    );
+    assert_eq!(diff_rows(&diff), renamed_rows());
 }
 
 #[test]
@@ -540,7 +539,8 @@ fn commit_files_and_the_commit_diff_see_the_same_files() {
     repo.git(&["add", "-A"]);
     repo.git(&["commit", "-q", "-m", "rename and add"]);
     let commit = repo.head_oid();
-    // 設定が効いている証拠。git 自身はこの rename を対にしない。
+    // 設定が効いている証拠。git 自身はこの rename を対にしない
+    // （`assert_git_splits_the_rename` と同じ確かめ。`added.txt` のぶん期待値が違う）。
     assert_eq!(
         repo.git(&["show", "--name-status", "--format=", "HEAD"]),
         "A\tadded.txt\nA\tnew.txt\nD\told.txt"
@@ -555,15 +555,15 @@ fn commit_files_and_the_commit_diff_see_the_same_files() {
         })
         .unwrap();
 
-    // 等しさだけでは、両方を同時に `find_similar(None)` に戻した形（どちらも
-    // Deleted + Added の 3 行で揃う）が通る。リテラルの行とも比べる。
+    // 見張るのは、それぞれをリテラルの行と比べる 2 本。2 つが揃うことはそこから従う。
+    // 2 つの等しさだけを見ると、両方を同時に `find_similar(None)` に戻した形（どちらも
+    // Deleted + Added の 3 行で揃う）が通る。
     let expected = [
         ("added.txt", None, FileStatus::Added),
         ("new.txt", Some("old.txt"), FileStatus::Renamed),
     ];
     assert_eq!(entry_rows(&entries), expected);
     assert_eq!(diff_rows(&diff), expected);
-    assert_eq!(entry_rows(&entries), diff_rows(&diff));
 }
 
 #[test]

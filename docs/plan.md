@@ -888,7 +888,10 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       libgit2 は `diff.renames` を読まないので、`false` にする変異と区別できない（libgit2 1.9.7 の
       `diff_tform.c` の `normalize_find_opts` のソース。02）。元のタスク（`renames(true)` を
       `false` にすると落ちるテスト）は libgit2 の構造上達成できないので、タスクをこの形に
-      書き換えて閉じ、`renames(true)` は保険として残すと 2026-10-11 にユーザーと決めた。見張りは `diff.renames=false` のリポジトリで rename が対になる
+      書き換えて閉じ、`renames(true)` は保険として残すと 2026-10-11 にユーザーと決めた。
+      #190 の時点の記述（どの fixture も既定の設定で rename が対になるので区別できない）は外れていた
+      —— 区別できないのは fixture のせいではなく libgit2 が `diff.renames` を読まないからで、
+      その行が挙げていた代替の類似度の閾値付近の fixture でも区別できない。見張りは `diff.renames=false` のリポジトリで rename が対になる
       ことを、git CLI では対にならないことと同じテストで見る —— staged
       （`a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off`）、ranged
       （`a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off`）、stashed

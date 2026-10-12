@@ -550,8 +550,8 @@ pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;
   1 文字もそのまま使える。`FileDiff` を空の `hunks` で返す形にすると、一覧の行が
   「ハンクの無いファイル」（バイナリ・mode だけの変更）と区別できなくなる
 - **比べる 2 つのツリーと rename 検出の設定は `diff()` と同じものを使う**（第一親、ルート
-  コミットは空ツリー、rename の検出は `diff()` と同じ `pair_renames`。commit 側でそうする理由は
-  「diff とハンク」の節）。実装でも同じ関数を通す。
+  コミットは空ツリー、rename の検出は `diff()` と同じ `pair_renames`。
+  commit / Range / Stash でそうする理由は「diff とハンク」の節）。実装でも同じ関数を通す。
   **出口（delta → `FileEntry` の写像）だけを共有しても、入口の設定が 2 本あれば結果はずれる。**
   ずれは「一覧に出ているファイルを選んだのに diff が空」という形で出る
 - **`Patch` は作らない。** 一覧に要るのはパスと種別だけで、そこがこの読み取りを
@@ -727,16 +727,9 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
   `for_untracked` が立っているあいだは `renames(true)` を外しても結果が変わらないので、
   変異で区別できない（下の記録の `renames(false)` の行）
 - 見張りは、`diff.renames=false` のリポジトリで rename が対になることを見る（`tests/diff.rs`。
-  どれも同じテストの中で git CLI では対にならないことを確かめる）。staged（`HeadVsIndex`）は
-  `a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off`、Range は
-  `a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off`、Stash は
-  `a_stashed_rename_pairs_even_when_the_repository_turns_rename_detection_off`、commit
-  （`commit_files` と `DiffTarget::Commit`）は `commit_files_and_the_commit_diff_see_the_same_files`
-  （一覧と diff をそれぞれリテラルの行と比べる。2 つの等しさだけでは、両方を同時に既定へ
-  戻した形が通る）。unstaged 側は `for_untracked` 無しでは
-  設定に関係なく対にならないので、既存の worktree rename のテスト
-  （`index_vs_worktree_agrees_with_status_on_a_worktree_rename` と
-  `a_path_keeps_a_worktree_rename_under_either_name`）が見張る。一覧と diff は同じ
+  どれも同じテストの中で git CLI では対にならないことを確かめる）。unstaged 側は
+  `for_untracked` 無しでは設定に関係なく対にならないので、既存の worktree rename の
+  テストが見張る。見張りの所在は下の変異の記録（2026-10-11）。一覧と diff は同じ
   `pair_renames` を通す
 - 変異で確かめた記録（`cargo test -p mewgit-core --no-fail-fast`。2026-10-11）
 
@@ -752,6 +745,7 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
   | `diff()` の呼び出し 1 行を `find_similar(None)`（全種別。`commit_files` はそのまま） | staged・ranged・stashed・`commit_files_and_the_commit_diff_see_the_same_files`・worktree の 2 本 |
   | `pair_renames` の中身を `find_similar(None)`（`diff()` と `commit_files` の両方） | 上と同じ 6 本 |
   | `pair_renames` の `renames(true)` を `renames(false)` | 0 本（全部通った） |
+  | `pair_renames` の `for_untracked` だけを外し、`renames(true)` は残す（2026-10-12。レビューで叩いた） | worktree の 2 本だけ（`a_path_keeps_a_worktree_rename_under_either_name` と `index_vs_worktree_agrees_with_status_on_a_worktree_rename`）。staged・ranged・stashed・commit は通ったままで、保険が効いた |
 
   記録時の名前は `find_options`。2026-10-12 に `pair_renames` へ畳んだ。
 

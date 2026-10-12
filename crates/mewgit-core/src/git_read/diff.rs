@@ -148,8 +148,10 @@ impl RepoReader {
 /// - ワークツリー上の rename（index から消えた + untracked で増えた）を `for_untracked` で
 ///   対にする
 /// - ユーザーの `diff.renames` を読まない。`diff.renames` に関わらず rename を対にする
-///   （`diff.renameLimit` は libgit2 が読む）
-/// - `renames(true)` は `for_untracked` と冗長で、保険として残している
+///   （`diff.renameLimit` は libgit2 が読む）。`renames(true)` と `for_untracked` の
+///   どちらかのビットが立っていれば、libgit2 は `diff.renames` を読まない
+/// - `renames(true)` は `for_untracked` と冗長で、保険として残している。`for_untracked` を
+///   外す変更が入っても、`diff.renames` を読まないままにするため
 fn pair_renames(diff: &mut git2::Diff<'_>) -> Result<(), git2::Error> {
     let mut options = DiffFindOptions::new();
     options.renames(true).for_untracked(true);

@@ -263,6 +263,7 @@ fn a_path_keeps_a_worktree_rename_under_either_name() {
 ///
 /// **git 自身はこの rename を対にしない**ので、各テストは git CLI で A/D になることを
 /// 先に確かめてから、mewgit の読み取りが Renamed の 1 行にすることを見る。
+/// unstaged（`IndexVsWorktree`）は、既存の worktree rename のテストが見張る（02）。
 fn renamed_with_detection_off() -> TestRepo {
     let repo = TestRepo::init();
     repo.git(&["config", "diff.renames", "false"]);
@@ -536,8 +537,12 @@ fn commit_files_and_the_commit_diff_see_the_same_files() {
     // `commit_files` 側で `pair_renames` を通さないと、rename が Deleted + Added の
     // 2 行になって diff の 1 行と食い違う。`diff.renames=false` のリポジトリで見るので、
     // 片側だけ `pair_renames` を外して既定の設定（`find_similar(None)`。設定を読んで
-    // 対にしない）で呼んだ形もここで落ちる。ずれは「一覧に出ているファイルを選んだのに diff が空」という形で
-    // 出るので、両方を同じリポジトリで突き合わせる。
+    // 対にしない）で呼んだ形もここで落ちる。ずれは「一覧に出ているファイルを選んだのに
+    // diff が空」という形で出る。
+    //
+    // 見張るのは、一覧と diff をそれぞれ同じリポジトリでリテラルの行と比べる 2 本。
+    // 2 つの等しさだけを見ると、両方を同時に `find_similar(None)` に戻した形（どちらも
+    // Deleted + Added の 3 行で揃う）が通る。
     let repo = renamed_with_detection_off();
     repo.write_worktree_file("added.txt", b"added\n");
     repo.git(&["add", "-A"]);
@@ -557,9 +562,7 @@ fn commit_files_and_the_commit_diff_see_the_same_files() {
         })
         .unwrap();
 
-    // 見張るのは、それぞれをリテラルの行と比べる 2 本。2 つが揃うことはそこから従う。
-    // 2 つの等しさだけを見ると、両方を同時に `find_similar(None)` に戻した形（どちらも
-    // Deleted + Added の 3 行で揃う）が通る。
+    // 2 つが揃うことは、どちらもリテラルと等しいことから従う。
     let expected = [("added.txt", None, FileStatus::Added), RENAMED[0]];
     assert_eq!(entry_rows(&entries), expected);
     assert_eq!(diff_rows(&diff), expected);

@@ -3,44 +3,8 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
-use mewgit_core::git_read::{
-    DiffTarget, FileDiff, FileEntry, FileStatus, Hunk, LineOrigin, RepoReader,
-};
-use mewgit_core::test_util::{fake_oid, TestRepo};
-
-/// ファイルの並びを `(path, old_path, status)` にする。
-fn files(diffs: &[FileDiff]) -> Vec<(&str, Option<&str>, FileStatus)> {
-    diffs
-        .iter()
-        .map(|file| {
-            (
-                file.path.to_str().expect("パスが UTF-8 ではありません"),
-                file.old_path
-                    .as_deref()
-                    .map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
-                file.status,
-            )
-        })
-        .collect()
-}
-
-/// [`files`] と同じ形で `WorktreeSnapshot` の区画を見る。`FileEntry` と `FileDiff` は
-/// 頭の 3 つが同じ値なので、`status` と `diff` の食い違いを直に比べられる。
-fn rows(entries: &[FileEntry]) -> Vec<(&str, Option<&str>, FileStatus)> {
-    entries
-        .iter()
-        .map(|entry| {
-            (
-                entry.path.to_str().expect("パスが UTF-8 ではありません"),
-                entry
-                    .old_path
-                    .as_deref()
-                    .map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
-                entry.status,
-            )
-        })
-        .collect()
-}
+use mewgit_core::git_read::{DiffTarget, FileStatus, Hunk, LineOrigin, RepoReader};
+use mewgit_core::test_util::{diff_rows, entry_rows, fake_oid, TestRepo};
 
 /// ハンクの行を `(origin, 中身)` にする。中身は読みやすさのため lossy で見る。
 fn lines(hunk: &Hunk) -> Vec<(LineOrigin, String)> {
@@ -69,7 +33,7 @@ fn index_vs_worktree_reports_unstaged_edits() {
 
     let diff = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
 
-    assert_eq!(files(&diff), [("file.txt", None, FileStatus::Modified)]);
+    assert_eq!(diff_rows(&diff), [("file.txt", None, FileStatus::Modified)]);
     assert_eq!(diff[0].hunks[0].header, "@@ -1 +1 @@");
     assert_eq!(
         lines(&diff[0].hunks[0]),
@@ -90,7 +54,7 @@ fn index_vs_worktree_shows_the_content_of_untracked_files() {
     let diff = reader.diff(DiffTarget::IndexVsWorktree(None)).unwrap();
 
     // 中身を出さないと worktree ペインで untracked を選んでも空になる。
-    assert_eq!(files(&diff), [("new.txt", None, FileStatus::Untracked)]);
+    assert_eq!(diff_rows(&diff), [("new.txt", None, FileStatus::Untracked)]);
     assert_eq!(
         lines(&diff[0].hunks[0]),
         [
@@ -131,7 +95,7 @@ fn head_vs_index_works_before_the_first_commit() {
     // unborn HEAD は空ツリーと比べる。`repo.head()` の `Err` で落ちない。
     let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
 
-    assert_eq!(files(&diff), [("file.txt", None, FileStatus::Added)]);
+    assert_eq!(diff_rows(&diff), [("file.txt", None, FileStatus::Added)]);
     assert_eq!(
         lines(&diff[0].hunks[0]),
         [(LineOrigin::Addition, "first".to_string())]
@@ -152,10 +116,10 @@ fn index_vs_worktree_agrees_with_status_on_a_worktree_rename() {
     // `for_untracked` が無いと、status は `Renamed` 1 行、diff は
     // `Deleted` + `Untracked` の 2 件になって食い違う。
     assert_eq!(
-        rows(&status.unstaged),
+        entry_rows(&status.unstaged),
         [("new.txt", Some("old.txt"), FileStatus::Renamed)]
     );
-    assert_eq!(files(&diff), rows(&status.unstaged));
+    assert_eq!(diff_rows(&diff), entry_rows(&status.unstaged));
 }
 
 /// `main` に `topic` を `--no-ff` でマージしたリポジトリと、そのマージコミット。
@@ -187,7 +151,7 @@ fn commit_diffs_against_the_first_parent() {
         .unwrap();
 
     // 第一親（main）との差なので、topic 側で足したファイルだけが出る。
-    assert_eq!(files(&diff), [("topic.txt", None, FileStatus::Added)]);
+    assert_eq!(diff_rows(&diff), [("topic.txt", None, FileStatus::Added)]);
 }
 
 #[test]
@@ -203,7 +167,7 @@ fn commit_diffs_the_root_commit_against_an_empty_tree() {
         })
         .unwrap();
 
-    assert_eq!(files(&diff), [("file.txt", None, FileStatus::Added)]);
+    assert_eq!(diff_rows(&diff), [("file.txt", None, FileStatus::Added)]);
 }
 
 #[test]
@@ -223,7 +187,7 @@ fn range_diffs_the_two_commits() {
         .unwrap();
 
     assert_eq!(
-        files(&diff),
+        diff_rows(&diff),
         [
             ("b.txt", None, FileStatus::Added),
             ("c.txt", None, FileStatus::Added),
@@ -245,7 +209,7 @@ fn a_path_narrows_the_diff_and_is_not_a_glob() {
 
     // 絞り込みは delta のパスとの完全一致。`[x]` を文字クラスとして扱うと
     // `x.txt` の方が出る。
-    assert_eq!(files(&diff), [("[x].txt", None, FileStatus::Untracked)]);
+    assert_eq!(diff_rows(&diff), [("[x].txt", None, FileStatus::Untracked)]);
 }
 
 #[test]
@@ -264,7 +228,7 @@ fn a_path_keeps_a_staged_rename_under_either_name() {
             .unwrap();
 
         assert_eq!(
-            files(&diff),
+            diff_rows(&diff),
             [("new.txt", Some("old.txt"), FileStatus::Renamed)],
             "絞り込み: {name}"
         );
@@ -287,11 +251,93 @@ fn a_path_keeps_a_worktree_rename_under_either_name() {
             .unwrap();
 
         assert_eq!(
-            files(&diff),
+            diff_rows(&diff),
             [("new.txt", Some("old.txt"), FileStatus::Renamed)],
             "絞り込み: {name}"
         );
     }
+}
+
+/// `diff.renames=false` のリポジトリで、`old.txt` を `new.txt` へ `git mv` した
+/// （まだコミットしていない）状態。
+///
+/// **git 自身はこの rename を対にしない**ので、各テストは git CLI で A/D になることを
+/// 先に確かめてから、mewgit の読み取りが Renamed の 1 行にすることを見る。
+/// unstaged（`IndexVsWorktree`）は、既存の worktree rename のテストが見張る（02）。
+fn renamed_with_detection_off() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.git(&["config", "diff.renames", "false"]);
+    repo.commit_file("old.txt", &twenty_lines());
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo
+}
+
+/// 設定が効いている証拠。git 自身はこの rename を対にしない。
+///
+/// `output` は git CLI の `--name-status` の出力。`extra` は rename のほかに同じ出力へ
+/// 出る行（`--name-status` の形）。git は状態の文字ではなくパスの順に並べるので
+/// （git 2.56.0 で確認）、期待値もパスで並べる。
+#[track_caller]
+fn assert_git_splits_the_rename(output: &str, extra: &[&str]) {
+    let mut expected = [extra, &["A\tnew.txt", "D\told.txt"]].concat();
+    expected.sort_by_key(|line| line.split_once('\t').map(|(_, path)| path));
+    assert_eq!(output, expected.join("\n"));
+}
+
+/// mewgit の読み取りがこの rename を対にした 1 行。
+const RENAMED: [(&str, Option<&str>, FileStatus); 1] =
+    [("new.txt", Some("old.txt"), FileStatus::Renamed)];
+
+#[test]
+fn a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
+    let repo = renamed_with_detection_off();
+    assert_git_splits_the_rename(&repo.git(&["diff", "--cached", "--name-status"]), &[]);
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let status = reader.status().unwrap();
+    let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
+
+    assert_eq!(entry_rows(&status.staged), RENAMED);
+    assert_eq!(diff_rows(&diff), RENAMED);
+}
+
+#[test]
+fn a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
+    let repo = renamed_with_detection_off();
+    let from = repo.head_oid();
+    repo.git(&["commit", "-q", "-m", "rename"]);
+    let to = repo.head_oid();
+    assert_git_splits_the_rename(
+        &repo.git(&["diff", "--name-status", &from.to_string(), &to.to_string()]),
+        &[],
+    );
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader
+        .diff(DiffTarget::Range {
+            from,
+            to,
+            path: None,
+        })
+        .unwrap();
+
+    assert_eq!(diff_rows(&diff), RENAMED);
+}
+
+#[test]
+fn a_stashed_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
+    let repo = renamed_with_detection_off();
+    repo.git(&["stash", "push", "-q"]);
+    let stash = repo.rev_parse("stash@{0}");
+    assert_git_splits_the_rename(
+        &repo.git(&["stash", "show", "--name-status", "stash@{0}"]),
+        &[],
+    );
+    let reader = RepoReader::open(repo.path()).unwrap();
+
+    let diff = reader.diff(DiffTarget::Stash(stash)).unwrap();
+
+    assert_eq!(diff_rows(&diff), RENAMED);
 }
 
 #[test]
@@ -384,7 +430,7 @@ fn a_mode_only_change_has_no_hunks_and_is_not_binary() {
     let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
 
     // バイナリと同じくハンクが空になるので、区別はフラグで付ける。
-    assert_eq!(files(&diff), [("run.sh", None, FileStatus::Modified)]);
+    assert_eq!(diff_rows(&diff), [("run.sh", None, FileStatus::Modified)]);
     assert!(!diff[0].binary, "バイナリと誤判定しています");
     assert_eq!(diff[0].hunks, []);
 }
@@ -416,7 +462,7 @@ fn diff_drops_a_file_whose_path_is_not_utf8() {
 
     let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
 
-    assert_eq!(files(&diff), []);
+    assert_eq!(diff_rows(&diff), []);
 }
 
 #[test]
@@ -441,7 +487,7 @@ fn diff_drops_a_rename_whose_old_path_is_not_utf8() {
     let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
 
     // 新しいパスは UTF-8 でも、旧パスを argv に載せられないので unstage できない。
-    assert_eq!(files(&diff), []);
+    assert_eq!(diff_rows(&diff), []);
 }
 
 #[test]
@@ -453,7 +499,7 @@ fn a_deleted_file_keeps_its_path() {
 
     let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
 
-    assert_eq!(files(&diff), [("gone.txt", None, FileStatus::Deleted)]);
+    assert_eq!(diff_rows(&diff), [("gone.txt", None, FileStatus::Deleted)]);
     assert_eq!(
         lines(&diff[0].hunks[0]),
         [(LineOrigin::Deletion, "gone".to_string())]
@@ -476,7 +522,7 @@ fn commit_files_lists_what_the_commit_changed() {
     let entries = reader.commit_files(second).unwrap();
 
     assert_eq!(
-        rows(&entries),
+        entry_rows(&entries),
         [
             ("a.txt", None, FileStatus::Modified),
             ("b.txt", None, FileStatus::Added),
@@ -486,19 +532,26 @@ fn commit_files_lists_what_the_commit_changed() {
 
 #[test]
 fn commit_files_and_the_commit_diff_see_the_same_files() {
-    // **入口（比べる 2 つのツリーと `find_similar`）が 2 本あれば結果はずれる。**
+    // **入口（比べる 2 つのツリーと `pair_renames`）が 2 本あれば結果はずれる。**
     // 出口（`file_entry`）だけを共有しても揃わない（02、#18 と同じ形）。
-    // `commit_files` 側で `find_similar` を呼ばないと、rename が Deleted + Added の
-    // 2 行になって diff の 1 行と食い違う（既定の設定で呼んでもこの fixture では対に
-    // なるので、設定の差まではここでは見えない）。ずれは「一覧に出ているファイルを
-    // 選んだのに diff が空」という形で出るので、両方を同じリポジトリで突き合わせる。
-    let repo = TestRepo::init();
-    repo.commit_file("old.txt", &twenty_lines());
-    repo.git(&["mv", "old.txt", "new.txt"]);
+    // `commit_files` 側で `pair_renames` を通さないと、rename が Deleted + Added の
+    // 2 行になって diff の 1 行と食い違う。`diff.renames=false` のリポジトリで見るので、
+    // 片側だけ `pair_renames` を外して既定の設定（`find_similar(None)`。設定を読んで
+    // 対にしない）で呼んだ形もここで落ちる。ずれは「一覧に出ているファイルを選んだのに
+    // diff が空」という形で出る。
+    //
+    // 見張るのは、一覧と diff をそれぞれ同じリポジトリでリテラルの行と比べる 2 本。
+    // 2 つの等しさだけを見ると、両方を同時に `find_similar(None)` に戻した形（どちらも
+    // Deleted + Added の 3 行で揃う）が通る。
+    let repo = renamed_with_detection_off();
     repo.write_worktree_file("added.txt", b"added\n");
     repo.git(&["add", "-A"]);
     repo.git(&["commit", "-q", "-m", "rename and add"]);
     let commit = repo.head_oid();
+    assert_git_splits_the_rename(
+        &repo.git(&["show", "--name-status", "--format=", "HEAD"]),
+        &["A\tadded.txt"],
+    );
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let entries = reader.commit_files(commit).unwrap();
@@ -509,7 +562,10 @@ fn commit_files_and_the_commit_diff_see_the_same_files() {
         })
         .unwrap();
 
-    assert_eq!(rows(&entries), files(&diff));
+    // 2 つが揃うことは、どちらもリテラルと等しいことから従う。
+    let expected = [("added.txt", None, FileStatus::Added), RENAMED[0]];
+    assert_eq!(entry_rows(&entries), expected);
+    assert_eq!(diff_rows(&diff), expected);
 }
 
 #[test]
@@ -535,7 +591,7 @@ fn a_stash_diff_shows_what_was_stashed_against_the_base() {
 
     let diff = reader.diff(DiffTarget::Stash(stash)).unwrap();
 
-    assert_eq!(files(&diff), [("a.txt", None, FileStatus::Modified)]);
+    assert_eq!(diff_rows(&diff), [("a.txt", None, FileStatus::Modified)]);
     assert_eq!(
         lines(&diff[0].hunks[0]),
         [
@@ -566,13 +622,16 @@ fn a_stash_diff_includes_the_untracked_files_as_added() {
         .unwrap();
 
     assert_eq!(
-        files(&diff),
+        diff_rows(&diff),
         [
             ("a.txt", None, FileStatus::Modified),
             ("new.txt", None, FileStatus::Added),
         ]
     );
-    assert_eq!(files(&as_commit), [("a.txt", None, FileStatus::Modified)]);
+    assert_eq!(
+        diff_rows(&as_commit),
+        [("a.txt", None, FileStatus::Modified)]
+    );
     assert_eq!(
         lines(&diff[1].hunks[0]),
         [(LineOrigin::Addition, "new".to_string())]

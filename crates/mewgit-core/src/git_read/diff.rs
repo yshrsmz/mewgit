@@ -56,7 +56,7 @@ impl RepoReader {
         };
 
         // `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの delta には効かない。
-        diff.find_similar(Some(&mut find_options()))?;
+        pair_renames(&mut diff)?;
         file_diffs(&diff, target.path(), stamp)
     }
 
@@ -71,9 +71,9 @@ impl RepoReader {
     pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError> {
         let mut opts = DiffOptions::new();
         let mut diff = self.commit_diff(oid, &mut opts)?;
-        // **`diff` と同じ設定で呼ぶ**（[`find_options`]）。ここだけ既定にすると、
-        // 一覧では 2 行の Deleted + Added、diff では 1 行の Renamed になる。
-        diff.find_similar(Some(&mut find_options()))?;
+        // **`diff` と同じ [`pair_renames`] を通す。** 片側だけ設定が違うと、一覧に出た
+        // rename を選んでも diff 側では Deleted + Added になる（02）。
+        pair_renames(&mut diff)?;
         Ok(diff
             .deltas()
             .filter_map(|delta| file_entry(&delta))
@@ -112,8 +112,8 @@ impl RepoReader {
     /// **index 側（第 2 親）は出さない。** `git stash show` の既定と同じで、stage して
     /// いたかどうかは apply の `--index` の話になる。
     ///
-    /// `find_similar` は呼び出し側が混ぜたあとに 1 回だけ掛ける。混ぜる前に掛けると、
-    /// tracked の削除と untracked の追加が rename として対にならない。
+    /// rename の対は呼び出し側が混ぜたあとに [`pair_renames`] で 1 回だけ取る。混ぜる前に
+    /// 取ると、tracked の削除と untracked の追加が rename として対にならない。
     fn stash_diff(&self, oid: Oid, opts: &mut DiffOptions) -> Result<git2::Diff<'_>, GitReadError> {
         let stash = self.repo.find_commit(oid)?;
         let base = stash.parent(0)?.tree()?;
@@ -142,22 +142,20 @@ impl RepoReader {
     }
 }
 
-/// rename 検出の設定。**`status` と同じ条件にするためのもの。**
+/// rename を対にする。**rename の検出はここを通す。** 呼び出しを散らすと、一覧と diff で
+/// 設定がずれる。理由と実測は 02 の「diff とハンク」。
 ///
-/// `find_similar(None)` の既定とは 2 点で違う。
-///
-/// - `for_untracked` を立てる。ワークツリー上の rename（まだ `add` していない
-///   `git mv`）は「index から消えた + untracked で増えた」の 2 つの delta なので、
-///   これが無いと対にならない。`status` は `renames_index_to_workdir` で検出するため、
-///   立てないと同じファイルが status では 1 行の `Renamed`、`diff` では
-///   `Deleted` + `Untracked` の 2 件になる
-/// - `renames` を明示する。既定は `diff.renames` の設定を読むが、`status` の側は
-///   `StatusOptions` で無条件に有効にしている。設定で切っている環境だけ 2 つが
-///   食い違うことになる
-fn find_options() -> DiffFindOptions {
+/// - ワークツリー上の rename（index から消えた + untracked で増えた）を `for_untracked` で
+///   対にする
+/// - ユーザーの `diff.renames` を読まない。`diff.renames` に関わらず rename を対にする
+///   （`diff.renameLimit` は libgit2 が読む）。`renames(true)` と `for_untracked` の
+///   どちらかのビットが立っていれば、libgit2 は `diff.renames` を読まない
+/// - `renames(true)` は `for_untracked` と冗長で、保険として残している。`for_untracked` を
+///   外す変更が入っても、`diff.renames` を読まないままにするため
+fn pair_renames(diff: &mut git2::Diff<'_>) -> Result<(), git2::Error> {
     let mut options = DiffFindOptions::new();
     options.renames(true).for_untracked(true);
-    options
+    diff.find_similar(Some(&mut options))
 }
 
 /// diff をファイル単位の値型に落とす。`path` があればそのファイルだけ残す。

@@ -1351,12 +1351,14 @@ impl GraphState {
     ///
     /// カーソルが窓の中にいる限り動かさない。カーソルと `viewport` から毎回導くと、
     /// 下端から上へ戻るときにカーソルが最下行に貼り付いたまま中身だけが流れる。
+    /// 毎回、カーソルを追う寄せの前に、`scroll` が上限（`rows - viewport`）を超えていれば
+    /// 詰める。効くのは窓が広がったときだけで、広げる前に窓の中にいたカーソルは広げた後も
+    /// 窓の中に残るので、寄せは動かず、詰めなければ下に空白が残る（01）。
     pub fn scroll_into_view(&mut self) {
         if self.viewport == 0 {
             return;
         }
-        // 窓が広がったときに先に詰める。末尾に貼り付いたまま端末を大きくすると、
-        // カーソルは窓の中にいるので下の分岐が動かず、上に行があるのに空白が残る。
+        // 先に詰める（理由は doc）。
         self.scroll = self.scroll.min(self.rows().saturating_sub(self.viewport));
         if self.cursor < self.scroll {
             self.scroll = self.cursor;

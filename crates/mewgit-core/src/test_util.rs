@@ -974,6 +974,36 @@ pub fn fake_hunk(header: &str, lines: &[(LineOrigin, &str)]) -> Hunk {
     }
 }
 
+/// `FileEntry` を `(path, old_path, status)` に並べる。[`diff_rows`] と同じ形にして、
+/// diff のファイルと直に比べられるようにする。
+pub fn entry_rows(entries: &[FileEntry]) -> Vec<(&str, Option<&str>, FileStatus)> {
+    entries
+        .iter()
+        .map(|entry| row(&entry.path, entry.old_path.as_deref(), entry.status))
+        .collect()
+}
+
+/// `FileDiff` を [`entry_rows`] と同じ `(path, old_path, status)` に並べる。
+pub fn diff_rows(diffs: &[FileDiff]) -> Vec<(&str, Option<&str>, FileStatus)> {
+    diffs
+        .iter()
+        .map(|file| row(&file.path, file.old_path.as_deref(), file.status))
+        .collect()
+}
+
+/// [`entry_rows`] と [`diff_rows`] の 1 行。
+fn row<'a>(
+    path: &'a Path,
+    old: Option<&'a Path>,
+    status: FileStatus,
+) -> (&'a str, Option<&'a str>, FileStatus) {
+    (
+        path.to_str().expect("パスが UTF-8 ではありません"),
+        old.map(|path| path.to_str().expect("旧パスが UTF-8 ではありません")),
+        status,
+    )
+}
+
 /// 中身を作り込んだ [`Commit`]。実リポジトリを作らずに一覧の描画を試すのに使う。
 ///
 /// `index` が Oid の最下位バイトになるので、同じ `index` なら常に同じ Oid。

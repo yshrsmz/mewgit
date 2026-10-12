@@ -324,8 +324,8 @@ Stash ペイン（01 の「Stash ペイン」）が使う。
   「いまある未追跡のファイル」と読めるが、退避したあとの作業ツリーには無い
 - **index 側（第 2 親）は出さない。** `git stash show` の既定と同じで、stage していたか
   どうかは apply の `--index` の話になる
-- **`find_similar` は混ぜたあとに 1 回だけ**（呼び出し側の `diff()` が掛ける）。混ぜる前に
-  掛けると、tracked の削除と untracked の追加が rename として対にならない
+- **rename の対は混ぜたあとに 1 回だけ取る**（呼び出し側の `diff()` が `pair_renames` を通す）。
+  混ぜる前に取ると、tracked の削除と untracked の追加が rename として対にならない
 - **第 3 親は数で確かめてから引く**（`parent_count() > 2`）。`parent(2)` の `Err` を
   「無い」と読むと、壊れたリポジトリで引けなかったものが黙って落ちる
 
@@ -550,7 +550,8 @@ pub fn commit_files(&self, oid: Oid) -> Result<Vec<FileEntry>, GitReadError>;
   1 文字もそのまま使える。`FileDiff` を空の `hunks` で返す形にすると、一覧の行が
   「ハンクの無いファイル」（バイナリ・mode だけの変更）と区別できなくなる
 - **比べる 2 つのツリーと rename 検出の設定は `diff()` と同じものを使う**（第一親、ルート
-  コミットは空ツリー、`find_similar` は `status` に合わせた設定）。実装でも同じ関数を通す。
+  コミットは空ツリー、rename の検出は `diff()` と同じ `pair_renames`。
+  commit / Range / Stash でそうする理由は「diff とハンク」の節）。実装でも同じ関数を通す。
   **出口（delta → `FileEntry` の写像）だけを共有しても、入口の設定が 2 本あれば結果はずれる。**
   ずれは「一覧に出ているファイルを選んだのに diff が空」という形で出る
 - **`Patch` は作らない。** 一覧に要るのはパスと種別だけで、そこがこの読み取りを
@@ -614,7 +615,12 @@ pub struct FileEntry {
 - `StatusOptions` で untracked を含め、`recurse_untracked_dirs` を有効化する。無効だと
   新しいディレクトリが 1 行にまとまり、中のファイルを個別に stage できない。ignored は含めない
 - rename 検出は `renames_head_to_index` / `renames_index_to_workdir` を有効にする。切ると
-  `git mv` が「削除 + 追加」の 2 行になり、`git status` の見え方と食い違う
+  `git mv` が「削除 + 追加」の 2 行になり、既定の設定の `git status` の見え方と食い違う。
+  `diff.renames=false` のユーザーでは逆に食い違う —— `git diff --cached` と、`status.renames`
+  を別に立てていなければ `git status` も A / D の 2 行を出すのに、mewgit は `Renamed` の
+  1 行を出す（git 2.56.0、2026-10-11 実測。`git config diff.renames false` → `git mv` →
+  `git status --short` が `A new.txt` / `D old.txt`。同じリポジトリで
+  `git -c status.renames=true status --short` は `R old.txt -> new.txt` の 1 行を出した）
 - 区画は delta の有無で決める。`head_to_index()` があれば staged、`index_to_workdir()` が
   あれば unstaged（種別が `Untracked` ならそちら）。`CONFLICTED` が立っている entry だけは
   例外で、conflicted にだけ入れて他の区画には出さない（解消するまで stage も unstage も
@@ -698,12 +704,69 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
   （新パスで絞ったときに rename の行が消えないようにするため）
 - rename 検出の `find_similar()` は `Patch` を作る前に呼ぶ。あとから呼んでも、取り出し済みの
   delta には効かない
-- **`find_similar()` の設定は `status` と揃える。既定（`None`）は使わない。**
+- **staged / unstaged の `find_similar()` の設定は `status` と揃える。既定（`None`）は使わない。**
   `for_untracked` を立てないと、ワークツリー上の rename（まだ `add` していない `git mv`）が
   「index から消えた + untracked で増えた」の 2 つの delta のままになる。`status` は
   `renames_index_to_workdir` で 1 行の `Renamed` にするので、同じファイルの見え方が食い違う。
-  `renames` も明示する。既定は `diff.renames` の設定を読むが `status` 側は無条件に有効なので、
-  設定で切っている環境だけ 2 つがずれる
+  `diff.renames` の設定も読ませない。`status` 側は無条件に有効なので、読ませると設定で
+  切っている環境だけ 2 つがずれる。**libgit2（1.9.7）が設定を読むのは、検出のフラグ
+  （`GIT_DIFF_FIND_ALL` の範囲）が 1 つも立っていないときだけ**で、`renames(true)`
+  （`GIT_DIFF_FIND_RENAMES`）と `for_untracked`（`GIT_DIFF_FIND_FOR_UNTRACKED`）は
+  どちらもその範囲のビット —— **どちらか片方が立っていれば設定は読まれず、2 つは
+  この点で冗長**。`GIT_DIFF_FIND_RENAMES` は設定から立てられるだけで、対を組む側は
+  読まない —— `renames(true)` を `false` にしても、`diff.renames=false` のリポジトリで
+  staged / unstaged の rename は対になった（2026-10-11 に実測。`diff_tform.c` の
+  `normalize_find_opts` と `git_diff_find_similar`）。libgit2 の status 自身も
+  `FIND_RENAMES` を立てず、`findopt.flags = GIT_DIFF_FIND_FOR_UNTRACKED` だけで rename を
+  対にしている（`status.c`）。
+  **`diff.renameLimit` のほうは libgit2 が読む**（`rename_limit` が 0 のとき。libgit2 1.9.7 の
+  `diff_tform.c` の `normalize_find_opts`）。`pair_renames` は `rename_limit` を設定せず、
+  status も同じ経路で読むので、一覧と diff は揃う
+- **`renames(true)` は保険として残す**（2026-10-11 にユーザーと決めた）。`for_untracked` を
+  外す変更があっても、`diff.renames` を読まないままにするため。**この保険には見張りが無い** ——
+  `for_untracked` が立っているあいだは `renames(true)` を外しても結果が変わらないので、
+  変異で区別できない（下の記録の `renames(false)` の行）
+- 見張りは、`diff.renames=false` のリポジトリで rename が対になることを見る（`tests/diff.rs`。
+  どれも同じテストの中で git CLI では対にならないことを確かめる）。unstaged 側は
+  `for_untracked` 無しでは設定に関係なく対にならないので、既存の worktree rename の
+  テストが見張る。見張りの所在は下の変異の記録（2026-10-11）。一覧と diff は同じ
+  `pair_renames` を通す
+- 変異で確かめた記録（`cargo test -p mewgit-core --no-fail-fast`。2026-10-11）
+
+  | 変異 | 落ちたテスト |
+  |---|---|
+  | `diff()` を種別で分岐させ、`HeadVsIndex` だけ `find_similar(None)` | staged の 1 本だけ |
+  | 同じく `Range` だけ | ranged の 1 本だけ |
+  | 同じく `Stash` だけ | stashed の 1 本だけ |
+  | 同じく `Commit` だけ | `commit_files_and_the_commit_diff_see_the_same_files` |
+  | 同じく `IndexVsWorktree` だけ | worktree の 2 本 |
+  | `commit_files` だけ `find_similar(None)` | `commit_files_and_the_commit_diff_see_the_same_files` |
+  | `diff()` の `Commit` と `commit_files` を同時に `find_similar(None)` | `commit_files_and_the_commit_diff_see_the_same_files`（リテラルの行との比較で） |
+  | `diff()` の呼び出し 1 行を `find_similar(None)`（全種別。`commit_files` はそのまま） | staged・ranged・stashed・`commit_files_and_the_commit_diff_see_the_same_files`・worktree の 2 本 |
+  | `pair_renames` の中身を `find_similar(None)`（`diff()` と `commit_files` の両方） | 上と同じ 6 本 |
+  | `pair_renames` の `renames(true)` を `renames(false)` | 0 本（全部通った） |
+  | `pair_renames` の `for_untracked` だけを外し、`renames(true)` は残す（2026-10-12。レビューで叩いた） | worktree の 2 本だけ（`a_path_keeps_a_worktree_rename_under_either_name` と `index_vs_worktree_agrees_with_status_on_a_worktree_rename`）。staged・ranged・stashed・commit は通ったままで、保険が効いた |
+
+  記録時の名前は `find_options`。2026-10-12 に `pair_renames` へ畳んだ。
+
+- **commit / Range / Stash の diff も同じ設定で、ユーザーの `diff.renames` を読まない。**
+  以下ではこの 3 つをまとめて「commit 側」と呼ぶ。
+  上の「staged / unstaged の `find_similar()` の設定は `status` と揃える」は mewgit の
+  status と diff を揃える理由で、commit 側には比べる status が無いので当てはまらない。
+  **git CLI と揃えているわけではない** —— staged / unstaged も、`diff.renames=false` の
+  ユーザーでは `git diff --cached` と、`status.renames` を別に立てていなければ
+  `git status` とも食い違う（「ステータス」の節）。
+  commit 側で読まない理由は別にある。(1) `commit_files` の一覧と
+  `diff(DiffTarget::Commit)` の中身が 1 つの設定で必ず揃う —— 「コミットのファイル一覧」の
+  「比べる 2 つのツリーと rename 検出の設定は `diff()` と同じものを使う」を、設定を
+  読む・読まないで割らない。(1) は commit（`commit_files` と `DiffTarget::Commit`）にしか
+  掛からない。(2) git の既定でも rename 検出は有効。Range と Stash に掛かる理由は (2) と、
+  rename の検出が全種別で 1 つの関数（`pair_renames`）を通ること —— 種別ごとに設定を
+  変えるには、そこを割ることになる。
+  この判断は 2026-10-11 にユーザーと決めた。
+  帰結として、`diff.renames=false` のユーザーには mewgit が `git show` と違って rename を
+  1 行の `Renamed` で出し（staged / unstaged が `git status` と違うのと同じ形）、
+  `diff.renames=copies` のユーザーにはコピー検出が効かない。見張りの所在は上の変異の記録
 - `Delta::Unmodified` / `Ignored` / `Unreadable` の delta は落とす。`FileStatus` に対応する
   変種が無く、この UI では出しても操作できない。`Patch::from_diff` が `None` を返すのも
   libgit2 が「出さない」と判断した delta だけなので、パッチが作れない delta はそのまま飛ばす。

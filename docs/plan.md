@@ -872,17 +872,41 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       確認（幅の予算・余白・隣との隙間）で嘘になる** —— 空白 1 つが消えて隣の語と
       地続きに見える（実測は `.claude/skills/pty-check/SKILL.md`）。いまは生の
       `ESC[<行>;<桁>H` を読んで回避している
-- [ ] `GraphState::scroll_into_view` に見張りを足す。**詰めの行（`scroll.min(rows - viewport)`）と
-      `cursor < scroll` の腕は、どちらを消しても core と tui のテストが全部通る**（#190 のテスト精査で
-      変異にかけた。消した `a_viewport_larger_than_the_history_scrolls_to_the_top` はカーソルが 0 で、
-      2 つの腕が互いを補うので元から空振りだった）。塞ぐには、窓の上端より上へ戻る形
-      （`cursor < scroll`）と、履歴が窓より短くカーソルが `scroll` より下にある形
-      （行 4・窓 20・cursor 3・scroll 2 → scroll 0）を `widening_the_terminal_…` の並びに 1 本ずつ
-- [ ] `git_read::diff::find_options` の `renames(true)` に見張りを足す。**`false` にしても
-      core と tui のテストが全部通る** —— どの fixture も既定の設定で rename が対になるので、
-      `find_options` と既定を区別できない（#190 で変異にかけた）。塞ぐには、`diff.renames=false` を
-      設定したリポジトリで rename が対になることを見る 1 本か、類似度の閾値付近の編集を
-      混ぜて既定の設定では対にならない fixture
+- [x] `GraphState::scroll_into_view` に見張りを足す。**`cursor < scroll` の腕は、消しても core と tui の
+      テストが全部通っていた**（#190 のテスト精査で変異にかけた）。詰めの行（`scroll.min(rows - viewport)`）は
+      丸ごと消せば `widening_the_terminal_…` が落ちるが、**履歴が窓より短い形（詰め先が 0）**は
+      見ていなかった。窓の上端より上へ戻る形と、行 4・窓 2 → 20 で scroll 2 → 0 になる形を 1 本ずつ足した
+      （2026-10-11 に core と tui の全テストで叩いた変異では、腕を消す変異は
+      `moving_above_the_window_scrolls_up_to_the_cursor` の 1 本だけを、「行が窓より多いときだけ
+      詰める」変異は `widening_past_the_whole_history_scrolls_to_the_top` の 1 本だけを落とした）。
+      #190 の時点の記述（詰めの行も、どちらを消しても通る）は詰めの行について外れていた。
+      足した `widening_past_the_whole_history_scrolls_to_the_top` は窓の変更を `Msg::Layout` で
+      届ける（`viewport` を直に書いて `scroll_into_view` を呼ばない）。既存の
+      `widening_the_terminal_pulls_the_view_back_to_the_end` も同じ形に揃えた
+- [x] `git_read::diff::pair_renames` が `diff.renames` を読まないことに見張りを足す。
+      **`renames(true)` 単体には見張りを置けない** —— `for_untracked` と冗長で、どちらのビットでも
+      libgit2 は `diff.renames` を読まないので、`false` にする変異と区別できない（libgit2 1.9.7 の
+      `diff_tform.c` の `normalize_find_opts` のソース。02）。元のタスク（`renames(true)` を
+      `false` にすると落ちるテスト）は libgit2 の構造上達成できないので、タスクをこの形に
+      書き換えて閉じ、`renames(true)` は保険として残すと 2026-10-11 にユーザーと決めた。
+      #190 の時点の記述（どの fixture も既定の設定で rename が対になるので区別できない）は外れていた
+      —— 区別できないのは fixture のせいではなく libgit2 が `diff.renames` を読まないからで、
+      その行が挙げていた代替の類似度の閾値付近の fixture でも区別できない。見張りは `diff.renames=false` のリポジトリで rename が対になる
+      ことを、git CLI では対にならないことと同じテストで見る —— staged
+      （`a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off`）、ranged
+      （`a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off`）、stashed
+      （`a_stashed_rename_pairs_even_when_the_repository_turns_rename_detection_off`）、commit
+      （`commit_files_and_the_commit_diff_see_the_same_files`）。worktree は既存の
+      `index_vs_worktree_agrees_with_status_on_a_worktree_rename` と
+      `a_path_keeps_a_worktree_rename_under_either_name` が見る。変異ごとにどれが落ちたかの
+      記録（2026-10-11）は 02 の「diff とハンク」。commit 側も `diff.renames` を読まないことは
+      02 に理由を書いた（2026-10-11 にユーザーと決めた）
+- [ ] `GraphState::viewport` を private にし、`set_viewport(rows)` の中で `scroll_into_view` を呼ぶ。
+      いまは「窓を変えたら詰め直す」を `Msg::Layout` の腕が手書きしているだけで、窓を変える経路が
+      増えると、広げたのに下に空白が残る形（01 の「グラフの行」）がその経路で再発する。
+      #191 のレビューで拾った（2026-10-12 にユーザーと決めて送った）。書き換える先は `Msg::Layout`、
+      core の `update/test_support.rs`、tui の `test_util.rs`、`update/mod.rs` のテストの
+      `viewport` への直書き。見張りは `set_viewport` で窓を広げたときに詰まることを見る 1 本
 - [x] 外部変更検知（1/2）— 検知と読み直し。**2 本に割った**（2026-10-01 にユーザーと決めた。
       理由は 01 の「外部の変更の検知 › 定期の status」—— 2 本目の守りは diff のキャッシュに
       手を入れる別の関心事で、比べる `(mtime, len)` はこちらが載せる）。**決めた形**（理由と

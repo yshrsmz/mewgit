@@ -142,22 +142,18 @@ impl RepoReader {
     }
 }
 
-/// rename を対にする。rename の検出はここを通す。呼び出しを散らすと、一覧と diff で
-/// 設定がずれる。
-fn pair_renames(diff: &mut git2::Diff<'_>) -> Result<(), git2::Error> {
-    diff.find_similar(Some(&mut find_options()))
-}
-
-/// rename 検出の設定。理由と実測は 02 の「diff とハンク」。
+/// rename を対にする。**rename の検出はここを通す。** 呼び出しを散らすと、一覧と diff で
+/// 設定がずれる。理由と実測は 02 の「diff とハンク」。
 ///
 /// - ワークツリー上の rename（index から消えた + untracked で増えた）を `for_untracked` で
 ///   対にする
-/// - ユーザーの `diff.renames` を読まない。設定に関わらず rename を対にする
+/// - ユーザーの `diff.renames` を読まない。`diff.renames` に関わらず rename を対にする
+///   （`diff.renameLimit` は libgit2 が読む）
 /// - `renames(true)` は `for_untracked` と冗長で、保険として残している
-fn find_options() -> DiffFindOptions {
+fn pair_renames(diff: &mut git2::Diff<'_>) -> Result<(), git2::Error> {
     let mut options = DiffFindOptions::new();
     options.renames(true).for_untracked(true);
-    options
+    diff.find_similar(Some(&mut options))
 }
 
 /// diff をファイル単位の値型に落とす。`path` があればそのファイルだけ残す。

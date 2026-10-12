@@ -692,11 +692,9 @@ mod tests {
 
     #[test]
     fn widening_the_terminal_pulls_the_view_back_to_the_end() {
-        // 広げる前に窓の中にいたカーソルは、広げた後も窓の中に残るので、カーソルを追う
-        // 寄せは動かず、詰めなければ上に行があるのに下に空白が残る（01）。ここでは
-        // たとえば、カーソルが末尾近くの最下行にいるまま端末を大きくした形を踏む。
-        // カーソル 29 は末尾の添字 30 の 1 つ手前で、窓が 5 行なら末尾の 1 行は窓の下に
-        // 隠れている。
+        // 窓を広げたら詰める（理由は `scroll_into_view` の doc）。ここでは、カーソルが
+        // 末尾近くの最下行にいるまま端末を大きくした形を踏む。カーソル 29 は末尾の
+        // 添字 30 の 1 つ手前で、窓が 5 行なら末尾の 1 行は窓の下に隠れている。
         let mut state = state_with_commits(30);
         state.graph.cursor = 29;
         let _ = update(&mut state, Msg::Layout { graph_rows: 5 });
@@ -710,8 +708,8 @@ mod tests {
 
     #[test]
     fn widening_past_the_whole_history_scrolls_to_the_top() {
-        // 履歴が窓より短くなると詰め先は 0。カーソルは窓の中にいるので、
-        // 詰めなければ上 2 行が隠れたまま残る。
+        // 履歴が窓より短くなると詰め先は 0（詰める理由は `scroll_into_view` の doc）。
+        // ここでは、詰めなければ上 2 行が隠れたまま残る。
         let mut state = state_with_commits(3);
         state.graph.cursor = 3;
         let _ = update(&mut state, Msg::Layout { graph_rows: 2 });
@@ -724,7 +722,7 @@ mod tests {
 
     #[test]
     fn moving_above_the_window_scrolls_up_to_the_cursor() {
-        let mut state = state_with_commits(30);
+        let mut state = state_with_commits(ROWS + 10);
         for _ in 0..ROWS + 5 {
             let _ = press(&mut state, 'j');
         }
@@ -743,7 +741,7 @@ mod tests {
     fn the_view_stays_put_while_the_cursor_is_visible() {
         // 下端から 1 つ戻ってもスクロールは動かない。動かすとカーソルが最下行に
         // 貼り付いたまま中身だけが流れる。
-        let mut state = state_with_commits(30);
+        let mut state = state_with_commits(ROWS + 10);
         for _ in 0..ROWS {
             let _ = press(&mut state, 'j');
         }
@@ -1089,11 +1087,11 @@ mod tests {
         // コミットの行の `Enter` は Commit detail へ入り、`Esc` で Graph へ戻る
         // （`Enter` の行き先は選択で決まる。07）。
         let mut state = on_first_commit(3);
-        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let cmd = press_code(&mut state, KeyCode::Enter);
         assert_eq!(state.focus, Pane::CommitDetail);
         assert_eq!(cmd, Cmd::None);
 
-        let cmd = update(&mut state, Msg::Key(Key::new(KeyCode::Esc)));
+        let cmd = press_code(&mut state, KeyCode::Esc);
 
         assert_eq!(state.focus, Pane::Graph);
         assert_eq!(cmd, Cmd::None);
@@ -1104,10 +1102,10 @@ mod tests {
         // グラフの `Enter` で入ってくる先なので、出口を揃える。無いと `Enter` の
         // 行き先によって戻り方が変わる。
         let mut state = state_with_commits(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let _ = press_code(&mut state, KeyCode::Enter);
         assert_eq!(state.focus, Pane::Worktree);
 
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Esc)));
+        let _ = press_code(&mut state, KeyCode::Esc);
 
         assert_eq!(state.focus, Pane::Graph);
     }
@@ -1138,7 +1136,7 @@ mod tests {
         let mut state = on_first_commit(3);
 
         for _ in 0..4 {
-            let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Tab)));
+            let _ = press_code(&mut state, KeyCode::Tab);
             assert_ne!(state.focus, Pane::Worktree, "{:?}", state.focus);
         }
     }
@@ -1148,7 +1146,7 @@ mod tests {
         // 選択が変わる経路はカーソルの移動だけではない。commit のあとの読み直しは
         // 先頭から積み直すのでカーソルが WIP 行に戻る（01 の「Pane と Modal」）。
         let mut state = on_first_commit(3);
-        let _ = update(&mut state, Msg::Key(Key::new(KeyCode::Enter)));
+        let _ = press_code(&mut state, KeyCode::Enter);
         assert_eq!(state.focus, Pane::CommitDetail);
 
         let page = LogPage {

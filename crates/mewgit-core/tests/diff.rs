@@ -273,28 +273,31 @@ fn renamed_with_detection_off() -> TestRepo {
 
 /// 設定が効いている証拠。git 自身はこの rename を対にしない。
 ///
-/// `output` は git CLI の `--name-status` の出力。
+/// `output` は git CLI の `--name-status` の出力。`extra` は rename のほかに同じ出力へ
+/// 出る行（`--name-status` の形）。git は状態の文字ではなくパスの順に並べるので
+/// （git 2.56.0 で確認）、期待値もパスで並べる。
 #[track_caller]
-fn assert_git_splits_the_rename(output: &str) {
-    assert_eq!(output, "A\tnew.txt\nD\told.txt");
+fn assert_git_splits_the_rename(output: &str, extra: &[&str]) {
+    let mut expected = [extra, &["A\tnew.txt", "D\told.txt"]].concat();
+    expected.sort_by_key(|line| line.split_once('\t').map(|(_, path)| path));
+    assert_eq!(output, expected.join("\n"));
 }
 
 /// mewgit の読み取りがこの rename を対にした 1 行。
-fn renamed_rows() -> [(&'static str, Option<&'static str>, FileStatus); 1] {
-    [("new.txt", Some("old.txt"), FileStatus::Renamed)]
-}
+const RENAMED: [(&str, Option<&str>, FileStatus); 1] =
+    [("new.txt", Some("old.txt"), FileStatus::Renamed)];
 
 #[test]
 fn a_staged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
     let repo = renamed_with_detection_off();
-    assert_git_splits_the_rename(&repo.git(&["diff", "--cached", "--name-status"]));
+    assert_git_splits_the_rename(&repo.git(&["diff", "--cached", "--name-status"]), &[]);
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let status = reader.status().unwrap();
     let diff = reader.diff(DiffTarget::HeadVsIndex(None)).unwrap();
 
-    assert_eq!(entry_rows(&status.staged), renamed_rows());
-    assert_eq!(diff_rows(&diff), renamed_rows());
+    assert_eq!(entry_rows(&status.staged), RENAMED);
+    assert_eq!(diff_rows(&diff), RENAMED);
 }
 
 #[test]
@@ -303,12 +306,10 @@ fn a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
     let from = repo.head_oid();
     repo.git(&["commit", "-q", "-m", "rename"]);
     let to = repo.head_oid();
-    assert_git_splits_the_rename(&repo.git(&[
-        "diff",
-        "--name-status",
-        &from.to_string(),
-        &to.to_string(),
-    ]));
+    assert_git_splits_the_rename(
+        &repo.git(&["diff", "--name-status", &from.to_string(), &to.to_string()]),
+        &[],
+    );
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let diff = reader
@@ -319,7 +320,7 @@ fn a_ranged_rename_pairs_even_when_the_repository_turns_rename_detection_off() {
         })
         .unwrap();
 
-    assert_eq!(diff_rows(&diff), renamed_rows());
+    assert_eq!(diff_rows(&diff), RENAMED);
 }
 
 #[test]
@@ -327,12 +328,15 @@ fn a_stashed_rename_pairs_even_when_the_repository_turns_rename_detection_off() 
     let repo = renamed_with_detection_off();
     repo.git(&["stash", "push", "-q"]);
     let stash = repo.rev_parse("stash@{0}");
-    assert_git_splits_the_rename(&repo.git(&["stash", "show", "--name-status", "stash@{0}"]));
+    assert_git_splits_the_rename(
+        &repo.git(&["stash", "show", "--name-status", "stash@{0}"]),
+        &[],
+    );
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let diff = reader.diff(DiffTarget::Stash(stash)).unwrap();
 
-    assert_eq!(diff_rows(&diff), renamed_rows());
+    assert_eq!(diff_rows(&diff), RENAMED);
 }
 
 #[test]
@@ -527,23 +531,21 @@ fn commit_files_lists_what_the_commit_changed() {
 
 #[test]
 fn commit_files_and_the_commit_diff_see_the_same_files() {
-    // **入口（比べる 2 つのツリーと `find_similar`）が 2 本あれば結果はずれる。**
+    // **入口（比べる 2 つのツリーと `pair_renames`）が 2 本あれば結果はずれる。**
     // 出口（`file_entry`）だけを共有しても揃わない（02、#18 と同じ形）。
-    // `commit_files` 側で `find_similar` を呼ばないと、rename が Deleted + Added の
+    // `commit_files` 側で `pair_renames` を通さないと、rename が Deleted + Added の
     // 2 行になって diff の 1 行と食い違う。`diff.renames=false` のリポジトリで見るので、
-    // 片側だけ既定の設定（`find_similar(None)`。設定を読んで対にしない）で呼んだ形も
-    // ここで落ちる。ずれは「一覧に出ているファイルを選んだのに diff が空」という形で
+    // 片側だけ `pair_renames` を外して既定の設定（`find_similar(None)`。設定を読んで
+    // 対にしない）で呼んだ形もここで落ちる。ずれは「一覧に出ているファイルを選んだのに diff が空」という形で
     // 出るので、両方を同じリポジトリで突き合わせる。
     let repo = renamed_with_detection_off();
     repo.write_worktree_file("added.txt", b"added\n");
     repo.git(&["add", "-A"]);
     repo.git(&["commit", "-q", "-m", "rename and add"]);
     let commit = repo.head_oid();
-    // 設定が効いている証拠。git 自身はこの rename を対にしない
-    // （`assert_git_splits_the_rename` と同じ確かめ。`added.txt` のぶん期待値が違う）。
-    assert_eq!(
-        repo.git(&["show", "--name-status", "--format=", "HEAD"]),
-        "A\tadded.txt\nA\tnew.txt\nD\told.txt"
+    assert_git_splits_the_rename(
+        &repo.git(&["show", "--name-status", "--format=", "HEAD"]),
+        &["A\tadded.txt"],
     );
     let reader = RepoReader::open(repo.path()).unwrap();
 
@@ -558,10 +560,7 @@ fn commit_files_and_the_commit_diff_see_the_same_files() {
     // 見張るのは、それぞれをリテラルの行と比べる 2 本。2 つが揃うことはそこから従う。
     // 2 つの等しさだけを見ると、両方を同時に `find_similar(None)` に戻した形（どちらも
     // Deleted + Added の 3 行で揃う）が通る。
-    let expected = [
-        ("added.txt", None, FileStatus::Added),
-        ("new.txt", Some("old.txt"), FileStatus::Renamed),
-    ];
+    let expected = [("added.txt", None, FileStatus::Added), RENAMED[0]];
     assert_eq!(entry_rows(&entries), expected);
     assert_eq!(diff_rows(&diff), expected);
 }

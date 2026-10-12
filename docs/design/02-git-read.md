@@ -324,8 +324,8 @@ Stash ペイン（01 の「Stash ペイン」）が使う。
   「いまある未追跡のファイル」と読めるが、退避したあとの作業ツリーには無い
 - **index 側（第 2 親）は出さない。** `git stash show` の既定と同じで、stage していたか
   どうかは apply の `--index` の話になる
-- **`find_similar` は混ぜたあとに 1 回だけ**（呼び出し側の `diff()` が掛ける）。混ぜる前に
-  掛けると、tracked の削除と untracked の追加が rename として対にならない
+- **rename の対は混ぜたあとに 1 回だけ取る**（呼び出し側の `diff()` が `pair_renames` を通す）。
+  混ぜる前に取ると、tracked の削除と untracked の追加が rename として対にならない
 - **第 3 親は数で確かめてから引く**（`parent_count() > 2`）。`parent(2)` の `Err` を
   「無い」と読むと、壊れたリポジトリで引けなかったものが黙って落ちる
 
@@ -718,7 +718,10 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
   staged / unstaged の rename は対になった（2026-10-11 に実測。`diff_tform.c` の
   `normalize_find_opts` と `git_diff_find_similar`）。libgit2 の status 自身も
   `FIND_RENAMES` を立てず、`findopt.flags = GIT_DIFF_FIND_FOR_UNTRACKED` だけで rename を
-  対にしている（`status.c`）
+  対にしている（`status.c`）。
+  **`diff.renameLimit` のほうは libgit2 が読む**（`rename_limit` が 0 のとき。libgit2 1.9.7 の
+  `diff_tform.c` の `normalize_find_opts`）。`pair_renames` は `rename_limit` を設定せず、
+  status も同じ経路で読むので、一覧と diff は揃う
 - **`renames(true)` は保険として残す**（2026-10-11 にユーザーと決めた）。`for_untracked` を
   外す変更があっても、`diff.renames` を読まないままにするため。**この保険には見張りが無い** ——
   `for_untracked` が立っているあいだは `renames(true)` を外しても結果が変わらないので、
@@ -748,9 +751,12 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
   | `diff()` の `Commit` と `commit_files` を同時に `find_similar(None)` | `commit_files_and_the_commit_diff_see_the_same_files`（リテラルの行との比較で） |
   | `diff()` の呼び出し 1 行を `find_similar(None)`（全種別。`commit_files` はそのまま） | staged・ranged・stashed・`commit_files_and_the_commit_diff_see_the_same_files`・worktree の 2 本 |
   | `pair_renames` の中身を `find_similar(None)`（`diff()` と `commit_files` の両方） | 上と同じ 6 本 |
-  | `find_options` を `renames(false)` | 0 本（全部通った） |
+  | `pair_renames` の `renames(true)` を `renames(false)` | 0 本（全部通った） |
+
+  記録時の名前は `find_options`。2026-10-12 に `pair_renames` へ畳んだ。
 
 - **commit / Range / Stash の diff も同じ設定で、ユーザーの `diff.renames` を読まない。**
+  以下ではこの 3 つをまとめて「commit 側」と呼ぶ。
   上の「staged / unstaged の `find_similar()` の設定は `status` と揃える」は mewgit の
   status と diff を揃える理由で、commit 側には比べる status が無いので当てはまらない。
   **git CLI と揃えているわけではない** —— staged / unstaged も、`diff.renames=false` の
@@ -759,7 +765,10 @@ pub struct HunkLine { pub origin: LineOrigin, pub content: Vec<u8> }
   commit 側で読まない理由は別にある。(1) `commit_files` の一覧と
   `diff(DiffTarget::Commit)` の中身が 1 つの設定で必ず揃う —— 「コミットのファイル一覧」の
   「比べる 2 つのツリーと rename 検出の設定は `diff()` と同じものを使う」を、設定を
-  読む・読まないで割らない。(2) git の既定でも rename 検出は有効。
+  読む・読まないで割らない。(1) は commit（`commit_files` と `DiffTarget::Commit`）にしか
+  掛からない。(2) git の既定でも rename 検出は有効。Range と Stash に掛かる理由は (2) と、
+  rename の検出が全種別で 1 つの関数（`pair_renames`）を通ること —— 種別ごとに設定を
+  変えるには、そこを割ることになる。
   この判断は 2026-10-11 にユーザーと決めた。
   帰結として、`diff.renames=false` のユーザーには mewgit が `git show` と違って rename を
   1 行の `Renamed` で出し（staged / unstaged が `git status` と違うのと同じ形）、

@@ -883,7 +883,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       足した `widening_past_the_whole_history_scrolls_to_the_top` は窓の変更を `Msg::Layout` で
       届ける（`viewport` を直に書いて `scroll_into_view` を呼ばない）。既存の
       `widening_the_terminal_pulls_the_view_back_to_the_end` も同じ形に揃えた
-- [x] `git_read::diff::find_options` が `diff.renames` を読まないことに見張りを足す。
+- [x] `git_read::diff::pair_renames` が `diff.renames` を読まないことに見張りを足す。
       **`renames(true)` 単体には見張りを置けない** —— `for_untracked` と冗長で、どちらのビットでも
       libgit2 は `diff.renames` を読まないので、`false` にする変異と区別できない（libgit2 1.9.7 の
       `diff_tform.c` の `normalize_find_opts` のソース。02）。元のタスク（`renames(true)` を
@@ -900,7 +900,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       02 に理由を書いた（2026-10-11 にユーザーと決めた）
 - [ ] `GraphState::viewport` を private にし、`set_viewport(rows)` の中で `scroll_into_view` を呼ぶ。
       いまは「窓を変えたら詰め直す」を `Msg::Layout` の腕が手書きしているだけで、窓を変える経路が
-      増えると、広げたのに下に空白が残る形（01 の Graph のスクロール）がその経路で再発する。
+      増えると、広げたのに下に空白が残る形（01 の「グラフの行」）がその経路で再発する。
       #191 のレビューで拾った（2026-10-12 にユーザーと決めて送った）。書き換える先は `Msg::Layout`、
       core の `update/test_support.rs`、tui の `test_util.rs`、`update/mod.rs` のテストの
       `viewport` への直書き。見張りは `set_viewport` で窓を広げたときに詰まることを見る 1 本

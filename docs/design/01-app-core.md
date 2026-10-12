@@ -484,8 +484,9 @@ pub enum GraphSelection<'a> { Wip, Commit(&'a GraphLine) }
 `scroll` は状態として持つ。`cursor` と `viewport` から毎回導くと、下端から上へ戻る
 ときにカーソルが最下行に貼り付いたまま中身だけが流れる。更新は
 `GraphState::move_cursor(delta)` / `scroll_into_view()`。
-`scroll_into_view()` は毎回、カーソルを追う寄せの前に `scroll` を `rows - viewport` まで
-詰める（表示行（WIP 行を含む）が窓以下なら 0 まで）。窓が縮んでも上限は上がるだけ
+`scroll_into_view()` は毎回、カーソルを追う寄せの前に `scroll` を詰める —— 上限
+`rows - viewport`（表示行（WIP 行を含む）が窓以下なら 0）を超えていればそこまで下げ、
+超えていなければ動かさない。窓が縮んでも上限は上がるだけ
 なので何も起きず、実際に効くのは窓が広がったとき ——
 広げる前に窓の中にいたカーソルは、広げた後も窓の中に残るので、カーソルを追う寄せは
 動かず、詰めなければ上に行があるのに下に空白が残る（たとえば、カーソルが末尾近くの

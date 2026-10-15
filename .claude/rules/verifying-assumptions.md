@@ -133,21 +133,4 @@
   cherry-pick / revert が止まったままでも git は `rebase -i` の sequence editor を起こす
   （git 2.56.0。`/code-review` が再現）。**「並ばない」「届かない」と書く前に、進行中操作の
   種類ごとに叩く**
-- **実測の出力が実測を汚す。** 一時リポジトリで叩くときの落とし穴が 2 つ（#126）。
-  **(1) 出力のファイルをリポジトリの中に書かない** —— `git revert … >o 2>e` を作業ツリーで
-  やると `o` / `e` が untracked になり、git の結びの文言が変わる（`nothing to commit,
-  working tree clean` → `nothing added to commit but untracked files present`）。その
-  文言で分類を決めるところだったので、**汚れた値を 03 の表に一度書いた**。出力は
-  リポジトリの外に書く。**(2) `echo 3>a` は fd 3 のリダイレクト** —— `a` は空になり、
-  fixture が狙った内容にならない。値は `echo "3" >a` と引用して書く。どちらも
-  「状態を作る実測は、その状態が狙った理由で起きたかまで確かめる」（上）の入口側。
-  **(2) は #133 でも踏んだ**（`echo 1>f` で fixture が空になり、pull の 4 形が全部 exit 1）。
-  **(3) 呼ばれたら書く印のファイルは、試行ごとに消してから始める** —— 前の試行の印が
-  ループの外に残り、次の実測で「`pull --rebase` も sequence editor を起こした」と一度
-  読み違えた（#133）。**全部が同じ結果になったら、測れているかをまず疑う**
-  **(4) 手元の shell と grep が想定と違う** —— Bash ツールの shell は **zsh** で、
-  クォートしていない `$cmd` を単語に分割しない。`for cmd in "cherry-pick side" …;
-  do git $cmd; done` は `git 'cherry-pick side'` を叩き、**全部が exit 1** になった
-  （#139）。ループは引数を直に書くか `eval "git $cmd"` にする。**`grep` の実体は
-  ugrep** で、BRE の `\|` が効かず**全部が「当たり無し」**になった。照合は
-  `grep -E` か python で書く。どちらも (3) と同じく「全部が同じ結果」で気付いた
+- **実測の出力が実測を汚す。** 一時リポジトリで叩くときの落とし穴が 2 つ（#126）。**(1) 出力のファイルをリポジトリの中に書かない** —— `git revert … >o 2>e` を作業ツリーでやると `o` / `e` が untracked になり、git の結びの文言が変わる（`nothing to commit, working tree clean` → `nothing added to commit but untracked files present`）。その文言で分類を決めるところだったので、**汚れた値を 03 の表に一度書いた**。出力はリポジトリの外に書く。**(2) `echo 3>a` は fd 3 のリダイレクト** —— `a` は空になり、fixture が狙った内容にならない。値は `echo "3" >a` と引用して書く。どちらも「状態を作る実測は、その状態が狙った理由で起きたかまで確かめる」（上）の入口側。**(2) は #133 でも踏んだ**（`echo 1>f` で fixture が空になり、pull の 4 形が全部 exit 1）。**(3) 呼ばれたら書く印のファイルは、試行ごとに消してから始める** —— 前の試行の印がループの外に残り、次の実測で「`pull --rebase` も sequence editor を起こした」と一度読み違えた（#133）。**全部が同じ結果になったら、測れているかをまず疑う** **(4) 手元の shell と grep が想定と違う** —— Bash ツールの shell は **zsh** で、クォートしていない `$cmd` を単語に分割しない。`for cmd in "cherry-pick side" …; do git $cmd; done` は `git 'cherry-pick side'` を叩き、**全部が exit 1** になった（#139）。ループは引数を直に書くか `eval "git $cmd"` にする。**`grep` の実体は ugrep** で、BRE の `\|` が効かず**全部が「当たり無し」**になった。照合は `grep -E` か python で書く。どちらも (3) と同じく「全部が同じ結果」で気付いた。**`sed` は BSD 版で、`\b` が効かない** —— 語の境目で切る置換が 1 つも当たらないまま exit 0 で返る（#194 で getter への置換が素通りし、置換後の grep で気付いた）。語の境目を使う置換は `perl -pi -e` で書く

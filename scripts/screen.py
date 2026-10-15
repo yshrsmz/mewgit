@@ -46,6 +46,9 @@ def replay(data: str, width: int, height: int) -> list[list[str]]:
                 elif final == "J" and args and args[0] == 2:  # 画面消去
                     screen = [[" "] * width for _ in range(height)]
                 elif final == "K":  # 行末まで消去
+                    # 全角の 2 桁目から消し始めたら、1 桁目も消す。
+                    if 0 <= row < height and 0 <= col < width:
+                        vacate(screen[row], col)
                     for x in range(col, width):
                         screen[row][x] = " "
                 i = csi.end()
@@ -83,24 +86,33 @@ def put(line: list[str], col: int, char: str, wide: bool) -> None:
     ratatui は変わったセルだけを描き直すので、全角の上に半角が乗ることがある。
     実端末は残った半分を消すが、素朴に 1 セルずつ写すと消し残りが混ざる
     （「詳細」の上に別の文字が来て「詳S細a」のようになる）。
+
+    **全角は 2 セルを上書きする。** 2 桁目のセルも、そこにあった全角の片割れを
+    空けてから書く。1 桁目だけ見ていると、2 桁目で潰した別の全角の印が宙に残り、
+    印は幅を持たないので行の以降が 1 桁左へ詰まる（Worktree のキーヒントが
+    `x:破棄 c:commit` ではなく `x:破棄c:commit` に見えた）。
     """
-    # 全角の 2 桁目に書き込むなら、残った 1 桁目は文字として成り立たないので空ける。
-    # **左隣も 2 桁目なら消さない。** そこは直前に書いた全角の 2 桁目で、`line[col]` に
-    # 残っているのは前のフレームの印。消すと、いま書いたばかりの全角が半分になる
-    # （部分再描画で 1 文字おきに空白が入る）。
-    if line[col] == WIDE_TAIL and col > 0 and line[col - 1] != WIDE_TAIL:
-        line[col - 1] = " "
+    cells = [col, col + 1] if wide and col + 1 < len(line) else [col]
+    for c in cells:
+        vacate(line, c)
 
     line[col] = char
-    if col + 1 < len(line):
-        if wide:
-            # 元がそこにあった文字の残骸を残さない。
-            line[col + 1] = WIDE_TAIL
-        elif line[col + 1] == WIDE_TAIL:
-            # 全角の 1 桁目を半角で潰した。宙に浮いた 2 桁目も空ける。ここを
-            # 忘れると、次の 1 文字がこの印を見て直前に書いたばかりの桁を消す
-            # （1 文字おきに空白が入る）。
-            line[col + 1] = " "
+    if len(cells) == 2:
+        line[col + 1] = WIDE_TAIL
+
+
+def vacate(line: list[str], col: int) -> None:
+    """これから上書きする 1 セルに全角が掛かっていたら、残る片割れを空ける。
+
+    実端末は全角の半分を上書きすると残りの半分も消すので、それに揃える。
+    """
+    if line[col] == WIDE_TAIL:
+        # 2 桁目を潰す。残る 1 桁目は文字として成り立たない。上書きのたびにここを
+        # 通るので、印の左隣は必ずその全角の 1 桁目（印が 2 つ並ぶことはない）。
+        line[col - 1] = " "
+    elif col + 1 < len(line) and line[col + 1] == WIDE_TAIL:
+        # 1 桁目を潰す。宙に浮く 2 桁目の印を空ける。
+        line[col + 1] = " "
 
 
 def main() -> None:

@@ -199,7 +199,7 @@ fn editor_bin() -> std::io::Result<std::path::PathBuf> {
 /// を通すのは、`viewport` の計算経路を 1 本に保つため。
 fn layout(state: &mut AppState) -> Cmd {
     let graph_rows = ui::graph_rows(state.term);
-    if graph_rows == state.graph.viewport {
+    if graph_rows == state.graph.viewport() {
         return Cmd::None;
     }
     update(state, Msg::Layout { graph_rows })
@@ -1406,7 +1406,7 @@ mod tests {
         run_with(events, &mut state, reader).await.unwrap();
 
         assert_eq!(state.focus, Pane::Worktree);
-        assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
+        assert_eq!(state.graph.viewport(), crate::test_util::graph_rows(&state));
     }
 
     #[test]
@@ -1415,12 +1415,12 @@ mod tests {
         // （07 の「CommitDetail ペイン」）。動くと `Msg::Layout` が毎回流れ、そのたびに
         // 追加読み込みの判定まで走る。
         let mut state = crate::test_util::state_with_commits(&["first"]);
-        let on_wip = state.graph.viewport;
+        let on_wip = state.graph.viewport();
 
         state.graph.cursor = 1;
 
         assert_eq!(layout(&mut state), Cmd::None);
-        assert_eq!(state.graph.viewport, on_wip);
+        assert_eq!(state.graph.viewport(), on_wip);
     }
 
     #[tokio::test]
@@ -1435,7 +1435,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(state.graph.viewport, crate::test_util::graph_rows(&state));
-        assert!(state.graph.viewport > 0);
+        assert_eq!(state.graph.viewport(), crate::test_util::graph_rows(&state));
+        assert!(state.graph.viewport() > 0);
     }
 }

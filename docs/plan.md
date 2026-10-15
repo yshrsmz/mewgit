@@ -901,12 +901,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `a_path_keeps_a_worktree_rename_under_either_name` が見る。変異ごとにどれが落ちたかの
       記録（2026-10-11）は 02 の「diff とハンク」。commit 側も `diff.renames` を読まないことは
       02 に理由を書いた（2026-10-11 にユーザーと決めた）
-- [ ] `GraphState::viewport` を private にし、`set_viewport(rows)` の中で `scroll_into_view` を呼ぶ。
-      いまは「窓を変えたら詰め直す」を `Msg::Layout` の腕が手書きしているだけで、窓を変える経路が
-      増えると、広げたのに下に空白が残る形（01 の「グラフの行」）がその経路で再発する。
-      #191 のレビューで拾った（2026-10-12 にユーザーと決めて送った）。書き換える先は `Msg::Layout`、
-      core の `update/test_support.rs`、tui の `test_util.rs`、`update/mod.rs` のテストの
-      `viewport` への直書き。見張りは `set_viewport` で窓を広げたときに詰まることを見る 1 本
+- [x] `GraphState::viewport` を private にし、`set_viewport(rows)` の中で `scroll_into_view` を呼ぶ。いまは「窓を変えたら詰め直す」を `Msg::Layout` の腕が手書きしているだけで、窓を変える経路が増えると、広げたのに下に空白が残る形（01 の「グラフの行」）がその経路で再発する。#191 のレビューで拾った（2026-10-12 にユーザーと決めて送った）。書き換える先は `Msg::Layout`、core の `update/test_support.rs`、tui の `test_util.rs`、`update/mod.rs` のテストの `viewport` への直書き。見張りは `set_viewport` で窓を広げたときに詰まることを見る 1 本。読む側は `viewport()` を通す。`scroll_into_view` も呼ぶのが `move_cursor` と `set_viewport` だけになったので private にした（01 の「グラフの行」）
 - [x] 外部変更検知（1/2）— 検知と読み直し。**2 本に割った**（2026-10-01 にユーザーと決めた。
       理由は 01 の「外部の変更の検知 › 定期の status」—— 2 本目の守りは diff のキャッシュに
       手を入れる別の関心事で、比べる `(mtime, len)` はこちらが載せる）。**決めた形**（理由と

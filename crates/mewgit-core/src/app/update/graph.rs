@@ -478,7 +478,7 @@ pub(super) fn load_more(state: &AppState) -> Cmd {
     // 失敗したあとは行が空なので「残りが 1 画面以下」が必ず真になる。見ないと、
     // 以後のレイアウト変化のたびに読み直しを出す（失敗自体がレイアウトを変える。
     // 行が消えると詳細の領域も消えるため）。
-    if state.graph.load_failed || state.graph.loaded_all || remaining > state.graph.viewport {
+    if state.graph.load_failed || state.graph.loaded_all || remaining > state.graph.viewport() {
         return Cmd::None;
     }
 
@@ -703,6 +703,20 @@ mod tests {
         let _ = update(&mut state, Msg::Layout { graph_rows: 25 });
 
         // 表示行は WIP 行を含めて 31。窓が 25 行なら先頭は 6 行目まで下がれる。
+        assert_eq!(state.graph.scroll, 6);
+    }
+
+    #[test]
+    fn set_viewport_pulls_the_view_back_without_going_through_layout() {
+        // 詰め直しは `set_viewport` が持つ（`GraphState::viewport` の doc）。`Msg::Layout`
+        // を通さずに窓を広げても、上の形と同じく詰まることを見る。
+        let mut state = state_with_commits(30);
+        state.graph.set_viewport(5);
+        state.graph.move_cursor(29);
+        assert_eq!(state.graph.scroll, 25);
+
+        state.graph.set_viewport(25);
+
         assert_eq!(state.graph.scroll, 6);
     }
 

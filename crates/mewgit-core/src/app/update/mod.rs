@@ -145,9 +145,7 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
             Cmd::None
         }
         Msg::Layout { graph_rows } => {
-            state.graph.viewport = graph_rows;
-            // 窓の大きさが変わったので位置を合わせ直す（`scroll_into_view` の doc）。
-            state.graph.scroll_into_view();
+            state.graph.set_viewport(graph_rows);
             // 続きを頼む: 窓が広がって残りが 1 画面を切ったぶんのログの追加ページ。
             load_more(state)
         }
@@ -1136,20 +1134,20 @@ mod tests {
 
         assert_eq!(update(&mut state, Msg::Resize { term }), Cmd::None);
         assert_eq!(state.term, term);
-        assert_eq!(state.graph.viewport, ROWS);
+        assert_eq!(state.graph.viewport(), ROWS);
     }
 
     #[test]
     fn layout_sets_the_viewport_and_asks_for_a_page_when_there_is_room() {
         let mut state = state();
-        state.graph.viewport = 0;
+        state.graph.set_viewport(0);
 
         // 1 行も積んでいないので、窓を知った時点で次のページを頼む。
         assert_eq!(
             update(&mut state, Msg::Layout { graph_rows: 36 }),
             more(&state)
         );
-        assert_eq!(state.graph.viewport, 36);
+        assert_eq!(state.graph.viewport(), 36);
     }
 
     #[test]

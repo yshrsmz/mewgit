@@ -421,7 +421,7 @@ pub fn state_with_history(history: &[(u8, &[u8])]) -> AppState {
 /// `viewport` は 24 行の端末で描くときのグラフの行数に合わせる。
 fn state_with_log(commits: Vec<Commit>) -> AppState {
     let mut state = state_at("/repo");
-    state.graph.viewport = graph_rows(&state);
+    state.graph.set_viewport(graph_rows(&state));
 
     let page = LogPage {
         commits,

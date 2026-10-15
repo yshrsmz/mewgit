@@ -33,7 +33,7 @@ pub(super) const ROWS: usize = 20;
 
 pub(super) fn state() -> AppState {
     let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
-    state.graph.viewport = ROWS;
+    state.graph.set_viewport(ROWS);
     state
 }
 
@@ -43,7 +43,7 @@ pub(super) fn github_disabled_state() -> AppState {
     let mut config = Config::default();
     config.github.enabled = false;
     let mut state = AppState::new(RepoInfo::default(), config, FAKE_NOW);
-    state.graph.viewport = ROWS;
+    state.graph.set_viewport(ROWS);
     state
 }
 

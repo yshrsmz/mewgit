@@ -1155,7 +1155,11 @@ pub struct GraphState {
     pub scroll: usize,
     /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Layout`] で運んでくる
     /// （`crate::app::Msg::Layout`）。core はヘッダや枠の高さを知らない。
-    pub viewport: usize,
+    ///
+    /// **private にして、書くのは [`set_viewport`](Self::set_viewport) だけにする。**
+    /// 窓を変えたら `scroll` を詰め直す必要があり、直書きを許すと、窓を変える経路を
+    /// 足したときにそこだけ詰め直しが抜けて、広げたのに下に空白が残る（01 の「グラフの行」）。
+    viewport: usize,
     /// 遅延取得した詳細（02）。どのコミットのものかは `detail.oid` で判る。
     /// カーソルの指すコミットと食い違っていれば、まだ届いていないか失敗したという
     /// こと。「読み込み中」のフラグを別に持たない（01 の「コミット詳細の遅延取得」）。
@@ -1347,6 +1351,17 @@ impl GraphState {
         self.scroll_into_view();
     }
 
+    /// グラフに使える行数。
+    pub fn viewport(&self) -> usize {
+        self.viewport
+    }
+
+    /// 窓を `rows` 行にし、その窓に合わせてスクロールを寄せ直す。
+    pub fn set_viewport(&mut self, rows: usize) {
+        self.viewport = rows;
+        self.scroll_into_view();
+    }
+
     /// カーソルが見える位置までスクロールを寄せる。
     ///
     /// カーソルが窓の中にいる限り動かさない。カーソルと `viewport` から毎回導くと、
@@ -1354,7 +1369,7 @@ impl GraphState {
     /// 毎回、カーソルを追う寄せの前に、`scroll` が上限（`rows - viewport`）を超えていれば
     /// 詰める。効くのは窓が広がったときだけで、広げる前に窓の中にいたカーソルは広げた後も
     /// 窓の中に残るので、寄せは動かず、詰めなければ下に空白が残る（01）。
-    pub fn scroll_into_view(&mut self) {
+    fn scroll_into_view(&mut self) {
         if self.viewport == 0 {
             return;
         }

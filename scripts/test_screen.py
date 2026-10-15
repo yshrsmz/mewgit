@@ -40,6 +40,13 @@ class WideOverwriteTest(unittest.TestCase):
     def test_erasing_from_wide_tail_clears_its_head(self):
         self.assertEqual(row(at(1, "a詳") + at(3, "\x1b[K")), "a       ")
 
+    def test_erasing_past_the_right_edge_keeps_the_row(self):
+        # 右端まで書いたあとのカーソルは画面の外（桁 = 幅）。消す範囲は空。
+        self.assertEqual(row("abcdefgh\x1b[K"), "abcdefgh")
+
+    def test_erasing_below_the_screen_is_ignored(self):
+        self.assertEqual(row("a\x1b[2;1H\x1b[K"), "a       ")
+
     def test_redrawing_shifted_wides_keeps_every_char(self):
         # 部分再描画で全角の並びが 1 桁ずれて描き直されても、1 文字おきに空白が
         # 入らない（前のフレームの印を、いま書いた全角の一部と取り違えない）。

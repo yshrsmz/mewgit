@@ -45,9 +45,9 @@ def replay(data: str, width: int, height: int) -> list[list[str]]:
                     col = args[1] - 1 if len(args) > 1 else 0
                 elif final == "J" and args and args[0] == 2:  # 画面消去
                     screen = [[" "] * width for _ in range(height)]
-                elif final == "K":  # 行末まで消去
+                elif final == "K" and 0 <= row < height:  # 行末まで消去
                     # 全角の 2 桁目から消し始めたら、1 桁目も消す。
-                    if 0 <= row < height and 0 <= col < width:
+                    if 0 <= col < width:
                         vacate(screen[row], col)
                     for x in range(col, width):
                         screen[row][x] = " "

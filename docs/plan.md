@@ -936,7 +936,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `deliver_status` が `reply` を通し、`status_arrived` が `Msg` を組む（発行済みの経路で
       `update` に直に渡すテストはこちらだけを使う）。`Msg::StatusLoaded` の形が変わっても
       直す場所は `status_arrived` の 1 つ。graph の 2 本は発行せずに届けていた（`/simplify` が拾った）
-- [x] README、リリースワークフロー。**release-please + 手書きのビルド、private のまま自分用、
+- [x] README、リリースワークフロー。**release-please + 手書きのビルド、private のまま自分用（2026-10-16 に public にして Homebrew で配る方針へ変えた。下の行）、
       `aarch64-apple-darwin` と `aarch64-unknown-linux-gnu`、crates.io には上げない
       （`publish = false`）**（2026-10-04 にユーザーと決めた）。**`release-type: rust` は
       このワークスペースで動かない** —— ルートの `Cargo.toml` に `[package]` が無いと
@@ -960,6 +960,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       版の書き換え（`Cargo.toml` / `Cargo.lock`）は 0.1.0 では空振りし、**release PR #157（0.1.1）で
       初めて動いた** —— `[workspace.package] version` と lock の `mewgit` / `mewgit-core` の 3 行だけが
       変わった
+- [ ] Homebrew の tap（`yshrsmz/homebrew-tap`）への同期。**リポジトリを public にする前提で組んだ**（2026-10-16 にユーザーと決めた。private のままでは tap の Formula が Release の tar.gz を取れず、attestation も付けられない）。形は mewbell の Cask と同じ —— release-please が draft の Release を作り（`draft` + `force-tag-creation`）、`release.yml` の build（書き込み権限なし）→ formula（2 つの SHA-256 から `packaging/homebrew/mewgit.rb.template` を組み、`brew style` / `brew audit --strict`）→ publish（attestation、添付、公開、`repository_dispatch` の `mewgit-released`）。tap 側の `update-mewgit.yml` が attestation と version・sha256 を確かめて `Formula/mewgit.rb` を PR で更新する。**Formula の `url` は `on_macos` / `on_linux` の中に置けない**（`brew audit --strict` が `on_macos cannot include url` で断る。Homebrew 7.0.9 で実測）ので `if OS.mac?` で分け、版は URL から読ませる（`version` を書くと redundant で断られる）。`test` は `--version` を見る —— v0.1.0 には `--version` が無い（#156 で足した）ので、tap に載せる最初の版は 0.1.1。手元で v0.1.0 の tar.gz を `file://` で入れて install が通ること、main のビルドで `brew test` が通ることを確かめた。**チェックを付けるのは 0.1.1 が tap の `Formula/mewgit.rb` に載り、`brew install yshrsmz/tap/mewgit` が通ってから**
 
 ## MVP 後
 

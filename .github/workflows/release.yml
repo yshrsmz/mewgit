@@ -1,19 +1,32 @@
 name: Release
 
 # main への push ごとに release-please が release PR を起こし直し、その PR をマージした
-# push でタグと GitHub Release を作る。バイナリは同じワークフローの後段で作って Release に
-# 載せる。**タグの push を別のワークフローで拾う形にはしない** —— 拾えるのはタグを作った
+# push でタグと draft の GitHub Release を作る。同じワークフローの後段でバイナリと Homebrew の
+# Formula を作り、attestation を付けて Release に載せてから公開し、最後に homebrew-tap へ
+# 版を知らせる（tap 側の update-mewgit.yml が attestation を確かめて Formula を PR で更新する）。
+# **タグの push を別のワークフローで拾う形にはしない** —— 拾えるのはタグを作った
 # トークンが GITHUB_TOKEN でない場合だけで、トークンの差し替えで黙ってビルドが止まる。
 #
-# このファイルを触る PR では build だけを走らせる（Release には載せない）。runner の
-# 都合（arm の Linux が回るか、macOS の setup が通るか）はタグを切るまで分からないので、
-# ここで先に踏む。
+# ビルド（cargo の build.rs を含む）は書き込み権限・OIDC トークン・シークレットを持たない
+# ジョブでだけ動かす。添付・公開・tap への知らせは、リポジトリのコードを checkout しない
+# publish が行う。
+#
+# このファイルを触る PR では build と formula だけを走らせる（Release には載せない）。runner の
+# 都合（arm の Linux が回るか、macOS の setup が通るか、brew audit が通るか）はタグを切るまで
+# 分からないので、ここで先に踏む。
 on:
   push:
     branches: [main]
   pull_request:
     paths:
       - '.github/workflows/release.yml'
+      - 'packaging/homebrew/**'
+  # draft のまま残った Release を、タグを指定して作り直す（push の実行をやり直せないとき）
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'draft のまま残った Release のタグ（vX.Y.Z）'
+        required: true
 
 permissions:
   contents: read
@@ -49,20 +62,84 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
 
+  # 対象のタグを決め、Release が公開済みかを確かめる。公開済みのとき（公開の後の手順だけが
+  # 失敗してやり直したとき）は、ビルドも添付もせず tap への知らせだけを送り直す（利用者が
+  # 取った tar.gz と Formula を変えない）。PR ではタグが無いので、ファイル名と Formula が
+  # 組めることだけを確かめる仮の版を使う。
+  prepare:
+    needs: release-please
+    # PR と workflow_dispatch では release-please を飛ばすので、cancelled 以外は needs の結果に
+    # 関わらず条件を評価する。`!cancelled()` が無いと、needs が skipped の時点でこのジョブも skipped になる。
+    if: >-
+      !cancelled() && (
+        github.event_name == 'pull_request' ||
+        (github.ref == 'refs/heads/main' && (
+          (github.event_name == 'push' && needs.release-please.result == 'success' &&
+            needs.release-please.outputs.release_created == 'true') ||
+          github.event_name == 'workflow_dispatch'
+        ))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # draft の Release は書き込み権限が無いと読めない。このジョブはコードを checkout しない
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      published: ${{ steps.state.outputs.published }}
+    steps:
+      - id: tag
+        name: Validate the tag
+        env:
+          TAG: >-
+            ${{ github.event_name == 'pull_request' && 'v0.0.0' ||
+            github.event_name == 'workflow_dispatch' && inputs.tag ||
+            needs.release-please.outputs.tag_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "タグの形式が vX.Y.Z ではありません" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+          } >>"$GITHUB_OUTPUT"
+
+      - id: state
+        name: Check the release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == pull_request ]]; then
+            echo "published=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          case "$draft" in
+            true) echo "published=false" >>"$GITHUB_OUTPUT" ;;
+            false)
+              echo "$TAG は公開済みなので、tap への知らせだけを送ります"
+              echo "published=true" >>"$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "$TAG の状態を読めませんでした: $draft" >&2
+              exit 1
+              ;;
+          esac
+
   # macOS runner は 1 分 $0.062（ubuntu-latest の 10.33 倍。ci.yml）。走るのはリリースと
   # このファイルを触る PR のときだけなので、ci.yml のように落とす対象にはしない。
   build:
-    needs: release-please
-    # release-please を飛ばした PR でも走らせる。`always()` が無いと、needs が skipped の
-    # 時点でこのジョブも skipped になる。
-    if: >-
-      always() &&
-      (github.event_name == 'pull_request' || needs.release-please.outputs.release_created == 'true')
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.published == 'false' }}
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -74,27 +151,174 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # PR では PR の head、リリースではタグをビルドする
+          ref: ${{ github.event_name != 'pull_request' && needs.prepare.outputs.tag || '' }}
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - run: cargo build --release --locked -p mewgit
       - name: Package
-        id: package
         env:
           TARGET: ${{ matrix.target }}
-          # PR ではタグが無いので、ファイル名が組めることだけを確かめる。
-          TAG: ${{ needs.release-please.outputs.tag_name || 'pr' }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           name="mewgit-${TAG}-${TARGET}"
-          mkdir "$name"
+          mkdir -p dist "$name"
           cp target/release/mewgit README.md LICENSE-APACHE LICENSE-MIT "$name/"
-          tar -czf "$name.tar.gz" "$name"
-          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
-          cat "$name.tar.gz.sha256"
-          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
-      - name: Upload to the release
-        if: github.event_name == 'push'
+          tar -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          cat "dist/$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # 2 つの tar.gz の SHA-256 が揃ってから Formula を組み、brew style と brew audit を通す。
+  # homebrew-tap はこの Formula をそのまま使う（attestation と version・sha256 を確かめてから）
+  formula:
+    needs: [prepare, build]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name != 'pull_request' && needs.prepare.outputs.tag || '' }}
+          persist-credentials: false
+          sparse-checkout: packaging/homebrew
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Render and check the formula
+        run: |
+          macos="$(cut -d ' ' -f 1 "dist/mewgit-$TAG-aarch64-apple-darwin.tar.gz.sha256")"
+          linux="$(cut -d ' ' -f 1 "dist/mewgit-$TAG-aarch64-unknown-linux-gnu.tar.gz.sha256")"
+          mkdir -p formula
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256_MACOS@/$macos/g" -e "s/@SHA256_LINUX@/$linux/g" \
+            packaging/homebrew/mewgit.rb.template >formula/mewgit.rb
+          if grep -q '@[A-Z0-9_]*@' formula/mewgit.rb; then
+            echo "埋め残した置き場所があります" >&2
+            exit 1
+          fi
+          cat formula/mewgit.rb
+          tap="$RUNNER_TEMP/homebrew-check"
+          mkdir -p "$tap/Formula"
+          cp formula/mewgit.rb "$tap/Formula/mewgit.rb"
+          git -C "$tap" init -q
+          git -C "$tap" add -A
+          git -C "$tap" -c user.name=ci -c user.email=ci@localhost commit -qm check
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew tap yshrsmz/check "$tap"
+          brew trust --tap yshrsmz/check
+          brew style --formula yshrsmz/check/mewgit
+          brew audit --formula --strict yshrsmz/check/mewgit
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-formula
+          path: formula/
+          if-no-files-found: error
+          retention-days: 7
+
+  # attestation を付けて添付し、公開して、tap に知らせる。リポジトリのコードは checkout も実行もしない
+  publish:
+    needs: [prepare, formula]
+    if: >-
+      !cancelled() && github.event_name != 'pull_request' && needs.prepare.result == 'success' && (
+        needs.formula.result == 'success' || needs.prepare.outputs.published == 'true'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: release-publish-${{ needs.prepare.outputs.tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      # tar.gz と Formula の build provenance attestation を作る（homebrew-tap が gh attestation verify で確かめる）
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      # prepare の後に別の実行が公開したかもしれない（同じタグの実行が重なった、公開の後の手順だけを
+      # やり直した）ので、添付の直前にもう一度確かめる。公開済みなら添付を差し替えずに知らせだけを送る
+      - name: Check the release state again
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-          ARCHIVE: ${{ steps.package.outputs.archive }}
-        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber -R "$GITHUB_REPOSITORY"
+        run: |
+          draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          case "$draft" in
+            true) echo "PUBLISHED=false" >>"$GITHUB_ENV" ;;
+            false)
+              echo "$TAG は公開済みなので、添付を差し替えずに tap への知らせだけを送ります"
+              echo "PUBLISHED=true" >>"$GITHUB_ENV"
+              ;;
+            *)
+              echo "$TAG の状態を読めませんでした: $draft" >&2
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: env.PUBLISHED == 'false'
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check the artifact
+        if: env.PUBLISHED == 'false'
+        working-directory: dist
+        run: |
+          ls -la
+          sha256sum -c "mewgit-$TAG-aarch64-apple-darwin.tar.gz.sha256"
+          sha256sum -c "mewgit-$TAG-aarch64-unknown-linux-gnu.tar.gz.sha256"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: env.PUBLISHED == 'false'
+        with:
+          subject-path: |
+            dist/mewgit-${{ needs.prepare.outputs.tag }}-aarch64-apple-darwin.tar.gz
+            dist/mewgit-${{ needs.prepare.outputs.tag }}-aarch64-unknown-linux-gnu.tar.gz
+            dist/mewgit.rb
+
+      # 添付してから公開する。ここまでのどこかで失敗したら Release は draft のまま残る
+      - name: Upload and publish
+        if: env.PUBLISHED == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "dist/mewgit-$TAG-aarch64-apple-darwin.tar.gz" \
+            "dist/mewgit-$TAG-aarch64-apple-darwin.tar.gz.sha256" \
+            "dist/mewgit-$TAG-aarch64-unknown-linux-gnu.tar.gz" \
+            "dist/mewgit-$TAG-aarch64-unknown-linux-gnu.tar.gz.sha256" \
+            dist/mewgit.rb
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+
+      # tap へ知らせるトークンは homebrew-tap の Contents の書き込みだけに絞る（dispatch に要る）。
+      # App は homebrew-tap にも install してある（.claude/rules/release.md）
+      - id: tap-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: yshrsmz
+          repositories: homebrew-tap
+          permission-contents: write
+
+      - name: Notify homebrew-tap
+        env:
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
+        run: |
+          gh api repos/yshrsmz/homebrew-tap/dispatches \
+            -f event_type=mewgit-released \
+            -f "client_payload[version]=$VERSION"

@@ -1,0 +1,24 @@
+class Mewgit < Formula
+  desc "TUI git client with a commit graph and GitHub integration"
+  homepage "https://github.com/yshrsmz/mewgit"
+  license any_of: ["MIT", "Apache-2.0"]
+
+  # on_macos / on_linux の中に url と sha256 は置けない（brew audit --strict が断る）
+  if OS.mac?
+    url "https://github.com/yshrsmz/mewgit/releases/download/v@VERSION@/mewgit-v@VERSION@-aarch64-apple-darwin.tar.gz"
+    sha256 "@SHA256_MACOS@"
+  else
+    url "https://github.com/yshrsmz/mewgit/releases/download/v@VERSION@/mewgit-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz"
+    sha256 "@SHA256_LINUX@"
+  end
+
+  depends_on arch: :arm64
+
+  def install
+    bin.install "mewgit"
+  end
+
+  test do
+    assert_equal "mewgit #{version}", shell_output("#{bin}/mewgit --version").strip
+  end
+end

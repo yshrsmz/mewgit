@@ -10,8 +10,8 @@ use crate::ui;
 const HINT: modals::Hint<'static> = &[&["[y] 実行", "[n] やめる"]];
 
 /// 破壊的操作の確認を描く。
-pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
-    let block = modals::block(title);
+pub fn render(frame: &mut Frame, area: Rect, title: &str, body: &str, charset: ui::Charset) {
+    let block = modals::block(title, charset);
     // **折り返してからでないと高さが決まらない。** `桁数 / 幅` の切り上げで見積もると
     // 単語境界で折れて増えたぶんを数え落とし、本文の末尾が黙って切れる（07）。
     let (text, body_rows) = ui::wrapped(body, modals::inner_width(area, modals::WIDTH, &block));

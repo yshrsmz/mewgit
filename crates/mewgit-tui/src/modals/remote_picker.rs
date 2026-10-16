@@ -10,6 +10,7 @@ use ratatui::Frame;
 
 use crate::modals;
 use crate::modals::picker::{self, Picker};
+use crate::ui::Charset;
 
 /// 枠のタイトル。**何を選ぶのかを出す** —— 「リモート」だけだと、fetch なのか
 /// push なのかが判らない（開く経路は `f` 1 つ。01）。
@@ -19,7 +20,14 @@ const TITLE: &str = "fetch するリモート";
 const HINT: modals::Hint<'static> = &[&["[j/k] 選ぶ", "[Enter] fetch", "[Esc] やめる"]];
 
 /// 一覧から fetch するリモートを選ばせる。
-pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], cursor: usize) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    reason: &str,
+    remotes: &[String],
+    cursor: usize,
+    charset: Charset,
+) {
     picker::render(
         frame,
         area,
@@ -33,6 +41,7 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], c
             cursor,
             hint: HINT,
         },
+        charset,
     );
 }
 

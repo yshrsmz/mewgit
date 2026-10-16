@@ -33,19 +33,23 @@ use crate::ui;
 /// `match` で `_` を使わないのは、`Modal` に変種を足したときに描画漏れを
 /// コンパイルエラーにするため（`update` や `Cmd::job_kind` と同じ）。
 pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
+    // 枠と省略の字（`config.graph.ascii`。07 の「ペインとフォーカス」）。
+    let charset = ui::charset(state);
     match modal {
-        Modal::Confirm { title, body, .. } => confirm::render(frame, area, title, body),
-        Modal::CommitMessage { buf, amend } => commit_message::render(frame, area, buf, *amend),
+        Modal::Confirm { title, body, .. } => confirm::render(frame, area, title, body, charset),
+        Modal::CommitMessage { buf, amend } => {
+            commit_message::render(frame, area, buf, *amend, charset);
+        }
         Modal::Input {
             title, prompt, buf, ..
-        } => input::render(frame, area, title, prompt, buf),
+        } => input::render(frame, area, title, prompt, buf, charset),
         Modal::RemotePicker {
             reason,
             remotes,
             cursor,
-        } => remote_picker::render(frame, area, reason, remotes, *cursor),
+        } => remote_picker::render(frame, area, reason, remotes, *cursor, charset),
         Modal::AccountPicker { view, cursor } => {
-            account_picker::render(frame, area, view, *cursor);
+            account_picker::render(frame, area, view, *cursor, charset);
         }
         Modal::PrCreate {
             title,
@@ -65,16 +69,19 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
                 draft: *draft,
                 field: *field,
             },
+            charset,
         ),
         Modal::NoticeLog { selected } => notice_log::render(frame, area, state, *selected),
-        Modal::ProgressMenu { menu, cursor } => progress_menu::render(frame, area, menu, *cursor),
+        Modal::ProgressMenu { menu, cursor } => {
+            progress_menu::render(frame, area, menu, *cursor, charset)
+        }
         Modal::MainlinePicker {
             target,
             summary,
             parents,
             cursor,
-        } => mainline_picker::render(frame, area, target, summary, parents, *cursor),
-        Modal::Help { pane, cursor } => help::render(frame, area, *pane, *cursor),
+        } => mainline_picker::render(frame, area, target, summary, parents, *cursor, charset),
+        Modal::Help { pane, cursor } => help::render(frame, area, *pane, *cursor, charset),
         Modal::RebaseEditor {
             onto,
             plan,
@@ -84,9 +91,9 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
         } => match (reword, plan.entries.get(*cursor)) {
             // 入力のあいだは一覧を隠す（07 の「RebaseEditor」）。
             (RewordInput::Open(buf), Some(entry)) => {
-                rebase_editor::render_reword(frame, area, &entry.oid, buf);
+                rebase_editor::render_reword(frame, area, &entry.oid, buf, charset);
             }
-            _ => rebase_editor::render(frame, area, onto, plan, *cursor),
+            _ => rebase_editor::render(frame, area, onto, plan, *cursor, charset),
         },
     }
 }
@@ -115,9 +122,12 @@ const HINT_GAP: &str = "   ";
 ///
 /// **右に余白を持たない。** 折り返しが 1 セルはみ出す件の余白は `ui::wrapped` が
 /// 持つ（07 の「モーダル」）。ここにも載せていたころは本文の余白が 2 重にかかっていた。
-pub fn block(title: &str) -> Block<'static> {
+///
+/// 字はペインの細線と同じ組（`ui::Charset::border`）。ASCII では `+-|` に倒れる。
+pub fn block(title: &str, charset: ui::Charset) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
+        .border_set(charset.border(false))
         .title(title.to_string())
         .border_style(Style::default().add_modifier(Modifier::BOLD))
 }

@@ -13,7 +13,7 @@ use ratatui::Frame;
 
 use crate::modals::picker::{self, Picker};
 use crate::modals::{self, commit_message};
-use crate::ui::theme;
+use crate::ui::{theme, Charset};
 
 const TITLE: &str = "interactive rebase";
 
@@ -63,7 +63,14 @@ const ACTION_CELLS: usize = "squash".len() + 2;
 
 /// plan を古い順に並べる。**通らない plan は理由を本文の下に赤で出す**（`Modal::RebaseEditor`
 /// の doc。07）。
-pub fn render(frame: &mut Frame, area: Rect, onto: &Oid, plan: &RebasePlan, cursor: usize) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    onto: &Oid,
+    plan: &RebasePlan,
+    cursor: usize,
+    charset: Charset,
+) {
     let mut body = Text::from(Line::from(format!(
         "上から順に {} の上へ積み直します。",
         short_oid(onto)
@@ -82,14 +89,15 @@ pub fn render(frame: &mut Frame, area: Rect, onto: &Oid, plan: &RebasePlan, curs
             cursor,
             hint: HINT,
         },
+        charset,
     );
 }
 
 /// reword のメッセージを打つ入力。**一覧は隠す**（07）—— 入力は複数行で高さが要る。
 /// 箱は `CommitMessage` と同じ（`commit_message::render_editor`）で、題に対象の短縮 Oid を出す。
-pub fn render_reword(frame: &mut Frame, area: Rect, oid: &Oid, buf: &TextBuffer) {
+pub fn render_reword(frame: &mut Frame, area: Rect, oid: &Oid, buf: &TextBuffer, charset: Charset) {
     let title = format!("reword {}", short_oid(oid));
-    commit_message::render_editor(frame, area, &title, REWORD_HINT, buf);
+    commit_message::render_editor(frame, area, &title, REWORD_HINT, buf, charset);
 }
 
 /// 1 行。`pick    abc1234  summary`。**drop の行は弱く出す**（残らないコミット）。

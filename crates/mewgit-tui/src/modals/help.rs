@@ -17,7 +17,7 @@ const TITLE: &str = "キー";
 const HINT: modals::Hint<'static> = &[&["[j/k] 移動", "[Esc] 閉じる"]];
 
 /// `pane` のキーとどこでも効くキーを並べる。
-pub fn render(frame: &mut Frame, area: Rect, pane: Pane, cursor: usize) {
+pub fn render(frame: &mut Frame, area: Rect, pane: Pane, cursor: usize, charset: ui::Charset) {
     let rows = keys::help(pane);
     // **キーの字の桁は並べる行から導く**（いちばん長いキーに 2 桁足して、説明の頭を揃える）。
     let key_cells = rows
@@ -40,6 +40,7 @@ pub fn render(frame: &mut Frame, area: Rect, pane: Pane, cursor: usize) {
             cursor,
             hint: HINT,
         },
+        charset,
     );
 }
 

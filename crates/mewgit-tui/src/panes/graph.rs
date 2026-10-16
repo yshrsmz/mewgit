@@ -20,9 +20,9 @@ use ratatui::Frame;
 
 use crate::ui::{self, lanes, theme};
 
-/// ペインの枠。`focused` はフォーカスの強調だけに効き、内側の大きさは変えない。
-fn block(focused: bool) -> Block<'static> {
-    ui::pane_block("Graph", focused)
+/// ペインの枠。`focused` と `charset` は字だけに効き、内側の大きさは変えない。
+fn block(focused: bool, charset: ui::Charset) -> Block<'static> {
+    ui::pane_block("Graph", focused, charset)
 }
 
 /// 描くときの枠。**印があればタイトルに本数を出す**（`Graph (印 3)`。07）—— 画面外の
@@ -30,9 +30,10 @@ fn block(focused: bool) -> Block<'static> {
 /// 内側の大きさは [`block`] と変わらないので、[`area`] は印を見ない。
 fn titled_block(state: &AppState) -> Block<'static> {
     let focused = state.focus == Pane::Graph;
+    let charset = ui::charset(state);
     match state.graph.marks.len() {
-        0 => block(focused),
-        marks => ui::pane_block(format!("Graph (印 {marks})"), focused),
+        0 => block(focused, charset),
+        marks => ui::pane_block(format!("Graph (印 {marks})"), focused, charset),
     }
 }
 
@@ -40,7 +41,7 @@ fn titled_block(state: &AppState) -> Block<'static> {
 ///
 /// **枠の内側そのまま。** 高さは端末サイズだけで決まる（07 の「CommitDetail ペイン」）。
 pub fn area(area: Rect) -> Rect {
-    block(false).inner(area)
+    block(false, ui::Charset::Utf8).inner(area)
 }
 
 /// グラフペインを描く。
@@ -144,7 +145,7 @@ impl<'a> View<'a> {
     /// 埋める。埋める幅に短縮 Oid のぶんも含めるのは、`WIP (n)` を下の行の summary と
     /// 同じ桁に揃えるため。
     fn wip_line(&self) -> Line<'static> {
-        let glyph = lanes::wip_glyph(self.state.config.graph.ascii);
+        let glyph = lanes::wip_glyph(ui::charset(self.state));
         let pad = lanes::width(self.lanes) + SHORT_OID + 1 - glyph.chars().count();
 
         Line::from(vec![
@@ -167,12 +168,8 @@ impl<'a> View<'a> {
         let labels = state.graph.refs.labels(line.commit.oid);
         // 罫線をそのまま土台にする。Oid・空白・ラベル 1 件あたり 4 つ・summary の
         // ぶんを足して、詰め直しを起こさない大きさにする。
-        let mut spans: Vec<Span<'a>> = lanes::spans(
-            &line.row,
-            self.lanes,
-            &self.palette,
-            state.config.graph.ascii,
-        );
+        let mut spans: Vec<Span<'a>> =
+            lanes::spans(&line.row, self.lanes, &self.palette, ui::charset(state));
         spans.reserve(3 + (branches.len() + labels.len()) * 4);
 
         // **印は oid の見た目だけで出し、桁を足さない**（07）—— 印の桁を足すと、印の

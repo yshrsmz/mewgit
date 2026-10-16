@@ -30,12 +30,17 @@ pub const fn width(lanes: usize) -> usize {
 }
 
 /// 行 1 本ぶんの罫線。`lanes` 本ぶんの桁に右を空白で詰める。
-pub fn spans(row: &GraphRow, lanes: usize, palette: &[Color], ascii: bool) -> Vec<Span<'static>> {
+pub fn spans(
+    row: &GraphRow,
+    lanes: usize,
+    palette: &[Color],
+    charset: ui::Charset,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(width(lanes));
 
     for index in 0..lanes {
         let cell = row.cells.get(index).copied().unwrap_or_default();
-        spans.push(Span::styled(glyph(cell, ascii), fg(color(cell, palette))));
+        spans.push(Span::styled(glyph(cell, charset), fg(color(cell, palette))));
 
         // レーンの継ぎ目。両側がつながっているときだけ線を引く（07）。継ぎ目の色は
         // 左のセルの横線の色。
@@ -43,7 +48,7 @@ pub fn spans(row: &GraphRow, lanes: usize, palette: &[Color], ascii: bool) -> Ve
         let joined = cell.horizontal.goes_right() && next.horizontal.goes_left();
         spans.push(if joined {
             let color = cell.horizontal.color().and_then(|id| pick(id, palette));
-            Span::styled(ui::pick_charset(HORIZONTAL, ascii), fg(color))
+            Span::styled(charset.pick(HORIZONTAL), fg(color))
         } else {
             Span::raw(" ")
         });
@@ -81,7 +86,7 @@ fn fg(color: Option<Color>) -> Style {
 ///
 /// `&'static str` を返すのは、毎フレーム 行 × レーン数ぶん `Span` を作るため。
 /// `char` から `String` を起こすと、そのぶん確保が要る。
-fn glyph(cell: Cell, ascii: bool) -> &'static str {
+fn glyph(cell: Cell, charset: ui::Charset) -> &'static str {
     use Horizontal as H;
     use Vertical as V;
 
@@ -105,7 +110,7 @@ fn glyph(cell: Cell, ascii: bool) -> &'static str {
         (V::Down(_), H::Both(_)) => ("┬", "+"),
     };
 
-    ui::pick_charset((utf8, plain), ascii)
+    charset.pick((utf8, plain))
 }
 
 /// 横線。レーンの継ぎ目にも使う。
@@ -115,8 +120,8 @@ const HORIZONTAL: (&str, &str) = ("─", "-");
 ///
 /// **コミットの `●` / `○` と重ならない字を選ぶ。** WIP 行はコミットではなく、
 /// `graph` 層を通らない（06 の「責務」）。ASCII 側も同じ理由で `*` / `o` を避ける。
-pub fn wip_glyph(ascii: bool) -> &'static str {
-    ui::pick_charset(("◇", "@"), ascii)
+pub fn wip_glyph(charset: ui::Charset) -> &'static str {
+    charset.pick(("◇", "@"))
 }
 
 #[cfg(test)]
@@ -171,8 +176,16 @@ mod tests {
 
         for &(vertical, horizontal, utf8, plain) in table {
             let cell = cell(vertical, horizontal);
-            assert_eq!(glyph(cell, false), utf8, "{vertical:?} {horizontal:?}");
-            assert_eq!(glyph(cell, true), plain, "{vertical:?} {horizontal:?}");
+            assert_eq!(
+                glyph(cell, ui::Charset::Utf8),
+                utf8,
+                "{vertical:?} {horizontal:?}"
+            );
+            assert_eq!(
+                glyph(cell, ui::Charset::Ascii),
+                plain,
+                "{vertical:?} {horizontal:?}"
+            );
         }
     }
 
@@ -188,14 +201,23 @@ mod tests {
         };
 
         // 横線が付いていても本体の文字は変わらない。
-        assert_eq!(glyph(cell(plain, Horizontal::None), false), "●");
+        assert_eq!(glyph(cell(plain, Horizontal::None), ui::Charset::Utf8), "●");
         assert_eq!(
-            glyph(cell(plain, Horizontal::Right(ColorId(0))), false),
+            glyph(
+                cell(plain, Horizontal::Right(ColorId(0))),
+                ui::Charset::Utf8
+            ),
             "●"
         );
-        assert_eq!(glyph(cell(merge, Horizontal::None), false), "○");
-        assert_eq!(glyph(cell(merge, Horizontal::None), true), "o");
-        assert_eq!(glyph(cell(plain, Horizontal::None), true), "*");
+        assert_eq!(glyph(cell(merge, Horizontal::None), ui::Charset::Utf8), "○");
+        assert_eq!(
+            glyph(cell(merge, Horizontal::None), ui::Charset::Ascii),
+            "o"
+        );
+        assert_eq!(
+            glyph(cell(plain, Horizontal::None), ui::Charset::Ascii),
+            "*"
+        );
     }
 
     #[test]
@@ -209,7 +231,7 @@ mod tests {
             Horizontal::None,
         )]);
 
-        let spans = spans(&row, 3, &[], false);
+        let spans = spans(&row, 3, &[], ui::Charset::Utf8);
 
         assert_eq!(text(&spans), "●     ");
         assert_eq!(spans.len(), width(3));
@@ -241,8 +263,8 @@ mod tests {
             cell(Vertical::Through(id), Horizontal::None),
         ]);
 
-        assert_eq!(text(&spans(&joined, 2, &[], false)), "○─╮ ");
-        assert_eq!(text(&spans(&apart, 2, &[], false)), "● │ ");
+        assert_eq!(text(&spans(&joined, 2, &[], ui::Charset::Utf8)), "○─╮ ");
+        assert_eq!(text(&spans(&apart, 2, &[], ui::Charset::Utf8)), "● │ ");
     }
 
     #[test]

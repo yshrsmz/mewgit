@@ -12,6 +12,7 @@ use ratatui::Frame;
 
 use crate::modals;
 use crate::modals::picker::{self, Picker};
+use crate::ui::Charset;
 
 /// 枠のタイトル。**選ぶのは残す側**だと言う —— git の `--mainline` は「本流」の番号で、
 /// 取り消される側と取り違えると逆の変更が消える（01 の「revert の開始（`v`）」）。
@@ -29,6 +30,7 @@ pub fn render(
     summary: &str,
     parents: &[ParentChoice],
     cursor: usize,
+    charset: Charset,
 ) {
     let body = format!(
         "{} {} は merge コミットです。残す側の親を選ぶと、ほかの親から入った変更を取り消します。",
@@ -50,6 +52,7 @@ pub fn render(
             cursor,
             hint: HINT,
         },
+        charset,
     );
 }
 

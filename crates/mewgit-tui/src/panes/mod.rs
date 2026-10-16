@@ -84,7 +84,11 @@ impl TopPane {
     ///
     /// **`self` を取らない** —— 組む前（[`build`](Self::build)）にも内側の幅を測る。
     fn block(state: &AppState, tab: RightTab) -> Block<'static> {
-        ui::pane_block(right_tabs(state), state.focus == tab.pane())
+        ui::pane_block(
+            right_tabs(state),
+            state.focus == tab.pane(),
+            ui::charset(state),
+        )
     }
 
     /// 描く。領域の高さは [`height`](Self::height) が決める。

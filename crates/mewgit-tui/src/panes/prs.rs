@@ -57,7 +57,7 @@ pub(super) fn lines(state: &AppState, width: u16) -> Rows {
         .max()
         .unwrap_or(0);
     let theme = &state.config.theme;
-    let ascii = state.config.graph.ascii;
+    let charset = ui::charset(state);
     let budget = summary_budget(state, &account.login, usize::from(width), width_of_status);
     // **集計の桁も出す行から導く。** 中身は行ごとに違う（引けていない行は待ちの印 1 つ、
     // 引けた行は記号が並ぶ）ので、揃えないとタイトルの開始位置が行ごとにずれる。
@@ -68,7 +68,7 @@ pub(super) fn lines(state: &AppState, width: u16) -> Rows {
             .prs
             .list
             .iter()
-            .map(|pr| summary_cell(state.prs.detail(pr.number), ascii, budget)),
+            .map(|pr| summary_cell(state.prs.detail(pr.number), charset, budget)),
     );
     Rows {
         lines: state
@@ -163,24 +163,24 @@ fn lead(pr: &PullRequest, login: &str) -> [Span<'static>; 2] {
 /// もう 1 組要り、狭い右列ではそれだけでタイトルが消える（[`summary_budget`] の doc）。
 fn summary_cell(
     detail: Option<&Result<PrDetail, GithubError>>,
-    ascii: bool,
+    charset: ui::Charset,
     budget: usize,
 ) -> String {
     match detail {
-        None => ui::pick_charset(CHECK_WAIT, ascii).to_string(),
+        None => charset.pick(CHECK_WAIT).to_string(),
         // **理由はここに出ない。** 枠の内側に入らないので、出せるのは「引けなかった」
         // ことだけ（07 で受け入れた穴）。打ち切りの理由は通知に出る。
-        Some(Err(_)) => ui::pick_charset(CHECK_ERROR, ascii).to_string(),
+        Some(Err(_)) => charset.pick(CHECK_ERROR).to_string(),
         Some(Ok(detail)) => {
             let checks = &detail.checks;
             let review = &detail.review;
             counts(
                 &[
-                    (checks.success, ui::pick_charset(CHECK_OK, ascii)),
-                    (checks.failure, ui::pick_charset(CHECK_FAIL, ascii)),
-                    (checks.pending, ui::pick_charset(CHECK_PENDING, ascii)),
-                    (checks.skipped, ui::pick_charset(CHECK_SKIPPED, ascii)),
-                    (checks.neutral, ui::pick_charset(CHECK_NEUTRAL, ascii)),
+                    (checks.success, charset.pick(CHECK_OK)),
+                    (checks.failure, charset.pick(CHECK_FAIL)),
+                    (checks.pending, charset.pick(CHECK_PENDING)),
+                    (checks.skipped, charset.pick(CHECK_SKIPPED)),
+                    (checks.neutral, charset.pick(CHECK_NEUTRAL)),
                     // **`commented` は出さない** —— 承認でも変更要求でもないコメントは、
                     // 出しても次に何をするかが変わらない。**値は捨てていない**ので、出す
                     // 場所ができたときに数え直さずに済む。

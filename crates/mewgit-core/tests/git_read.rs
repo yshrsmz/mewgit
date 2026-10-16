@@ -1031,17 +1031,43 @@ fn branches_tells_whether_the_head_includes_its_upstream() {
         inclusion_of(&repo, "main"),
         (1, 2, Some(Inclusion::Included))
     );
+}
 
-    // 追跡 ref が自分の push の位置なら、diverged でも取り込み済み（push のあとの
-    // amend や rebase と同じ形）。
-    repo.git(&[
-        "update-ref",
-        "refs/remotes/origin/main",
-        &pushed.to_string(),
-    ]);
+#[test]
+fn branches_counts_an_amend_after_the_push_as_including_its_upstream() {
+    // push のあとの amend は diverged（1 / 1）だが、追跡 ref の先端を main が一度指して
+    // いた（push した位置）ので取り込み済み（01 の「force push」の表）。
+    let (repo, _) = pushed_main();
+    repo.git(&["commit", "-q", "--amend", "-m", "second again"]);
     assert_eq!(
         inclusion_of(&repo, "main"),
         (1, 1, Some(Inclusion::Included))
+    );
+}
+
+#[test]
+fn branches_ignores_what_the_branch_held_before_the_last_fetch() {
+    // **git と同じ打ち切り。** 追跡 ref が最後に動いた（fetch した）時刻より古い項目は、
+    // 最初の 1 つまでしか見ない。見ないと、fetch より前に取り込んで捨てた子孫から辿り
+    // 着いてしまい、他人が force push で戻した先端の上を消す force が通る（git は
+    // `remote ref updated since checkout` で断る。`/code-review` が再現した形）。
+    let (repo, pushed) = pushed_main();
+    let tree = format!("{pushed}^{{tree}}");
+    let theirs_c = repo.git(&["commit-tree", &tree, "-p", &pushed.to_string(), "-m", "C"]);
+    let theirs_c = theirs_c.trim();
+    let theirs_d = repo.git(&["commit-tree", &tree, "-p", theirs_c, "-m", "D"]);
+    let theirs_d = theirs_d.trim();
+    // 他人が C と D を push し、fetch して早送りで取り込んだ。
+    repo.git(&["update-ref", "refs/remotes/origin/main", theirs_d]);
+    repo.git(&["merge", "-q", "--ff-only", theirs_d]);
+    // 取り込んだ 2 つを捨てた。
+    repo.git(&["reset", "-q", "--hard", &pushed.to_string()]);
+    // 他人が force push で C に戻し、fetch した。D（main の reflog に在る）は C の子孫。
+    repo.git(&["update-ref", "refs/remotes/origin/main", theirs_c]);
+
+    assert_eq!(
+        inclusion_of(&repo, "main"),
+        (0, 1, Some(Inclusion::NotIncluded))
     );
 }
 

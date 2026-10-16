@@ -180,10 +180,16 @@ fn push_plan(state: &AppState) -> PushPlan {
         // `--force-if-includes` と同じ問い。巻き戻した形もここを通る）。断る文は `p` だけを
         // 勧めない —— 巻き戻した人には巻き戻しを元に戻す案内になる。
         (true, Some(upstream)) if upstream.inclusion != Inclusion::Included => {
+            // **`p` を勧めるのは早送りできるときだけ。** `p` は `pull --ff-only` なので、
+            // 送るコミットがある（分かれた）ブランチでは通らない。
             return PushPlan::Refused(
-                "リモートに未取り込みのコミット。p で取り込むか、外の git で force push"
-                    .to_string(),
-            )
+                if head.ahead == 0 {
+                    "リモートに未取り込みのコミット。p で取り込むか、外の git で force push"
+                } else {
+                    "リモートに未取り込みのコミット。外の git で取り込むか force push"
+                }
+                .to_string(),
+            );
         }
         (true, Some(upstream)) => Some(upstream.oid),
         (false, _) => None,
@@ -1009,9 +1015,12 @@ mod tests {
 
             let message = refused_force(&mut state);
             // `p` だけを勧めない —— 巻き戻した人には巻き戻しを元に戻す案内になる（01）。
-            assert!(
-                message.contains("p で取り込む") && message.contains("外の git"),
-                "取り込む道と外の git の道を両方挙げていません: {message}"
+            assert!(message.contains("外の git"), "{message}");
+            // `p`（`pull --ff-only`）を勧めるのは早送りできる形だけ。
+            assert_eq!(
+                message.contains("p で取り込む"),
+                ahead == 0,
+                "ahead {ahead}: {message}"
             );
             assert!(cells(&message) <= NOTICE_CELLS, "{message}");
         }

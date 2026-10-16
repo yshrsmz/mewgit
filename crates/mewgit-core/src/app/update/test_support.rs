@@ -385,9 +385,9 @@ pub(super) const HEADS_MAIN: &str = "refs/heads/main";
 
 /// 追跡 ref も持つブランチ。その位置が force push の lease になる。
 ///
-/// **`ahead` は 1。** force push はリモートに無いコミットを出す操作なので、
-/// 0 のままだと `push_plan` が「出すものが無い」と断る（`↓n` だけのブランチを
-/// 見る腕は [`a_force_push_is_refused_when_there_is_nothing_to_publish`]）。
+/// **`ahead` は 1、追跡 ref の先端は取り込み済み**（`fake_upstream`）。自分の push の上に
+/// 1 つ積んだ形で、断られたあとの `P` が force に上がる。取り込んでいない形を見る腕は
+/// `remote` のテストの `a_force_push_is_refused_over_a_fetched_tip_it_does_not_include`。
 pub(super) fn tracked_head(
     name: &str,
     remote: &str,

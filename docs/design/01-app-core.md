@@ -2517,20 +2517,24 @@ pub struct PushRejection {
   読む側が使えない印を持つと、あとから追跡設定が外で入ったときに、追跡していない push の
   拒否を根拠に force の腕が立つ。憶えるかどうかは「次を force に上げられる経路か」
   （`upgradable`）の 1 つの問いで、force の失敗を憶えないのと同じ場所で決める
-- **force に上げるのは、追跡 ref の先端を取り込んだ形だけ**（`Upstream.inclusion` が `Included`。02）。問いは git の `--force-if-includes` と同じで、「追跡 ref の先端に、ローカルの先端かブランチの reflog のどれかの項目から辿り着けるか」。**lease は「リモートが動いていないこと」しか守らない**ので、`f` のあとは守りにならない —— `↓n` だけのブランチも非 FF で断られて（git 2.55 で確認）記憶が立ち、`f` で lease がリモートの位置に追いつくと、**出すものが 1 つも無いのに他人のコミットを消す force が通る**。ahead ≥ 1 で他人の push を `f` で取っただけの形（diverged）も同じで、元は `ahead == 0` だけを断っていたのでこちらは通っていた（`/simplify` の altitude が拾った）。**意図的な巻き戻し（`reset --hard HEAD~1` してから `P`）、push のあとの amend、自分の push の上での rebase** は、追跡 ref の先端をこのブランチが一度指していたので通る。**git の `--force-if-includes` には任せられない** —— lease の値と一緒に渡すと何もせず（`--force-with-lease=<dst>:<oid> --force-if-includes` で他人の push の上へ exit 0 で通った。altitude が実測）、値を外すと 03 が禁じた裸の lease になる。取り込んでいなければ断り、`p` で取り込むか外の git で force するかを案内する（`p` だけを勧めると、巻き戻した人には巻き戻しを元に戻す逆向きの案内になる）。**reflog で見分けるので専用のキーも入口も足さない**（07 の「専用のキーを作らない」はそのまま）。確認モーダルの本文は消えるもの —— リモートにしか無い `behind` 本 —— の数を言い、ahead が 0 なら送るコミットが無いことも言う
+- **force に上げるのは、追跡 ref の先端を取り込んだ形だけ**（`Upstream.inclusion` が `Included`。02）。問いは git の `--force-if-includes` と同じで、「追跡 ref の先端に、ローカルの先端かブランチの reflog の項目から辿り着けるか」（どこまで遡るかの打ち切りは下）。**lease は「リモートが動いていないこと」しか守らない**ので、`f` のあとは守りにならない —— `↓n` だけのブランチも非 FF で断られて（git 2.55 で確認）記憶が立ち、`f` で lease がリモートの位置に追いつくと、**出すものが 1 つも無いのに他人のコミットを消す force が通る**。ahead ≥ 1 で他人の push を `f` で取っただけの形（diverged）も同じで、元は `ahead == 0` だけを断っていたのでこちらは通っていた（`/simplify` の altitude が拾った）。**意図的な巻き戻し（`reset --hard HEAD~1` してから `P`）、push のあとの amend、自分の push の上での rebase** は、追跡 ref の先端をこのブランチが一度指していたので通る。**git の `--force-if-includes` には任せられない** —— lease の値と一緒に渡すと何もせず（`--force-with-lease=<dst>:<oid> --force-if-includes` で他人の push の上へ exit 0 で通った。altitude が実測）、値を外すと 03 が禁じた裸の lease になる。取り込んでいなければ断り、`p` で取り込むか外の git で force するかを案内する（ahead ≥ 1 なら外の git だけ。下。`p` だけを勧めると、巻き戻した人には巻き戻しを元に戻す逆向きの案内になる）。**reflog で見分けるので専用のキーも入口も足さない**（07 の「専用のキーを作らない」はそのまま）。確認モーダルの本文は消えるもの —— リモートにしか無い `behind` 本 —— の数を言い、ahead が 0 なら送るコミットが無いことも言う
 
-  実測（2026-10-16、git 2.56.0、一時リポジトリ。「判定」は追跡 ref の先端が reflog のどれかの項目の祖先か自身か。git の列は lease の値を付けない `--force-with-lease --force-if-includes` の `--dry-run`）:
+  **規則は git の `--force-if-includes` と同じで、打ち切りも含む** —— ブランチの reflog を新しい順に見て、追跡 ref が最後に動いた（fetch / push した）時刻より古い項目は**最初の 1 つまで**しか候補にしない。打ち切りが無いと、fetch より前に取り込んで捨てた子孫から辿り着いてしまい、他人が force push で戻した先端の上を消す force が通る（下の表の I。2 回目の `/code-review` が再現した）。**断る文は形で分ける** —— ahead が 0 なら `p`（`pull --ff-only`）で取り込めるので挙げ、ahead ≥ 1 なら `p` は通らないので外の git だけを挙げる
 
-  | 形 | ahead / behind | 判定 | git の `--force-if-includes` |
+  実測（2026-10-16、git 2.56.0、一時リポジトリ。手順のあいだに 1 秒ずつ置いた。mewgit の列は `RepoReader::branches` の HEAD の行、git の列は lease の値を付けない `--force-with-lease --force-if-includes` の `--dry-run`）:
+
+  | 形 | ahead / behind | mewgit | git の `--force-if-includes` |
   |---|---|---|---|
-  | push してから `reset --hard HEAD~1` | 0 / 1 | 辿り着ける | 通る |
-  | push してから `commit --amend` | 1 / 1 | 辿り着ける | 通る |
-  | 自分の push のあとローカルで `rebase --root` して amend | 1 / 1 | 辿り着ける | 通る |
-  | 他人の push を `fetch` で取っただけ | 0 / 1 | 辿り着けない | 断る（`remote ref updated since checkout`） |
-  | 他人の push を `fetch` で取り、ローカルで 1 コミット | 1 / 1 | 辿り着けない | 断る（同上） |
-  | `pull --ff-only` で取り込んでから `reset --hard HEAD~1` | 0 / 1 | 辿り着ける（ローカルに一度在ったものを捨てる。意図した巻き戻しとして通す） | — |
-  | `branch -m` で改名してから巻き戻す | 0 / 1 | 辿り着ける（reflog は改名先に付いてくる） | — |
-  | reflog のファイルが一度も作られていない（**ファイルが既にあれば `core.logAllRefUpdates=false` でも git は追記を続ける**ので、設定だけではこの形にならない。`/code-review` が実測） | 0 / 1 | 辿り着けない —— 断る側に落ちる | — |
+  | A. push してから `reset --hard HEAD~1` | 0 / 1 | `Included` | 通る |
+  | B. push してから `commit --amend` | 1 / 1 | `Included` | 通る |
+  | C. 他人の push を `fetch` で取っただけ | 0 / 1 | `NotIncluded` | 断る（`remote ref updated since checkout`） |
+  | D. 他人の push を `fetch` で取り、ローカルで 1 コミット | 1 / 1 | `NotIncluded` | 断る |
+  | F. 自分の push のあとローカルで `rebase --root` して amend | 1 / 1 | `Included` | 通る |
+  | G. 他人の push を `pull --ff-only` で取り込んでから `reset --hard HEAD~1`（ローカルに一度在ったものを捨てる。意図した巻き戻しとして通す） | 0 / 1 | `Included` | 通る |
+  | H. 他人の push を `merge -s ours` で取り込んでから merge を捨てる（reflog の項目は先端の子孫で、先端そのものは一度も値になっていない） | 1 / 1 | `Included` | 通る |
+  | I. 他人が 2 つ push → `pull --ff-only` → `reset --hard HEAD~2` → 他人が force push で 1 つ戻す → `fetch` | 0 / 1 | `NotIncluded` | 断る |
+
+  同じ日に、`branch -m` で改名してから巻き戻した形は reflog が改名先に付いてくるので通り、reflog のファイルが一度も作られていない形は断る側に落ちることも確かめた（**ファイルが既にあれば `core.logAllRefUpdates=false` でも git は追記を続ける**ので、設定だけではこの形にならない。1 回目の `/code-review` が実測）
 - **憶えるのは押したブランチ**（`GitOp::Push` の `src`）。一覧の読み直しは別のジョブ
   なので、`Switch` の直後に押した push が返るころには HEAD が別のブランチになって
   いることがある。HEAD で憶えると、押していないブランチに force の腕が立つ

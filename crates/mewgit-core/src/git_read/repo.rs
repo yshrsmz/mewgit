@@ -1,6 +1,5 @@
 //! リポジトリを開いて ref / リモート / HEAD を読む。設計は `docs/design/02-git-read.md`。
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use git2::{ErrorCode, Reference, ReferenceType, Repository};
@@ -343,7 +342,11 @@ impl RepoReader {
     /// `reflog` は取り込みを確かめるブランチの完全な ref 名。`None` なら確かめない
     /// （[`Inclusion::Unchecked`]。HEAD 以外の行）。
     fn tracking(&self, local: Oid, upstream: &git2::Branch<'_>, reflog: Option<&str>) -> Tracking {
-        let (Ok(Some(name)), Some(oid)) = (upstream.name(), upstream.get().target()) else {
+        let (Ok(Some(name)), Ok(tracking_ref), Some(oid)) = (
+            upstream.name(),
+            upstream.get().name(),
+            upstream.get().target(),
+        ) else {
             return Tracking::default();
         };
         match self.repo.graph_ahead_behind(local, oid) {
@@ -355,7 +358,7 @@ impl RepoReader {
                         None => Inclusion::Unchecked,
                         // 先端がローカルの先端の祖先か自身。reflog を読むまでもない。
                         Some(_) if behind == 0 => Inclusion::Included,
-                        Some(full) => self.reflog_reaches(full, oid),
+                        Some(full) => self.reflog_reaches(full, tracking_ref, oid),
                     },
                 }),
                 ahead,
@@ -365,30 +368,78 @@ impl RepoReader {
         }
     }
 
-    /// `target` に、ブランチ `full_ref` の reflog のどれかの項目（新しい側）から辿り
-    /// 着けるか —— 自身か祖先か（02 の「ブランチ一覧」の `inclusion`。git の
-    /// `--force-if-includes` と同じ問い）。
+    /// 追跡 ref（`tracking_ref`）の先端 `target` を、ブランチ `full_ref` が取り込んでいるか
+    /// （02 の「ブランチ一覧」の `inclusion`）。**git の `--force-if-includes` と同じ規則**
+    /// （git 2.56.0 の `--dry-run` と形ごとに突き合わせた。01 の「force push」の表）——
+    ///
+    /// 1. 追跡 ref の reflog のいちばん新しい項目の時刻（最後に fetch / push で動いた時刻）を
+    ///    取る。reflog が無ければ 0（全項目を見る）
+    /// 2. ブランチの reflog を新しい順に見て、新しい側が `target` そのものなら取り込み済み。
+    ///    そうでなければ候補に積み、**時刻が 1 より古い項目を積んだところで打ち切る**
+    /// 3. 候補のどれかから `target` に辿り着けるか
+    ///
+    /// **打ち切りが要る** —— 無いと、fetch より前に一度取り込んで捨てた子孫から辿り着いて
+    /// しまう（他人が force push で戻した先端の上を、git は断るのにこちらは通した。
+    /// `/code-review` が再現）。**3 は 1 本の revwalk で見る** —— 候補を push し、`target` の
+    /// 親を hide すると、辿るのは分かれた部分だけになる。候補ごとに `graph_descendant_of`
+    /// を呼ぶと、取り込んでいない形で候補の数 × 履歴の深さを歩く（20,000 コミット・reflog
+    /// 1,000 項目で一覧の読み取りが 1 回 3 秒。`/code-review` が release で実測）。
     ///
     /// **reflog が無い・読めないときは [`Inclusion::NotIncluded`]。** 読み手は force push を
     /// 通すかをこれで決める（01 の「force push」）ので、判らないときは断る側に倒す。
     /// **先に `reference_has_log` で見る** —— `reflog()` はファイルが無いと空のファイルを
     /// 作り（libgit2 1.9.7 の `refdb_reflog_fs__read`）、以後 git が
     /// `core.logAllRefUpdates=false` でもそこへ追記する。読み取りで git の振る舞いを変えない。
-    fn reflog_reaches(&self, full_ref: &str, target: Oid) -> Inclusion {
-        let reaches = self.repo.reference_has_log(full_ref).unwrap_or(false)
-            && self.repo.reflog(full_ref).is_ok_and(|reflog| {
-                let mut seen = HashSet::new();
-                reflog.iter().map(|entry| entry.id_new()).any(|id| {
-                    seen.insert(id)
-                        && (id == target
-                            || self.repo.graph_descendant_of(id, target).unwrap_or(false))
-                })
-            });
-        if reaches {
-            Inclusion::Included
-        } else {
-            Inclusion::NotIncluded
+    fn reflog_reaches(&self, full_ref: &str, tracking_ref: &str, target: Oid) -> Inclusion {
+        match self.includes(full_ref, tracking_ref, target) {
+            Ok(true) => Inclusion::Included,
+            Ok(false) | Err(_) => Inclusion::NotIncluded,
         }
+    }
+
+    /// [`RepoReader::reflog_reaches`] の本体。
+    fn includes(
+        &self,
+        full_ref: &str,
+        tracking_ref: &str,
+        target: Oid,
+    ) -> Result<bool, git2::Error> {
+        if !self.repo.reference_has_log(full_ref)? {
+            return Ok(false);
+        }
+        let since = if self.repo.reference_has_log(tracking_ref)? {
+            self.repo
+                .reflog(tracking_ref)?
+                .get(0)
+                .map_or(0, |entry| entry.committer().when().seconds())
+        } else {
+            0
+        };
+
+        let reflog = self.repo.reflog(full_ref)?;
+        let mut walk = self.repo.revwalk()?;
+        for entry in reflog.iter() {
+            let id = entry.id_new();
+            if id == target {
+                return Ok(true);
+            }
+            // 削除の項目（新しい側が 0）や、gc で消えたコミットは候補にならないだけ。
+            if !id.is_zero() {
+                let _ = walk.push(id);
+            }
+            if entry.committer().when().seconds() < since {
+                break;
+            }
+        }
+        for parent in self.repo.find_commit(target)?.parent_ids() {
+            walk.hide(parent)?;
+        }
+        for oid in walk {
+            if oid? == target {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// `branch.<name>.remote` / `branch.<name>.merge` を読む。

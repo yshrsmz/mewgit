@@ -4,7 +4,7 @@
 //! アカウントと同じくリポジトリ単位の話で、どのペインに居るかと関係が無い。
 
 use crate::git_exec::{push_remote_ref, ExecError, ExecErrorKind, ExecOutput, GitOp};
-use crate::git_read::{short_oid, Branch, Remote};
+use crate::git_read::{short_oid, Branch, Inclusion, Remote};
 
 use super::confirm;
 use crate::app::state::Tracked;
@@ -172,15 +172,17 @@ fn push_plan(state: &AppState) -> PushPlan {
                 "追跡 ref が無いので force push できません。f で取得してください".to_string(),
             )
         }
-        // **リモートに無いコミットが 1 つも無いなら、force push は消すだけ。**
-        // `↓n` だけのブランチも非 FF で断られる（git 2.55 で確認）ので、断られた記憶は
-        // 立つ。そこで `f` を踏むと lease がリモートの位置に追いつき、**通ってしまう**
-        // —— 出すものが無いのに他人のコミットを消す（01 の「force push」）。**通すのは
-        // 巻き戻した形だけ**（`rewound`。追跡 ref の先端をこのブランチが一度指していた）。
-        // 断る文は `p` だけを勧めない —— 巻き戻した人には巻き戻しを元に戻す案内になる。
-        (true, Some(upstream)) if head.ahead == 0 && !upstream.rewound => {
+        // **取り込んでいない追跡 ref の先端の上へは force しない。** lease は「リモートが
+        // 動いていないこと」しか守らないので、`f` のあとは守りにならない —— `↓n` だけの
+        // ブランチも diverged のブランチも非 FF で断られて記憶が立ち、`f` で lease が
+        // リモートの位置に追いつくと、他人のコミットを消す force が通る（01 の「force
+        // push」）。**通すのは先端を取り込んだ形だけ**（`Inclusion::Included`。git の
+        // `--force-if-includes` と同じ問い。巻き戻した形もここを通る）。断る文は `p` だけを
+        // 勧めない —— 巻き戻した人には巻き戻しを元に戻す案内になる。
+        (true, Some(upstream)) if upstream.inclusion != Inclusion::Included => {
             return PushPlan::Refused(
-                "送るコミットがありません。p で取り込むか、外の git で force push".to_string(),
+                "リモートに未取り込みのコミット。p で取り込むか、外の git で force push"
+                    .to_string(),
             )
         }
         (true, Some(upstream)) => Some(upstream.oid),
@@ -189,26 +191,31 @@ fn push_plan(state: &AppState) -> PushPlan {
 
     let dst = push_dst(&head.name, &config.merge);
     let body = lease.map(|lease| {
-        let target = format!(
-            "{} を {} の {} に force push します。",
+        // 消えるものの数を言う —— リモートにしか無い `behind` 本。ahead が 0 なら送るものも
+        // 無い（巻き戻した形。01）。
+        let mut body = format!(
+            "{} を {} の {} に force push します。\n",
             head.name,
             config.remote,
             push_remote_ref(&head.name, dst.as_deref())
         );
-        let guard = format!(
+        if head.ahead == 0 {
+            body.push_str("送るコミットはありません。");
+        }
+        if head.behind > 0 {
+            body.push_str(&format!(
+                "リモートにしか無い {} 本が消えます。",
+                head.behind
+            ));
+        }
+        if head.ahead == 0 || head.behind > 0 {
+            body.push('\n');
+        }
+        body.push_str(&format!(
             "リモートが {} から動いていれば git が断ります。上書きした履歴は戻せません。",
             short_oid(&lease)
-        );
-        // 巻き戻した形は送るものが無く、消えるのはリモートにしか無いコミットだけ ——
-        // 通常の force（新しい履歴で上書きする）と消えるものが違うので数を出す（01）。
-        if head.ahead == 0 {
-            format!(
-                "{target}\n送るコミットはありません。リモートにしか無い {} 本が消えます。\n{guard}",
-                head.behind
-            )
-        } else {
-            format!("{target}\n{guard}")
-        }
+        ));
+        body
     });
     let op = GitOp::Push {
         remote: config.remote.clone(),
@@ -568,10 +575,10 @@ fn push_dst(local: &str, merge: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{
-        cells, deliver_branches, exec_done_of, failed_with, fake_output, fetched_remote,
-        finish_exec, forced_push_op, load_branches, open_confirm, press, press_code, push_op,
-        reject_non_fast_forward, state_for_push, state_with_commits, tracked_head, tracking_branch,
-        with_remotes, HEADS_MAIN, NOTICE_CELLS,
+        cells, deliver_branches, failed_with, fake_output, fetched_remote, finish_exec,
+        forced_push_op, load_branches, open_confirm, press, press_code, push_op,
+        reject_non_fast_forward, reply_exec, state_for_push, state_with_commits, tracked_head,
+        tracking_branch, with_remotes, HEADS_MAIN, NOTICE_CELLS,
     };
     use super::super::update;
 
@@ -579,7 +586,7 @@ mod tests {
     use crate::app::{Key, KeyCode, Modal, Msg, Pane};
 
     use crate::git_exec::PullMode;
-    use crate::git_read::{Branch, BranchList, GitReadError, Head, Upstream};
+    use crate::git_read::{Branch, BranchList, GitReadError, Head};
 
     use crate::test_util::{
         fake_branch, fake_branch_list, fake_head_list, fake_oid, fake_upstream,
@@ -971,12 +978,50 @@ mod tests {
         );
     }
 
+    /// 断られたあとの `P` で force を断ったか。断った理由の通知を返す。
+    fn refused_force(state: &mut AppState) -> String {
+        assert_eq!(press(state, 'P'), Cmd::None);
+        assert_eq!(state.modal, None);
+        state
+            .notices
+            .back()
+            .expect("通知が出ていません")
+            .message
+            .clone()
+    }
+
     #[test]
-    fn a_force_push_is_refused_when_there_is_nothing_to_publish() {
-        // **`↓n` だけのブランチも非 FF で断られる**（git 2.55 で確認）ので、記憶は立つ。
-        // そこで案内どおり `f` を踏むと lease がリモートの位置に追いつき、force が
-        // **通ってしまう** —— 出すものが 1 つも無いのに他人のコミットを消す。
-        // `fake_upstream` は巻き戻していない形（`rewound: false`）。
+    fn a_force_push_is_refused_over_a_fetched_tip_it_does_not_include() {
+        // **`↓n` だけのブランチも diverged のブランチも非 FF で断られる**（git 2.55 で
+        // 確認）ので、記憶は立つ。そこで `f` を踏むと lease がリモートの位置に追いつき、
+        // force が**通ってしまう** —— 他人のコミットを消す。先端を取り込んでいるか
+        // （`Inclusion`。02）で断る。**ahead は問わない**（元は 0 だけを断っていた）。
+        for (ahead, behind) in [(0, 2), (1, 1)] {
+            let lease = fake_oid(7);
+            let mut head = Branch {
+                ahead,
+                behind,
+                ..tracked_head("main", "origin", HEADS_MAIN, Some(lease))
+            };
+            head.upstream.as_mut().unwrap().inclusion = Inclusion::NotIncluded;
+            let mut state = state_for_push(&["origin"], head);
+            reject_non_fast_forward(&mut state, push_op("origin", "main", false));
+
+            let message = refused_force(&mut state);
+            // `p` だけを勧めない —— 巻き戻した人には巻き戻しを元に戻す案内になる（01）。
+            assert!(
+                message.contains("p で取り込む") && message.contains("外の git"),
+                "取り込む道と外の git の道を両方挙げていません: {message}"
+            );
+            assert!(cells(&message) <= NOTICE_CELLS, "{message}");
+        }
+    }
+
+    #[test]
+    fn a_rewound_branch_turns_the_next_push_into_a_confirmed_force_push() {
+        // `reset --hard HEAD~1` してから `P` —— 送るものは無いが、追跡 ref の先端に
+        // reflog から辿り着ける（`Inclusion::Included`。02）。上の `↓n` の形と ahead /
+        // behind は同じで、違うのは `inclusion` だけ。
         let lease = fake_oid(7);
         let head = Branch {
             ahead: 0,
@@ -984,50 +1029,21 @@ mod tests {
             ..tracked_head("main", "origin", HEADS_MAIN, Some(lease))
         };
         let mut state = state_for_push(&["origin"], head);
-        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
-
-        assert_eq!(press(&mut state, 'P'), Cmd::None);
-        assert_eq!(state.modal, None);
-        let notice = state.notices.back().expect("通知が出ていません");
-        // `p` だけを勧めない —— 巻き戻した人には巻き戻しを元に戻す案内になる（01）。
-        assert!(
-            notice.message.contains("p で取り込む") && notice.message.contains("外の git"),
-            "取り込む道と外の git の道を両方挙げていません: {}",
-            notice.message
-        );
-        assert!(cells(&notice.message) <= NOTICE_CELLS, "{}", notice.message);
-    }
-
-    #[test]
-    fn a_rewound_branch_turns_the_next_push_into_a_confirmed_force_push() {
-        // `reset --hard HEAD~1` してから `P` —— 送るものは無いが、追跡 ref の先端を
-        // このブランチが一度指していた（`rewound`。02）。上の `↓n` の形と ahead /
-        // behind は同じで、違うのは `rewound` だけ。
-        let lease = fake_oid(7);
-        let tracked = tracked_head("main", "origin", HEADS_MAIN, Some(lease));
-        let head = Branch {
-            upstream: tracked.upstream.clone().map(|upstream| Upstream {
-                rewound: true,
-                ..upstream
-            }),
-            ahead: 0,
-            behind: 2,
-            ..tracked
-        };
-        let mut state = state_for_push(&["origin"], head);
         // **断られる前は force にしない**（専用のキーは作らない。07）。
-        assert_eq!(
-            press(&mut state, 'P'),
-            Cmd::Exec(push_op("origin", "main", false))
-        );
-        // `press` が `update` の出口で発行済みなので、返信だけを届ける（もう一度
-        // `issue` に通すと登録済みの種別として落とされる）。
-        let _ = update(
+        let plain = push_op("origin", "main", false);
+        assert_eq!(press(&mut state, 'P'), Cmd::Exec(plain.clone()));
+        reply_exec(
             &mut state,
-            exec_done_of(
-                push_op("origin", "main", false),
-                Err(failed_with(ExecErrorKind::NonFastForward)),
-            ),
+            plain,
+            Err(failed_with(ExecErrorKind::NonFastForward)),
+        );
+        // 1 回目の案内は「リモートが進んでいます」と言わない（進んでいない。`p` を押すと
+        // 捨てたコミットが戻る。01 の「失敗の案内文」）。
+        let notice = state.notices.back().expect("通知が出ていません");
+        assert!(
+            !notice.message.contains("進んで") && notice.message.contains("上書きするなら P"),
+            "{}",
+            notice.message
         );
 
         assert_eq!(press(&mut state, 'P'), Cmd::None, "確認せずに撃っています");

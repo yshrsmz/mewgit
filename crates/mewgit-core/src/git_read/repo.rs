@@ -1,12 +1,13 @@
 //! リポジトリを開いて ref / リモート / HEAD を読む。設計は `docs/design/02-git-read.md`。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
-    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, Oid, RefIndex, RefLabel,
-    Remote, RowlessHead, StashEntry, Upstream, UpstreamConfig, STASH_REF,
+    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, Inclusion, Oid, RefIndex,
+    RefLabel, Remote, RowlessHead, StashEntry, Upstream, UpstreamConfig, STASH_REF,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -211,17 +212,24 @@ impl RepoReader {
         let config = self.repo.config()?.snapshot()?;
         let push_default = config.get_string("remote.pushDefault").ok();
 
+        // **どの行が HEAD かは名前で決める**（`Branch` に旗を持たせない。02 の「head」）。
+        // 列挙は `refs/heads/*` だけなので、行の名前は target から接頭辞を外したものと
+        // 比べられる。外れなければ（`refs/heads/` の外を指す symref）どの行でもない。
+        // symbolic でない HEAD は名前を持たないので、必ず `rowless` へ落ちる。
+        let head_name = head_target.and_then(|target| target.strip_prefix("refs/heads/"));
+
         let mut branches = Vec::new();
         for reference in self.repo.references_glob("refs/heads/*")? {
-            let reference = reference?;
+            let branch = git2::Branch::wrap(reference?);
+            let reference = branch.get();
             // 非 UTF-8 のブランチ名は識別子として使えない（`git_exec` の argv にも
             // 載せられない）ので落とす。切替も削除もできない行を出さないため。
-            let Some(name) = reference.shorthand().ok().map(str::to_string) else {
+            // `refs/heads/*` の完全な名前は `refs/heads/` + 短縮名なので、短縮名が
+            // UTF-8 なら完全な名前も UTF-8。
+            let (Ok(short), Ok(full)) = (reference.shorthand(), reference.name()) else {
                 continue;
             };
-            // 写しを持つ。`reference` は下で `git2::Branch` に包むので借りたままにできない
-            // （reflog を引くのはその後。`pointed_at`）。
-            let full = reference.name().ok().map(str::to_string);
+            let name = short.to_string();
             // 指す先が commit でない ref（ありえないが、壊れたリポジトリでは起きる）は
             // 落とす。`refs` が peel できないタグを落とすのと同じ扱い。HEAD の行を落とした
             // ときは `rowless_head` が peel し直して `Err` にする。
@@ -232,20 +240,21 @@ impl RepoReader {
             // **追跡設定は remote-tracking ref とは別に読む。** `upstream()` は ref が
             // 無ければ引けないが、`branch.<name>.remote` / `.merge` は config に残って
             // いる。push の `-u` はこちらで決める（02 の「ブランチ一覧」）。
-            let upstream_config = full.as_deref().and_then(|full| self.upstream_config(full));
+            let upstream_config = self.upstream_config(full);
             let push_remote = config
                 .get_string(&format!("branch.{name}.pushRemote"))
                 .ok()
                 .or_else(|| push_default.clone());
 
-            let branch = git2::Branch::wrap(reference);
             // **upstream が引けないブランチも一覧に残す。** 未設定なら
             // `NotFound`（class=Config）、設定はあるが追跡 ref が消えていれば
             // `NotFound`（class=Reference。git2 0.21 で確認）。**理由を問わず
             // `(None, 0, 0)` に落とすのは、1 本の壊れた追跡 ref で一覧全体を
             // 失わせないため**（他のブランチはどれも読めている。02）。
+            // **取り込みを確かめるのは HEAD の行だけ**（02 の `inclusion`）。
+            let reflog = (head_name == Some(short)).then_some(full);
             let tracking = match branch.upstream() {
-                Ok(upstream) => self.tracking(full.as_deref(), oid, &upstream),
+                Ok(upstream) => self.tracking(oid, &upstream, reflog),
                 Err(_) => Tracking::default(),
             };
 
@@ -262,11 +271,6 @@ impl RepoReader {
 
         // git2 の列挙順は安定していない（`RefIndex::from_iter` と同じ理由）。
         branches.sort_by(|a, b| a.name.cmp(&b.name));
-        // **どの行が HEAD かは名前で決める**（`Branch` に旗を持たせない。02 の「head」）。
-        // 列挙は `refs/heads/*` だけなので、行の名前は target から接頭辞を外したものと
-        // 比べられる。外れなければ（`refs/heads/` の外を指す symref）どの行でもない。
-        // symbolic でない HEAD は名前を持たないので、必ず `rowless` へ落ちる。
-        let head_name = head_target.and_then(|target| target.strip_prefix("refs/heads/"));
         BranchList::new(branches, head_name, || match head_target {
             None => Ok(RowlessHead::Detached(head.peel_to_commit()?.id())),
             Some(target) => rowless_head(&head, target),
@@ -335,12 +339,10 @@ impl RepoReader {
     /// symbolic な remote-tracking ref（ラベルと同じく解決しない）、`ahead_behind` が
     /// 引けない（指す先のオブジェクトが無い）のどれも、**一覧の読み手にとっては同じ
     /// 「比べる相手がいない」**（02）。
-    fn tracking(
-        &self,
-        full_ref: Option<&str>,
-        local: Oid,
-        upstream: &git2::Branch<'_>,
-    ) -> Tracking {
+    ///
+    /// `reflog` は取り込みを確かめるブランチの完全な ref 名。`None` なら確かめない
+    /// （[`Inclusion::Unchecked`]。HEAD 以外の行）。
+    fn tracking(&self, local: Oid, upstream: &git2::Branch<'_>, reflog: Option<&str>) -> Tracking {
         let (Ok(Some(name)), Some(oid)) = (upstream.name(), upstream.get().target()) else {
             return Tracking::default();
         };
@@ -349,9 +351,12 @@ impl RepoReader {
                 upstream: Some(Upstream {
                     name: name.to_string(),
                     oid,
-                    rewound: ahead == 0
-                        && behind > 0
-                        && full_ref.is_some_and(|full| self.pointed_at(full, oid)),
+                    inclusion: match reflog {
+                        None => Inclusion::Unchecked,
+                        // 先端がローカルの先端の祖先か自身。reflog を読むまでもない。
+                        Some(_) if behind == 0 => Inclusion::Included,
+                        Some(full) => self.reflog_reaches(full, oid),
+                    },
                 }),
                 ahead,
                 behind,
@@ -360,15 +365,30 @@ impl RepoReader {
         }
     }
 
-    /// ブランチ `full_ref` が `oid` を一度指していたか。reflog のどれかの項目の新しい側に
-    /// `oid` があれば真（02 の「ブランチ一覧」の `rewound`）。
+    /// `target` に、ブランチ `full_ref` の reflog のどれかの項目（新しい側）から辿り
+    /// 着けるか —— 自身か祖先か（02 の「ブランチ一覧」の `inclusion`。git の
+    /// `--force-if-includes` と同じ問い）。
     ///
-    /// **reflog が無い・読めないときは偽。** 読み手は force push を通すかをこれで決める
-    /// （01 の「force push」）ので、判らないときは断る側に倒す。
-    fn pointed_at(&self, full_ref: &str, oid: Oid) -> bool {
-        self.repo
-            .reflog(full_ref)
-            .is_ok_and(|reflog| reflog.iter().any(|entry| entry.id_new() == oid))
+    /// **reflog が無い・読めないときは [`Inclusion::NotIncluded`]。** 読み手は force push を
+    /// 通すかをこれで決める（01 の「force push」）ので、判らないときは断る側に倒す。
+    /// **先に `reference_has_log` で見る** —— `reflog()` はファイルが無いと空のファイルを
+    /// 作り（libgit2 1.9.7 の `refdb_reflog_fs__read`）、以後 git が
+    /// `core.logAllRefUpdates=false` でもそこへ追記する。読み取りで git の振る舞いを変えない。
+    fn reflog_reaches(&self, full_ref: &str, target: Oid) -> Inclusion {
+        let reaches = self.repo.reference_has_log(full_ref).unwrap_or(false)
+            && self.repo.reflog(full_ref).is_ok_and(|reflog| {
+                let mut seen = HashSet::new();
+                reflog.iter().map(|entry| entry.id_new()).any(|id| {
+                    seen.insert(id)
+                        && (id == target
+                            || self.repo.graph_descendant_of(id, target).unwrap_or(false))
+                })
+            });
+        if reaches {
+            Inclusion::Included
+        } else {
+            Inclusion::NotIncluded
+        }
     }
 
     /// `branch.<name>.remote` / `branch.<name>.merge` を読む。

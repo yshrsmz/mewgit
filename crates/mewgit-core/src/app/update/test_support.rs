@@ -405,6 +405,13 @@ pub(super) fn tracked_head(
 /// ジョブが残らない（残すと後続の `Cmd::Exec` を `issue` が黙って落とす。#38）。
 pub(super) fn finish_exec(state: &mut AppState, op: GitOp, result: Result<ExecOutput, ExecError>) {
     let _ = state.issue(Cmd::Exec(op.clone()));
+    reply_exec(state, op, result);
+}
+
+/// 発行済みの `op` に結果だけを届ける。キー（[`press`]）が `update` の出口で発行した
+/// あとに使う —— もう一度 `issue` に通すと登録済みの種別として落とされ、ジョブだけが
+/// 残る（`.claude/rules/app-invariants.md`）。
+pub(super) fn reply_exec(state: &mut AppState, op: GitOp, result: Result<ExecOutput, ExecError>) {
     let _ = update(state, exec_done_of(op, result));
 }
 

@@ -669,14 +669,13 @@ const PUSH_REMOTE_AHEAD: &str =
 /// 非 FF で断られたときの案内。**押すキーが op で違う**（01 の「失敗の案内文」）。
 fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
     match op {
-        // force push が lease に断られた形（`stale info`）。**これは守りが効いている**
-        // ので、リモートの位置を見てから押し直す（01 の「force push」）。
-        // **`P` は 2 回。** force の失敗では記憶を落とす（同じ古い lease で撃ち続ける
-        // 輪を作らないため）ので、`f` のあと 1 回目の `P` は素の push になり、もう一度
-        // 非 FF で断られてから force の確認が出る。**「押し直して」と 1 回に読める形で
-        // 書くと、途中で出る別の案内と食い違う。**
+        // force push が lease に断られた形（`stale info`）。**これは守りが効いている** ——
+        // 他人が push した印で、`f` で取ってもその先端はこのブランチの reflog から辿り
+        // 着けないので、取り込むまで `P` は force に上がらない（01 の「force push」）。
+        // `p` は `--ff-only` で分かれた履歴を取り込めないので、外の git へ送る。元は
+        // 「`f` のあと `P` を 2 回」と案内していたが、それは他人の push を消す手順だった。
         GitOp::Push { lease: Some(_), .. } => {
-            Some("リモートが動いています。f で取得してから P を 2 回押してください")
+            Some("リモートが動いています。f で取得し、外の git で取り込んでから P")
         }
         // `-u` の提案から入った形。force に上げられるのは `PushPlan::Tracked` だけ
         // （lease の値が無い）で、`p` も追跡設定が無いと git がどのブランチを取るか
@@ -689,11 +688,14 @@ fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
             set_upstream: true, ..
         } => Some("追跡先が無いため force push できません。Branches で改名してください"),
         // 追跡設定に沿った push。**次の `P` が force の確認を出すかは書かない** ——
-        // それを決めるのは `push_plan`（`ahead == 0` と追跡 ref の有無で断る）で、
-        // ここで先読みすると同じ判定が 2 箇所に割れる。断られても出るのは
-        // `PushPlan::Refused` の正しい文言なので、この案内は嘘にならない。
+        // それを決めるのは `push_plan`（追跡 ref の先端を取り込んでいないときと、追跡 ref が
+        // 無いときに断る）で、ここで先読みすると同じ判定が 2 箇所に割れる。断られても
+        // 出るのは `PushPlan::Refused` の正しい文言なので、この案内は嘘にならない。
+        // **「リモートが進んでいます」とは言わない** —— 巻き戻したブランチの 1 回目の
+        // `P` もここに来る（断られる前は force にしない）。リモートは進んでおらず、`p` を
+        // 押すと捨てたコミットが戻る（01 の「失敗の案内文」）。
         GitOp::Push { .. } => {
-            Some("リモートが進んでいます。p で取り込むか、P をもう一度押してください")
+            Some("リモートと分かれています。p で取り込むか、上書きするなら P をもう一度")
         }
         // `pull --ff-only` が履歴の分かれたブランチを断った形。merge / rebase は
         // M5 なので、mewgit の中に踏める手が無いことをそのまま言う。
@@ -811,7 +813,7 @@ mod tests {
             (
                 tracked.clone(),
                 ExecErrorKind::NonFastForward,
-                "P をもう一度押してください",
+                "上書きするなら P をもう一度",
             ),
             (
                 push_op("origin", "main", true),
@@ -821,7 +823,7 @@ mod tests {
             (
                 forced_push_op(fake_oid(7)),
                 ExecErrorKind::NonFastForward,
-                "f で取得してから P を 2 回",
+                "外の git で取り込んでから P",
             ),
             (
                 GitOp::Pull {

@@ -2411,14 +2411,7 @@ mewgit には無い —— 押されたときに読み直す以外にない。
    - **`-u` を付けない。** 付けると `branch.<b>.remote` が push 先に書き換わり、
      以後の `p` がそこから取り込む —— upstream から pull して fork へ push する運用の
      意図を書き換える（2026-10-03 にユーザーと決めた。`/simplify` の altitude が拾った）
-   - **force には上げない。** lease（`Branch.upstream` の位置）と `ahead == 0` の判定は
-     追跡先に対する値で、行き先が違うと比べる相手がいない。**非 FF で断られても記憶を
-     立てない**（`update::remote::pushed_elsewhere`。op の形だけでは追跡設定の push と
-     見分けられないので、押したブランチの追跡先と行き先を比べる）。立てて `P` で断ると
-     `Push` が出なくなり、push 先のブランチが外で消えても断り続ける（`/code-review` が
-     拾った）。**案内も分ける** —— 追跡設定の push 向けの「`p` で取り込むか `P` を
-     もう一度」は、`p` が追跡先から取り込み `P` が force に上がらないので、どちらも
-     出口にならない。mewgit に出口が無いことを言い、外の git へ送る
+   - **force には上げない。** lease（`Branch.upstream` の位置）と取り込みの判定（`Upstream.inclusion`）は追跡先に対する値で、行き先が違うと比べる相手がいない。**非 FF で断られても記憶を立てない**（`update::remote::pushed_elsewhere`。op の形だけでは追跡設定の push と見分けられないので、押したブランチの追跡先と行き先を比べる）。立てて `P` で断ると `Push` が出なくなり、push 先のブランチが外で消えても断り続ける（`/code-review` が拾った）。**案内も分ける** —— 追跡設定の push 向けの「`p` で取り込むか `P` をもう一度」は、`p` が追跡先から取り込み `P` が force に上がらないので、どちらも出口にならない。mewgit に出口が無いことを言い、外の git へ送る
    - **値は名前でも URL でもそのまま渡す。`.` と一覧に無い名前は断る**（表の J / L / M。
      `origin` へ落とさない —— ユーザーが書いた行き先とは別のリモートへ送る）。値は
      **文字列のまま追跡先と比べる**ので、名前と URL で同じリポジトリを指していれば 2 の
@@ -2524,17 +2517,20 @@ pub struct PushRejection {
   読む側が使えない印を持つと、あとから追跡設定が外で入ったときに、追跡していない push の
   拒否を根拠に force の腕が立つ。憶えるかどうかは「次を force に上げられる経路か」
   （`upgradable`）の 1 つの問いで、force の失敗を憶えないのと同じ場所で決める
-- **`ahead == 0` なら、巻き戻した形（`Upstream.rewound`。02）でだけ force に上げる。** `↓n` だけのブランチも非 FF で断られる（git 2.55 で確認）ので記憶は立つ。そこで `f` を踏むと lease がリモートの位置に追いつき、**force が通ってしまう** —— 出すものが 1 つも無いのに他人のコミットを消す。**lease は「リモートが動いていないこと」しか守らない**ので、fetch のあとは守りにならない。**意図的な巻き戻し（`reset --hard HEAD~1` してから `P`）は ahead / behind では同じ見た目だが、ブランチの reflog が見分ける** —— 巻き戻した形では追跡 ref の先端を**このブランチが一度指していた**ので reflog に残り、他人の push を `f` で取っただけの形では残らない（下の表）。`rewound` でないなら断り、取り込むか外の git で force するかを案内する（`p` だけを勧めると、巻き戻した人には巻き戻しを元に戻す逆向きの案内になる）。**reflog で見分けるので専用のキーも入口も足さない**（07 の「専用のキーを作らない」はそのまま）。確認モーダルの本文は「送るコミットは無く、リモートにしか無い `behind` 本が消える」と言う —— 通常の force の本文（新しい履歴で上書きする）とは消えるものが違う
+- **force に上げるのは、追跡 ref の先端を取り込んだ形だけ**（`Upstream.inclusion` が `Included`。02）。問いは git の `--force-if-includes` と同じで、「追跡 ref の先端に、ローカルの先端かブランチの reflog のどれかの項目から辿り着けるか」。**lease は「リモートが動いていないこと」しか守らない**ので、`f` のあとは守りにならない —— `↓n` だけのブランチも非 FF で断られて（git 2.55 で確認）記憶が立ち、`f` で lease がリモートの位置に追いつくと、**出すものが 1 つも無いのに他人のコミットを消す force が通る**。ahead ≥ 1 で他人の push を `f` で取っただけの形（diverged）も同じで、元は `ahead == 0` だけを断っていたのでこちらは通っていた（`/simplify` の altitude が拾った）。**意図的な巻き戻し（`reset --hard HEAD~1` してから `P`）、push のあとの amend、自分の push の上での rebase** は、追跡 ref の先端をこのブランチが一度指していたので通る。**git の `--force-if-includes` には任せられない** —— lease の値と一緒に渡すと何もせず（`--force-with-lease=<dst>:<oid> --force-if-includes` で他人の push の上へ exit 0 で通った。altitude が実測）、値を外すと 03 が禁じた裸の lease になる。取り込んでいなければ断り、`p` で取り込むか外の git で force するかを案内する（`p` だけを勧めると、巻き戻した人には巻き戻しを元に戻す逆向きの案内になる）。**reflog で見分けるので専用のキーも入口も足さない**（07 の「専用のキーを作らない」はそのまま）。確認モーダルの本文は消えるもの —— リモートにしか無い `behind` 本 —— の数を言い、ahead が 0 なら送るコミットが無いことも言う
 
-  実測（2026-10-16、git 2.56.0、一時リポジトリ。どれも ahead 0 / behind 1）:
+  実測（2026-10-16、git 2.56.0、一時リポジトリ。「判定」は追跡 ref の先端が reflog のどれかの項目の祖先か自身か。git の列は lease の値を付けない `--force-with-lease --force-if-includes` の `--dry-run`）:
 
-  | 形 | 追跡 ref の先端がブランチの reflog に在るか |
-  |---|---|
-  | push してから `reset --hard HEAD~1` | 在る |
-  | 他人の push を `fetch` で取っただけ | 無い |
-  | `pull --ff-only` で取り込んでから `reset --hard HEAD~1` | 在る（ローカルに一度在ったものを捨てる。意図した巻き戻しとして通す） |
-  | `branch -m` で改名してから巻き戻す | 在る（reflog は改名先に付いてくる） |
-  | `core.logAllRefUpdates=false`（reflog が無い） | 無い —— 断る側に落ちる |
+  | 形 | ahead / behind | 判定 | git の `--force-if-includes` |
+  |---|---|---|---|
+  | push してから `reset --hard HEAD~1` | 0 / 1 | 辿り着ける | 通る |
+  | push してから `commit --amend` | 1 / 1 | 辿り着ける | 通る |
+  | 自分の push のあとローカルで `rebase --root` して amend | 1 / 1 | 辿り着ける | 通る |
+  | 他人の push を `fetch` で取っただけ | 0 / 1 | 辿り着けない | 断る（`remote ref updated since checkout`） |
+  | 他人の push を `fetch` で取り、ローカルで 1 コミット | 1 / 1 | 辿り着けない | 断る（同上） |
+  | `pull --ff-only` で取り込んでから `reset --hard HEAD~1` | 0 / 1 | 辿り着ける（ローカルに一度在ったものを捨てる。意図した巻き戻しとして通す） | — |
+  | `branch -m` で改名してから巻き戻す | 0 / 1 | 辿り着ける（reflog は改名先に付いてくる） | — |
+  | reflog のファイルが一度も作られていない（**ファイルが既にあれば `core.logAllRefUpdates=false` でも git は追記を続ける**ので、設定だけではこの形にならない。`/code-review` が実測） | 0 / 1 | 辿り着けない —— 断る側に落ちる | — |
 - **憶えるのは押したブランチ**（`GitOp::Push` の `src`）。一覧の読み直しは別のジョブ
   なので、`Switch` の直後に押した push が返るころには HEAD が別のブランチになって
   いることがある。HEAD で憶えると、押していないブランチに force の腕が立つ
@@ -2542,7 +2538,7 @@ pub struct PushRejection {
 `lease` に渡すのは `Branch.upstream` の位置（02）。**追跡 ref が無ければ force push は断る**
 —— 値を作れないなら撃たない。`fetch --prune` のあとがこの形。
 
-**force push は fetch を挟まないと lease に断られる。** 断られた時点の `origin/x` は他人が進める前の位置なので、そのまま lease に渡すと `stale info` で落ちる（git 2.55 で確認）。**これは守りが効いている形**で、ユーザーは `f` でリモートの位置を見てから `P` を押す（**fetch はローカルの先端を動かさないので記憶は生きたまま**。`P` は 1 回でよい）。**手前で fetch を代行しない** —— `f` が別のキーとして在り、fetch はラベルとログを動かす（`Reload::RefsAndLog`）ので、`P` の中で黙って走らせると画面が押した覚えのない形で作り替わる。**巻き戻した形は fetch を挟まずに通る** —— 追跡 ref の先端はこちらが push した位置そのもので、リモートが動いていなければ lease と一致する（動いていれば上と同じく `stale info` で断られ、fetch すると先端が reflog に無い位置へ進むので、今度は `rewound` でなくなって断る）。
+**force push は fetch を挟まないと lease に断られ、fetch したあとは取り込まないと force に上がらない。** 断られた時点の `origin/x` は他人が進める前の位置なので、そのまま lease に渡すと `stale info` で落ちる（git 2.55 で確認）。**これは守りが効いている形**で、`stale info` は「他人が push した」の印。`f` で取ってもその先端はこのブランチの reflog から辿り着けないので、次の `P` は上の判定で断られる —— 他人の push の上を mewgit から消させない。案内は外の git で取り込ませる（`p` は `--ff-only` なので、分かれた履歴は取り込めない）。**手前で fetch を代行しない** —— `f` が別のキーとして在り、fetch はラベルとログを動かす（`Reload::RefsAndLog`）ので、`P` の中で黙って走らせると画面が押した覚えのない形で作り替わる。**巻き戻した形は fetch を挟まずに通る** —— 追跡 ref の先端はこちらが push した位置そのもので、リモートが動いていなければ lease と一致する。
 
 確認モーダルには remote / 行き先 / lease の短縮 Oid を出す。**`y` を押した時点で
 読み直さない**（上の「確認モーダルを組む時点の値を `GitOp` に閉じ込める」）。
@@ -2570,9 +2566,9 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
 | `SamlSsoRequired` | GitHub で鍵を Authorize する |
 | `SshAuthFailed` | ssh-agent と鍵の登録を確認する |
 | `HttpsAuthFailed` | `gh auth setup-git` を実行する |
-| `NonFastForward` + `Push { lease: Some }` | `f` で取得してから `P` を 2 回押す |
+| `NonFastForward` + `Push { lease: Some }` | `f` で取得し、外の git で取り込んでから `P` |
 | `NonFastForward` + `Push { set_upstream: true }` | Branches で改名する |
-| `NonFastForward` + `Push { .. }` | `p` で取り込むか `P` をもう一度 |
+| `NonFastForward` + `Push { .. }` | `p` で取り込むか、上書きするなら `P` をもう一度 |
 | `NonFastForward` + `Pull` | 履歴が分かれている（merge / rebase は M5） |
 | `Conflict` + rebase / cherry-pick / revert（開始・continue・skip）/ `pull --rebase` | 解消して `git add` したら `m` で continue する（**`Warn`**） |
 | `Empty` + cherry-pick（開始・continue・skip） | `m` から skip する（**`Warn`**） |
@@ -2589,18 +2585,9 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
 | `EditorGone` + それ以外 | mewgit が消えた。起動し直してから押し直す（`Error`、43 セル） |
 | それ以外 | 無し（git の出力から選んだ理由の行。選べなければ固定の文言か `Display`） |
 
-- **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が
-  `stale info` で断られた形は fetch を勧める側（lease は fetch してからでないと通らない。
-  上の「force push」）、`-u` の提案から入った形は force に上げる経路が無い側（force は
-  `PushPlan::Tracked` にしか無い）。kind だけで文を選ぶと、どちらかに嘘を言う
-- **`f` のあとの `P` は 2 回。** force の失敗では記憶を落とす（上の「force push」）ので、
-  1 回目の `P` は素の push になり、もう一度非 FF で断られてから force の確認が出る
-  （一時リポジトリで確認）。**「押し直して」と 1 回に読める形で書くと、途中で出る
-  「`p` で取り込むか、`P` をもう一度」と食い違う**
-- **通常の push には「`P` をもう一度」とだけ書く。** 次の `P` が force の確認を出すかは
-  `push_plan` が決めていて（`ahead == 0` と追跡 ref の有無で断る）、ここで先読みすると
-  **同じ判定が 2 箇所に割れる**。押した結果が断りでも、出るのは `PushPlan::Refused` の
-  正しい文言なので、案内が嘘にはならない
+- **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が `stale info` で断られた形は外の git で取り込ませる側（`f` で取っても、取り込まないと force に上がらない。上の「force push」）、`-u` の提案から入った形は force に上げる経路が無い側（force は `PushPlan::Tracked` にしか無い）。kind だけで文を選ぶと、どちらかに嘘を言う
+- **`stale info` のあとは、mewgit の中で force に戻らない。** `f` で取った先端はこのブランチの reflog から辿り着けないので、取り込むまで `P` は断られる（上の「force push」）。元は「`f` で取得してから `P` を 2 回押す」と案内していたが、**それは他人の push を消す手順そのものだった**（`/simplify` の altitude が拾った）
+- **通常の push には「上書きするなら `P` をもう一度」とだけ書く。** 次の `P` が force の確認を出すかは `push_plan` が決めていて（追跡 ref の先端を取り込んでいないときと、追跡 ref が無いときに断る）、ここで先読みすると**同じ判定が 2 箇所に割れる**。押した結果が断りでも、出るのは `PushPlan::Refused` の正しい文言なので、案内が嘘にはならない。**「リモートが進んでいます」とは言わない** —— 巻き戻したブランチの 1 回目の `P` もここに来るので（断られる前は force にしない）、リモートは進んでおらず、`p` を押すと捨てたコミットが戻る（`/code-review` が拾った）。文は「リモートと分かれています」から始め、`p` と `P` の両方を挙げる
 - **`-u` の経路は mewgit の中で行き止まり。** 追跡設定が無いので `p` も通らず
   （`git pull` が「どのブランチか」を決められない）、force にも上げられない。残る
   出口は改名だけ（リモートに同名の ref が無くなり、`-u` の push が通る）。

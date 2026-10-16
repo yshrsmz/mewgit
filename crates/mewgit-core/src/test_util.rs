@@ -80,8 +80,8 @@ use crate::git_exec::{ForkUpstream, GitOp, LocalBranch, PrCheckout, PrSource, Ru
 use crate::git_exec::{RebaseAction, RebaseEntry};
 use crate::git_read::{
     Branch, BranchList, Commit, CommitDetail, FileDiff, FileEntry, FileStatus, GitReadError, Hunk,
-    HunkLine, LineOrigin, Oid, PathStamp, RefIndex, Remote, RepoReader, RowlessHead, Signature,
-    StashEntry, Timestamp, Upstream, WorktreeSnapshot,
+    HunkLine, Inclusion, LineOrigin, Oid, PathStamp, RefIndex, Remote, RepoReader, RowlessHead,
+    Signature, StashEntry, Timestamp, Upstream, WorktreeSnapshot,
 };
 use crate::github::{GithubError, PrDetail, PrStatus, PullRequest, RateLimit, RefSpec, RepoRef};
 use secrecy::SecretString;
@@ -852,13 +852,14 @@ pub fn fake_branch(name: &str) -> Branch {
 }
 
 /// 追跡 ref から読めた値。位置は指定する（force push の lease に渡る値なので、
-/// テストが「どの位置を主張したか」を見られるようにする）。巻き戻していない形
-/// （`rewound: false`）で、要るテストは戻り値のフィールドを書き換える。
+/// テストが「どの位置を主張したか」を見られるようにする）。**先端を取り込んだ形**
+/// （`Inclusion::Included`。自分の push の上に居るブランチ）で、force に上がる。
+/// 他人の push を取っただけの形を見るテストは戻り値のフィールドを書き換える。
 pub fn fake_upstream(name: &str, oid: Oid) -> Upstream {
     Upstream {
         name: name.to_string(),
         oid,
-        rewound: false,
+        inclusion: Inclusion::Included,
     }
 }
 

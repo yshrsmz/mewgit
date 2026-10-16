@@ -3,8 +3,8 @@
 use std::fs;
 
 use mewgit_core::git_read::{
-    BranchList, GitReadError, Head, InProgressOp, LogPage, Oid, RefLabel, RepoReader, Step,
-    Upstream, UpstreamConfig,
+    BranchList, GitReadError, Head, InProgressOp, Inclusion, LogPage, Oid, RefLabel, RepoReader,
+    Step, Upstream, UpstreamConfig,
 };
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
@@ -935,7 +935,7 @@ fn branches_reports_the_upstream_and_how_far_it_diverged() {
         Some(Upstream {
             name: "origin/main".to_string(),
             oid: base.parse().unwrap(),
-            rewound: false,
+            inclusion: Inclusion::Included,
         })
     );
     assert_eq!((main.ahead, main.behind), (2, 0));
@@ -949,10 +949,21 @@ fn branches_reports_the_upstream_and_how_far_it_diverged() {
     );
 }
 
-#[test]
-fn branches_tells_a_rewound_branch_from_one_that_only_fetched() {
-    // ahead / behind ではどちらも `0 / n` になる 2 つの形を、ブランチの reflog で見分ける
-    // （02 の「ブランチ一覧」の `rewound`、01 の「force push」の表）。
+/// `name` の行の ahead / behind と、追跡 ref の先端を取り込んでいるか。
+fn inclusion_of(repo: &TestRepo, name: &str) -> (usize, usize, Option<Inclusion>) {
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let list = reader.branches().unwrap();
+    let branch = list.branches().iter().find(|b| b.name == name).unwrap();
+    (
+        branch.ahead,
+        branch.behind,
+        branch.upstream.as_ref().map(|upstream| upstream.inclusion),
+    )
+}
+
+/// 追跡設定付きで `first` / `second` を積み、`second` を push した形（追跡 ref が
+/// `second` を指す）。`second` の Oid を返す。
+fn pushed_main() -> (TestRepo, Oid) {
     let repo = TestRepo::init();
     repo.commit("first");
     repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
@@ -964,24 +975,30 @@ fn branches_tells_a_rewound_branch_from_one_that_only_fetched() {
         "refs/remotes/origin/main",
         &pushed.to_string(),
     ]);
-    let rewound = |repo: &TestRepo| {
-        let reader = RepoReader::open(repo.path()).unwrap();
-        let list = reader.branches().unwrap();
-        let main = list.branches().iter().find(|b| b.name == "main").unwrap();
-        (
-            main.ahead,
-            main.behind,
-            main.upstream.as_ref().map(|upstream| upstream.rewound),
-        )
-    };
-    // 同期している形は巻き戻していない。
-    assert_eq!(rewound(&repo), (0, 0, Some(false)));
+    (repo, pushed)
+}
 
-    // push した先端から 1 つ戻す。先端は main が一度指していたので reflog に在る。
+#[test]
+fn branches_tells_whether_the_head_includes_its_upstream() {
+    // ahead / behind ではどちらも `0 / n` や `1 / n` になる形を、ブランチの reflog で
+    // 見分ける（02 の「ブランチ一覧」の `inclusion`、01 の「force push」の表）。問いは
+    // git の `--force-if-includes` と同じ。
+    let (repo, pushed) = pushed_main();
+    // 同期している形は reflog を読まずに取り込み済み。
+    assert_eq!(
+        inclusion_of(&repo, "main"),
+        (0, 0, Some(Inclusion::Included))
+    );
+
+    // push した先端から 1 つ戻す。先端は main が一度指していたので reflog から辿り着ける。
     repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
-    assert_eq!(rewound(&repo), (0, 1, Some(true)));
+    assert_eq!(
+        inclusion_of(&repo, "main"),
+        (0, 1, Some(Inclusion::Included))
+    );
 
-    // 他人の push を fetch で取っただけの形。追跡 ref の先端を main は一度も指していない。
+    // 他人の push を fetch で取っただけの形。追跡 ref の先端に main の reflog から辿り
+    // 着けない。
     let tree = format!("{pushed}^{{tree}}");
     let theirs = repo.git(&[
         "commit-tree",
@@ -992,16 +1009,88 @@ fn branches_tells_a_rewound_branch_from_one_that_only_fetched() {
         "theirs",
     ]);
     repo.git(&["update-ref", "refs/remotes/origin/main", theirs.trim()]);
-    assert_eq!(rewound(&repo), (0, 2, Some(false)));
+    assert_eq!(
+        inclusion_of(&repo, "main"),
+        (0, 2, Some(Inclusion::NotIncluded))
+    );
 
-    // 先端が reflog に在っても、送るコミットがあるなら巻き戻しではない（通常の force）。
+    // **ahead が 1 以上でも同じ**（diverged。元は ahead 0 だけを見ていて、ここは force が
+    // 通っていた）。
+    repo.commit("mine");
+    assert_eq!(
+        inclusion_of(&repo, "main"),
+        (1, 2, Some(Inclusion::NotIncluded))
+    );
+
+    // **一致ではなく祖先でも辿り着ける。** 他人の push を merge で取り込んでから merge を
+    // 捨てた形 —— reflog の項目（merge コミット）は追跡 ref の先端の子孫で、先端そのものは
+    // 一度も main の値になっていない。
+    repo.git(&["merge", "-q", "-s", "ours", "--no-edit", theirs.trim()]);
+    repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    assert_eq!(
+        inclusion_of(&repo, "main"),
+        (1, 2, Some(Inclusion::Included))
+    );
+
+    // 追跡 ref が自分の push の位置なら、diverged でも取り込み済み（push のあとの
+    // amend や rebase と同じ形）。
     repo.git(&[
         "update-ref",
         "refs/remotes/origin/main",
         &pushed.to_string(),
     ]);
-    repo.commit("third");
-    assert_eq!(rewound(&repo), (1, 1, Some(false)));
+    assert_eq!(
+        inclusion_of(&repo, "main"),
+        (1, 1, Some(Inclusion::Included))
+    );
+}
+
+#[test]
+fn branches_checks_the_inclusion_only_on_the_head_row() {
+    // 読み手は `P`（HEAD のブランチを push する）だけ。ほかの行で reflog を読むと、
+    // fetch のあとに遅れている行の数だけ読む（02）。
+    let (repo, _) = pushed_main();
+    // `second` を一度指してから 1 つ戻した（HEAD にすれば取り込み済みになる形）。
+    repo.git(&["branch", "other"]);
+    repo.git(&["branch", "-f", "other", "HEAD~1"]);
+    repo.git(&["config", "branch.other.remote", "origin"]);
+    repo.git(&["config", "branch.other.merge", "refs/heads/main"]);
+
+    assert_eq!(
+        inclusion_of(&repo, "other"),
+        (0, 1, Some(Inclusion::Unchecked))
+    );
+    // 同じ形の HEAD の行は確かめる（入力が効いている証拠）。
+    repo.git(&["switch", "-q", "other"]);
+    assert_eq!(
+        inclusion_of(&repo, "other"),
+        (0, 1, Some(Inclusion::Included))
+    );
+}
+
+#[test]
+fn branches_does_not_create_a_missing_reflog() {
+    // reflog のファイルが一度も作られていない形は、取り込んでいないものとして断る側へ
+    // 倒す。**読み取りがファイルを作らない** —— libgit2 の `reflog()` は無ければ空の
+    // ファイルを作り、そこへ git が `core.logAllRefUpdates=false` でも追記を始める（02）。
+    let (repo, _) = pushed_main();
+    repo.git(&["config", "core.logAllRefUpdates", "false"]);
+    let logs = repo.path().join(".git/logs");
+    fs::remove_dir_all(&logs).unwrap();
+    repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    assert!(
+        !logs.join("refs/heads/main").exists(),
+        "fixture に reflog が在ります"
+    );
+
+    assert_eq!(
+        inclusion_of(&repo, "main"),
+        (0, 1, Some(Inclusion::NotIncluded))
+    );
+    assert!(
+        !logs.join("refs/heads/main").exists(),
+        "読み取りが reflog のファイルを作りました"
+    );
 }
 
 #[test]

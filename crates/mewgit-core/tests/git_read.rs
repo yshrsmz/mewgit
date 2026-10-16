@@ -1097,12 +1097,9 @@ fn branches_checks_the_inclusion_only_on_the_head_row() {
 #[test]
 fn branches_does_not_create_a_missing_reflog() {
     // reflog のファイルが一度も作られていない形は、取り込んでいないものとして断る側へ
-    // 倒す。**読み取りがファイルを作らない** —— libgit2 の `reflog()` は無ければ空の
-    // ファイルを作り、そこへ git が `core.logAllRefUpdates=false` でも追記を始める（02）。
+    // 倒す。**読み取りがファイルを作らない**（02 の「reflog の読み方」）。
     let (repo, _) = pushed_main();
-    repo.git(&["config", "core.logAllRefUpdates", "false"]);
-    let logs = repo.path().join(".git/logs");
-    fs::remove_dir_all(&logs).unwrap();
+    let logs = repo.drop_reflogs();
     repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
     assert!(
         !logs.join("refs/heads/main").exists(),
@@ -1293,19 +1290,18 @@ fn a_stopped_rebase_reports_its_step() {
 #[test]
 fn refused_reword_does_not_create_a_missing_head_reflog() {
     // `core.logAllRefUpdates=false` で `logs/HEAD` が無い形。**見分けの読み取りが作らない**
-    // —— 作ると、以後 git がそこへ HEAD の reflog を書き始める（02 の「reflog の読み方」）。
-    // 中身は見分けが reflog を読むところまで届く最小の形（`done` の最終行が reword、
+    // （02 の「reflog の読み方」）。中身は見分けが reflog を読むところまで届く最小の形（`done` の最終行が reword、
     // メッセージのファイルが在る、HEAD が X と違う）を手で置く。
     let repo = TestRepo::init();
     let x = repo.commit("x").to_string();
     repo.commit("y");
-    repo.git(&["config", "core.logAllRefUpdates", "false"]);
-    let logs = repo.path().join(".git/logs");
-    fs::remove_dir_all(&logs).unwrap();
+    let logs = repo.drop_reflogs();
     let rebase_dir = repo.path().join(".git/rebase-merge");
     fs::create_dir(&rebase_dir).unwrap();
     fs::write(rebase_dir.join("done"), format!("reword {x} x\n")).unwrap();
     fs::write(reword_message_path(&rebase_dir, &x), "new\n").unwrap();
+
+    assert!(!logs.join("HEAD").exists(), "fixture に reflog が在ります");
 
     let reader = RepoReader::open(repo.path()).unwrap();
     assert_eq!(reader.refused_reword(), None);
@@ -1455,18 +1451,8 @@ fn a_linked_worktree_reads_its_own_state() {
 fn stashes_is_empty_before_anything_is_stashed() {
     // `refs/stash` が無い形。**`Err` にしない** —— stash を 1 度もしていない
     // リポジトリのほうが普通で、そこで Stash ペインを失敗にすると毎回赤くなる。
-    let repo = TestRepo::init();
-    repo.commit("first");
-    let reader = RepoReader::open(repo.path()).unwrap();
-
-    assert_eq!(reader.stashes().unwrap(), []);
-}
-
-#[test]
-fn stashes_and_the_fingerprint_do_not_create_a_missing_stash_reflog() {
-    // **読み取りが `logs/refs/stash` を作らない。** 空のファイルがあると
-    // `git reflog exists refs/stash` が真になり、`refs/stash/<名前>` の ref が作れなく
-    // なる（02 の「reflog の読み方」）。指紋は 2 秒ごとに読むので、作れば必ず残る。
+    // **読み取りが `logs/refs/stash` を作らない**（02 の「reflog の読み方」）。指紋は 2 秒
+    // ごとに読むので、作れば必ず残る。
     let repo = TestRepo::init();
     repo.commit("first");
     let reader = RepoReader::open(repo.path()).unwrap();

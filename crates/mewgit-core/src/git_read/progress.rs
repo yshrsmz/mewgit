@@ -99,16 +99,14 @@ impl RepoReader {
                 .existing_reflog("HEAD")
                 .ok()
                 .flatten()
-                .and_then(|log| {
-                    let last = log.get(0)?;
-                    Some(
+                .is_some_and(|log| {
+                    log.get(0).is_some_and(|last| {
                         last.id_new() == head.id()
                             && last
                                 .message_bytes()
-                                .is_some_and(|m| m.starts_with(b"rebase (reword): ")),
-                    )
-                })
-                .unwrap_or(false);
+                                .is_some_and(|m| m.starts_with(b"rebase (reword): "))
+                    })
+                });
             moved_by_reword
                 && head.message_bytes() == stopped.message_bytes()
                 && head.author() == stopped.author()

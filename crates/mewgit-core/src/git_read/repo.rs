@@ -80,11 +80,11 @@ impl RepoReader {
 
     /// `name` の reflog。ファイルが無ければ `None`。
     ///
-    /// **reflog は必ずここで読む（`self.repo.reflog` を直に呼ばない）。** libgit2 1.9.7 の
-    /// `refdb_reflog_fs__read` はファイルが無いと `create_new_reflog_file` で空のファイルを
-    /// 作り、空のファイルがあると git の振る舞いが変わる —— `core.logAllRefUpdates=false`
-    /// でもそこへ追記を始め、`logs/refs/stash` なら `refs/stash/<名前>` の ref が作れなく
-    /// なる（`stash clear` でも `gc` でも消えない。02 の「reflog の読み方」）。
+    /// **reflog は必ずここで読む。** `git2::Repository::reflog` はファイルが無いと空の
+    /// ファイルを作り（libgit2 1.9.7 の `refdb_reflog_fs__read`）、それが git の振る舞いを
+    /// 変える（02 の「reflog の読み方」）。直呼びは `clippy.toml` の `disallowed-methods` で
+    /// 断る。確かめてから読むまでのあいだに外でファイルが消えると作ってしまう窓は残る。
+    #[allow(clippy::disallowed_methods)]
     pub(super) fn existing_reflog(&self, name: &str) -> Result<Option<git2::Reflog>, git2::Error> {
         if !self.repo.reference_has_log(name)? {
             return Ok(None);

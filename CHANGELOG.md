@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.1](https://github.com/yshrsmz/mewgit/compare/v0.1.0...v0.1.1) (2026-10-16)
+
+
+### Features
+
+* **account:** 選び直しの画面でも r で解決し直せるようにする ([#168](https://github.com/yshrsmz/mewgit/issues/168)) ([57c6e81](https://github.com/yshrsmz/mewgit/commit/57c6e810072de09cbff5f11d6f4cf26c3eca2f26))
+* **app:** 1〜5 で画面の場所のペインへ直接移る ([#169](https://github.com/yshrsmz/mewgit/issues/169)) ([3943873](https://github.com/yshrsmz/mewgit/commit/3943873362782fb66c039cc8f1e88580bd69002e))
+* **cli:** --version と --help を足す ([#156](https://github.com/yshrsmz/mewgit/issues/156)) ([7214ac5](https://github.com/yshrsmz/mewgit/commit/7214ac5bd1b637491707f7b6dd45490d43b1edaa))
+* **config:** ロケールから graph.ascii の既定を決める ([#179](https://github.com/yshrsmz/mewgit/issues/179)) ([3c012c8](https://github.com/yshrsmz/mewgit/commit/3c012c842e7ad4ad0b04133bad03481df5ca0339))
+* **release:** Release を draft で作り、公開のあとに homebrew-tap へ Formula の更新を知らせる ([#197](https://github.com/yshrsmz/mewgit/issues/197)) ([4b27139](https://github.com/yshrsmz/mewgit/commit/4b27139b59d9995c9be53caedc7867d2ef29cb7d))
+* **ui:** ヘッダを決めた順に畳み、右端にスピナーの席を取る（端末幅 &lt; 100 のレイアウト 5/5） ([#166](https://github.com/yshrsmz/mewgit/issues/166)) ([a83253a](https://github.com/yshrsmz/mewgit/commit/a83253a03ecb338dcb0b51ede6b5919033adda22))
+* **ui:** モーダルのキーの案内をキーの区切りで折る（端末幅 &lt; 100 のレイアウト 4/5） ([#164](https://github.com/yshrsmz/mewgit/issues/164)) ([c68140a](https://github.com/yshrsmz/mewgit/commit/c68140afe6fc1e68eb3c97ee08c2860c54470549))
+* **ui:** 幅 100 未満では focus のペインだけを全画面で描く ([#160](https://github.com/yshrsmz/mewgit/issues/160)) ([7b4437c](https://github.com/yshrsmz/mewgit/commit/7b4437c1ca1c87b48719458e414a55dad19fa464))
+* **ui:** 狭い右列で決めた畳み方を数え直し、折り返しの余白を ui::wrapped に置く ([#162](https://github.com/yshrsmz/mewgit/issues/162)) ([5167b78](https://github.com/yshrsmz/mewgit/commit/5167b785eaf9e7a99078cff8f8a36c9119535d67))
+* **ui:** 窓に入る行だけを組み、長いパスを左で切り、PR の集計の上限を幅から導く ([#163](https://github.com/yshrsmz/mewgit/issues/163)) ([e02c3ca](https://github.com/yshrsmz/mewgit/commit/e02c3ca03f1865c9880b17330be70be53204df9f))
+
+
+### Bug Fixes
+
+* **app:** is_abort を GitOp の網羅 match にする ([#175](https://github.com/yshrsmz/mewgit/issues/175)) ([a8181ab](https://github.com/yshrsmz/mewgit/commit/a8181ab6b09a2b70bca08835d8ac8c8cfe7a6f43))
+* **cli:** オプションを位置によらず拾い、余った引数を断る ([#171](https://github.com/yshrsmz/mewgit/issues/171)) ([bba8eee](https://github.com/yshrsmz/mewgit/commit/bba8eee2f0579fea101b0aadb36c73607b9e961e))
+* **prs:** 既定リモートから GitHub を特定できないとき「読み込み中…」に留まらない ([#167](https://github.com/yshrsmz/mewgit/issues/167)) ([2dc77d4](https://github.com/yshrsmz/mewgit/commit/2dc77d4aa5d2800844aa696e8e23f71e0b938210))
+* **scripts:** screen.py が全角の 2 桁目の印を消し残して 1 桁詰めるのを直す ([#196](https://github.com/yshrsmz/mewgit/issues/196)) ([9f4b6ea](https://github.com/yshrsmz/mewgit/commit/9f4b6ea43513b3eb2e9464376ab8cda573bd3b5a))
+* **tui:** no_material の名前を GithubJob の網羅 match から引く ([#176](https://github.com/yshrsmz/mewgit/issues/176)) ([a9d7b4a](https://github.com/yshrsmz/mewgit/commit/a9d7b4a0e0cec497cad0c61b01d09e6c350b54a7))
+
 ## 0.1.0 (2026-10-04)
 
 

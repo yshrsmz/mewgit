@@ -21,11 +21,19 @@ Status: 0.1, used by the author. See `docs/requirements.md` for the scope and
 
 ## Install
 
+### Homebrew
+
+macOS and Linux on arm64. Homebrew loads formulae from third-party taps only after you trust them:
+
+```sh
+brew tap yshrsmz/tap
+brew trust --formula yshrsmz/tap/mewgit
+brew install yshrsmz/tap/mewgit
+```
+
 ### From a release
 
-Binaries are attached to each [GitHub Release](https://github.com/yshrsmz/mewgit/releases)
-for `aarch64-apple-darwin` and `aarch64-unknown-linux-gnu`. The repository is
-private, so download them with `gh`:
+Binaries are attached to each [GitHub Release](https://github.com/yshrsmz/mewgit/releases) for `aarch64-apple-darwin` and `aarch64-unknown-linux-gnu`:
 
 ```sh
 gh release download -R yshrsmz/mewgit --pattern '*aarch64-apple-darwin.tar.gz*'
@@ -77,10 +85,7 @@ cargo run -p mewgit -- <repo-path>
 
 ## Releasing
 
-[release-please](https://github.com/googleapis/release-please) keeps a release
-PR open on `main`, built from the Conventional Commits since the last release.
-Merging it tags `vX.Y.Z`, creates the GitHub Release, and the `Release`
-workflow attaches the binaries. See `.github/workflows/release.yml`.
+[release-please](https://github.com/googleapis/release-please) keeps a release PR open on `main`, built from the Conventional Commits since the last release. Merging it tags `vX.Y.Z` and creates a draft GitHub Release. The `Release` workflow attaches the binaries and the Homebrew formula with build provenance attestations, publishes the release, and notifies [yshrsmz/homebrew-tap](https://github.com/yshrsmz/homebrew-tap), which updates `Formula/mewgit.rb`. See `.github/workflows/release.yml`.
 
 ## License
 

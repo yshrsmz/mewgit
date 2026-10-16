@@ -158,6 +158,7 @@ pub struct Branch {
 pub struct Upstream {
     pub name: String,  // "origin/feat/x"。表示用
     pub oid: Oid,      // force push の lease に渡す位置
+    pub rewound: bool, // ahead 0 / behind > 0 で、oid がこのブランチの reflog に在る
 }
 
 pub struct UpstreamConfig {
@@ -220,6 +221,7 @@ Branches ペイン（07）が使い、グラフのローカルブランチのラ
   いう起こらない形が型で組めて、揃っていることを散文で約束することになる
   （`GitOp::Push` の `lease` と同じ理由。03）。位置は force push の
   `--force-with-lease=<dst>:<lease>` に渡す（01）
+- **`rewound` は「巻き戻したブランチか」**（01 の「force push」が `ahead == 0` の force を通すかをこれで決める）。ahead が 0、behind が 1 以上で、追跡 ref の位置を `refs/heads/<name>` の reflog のどれかの項目の新しい側が持っていれば真 —— このブランチが一度そこを指していた。**reflog を読むのはこの条件の行だけ**（ほとんどのブランチは ahead か behind のどちらかが条件を外れるので、一覧の読み取りに足すのは数本ぶんのファイル読み）。reflog が無い・読めないときは偽（force を断る側）。**`Upstream` に入れる**のは、追跡 ref が無ければ比べる位置が無いため（`Branch` に直に置くと、「追跡 ref が無い」と「巻き戻していない」が同じ偽になる）
 - **`upstream_config` があっても `upstream` が無い形はある**（`fetch --prune` のあと）。
   そのときは追跡先の位置を知らないので、**force push は断る**（01）。config だけで
   lease を組むと、比べる相手がいないまま `--force` と同じものを撃つことになる

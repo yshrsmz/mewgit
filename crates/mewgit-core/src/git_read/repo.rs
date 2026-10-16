@@ -219,7 +219,9 @@ impl RepoReader {
             let Some(name) = reference.shorthand().ok().map(str::to_string) else {
                 continue;
             };
-            let full = reference.name().ok();
+            // 写しを持つ。`reference` は下で `git2::Branch` に包むので借りたままにできない
+            // （reflog を引くのはその後。`pointed_at`）。
+            let full = reference.name().ok().map(str::to_string);
             // 指す先が commit でない ref（ありえないが、壊れたリポジトリでは起きる）は
             // 落とす。`refs` が peel できないタグを落とすのと同じ扱い。HEAD の行を落とした
             // ときは `rowless_head` が peel し直して `Err` にする。
@@ -230,7 +232,7 @@ impl RepoReader {
             // **追跡設定は remote-tracking ref とは別に読む。** `upstream()` は ref が
             // 無ければ引けないが、`branch.<name>.remote` / `.merge` は config に残って
             // いる。push の `-u` はこちらで決める（02 の「ブランチ一覧」）。
-            let upstream_config = full.and_then(|full| self.upstream_config(full));
+            let upstream_config = full.as_deref().and_then(|full| self.upstream_config(full));
             let push_remote = config
                 .get_string(&format!("branch.{name}.pushRemote"))
                 .ok()
@@ -243,7 +245,7 @@ impl RepoReader {
             // `(None, 0, 0)` に落とすのは、1 本の壊れた追跡 ref で一覧全体を
             // 失わせないため**（他のブランチはどれも読めている。02）。
             let tracking = match branch.upstream() {
-                Ok(upstream) => self.tracking(oid, &upstream),
+                Ok(upstream) => self.tracking(full.as_deref(), oid, &upstream),
                 Err(_) => Tracking::default(),
             };
 
@@ -333,7 +335,12 @@ impl RepoReader {
     /// symbolic な remote-tracking ref（ラベルと同じく解決しない）、`ahead_behind` が
     /// 引けない（指す先のオブジェクトが無い）のどれも、**一覧の読み手にとっては同じ
     /// 「比べる相手がいない」**（02）。
-    fn tracking(&self, local: Oid, upstream: &git2::Branch<'_>) -> Tracking {
+    fn tracking(
+        &self,
+        full_ref: Option<&str>,
+        local: Oid,
+        upstream: &git2::Branch<'_>,
+    ) -> Tracking {
         let (Ok(Some(name)), Some(oid)) = (upstream.name(), upstream.get().target()) else {
             return Tracking::default();
         };
@@ -342,12 +349,26 @@ impl RepoReader {
                 upstream: Some(Upstream {
                     name: name.to_string(),
                     oid,
+                    rewound: ahead == 0
+                        && behind > 0
+                        && full_ref.is_some_and(|full| self.pointed_at(full, oid)),
                 }),
                 ahead,
                 behind,
             },
             Err(_) => Tracking::default(),
         }
+    }
+
+    /// ブランチ `full_ref` が `oid` を一度指していたか。reflog のどれかの項目の新しい側に
+    /// `oid` があれば真（02 の「ブランチ一覧」の `rewound`）。
+    ///
+    /// **reflog が無い・読めないときは偽。** 読み手は force push を通すかをこれで決める
+    /// （01 の「force push」）ので、判らないときは断る側に倒す。
+    fn pointed_at(&self, full_ref: &str, oid: Oid) -> bool {
+        self.repo
+            .reflog(full_ref)
+            .is_ok_and(|reflog| reflog.iter().any(|entry| entry.id_new() == oid))
     }
 
     /// `branch.<name>.remote` / `branch.<name>.merge` を読む。

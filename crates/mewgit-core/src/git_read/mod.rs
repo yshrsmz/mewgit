@@ -486,6 +486,13 @@ pub struct Upstream {
     /// 指している位置。force push の `--force-with-lease=<dst>:<lease>` に渡す
     /// （01 の「force push」）。
     pub oid: Oid,
+    /// 巻き戻したブランチか。ahead が 0、behind が 1 以上で、[`Upstream::oid`] を
+    /// このブランチの reflog が持っている（一度そこを指していた）。
+    ///
+    /// **`ahead == 0` の force push を通すかはこれで決める**（01 の「force push」）。
+    /// ahead / behind だけでは、他人の push を fetch で取っただけの形と見分けられない
+    /// （そちらの先端はこのブランチの reflog に無い）。reflog が無ければ偽（02）。
+    pub rewound: bool,
 }
 
 /// ブランチの追跡設定。`git_exec` の `GitOp::Push` を組むのに使う。

@@ -852,11 +852,13 @@ pub fn fake_branch(name: &str) -> Branch {
 }
 
 /// 追跡 ref から読めた値。位置は指定する（force push の lease に渡る値なので、
-/// テストが「どの位置を主張したか」を見られるようにする）。
+/// テストが「どの位置を主張したか」を見られるようにする）。巻き戻していない形
+/// （`rewound: false`）で、要るテストは戻り値のフィールドを書き換える。
 pub fn fake_upstream(name: &str, oid: Oid) -> Upstream {
     Upstream {
         name: name.to_string(),
         oid,
+        rewound: false,
     }
 }
 

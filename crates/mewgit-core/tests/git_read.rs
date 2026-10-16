@@ -935,6 +935,7 @@ fn branches_reports_the_upstream_and_how_far_it_diverged() {
         Some(Upstream {
             name: "origin/main".to_string(),
             oid: base.parse().unwrap(),
+            rewound: false,
         })
     );
     assert_eq!((main.ahead, main.behind), (2, 0));
@@ -946,6 +947,61 @@ fn branches_reports_the_upstream_and_how_far_it_diverged() {
             merge: "refs/heads/main".to_string(),
         })
     );
+}
+
+#[test]
+fn branches_tells_a_rewound_branch_from_one_that_only_fetched() {
+    // ahead / behind ではどちらも `0 / n` になる 2 つの形を、ブランチの reflog で見分ける
+    // （02 の「ブランチ一覧」の `rewound`、01 の「force push」の表）。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    let pushed = repo.commit("second");
+    repo.git(&[
+        "update-ref",
+        "refs/remotes/origin/main",
+        &pushed.to_string(),
+    ]);
+    let rewound = |repo: &TestRepo| {
+        let reader = RepoReader::open(repo.path()).unwrap();
+        let list = reader.branches().unwrap();
+        let main = list.branches().iter().find(|b| b.name == "main").unwrap();
+        (
+            main.ahead,
+            main.behind,
+            main.upstream.as_ref().map(|upstream| upstream.rewound),
+        )
+    };
+    // 同期している形は巻き戻していない。
+    assert_eq!(rewound(&repo), (0, 0, Some(false)));
+
+    // push した先端から 1 つ戻す。先端は main が一度指していたので reflog に在る。
+    repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    assert_eq!(rewound(&repo), (0, 1, Some(true)));
+
+    // 他人の push を fetch で取っただけの形。追跡 ref の先端を main は一度も指していない。
+    let tree = format!("{pushed}^{{tree}}");
+    let theirs = repo.git(&[
+        "commit-tree",
+        &tree,
+        "-p",
+        &pushed.to_string(),
+        "-m",
+        "theirs",
+    ]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", theirs.trim()]);
+    assert_eq!(rewound(&repo), (0, 2, Some(false)));
+
+    // 先端が reflog に在っても、送るコミットがあるなら巻き戻しではない（通常の force）。
+    repo.git(&[
+        "update-ref",
+        "refs/remotes/origin/main",
+        &pushed.to_string(),
+    ]);
+    repo.commit("third");
+    assert_eq!(rewound(&repo), (1, 1, Some(false)));
 }
 
 #[test]

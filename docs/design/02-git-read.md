@@ -231,7 +231,7 @@ Branches ペイン（07）が使い、グラフのローカルブランチのラ
   - **確かめるのは HEAD の行だけ**で、ほかの行は `Unchecked`。読み手は `P`（HEAD のブランチを push する）だけで、全行で読むと fetch のあとに遅れている行の数だけ reflog を読む（libgit2 1.9.7 の `reflog_parse` はファイル全体を解析する。1,000 行あたり約 0.28ms、300 本がそれぞれ 2,000 行で一覧が +223ms。2026-10-16 に `/simplify` の efficiency が release で実測）。**`bool` にしない** —— 「読んでいない」と「取り込んでいない」が同じ偽になる（`rust-coding.md` の「`None` の理由を 2 つ以上持たせない」）
   - **behind が 0 なら reflog を読まずに `Included`**（先端がローカルの先端の祖先か自身）。読むのは behind ≥ 1 の HEAD の行だけ。**規則は git と同じ**（01 の「force push」の表で 8 つの形を突き合わせた）—— 追跡 ref の reflog のいちばん新しい項目の時刻を取り（無ければ 0）、ブランチの reflog を新しい順に見て、新しい側が先端そのものなら `Included`。そうでなければ候補に積み、その時刻より古い項目を積んだところで打ち切る。最後に候補のどれかから先端に辿り着けるかを見る
   - **辿り着けるかは 1 本の revwalk で見る。** 候補を push し、先端の親を hide すると、辿るのは分かれた部分だけになる。**候補ごとに `graph_descendant_of` を呼ばない** —— libgit2 1.9.7 は呼ぶたびに walk を組み直すので、取り込んでいない形で候補の数 × 履歴の深さを歩く。20,000 コミット・reflog 1,000 項目で一覧の読み取りが 1 回 2.7〜3.1 秒（`commit-graph` を書いても変わらない。2 回目の `/code-review` が release で実測）、revwalk に変えて同じ規模で 0.01 秒未満（2026-10-16、release）。一覧は ref を動かすたびに読み直すので、ここが遅いと書き込みのたびに払う
-  - **reflog のファイルが無ければ `NotIncluded`**（force を断る側）。**先に `reference_has_log` で見る** —— libgit2 1.9.7 の `refdb_reflog_fs__read` は、ファイルが無いと `create_new_reflog_file` で空のファイルを作る（ソースで確認）。空のファイルがあると、`core.logAllRefUpdates=false` でも git はそこへ追記を始めるので、**読み取りが git の振る舞いを変える**（efficiency が実測）。読めないときも `NotIncluded`
+  - **reflog のファイルが無ければ `NotIncluded`**（force を断る側）。ファイルが無いことは読む前に確かめる（確かめずに読むと libgit2 が空のファイルを作る。下の「reflog の読み方」）。読めないときも `NotIncluded`
   - **`Upstream` に入れる**のは、追跡 ref が無ければ比べる位置が無いため（`Branch` に直に置くと、「追跡 ref が無い」も値を持つことになる）
 - **`upstream_config` があっても `upstream` が無い形はある**（`fetch --prune` のあと）。
   そのときは追跡先の位置を知らないので、**force push は断る**（01）。config だけで
@@ -304,9 +304,7 @@ Stash ペイン（01 の「Stash ペイン」）が使う。
   `stash@{index}` の index になる。**`git2::Repository::stash_foreach` は使わない** ——
   git2 0.21 では `&mut self` を取り、読み取りを `&self` に揃えている `RepoReader` に
   合わない
-- **stash が 1 つも無い（`refs/stash` が無い）ときは空の `Vec`**。libgit2 は reflog の
-  ファイルが無ければ空の reflog を返す。`Err` にすると、stash をしたことの無い
-  リポジトリで Stash ペインが毎回失敗になる
+- **stash が 1 つも無い（reflog のファイルが無い）ときは空の `Vec`**。`Err` にすると、stash をしたことの無いリポジトリで Stash ペインが毎回失敗になる。**ファイルが無いことを先に確かめる** —— 確かめずに読むと libgit2 が空のファイルを作る（下の「reflog の読み方」）
 - **メッセージは reflog の本文**。実測（git 2.55.0、2026-09-30）では、`-m` 無しが
   `WIP on <branch>: <短縮 sha> <HEAD の summary>`、`-m` 付きが `On <branch>: <m>`。
   **非 UTF-8 でも行ごと落とさない**（lossy にする）—— 落とすと後ろの index がずれ、
@@ -353,6 +351,24 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 - 例外は HEAD が指すブランチ名で、これだけは落とさず `branches()` 全体を
   `GitReadError::NonUtf8Head` にする。その行を落とすと「ブランチに居るのに HEAD の行が
   無い」になり、上位が detached と区別できない
+
+### reflog の読み方
+
+reflog は必ず `RepoReader::existing_reflog` で読み、ファイルが無ければ `None` を受け取る。`git2::Repository::reflog` を直に呼ばない。読み手は stash の一覧と件数（下の「指紋」）、`Upstream.inclusion`（上の「ブランチ一覧」）、断られた reword の見分け（「断られた reword」）。
+
+- **読み取りがファイルを作るから。** libgit2 1.9.7 の `refdb_reflog_fs__read` は、ファイルが無いと `create_new_reflog_file` で空のファイルを作る（ソースで確認）。指紋は 2 秒ごとに `refs/stash` の reflog を読むので、stash をしたことの無いリポジトリでも、mewgit で開けば必ず `.git/logs/refs/stash` が残る
+- **空のファイルがあると git の振る舞いが変わる。** 実測（2026-10-17、git 2.56.0、一時リポジトリで空の `logs/refs/stash` が有る形と無い形を並べた）:
+
+  | 操作 | ファイル無し | 空のファイル有り |
+  |---|---|---|
+  | `git reflog exists refs/stash` | exit 1 | **exit 0** |
+  | `git update-ref refs/stash/foo HEAD` | exit 0 | **exit 128**（`unable to append to '.git/logs/refs/stash/foo': Not a directory`） |
+  | `git stash clear`（stash 無し）・`git gc` のあと | 無いまま | **残る** |
+  | `git stash list`・`stash@{0}` の解決・`fsck` | 空・exit 1・exit 0 | 同じ |
+  | `stash push` ×2 → `drop stash@{1}` → `pop` | 一覧 2 → 1 → 0 件、最後の pop でファイルが消える | 同じ |
+
+  stash の一覧そのものは変わらない。それでも、読み取り専用の層がユーザーのリポジトリの振る舞いを変えるので塞ぐ。ほかの ref でも同じことが起きる —— 空のファイルがあると、`core.logAllRefUpdates=false` でも git はそこへ追記を始める（#201 で `Upstream.inclusion` を足したときに実測。01 の「force push」）
+- **ファイルが無いときに返す値は読み手ごとに決める。** stash は空の一覧と件数 0、`inclusion` は `NotIncluded`（force を断る側）、reword の見分けは「当たらない」
 
 ### head
 
@@ -949,8 +965,7 @@ amend してから進めるので（03）、`status()` がここで見分けて 
   —— 1 本前の reword が通ってから X の pick がコンフリクトすると、先頭は
   `rebase (reword): …` のまま。メッセージと author の比較はこちらを外す（統合テストで
   両方を踏む）
-- **reflog が読めなければ「当たらない」**（素の continue になる）。外れる側は git 自身の
-  continue と同じ振る舞いで、新しいメッセージが入らないだけ
+- **reflog が無い・読めなければ「当たらない」**（素の continue になる）。外れる側は git 自身の continue と同じ振る舞いで、新しいメッセージが入らないだけ。`core.logAllRefUpdates=false` で `logs/HEAD` が無い形がこちらで、見分けがファイルを作らないことは「reflog の読み方」
 - **`head` を持つのは、continue の時点で同じ停止かを git に照合させるため**（03 の
   `update-ref --stdin` の `verify`）。snapshot のあとで端末から continue して別の停止に
   移っていると、`mewgit-reword-<X>` は残ったまま HEAD だけが変わる
@@ -992,12 +1007,7 @@ stage 0 の blob、HEAD のツリーにある blob）を組む。HEAD 側は sta
 外の変更を見張るための値（`RepoFingerprint`。型と、差から何を読み直すかは 01 の
 「外部の変更の検知」）。**git を起動しない** —— 2 秒ごとに呼ばれるので、git2 と stat だけで組む。
 
-- **ref は `references()` で全部列挙し、名前と指す先をハッシュに畳む。** HEAD は
-  `symbolic_target()`（ブランチ名）と解決した oid の両方を入れる —— 同じコミットを指す
-  別のブランチへ `switch` しても ref の値は動かないので、名前を入れないと拾えない。
-  **`refs/stash` だけは別に持つ**（`Reload::Stashes` で済むものを `RefsAndLog` にしない）。
-  **mtime ではなく列挙にしたのは、入れ子の ref の作成を mtime では拾えないから**
-  （実測の表とコストは 01）。reftable 形式のリポジトリも git2 が吸収する（確かめていない）
+- **ref は `references()` で全部列挙し、名前と指す先をハッシュに畳む。** HEAD は `symbolic_target()`（ブランチ名）と解決した oid の両方を入れる —— 同じコミットを指す別のブランチへ `switch` しても ref の値は動かないので、名前を入れないと拾えない。**`refs/stash` だけは別に持つ**（`Reload::Stashes` で済むものを `RefsAndLog` にしない）。件数は reflog から数え、ファイルが無ければ 0（読む前に確かめる。「reflog の読み方」 —— 2 秒ごとに読むので、確かめないと mewgit で開いたリポジトリに必ず空のファイルが残る）。**mtime ではなく列挙にしたのは、入れ子の ref の作成を mtime では拾えないから**（実測の表とコストは 01）。reftable 形式のリポジトリも git2 が吸収する（確かめていない）
 - **`config` は commondir（`Repository::commondir()`）の、`index` と gitdir はワークツリーごとの
   gitdir（`Repository::path()`）の mtime。** 進行中操作の印（`MERGE_HEAD`、`rebase-merge/`
   など）はワークツリーごとの gitdir にできるので、gitdir のディレクトリの mtime が動く

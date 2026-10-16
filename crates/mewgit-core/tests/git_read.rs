@@ -3,8 +3,8 @@
 use std::fs;
 
 use mewgit_core::git_read::{
-    BranchList, GitReadError, Head, InProgressOp, Inclusion, LogPage, Oid, RefLabel, RepoReader,
-    Step, Upstream, UpstreamConfig,
+    reword_message_path, BranchList, GitReadError, Head, InProgressOp, Inclusion, LogPage, Oid,
+    RefLabel, RepoReader, Step, Upstream, UpstreamConfig,
 };
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
@@ -1291,6 +1291,31 @@ fn a_stopped_rebase_reports_its_step() {
 }
 
 #[test]
+fn refused_reword_does_not_create_a_missing_head_reflog() {
+    // `core.logAllRefUpdates=false` で `logs/HEAD` が無い形。**見分けの読み取りが作らない**
+    // —— 作ると、以後 git がそこへ HEAD の reflog を書き始める（02 の「reflog の読み方」）。
+    // 中身は見分けが reflog を読むところまで届く最小の形（`done` の最終行が reword、
+    // メッセージのファイルが在る、HEAD が X と違う）を手で置く。
+    let repo = TestRepo::init();
+    let x = repo.commit("x").to_string();
+    repo.commit("y");
+    repo.git(&["config", "core.logAllRefUpdates", "false"]);
+    let logs = repo.path().join(".git/logs");
+    fs::remove_dir_all(&logs).unwrap();
+    let rebase_dir = repo.path().join(".git/rebase-merge");
+    fs::create_dir(&rebase_dir).unwrap();
+    fs::write(rebase_dir.join("done"), format!("reword {x} x\n")).unwrap();
+    fs::write(reword_message_path(&rebase_dir, &x), "new\n").unwrap();
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    assert_eq!(reader.refused_reword(), None);
+    assert!(
+        !logs.join("HEAD").exists(),
+        "読み取りが HEAD の reflog のファイルを作りました"
+    );
+}
+
+#[test]
 fn a_stopped_apply_backend_rebase_is_a_rebase() {
     let (repo, _, _) = TestRepo::diverged();
     repo.git(&["switch", "side"]);
@@ -1435,6 +1460,31 @@ fn stashes_is_empty_before_anything_is_stashed() {
     let reader = RepoReader::open(repo.path()).unwrap();
 
     assert_eq!(reader.stashes().unwrap(), []);
+}
+
+#[test]
+fn stashes_and_the_fingerprint_do_not_create_a_missing_stash_reflog() {
+    // **読み取りが `logs/refs/stash` を作らない。** 空のファイルがあると
+    // `git reflog exists refs/stash` が真になり、`refs/stash/<名前>` の ref が作れなく
+    // なる（02 の「reflog の読み方」）。指紋は 2 秒ごとに読むので、作れば必ず残る。
+    let repo = TestRepo::init();
+    repo.commit("first");
+    let reader = RepoReader::open(repo.path()).unwrap();
+    let log = repo.path().join(".git/logs/refs/stash");
+
+    assert_eq!(reader.stashes().unwrap(), []);
+    assert!(
+        !log.exists(),
+        "stash の一覧が reflog のファイルを作りました"
+    );
+    assert_eq!(reader.fingerprint().unwrap().stash, (None, 0));
+    assert!(!log.exists(), "指紋が reflog のファイルを作りました");
+
+    // ファイルができれば、同じ reader がそのまま読む。
+    repo.write_worktree_file("file.txt", b"changed\n");
+    repo.git(&["stash", "push", "-q"]);
+    assert_eq!(reader.stashes().unwrap().len(), 1);
+    assert_eq!(reader.fingerprint().unwrap().stash.1, 1);
 }
 
 #[test]

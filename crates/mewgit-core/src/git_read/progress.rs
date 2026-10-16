@@ -96,9 +96,9 @@ impl RepoReader {
             // 止まった HEAD がどちらも揃える（`/code-review` が踏んだ。02）。HEAD を
             // 動かしたのがこの reword の手順であることを reflog で見る。
             let moved_by_reword = self
-                .repo
-                .reflog("HEAD")
+                .existing_reflog("HEAD")
                 .ok()
+                .flatten()
                 .and_then(|log| {
                     let last = log.get(0)?;
                     Some(

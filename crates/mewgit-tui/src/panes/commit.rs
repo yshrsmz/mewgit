@@ -29,7 +29,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) 
     // **対象を枠に出す。** 右が差し替わっているので、出さないと誰の詳細かを画面から
     // 辿れない（Diff ペインと同じ理由）。
     let title = format!("Commit {}", short_oid(&commit.oid));
-    let block = ui::pane_block(title, state.focus == Pane::CommitDetail);
+    let block = ui::pane_block(
+        title,
+        state.focus == Pane::CommitDetail,
+        state.config.graph.ascii,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -54,7 +58,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, commit: &Commit) 
         files_area,
         files.len(),
         files_cursor..files_cursor + 1,
-        |at| file_line(files[at], at == files_cursor, files_area.width),
+        |at| {
+            file_line(
+                files[at],
+                at == files_cursor,
+                files_area.width,
+                state.config.graph.ascii,
+            )
+        },
     );
 }
 
@@ -115,13 +126,15 @@ fn files_rows(state: &AppState) -> (Vec<FileRow<'_>>, usize) {
 }
 
 /// 1 行を組む。カーソル行は反転（見出しと文言は選べる行ではない）。
-fn file_line(row: FileRow<'_>, is_cursor: bool, width: u16) -> Line<'static> {
+fn file_line(row: FileRow<'_>, is_cursor: bool, width: u16, ascii: bool) -> Line<'static> {
     match row {
         FileRow::Placeholder(text) => Line::raw(text),
         FileRow::Heading(count) => {
             Line::from(Span::styled(format!("Files ({count})"), theme::muted()))
         }
-        FileRow::File(entry) => theme::select(Line::raw(ui::file_row(entry, width)), is_cursor),
+        FileRow::File(entry) => {
+            theme::select(Line::raw(ui::file_row(entry, width, ascii)), is_cursor)
+        }
     }
 }
 

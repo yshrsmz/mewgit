@@ -36,7 +36,8 @@ const RULE_ROWS: u16 = 1;
 /// 通知の履歴を描く。一覧は新しい順で、`selected` の通知を反転して中身を下に出す
 /// （`Modal::NoticeLog`）。
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, selected: u64) {
-    let block = modals::block(TITLE);
+    let ascii = state.config.graph.ascii;
+    let block = modals::block(TITLE, ascii);
     let width = modals::inner_width(area, WIDTH, &block);
 
     // **描く行は core が決める**（`AppState::notice_log_row`）。`j` / `k` も同じ 1 本を
@@ -49,7 +50,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, selected: u64) {
     };
     let newest_first = || state.notices.iter().rev();
 
-    let mut rows: Vec<Line<'_>> = newest_first().map(|n| row(n, width)).collect();
+    let mut rows: Vec<Line<'_>> = newest_first().map(|n| row(n, width, ascii)).collect();
     let chosen = newest_first()
         .nth(cursor)
         .expect("notice_log_row は一覧の中を返す");
@@ -88,6 +89,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, selected: u64) {
     frame.render_widget(
         Block::default()
             .borders(Borders::TOP)
+            .border_set(ui::border_set(false, ascii))
             .border_style(theme::muted()),
         rule,
     );
@@ -98,7 +100,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, selected: u64) {
         let [shown, more] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body);
         frame.render_widget(content, shown);
-        frame.render_widget(Paragraph::new(Span::styled("…", theme::muted())), more);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                ui::pick_charset(ui::ELLIPSIS, ascii),
+                theme::muted(),
+            )),
+            more,
+        );
     } else {
         frame.render_widget(content, body);
     }
@@ -107,13 +115,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, selected: u64) {
 /// 一覧の 1 行 —— 日時、重さの 1 文字、`message` の 1 行目。
 ///
 /// **重さを字でも出す。** 色だけにすると、色の出ない端末で区別が消える（07）。
-fn row(notice: &Notice, width: u16) -> Line<'_> {
+fn row(notice: &Notice, width: u16, ascii: bool) -> Line<'_> {
     let (mark, style) = level(notice.level);
     let lead = vec![
         Span::styled(format!("{} ", time::format(notice.at)), theme::muted()),
         Span::styled(format!("{mark} "), style),
     ];
-    ui::lead_line(lead, &notice.message, width)
+    ui::lead_line(lead, &notice.message, width, ascii)
 }
 
 /// 重さの字とその色。

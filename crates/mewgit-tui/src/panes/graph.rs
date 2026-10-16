@@ -20,9 +20,9 @@ use ratatui::Frame;
 
 use crate::ui::{self, lanes, theme};
 
-/// ペインの枠。`focused` はフォーカスの強調だけに効き、内側の大きさは変えない。
-fn block(focused: bool) -> Block<'static> {
-    ui::pane_block("Graph", focused)
+/// ペインの枠。`focused` と `ascii` は字だけに効き、内側の大きさは変えない。
+fn block(focused: bool, ascii: bool) -> Block<'static> {
+    ui::pane_block("Graph", focused, ascii)
 }
 
 /// 描くときの枠。**印があればタイトルに本数を出す**（`Graph (印 3)`。07）—— 画面外の
@@ -30,9 +30,10 @@ fn block(focused: bool) -> Block<'static> {
 /// 内側の大きさは [`block`] と変わらないので、[`area`] は印を見ない。
 fn titled_block(state: &AppState) -> Block<'static> {
     let focused = state.focus == Pane::Graph;
+    let ascii = state.config.graph.ascii;
     match state.graph.marks.len() {
-        0 => block(focused),
-        marks => ui::pane_block(format!("Graph (印 {marks})"), focused),
+        0 => block(focused, ascii),
+        marks => ui::pane_block(format!("Graph (印 {marks})"), focused, ascii),
     }
 }
 
@@ -40,7 +41,7 @@ fn titled_block(state: &AppState) -> Block<'static> {
 ///
 /// **枠の内側そのまま。** 高さは端末サイズだけで決まる（07 の「CommitDetail ペイン」）。
 pub fn area(area: Rect) -> Rect {
-    block(false).inner(area)
+    block(false, false).inner(area)
 }
 
 /// グラフペインを描く。

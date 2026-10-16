@@ -40,8 +40,8 @@ pub struct Picker<'a> {
 }
 
 /// 箱を描き、本文と一覧を置く。
-pub fn render(frame: &mut Frame, area: Rect, picker: Picker<'_>) {
-    let block = modals::block(picker.title);
+pub fn render(frame: &mut Frame, area: Rect, picker: Picker<'_>, ascii: bool) {
+    let block = modals::block(picker.title, ascii);
     // **本文は折り返しうる。** 桁数を幅で割る見積もりだと単語境界で折れて増えたぶんを
     // 数え落とし、末尾が黙って切れる（`Confirm` と同じ理由。07）。
     let width = modals::inner_width(area, picker.width, &block);

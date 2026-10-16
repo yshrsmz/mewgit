@@ -17,8 +17,15 @@ const HINT: modals::Hint<'static> = &[&["[Enter] 決定", "[Esc] やめる"]];
 const INPUT_ROWS: u16 = 1;
 
 /// 1 行入力を描く。
-pub fn render(frame: &mut Frame, area: Rect, title: &str, prompt: &str, buf: &TextBuffer) {
-    let block = modals::block(title);
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    prompt: &str,
+    buf: &TextBuffer,
+    ascii: bool,
+) {
+    let block = modals::block(title, ascii);
     // **prompt は折り返してから行数を数える**（`Confirm` の本文と同じ）。`桁数 / 幅` の
     // 切り上げで見積もると、単語境界で折れて増えたぶんを数え落として末尾が切れる。
     let (prompt_text, prompt_rows) =

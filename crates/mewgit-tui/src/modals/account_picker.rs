@@ -56,7 +56,7 @@ fn saves_to() -> String {
 }
 
 /// アカウント解決の内訳を出し、選べるなら選ばせる。
-pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize) {
+pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize, ascii: bool) {
     let candidates = view.candidates();
     let hint = hint(view);
 
@@ -71,6 +71,7 @@ pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize) 
             cursor,
             hint: &[&hint],
         },
+        ascii,
     );
 }
 

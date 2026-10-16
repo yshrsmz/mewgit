@@ -19,7 +19,7 @@ const HINT: modals::Hint<'static> = &[&["[j/k] 選ぶ", "[Enter] 実行", "[Esc]
 const WORD_CELLS: usize = "continue".len() + 2;
 
 /// 進行中操作から出る手を並べる。
-pub fn render(frame: &mut Frame, area: Rect, menu: &ProgressMenu, cursor: usize) {
+pub fn render(frame: &mut Frame, area: Rect, menu: &ProgressMenu, cursor: usize, ascii: bool) {
     picker::render(
         frame,
         area,
@@ -31,6 +31,7 @@ pub fn render(frame: &mut Frame, area: Rect, menu: &ProgressMenu, cursor: usize)
             cursor,
             hint: HINT,
         },
+        ascii,
     );
 }
 

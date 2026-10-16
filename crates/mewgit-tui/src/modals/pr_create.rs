@@ -53,7 +53,7 @@ pub struct Fields<'a> {
 ///
 /// **縦は算術で割る**（`ui::split` と同じ形）。`Layout` の `Length` に絶対優先を
 /// 与えると、狭い端末で `Body` が 0 行に潰れる（#65 で一覧を潰した形）。
-pub fn render(frame: &mut Frame, area: Rect, fields: Fields) {
+pub fn render(frame: &mut Frame, area: Rect, fields: Fields, ascii: bool) {
     let Fields {
         title,
         body,
@@ -65,7 +65,7 @@ pub fn render(frame: &mut Frame, area: Rect, fields: Fields) {
     // 1 行の欄（`Title` / `Base` / `Head` / `Draft`）と、残りを取る `Body`。
     let singles: u16 = 4;
     let want = singles.saturating_add(u16::try_from(body.lines.len()).unwrap_or(u16::MAX));
-    let area = modals::place(frame, area, modals::block(TITLE), WIDTH, want, HINT);
+    let area = modals::place(frame, area, modals::block(TITLE, ascii), WIDTH, want, HINT);
     let body_rows = area.height.saturating_sub(singles);
 
     // **上から順に積む。** 各欄の y を `1 + body_rows` のように手で組むと、欄を

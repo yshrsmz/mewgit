@@ -29,6 +29,7 @@ pub fn render(
     summary: &str,
     parents: &[ParentChoice],
     cursor: usize,
+    ascii: bool,
 ) {
     let body = format!(
         "{} {} は merge コミットです。残す側の親を選ぶと、ほかの親から入った変更を取り消します。",
@@ -50,6 +51,7 @@ pub fn render(
             cursor,
             hint: HINT,
         },
+        ascii,
     );
 }
 

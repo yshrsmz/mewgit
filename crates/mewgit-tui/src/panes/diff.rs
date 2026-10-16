@@ -27,6 +27,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let block = ui::pane_block(
         title(state, view, wanted.as_ref()),
         state.focus == Pane::Diff,
+        state.config.graph.ascii,
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);

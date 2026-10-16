@@ -19,7 +19,14 @@ const TITLE: &str = "fetch するリモート";
 const HINT: modals::Hint<'static> = &[&["[j/k] 選ぶ", "[Enter] fetch", "[Esc] やめる"]];
 
 /// 一覧から fetch するリモートを選ばせる。
-pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], cursor: usize) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    reason: &str,
+    remotes: &[String],
+    cursor: usize,
+    ascii: bool,
+) {
     picker::render(
         frame,
         area,
@@ -33,6 +40,7 @@ pub fn render(frame: &mut Frame, area: Rect, reason: &str, remotes: &[String], c
             cursor,
             hint: HINT,
         },
+        ascii,
     );
 }
 

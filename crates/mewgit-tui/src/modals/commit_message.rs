@@ -26,7 +26,7 @@ const HINT: modals::Hint<'static> = &[&[
 pub const WIDTH: u16 = 76;
 
 /// コミットメッセージの編集を描く。
-pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool) {
+pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool, ascii: bool) {
     // **どちらの操作かを枠に出す。** amend は HEAD を書き換えるので、新規コミットの
     // つもりで確定させない（07）。
     let title = if amend {
@@ -34,7 +34,7 @@ pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool) {
     } else {
         "Commit message"
     };
-    render_editor(frame, area, title, HINT, buf);
+    render_editor(frame, area, title, HINT, buf, ascii);
 }
 
 /// メッセージを打つ箱を描く。**RebaseEditor の reword も同じ箱**で、違うのは題と
@@ -46,10 +46,18 @@ pub fn render_editor(
     title: &str,
     hint: modals::Hint<'_>,
     buf: &TextBuffer,
+    ascii: bool,
 ) {
     // 折り返さないので、本文の行数はそのままバッファの行数（下の `Paragraph`）。
     let body_rows = u16::try_from(buf.lines.len()).unwrap_or(u16::MAX);
-    let body_area = modals::place(frame, area, modals::block(title), WIDTH, body_rows, hint);
+    let body_area = modals::place(
+        frame,
+        area,
+        modals::block(title, ascii),
+        WIDTH,
+        body_rows,
+        hint,
+    );
 
     // **`ui::render_rows` は使わない。** あちらは横位置を持たず、diff と一覧は
     // それでよい（長い行は右で切れるだけ）。編集中はカーソルが右端を越えるので、

@@ -356,7 +356,7 @@ git は ref 名・パス・メッセージにどんなバイト列も許すの�
 
 reflog は必ず `RepoReader::existing_reflog` で読み、ファイルが無ければ `None` を受け取る。**`git2::Repository::reflog` の直呼びは `clippy.toml` の `disallowed-methods` で断る**（CI の `clippy -D warnings` で落ちる）。ファイルが無いときに何を返すかは読み手ごとに決め、各節に書く。
 
-- **読み取りがファイルを作るから。** libgit2 1.9.7 の `refdb_reflog_fs__read` は、ファイルが無いと `create_new_reflog_file` で空のファイルを作る（ソースで確認）。指紋は 2 秒ごとに `refs/stash` の reflog を読むので、stash をしたことの無いリポジトリでも、mewgit で開けば必ず `.git/logs/refs/stash` が残る
+- **読み取りがファイルを作るから。** libgit2 1.9.7 の `refdb_reflog_fs__read` は、ファイルが無いと `create_new_reflog_file` で空のファイルを作る（ソースで確認）。指紋は 2 秒ごとに `refs/stash` の reflog を読むので、直に読んでいたあいだは、stash をしたことの無いリポジトリでも mewgit で開くだけで `.git/logs/refs/stash` が残っていた
 - **空のファイルがあると git の振る舞いが変わる。** 実測（2026-10-17、git 2.56.0、一時リポジトリで空の `logs/refs/stash` が有る形と無い形を並べた）:
 
   | 操作 | ファイル無し | 空のファイル有り |
@@ -367,7 +367,7 @@ reflog は必ず `RepoReader::existing_reflog` で読み、ファイルが無け
   | `git stash list`・`stash@{0}` の解決・`fsck` | 空・exit 1・exit 0 | 同じ |
   | `stash push` ×2 → `drop stash@{1}` → `pop` | 一覧 2 → 1 → 0 件、最後の pop でファイルが消える | 同じ |
 
-  stash の一覧そのものは変わらない。それでも、読み取り専用の層がユーザーのリポジトリの振る舞いを変えるので塞ぐ。ほかの ref でも同じことが起きる —— 空のファイルがあると、`core.logAllRefUpdates=false` でも git はそこへ追記を始める（#201 で `Upstream.inclusion` を足したときに実測。01 の「force push」）
+  stash の一覧そのものは変わらない。それでも、読み取り専用の層がユーザーのリポジトリの振る舞いを変えるので塞ぐ。ほかの ref でも同じことが起きる —— 空のファイルがあると、`core.logAllRefUpdates=false` でも git はそこへ追記を始める（#201 で `Upstream.inclusion` を足したときに実測。01 の「force push」。2026-10-17 に git 2.56.0 で、`commit`・`reset --hard`・`update-ref`・`branch -f` のどれもがブランチの空のファイルへ 1 行足すことを確かめた。`logs/HEAD` を置かない形でも同じ）
 - **確かめてから読むまでの窓は残る。** `reference_has_log` と `reflog()` のあいだに外で最後の stash を pop すると、ファイルが消えた直後に読んで空のファイルを作る。libgit2 に「無ければ作らずに読む」API が無いので塞いでいない（確かめてはいない。指紋の 2 秒ごとの読みと外の pop が重なったときだけ）
 
 ### head
@@ -965,7 +965,7 @@ amend してから進めるので（03）、`status()` がここで見分けて 
   —— 1 本前の reword が通ってから X の pick がコンフリクトすると、先頭は
   `rebase (reword): …` のまま。メッセージと author の比較はこちらを外す（統合テストで
   両方を踏む）
-- **reflog が無い・読めなければ「当たらない」**（素の continue になる）。外れる側は git 自身の continue と同じ振る舞いで、新しいメッセージが入らないだけ。`core.logAllRefUpdates=false` で `logs/HEAD` が無い形もこちら（「reflog の読み方」）
+- **reflog が無い・読めなければ「当たらない」**（素の continue になる）。外れる側は git 自身の continue と同じ振る舞いで、新しいメッセージが入らないだけ。`core.logAllRefUpdates=false` で `logs/HEAD` が無い形もこちらで、**この設定では載せ直した形の断られた reword を毎回見分けない**（早送りした形は HEAD = X で見分ける）。直に読んでいたころは読みが `logs/HEAD` を作るので、以後 git がそこへ書き、次からは当たりえた（`/code-review` の指摘。こちらでは確かめていない）。それはユーザーの設定を mewgit が黙って覆す形なので戻さない（「reflog の読み方」）
 - **`head` を持つのは、continue の時点で同じ停止かを git に照合させるため**（03 の
   `update-ref --stdin` の `verify`）。snapshot のあとで端末から continue して別の停止に
   移っていると、`mewgit-reword-<X>` は残ったまま HEAD だけが変わる

@@ -4,7 +4,7 @@ use std::fs;
 
 use mewgit_core::git_read::{
     reword_message_path, BranchList, GitReadError, Head, InProgressOp, Inclusion, LogPage, Oid,
-    RefLabel, RepoReader, Step, Upstream, UpstreamConfig,
+    RefLabel, RefusedReword, RepoReader, Step, Upstream, UpstreamConfig,
 };
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
@@ -1290,17 +1290,17 @@ fn a_stopped_rebase_reports_its_step() {
 #[test]
 fn refused_reword_does_not_create_a_missing_head_reflog() {
     // `core.logAllRefUpdates=false` で `logs/HEAD` が無い形。**見分けの読み取りが作らない**
-    // （02 の「reflog の読み方」）。中身は見分けが reflog を読むところまで届く最小の形（`done` の最終行が reword、
-    // メッセージのファイルが在る、HEAD が X と違う）を手で置く。
+    // （02 の「reflog の読み方」）。載せ直した形（HEAD が X と別のコミットで、メッセージと
+    // author が X と同じ）を手で置くので、見分けは reflog を読むところまで届く。
     let repo = TestRepo::init();
     let x = repo.commit("x").to_string();
-    repo.commit("y");
+    repo.git(&["commit", "-q", "--allow-empty", "-C", &x]);
+    let head = repo.head_oid();
     let logs = repo.drop_reflogs();
     let rebase_dir = repo.path().join(".git/rebase-merge");
     fs::create_dir(&rebase_dir).unwrap();
     fs::write(rebase_dir.join("done"), format!("reword {x} x\n")).unwrap();
     fs::write(reword_message_path(&rebase_dir, &x), "new\n").unwrap();
-
     assert!(!logs.join("HEAD").exists(), "fixture に reflog が在ります");
 
     let reader = RepoReader::open(repo.path()).unwrap();
@@ -1309,6 +1309,16 @@ fn refused_reword_does_not_create_a_missing_head_reflog() {
         !logs.join("HEAD").exists(),
         "読み取りが HEAD の reflog のファイルを作りました"
     );
+
+    // reflog が在れば、同じ形を見分ける。
+    let zero = Oid::ZERO_SHA1;
+    fs::create_dir(&logs).unwrap();
+    fs::write(
+        logs.join("HEAD"),
+        format!("{zero} {head} t <t@t> 0 +0000\trebase (reword): x\n"),
+    )
+    .unwrap();
+    assert_eq!(reader.refused_reword(), Some(RefusedReword { head }));
 }
 
 #[test]

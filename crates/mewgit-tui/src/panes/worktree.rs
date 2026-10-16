@@ -13,11 +13,8 @@ use crate::ui::{self, theme};
 
 /// ワーキングツリーペインを描く。
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let block = ui::pane_block(
-        title(state),
-        state.focus == Pane::Worktree,
-        state.config.graph.ascii,
-    );
+    let charset = ui::charset(state);
+    let block = ui::pane_block(title(state), state.focus == Pane::Worktree, charset);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -29,12 +26,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let (rows, cursor) = rows(state);
     // 見せたいのはカーソルの 1 行だけ。Diff ペインはハンク全体を渡す。
     ui::render_rows(frame, inner, rows.len(), cursor..cursor + 1, |at| {
-        line(
-            rows[at],
-            at == cursor,
-            inner.width,
-            state.config.graph.ascii,
-        )
+        line(rows[at], at == cursor, inner.width, charset)
     });
 }
 
@@ -91,10 +83,10 @@ fn rows(state: &AppState) -> (Vec<Row<'_>>, usize) {
 }
 
 /// 1 行を組む。カーソル行は反転。
-fn line(row: Row<'_>, selected: bool, width: u16, ascii: bool) -> Line<'static> {
+fn line(row: Row<'_>, selected: bool, width: u16, charset: ui::Charset) -> Line<'static> {
     match row {
         Row::Heading(section) => Line::from(Span::styled(heading(section), theme::muted())),
-        Row::File(entry) => theme::select(Line::raw(ui::file_row(entry, width, ascii)), selected),
+        Row::File(entry) => theme::select(Line::raw(ui::file_row(entry, width, charset)), selected),
     }
 }
 

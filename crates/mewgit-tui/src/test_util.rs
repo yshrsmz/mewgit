@@ -266,7 +266,7 @@ fn draw_modal(state: &AppState, size: TermSize) -> (Buffer, Rect) {
         .map(|at| Rect::new(at.x, at.y, 1, 1))
         .reduce(Rect::union)
         .expect("箱が描かれていない");
-    let inner = modals::block("", false).inner(outer);
+    let inner = modals::block("", crate::ui::Charset::Utf8).inner(outer);
     (buffer, inner)
 }
 

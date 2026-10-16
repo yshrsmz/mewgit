@@ -32,14 +32,14 @@ pub(super) fn lines(state: &AppState) -> Rows {
         };
     }
 
-    let ascii = state.config.graph.ascii;
+    let charset = ui::charset(state);
     // **カーソル行の反転はここで当てない。** [`super::TopPane::render`] が `cursor` を
     // 見て 1 箇所で当てる（`Prs` と共有）。
     let head = state.branches.head_row();
     let lines = branches
         .iter()
         .enumerate()
-        .map(|(i, branch)| row(branch, head == Some(i), ascii))
+        .map(|(i, branch)| row(branch, head == Some(i), charset))
         .collect();
     Rows {
         lines,
@@ -48,12 +48,12 @@ pub(super) fn lines(state: &AppState) -> Rows {
 }
 
 /// 1 行。`* main  ↑1`。印が付くのは HEAD のブランチだけ。
-fn row(branch: &Branch, is_head: bool, ascii: bool) -> Line<'static> {
+fn row(branch: &Branch, is_head: bool, charset: ui::Charset) -> Line<'static> {
     let mark = if is_head { '*' } else { ' ' };
     Line::from(vec![
         Span::raw(format!(" {mark} {}", branch.name)),
         // 空なら何も描かれない（upstream が無いか、追いついている）。
-        Span::styled(tracking(branch, ascii), theme::muted()),
+        Span::styled(tracking(branch, charset), theme::muted()),
     ])
 }
 
@@ -64,9 +64,9 @@ fn row(branch: &Branch, is_head: bool, ascii: bool) -> Line<'static> {
 ///
 /// 記号は `config.graph.ascii` に従う。キーは `[graph]` の下にあるが、既定は locale から
 /// 決まる（08）ので意味は「この端末が非 ASCII の記号を出せるか」。
-fn tracking(branch: &Branch, ascii: bool) -> String {
-    let up = ui::pick_charset(AHEAD, ascii);
-    let down = ui::pick_charset(BEHIND, ascii);
+fn tracking(branch: &Branch, charset: ui::Charset) -> String {
+    let up = charset.pick(AHEAD);
+    let down = charset.pick(BEHIND);
     let mut out = String::new();
     if branch.ahead > 0 {
         out.push_str(&format!("  {up}{}", branch.ahead));

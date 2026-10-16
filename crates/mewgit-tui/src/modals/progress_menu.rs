@@ -11,6 +11,7 @@ use ratatui::Frame;
 
 use crate::modals;
 use crate::modals::picker::{self, Picker};
+use crate::ui::Charset;
 
 /// キーの案内。`update::picker_key` と `update::progress::progress_picked` が受けるキーと揃える。
 const HINT: modals::Hint<'static> = &[&["[j/k] 選ぶ", "[Enter] 実行", "[Esc] やめる"]];
@@ -19,7 +20,7 @@ const HINT: modals::Hint<'static> = &[&["[j/k] 選ぶ", "[Enter] 実行", "[Esc]
 const WORD_CELLS: usize = "continue".len() + 2;
 
 /// 進行中操作から出る手を並べる。
-pub fn render(frame: &mut Frame, area: Rect, menu: &ProgressMenu, cursor: usize, ascii: bool) {
+pub fn render(frame: &mut Frame, area: Rect, menu: &ProgressMenu, cursor: usize, charset: Charset) {
     picker::render(
         frame,
         area,
@@ -31,7 +32,7 @@ pub fn render(frame: &mut Frame, area: Rect, menu: &ProgressMenu, cursor: usize,
             cursor,
             hint: HINT,
         },
-        ascii,
+        charset,
     );
 }
 

@@ -6,6 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 
 use crate::modals;
+use crate::ui::Charset;
 
 /// キーの案内。`update::commit_message_key` が受けるキーと揃える。
 ///
@@ -26,7 +27,7 @@ const HINT: modals::Hint<'static> = &[&[
 pub const WIDTH: u16 = 76;
 
 /// コミットメッセージの編集を描く。
-pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool, ascii: bool) {
+pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool, charset: Charset) {
     // **どちらの操作かを枠に出す。** amend は HEAD を書き換えるので、新規コミットの
     // つもりで確定させない（07）。
     let title = if amend {
@@ -34,7 +35,7 @@ pub fn render(frame: &mut Frame, area: Rect, buf: &TextBuffer, amend: bool, asci
     } else {
         "Commit message"
     };
-    render_editor(frame, area, title, HINT, buf, ascii);
+    render_editor(frame, area, title, HINT, buf, charset);
 }
 
 /// メッセージを打つ箱を描く。**RebaseEditor の reword も同じ箱**で、違うのは題と
@@ -46,14 +47,14 @@ pub fn render_editor(
     title: &str,
     hint: modals::Hint<'_>,
     buf: &TextBuffer,
-    ascii: bool,
+    charset: Charset,
 ) {
     // 折り返さないので、本文の行数はそのままバッファの行数（下の `Paragraph`）。
     let body_rows = u16::try_from(buf.lines.len()).unwrap_or(u16::MAX);
     let body_area = modals::place(
         frame,
         area,
-        modals::block(title, ascii),
+        modals::block(title, charset),
         WIDTH,
         body_rows,
         hint,

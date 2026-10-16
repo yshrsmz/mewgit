@@ -148,34 +148,24 @@ fn split_right(state: &AppState, top: &panes::TopPane, right: Rect) -> [Rect; 2]
 /// `s` や `x` が別のペインに飛んだように見える。**線の形（太線）と色の両方を変える**
 /// —— 修飾だけだと、太字を描かない端末で差が出ない。枠の内側の大きさは強調の有無で
 /// 変わらない（太線も 1 セル）ので、レイアウトの計算は `focused` を偽で呼んでよい。
-/// `ascii`（`config.graph.ascii`）も字を替えるだけで、内側の大きさは変えない。
-pub fn pane_block(title: impl Into<Line<'static>>, focused: bool, ascii: bool) -> Block<'static> {
+/// `charset` も字を替えるだけで、内側の大きさは変えない。
+pub fn pane_block(
+    title: impl Into<Line<'static>>,
+    focused: bool,
+    charset: Charset,
+) -> Block<'static> {
     // **`&'static str` も受ける。** グラフの枠は行数を測るのに `runtime::layout` から
     // ループのたびに組まれるので、そこで毎回 `String` を確保しない。
     // **`Line` も受ける**のは、右上のタブが見出しの中で 2 枚を描き分けるため
     // （`panes::right_tabs`。07 の「右上のタブ」）。
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(border_set(focused, ascii))
+        .border_set(charset.border(focused))
         .title(title.into());
     if focused {
         block.border_style(theme::focused())
     } else {
         block
-    }
-}
-
-/// 枠の字。細線か太線か（フォーカスの強調）と、UTF-8 か ASCII か（07 の「ペインと
-/// フォーカス」）。
-///
-/// **ASCII でも形の差を残す。** 太線の代わりに角と縦線を `#`、横線を `=` にする ——
-/// 色だけにすると、色も修飾も出ない端末で区別が消える。モーダルの枠は細線の組を使う。
-pub fn border_set(focused: bool, ascii: bool) -> border::Set<'static> {
-    match (focused, ascii) {
-        (false, false) => border::PLAIN,
-        (true, false) => border::THICK,
-        (false, true) => ASCII_PLAIN,
-        (true, true) => ASCII_THICK,
     }
 }
 
@@ -321,17 +311,58 @@ pub fn render_built(
     });
 }
 
-/// UTF-8 と ASCII の字を選ぶ。`config.graph.ascii` に従う（08）。
+/// 端末に出す字の組。UTF-8 の記号を出すか、ASCII に倒すか（06 の「ASCII フォールバック」）。
 ///
-/// **選ぶところは 1 本。** キーは `[graph]` の下にあるが、既定は locale から決まる
-/// ので意味は「この端末が非 ASCII の字を出せるか」。グラフのレーンだけに効かせると、
-/// 同じ端末で Branches ペインの矢印だけが化ける（07）。枠線（[`border_set`]）・
-/// 省略の印（[`ELLIPSIS`]）・スピナー（[`SPINNER`]）も同じ判定で倒す。
-pub fn pick_charset(glyphs: (&'static str, &'static str), ascii: bool) -> &'static str {
-    if ascii {
-        glyphs.1
+/// **`config.graph.ascii` を読むのは [`charset`] だけ。** キーは `[graph]` の下にあるが、
+/// 既定は locale から決まるので意味は「この端末が非 ASCII の字を出せるか」。グラフの
+/// レーンだけに効かせると、同じ端末で Branches ペインの矢印だけが化ける（07）。
+/// `bool` で運ばないのは、`pane_block(title, focused, …)` のように旗が並ぶと取り違えても
+/// コンパイラが止めないため。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Charset {
+    Utf8,
+    Ascii,
+}
+
+impl Charset {
+    /// `(UTF-8, ASCII)` の組から字を選ぶ。**倒す字は全部ここか [`Charset::border`] を通る。**
+    pub fn pick(self, glyphs: (&'static str, &'static str)) -> &'static str {
+        match self {
+            Charset::Utf8 => glyphs.0,
+            Charset::Ascii => glyphs.1,
+        }
+    }
+
+    /// 枠の字。細線か太線か（フォーカスの強調）と、字の組で決まる（07 の「ペインと
+    /// フォーカス」）。
+    ///
+    /// **ASCII でも形の差を残す。** 太線の代わりに角と縦線を `#`、横線を `=` にする ——
+    /// 色だけにすると、色も修飾も出ない端末で区別が消える。モーダルの枠は細線の組を使う。
+    pub fn border(self, focused: bool) -> border::Set<'static> {
+        match (self, focused) {
+            (Charset::Utf8, false) => border::PLAIN,
+            (Charset::Utf8, true) => border::THICK,
+            (Charset::Ascii, false) => ASCII_PLAIN,
+            (Charset::Ascii, true) => ASCII_THICK,
+        }
+    }
+
+    /// 省略の印とそのセル数。**印の取り出し口はここ 1 本**（[`ELLIPSIS`]）。
+    pub fn ellipsis(self) -> (&'static str, u16) {
+        let mark = self.pick(ELLIPSIS);
+        (
+            mark,
+            u16::try_from(Span::raw(mark).width()).unwrap_or(u16::MAX),
+        )
+    }
+}
+
+/// いまの端末の字の組。`config.graph.ascii` を読むのはここだけ。
+pub fn charset(state: &AppState) -> Charset {
+    if state.config.graph.ascii {
+        Charset::Ascii
     } else {
-        glyphs.0
+        Charset::Utf8
     }
 }
 
@@ -422,35 +453,35 @@ pub fn files_placeholder(state: &AppState) -> &'static str {
 ///
 /// **`width` に入らないパスは左を切る**（[`ellipsize_left`]。07 の「Worktree ペイン」）。
 /// 右で切るとファイル名が消える。
-pub fn file_row(entry: &FileEntry, width: u16, ascii: bool) -> String {
+pub fn file_row(entry: &FileEntry, width: u16, charset: Charset) -> String {
     let lead = format!(" {} ", mark(entry.status));
     let room = width.saturating_sub(u16::try_from(lead.len()).unwrap_or(u16::MAX));
     let label = path_label(&entry.path, entry.old_path.as_deref());
-    lead + &ellipsize_left(&label, room, ascii)
+    lead + &ellipsize_left(&label, room, charset)
 }
 
 /// `path` を `cells` セルに収める。溢れるときは先頭の成分から落として `…/` にする。
 ///
 /// **`/` の区切りで落とす**（07 の「Worktree ペイン」）。どこまで落としてもファイル名が
 /// 入らないときは、書記素で左を落として `…` + 末尾にする。測るのは [`ellipsize`] と
-/// 同じく書記素ごと。印は `ascii` で `...` に倒れる（[`ELLIPSIS`]）。
-fn ellipsize_left(path: &str, cells: u16, ascii: bool) -> Cow<'_, str> {
+/// 同じく書記素ごと。印は ASCII で `...` に倒れる（[`ELLIPSIS`]）。
+fn ellipsize_left(path: &str, cells: u16, charset: Charset) -> Cow<'_, str> {
     if fits(path, cells) {
         return Cow::Borrowed(path);
     }
-    let (mark, mark_cells) = ellipsis(ascii);
-    // `…/` の後ろに残す形を、長いほうから試す。先頭の成分は残す候補にしない
-    // （それはパス全体で、上で入らないと判っている）。
-    for (at, _) in path.match_indices('/') {
-        let rest = &path[at..];
-        if mark_cells <= cells && fits(rest, cells - mark_cells) {
-            return Cow::Owned(format!("{mark}{rest}"));
-        }
-    }
+    let (mark, mark_cells) = charset.ellipsis();
     // 印が入らない幅では印を付けずに切る。
     let Some(room) = cells.checked_sub(mark_cells) else {
         return Cow::Owned(take_cells(path, cells, End::Tail));
     };
+    // 印 + `/` の後ろに残す形を、長いほうから試す。先頭の成分は残す候補にしない
+    // （それはパス全体で、上で入らないと判っている）。
+    for (at, _) in path.match_indices('/') {
+        let rest = &path[at..];
+        if fits(rest, room) {
+            return Cow::Owned(format!("{mark}{rest}"));
+        }
+    }
     // 印のセルを先に取っておき、末尾から詰める。
     Cow::Owned(format!("{mark}{}", take_cells(path, room, End::Tail)))
 }
@@ -609,7 +640,7 @@ fn header_line(state: &AppState, width: u16) -> Paragraph<'static> {
         }
     }
     // **最後はリポジトリ名だけ。** それも入らなければ切る。
-    let repo = ellipsize(&repo, width, state.config.graph.ascii).into_owned();
+    let repo = ellipsize(&repo, width, charset(state)).into_owned();
     Paragraph::new(Line::from(Span::styled(repo, header_repo_style())))
 }
 
@@ -804,16 +835,16 @@ fn spinner_line(state: &AppState) -> Option<Line<'static>> {
     }
     // 駒は `Tick` の回数で選ぶ。`jobs` の中身では選ばない —— 走っているものが
     // 変わらないあいだ止まって見える。
-    let ascii = state.config.graph.ascii;
-    let frame = pick_charset(SPINNER[(state.tick % SPINNER.len() as u64) as usize], ascii);
-    Some(fold_spinner(frame, &labels, ascii))
+    let charset = self::charset(state);
+    let frame = charset.pick(SPINNER[(state.tick % SPINNER.len() as u64) as usize]);
+    Some(fold_spinner(frame, &labels, charset))
 }
 
 /// 駒と説明を [`SPINNER_SEAT`] に畳む（07 の「ヘッダ」）。
 ///
 /// 入るだけ並べて残りを `+N` にする（`⠋ fetch +2`）。1 つも入らなければ `⠋ +3`、
 /// 1 つしか無いのに入らなければその説明を切る。
-fn fold_spinner(frame: &'static str, labels: &[&'static str], ascii: bool) -> Line<'static> {
+fn fold_spinner(frame: &'static str, labels: &[&'static str], charset: Charset) -> Line<'static> {
     let lead = || vec![Span::raw(frame), Span::raw(" ")];
     // `shown == 0` は `⠋ +3`。1 つしか無いときは数だけにせず、下で切る。
     let fewest = usize::from(labels.len() == 1);
@@ -835,7 +866,7 @@ fn fold_spinner(frame: &'static str, labels: &[&'static str], ascii: bool) -> Li
             return line;
         }
     }
-    lead_line(lead(), labels[0], SPINNER_SEAT, ascii)
+    lead_line(lead(), labels[0], SPINNER_SEAT, charset)
 }
 
 /// フッターの 1 行目。進行中操作のバッジと、直近の通知を積まれた時刻を添えて出す。
@@ -868,12 +899,7 @@ fn status_line(state: &AppState, width: u16) -> Paragraph<'_> {
         format!("{} ", time::clock(notice.at)),
         theme::muted(),
     ));
-    Paragraph::new(lead_line(
-        lead,
-        &notice.message,
-        width,
-        state.config.graph.ascii,
-    ))
+    Paragraph::new(lead_line(lead, &notice.message, width, charset(state)))
 }
 
 /// 進行中操作のバッジの文言。git の語を大文字で（07 の「ステータスバー」）。
@@ -903,11 +929,11 @@ pub(crate) fn lead_line<'a>(
     mut lead: Vec<Span<'a>>,
     message: &'a str,
     width: u16,
-    ascii: bool,
+    charset: Charset,
 ) -> Line<'a> {
     let used: usize = lead.iter().map(Span::width).sum();
     let room = width.saturating_sub(u16::try_from(used).unwrap_or(u16::MAX));
-    lead.push(Span::raw(ellipsize(first_line(message), room, ascii)));
+    lead.push(Span::raw(ellipsize(first_line(message), room, charset)));
     Line::from(lead)
 }
 
@@ -952,13 +978,13 @@ pub fn push_expanded(out: &mut String, text: &str) {
 
 /// `text` を `cells` セルに収める。溢れるときは末尾を `…` に置き換える。
 ///
-/// 印は `ascii` で `...` に倒れる（[`ELLIPSIS`]）。**印が入らない幅では印を付けずに
+/// 印は ASCII で `...` に倒れる（[`ELLIPSIS`]）。**印が入らない幅では印を付けずに
 /// 切る**（07 の「ステータスバー」）。
-fn ellipsize(text: &str, cells: u16, ascii: bool) -> Cow<'_, str> {
+fn ellipsize(text: &str, cells: u16, charset: Charset) -> Cow<'_, str> {
     if fits(text, cells) {
         return Cow::Borrowed(text);
     }
-    let (mark, mark_cells) = ellipsis(ascii);
+    let (mark, mark_cells) = charset.ellipsis();
     let Some(room) = cells.checked_sub(mark_cells) else {
         return Cow::Owned(take_cells(text, cells, End::Head));
     };
@@ -972,16 +998,7 @@ fn ellipsize(text: &str, cells: u16, ascii: bool) -> Cow<'_, str> {
 ///
 /// **ASCII は 3 セルの `...`**（07 の「ステータスバー」）。1 セルの `~` や `.` は、パスの
 /// `~/` がホームに、`.` が文末やファイル名の点に読める。
-pub const ELLIPSIS: (&str, &str) = ("…", "...");
-
-/// 省略の印とそのセル数。
-fn ellipsis(ascii: bool) -> (&'static str, u16) {
-    let mark = pick_charset(ELLIPSIS, ascii);
-    (
-        mark,
-        u16::try_from(Span::raw(mark).width()).unwrap_or(u16::MAX),
-    )
-}
+const ELLIPSIS: (&str, &str) = ("…", "...");
 
 /// 最初の行。改行が無ければ全体。
 fn first_line(text: &str) -> &str {
@@ -1135,7 +1152,7 @@ mod tests {
         use mewgit_core::git_read::FileStatus;
         use mewgit_core::test_util::fake_entry;
 
-        let row = |status| file_row(&fake_entry("a.txt", status), 80, false);
+        let row = |status| file_row(&fake_entry("a.txt", status), 80, super::Charset::Utf8);
 
         assert_eq!(row(FileStatus::Added), " A a.txt");
         assert_eq!(row(FileStatus::Modified), " M a.txt");
@@ -1148,7 +1165,10 @@ mod tests {
         // rename は元の名前も出す（`path_label`）。
         let mut renamed = fake_entry("new.txt", FileStatus::Renamed);
         renamed.old_path = Some("old.txt".into());
-        assert_eq!(file_row(&renamed, 80, false), " R old.txt -> new.txt");
+        assert_eq!(
+            file_row(&renamed, 80, super::Charset::Utf8),
+            " R old.txt -> new.txt"
+        );
     }
 
     #[test]
@@ -1164,11 +1184,17 @@ mod tests {
         );
         // 幅 24 なら種別の 3 セルを除いて 21 セル。`…/panes/worktree.rs`（19 セル）は入り、
         // `…/src/panes/worktree.rs`（23 セル）は入らない。
-        assert_eq!(file_row(&entry, 24, false), " M …/panes/worktree.rs");
-        assert_eq!(file_row(&entry, 21, false), " M …/worktree.rs");
+        assert_eq!(
+            file_row(&entry, 24, super::Charset::Utf8),
+            " M …/panes/worktree.rs"
+        );
+        assert_eq!(
+            file_row(&entry, 21, super::Charset::Utf8),
+            " M …/worktree.rs"
+        );
         // 入る幅では切らない。
         assert_eq!(
-            file_row(&entry, 42, false),
+            file_row(&entry, 42, super::Charset::Utf8),
             " M crates/mewgit-tui/src/panes/worktree.rs"
         );
     }
@@ -1176,19 +1202,32 @@ mod tests {
     #[test]
     fn a_left_cut_falls_back_to_graphemes_when_the_name_alone_is_too_long() {
         // ファイル名だけでも入らなければ、区切りを諦めて末尾を書記素で残す。
-        assert_eq!(ellipsize_left("dir/abcdefgh.rs", 6, false), "…gh.rs");
+        assert_eq!(
+            ellipsize_left("dir/abcdefgh.rs", 6, super::Charset::Utf8),
+            "…gh.rs"
+        );
         // 区切りが無いパスも同じ。
-        assert_eq!(ellipsize_left("abcdefgh.rs", 4, false), "….rs");
+        assert_eq!(
+            ellipsize_left("abcdefgh.rs", 4, super::Charset::Utf8),
+            "….rs"
+        );
         // **全角は 2 セルで数える。** 文字数で数えると `…` が枠を越える。
-        assert_eq!(ellipsize_left("ディレクトリ/ファイル", 7, false), "…ァイル");
-        assert_eq!(ellipsize_left("a/b", 0, false), "");
+        assert_eq!(
+            ellipsize_left("ディレクトリ/ファイル", 7, super::Charset::Utf8),
+            "…ァイル"
+        );
+        assert_eq!(ellipsize_left("a/b", 0, super::Charset::Utf8), "");
     }
 
     #[test]
     fn a_left_cut_of_a_rename_drops_the_old_name_first() {
         // 1 本の文字列として左から切る（07 で受け入れた穴）。`R` の印で rename は読める。
         assert_eq!(
-            ellipsize_left("src/old_name.rs -> src/new_name.rs", 20, false),
+            ellipsize_left(
+                "src/old_name.rs -> src/new_name.rs",
+                20,
+                super::Charset::Utf8
+            ),
             "…/new_name.rs"
         );
     }
@@ -1197,10 +1236,10 @@ mod tests {
     fn an_ascii_terminal_cuts_with_three_dots() {
         // `…` は罫線と同じ曖昧幅なので、ASCII では `...` に倒す（06 の「ASCII
         // フォールバック」）。**印の 3 セルを先に取っておく。**
-        assert_eq!(ellipsize("abcdef", 6, true), "abcdef");
-        assert_eq!(ellipsize("abcdef", 5, true), "ab...");
+        assert_eq!(ellipsize("abcdef", 6, super::Charset::Ascii), "abcdef");
+        assert_eq!(ellipsize("abcdef", 5, super::Charset::Ascii), "ab...");
         // 印が入らない幅では印を付けずに切る（07 の「ステータスバー」）。
-        assert_eq!(ellipsize("abcdef", 2, true), "ab");
+        assert_eq!(ellipsize("abcdef", 2, super::Charset::Ascii), "ab");
 
         use mewgit_core::git_read::FileStatus;
         use mewgit_core::test_util::fake_entry;
@@ -1210,11 +1249,20 @@ mod tests {
         );
         // 幅 24 なら 21 セル。`.../panes/worktree.rs` は 21 セルでちょうど入る。
         // 幅 21 の 18 セルには `/panes/worktree.rs`（18）が印の後ろに入らない。
-        assert_eq!(file_row(&entry, 24, true), " M .../panes/worktree.rs");
-        assert_eq!(file_row(&entry, 21, true), " M .../worktree.rs");
+        assert_eq!(
+            file_row(&entry, 24, super::Charset::Ascii),
+            " M .../panes/worktree.rs"
+        );
+        assert_eq!(
+            file_row(&entry, 21, super::Charset::Ascii),
+            " M .../worktree.rs"
+        );
         // ファイル名だけでも入らなければ書記素で。印が入らなければ印を付けない。
-        assert_eq!(ellipsize_left("dir/abcdefgh.rs", 6, true), "....rs");
-        assert_eq!(ellipsize_left("abc.rs", 2, true), "rs");
+        assert_eq!(
+            ellipsize_left("dir/abcdefgh.rs", 6, super::Charset::Ascii),
+            "....rs"
+        );
+        assert_eq!(ellipsize_left("abc.rs", 2, super::Charset::Ascii), "rs");
     }
 
     #[test]
@@ -1253,7 +1301,7 @@ mod tests {
         // そのまま足し、行が `内側 + 1` セルで確定する。ペインで折り返すのは CommitDetail
         // だけなので、枠付きのペインと同じ形（`pane_block` の内側に描く）で見る。
         let area = Rect::new(0, 0, 12, 4);
-        let block = super::pane_block("t", false, false);
+        let block = super::pane_block("t", false, super::Charset::Utf8);
         let inner = block.inner(area);
         let text = format!("{}あ", "x".repeat(usize::from(inner.width) - 1));
         let (paragraph, rows) = wrapped(text, inner.width);
@@ -1409,11 +1457,12 @@ mod tests {
     #[test]
     fn an_ascii_terminal_draws_nothing_but_ascii_and_japanese() {
         // 枠線・`…`・スピナーも `config.graph.ascii` で倒す（06 の「ASCII フォールバック」）。
-        // **描く場所を数え上げず、画面全体で見る** —— 字を足した描画が倒し忘れても拾える。
+        // **描く場所を数え上げず、画面全体で見る** —— 描いた画面（既定の画面と NoticeLog）の中なら、字を足した描画が倒し忘れても拾える。
         let size = SPLIT_NARROWEST;
         // 倒れる字が全部出る状態: フォーカスの太線、パスの左切り、溢れる通知と detail、
         // `Tick` をまたいで走っているジョブ。
-        let draw_with = |ascii: bool, log: bool| {
+        // 返すのは状態。字はバッファから、文字列は `draw` から読む。
+        let state_with = |ascii: bool, log: bool| {
             let path = "crates/mewgit-tui/src/panes/long/deep/a.rs";
             let mut state = state_with_status(fake_snapshot(&[], &[path], &[]));
             state.config.graph.ascii = ascii;
@@ -1427,33 +1476,38 @@ mod tests {
             if log {
                 let _ = update(&mut state, Msg::Key(Key::char('L')));
             }
-            terminal_with(&state, size).backend().buffer().clone()
+            state
+        };
+        let glyphs = |ascii, log| {
+            glyphs_beyond_ascii(
+                terminal_with(&state_with(ascii, log), size)
+                    .backend()
+                    .buffer(),
+            )
         };
 
         // **倒さない側で字が出ていることを先に見る。** 出ていなければ、この状態は何も
         // 見張っていない（`.claude/rules/testing.md`）。
-        let utf8 = glyphs_beyond_ascii(&draw_with(false, false));
+        let utf8 = glyphs(false, false);
         for glyph in ["┏", "┌", "…", "⠙"] {
             assert!(utf8.iter().any(|g| g == glyph), "{glyph}: {utf8:?}");
         }
-        let utf8 = glyphs_beyond_ascii(&draw_with(false, true));
+        let utf8 = glyphs(false, true);
         assert!(utf8.iter().any(|g| g == "…"), "{utf8:?}");
 
         for log in [false, true] {
-            let found = glyphs_beyond_ascii(&draw_with(true, log));
+            let found = glyphs(true, log);
             assert!(found.is_empty(), "log={log}: {found:?}");
         }
 
         // **倒した字が出ていることも見る。** 字を描かなくしただけでも上は通る。
-        let text =
-            |buffer: Buffer| -> String { buffer.content.iter().map(|c| c.symbol()).collect() };
-        let ascii = text(draw_with(true, false));
+        let ascii = draw(&state_with(true, false), size).join("\n");
         // 太線と細線の角、溢れた通知、パスの左切り、`tick` 1 の駒。
         for glyph in ["#=", "+-", "x...", ".../", "/ fetch"] {
             assert!(ascii.contains(glyph), "{glyph}: {ascii}");
         }
         // NoticeLog の detail が溢れた最下行（枠の直後）。
-        let log = text(draw_with(true, true));
+        let log = draw(&state_with(true, true), size).join("\n");
         assert!(log.contains("|..."), "{log}");
     }
 
@@ -1885,27 +1939,29 @@ mod tests {
     fn the_spinner_folds_what_does_not_fit_its_seat() {
         // 入るだけ並べて残りを `+N` にする。
         assert_eq!(
-            super::fold_spinner("⠋", &["fetch", "status", "branches"], false).to_string(),
+            super::fold_spinner("⠋", &["fetch", "status", "branches"], super::Charset::Utf8)
+                .to_string(),
             "⠋ fetch +2"
         );
         // ちょうど席に入るものは畳まない（`⠋ cherry-pick` は 13 セル）。
         assert_eq!(
-            super::fold_spinner("⠋", &["cherry-pick"], false).to_string(),
+            super::fold_spinner("⠋", &["cherry-pick"], super::Charset::Utf8).to_string(),
             "⠋ cherry-pick"
         );
         // 1 つも入らなければ数だけ。
         assert_eq!(
-            super::fold_spinner("⠋", &["cherry-pick", "pr checks"], false).to_string(),
+            super::fold_spinner("⠋", &["cherry-pick", "pr checks"], super::Charset::Utf8)
+                .to_string(),
             "⠋ +2"
         );
         // 1 つしか無いのに入らなければ切る。
         assert_eq!(
-            super::fold_spinner("⠋", &["a-very-long-label"], false).to_string(),
+            super::fold_spinner("⠋", &["a-very-long-label"], super::Charset::Utf8).to_string(),
             "⠋ a-very-lon…"
         );
         // ASCII の印は 3 セルなので、そのぶん説明が短くなる。
         assert_eq!(
-            super::fold_spinner("|", &["a-very-long-label"], true).to_string(),
+            super::fold_spinner("|", &["a-very-long-label"], super::Charset::Ascii).to_string(),
             "| a-very-l..."
         );
     }
@@ -1989,17 +2045,17 @@ mod tests {
 
     #[test]
     fn ellipsize_cuts_at_the_cell_budget_and_marks_the_cut() {
-        assert_eq!(ellipsize("abc", 3, false), "abc");
-        assert_eq!(ellipsize("abcd", 3, false), "ab…");
+        assert_eq!(ellipsize("abc", 3, super::Charset::Utf8), "abc");
+        assert_eq!(ellipsize("abcd", 3, super::Charset::Utf8), "ab…");
         // 全角は 2 セル。半端な 1 セルは空けて、`…` を跨がせない。
-        assert_eq!(ellipsize("あいう", 5, false), "あい…");
-        assert_eq!(ellipsize("あいう", 4, false), "あ…");
-        assert_eq!(ellipsize("abc", 0, false), "");
+        assert_eq!(ellipsize("あいう", 5, super::Charset::Utf8), "あい…");
+        assert_eq!(ellipsize("あいう", 4, super::Charset::Utf8), "あ…");
+        assert_eq!(ellipsize("abc", 0, super::Charset::Utf8), "");
         // 異体字セレクタ付きの絵文字は 1 書記素で 2 セル（文字ごとに足すと 1）。
         let heart = "a❤️bcd";
         assert_eq!(ratatui::text::Span::raw(heart).width(), 6);
-        assert_eq!(ellipsize(heart, 4, false), "a❤️…");
-        assert_eq!(ellipsize(heart, 3, false), "a…");
+        assert_eq!(ellipsize(heart, 4, super::Charset::Utf8), "a❤️…");
+        assert_eq!(ellipsize(heart, 3, super::Charset::Utf8), "a…");
     }
 
     /// `pane` にフォーカスを置いて描いたヒントの行。
@@ -2190,7 +2246,7 @@ mod tests {
         let last = notice_bar_with(
             "設定ファイルの構文エラー
   |
-2 | ascii = 
+2 | charset = 
   | ^",
         );
 

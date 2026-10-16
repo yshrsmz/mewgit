@@ -23,9 +23,9 @@ pub fn render(
     title: &str,
     prompt: &str,
     buf: &TextBuffer,
-    ascii: bool,
+    charset: ui::Charset,
 ) {
-    let block = modals::block(title, ascii);
+    let block = modals::block(title, charset);
     // **prompt は折り返してから行数を数える**（`Confirm` の本文と同じ）。`桁数 / 幅` の
     // 切り上げで見積もると、単語境界で折れて増えたぶんを数え落として末尾が切れる。
     let (prompt_text, prompt_rows) =

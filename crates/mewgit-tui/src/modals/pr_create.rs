@@ -53,7 +53,7 @@ pub struct Fields<'a> {
 ///
 /// **縦は算術で割る**（`ui::split` と同じ形）。`Layout` の `Length` に絶対優先を
 /// 与えると、狭い端末で `Body` が 0 行に潰れる（#65 で一覧を潰した形）。
-pub fn render(frame: &mut Frame, area: Rect, fields: Fields, ascii: bool) {
+pub fn render(frame: &mut Frame, area: Rect, fields: Fields, charset: ui::Charset) {
     let Fields {
         title,
         body,
@@ -65,7 +65,14 @@ pub fn render(frame: &mut Frame, area: Rect, fields: Fields, ascii: bool) {
     // 1 行の欄（`Title` / `Base` / `Head` / `Draft`）と、残りを取る `Body`。
     let singles: u16 = 4;
     let want = singles.saturating_add(u16::try_from(body.lines.len()).unwrap_or(u16::MAX));
-    let area = modals::place(frame, area, modals::block(TITLE, ascii), WIDTH, want, HINT);
+    let area = modals::place(
+        frame,
+        area,
+        modals::block(TITLE, charset),
+        WIDTH,
+        want,
+        HINT,
+    );
     let body_rows = area.height.saturating_sub(singles);
 
     // **上から順に積む。** 各欄の y を `1 + body_rows` のように手で組むと、欄を
@@ -154,7 +161,7 @@ fn label(field: PrField) -> &'static str {
 /// `Head` の値（07 の「PrCreate モーダル」）。選んでいる候補の `<owner>:<branch>` と、
 /// **候補が 2 つ以上あるときだけ**選び直せることの印。
 ///
-/// **印は ASCII**（`<- ->`）。`ui::pick_charset` を通さずに済み、端末で化けない。
+/// **印は ASCII**（`<- ->`）。`ui::Charset::pick` を通さずに済み、端末で化けない。
 /// **空は「候補なし」** —— 開いているあいだに候補が消えた形（確定のときに
 /// `update::prs` が欄を入れ替える）。
 fn head_value(heads: &PrHeads) -> String {
@@ -170,7 +177,7 @@ fn head_value(heads: &PrHeads) -> String {
     }
 }
 
-/// `Draft` の値。**`ui::pick_charset` を通さない** —— ASCII だけなので端末で
+/// `Draft` の値。**`ui::Charset::pick` を通さない** —— ASCII だけなので端末で
 /// 化けようがない（07）。
 fn draft_box(draft: bool) -> &'static str {
     if draft {

@@ -10,6 +10,7 @@ use ratatui::Frame;
 
 use crate::modals;
 use crate::modals::picker::{self, Picker};
+use crate::ui::Charset;
 
 /// 枠のタイトル。**何を選ぶのかを出す** —— 「リモート」だけだと、fetch なのか
 /// push なのかが判らない（開く経路は `f` 1 つ。01）。
@@ -25,7 +26,7 @@ pub fn render(
     reason: &str,
     remotes: &[String],
     cursor: usize,
-    ascii: bool,
+    charset: Charset,
 ) {
     picker::render(
         frame,
@@ -40,7 +41,7 @@ pub fn render(
             cursor,
             hint: HINT,
         },
-        ascii,
+        charset,
     );
 }
 

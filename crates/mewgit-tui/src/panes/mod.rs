@@ -87,7 +87,7 @@ impl TopPane {
         ui::pane_block(
             right_tabs(state),
             state.focus == tab.pane(),
-            state.config.graph.ascii,
+            ui::charset(state),
         )
     }
 

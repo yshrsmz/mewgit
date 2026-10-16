@@ -470,8 +470,8 @@ fn ellipsize_left(path: &str, cells: u16, charset: Charset) -> Cow<'_, str> {
         return Cow::Borrowed(path);
     }
     let (mark, mark_cells) = charset.ellipsis();
-    // 印が入らない幅では印を付けずに切る。
-    let Some(room) = cells.checked_sub(mark_cells) else {
+    // 印のほかに 1 セルも残らない幅では印を付けずに切る（印だけでは中身が何も読めない）。
+    let Some(room) = cells.checked_sub(mark_cells).filter(|&room| room > 0) else {
         return Cow::Owned(take_cells(path, cells, End::Tail));
     };
     // 印 + `/` の後ろに残す形を、長いほうから試す。先頭の成分は残す候補にしない
@@ -978,14 +978,14 @@ pub fn push_expanded(out: &mut String, text: &str) {
 
 /// `text` を `cells` セルに収める。溢れるときは末尾を `…` に置き換える。
 ///
-/// 印は ASCII で `...` に倒れる（[`ELLIPSIS`]）。**印が入らない幅では印を付けずに
-/// 切る**（07 の「ステータスバー」）。
+/// 印は ASCII で `...` に倒れる（[`ELLIPSIS`]）。**印のほかに 1 セルも残らない幅では
+/// 印を付けずに切る**（07 の「ステータスバー」）。
 fn ellipsize(text: &str, cells: u16, charset: Charset) -> Cow<'_, str> {
     if fits(text, cells) {
         return Cow::Borrowed(text);
     }
     let (mark, mark_cells) = charset.ellipsis();
-    let Some(room) = cells.checked_sub(mark_cells) else {
+    let Some(room) = cells.checked_sub(mark_cells).filter(|&room| room > 0) else {
         return Cow::Owned(take_cells(text, cells, End::Head));
     };
     // 印のセルを先に取っておく。
@@ -1238,8 +1238,12 @@ mod tests {
         // フォールバック」）。**印の 3 セルを先に取っておく。**
         assert_eq!(ellipsize("abcdef", 6, super::Charset::Ascii), "abcdef");
         assert_eq!(ellipsize("abcdef", 5, super::Charset::Ascii), "ab...");
-        // 印が入らない幅では印を付けずに切る（07 の「ステータスバー」）。
+        // 印のほかに 1 セルも残らない幅では印を付けずに切る（07 の「ステータスバー」）。
+        // ちょうど印の幅でも `...` だけにはしない。
+        assert_eq!(ellipsize("abcdef", 4, super::Charset::Ascii), "a...");
+        assert_eq!(ellipsize("abcdef", 3, super::Charset::Ascii), "abc");
         assert_eq!(ellipsize("abcdef", 2, super::Charset::Ascii), "ab");
+        assert_eq!(ellipsize_left("abc.rs", 3, super::Charset::Ascii), ".rs");
 
         use mewgit_core::git_read::FileStatus;
         use mewgit_core::test_util::fake_entry;
@@ -1367,7 +1371,7 @@ mod tests {
     fn the_focused_pane_is_the_only_one_with_a_thick_border() {
         // どちらがキーを受けるか判らないと、`s` や `x` が別のペインに飛んだように見える。
         // **線の形と色の両方を見る**（07）。形は色も修飾も出ない端末のための強調で、
-        // 色だけを見ると `BorderType` を落としても通る。
+        // 色だけを見ると、太線の組（`Charset::border`）を落としても通る。
         let size = SPLIT_NARROWEST;
         // 巡回の候補はグラフの選択で変わる（01）。WIP 側で回す。
         //
@@ -1433,25 +1437,15 @@ mod tests {
         assert_eq!(border(Pane::Worktree), ["+", "|", "-"]);
     }
 
-    /// `buffer` のうち ASCII でも全角でもない字。**日本語の文言の中の `…`**（全角の
-    /// 直後）は数えない —— 倒さないと決めた字（06 の「ASCII フォールバック」）。
-    fn glyphs_beyond_ascii(buffer: &Buffer) -> Vec<String> {
-        let wide = |symbol: &str| Span::raw(symbol).width() == 2;
-        let mut found = Vec::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                let symbol = buffer[(x, y)].symbol();
-                if symbol.is_ascii() || wide(symbol) {
-                    continue;
-                }
-                // 全角の 2 セル目を挟むので 2 つ手前を見る。
-                if symbol == "…" && x >= 2 && wide(buffer[(x - 2, y)].symbol()) {
-                    continue;
-                }
-                found.push(symbol.to_string());
-            }
-        }
-        found
+    /// 描いた行のうち ASCII でも全角でもない字。**`ui::LOADING` の `…` だけは数えない** ——
+    /// 日本語の文言の中の記号は倒さない（06 の「ASCII フォールバック」）。除くのは文言
+    /// そのものだけで、日本語の通知を切ったあとの `…` は数える。
+    fn glyphs_beyond_ascii(lines: &[String]) -> Vec<char> {
+        lines
+            .iter()
+            .flat_map(|line| line.replace(super::LOADING, "").chars().collect::<Vec<_>>())
+            .filter(|&c| !c.is_ascii() && Span::raw(c.to_string()).width() != 2)
+            .collect()
     }
 
     #[test]
@@ -1460,14 +1454,15 @@ mod tests {
         // **描く場所を数え上げず、画面全体で見る** —— 描いた画面（既定の画面と NoticeLog）の中なら、字を足した描画が倒し忘れても拾える。
         let size = SPLIT_NARROWEST;
         // 倒れる字が全部出る状態: フォーカスの太線、パスの左切り、溢れる通知と detail、
-        // `Tick` をまたいで走っているジョブ。
-        // 返すのは状態。字はバッファから、文字列は `draw` から読む。
+        // `Tick` をまたいで走っているジョブ。**通知は日本語にする** —— 日本語の後ろで切った
+        // `…` も倒す（倒さないのは文言の中の記号だけ）。
         let state_with = |ascii: bool, log: bool| {
             let path = "crates/mewgit-tui/src/panes/long/deep/a.rs";
             let mut state = state_with_status(fake_snapshot(&[], &[path], &[]));
             state.config.graph.ascii = ascii;
             let detail: String = (0..40).map(|i| format!("stderr {i}\n")).collect();
-            state.push_notice(NoticeLevel::Error, "x".repeat(200), Some(detail));
+            let message = "ローカルの変更が上書きされます。".repeat(10);
+            state.push_notice(NoticeLevel::Error, message, Some(detail));
             let _ = state.issue(Cmd::Exec(GitOp::Fetch {
                 remote: None,
                 prune: false,
@@ -1478,22 +1473,16 @@ mod tests {
             }
             state
         };
-        let glyphs = |ascii, log| {
-            glyphs_beyond_ascii(
-                terminal_with(&state_with(ascii, log), size)
-                    .backend()
-                    .buffer(),
-            )
-        };
+        let glyphs = |ascii, log| glyphs_beyond_ascii(&draw(&state_with(ascii, log), size));
 
         // **倒さない側で字が出ていることを先に見る。** 出ていなければ、この状態は何も
         // 見張っていない（`.claude/rules/testing.md`）。
         let utf8 = glyphs(false, false);
-        for glyph in ["┏", "┌", "…", "⠙"] {
-            assert!(utf8.iter().any(|g| g == glyph), "{glyph}: {utf8:?}");
+        for glyph in ['┏', '┌', '…', '⠙'] {
+            assert!(utf8.contains(&glyph), "{glyph}: {utf8:?}");
         }
         let utf8 = glyphs(false, true);
-        assert!(utf8.iter().any(|g| g == "…"), "{utf8:?}");
+        assert!(utf8.contains(&'…'), "{utf8:?}");
 
         for log in [false, true] {
             let found = glyphs(true, log);
@@ -1502,10 +1491,13 @@ mod tests {
 
         // **倒した字が出ていることも見る。** 字を描かなくしただけでも上は通る。
         let ascii = draw(&state_with(true, false), size).join("\n");
-        // 太線と細線の角、溢れた通知、パスの左切り、`tick` 1 の駒。
-        for glyph in ["#=", "+-", "x...", ".../", "/ fetch"] {
+        // 太線と細線の角、パスの左切り、`tick` 1 の駒。
+        for glyph in ["#=", "+-", ".../", "/ fetch"] {
             assert!(ascii.contains(glyph), "{glyph}: {ascii}");
         }
+        // 日本語の後ろで切った通知。
+        let bar = notice_bar(&state_with(true, false), size);
+        assert!(bar.trim_end().ends_with("..."), "{bar:?}");
         // NoticeLog の detail が溢れた最下行（枠の直後）。
         let log = draw(&state_with(true, true), size).join("\n");
         assert!(log.contains("|..."), "{log}");
@@ -2246,7 +2238,7 @@ mod tests {
         let last = notice_bar_with(
             "設定ファイルの構文エラー
   |
-2 | charset = 
+2 | ascii = 
   | ^",
         );
 

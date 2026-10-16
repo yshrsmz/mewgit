@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use git2::{ErrorCode, Reference, ReferenceType, Repository};
 
 use super::{
-    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, Oid, RefIndex, RefLabel,
-    Remote, RowlessHead, StashEntry, Upstream, UpstreamConfig, STASH_REF,
+    lossy, signature, Branch, BranchList, CommitDetail, GitReadError, Inclusion, Oid, RefIndex,
+    RefLabel, Remote, RowlessHead, StashEntry, Upstream, UpstreamConfig, STASH_REF,
 };
 
 /// git2 による読み取り専用のリポジトリハンドル。
@@ -211,15 +211,24 @@ impl RepoReader {
         let config = self.repo.config()?.snapshot()?;
         let push_default = config.get_string("remote.pushDefault").ok();
 
+        // **どの行が HEAD かは名前で決める**（`Branch` に旗を持たせない。02 の「head」）。
+        // 列挙は `refs/heads/*` だけなので、行の名前は target から接頭辞を外したものと
+        // 比べられる。外れなければ（`refs/heads/` の外を指す symref）どの行でもない。
+        // symbolic でない HEAD は名前を持たないので、必ず `rowless` へ落ちる。
+        let head_name = head_target.and_then(|target| target.strip_prefix("refs/heads/"));
+
         let mut branches = Vec::new();
         for reference in self.repo.references_glob("refs/heads/*")? {
-            let reference = reference?;
+            let branch = git2::Branch::wrap(reference?);
+            let reference = branch.get();
             // 非 UTF-8 のブランチ名は識別子として使えない（`git_exec` の argv にも
             // 載せられない）ので落とす。切替も削除もできない行を出さないため。
-            let Some(name) = reference.shorthand().ok().map(str::to_string) else {
+            // `refs/heads/*` の完全な名前は `refs/heads/` + 短縮名なので、短縮名が
+            // UTF-8 なら完全な名前も UTF-8。
+            let (Ok(short), Ok(full)) = (reference.shorthand(), reference.name()) else {
                 continue;
             };
-            let full = reference.name().ok();
+            let name = short.to_string();
             // 指す先が commit でない ref（ありえないが、壊れたリポジトリでは起きる）は
             // 落とす。`refs` が peel できないタグを落とすのと同じ扱い。HEAD の行を落とした
             // ときは `rowless_head` が peel し直して `Err` にする。
@@ -230,20 +239,21 @@ impl RepoReader {
             // **追跡設定は remote-tracking ref とは別に読む。** `upstream()` は ref が
             // 無ければ引けないが、`branch.<name>.remote` / `.merge` は config に残って
             // いる。push の `-u` はこちらで決める（02 の「ブランチ一覧」）。
-            let upstream_config = full.and_then(|full| self.upstream_config(full));
+            let upstream_config = self.upstream_config(full);
             let push_remote = config
                 .get_string(&format!("branch.{name}.pushRemote"))
                 .ok()
                 .or_else(|| push_default.clone());
 
-            let branch = git2::Branch::wrap(reference);
             // **upstream が引けないブランチも一覧に残す。** 未設定なら
             // `NotFound`（class=Config）、設定はあるが追跡 ref が消えていれば
             // `NotFound`（class=Reference。git2 0.21 で確認）。**理由を問わず
             // `(None, 0, 0)` に落とすのは、1 本の壊れた追跡 ref で一覧全体を
             // 失わせないため**（他のブランチはどれも読めている。02）。
+            // **取り込みを確かめるのは HEAD の行だけ**（02 の `inclusion`）。
+            let reflog = (head_name == Some(short)).then_some(full);
             let tracking = match branch.upstream() {
-                Ok(upstream) => self.tracking(oid, &upstream),
+                Ok(upstream) => self.tracking(oid, &upstream, reflog),
                 Err(_) => Tracking::default(),
             };
 
@@ -260,11 +270,6 @@ impl RepoReader {
 
         // git2 の列挙順は安定していない（`RefIndex::from_iter` と同じ理由）。
         branches.sort_by(|a, b| a.name.cmp(&b.name));
-        // **どの行が HEAD かは名前で決める**（`Branch` に旗を持たせない。02 の「head」）。
-        // 列挙は `refs/heads/*` だけなので、行の名前は target から接頭辞を外したものと
-        // 比べられる。外れなければ（`refs/heads/` の外を指す symref）どの行でもない。
-        // symbolic でない HEAD は名前を持たないので、必ず `rowless` へ落ちる。
-        let head_name = head_target.and_then(|target| target.strip_prefix("refs/heads/"));
         BranchList::new(branches, head_name, || match head_target {
             None => Ok(RowlessHead::Detached(head.peel_to_commit()?.id())),
             Some(target) => rowless_head(&head, target),
@@ -333,8 +338,15 @@ impl RepoReader {
     /// symbolic な remote-tracking ref（ラベルと同じく解決しない）、`ahead_behind` が
     /// 引けない（指す先のオブジェクトが無い）のどれも、**一覧の読み手にとっては同じ
     /// 「比べる相手がいない」**（02）。
-    fn tracking(&self, local: Oid, upstream: &git2::Branch<'_>) -> Tracking {
-        let (Ok(Some(name)), Some(oid)) = (upstream.name(), upstream.get().target()) else {
+    ///
+    /// `reflog` は取り込みを確かめるブランチの完全な ref 名。`None` なら確かめない
+    /// （[`Inclusion::Unchecked`]。HEAD 以外の行）。
+    fn tracking(&self, local: Oid, upstream: &git2::Branch<'_>, reflog: Option<&str>) -> Tracking {
+        let (Ok(Some(name)), Ok(tracking_ref), Some(oid)) = (
+            upstream.name(),
+            upstream.get().name(),
+            upstream.get().target(),
+        ) else {
             return Tracking::default();
         };
         match self.repo.graph_ahead_behind(local, oid) {
@@ -342,12 +354,92 @@ impl RepoReader {
                 upstream: Some(Upstream {
                     name: name.to_string(),
                     oid,
+                    inclusion: match reflog {
+                        None => Inclusion::Unchecked,
+                        // 先端がローカルの先端の祖先か自身。reflog を読むまでもない。
+                        Some(_) if behind == 0 => Inclusion::Included,
+                        Some(full) => self.reflog_reaches(full, tracking_ref, oid),
+                    },
                 }),
                 ahead,
                 behind,
             },
             Err(_) => Tracking::default(),
         }
+    }
+
+    /// 追跡 ref（`tracking_ref`）の先端 `target` を、ブランチ `full_ref` が取り込んでいるか
+    /// （02 の「ブランチ一覧」の `inclusion`）。**git の `--force-if-includes` と同じ規則**
+    /// （git 2.56.0 の `--dry-run` と形ごとに突き合わせた。01 の「force push」の表）——
+    ///
+    /// 1. 追跡 ref の reflog のいちばん新しい項目の時刻（最後に fetch / push で動いた時刻）を
+    ///    取る。reflog が無ければ 0（全項目を見る）
+    /// 2. ブランチの reflog を新しい順に見て、新しい側が `target` そのものなら取り込み済み。
+    ///    そうでなければ候補に積み、**時刻が 1 より古い項目を積んだところで打ち切る**
+    /// 3. 候補のどれかから `target` に辿り着けるか
+    ///
+    /// **打ち切りが要る** —— 無いと、fetch より前に一度取り込んで捨てた子孫から辿り着いて
+    /// しまう（他人が force push で戻した先端の上を、git は断るのにこちらは通した。
+    /// `/code-review` が再現）。**3 は 1 本の revwalk で見る** —— 候補を push し、`target` の
+    /// 親を hide すると、辿るのは分かれた部分だけになる。候補ごとに `graph_descendant_of`
+    /// を呼ぶと、取り込んでいない形で候補の数 × 履歴の深さを歩く（20,000 コミット・reflog
+    /// 1,000 項目で一覧の読み取りが 1 回 3 秒。`/code-review` が release で実測）。
+    ///
+    /// **reflog が無い・読めないときは [`Inclusion::NotIncluded`]。** 読み手は force push を
+    /// 通すかをこれで決める（01 の「force push」）ので、判らないときは断る側に倒す。
+    /// **先に `reference_has_log` で見る** —— `reflog()` はファイルが無いと空のファイルを
+    /// 作り（libgit2 1.9.7 の `refdb_reflog_fs__read`）、以後 git が
+    /// `core.logAllRefUpdates=false` でもそこへ追記する。読み取りで git の振る舞いを変えない。
+    fn reflog_reaches(&self, full_ref: &str, tracking_ref: &str, target: Oid) -> Inclusion {
+        match self.includes(full_ref, tracking_ref, target) {
+            Ok(true) => Inclusion::Included,
+            Ok(false) | Err(_) => Inclusion::NotIncluded,
+        }
+    }
+
+    /// [`RepoReader::reflog_reaches`] の本体。
+    fn includes(
+        &self,
+        full_ref: &str,
+        tracking_ref: &str,
+        target: Oid,
+    ) -> Result<bool, git2::Error> {
+        if !self.repo.reference_has_log(full_ref)? {
+            return Ok(false);
+        }
+        let since = if self.repo.reference_has_log(tracking_ref)? {
+            self.repo
+                .reflog(tracking_ref)?
+                .get(0)
+                .map_or(0, |entry| entry.committer().when().seconds())
+        } else {
+            0
+        };
+
+        let reflog = self.repo.reflog(full_ref)?;
+        let mut walk = self.repo.revwalk()?;
+        for entry in reflog.iter() {
+            let id = entry.id_new();
+            if id == target {
+                return Ok(true);
+            }
+            // 削除の項目（新しい側が 0）や、gc で消えたコミットは候補にならないだけ。
+            if !id.is_zero() {
+                let _ = walk.push(id);
+            }
+            if entry.committer().when().seconds() < since {
+                break;
+            }
+        }
+        for parent in self.repo.find_commit(target)?.parent_ids() {
+            walk.hide(parent)?;
+        }
+        for oid in walk {
+            if oid? == target {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// `branch.<name>.remote` / `branch.<name>.merge` を読む。

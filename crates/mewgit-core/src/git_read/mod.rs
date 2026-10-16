@@ -486,6 +486,29 @@ pub struct Upstream {
     /// 指している位置。force push の `--force-with-lease=<dst>:<lease>` に渡す
     /// （01 の「force push」）。
     pub oid: Oid,
+    /// [`Upstream::oid`] を取り込んでいるか。**確かめるのは HEAD の行だけ**（02 の
+    /// 「ブランチ一覧」）。
+    ///
+    /// **force push に上げるかはこれで決める**（01 の「force push」）。ahead / behind だけ
+    /// では、巻き戻した形と他人の push を fetch で取っただけの形を見分けられない。
+    pub inclusion: Inclusion,
+}
+
+/// 追跡 ref の先端を取り込んでいるか。問いは git の `--force-if-includes` と同じ ——
+/// 先端に、ローカルの先端かブランチの reflog の項目から辿り着けるか。どこまで遡るかの
+/// 打ち切りも git と同じ（02 の「ブランチ一覧」）。
+///
+/// **3 値にする。** `bool` だと、確かめていない行（HEAD 以外）の偽と、取り込んでいない
+/// 偽が同じ値になる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Inclusion {
+    /// 辿り着ける。巻き戻した形、push のあとの amend、自分の push の上での rebase。
+    Included,
+    /// 辿り着けない。他人の push を fetch で取っただけの形。reflog が無い・読めないときも
+    /// こちら（force を断る側）。
+    NotIncluded,
+    /// 確かめていない（HEAD 以外の行）。
+    Unchecked,
 }
 
 /// ブランチの追跡設定。`git_exec` の `GitOp::Push` を組むのに使う。

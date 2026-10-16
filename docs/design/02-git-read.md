@@ -158,6 +158,13 @@ pub struct Branch {
 pub struct Upstream {
     pub name: String,  // "origin/feat/x"。表示用
     pub oid: Oid,      // force push の lease に渡す位置
+    pub inclusion: Inclusion,  // 先端を取り込んでいるか（HEAD の行だけ確かめる）
+}
+
+pub enum Inclusion {
+    Included,     // ローカルの先端か reflog のどれかの項目から辿り着ける
+    NotIncluded,  // 辿り着けない。reflog が無い・読めないもこちら
+    Unchecked,    // 確かめていない（HEAD 以外の行）
 }
 
 pub struct UpstreamConfig {
@@ -220,6 +227,12 @@ Branches ペイン（07）が使い、グラフのローカルブランチのラ
   いう起こらない形が型で組めて、揃っていることを散文で約束することになる
   （`GitOp::Push` の `lease` と同じ理由。03）。位置は force push の
   `--force-with-lease=<dst>:<lease>` に渡す（01）
+- **`inclusion` は「追跡 ref の先端を取り込んでいるか」**（01 の「force push」が force に上げるかをこれで決める）。問いは git の `--force-if-includes` と同じで、追跡 ref の先端に、ローカルの先端か `refs/heads/<name>` の reflog の項目の新しい側から辿り着けるか（自身か祖先か。どこまで遡るかの打ち切りは下の項）。3 値 —— `Included` / `NotIncluded` / `Unchecked`。
+  - **確かめるのは HEAD の行だけ**で、ほかの行は `Unchecked`。読み手は `P`（HEAD のブランチを push する）だけで、全行で読むと fetch のあとに遅れている行の数だけ reflog を読む（libgit2 1.9.7 の `reflog_parse` はファイル全体を解析する。1,000 行あたり約 0.28ms、300 本がそれぞれ 2,000 行で一覧が +223ms。2026-10-16 に `/simplify` の efficiency が release で実測）。**`bool` にしない** —— 「読んでいない」と「取り込んでいない」が同じ偽になる（`rust-coding.md` の「`None` の理由を 2 つ以上持たせない」）
+  - **behind が 0 なら reflog を読まずに `Included`**（先端がローカルの先端の祖先か自身）。読むのは behind ≥ 1 の HEAD の行だけ。**規則は git と同じ**（01 の「force push」の表で 8 つの形を突き合わせた）—— 追跡 ref の reflog のいちばん新しい項目の時刻を取り（無ければ 0）、ブランチの reflog を新しい順に見て、新しい側が先端そのものなら `Included`。そうでなければ候補に積み、その時刻より古い項目を積んだところで打ち切る。最後に候補のどれかから先端に辿り着けるかを見る
+  - **辿り着けるかは 1 本の revwalk で見る。** 候補を push し、先端の親を hide すると、辿るのは分かれた部分だけになる。**候補ごとに `graph_descendant_of` を呼ばない** —— libgit2 1.9.7 は呼ぶたびに walk を組み直すので、取り込んでいない形で候補の数 × 履歴の深さを歩く。20,000 コミット・reflog 1,000 項目で一覧の読み取りが 1 回 2.7〜3.1 秒（`commit-graph` を書いても変わらない。2 回目の `/code-review` が release で実測）、revwalk に変えて同じ規模で 0.01 秒未満（2026-10-16、release）。一覧は ref を動かすたびに読み直すので、ここが遅いと書き込みのたびに払う
+  - **reflog のファイルが無ければ `NotIncluded`**（force を断る側）。**先に `reference_has_log` で見る** —— libgit2 1.9.7 の `refdb_reflog_fs__read` は、ファイルが無いと `create_new_reflog_file` で空のファイルを作る（ソースで確認）。空のファイルがあると、`core.logAllRefUpdates=false` でも git はそこへ追記を始めるので、**読み取りが git の振る舞いを変える**（efficiency が実測）。読めないときも `NotIncluded`
+  - **`Upstream` に入れる**のは、追跡 ref が無ければ比べる位置が無いため（`Branch` に直に置くと、「追跡 ref が無い」も値を持つことになる）
 - **`upstream_config` があっても `upstream` が無い形はある**（`fetch --prune` のあと）。
   そのときは追跡先の位置を知らないので、**force push は断る**（01）。config だけで
   lease を組むと、比べる相手がいないまま `--force` と同じものを撃つことになる

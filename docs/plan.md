@@ -649,10 +649,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `P` 全体を揃えた —— `Branch.push_remote`（02）があればそこへ同名で送る
       （`-u` もモーダルも無し。force には上げない）。決めた形と実測の表は 01 の
       「push の行き先」
-- [ ] 意図的な巻き戻しの force push（`reset --hard HEAD~1` してから `P`）。**いまは
-      `ahead == 0` でまとめて断っている** —— `↓n` だけのブランチが `f` のあとに force で
-      通ってしまう形と同じ見た目なので、区別するには「巻き戻すつもりだ」を別の入口で
-      受けるしかない（01 の「force push」）
+- [x] 意図的な巻き戻しの force push（`reset --hard HEAD~1` してから `P`）。`ahead == 0` でまとめて断っていた —— `↓n` だけのブランチが `f` のあとに force で通ってしまう形と ahead / behind では同じ見た目なので、ここには「別の入口で受けるしかない」と書いていた。**ブランチの reflog が見分ける**と実測で判ったので（巻き戻した形では追跡 ref の先端が reflog に在り、`f` で取っただけの形には無い。01 の「force push」の表）、入口は足さずに reflog で判じる（2026-10-16 にユーザーと決めた）。**同じ PR で判定を ahead に関係なく広げた** —— diverged（ahead ≥ 1）で他人の push を `f` で取っただけの形も force が他人のコミットを消していた（`/simplify` の altitude が拾った。2026-10-16 にユーザーと決めた）。問いは git の `--force-if-includes` と同じで、`Upstream.inclusion`（02）が `Included` のときだけ force の確認を出す。断るときの案内は `p` だけでなく外の git の force も挙げ、非 FF の案内から「リモートが進んでいます」と「`f` のあと `P` を 2 回」を外した（前者は巻き戻した人に `p` を勧め、後者は他人の push を消す手順だった）
 - [x] 端末幅 < 100 のレイアウト（1/5）— 右列を隠して `focus` のペインだけを全画面で描く。
       **2 本に割った**（2026-10-04 にユーザーと決めた。理由は 07 の「レイアウト」。残りの
       1 本は同じ日に 4 本へ割り直した —— 2/5〜5/5）—— こちらは読み取りを 1 つも足さずに、80 桁で右列のペインが全幅で読めるようになる。
@@ -939,6 +936,9 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       初めて動いた** —— `[workspace.package] version` と lock の `mewgit` / `mewgit-core` の 3 行だけが
       変わった
 - [x] Homebrew の tap（`yshrsmz/homebrew-tap`）への同期。**リポジトリを public にする前提で組んだ**（2026-10-16 にユーザーと決めた。private のままでは tap の Formula が Release の tar.gz を取れず、attestation も付けられない）。形は mewbell の Cask と同じ —— release-please が draft の Release を作り（`draft` + `force-tag-creation`）、`release.yml` の build（書き込み権限なし）→ formula（2 つの SHA-256 から `packaging/homebrew/mewgit.rb.template` を組み、`brew style` / `brew audit --strict`）→ publish（attestation、添付、公開、`repository_dispatch` の `mewgit-released`）。tap 側の `update-mewgit.yml` が attestation と version・sha256 を確かめて `Formula/mewgit.rb` を PR で更新する。**Formula の `url` は `on_macos` / `on_linux` の中に置けない**（`brew audit --strict` が `on_macos cannot include url` で断る。Homebrew 7.0.9 で実測）ので `if OS.mac?` で分け、版は URL から読ませる（`version` を書くと redundant で断られる）。`test` は `--version` を見る —— v0.1.0 には `--version` が無い（#156 で足した）ので、tap に載せる最初の版は 0.1.1。手元で v0.1.0 の tar.gz を `file://` で入れて install が通ること、main のビルドで `brew test` が通ることを確かめた。**チェックを付けるのは 0.1.1 が tap の `Formula/mewgit.rb` に載り、`brew install yshrsmz/tap/mewgit` が通ってから**。**0.1.1 で通った**（2026-10-16）—— release.yml の 6 ジョブが全部成功し、tap の `update-mewgit.yml` が attestation を確かめて homebrew-tap#11 を開き、ci（Formula の style / audit を初めて踏んだ）が通って auto-merge された。手元の macOS arm64 で `brew install yshrsmz/tap/mewgit` と `brew test` が通り、`mewgit --version` が `mewgit 0.1.1` を返した。Linux の brew は確かめていない
+- [ ] 通常の push が非 FF で断られたときの案内（「リモートと分かれています。p で取り込むか、上書きするなら P をもう一度」）を、diverged（ahead ≥ 1）のブランチでは `p` を挙げない形にする。`p` は `pull --ff-only` なので通らない（押すと「履歴が分かれています」の通知が出るだけで、壊しはしない）。**塞ぐのに要るのは、`exec_advice`（op と kind だけを見る純粋関数）に、押したブランチの ahead を渡す経路** —— 一覧の行は `exec_finished` の時点で読めるが、「次の `P` が force に上がるかを先読みしない」（01 の「失敗の案内文」）と同じ割れ方をしないか数えてから決める。巻き戻しの force push の PR の 2 回目の `/code-review` が「明らかなバグではない」として外した指摘（2026-10-16）
+- [ ] `RepoReader::stashes` が `refs/stash` の reflog を `reference_has_log` で確かめずに読む。libgit2 1.9.7 の `reflog()` はファイルが無いと空のファイルを作るので、stash が 1 つも無いリポジトリで `.git/logs/refs/stash` を作っている（ソースで確認。`Upstream.inclusion` の読みで同じ形を塞いだ。02 の「ブランチ一覧」）。git の振る舞いが変わるか（`git stash` は reflog を必ず書くので変わらないはず）は**確かめていない** —— 確かめて、変わらなければ理由を 02 の「stash 一覧」に書いて閉じ、変わるなら `has_log` を先に見る。`watch.rs` の stash の件数の読みも同じ経路
+- [ ] `tests/git_read.rs` の追跡設定の 3 行（`remote add origin …`・`branch.main.remote`・`branch.main.merge`）が 4 箇所に写っている（巻き戻しの force push の PR で `pushed_main` を足した時点で 4 つ目。`/simplify` の reuse が拾い、PR が始めた重複ではないので見送った）。`TestRepo` に寄せるなら、`pushed_main` もその上に組む
 
 ## MVP 後
 

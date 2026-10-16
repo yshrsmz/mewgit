@@ -385,9 +385,9 @@ pub(super) const HEADS_MAIN: &str = "refs/heads/main";
 
 /// 追跡 ref も持つブランチ。その位置が force push の lease になる。
 ///
-/// **`ahead` は 1。** force push はリモートに無いコミットを出す操作なので、
-/// 0 のままだと `push_plan` が「出すものが無い」と断る（`↓n` だけのブランチを
-/// 見る腕は [`a_force_push_is_refused_when_there_is_nothing_to_publish`]）。
+/// **`ahead` は 1、追跡 ref の先端は取り込み済み**（`fake_upstream`）。自分の push の上に
+/// 1 つ積んだ形で、断られたあとの `P` が force に上がる。取り込んでいない形を見る腕は
+/// `remote` のテストの `a_force_push_is_refused_over_a_fetched_tip_it_does_not_include`。
 pub(super) fn tracked_head(
     name: &str,
     remote: &str,
@@ -405,6 +405,13 @@ pub(super) fn tracked_head(
 /// ジョブが残らない（残すと後続の `Cmd::Exec` を `issue` が黙って落とす。#38）。
 pub(super) fn finish_exec(state: &mut AppState, op: GitOp, result: Result<ExecOutput, ExecError>) {
     let _ = state.issue(Cmd::Exec(op.clone()));
+    reply_exec(state, op, result);
+}
+
+/// 発行済みの `op` に結果だけを届ける。キー（[`press`]）が `update` の出口で発行した
+/// あとに使う —— もう一度 `issue` に通すと登録済みの種別として落とされ、ジョブだけが
+/// 残る（`.claude/rules/app-invariants.md`）。
+pub(super) fn reply_exec(state: &mut AppState, op: GitOp, result: Result<ExecOutput, ExecError>) {
     let _ = update(state, exec_done_of(op, result));
 }
 

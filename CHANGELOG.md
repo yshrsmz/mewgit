@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.2](https://github.com/yshrsmz/mewgit/compare/v0.1.1...v0.1.2) (2026-10-17)
+
+
+### Features
+
+* **remote:** 巻き戻したブランチの force push を通し、force を追跡 ref の先端を取り込んだ形に絞る ([#201](https://github.com/yshrsmz/mewgit/issues/201)) ([a220e33](https://github.com/yshrsmz/mewgit/commit/a220e337362de3bfb83e5959ccc8e58b9c1134df))
+* **ui:** graph.ascii で枠線・省略の印・スピナーも ASCII に倒す ([#199](https://github.com/yshrsmz/mewgit/issues/199)) ([9937401](https://github.com/yshrsmz/mewgit/commit/9937401a62b0344b4c1a83a9bc8ce3295298803d))
+
+
+### Bug Fixes
+
+* **exec:** 分かれたブランチの push が断られたときの案内から p を外す ([#203](https://github.com/yshrsmz/mewgit/issues/203)) ([fd73d0a](https://github.com/yshrsmz/mewgit/commit/fd73d0a9af85269429615766da0ccdfbd49d2dcc))
+* **git_read:** reflog の読み取りが無いファイルを作らないようにする ([#202](https://github.com/yshrsmz/mewgit/issues/202)) ([fa5d6d6](https://github.com/yshrsmz/mewgit/commit/fa5d6d6a5578f21fbf16a31c9efa96031ffc6b9c))
+
 ## [0.1.1](https://github.com/yshrsmz/mewgit/compare/v0.1.0...v0.1.1) (2026-10-16)
 
 

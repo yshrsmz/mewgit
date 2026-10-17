@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "git2::Repository::reflog", reason = "reflog のファイルが無いと空のファイルを作る。RepoReader::existing_reflog で読む（02 の「reflog の読み方」）" },
+]

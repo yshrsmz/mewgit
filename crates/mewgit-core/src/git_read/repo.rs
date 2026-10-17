@@ -78,6 +78,20 @@ impl RepoReader {
         self.repo.path()
     }
 
+    /// `name` の reflog。ファイルが無ければ `None`。
+    ///
+    /// **reflog は必ずここで読む。** `git2::Repository::reflog` はファイルが無いと空の
+    /// ファイルを作り（libgit2 1.9.7 の `refdb_reflog_fs__read`）、それが git の振る舞いを
+    /// 変える（02 の「reflog の読み方」）。直呼びは `clippy.toml` の `disallowed-methods` で
+    /// 断る。確かめてから読むまでのあいだに外でファイルが消えると作ってしまう窓は残る。
+    #[allow(clippy::disallowed_methods)]
+    pub(super) fn existing_reflog(&self, name: &str) -> Result<Option<git2::Reflog>, git2::Error> {
+        if !self.repo.reference_has_log(name)? {
+            return Ok(None);
+        }
+        self.repo.reflog(name).map(Some)
+    }
+
     /// `core.sshCommand` の値。設定されていなければ `None`。
     ///
     /// **読むのは起動時の 1 回だけ。** `Runner` がここから受けた値に
@@ -313,10 +327,11 @@ impl RepoReader {
     /// のは `&mut self` を取るからで、読み取りを `&self` に揃えている `RepoReader` には
     /// 合わない（git2 0.21。02 の「stash 一覧」）。
     ///
-    /// stash が 1 つも無い（`refs/stash` が無い）ときは空の `Vec`。libgit2 は reflog の
-    /// ファイルが無ければ空の reflog を返す。
+    /// stash が 1 つも無い（reflog のファイルが無い）ときは空の `Vec`。
     pub fn stashes(&self) -> Result<Vec<StashEntry>, GitReadError> {
-        let reflog = self.repo.reflog(STASH_REF)?;
+        let Some(reflog) = self.existing_reflog(STASH_REF)? else {
+            return Ok(Vec::new());
+        };
         Ok(reflog
             .iter()
             .enumerate()
@@ -387,9 +402,6 @@ impl RepoReader {
     ///
     /// **reflog が無い・読めないときは [`Inclusion::NotIncluded`]。** 読み手は force push を
     /// 通すかをこれで決める（01 の「force push」）ので、判らないときは断る側に倒す。
-    /// **先に `reference_has_log` で見る** —— `reflog()` はファイルが無いと空のファイルを
-    /// 作り（libgit2 1.9.7 の `refdb_reflog_fs__read`）、以後 git が
-    /// `core.logAllRefUpdates=false` でもそこへ追記する。読み取りで git の振る舞いを変えない。
     fn reflog_reaches(&self, full_ref: &str, tracking_ref: &str, target: Oid) -> Inclusion {
         match self.includes(full_ref, tracking_ref, target) {
             Ok(true) => Inclusion::Included,
@@ -404,19 +416,14 @@ impl RepoReader {
         tracking_ref: &str,
         target: Oid,
     ) -> Result<bool, git2::Error> {
-        if !self.repo.reference_has_log(full_ref)? {
+        let Some(reflog) = self.existing_reflog(full_ref)? else {
             return Ok(false);
-        }
-        let since = if self.repo.reference_has_log(tracking_ref)? {
-            self.repo
-                .reflog(tracking_ref)?
-                .get(0)
-                .map_or(0, |entry| entry.committer().when().seconds())
-        } else {
-            0
         };
+        let since = self
+            .existing_reflog(tracking_ref)?
+            .and_then(|log| log.get(0).map(|entry| entry.committer().when().seconds()))
+            .unwrap_or(0);
 
-        let reflog = self.repo.reflog(full_ref)?;
         let mut walk = self.repo.revwalk()?;
         for entry in reflog.iter() {
             let id = entry.id_new();

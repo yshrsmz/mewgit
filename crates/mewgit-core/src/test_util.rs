@@ -452,6 +452,17 @@ impl TestRepo {
         self.path().join(".git/index.lock")
     }
 
+    /// reflog を止め（`core.logAllRefUpdates=false`）、`.git/logs` を消す。以後の書き込みも
+    /// reflog を作らない。戻り値は `.git/logs` の場所で、読み取りがファイルを作らないことを
+    /// 見る（02 の「reflog の読み方」）。
+    pub fn drop_reflogs(&self) -> PathBuf {
+        self.git(&["config", "core.logAllRefUpdates", "false"]);
+        let logs = self.path().join(".git/logs");
+        fs::remove_dir_all(&logs)
+            .unwrap_or_else(|err| panic!(".git/logs を消せませんでした: {err}"));
+        logs
+    }
+
     /// `.git/` の下のファイルを生バイト列で書く。git CLI では作れない ref 名
     /// （非 UTF-8）を仕込むのに使う。
     pub fn write_git_file(&self, name: &str, content: &[u8]) {

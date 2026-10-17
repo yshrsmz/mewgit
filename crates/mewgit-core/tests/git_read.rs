@@ -3,8 +3,8 @@
 use std::fs;
 
 use mewgit_core::git_read::{
-    BranchList, GitReadError, Head, InProgressOp, Inclusion, LogPage, Oid, RefLabel, RepoReader,
-    Step, Upstream, UpstreamConfig,
+    reword_message_path, BranchList, GitReadError, Head, InProgressOp, Inclusion, LogPage, Oid,
+    RefLabel, RefusedReword, RepoReader, Step, Upstream, UpstreamConfig,
 };
 use mewgit_core::test_util::{BareRepo, TestRepo};
 
@@ -1097,12 +1097,9 @@ fn branches_checks_the_inclusion_only_on_the_head_row() {
 #[test]
 fn branches_does_not_create_a_missing_reflog() {
     // reflog のファイルが一度も作られていない形は、取り込んでいないものとして断る側へ
-    // 倒す。**読み取りがファイルを作らない** —— libgit2 の `reflog()` は無ければ空の
-    // ファイルを作り、そこへ git が `core.logAllRefUpdates=false` でも追記を始める（02）。
+    // 倒す。**読み取りがファイルを作らない**（02 の「reflog の読み方」）。
     let (repo, _) = pushed_main();
-    repo.git(&["config", "core.logAllRefUpdates", "false"]);
-    let logs = repo.path().join(".git/logs");
-    fs::remove_dir_all(&logs).unwrap();
+    let logs = repo.drop_reflogs();
     repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
     assert!(
         !logs.join("refs/heads/main").exists(),
@@ -1291,6 +1288,40 @@ fn a_stopped_rebase_reports_its_step() {
 }
 
 #[test]
+fn refused_reword_does_not_create_a_missing_head_reflog() {
+    // `core.logAllRefUpdates=false` で `logs/HEAD` が無い形。**見分けの読み取りが作らない**
+    // （02 の「reflog の読み方」）。載せ直した形（HEAD が X と別のコミットで、メッセージと
+    // author が X と同じ）を手で置くので、見分けは reflog を読むところまで届く。
+    let repo = TestRepo::init();
+    let x = repo.commit("x").to_string();
+    repo.git(&["commit", "-q", "--allow-empty", "-C", &x]);
+    let head = repo.head_oid();
+    let logs = repo.drop_reflogs();
+    let rebase_dir = repo.path().join(".git/rebase-merge");
+    fs::create_dir(&rebase_dir).unwrap();
+    fs::write(rebase_dir.join("done"), format!("reword {x} x\n")).unwrap();
+    fs::write(reword_message_path(&rebase_dir, &x), "new\n").unwrap();
+    assert!(!logs.join("HEAD").exists(), "fixture に reflog が在ります");
+
+    let reader = RepoReader::open(repo.path()).unwrap();
+    assert_eq!(reader.refused_reword(), None);
+    assert!(
+        !logs.join("HEAD").exists(),
+        "読み取りが HEAD の reflog のファイルを作りました"
+    );
+
+    // reflog が在れば、同じ形を見分ける。
+    let zero = Oid::ZERO_SHA1;
+    fs::create_dir(&logs).unwrap();
+    fs::write(
+        logs.join("HEAD"),
+        format!("{zero} {head} t <t@t> 0 +0000\trebase (reword): x\n"),
+    )
+    .unwrap();
+    assert_eq!(reader.refused_reword(), Some(RefusedReword { head }));
+}
+
+#[test]
 fn a_stopped_apply_backend_rebase_is_a_rebase() {
     let (repo, _, _) = TestRepo::diverged();
     repo.git(&["switch", "side"]);
@@ -1430,11 +1461,26 @@ fn a_linked_worktree_reads_its_own_state() {
 fn stashes_is_empty_before_anything_is_stashed() {
     // `refs/stash` が無い形。**`Err` にしない** —— stash を 1 度もしていない
     // リポジトリのほうが普通で、そこで Stash ペインを失敗にすると毎回赤くなる。
+    // **読み取りが `logs/refs/stash` を作らない**（02 の「reflog の読み方」）。指紋は 2 秒
+    // ごとに読むので、作れば必ず残る。
     let repo = TestRepo::init();
     repo.commit("first");
     let reader = RepoReader::open(repo.path()).unwrap();
+    let log = repo.path().join(".git/logs/refs/stash");
 
     assert_eq!(reader.stashes().unwrap(), []);
+    assert!(
+        !log.exists(),
+        "stash の一覧が reflog のファイルを作りました"
+    );
+    assert_eq!(reader.fingerprint().unwrap().stash, (None, 0));
+    assert!(!log.exists(), "指紋が reflog のファイルを作りました");
+
+    // ファイルができれば、同じ reader がそのまま読む。
+    repo.write_worktree_file("file.txt", b"changed\n");
+    repo.git(&["stash", "push", "-q"]);
+    assert_eq!(reader.stashes().unwrap().len(), 1);
+    assert_eq!(reader.fingerprint().unwrap().stash.1, 1);
 }
 
 #[test]

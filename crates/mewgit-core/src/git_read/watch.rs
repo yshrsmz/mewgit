@@ -109,8 +109,7 @@ impl RepoReader {
 
         let mtime = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
         let git_dir = self.git_dir();
-        // 無い reflog は空で返る（libgit2。`stashes` と同じ）。
-        let stashes = self.repo.reflog(STASH_REF)?.len();
+        let stashes = self.existing_reflog(STASH_REF)?.map_or(0, |log| log.len());
         Ok(RepoFingerprint {
             refs: hasher.finish(),
             stash: (top, stashes),

@@ -96,19 +96,17 @@ impl RepoReader {
             // 止まった HEAD がどちらも揃える（`/code-review` が踏んだ。02）。HEAD を
             // 動かしたのがこの reword の手順であることを reflog で見る。
             let moved_by_reword = self
-                .repo
-                .reflog("HEAD")
+                .existing_reflog("HEAD")
                 .ok()
-                .and_then(|log| {
-                    let last = log.get(0)?;
-                    Some(
+                .flatten()
+                .is_some_and(|log| {
+                    log.get(0).is_some_and(|last| {
                         last.id_new() == head.id()
                             && last
                                 .message_bytes()
-                                .is_some_and(|m| m.starts_with(b"rebase (reword): ")),
-                    )
-                })
-                .unwrap_or(false);
+                                .is_some_and(|m| m.starts_with(b"rebase (reword): "))
+                    })
+                });
             moved_by_reword
                 && head.message_bytes() == stopped.message_bytes()
                 && head.author() == stopped.author()

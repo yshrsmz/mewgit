@@ -39,7 +39,7 @@ pub(super) fn push(state: &mut AppState) -> Cmd {
 ///   あとから追跡設定が外で入ったときに、追跡していない push の拒否を根拠に force の腕が
 ///   立つ**
 ///
-/// - 追跡先ではない push 先への push（[`pushed_elsewhere`]）。lease が追跡先に対する
+/// - 追跡先ではない push 先への push（[`PlainPush::Elsewhere`]）。lease が追跡先に対する
 ///   値なので force に上げない。**憶えて断ると `P` が `Push` を出さなくなり**、push 先の
 ///   ブランチが外で消えても先端が動くまで断り続ける（`/code-review` が拾った）
 ///
@@ -180,10 +180,9 @@ fn push_plan(state: &AppState) -> PushPlan {
         // `--force-if-includes` と同じ問い。巻き戻した形もここを通る）。断る文は `p` だけを
         // 勧めない —— 巻き戻した人には巻き戻しを元に戻す案内になる。
         (true, Some(upstream)) if upstream.inclusion != Inclusion::Included => {
-            // **`p` を勧めるのは早送りできるときだけ。** `p` は `pull --ff-only` なので、
-            // 送るコミットがある（分かれた）ブランチでは通らない。
+            // **`p` を勧めるのは早送りできるときだけ**（[`pull_fast_forwards`]）。
             return PushPlan::Refused(
-                if head.ahead == 0 {
+                if pull_fast_forwards(head) {
                     "リモートに未取り込みのコミット。p で取り込むか、外の git で force push"
                 } else {
                     "リモートに未取り込みのコミット。外の git で取り込むか force push"
@@ -241,6 +240,18 @@ fn push_plan(state: &AppState) -> PushPlan {
     }
 }
 
+/// `p`（`pull --ff-only`）でこのブランチを早送りできるか。**`p` を案内に挙げるのは
+/// これが真のときだけ** —— 送るコミットがある（分かれた）ブランチでは git が断る。
+/// 読むのは `push_plan` の断りと、非 FF で断られた push の案内（01 の「失敗の案内文」）。
+///
+/// **ahead は追跡 ref に対する値。** 追跡 ref が無い（`fetch --prune` で消えた）行の
+/// ahead は「送るものが無い」ではなく「比べる相手がいない」の 0 なので、偽にする。
+/// 追跡 ref はリモートより古いこともあり、リモートがこちらのコミットを既に含んでいる
+/// 形では偽でも `p` が通る（01 に実測。受け入れた穴）。
+fn pull_fast_forwards(branch: &Branch) -> bool {
+    branch.upstream.is_some() && branch.ahead == 0
+}
+
 /// 直前の `P` が断られたか。**断られたときだけ force に上げる**（01 の「force push」）。
 /// 専用のキーを作らないのは、断られていない場面で押せる形にしないため（07）。
 fn rejected(state: &AppState, head: &Branch) -> bool {
@@ -255,7 +266,7 @@ fn rejected(state: &AppState, head: &Branch) -> bool {
 ///
 /// **force には上げない。** lease（`Branch.upstream` の位置）と `ahead` は追跡先に
 /// 対する値で、行き先が違うと比べる相手がいない。断られた記憶もこの push では立てない
-/// （[`pushed_elsewhere`]）ので、ここで記憶を読む必要が無い。
+/// （[`PlainPush::Elsewhere`]）ので、ここで記憶を読む必要が無い。
 fn push_elsewhere(head: &Branch, remote: &str) -> PushPlan {
     PushPlan::Tracked(GitOp::Push {
         remote: remote.to_string(),
@@ -266,12 +277,26 @@ fn push_elsewhere(head: &Branch, remote: &str) -> PushPlan {
     })
 }
 
-/// 追跡先ではない push 先へ送った push か（[`push_elsewhere`] が組む形）。
+/// lease も `-u` も無い push が、押したブランチ（`src`）の何に向かっていたか。
+/// 完了時の案内と記憶（[`push_rejection`]）の両方が読む（01 の「失敗の案内文」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlainPush {
+    /// 追跡先ではない push 先へ送った（[`push_elsewhere`] が組む形）。lease も `ahead` も
+    /// 追跡先に対する値なので、force にも `p` にも上げない。
+    Elsewhere,
+    /// 追跡先へ送った。`p` で早送りできるか（[`pull_fast_forwards`]）。
+    Upstream { fast_forwards: bool },
+    /// 一覧に行が無い。追跡先へ送ったものとして扱い、`p` を挙げる従来の案内に落とす。
+    Unlisted,
+}
+
+/// 完了した `op` を [`PlainPush`] に解く。lease か `-u` が付いた push と push 以外は `None`。
 ///
-/// **op だけでは見分けられない** —— 追跡設定に沿った push と同じく lease も `-u` も無い。
-/// 押したブランチ（`src`）の追跡先と行き先を比べる。完了時に読むのは
-/// [`push_rejection`] と同じく一覧の行で、push はローカルの ref も config も動かさない。
-pub(super) fn pushed_elsewhere(state: &AppState, op: &GitOp) -> bool {
+/// **op だけでは見分けられない** —— 追跡先への push も push 先への push も lease と `-u` が
+/// 無い。押したブランチ（`src`）の行の追跡先と行き先を比べる。**読むのは `src` の行で、
+/// HEAD ではない**（`Switch` の直後に押した push が返るころには HEAD が動いていることが
+/// ある）。push はローカルの ref も config も動かさないので、完了時に読んでよい。
+pub(super) fn plain_push(state: &AppState, op: &GitOp) -> Option<PlainPush> {
     let GitOp::Push {
         remote,
         src,
@@ -280,21 +305,28 @@ pub(super) fn pushed_elsewhere(state: &AppState, op: &GitOp) -> bool {
         ..
     } = op
     else {
-        return false;
+        return None;
     };
-    state
+    let Some(branch) = state
         .branches
         .branches()
         .iter()
         .find(|branch| &branch.name == src)
-        // **一覧に無いブランチは追跡先へ送ったものとして扱う**（従来の案内と記憶）。
-        // 追跡設定が無い行は push 先へ送ったもの（-u の push は上の形で外れている）。
-        .is_some_and(|branch| {
-            branch
-                .upstream_config
-                .as_ref()
-                .is_none_or(|config| &config.remote != remote)
-        })
+    else {
+        return Some(PlainPush::Unlisted);
+    };
+    // 追跡設定が無い行は push 先へ送ったもの（-u の push は上の形で外れている）。
+    let elsewhere = branch
+        .upstream_config
+        .as_ref()
+        .is_none_or(|config| &config.remote != remote);
+    Some(if elsewhere {
+        PlainPush::Elsewhere
+    } else {
+        PlainPush::Upstream {
+            fast_forwards: pull_fast_forwards(branch),
+        }
+    })
 }
 
 /// `f`。既定リモートを決めて fetch する。
@@ -1050,7 +1082,7 @@ mod tests {
         // 捨てたコミットが戻る。01 の「失敗の案内文」）。
         let notice = state.notices.back().expect("通知が出ていません");
         assert!(
-            !notice.message.contains("進んで") && notice.message.contains("上書きするなら P"),
+            !notice.message.contains("進んで") && notice.message.contains("上書きは P"),
             "{}",
             notice.message
         );

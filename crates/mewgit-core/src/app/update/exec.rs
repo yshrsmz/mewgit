@@ -14,7 +14,7 @@ use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput, GitOp, PullMode};
 
 use super::account::resolve_again;
 use super::graph::reload_log;
-use super::remote::{push_rejection, pushed_elsewhere};
+use super::remote::{plain_push, push_rejection, PlainPush};
 use crate::app::{AppState, Cmd, ExecDone, JobKind, NoticeLevel, Region};
 
 /// `git` の実行が終わった。
@@ -24,22 +24,15 @@ use crate::app::{AppState, Cmd, ExecDone, JobKind, NoticeLevel, Region};
 /// 出さないが、`.git/config` の 1 行では進行中操作は動かない。
 pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
     state.jobs.finish(JobKind::Exec);
+    // **押したブランチの行は 1 回だけ引く。** 案内と記憶が同じ答えを読む。
+    let pushed = plain_push(state, &done.op);
 
     if let Err(err) = &done.result {
         // **要約行は案内文、証拠は `detail`。** ステータスバーは `message` の 1 行目
         // しか描かない（07）ので、そこを argv で埋めると案内が画面に出ない
         // （01 の「失敗の案内文」）。案内が無ければ [`exec_summary`] に落とす。
         let detail = exec_detail(err);
-        let advice = match err {
-            // **追跡先ではない push 先が進んでいた形。** 追跡設定の push 向けの案内（`p` で
-            // 取り込む / `P` で force）は、どちらもこの行き先には効かない（01 の「push の
-            // 行き先」の 2）。op だけでは見分けられないので `exec_advice` の外で選ぶ。
-            ExecError::Failed {
-                kind: ExecErrorKind::NonFastForward,
-                ..
-            } if pushed_elsewhere(state, &done.op) => Some(PUSH_REMOTE_AHEAD),
-            _ => exec_advice(&done.op, err),
-        };
+        let advice = exec_advice(&done.op, err, pushed);
         // **中断は失敗ではない。** 押した本人が止めたものを `Error` で出すと、
         // 頼んでいないことが壊れたように読める。**コンフリクトで止まったのも同じ** ——
         // continue のあとに次のコミットでまた止まるのは想定どおりの結末で、進行中操作は
@@ -67,14 +60,12 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         state.push_notice(level, message, Some(detail));
     }
 
-    if let GitOp::Push {
-        src,
-        lease,
-        set_upstream,
-        ..
-    } = &done.op
-    {
-        let upgradable = lease.is_none() && !set_upstream && !pushed_elsewhere(state, &done.op);
+    if let GitOp::Push { src, .. } = &done.op {
+        // force に上げられるのは追跡先への素の push だけ（[`push_rejection`]）。
+        let upgradable = matches!(
+            pushed,
+            Some(PlainPush::Upstream { .. } | PlainPush::Unlisted)
+        );
         state.push_rejected = push_rejection(state, &done.result, src, upgradable);
     }
 
@@ -386,7 +377,7 @@ fn exec_summary(err: &ExecError) -> String {
 /// 「失敗の案内文」）。フッターの 1 行目は通知とその時刻だけが使う（キーヒントは 2 行目。
 /// 07）。溢れると末尾が `…` に置き換わるので、「どうすればよいか」の側から消える。
 /// 見張りは `mewgit-tui` 側にも置く（80 桁で描いて確かめる）。
-fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
+fn exec_advice(op: &GitOp, err: &ExecError, pushed: Option<PlainPush>) -> Option<&'static str> {
     // `NoResult` の `reason` は git の stderr ではなく mewgit の文言で、それ自体が
     // 案内になっている（03）。差し替えると説明が消える。`Canceled` も同じで、
     // `Display` の「git の実行を中断しました」以上に言うことが無い。
@@ -406,7 +397,7 @@ fn exec_advice(op: &GitOp, err: &ExecError) -> Option<&'static str> {
         ExecErrorKind::HttpsAuthFailed => {
             Some("HTTPS 認証に失敗しました。gh auth setup-git を実行してください")
         }
-        ExecErrorKind::NonFastForward => non_fast_forward_advice(op),
+        ExecErrorKind::NonFastForward => non_fast_forward_advice(op, pushed),
         ExecErrorKind::Conflict => conflict_advice(op),
         ExecErrorKind::Empty => empty_advice(op),
         ExecErrorKind::NoChanges => no_changes_advice(op),
@@ -659,15 +650,9 @@ fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
     }
 }
 
-/// 追跡先ではない push 先（`pushRemote` / `pushDefault`）が進んでいて断られたときの案内。
-///
-/// **mewgit に出口が無い。** `p` は追跡先から取り込み（push 先の分岐は解けない）、
-/// force は lease が追跡先に対する値なので撃たない（01 の「push の行き先」の 2）。
-const PUSH_REMOTE_AHEAD: &str =
-    "push 先が進んでいます。外の git で取り込んでから P を押してください";
-
 /// 非 FF で断られたときの案内。**押すキーが op で違う**（01 の「失敗の案内文」）。
-fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
+/// 素の push は op だけでは決まらず、押したブランチの行から解いた `pushed` で分ける。
+fn non_fast_forward_advice(op: &GitOp, pushed: Option<PlainPush>) -> Option<&'static str> {
     match op {
         // force push が lease に断られた形（`stale info`）。**これは守りが効いている** ——
         // 他人が push した印で、`f` で取ってもその先端はこのブランチの reflog から辿り
@@ -694,9 +679,26 @@ fn non_fast_forward_advice(op: &GitOp) -> Option<&'static str> {
         // **「リモートが進んでいます」とは言わない** —— 巻き戻したブランチの 1 回目の
         // `P` もここに来る（断られる前は force にしない）。リモートは進んでおらず、`p` を
         // 押すと捨てたコミットが戻る（01 の「失敗の案内文」）。
-        GitOp::Push { .. } => {
-            Some("リモートと分かれています。p で取り込むか、上書きするなら P をもう一度")
-        }
+        GitOp::Push { .. } => Some(match pushed {
+            // **追跡先ではない push 先が進んでいた形。mewgit に出口が無い。** `p` は
+            // 追跡先から取り込み（push 先の分岐は解けない）、force は lease が追跡先に
+            // 対する値なので撃たない（01 の「push の行き先」の 2）。
+            Some(PlainPush::Elsewhere) => {
+                "push 先が進んでいます。外の git で取り込んでから P を押してください"
+            }
+            // **送るコミットがある（分かれた）ブランチには `p` を挙げない** ——
+            // `pull --ff-only` が断る。追跡 ref が無くて比べられない行も同じ側
+            // （`remote::pull_fast_forwards`）。
+            Some(PlainPush::Upstream {
+                fast_forwards: false,
+            }) => "リモートと分かれています。外の git で取り込むか、上書きは P をもう一度",
+            // lease も `-u` も無い push なので `None` は来ない（`remote::plain_push`）。
+            Some(PlainPush::Upstream {
+                fast_forwards: true,
+            })
+            | Some(PlainPush::Unlisted)
+            | None => "リモートと分かれています。p で取り込むか、上書きは P をもう一度",
+        }),
         // `pull --ff-only` が履歴の分かれたブランチを断った形。merge / rebase は
         // M5 なので、mewgit の中に踏める手が無いことをそのまま言う。
         GitOp::Pull { .. } => Some("履歴が分かれています。merge / rebase はまだ実装していません"),
@@ -725,7 +727,7 @@ mod tests {
     use crate::app::Msg;
 
     use crate::git_exec::{ExecErrorKind, HunkApply, LocalBranch, PrSource, PullMode, RebasePlan};
-    use crate::git_read::{GitReadError, LogPage, WorktreeSection};
+    use crate::git_read::{Branch, GitReadError, LogPage, WorktreeSection};
     use crate::test_util::{
         fake_detail, fake_oid, fake_pr_checkout, fake_repo_snapshot, fake_snapshot, fake_stamp,
         status_arrived,
@@ -813,7 +815,7 @@ mod tests {
             (
                 tracked.clone(),
                 ExecErrorKind::NonFastForward,
-                "上書きするなら P をもう一度",
+                "上書きは P をもう一度",
             ),
             (
                 push_op("origin", "main", true),
@@ -864,6 +866,60 @@ mod tests {
                 cells(&notice.message),
                 notice.message
             );
+        }
+    }
+
+    #[test]
+    fn a_rejected_push_of_a_diverged_branch_does_not_offer_p() {
+        // `p` は `pull --ff-only` なので、送るコミットがあるブランチでは断られる（01 の
+        // 「失敗の案内文」）。**読むのは押したブランチ（`src`）の行** —— 一覧に無い
+        // `gone` を押した形では、HEAD の行（ahead 1）を読むと `p` が消える。
+        let diverged = tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(9)));
+        let rewound = Branch {
+            ahead: 0,
+            ..diverged.clone()
+        };
+        // 追跡 ref が `fetch --prune` で消えた行。ahead は比べる相手がいない 0 で、送る
+        // コミットがあっても `p` は断られる（`/code-review` が一時リポジトリで再現）。
+        let pruned = Branch {
+            upstream: None,
+            ahead: 0,
+            ..diverged.clone()
+        };
+        let plain = push_op("origin", "main", false);
+        let cases = [
+            (diverged.clone(), plain.clone(), Some(false)),
+            // 巻き戻した形。`p` を押すと捨てたコミットが戻ることも含めて両方を挙げる。
+            (rewound, plain.clone(), Some(true)),
+            (pruned, plain, Some(false)),
+            (
+                diverged.clone(),
+                push_op("origin", "gone", false),
+                Some(true),
+            ),
+            // **force push の断りは lease の案内のまま** —— ahead ≥ 1 の行でも、分かれた
+            // ブランチの文にすり替えない（`/code-review` の変異で見張りが無かった）。
+            (diverged, forced_push_op(fake_oid(9)), None),
+        ];
+
+        for (head, op, offers_p) in cases {
+            let ahead = head.ahead;
+            let mut state = state_for_push(&["origin"], head);
+            reject_non_fast_forward(&mut state, op.clone());
+
+            let notice = state.notices.back().expect("通知がありません");
+            let label = format!("ahead {ahead} / {op:?}: {}", notice.message);
+            match offers_p {
+                Some(offers_p) => {
+                    assert_eq!(notice.message.contains("p で取り込む"), offers_p, "{label}");
+                    assert!(notice.message.contains("P をもう一度"), "{label}");
+                }
+                None => assert!(
+                    notice.message.contains("外の git で取り込んでから P"),
+                    "{label}"
+                ),
+            }
+            assert!(cells(&notice.message) <= NOTICE_CELLS, "{label}");
         }
     }
 

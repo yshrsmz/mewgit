@@ -2572,7 +2572,8 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
 | `HttpsAuthFailed` | `gh auth setup-git` を実行する |
 | `NonFastForward` + `Push { lease: Some }` | `f` で取得し、外の git で取り込んでから `P` |
 | `NonFastForward` + `Push { set_upstream: true }` | Branches で改名する |
-| `NonFastForward` + `Push { .. }` | `p` で取り込むか、上書きするなら `P` をもう一度 |
+| `NonFastForward` + `Push { .. }`（押したブランチの ahead が 0、または一覧に行が無い） | `p` で取り込むか、上書きするなら `P` をもう一度 |
+| `NonFastForward` + `Push { .. }`（押したブランチの ahead ≥ 1） | 外の git で取り込むか、上書きは `P` をもう一度 |
 | `NonFastForward` + `Pull` | 履歴が分かれている（merge / rebase は M5） |
 | `Conflict` + rebase / cherry-pick / revert（開始・continue・skip）/ `pull --rebase` | 解消して `git add` したら `m` で continue する（**`Warn`**） |
 | `Empty` + cherry-pick（開始・continue・skip） | `m` から skip する（**`Warn`**） |
@@ -2592,6 +2593,7 @@ stdout より前**なのは、履歴のモーダルが入りきらない `detail
 - **非 FF は op で分ける。** 同じ `(non-fast-forward)` でも、force push が `stale info` で断られた形は外の git で取り込ませる側（`f` で取っても、取り込まないと force に上がらない。上の「force push」）、`-u` の提案から入った形は force に上げる経路が無い側（force は `PushPlan::Tracked` にしか無い）。kind だけで文を選ぶと、どちらかに嘘を言う
 - **`stale info` のあとは、mewgit の中で force に戻らない。** `f` で取った先端はこのブランチの reflog から辿り着けないので、取り込むまで `P` は断られる（上の「force push」）。元は「`f` で取得してから `P` を 2 回押す」と案内していたが、**それは他人の push を消す手順そのものだった**（`/simplify` の altitude が拾った）
 - **通常の push には「上書きするなら `P` をもう一度」とだけ書く。** 次の `P` が force の確認を出すかは `push_plan` が決めていて（追跡 ref の先端を取り込んでいないときと、追跡 ref が無いときに断る）、ここで先読みすると**同じ判定が 2 箇所に割れる**。押した結果が断りでも、出るのは `PushPlan::Refused` の正しい文言なので、案内が嘘にはならない。**「リモートが進んでいます」とは言わない** —— 巻き戻したブランチの 1 回目の `P` もここに来るので（断られる前は force にしない）、リモートは進んでおらず、`p` を押すと捨てたコミットが戻る（`/code-review` が拾った）。文は「リモートと分かれています」から始め、`p` と `P` の両方を挙げる
+- **`p` を挙げるのは、押したブランチの ahead が 0 のときだけ。** `p` は `pull --ff-only` なので、送るコミットがある（分かれた）ブランチでは「履歴が分かれています」で断られる。**これは上の「先読みしない」と割れない** —— 先読みを断っているのは「次の `P` が force に上がるか」（`push_plan` の問い）で、「`p` が早送りできるか」は別の問い。しかも `push_plan` は、取り込んでいない先端の上で断る文を選ぶときに同じ問いを既に使っている（上の「force push」）ので、**述語 `remote::pull_fast_forwards` を 1 本にして両方が読む**。読む行は `GitOp::Push` の `src`（HEAD ではない。`Switch` の直後に押した push が返るころには HEAD が動いていることがある。`push_rejection` と同じ）で、一覧に行が無ければ `p` を挙げる文に落とす。追跡先ではない push 先の案内（上の「push の行き先」の 2）はこれより先に選ぶ。**ahead は古い追跡 ref に対する値** —— 断られた時点の `origin/x` はリモートより古いので、**リモートがこちらのコミットを既に含んでいる形**（別のクローンから同じコミットとその先を push した）でも ahead ≥ 1 になり、`p` は通るのに挙げない。分かれた形と並べて叩くと、どちらも ahead 1 / behind 0 で、push は同じ `(fetch first)` で断られた（git 2.56.0、2026-10-17）ので、mewgit からは見分けられない。**受け入れた穴** —— 挙げない誤りは外の git で済み、壊すものは無い
 - **`-u` の経路は mewgit の中で行き止まり。** 追跡設定が無いので `p` も通らず
   （`git pull` が「どのブランチか」を決められない）、force にも上げられない。残る
   出口は改名だけ（リモートに同名の ref が無くなり、`-u` の push が通る）。

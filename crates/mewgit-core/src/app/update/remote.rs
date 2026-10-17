@@ -180,10 +180,9 @@ fn push_plan(state: &AppState) -> PushPlan {
         // `--force-if-includes` と同じ問い。巻き戻した形もここを通る）。断る文は `p` だけを
         // 勧めない —— 巻き戻した人には巻き戻しを元に戻す案内になる。
         (true, Some(upstream)) if upstream.inclusion != Inclusion::Included => {
-            // **`p` を勧めるのは早送りできるときだけ。** `p` は `pull --ff-only` なので、
-            // 送るコミットがある（分かれた）ブランチでは通らない。
+            // **`p` を勧めるのは早送りできるときだけ**（[`pull_fast_forwards`]）。
             return PushPlan::Refused(
-                if head.ahead == 0 {
+                if pull_fast_forwards(head) {
                     "リモートに未取り込みのコミット。p で取り込むか、外の git で force push"
                 } else {
                     "リモートに未取り込みのコミット。外の git で取り込むか force push"
@@ -239,6 +238,16 @@ fn push_plan(state: &AppState) -> PushPlan {
             op,
         },
     }
+}
+
+/// `p`（`pull --ff-only`）でこのブランチを早送りできるか。**`p` を案内に挙げるのは
+/// これが真のときだけ** —— 送るコミットがある（分かれた）ブランチでは git が断る。
+/// 読むのは `push_plan` の断りと、非 FF で断られた push の案内（01 の「失敗の案内文」）。
+///
+/// **ahead は追跡 ref に対する値**で、リモートより古いことがある。リモートがこちらの
+/// コミットを既に含んでいる形では偽でも `p` が通る（01 に実測。受け入れた穴）。
+pub(super) fn pull_fast_forwards(branch: &Branch) -> bool {
+    branch.ahead == 0
 }
 
 /// 直前の `P` が断られたか。**断られたときだけ force に上げる**（01 の「force push」）。

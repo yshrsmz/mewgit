@@ -3077,6 +3077,11 @@ pub enum Action {
     Worktree(WorktreeAction), CommitDetail(CommitDetailAction), Diff(DiffAction),
 }
 
+/// ペインごとの動作（`GraphAction` など）と、どこでも効く動作。どれも unit 変種だけ。
+pub enum CommonAction { Help, Quit, Fetch, /* … */ Interrupt }
+
+/// 中断 / 終了の打鍵。**`update_key` は表を引かずにこれと比べる**（下の「表が dispatch を兼ねる」）。
+pub const INTERRUPT: Key;
 /// `?`（キーの一覧）と `q`。フッターに必ず出し、幅が足りなくても落とさない（07）。
 pub const PINNED: &[KeyHint];
 /// どのペインでも効くキーのうち、**フッターには出さないもの**。`Modal::Help` だけが読む（07）。
@@ -3085,6 +3090,8 @@ pub const COMMON: &[KeyHint];
 pub fn help(pane: Pane) -> Vec<HelpRow>;
 /// **いま**押せるペインのキー。`None` は「この表のどれも押せない」（モーダル表示中）。
 pub fn live(state: &AppState) -> Option<&'static [KeyHint]>;
+/// `action` に**いま**効くキー（ペインの表と、どこでも効く表）。`None` は「いまは押せない」。
+pub fn live_key(state: &AppState, action: Action) -> Option<Key>;
 /// そのペインで押せるキー。網羅 `match` なので、`Pane` を足すと実装漏れが落ちる。
 pub fn pane(pane: Pane) -> &'static [KeyHint];
 ```
@@ -3094,8 +3101,7 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
 - **ラベルは core が持つ。** 通知の文言と同じ扱いで、`ui` は並べるだけ（不変ルール 2）
 - **同じ動作の別名は入れない。** `j` / `k` の代わりに効く `Down` / `Up` は表に無い
   —— 案内に出すものの一覧なので、出さないものを入れると「表 → 実際に押せる」の
-  見張りが通るだけで案内は変わらない。**逆向き（`match` の腕が全部表にあるか）は
-  `match` から導けない**ので、そこは見張れない
+  見張りが通るだけで案内は変わらない。別名は引く側だけが持つ（下の「表が dispatch を兼ねる」）
 - **`m` / `Tab` / `Shift+Tab` / `1`〜`5` / `Ctrl-C` は `COMMON` に入っている**（`Modal::Help` で
   足した）。読むのは `?` の一覧だけで、フッターには出ない
 - **「いま押せるか」に答えるのは [`live`] のほう。** モーダル表示中はキーを全部モーダルが
@@ -3123,18 +3129,25 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
 - **別名は表に出さずに引く**（`Down` / `Up` の矢印 → `Action::Down` / `Up`）。案内に
   出さないものは表の `KeyHint` に入れない（上の「同じ動作の別名は入れない」）ので、
   引く側だけが持つ
-- **比べるのは `Key` 全体。** 以前の `match key.code()` は修飾を見ず、`Ctrl-j` でも
-  `Alt-s` でも同じ動作が起きていた。表で引く形ではそれが効かなくなる（共通キーの段は
-  元から `Key` 全体で比べていた。理由は `update_key` のコメント —— 07 が移動に予約した
-  `Ctrl-d` / `Ctrl-u` の隣で修飾付きのキーを先に食わないため）
+- **比べるのは `Key` 全体。** 以前は各ペインの `*_key` と共通キーの `Tab` / `BackTab` が
+  `match key.code()` で修飾を見ておらず、修飾付きでも同じ動作が起きていた。表で引く形では
+  それが全部効かなくなる —— `Ctrl-j` / `Alt-s` などの文字キー、`Shift+Down` / `Shift+Up`、
+  `Shift` / `Alt+Enter`、`Shift+Esc`、`Alt` / `Ctrl+Tab`（`Key::with_mods` が shift を落とすのは
+  `Char` と `Tab` / `BackTab` だけなので、矢印・`Enter`・`Esc` の shift は残って別のキーになる）。
+  共通キーの文字（`f` / `p` / `P` など）は元から `Key` 全体で比べていた（`update_key` の
+  コメントの理由 —— 07 が移動に予約した `Ctrl-d` / `Ctrl-u` の隣で修飾付きのキーを先に食わないため）。
+  **ペインのキーも同じ理由で揃えた**
 - **`Ctrl-C` だけは表を引かない。** `update_key` の先頭で定数（`keys::INTERRUPT`）と
   比べ、モーダルより先に受ける（上の「キー入力」の脱出口）。表の行は案内に出すためだけに
   ある。`config.keymap` では上書きさせない（08）が、それを上書きの処理の特例ではなく
   置き場所で守る —— 表を引く形だと、`quit = "ctrl-c"` のような衝突を後勝ちで解いた瞬間に
-  `Interrupt` が表から消え、モーダル表示中に抜ける手が無くなる
+  `Interrupt` が表から消え、モーダル表示中に抜ける手が無くなる。**守れるのは脱出口が
+  消えないことまで** —— 値に `"ctrl-c"` を書いた上書き（`fetch = "ctrl-c"`）は、案内に
+  `Ctrl-C:fetch` を出しながら押すと終了する。値の側も断る（08）
 - **字ではなく動作で聞く**（`keys::live_key(state, Action) -> Option<Key>`）。ペインの本文に
   キーを書く側（PRs ペインの「（N）」）は、いま効くキーを動作から逆引きして字にする。字で
-  聞くと、上書きした瞬間に押せないキーを案内する
+  聞くと、上書きした瞬間に押せないキーを案内する。**引くのはペインの表とどこでも効く表の
+  両方**（`A` や `?` を案内に書く側も同じ関数で引ける）
 - **押して無反応なキーを表に入れない見張り**（`every_hinted_key_does_something`）は
   残す。網羅 `match` が強いるのは腕があることだけで、**腕が `Cmd::None` を返すだけの形は
   通る** —— それを拾うのはこちら。**キーの動作が丸ごと通知に退化した形や誤配線

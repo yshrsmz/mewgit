@@ -407,7 +407,7 @@ const DIFF: &[KeyHint] = &[
 ];
 
 /// どのペインでも効く表（[`COMMON`] と [`PINNED`]）。
-fn anywhere() -> impl Iterator<Item = &'static KeyHint> {
+pub(crate) fn anywhere() -> impl Iterator<Item = &'static KeyHint> {
     COMMON.iter().chain(PINNED)
 }
 
@@ -485,7 +485,8 @@ pub fn live(state: &AppState) -> Option<&'static [KeyHint]> {
     Some(pane(state.focus))
 }
 
-/// `action` に**いま**効くキー。`None` は「いまは押せない」。
+/// `action` に**いま**効くキー。`None` は「いまは押せない」。引くのはペインの表
+/// （[`live`]）と、どこでも効く表（[`COMMON`] と [`PINNED`]）の両方。
 ///
 /// **ペインの本文にキーを書くときに使う**（PRs ペインの「開いている PR はありません（N）」。
 /// 07 の「PRs ペイン」）。`ui` が `focus` やモーダルを見て自分で決めると、振り分けの規則の
@@ -493,7 +494,7 @@ pub fn live(state: &AppState) -> Option<&'static [KeyHint]> {
 /// **字ではなく動作で聞く** —— 字で聞くと、`config.keymap`（08）で上書きした瞬間に
 /// 押せないキーを案内する。表に載っていない別名（`Down` など）は返さない。
 pub fn live_key(state: &AppState, action: Action) -> Option<Key> {
-    binds(live(state)?)
+    binds(live(state)?.iter().chain(anywhere()))
         .find(|(_, bound)| *bound == action)
         .map(|(key, _)| *key)
 }
@@ -535,12 +536,20 @@ mod tests {
         assert_eq!(live_key(&state, create), Some(Key::char('N')));
         // 別名は案内に出さないので、表のキー（`j`）を返す。
         assert_eq!(live_key(&state, Action::Down), Some(Key::char('j')));
+        // **どこでも効く表も引く**（`A` を案内に書く側が同じ関数で引ける）。
+        let account = Action::Common(CommonAction::Account);
+        assert_eq!(live_key(&state, account), Some(Key::char('A')));
         // **モーダル表示中はキーを全部モーダルが受ける**（`live`）。
         state.modal = Some(Modal::Help {
             pane: Pane::Prs,
             cursor: 0,
         });
         assert_eq!(live_key(&state, create), None, "モーダルの下で効くと言った");
+        assert_eq!(
+            live_key(&state, account),
+            None,
+            "モーダルの下で効くと言った"
+        );
     }
 
     /// 表の打鍵が引く動作を全部。

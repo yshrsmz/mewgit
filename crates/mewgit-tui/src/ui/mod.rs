@@ -1031,7 +1031,14 @@ fn hint_text(keys: &PaneKeys, width: u16) -> String {
     let pane = keys.hints();
     let pinned = joined(keys.pinned());
     for keep in (1..=pane.len()).rev() {
-        let text = format!("{}{SEP}{pinned}", joined(&pane[..keep]));
+        let text = joined(&pane[..keep]);
+        // **`?` と `q` が無いこともある** —— `config.keymap` の上書きに負けると表から外れる
+        // （08 の「衝突」）。区切りだけを末尾に残さない。
+        let text = if pinned.is_empty() {
+            text
+        } else {
+            format!("{text}{SEP}{pinned}")
+        };
         if fits(&text, width) {
             return text;
         }
@@ -2111,6 +2118,20 @@ mod tests {
             assert!(hints.ends_with("  ?:help q:quit"), "{pane:?}: {hints:?}");
             assert!(!hints.contains("f:fetch"), "{pane:?}: {hints:?}");
         }
+    }
+
+    #[test]
+    fn the_footer_follows_the_overrides_and_leaves_no_separator_when_help_and_quit_lose() {
+        let overrides = [("stage", "S"), ("fetch", "q"), ("pull", "?")]
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .into();
+        let (keymap, _) = Keymap::new(&overrides);
+        let hints = hint_text(keymap.pane(Pane::Worktree), u16::MAX);
+        assert!(hints.contains("S:stage"), "{hints:?}");
+        assert!(!hints.contains("s:stage"), "{hints:?}");
+        // `?` と `q` は上書きに負けて表から外れた。
+        assert!(!hints.contains("q:quit"), "{hints:?}");
+        assert!(!hints.ends_with(' '), "区切りが残っています: {hints:?}");
     }
 
     #[test]

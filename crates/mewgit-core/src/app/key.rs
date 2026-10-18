@@ -184,6 +184,11 @@ impl Key {
             if mods.ctrl && c.is_ascii_uppercase() {
                 return Err(ParseKeyError::CtrlUppercase);
             }
+            // CSI u を話さない端末では、`Tab` / `Enter` / `Esc` と同じバイト（0x09 / 0x0D /
+            // 0x1B）で届き、crossterm はそちらのキーとして返す（`parse_event`）。
+            if mods.ctrl && matches!(c, 'i' | 'm' | '[') {
+                return Err(ParseKeyError::CtrlSameAsKey);
+            }
         }
         Ok(Self::with_mods(code, mods))
     }
@@ -203,6 +208,8 @@ pub enum ParseKeyError {
     ShiftOnChar,
     #[error("ctrl- の後ろの英字は小文字で書いてください（端末は大文字を送りません）")]
     CtrlUppercase,
+    #[error("ctrl-i / ctrl-m / ctrl-[ は端末によって Tab / Enter / Esc として届きます")]
+    CtrlSameAsKey,
 }
 
 #[cfg(test)]
@@ -331,6 +338,15 @@ mod tests {
         assert_eq!(Key::parse("ctrl-"), Err(ParseKeyError::Unknown));
         assert_eq!(Key::parse("shift-a"), Err(ParseKeyError::ShiftOnChar));
         assert_eq!(Key::parse("ctrl-D"), Err(ParseKeyError::CtrlUppercase));
+        for value in ["ctrl-i", "ctrl-m", "ctrl-["] {
+            assert_eq!(
+                Key::parse(value),
+                Err(ParseKeyError::CtrlSameAsKey),
+                "{value}"
+            );
+        }
+        // `ctrl-j` は raw mode では `Enter` に化けない（crossterm の Issue #371 の扱い）。
+        assert_eq!(Key::parse("ctrl-j"), Ok(Key::ctrl('j')));
         // 大文字が断られるのは ctrl だけ（`alt-P` は端末が `P` を送る形がある）。
         assert!(Key::parse("alt-P").is_ok());
     }

@@ -240,7 +240,7 @@ const INTERRUPT_NAME: &str = "interrupt";
 /// **動作は行ではなく打鍵ごとに持つ**（`j/k:移動` は 1 行で 2 つ）。行の束ね方は 07 の
 /// 80 桁の実測が前提なので、同一性のために割らない。
 ///
-/// **打鍵は `Cow`。** 既定の表は `const` で借り、上書きを当てた行だけが持つ（[`Keymap`]）。
+/// **打鍵は `Cow`。** 既定の表は `const` で借り、[`Keymap`] が組んだ行は持つ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyHint {
     binds: Cow<'static, [(Key, Action)]>,
@@ -567,6 +567,14 @@ pub enum KeymapWarning {
         winner: &'static str,
         loser: &'static str,
     },
+    /// 上書きが表に出さない別名（矢印の `Down` / `Up`）を奪った。`j` / `k` は残るので、
+    /// [`Conflict`](Self::Conflict) の文言では何が効かなくなったかが読めない。
+    #[error("[keymap] \"{value}\" は {loser} の矢印キーなので、矢印で {loser} は効かなくなり {winner} を使います")]
+    AliasTaken {
+        value: String,
+        winner: &'static str,
+        loser: &'static str,
+    },
 }
 
 /// 打鍵の出どころ。**宣言の順が強さの順**（別名 < 既定 < 上書き。上書き同士は名前の昇順で
@@ -730,25 +738,43 @@ impl PaneKeys {
             .collect();
         ranked.sort_by_key(|(_, _, source)| *source);
 
-        let mut actions: HashMap<Key, Action> = HashMap::new();
+        let mut bound: HashMap<Key, (Action, Source)> = HashMap::new();
         for (key, action, source) in ranked {
-            let Some(loser) = actions.insert(key, action).filter(|loser| *loser != action) else {
+            let Some((loser, lost)) = bound
+                .insert(key, (action, source))
+                .filter(|(loser, _)| *loser != action)
+            else {
                 continue;
             };
-            // 勝つのは必ず上書き —— 既定の表と別名は互いに重ならない
-            // （`the_default_tables_have_no_conflicts_but_an_override_can_make_one`）。
+            // **警告するのは上書きが勝ったときだけ。** 既定の表と別名は互いに重ならず、それは
+            // `the_default_tables_keep_every_bind_on_every_screen` が負けた打鍵の数で見る。
             let Source::Override(i) = source else {
                 continue;
             };
-            let conflict = KeymapWarning::Conflict {
-                value: overrides[i].value.to_string(),
-                winner: action.name(),
-                loser: loser.name(),
+            let (value, winner, loser) =
+                (overrides[i].value.to_string(), action.name(), loser.name());
+            let conflict = if lost == Source::Alias {
+                KeymapWarning::AliasTaken {
+                    value,
+                    winner,
+                    loser,
+                }
+            } else {
+                KeymapWarning::Conflict {
+                    value,
+                    winner,
+                    loser,
+                }
             };
             if !conflicts.contains(&conflict) {
                 conflicts.push(conflict);
             }
         }
+
+        let actions: HashMap<Key, Action> = bound
+            .into_iter()
+            .map(|(key, (action, _))| (key, action))
+            .collect();
 
         // 負けた打鍵を外す。打鍵が 1 つも残らない行は落とす。
         let resolve = |rows: Vec<Row>| -> Vec<KeyHint> {
@@ -1059,12 +1085,37 @@ mod tests {
     }
 
     /// **既定の表では、1 つのキーが同じ画面で 2 つの動作を引かない。** 数えるのは
-    /// 「共通キー ∪ そのペインのキー ∪ 別名」—— 判定は production の [`PaneKeys::build`] が
-    /// 持つ（08）。**否定だけだと自明に通る**ので、重なる上書きで警告が出ることも続けて見る。
+    /// 「共通キー ∪ そのペインのキー ∪ 別名」。**警告では見ない** —— [`PaneKeys::build`] が
+    /// 警告するのは上書きが勝ったときだけなので、既定どうしが重なると黙って片方が外れる。
+    /// だから組んだ表に既定の打鍵が全部残っていることを見る（負けた打鍵は表から外れる）。
     #[test]
-    fn the_default_tables_have_no_conflicts_but_an_override_can_make_one() {
+    fn the_default_tables_keep_every_bind_on_every_screen() {
+        let keymap = Keymap::default();
+        for &pane in Pane::ALL {
+            let keys = keymap.pane(pane);
+            let defaults: Vec<(Key, Action)> = binds(table(pane).iter().chain(anywhere()))
+                .chain(ALIASES)
+                .copied()
+                .collect();
+            for (key, action) in defaults {
+                assert_eq!(
+                    keys.action(key),
+                    Some(action),
+                    "{pane:?} で {key:?} が {action:?} を引きません"
+                );
+            }
+            assert_eq!(
+                screen_binds(keys).len(),
+                binds(table(pane).iter().chain(anywhere())).count(),
+                "{pane:?} の案内から打鍵が外れています"
+            );
+        }
         assert_eq!(Keymap::new(&HashMap::new()).1, Vec::new());
+    }
 
+    /// 重なる上書きは警告する。共通キーの衝突は全部の画面で起きるが、警告は 1 つに畳む。
+    #[test]
+    fn an_override_that_collides_is_warned_once() {
         let (_, warnings) = Keymap::new(&overrides(&[("fetch", "s")]));
         assert_eq!(
             warnings,
@@ -1074,6 +1125,20 @@ mod tests {
                 loser: "stage",
             }],
             "Worktree と Diff の 2 画面で重なるが、警告は 1 つに畳む"
+        );
+        // **別名を奪ったときは別の文言**（`j` は残るので「down に重なる」では読めない）。
+        let (keymap, warnings) = Keymap::new(&overrides(&[("fetch", "down")]));
+        assert_eq!(
+            warnings,
+            vec![KeymapWarning::AliasTaken {
+                value: "down".into(),
+                winner: "fetch",
+                loser: "down",
+            }]
+        );
+        assert_eq!(
+            keymap.pane(Pane::Graph).action(Key::char('j')),
+            Some(Action::Down)
         );
     }
 

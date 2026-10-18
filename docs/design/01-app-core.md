@@ -3022,9 +3022,7 @@ impl JobKind {
 crossterm の `KeyEvent` は core に入れられないので、core 側に等価な型を持つ。
 `crossterm::event::KeyEvent → app::Key` の変換は `mewgit-tui` 側で行う。
 
-フィールドは非公開にし、コンストラクタを唯一の入口にする。同じ打鍵が 1 通りの表現に
-なるよう正規化するため。正規化しないと `Key` の `Eq` / `Hash` が壊れ、`keymap`（08）
-の引き当てが静かに外れる。
+フィールドは非公開にし、コンストラクタを唯一の入口にする。同じ打鍵が 1 通りの表現になるよう正規化するため。正規化しないと `Key` の `Eq` / `Hash` が壊れ、`keymap`（08）の引き当てが静かに外れる。
 
 - `Char` は shift 適用後の値が入るので `shift` を落とす（crossterm は `P` に `SHIFT` を立てて渡す）
 - Shift+Tab は端末が `BackTab` + SHIFT として送る。`Tab` + shift / `BackTab` + shift /

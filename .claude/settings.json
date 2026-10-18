@@ -5,5 +5,18 @@
       "Bash(cargo fmt:*)", "Bash(cargo check:*)", "Bash(cargo run:*)",
       "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)"
     ]
+  },
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/clean-target.sh\"",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
   }
 }

@@ -18,9 +18,8 @@ use super::{confirm, focus, multiline_input_key, submit_exec, InputKey};
 use crate::app::keys::WorktreeAction;
 use crate::app::{AppState, Cmd, DiffOrigin, JobKind, Key, Modal, NoticeLevel, Pane, TextBuffer};
 
-/// ワーキングツリーペインのキー処理。
-///
-/// `j` / `k` は区画をまたいで 1 本のリストのように動く（01 の「ワーキングツリー」）。
+/// ワーキングツリーペインのキー処理。上下移動は `update_key` の `move_cursor` が受ける
+/// （[`move_entry`]）。
 pub(super) fn worktree_key(state: &mut AppState, action: WorktreeAction) -> Cmd {
     match action {
         // 左の領域を Diff に差し替える（07）。読むかどうかは `focus` が決める。
@@ -195,12 +194,13 @@ pub(super) fn head_message_loaded(
     Cmd::None
 }
 
-/// ワーキングツリーのカーソルを動かす。
+/// ワーキングツリーのカーソルを動かす。区画をまたいで 1 本のリストのように動く
+/// （01 の「ワーキングツリー」）。
 ///
 /// **カーソルを動かすキーはすべてここを通す。** 動かすと diff の対象が変わるので、
 /// 直前の失敗を落として 1 回だけ試し直せるようにする（`GraphState.load_failed` を
 /// `scrolled` で落とすのと同じ形。01 の「diff の遅延取得」）。
-pub(super) fn moved(state: &mut AppState, delta: isize) -> Cmd {
+pub(super) fn move_entry(state: &mut AppState, delta: isize) -> Cmd {
     state.worktree.move_cursor(delta);
     state.diff.failed = None;
     Cmd::None

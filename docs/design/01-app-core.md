@@ -679,7 +679,7 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   `status_loaded` が `clamp` のあとに `load_diff` を呼ぶのと同じ形
 - **一覧のカーソルを動かしたら `DiffState.failed` を落とす。** 対象が変わるので、
   一度失敗したファイルにも戻ってくれば 1 回だけ試し直せる（ワーキングツリーの
-  `moved` と同じ形。下の「diff の遅延取得」）
+  `move_entry` と同じ形。下の「diff の遅延取得」）
 - **空の `entries` と「まだ読めていない」を区別する。** `--allow-empty` のコミットは
   変更を 1 つも持たない。`Option<CommitFiles>` の `None` が「届いていない」、
   `Some` で `entries` が空が「変更なし」。`Vec` 1 本にすると、読み込み中と空の
@@ -3127,8 +3127,14 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
   `Alt-s` でも同じ動作が起きていた。表で引く形ではそれが効かなくなる（共通キーの段は
   元から `Key` 全体で比べていた。理由は `update_key` のコメント —— 07 が移動に予約した
   `Ctrl-d` / `Ctrl-u` の隣で修飾付きのキーを先に食わないため）
-- **`Ctrl-C` も表を引く**が、モーダルより先に見る（上の「キー入力」の脱出口）。
-  `config.keymap` では上書きさせない（08）
+- **`Ctrl-C` だけは表を引かない。** `update_key` の先頭で定数（`keys::INTERRUPT`）と
+  比べ、モーダルより先に受ける（上の「キー入力」の脱出口）。表の行は案内に出すためだけに
+  ある。`config.keymap` では上書きさせない（08）が、それを上書きの処理の特例ではなく
+  置き場所で守る —— 表を引く形だと、`quit = "ctrl-c"` のような衝突を後勝ちで解いた瞬間に
+  `Interrupt` が表から消え、モーダル表示中に抜ける手が無くなる
+- **字ではなく動作で聞く**（`keys::live_key(state, Action) -> Option<Key>`）。ペインの本文に
+  キーを書く側（PRs ペインの「（N）」）は、いま効くキーを動作から逆引きして字にする。字で
+  聞くと、上書きした瞬間に押せないキーを案内する
 - **押して無反応なキーを表に入れない見張り**（`every_hinted_key_does_something`）は
   残す。網羅 `match` が強いるのは腕があることだけで、**腕が `Cmd::None` を返すだけの形は
   通る** —— それを拾うのはこちら。**キーの動作が丸ごと通知に退化した形や誤配線

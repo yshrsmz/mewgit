@@ -1071,7 +1071,7 @@ pub(crate) fn push_keys(out: &mut String, hint: &KeyHint) {
 /// キー 1 つの字。
 ///
 /// **`Key` 全体を見る**（`KeyCode` だけでは `Ctrl-C` と `c` が同じ字になる）。
-fn push_key(out: &mut String, key: &Key) {
+pub(crate) fn push_key(out: &mut String, key: &Key) {
     let mods = key.mods();
     if mods.ctrl {
         out.push_str("Ctrl-");

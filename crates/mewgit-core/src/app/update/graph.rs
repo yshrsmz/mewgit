@@ -302,7 +302,7 @@ pub(super) fn commit_detail_key(state: &mut AppState, action: CommitDetailAction
 /// ファイル一覧のカーソルを `delta` 行動かす。
 ///
 /// **動かすと diff の対象が変わるので、直前の失敗を落とす**（ワーキングツリーの
-/// `worktree::moved` と同じ形）。移動して戻ってくれば 1 回だけ試し直せる。
+/// `worktree::move_entry` と同じ形）。移動して戻ってくれば 1 回だけ試し直せる。
 ///
 /// **動かすのは出ている一覧だけ。** 別のコミットのものが残っていることがあり
 /// （読み込み中・失敗中）、濾さずに動かすと画面に出ていない一覧のカーソルが黙って動く。
@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn moving_the_file_cursor_clears_the_failed_diff() {
         // 対象が変わるので、一度失敗したファイルにも戻ってくれば試し直せる
-        // （ワーキングツリーの `moved` と同じ形）。
+        // （ワーキングツリーの `move_entry` と同じ形）。
         let mut state = on_first_commit(3);
         let _ = press_code(&mut state, KeyCode::Enter);
         state.diff.failed = Some(commit_diff_target(&state, "a.txt"));

@@ -150,8 +150,8 @@ impl KeyHint {
     /// 出すものの一覧で、出さないものを足しても案内は変わらない（01）。
     ///
     /// **`'static` を約束しない。** `config.keymap` の上書き（08）で差し替えたキーは
-    /// `'static` では持てないので、いま約束すると、そのタスクで**呼び手ごと書き換える
-    /// ことになる**。
+    /// `'static` では持てない。**先に外したのはここだけ**で、[`pane`] / [`live`] /
+    /// [`help`] の `'static` は上書きを入れるタスク（`docs/plan.md` の 2/2）で外す。
     pub fn keys(&self) -> impl Iterator<Item = Key> + '_ {
         self.binds.iter().map(|(key, _)| *key)
     }
@@ -183,6 +183,13 @@ const fn code(code: KeyCode, action: Action) -> (Key, Action) {
 
 /// キーの一覧（`Modal::Help`）を開く。
 pub const HELP: KeyHint = hint(&[ch('?', Action::Common(CommonAction::Help))], "help");
+
+/// 中断 / 終了の打鍵。**表を引かずにこの定数と比べる**（`update_key` の先頭）。
+///
+/// モーダル表示中も効く唯一の脱出口なので、`config.keymap` の上書き（08）が表をどう
+/// 書き換えても消えないよう、表の中身ではなく置き場所で守る。表の行（[`COMMON`] の
+/// 「中断 / 終了」）は案内に出すためだけにある。
+pub const INTERRUPT: Key = Key::ctrl('c');
 
 /// 終了。
 pub const QUIT: KeyHint = hint(&[ch('q', Action::Common(CommonAction::Quit))], "quit");
@@ -230,9 +237,9 @@ pub const COMMON: &[KeyHint] = &[
         ],
         "Graph/Branches/Stash/PRs/右下へ",
     ),
-    // git が走っていれば中断、そうでなければ終了（`update_key` の先頭）。
+    // git が走っていれば中断、そうでなければ終了。**引くのは表ではなく [`INTERRUPT`]**。
     hint(
-        &[(Key::ctrl('c'), Action::Common(CommonAction::Interrupt))],
+        &[(INTERRUPT, Action::Common(CommonAction::Interrupt))],
         "中断 / 終了",
     ),
 ];
@@ -399,18 +406,29 @@ const DIFF: &[KeyHint] = &[
     hint(&[code(KeyCode::Esc, Action::Diff(DiffAction::Back))], BACK),
 ];
 
-/// `hints` で `key` を引く。**比べるのは `Key` 全体**（修飾付きのキーを拾わない。01）。
-fn find<'a>(hints: impl IntoIterator<Item = &'a KeyHint>, key: Key) -> Option<Action> {
-    hints
+/// どのペインでも効く表（[`COMMON`] と [`PINNED`]）。
+fn anywhere() -> impl Iterator<Item = &'static KeyHint> {
+    COMMON.iter().chain(PINNED)
+}
+
+/// 表の打鍵を平たく並べる。
+fn binds<'a>(
+    hints: impl IntoIterator<Item = &'a KeyHint>,
+) -> impl Iterator<Item = &'a (Key, Action)> {
+    hints.into_iter().flat_map(|hint| hint.binds)
+}
+
+/// `binds` で `key` を引く。**比べるのは `Key` 全体**（修飾付きのキーを拾わない。01）。
+fn find<'a>(binds: impl IntoIterator<Item = &'a (Key, Action)>, key: Key) -> Option<Action> {
+    binds
         .into_iter()
-        .flat_map(|hint| hint.binds)
         .find(|(bound, _)| *bound == key)
         .map(|(_, action)| *action)
 }
 
-/// どのペインでも効く表（[`COMMON`] と [`PINNED`]）で `key` を引く。
+/// どのペインでも効く表で `key` を引く。
 pub(crate) fn common_action(key: Key) -> Option<CommonAction> {
-    match find(COMMON.iter().chain(PINNED), key)? {
+    match find(binds(anywhere()), key)? {
         Action::Common(action) => Some(action),
         // 共通の表にペインの動作は置かない（`the_tables_hold_only_their_own_actions`）。
         _ => None,
@@ -419,12 +437,7 @@ pub(crate) fn common_action(key: Key) -> Option<CommonAction> {
 
 /// `pane` の表で `key` を引き、無ければ別名（[`ALIASES`]）を引く。
 pub(crate) fn pane_action(pane: Pane, key: Key) -> Option<Action> {
-    find(self::pane(pane), key).or_else(|| {
-        ALIASES
-            .iter()
-            .find(|(alias, _)| *alias == key)
-            .map(|(_, action)| *action)
-    })
+    find(binds(self::pane(pane)).chain(ALIASES), key)
 }
 
 /// [`help`] の段。見出しの字は `ui` が持つ。
@@ -454,7 +467,7 @@ pub fn help(pane: Pane) -> Vec<HelpRow> {
     rows.push(HelpRow::Heading(HelpSection::Pane));
     rows.extend(here.iter().map(HelpRow::Key));
     rows.push(HelpRow::Heading(HelpSection::Anywhere));
-    rows.extend(COMMON.iter().chain(PINNED).map(HelpRow::Key));
+    rows.extend(anywhere().map(HelpRow::Key));
     rows
 }
 
@@ -472,18 +485,17 @@ pub fn live(state: &AppState) -> Option<&'static [KeyHint]> {
     Some(pane(state.focus))
 }
 
-/// `key` が**いま**効くか。[`live`] の表に載っているかで答える。
+/// `action` に**いま**効くキー。`None` は「いまは押せない」。
 ///
 /// **ペインの本文にキーを書くときに使う**（PRs ペインの「開いている PR はありません（N）」。
 /// 07 の「PRs ペイン」）。`ui` が `focus` やモーダルを見て自分で決めると、振り分けの規則の
 /// 写しが 2 本になり、モーダル表示中に効かない案内が出る（[`live`] の doc と同じ理由）。
-/// 表に載っていない別名（`Down` など）は偽 —— 案内に書くのは表のキーだけ。
-pub fn is_live(state: &AppState, key: Key) -> bool {
-    live(state).is_some_and(|hints| {
-        hints
-            .iter()
-            .any(|hint| hint.keys().any(|bound| bound == key))
-    })
+/// **字ではなく動作で聞く** —— 字で聞くと、`config.keymap`（08）で上書きした瞬間に
+/// 押せないキーを案内する。表に載っていない別名（`Down` など）は返さない。
+pub fn live_key(state: &AppState, action: Action) -> Option<Key> {
+    binds(live(state)?)
+        .find(|(_, bound)| *bound == action)
+        .map(|(key, _)| *key)
 }
 
 /// そのペインで押せるキー。
@@ -510,28 +522,47 @@ mod tests {
     use crate::test_util::FAKE_NOW;
 
     #[test]
-    fn a_key_is_live_only_in_its_pane_and_never_under_a_modal() {
+    fn an_action_has_a_live_key_only_in_its_pane_and_never_under_a_modal() {
         let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
-        let n = Key::char('N');
+        let create = Action::Prs(PrsAction::Create);
         state.focus = Pane::Graph;
-        assert!(!is_live(&state, n), "Graph では N は効かない");
+        assert_eq!(
+            live_key(&state, create),
+            None,
+            "Graph では PR 作成は効かない"
+        );
         state.focus = Pane::Prs;
-        assert!(is_live(&state, n));
+        assert_eq!(live_key(&state, create), Some(Key::char('N')));
+        // 別名は案内に出さないので、表のキー（`j`）を返す。
+        assert_eq!(live_key(&state, Action::Down), Some(Key::char('j')));
         // **モーダル表示中はキーを全部モーダルが受ける**（`live`）。
         state.modal = Some(Modal::Help {
             pane: Pane::Prs,
             cursor: 0,
         });
-        assert!(!is_live(&state, n), "モーダルの下で効くと言った");
+        assert_eq!(live_key(&state, create), None, "モーダルの下で効くと言った");
     }
 
     /// 表の打鍵が引く動作を全部。
-    fn bound(hints: &[KeyHint]) -> Vec<Action> {
-        hints
-            .iter()
-            .flat_map(|hint| hint.binds)
-            .map(|(_, action)| *action)
-            .collect()
+    fn bound<'a>(hints: impl IntoIterator<Item = &'a KeyHint>) -> Vec<Action> {
+        binds(hints).map(|(_, action)| *action).collect()
+    }
+
+    /// 動作の持ち主のペイン。移動と共通の動作は `None`（どのペインのものでもない）。
+    ///
+    /// **網羅 `match`** —— `Action` にペインを足すと、ここで書き忘れが落ちる。下の 2 本の
+    /// テストはどちらもこの対応を引く（ペインと動作の enum の対応を 2 箇所に書かない）。
+    fn owner(action: Action) -> Option<Pane> {
+        match action {
+            Action::Down | Action::Up | Action::Common(_) => None,
+            Action::Graph(_) => Some(Pane::Graph),
+            Action::Branches(_) => Some(Pane::Branches),
+            Action::Stash(_) => Some(Pane::Stash),
+            Action::Prs(_) => Some(Pane::Prs),
+            Action::Worktree(_) => Some(Pane::Worktree),
+            Action::CommitDetail(_) => Some(Pane::CommitDetail),
+            Action::Diff(_) => Some(Pane::Diff),
+        }
     }
 
     /// **動作の enum の全変種が表に在る**（01 の「表が dispatch を兼ねる」）。dispatch の
@@ -539,8 +570,7 @@ mod tests {
     /// 表に無い変種は、腕を書いても押す手が無い。
     #[test]
     fn every_action_is_bound_in_its_table() {
-        let common = bound(COMMON);
-        let pinned = bound(PINNED);
+        let anywhere = bound(anywhere());
         for action in all_variants!(CommonAction {
             Help,
             Quit,
@@ -561,111 +591,97 @@ mod tests {
             Interrupt,
         }) {
             let action = Action::Common(action);
-            assert!(
-                common.contains(&action) || pinned.contains(&action),
-                "{action:?} が表にありません"
-            );
+            assert!(anywhere.contains(&action), "{action:?} が表にありません");
         }
 
-        let expected: Vec<(Pane, Vec<Action>)> = vec![
-            (
-                Pane::Graph,
-                all_variants!(GraphAction {
-                    Detail,
-                    Branch,
-                    CherryPick,
-                    Revert,
-                    Rebase,
-                    Mark,
-                    Unmark,
-                })
-                .map(Action::Graph)
+        let pane_actions: Vec<Action> = [
+            all_variants!(GraphAction {
+                Detail,
+                Branch,
+                CherryPick,
+                Revert,
+                Rebase,
+                Mark,
+                Unmark,
+            })
+            .map(Action::Graph)
+            .to_vec(),
+            all_variants!(BranchesAction {
+                Checkout,
+                Branch,
+                Rename,
+                Delete,
+                ForceDelete,
+                Back,
+            })
+            .map(Action::Branches)
+            .to_vec(),
+            all_variants!(StashAction {
+                Diff,
+                Stash,
+                Apply,
+                Pop,
+                Drop,
+                Back,
+            })
+            .map(Action::Stash)
+            .to_vec(),
+            all_variants!(PrsAction {
+                Checkout,
+                Open,
+                Refresh,
+                Create,
+                Back,
+            })
+            .map(Action::Prs)
+            .to_vec(),
+            all_variants!(WorktreeAction {
+                Diff,
+                Stage,
+                Unstage,
+                Discard,
+                Commit,
+                Amend,
+                Stash,
+                StashFile,
+                Back,
+            })
+            .map(Action::Worktree)
+            .to_vec(),
+            all_variants!(CommitDetailAction { Diff, Back })
+                .map(Action::CommitDetail)
                 .to_vec(),
-            ),
-            (
-                Pane::Branches,
-                all_variants!(BranchesAction {
-                    Checkout,
-                    Branch,
-                    Rename,
-                    Delete,
-                    ForceDelete,
-                    Back,
-                })
-                .map(Action::Branches)
-                .to_vec(),
-            ),
-            (
-                Pane::Stash,
-                all_variants!(StashAction {
-                    Diff,
-                    Stash,
-                    Apply,
-                    Pop,
-                    Drop,
-                    Back,
-                })
-                .map(Action::Stash)
-                .to_vec(),
-            ),
-            (
-                Pane::Prs,
-                all_variants!(PrsAction {
-                    Checkout,
-                    Open,
-                    Refresh,
-                    Create,
-                    Back,
-                })
-                .map(Action::Prs)
-                .to_vec(),
-            ),
-            (
-                Pane::Worktree,
-                all_variants!(WorktreeAction {
-                    Diff,
-                    Stage,
-                    Unstage,
-                    Discard,
-                    Commit,
-                    Amend,
-                    Stash,
-                    StashFile,
-                    Back,
-                })
-                .map(Action::Worktree)
-                .to_vec(),
-            ),
-            (
-                Pane::CommitDetail,
-                all_variants!(CommitDetailAction { Diff, Back })
-                    .map(Action::CommitDetail)
-                    .to_vec(),
-            ),
-            (
-                Pane::Diff,
-                all_variants!(DiffAction {
-                    Stage,
-                    Unstage,
-                    Discard,
-                    Back,
-                })
-                .map(Action::Diff)
-                .to_vec(),
-            ),
-        ];
+            all_variants!(DiffAction {
+                Stage,
+                Unstage,
+                Discard,
+                Back,
+            })
+            .map(Action::Diff)
+            .to_vec(),
+        ]
+        .concat();
+        for &action in &pane_actions {
+            let pane = owner(action).unwrap_or_else(|| panic!("{action:?} の持ち主がありません"));
+            assert!(
+                bound(self::pane(pane)).contains(&action),
+                "{pane:?} の表に {action:?} がありません"
+            );
+        }
         // **ペインの一覧も網羅で回す**（`.claude/rules/testing.md` の「見張りが回す範囲を
-        // 実装側の集合から導いていると…」）。`Pane::ALL` にあって上に無いペインを落とす。
+        // 実装側の集合から導いていると…」）。上に並べ忘れたペインと、移動の無いペインを落とす。
         for &pane in Pane::ALL {
-            let (_, actions) = expected
-                .iter()
-                .find(|(listed, _)| *listed == pane)
-                .unwrap_or_else(|| panic!("{pane:?} の動作が並んでいません"));
-            let table = bound(self::pane(pane));
+            assert!(
+                pane_actions
+                    .iter()
+                    .any(|action| owner(*action) == Some(pane)),
+                "{pane:?} の動作が並んでいません"
+            );
             // **移動はどのペインにもある**（別名の矢印もこれを前提にペインを問わず引く）。
-            for action in actions.iter().chain(&[Action::Down, Action::Up]) {
+            let table = bound(self::pane(pane));
+            for action in [Action::Down, Action::Up] {
                 assert!(
-                    table.contains(action),
+                    table.contains(&action),
                     "{pane:?} の表に {action:?} がありません"
                 );
             }
@@ -676,22 +692,13 @@ mod tests {
     /// それを別のペインの `*_key` に渡し、フォーカスと違うペインの状態を動かす。
     #[test]
     fn the_tables_hold_only_their_own_actions() {
-        for action in bound(COMMON).into_iter().chain(bound(PINNED)) {
+        for action in bound(anywhere()) {
             assert!(matches!(action, Action::Common(_)), "共通の表に {action:?}");
         }
         for &pane in Pane::ALL {
             for action in bound(self::pane(pane)) {
-                let own = matches!(
-                    (pane, action),
-                    (_, Action::Down | Action::Up)
-                        | (Pane::Graph, Action::Graph(_))
-                        | (Pane::Branches, Action::Branches(_))
-                        | (Pane::Stash, Action::Stash(_))
-                        | (Pane::Prs, Action::Prs(_))
-                        | (Pane::Worktree, Action::Worktree(_))
-                        | (Pane::CommitDetail, Action::CommitDetail(_))
-                        | (Pane::Diff, Action::Diff(_))
-                );
+                let own =
+                    matches!(action, Action::Down | Action::Up) || owner(action) == Some(pane);
                 assert!(own, "{pane:?} の表に {action:?}");
             }
         }
@@ -703,13 +710,8 @@ mod tests {
     fn no_key_is_bound_twice_on_one_screen() {
         for &pane in Pane::ALL {
             let mut seen: Vec<Key> = Vec::new();
-            let binds = COMMON
-                .iter()
-                .chain(PINNED)
-                .chain(self::pane(pane))
-                .flat_map(|hint| hint.binds)
-                .chain(ALIASES);
-            for (key, action) in binds {
+            let on_screen = binds(anywhere().chain(self::pane(pane))).chain(ALIASES);
+            for (key, action) in on_screen {
                 assert!(
                     !seen.contains(key),
                     "{pane:?} で {key:?} が 2 度（{action:?}）"
@@ -724,7 +726,7 @@ mod tests {
         let shift = |code| {
             Key::with_mods(
                 code,
-                super::super::Modifiers {
+                crate::app::Modifiers {
                     shift: true,
                     ..Default::default()
                 },

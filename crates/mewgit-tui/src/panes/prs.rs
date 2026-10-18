@@ -5,7 +5,8 @@
 
 use std::borrow::Cow;
 
-use mewgit_core::app::{keys, AppState, GithubBlock, Key, PrLoad};
+use mewgit_core::app::keys::{self, Action, PrsAction};
+use mewgit_core::app::{AppState, GithubBlock, PrLoad};
 use mewgit_core::auth::AccountState;
 use mewgit_core::config::Theme;
 use mewgit_core::github::{GithubError, PrDetail, PrStatus, PullRequest};
@@ -347,8 +348,9 @@ const TARGET_UNAVAILABLE: &str = "GitHub のリポジトリを特定できませ
 /// **空の一覧には、`N`（PR 作成）が効くときだけ `（N）` を添える**（degraded の `（A）` と
 /// 同じ書き方。07 の「PRs ペイン」）。幅 100 以上ではフォーカスが Graph のままこの文言が
 /// 見えるので、そこで添えると押しても何も起きない案内になる。**効くかは
-/// [`keys::is_live`] に聞く** —— `focus` をここで見ると、モーダル表示中の扱いなど
-/// 振り分けの規則の写しが 2 本になる。
+/// [`keys::live_key`] に聞く** —— `focus` をここで見ると、モーダル表示中の扱いなど
+/// 振り分けの規則の写しが 2 本になる。**字も表から引く**（動作で聞くので、
+/// `config.keymap` で上書きしたキーがそのまま出る。08）。
 fn placeholder(state: &AppState) -> Cow<'static, str> {
     match &state.account {
         // **既定リモートが GitHub でないときもここに落ちる**（`TargetState::Unavailable`
@@ -368,10 +370,15 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
         // 読めていた一覧があればそちらが出る。
         AccountState::Resolved(_) => match state.prs.load() {
             PrLoad::Pending => ui::LOADING.into(),
-            PrLoad::Loaded if keys::is_live(state, Key::char('N')) => {
-                format!("{EMPTY}（N）").into()
-            }
-            PrLoad::Loaded => EMPTY.into(),
+            PrLoad::Loaded => match keys::live_key(state, Action::Prs(PrsAction::Create)) {
+                Some(key) => {
+                    let mut text = format!("{EMPTY}（");
+                    ui::push_key(&mut text, &key);
+                    text.push('）');
+                    text.into()
+                }
+                None => EMPTY.into(),
+            },
             PrLoad::Failed(err) => format!("PR を読み込めませんでした: {err}").into(),
         },
     }
@@ -384,7 +391,7 @@ mod tests {
         col_of, draw, pane_row, pane_row_is_reversed, pane_text, state_at, terminal_with,
     };
     use crate::ui;
-    use mewgit_core::app::{update, Cmd, KeyCode, Msg, Pane, TargetState, TermSize};
+    use mewgit_core::app::{update, Cmd, Key, KeyCode, Msg, Pane, TargetState, TermSize};
     use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::github::{CheckSummary, ReviewSummary};
     use mewgit_core::test_util::{

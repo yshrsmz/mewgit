@@ -40,7 +40,7 @@ use rebase::commit_message_loaded;
 use remote::{fetch, push};
 use stash::{stash_key, stashes_loaded};
 use watch::{fingerprint_loaded, focus_gained, reload_all};
-use worktree::{head_message_loaded, moved as worktree_moved, status_loaded, worktree_key};
+use worktree::{head_message_loaded, move_entry, status_loaded, worktree_key};
 
 mod account;
 mod branches;
@@ -202,11 +202,12 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
 /// 共通キーの表をペインの表より先に引く —— 後ろに置くと、あとから足したペインで
 /// 押せなくなる（`Tab` も番号も同じ理由）。
 fn update_key(state: &mut AppState, key: Key) -> Cmd {
-    let common = keys::common_action(key);
     // Ctrl-C はモーダルより先に見る。raw mode では SIGINT が届かず、モーダル表示中は
     // `q` が入力文字になる（M2 の CommitMessage）ので、常に効く脱出口が要る。
-    if common == Some(CommonAction::Interrupt) {
-        return common_key(state, CommonAction::Interrupt);
+    // **表を引かずに定数と比べる**（`keys::INTERRUPT`）—— `config.keymap` の上書き（08）が
+    // 表をどう書き換えても、脱出口は消えない。
+    if key == keys::INTERRUPT {
+        return interrupt(state);
     }
 
     // モーダル表示中はすべてモーダルが受ける。`q` もここでは終了にならない
@@ -215,7 +216,7 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         return modal_key(state, key);
     }
 
-    if let Some(action) = common {
+    if let Some(action) = keys::common_action(key) {
         return common_key(state, action);
     }
 
@@ -239,6 +240,7 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
 /// どのペインでも効くキー（`keys::COMMON` と `keys::PINNED`）。
 fn common_key(state: &mut AppState, action: CommonAction) -> Cmd {
     match action {
+        // 先頭の `keys::INTERRUPT` が先に受けるので、表から来ることは無い。
         CommonAction::Interrupt => interrupt(state),
         CommonAction::Quit => Cmd::Quit,
         // **リモートを明示する。** git に決めさせると、**複数あって `origin` も追跡先も
@@ -333,7 +335,7 @@ fn move_cursor(state: &mut AppState, delta: isize) -> Cmd {
             state.prs.move_cursor(delta);
             Cmd::None
         }
-        Pane::Worktree => worktree_moved(state, delta),
+        Pane::Worktree => move_entry(state, delta),
         Pane::CommitDetail => move_file(state, delta),
         Pane::Diff => move_hunk(state, delta),
     }
@@ -674,12 +676,12 @@ mod tests {
         assert_eq!(at, [FAKE_NOW, later]);
     }
 
-    /// 案内に出すキーの表（`app::keys`）は、`update_key` の `match` に対する 2 本目の
-    /// 一覧（01 の「案内に出すキーの表」）。**表に載せたキーがそのペインで本当に
-    /// 何かすることを見る。**
+    /// **表（`app::keys`）に載せたキーがそのペインで本当に何かすることを見る。**
     ///
-    /// **向きは表 → dispatch だけ。** 逆（`match` の腕が全部表にあるか）は `match` から
-    /// 導けない。
+    /// 表は dispatch を兼ねる（01 の「表が dispatch を兼ねる」）ので、「表 → 腕」は網羅
+    /// `match` が、「動作 → 表」は `keys` の `every_action_is_bound_in_its_table` が見る。
+    /// **それでも残すのは、腕が `Cmd::None` を返すだけの形を拾うため** —— 網羅 `match` が
+    /// 強いるのは腕が在ることだけ。
     ///
     /// **`update` を通す。** ペインの `*_key` を直に呼ぶと [`AppState::issue`] を通らず、
     /// 「出なかった」と「落とされた」が混ざる（#38）。

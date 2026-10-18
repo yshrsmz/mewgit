@@ -10,9 +10,8 @@ use crate::git_read::{DiffTarget, FileDiff, GitReadError};
 
 use super::focus;
 use super::worktree::{act, Action};
-use crate::app::{
-    AppState, Cmd, DiffCursor, DiffOrigin, DiffView, JobKind, Key, KeyCode, NoticeLevel, Pane,
-};
+use crate::app::keys::DiffAction;
+use crate::app::{AppState, Cmd, DiffCursor, DiffOrigin, DiffView, JobKind, NoticeLevel, Pane};
 
 /// `Enter`。左の領域を Diff に差し替える（07）。
 ///
@@ -73,15 +72,12 @@ pub(super) fn load_diff(state: &mut AppState) -> Cmd {
 ///
 /// カーソルはハンク単位で、`s` / `u` / `x` はカーソルの指すハンクに効く（07）。
 /// 可否の表は Worktree ペインと共通（`worktree::plan`）。
-pub(super) fn diff_key(state: &mut AppState, key: Key) -> Cmd {
-    match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => move_hunk(state, 1),
-        KeyCode::Char('k') | KeyCode::Up => move_hunk(state, -1),
-        KeyCode::Char('s') => act(state, Action::Stage),
-        KeyCode::Char('u') => act(state, Action::Unstage),
-        KeyCode::Char('x') => act(state, Action::Discard),
-        KeyCode::Esc => focus(state, came_from(state)),
-        _ => Cmd::None,
+pub(super) fn diff_key(state: &mut AppState, action: DiffAction) -> Cmd {
+    match action {
+        DiffAction::Stage => act(state, Action::Stage),
+        DiffAction::Unstage => act(state, Action::Unstage),
+        DiffAction::Discard => act(state, Action::Discard),
+        DiffAction::Back => focus(state, came_from(state)),
     }
 }
 
@@ -103,7 +99,7 @@ fn came_from(state: &AppState) -> Pane {
 /// **いま見えている diff だけを動かす。** 別の対象のものが `view` に残っていることが
 /// あり（読み込み中・失敗中）、濾さずに動かすと画面に出ていない diff のカーソルが
 /// 黙って動く。
-fn move_hunk(state: &mut AppState, delta: isize) -> Cmd {
+pub(super) fn move_hunk(state: &mut AppState, delta: isize) -> Cmd {
     let wanted = state.wanted_diff();
     if let Some(view) = state.diff.fresh_view_mut(wanted.as_ref()) {
         view.move_cursor(delta);
@@ -184,7 +180,7 @@ mod tests {
     use super::super::update;
     use super::super::worktree::NOT_LATEST;
     use super::*;
-    use crate::app::{Job, Msg, Pane};
+    use crate::app::{Job, KeyCode, Msg, Pane};
 
     use crate::git_exec::{hunk_patch, GitOp, HunkApply};
     use crate::git_read::{FileStatus, Hunk, LineOrigin, WorktreeSection, WorktreeSnapshot};

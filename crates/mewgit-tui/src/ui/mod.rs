@@ -1060,11 +1060,11 @@ fn push_hint(out: &mut String, hint: &KeyHint) {
 /// `?` の一覧（`modals::help`）が使う。**モーダルは自前の `HINT` を持っている**
 /// （`modals::*`。あちらは箱の中で予算が違う）ので、綴りが 2 通りある（07）。
 pub(crate) fn push_keys(out: &mut String, hint: &KeyHint) {
-    for (i, key) in hint.keys().iter().enumerate() {
+    for (i, key) in hint.keys().enumerate() {
         if i > 0 {
             out.push('/');
         }
-        push_key(out, key);
+        push_key(out, &key);
     }
 }
 

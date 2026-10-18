@@ -16,16 +16,18 @@
 
 use crate::git_exec::{GitOp, PullMode};
 
+use super::keys::{self, Action, CommonAction};
 use super::{
     AppState, Cmd, InputIntent, JobKind, Key, KeyCode, Modal, Motion, Msg, NoticeLevel, Pane,
     PrField, RewordInput, TextBuffer,
 };
 use account::{account_resolved, accounts_listed, open_account, repo_info_loaded, target_resolved};
 use branches::branches_key;
-use diff::{diff_key, diff_loaded, load_diff};
+use diff::{diff_key, diff_loaded, load_diff, move_hunk};
 use exec::exec_finished;
 use graph::{
     commit_detail_key, commit_detail_loaded, commit_files_loaded, graph_key, load_more, log_loaded,
+    move_file, scrolled,
 };
 use modal::{modal_key, open_notice_log};
 use progress::open_progress_menu;
@@ -38,7 +40,7 @@ use rebase::commit_message_loaded;
 use remote::{fetch, push};
 use stash::{stash_key, stashes_loaded};
 use watch::{fingerprint_loaded, focus_gained, reload_all};
-use worktree::{head_message_loaded, status_loaded, worktree_key};
+use worktree::{head_message_loaded, moved as worktree_moved, status_loaded, worktree_key};
 
 mod account;
 mod branches;
@@ -195,30 +197,16 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
 }
 
 /// キー入力を `modal` → `focus` の順に振り分ける。
+///
+/// **表（`app::keys`）を引いてから `match` する**（01 の「表が dispatch を兼ねる」）。
+/// 共通キーの表をペインの表より先に引く —— 後ろに置くと、あとから足したペインで
+/// 押せなくなる（`Tab` も番号も同じ理由）。
 fn update_key(state: &mut AppState, key: Key) -> Cmd {
+    let common = keys::common_action(key);
     // Ctrl-C はモーダルより先に見る。raw mode では SIGINT が届かず、モーダル表示中は
     // `q` が入力文字になる（M2 の CommitMessage）ので、常に効く脱出口が要る。
-    if key == Key::ctrl('c') {
-        // **中断を優先するのは `Exec` が走っているときだけ。** 「ジョブがあれば」に
-        // すると、スクロール中はほぼ常に `LoadLog` が走っているので終了できない
-        // 瞬間ができる。そもそも中断できるのは `Cmd::Exec` だけで、読み取りの
-        // future は途中で捨てられない（02 の「スレッド」）。
-        //
-        // **しかも「まだ頼んでいない」ときだけ。** 走っているかどうかで決めると、
-        // SIGTERM で死なない git のあいだ `Ctrl-C` が中断を返し続け、モーダルを
-        // 開いていると脱出口が 1 つも無くなる（`q` は入力文字）。この関数の先頭が
-        // 「常に効く脱出口が要る」と言っているのは、まさにその形を作らないため。
-        if state.jobs.request_cancel(JobKind::Exec) {
-            // **2 回目が何をするかを書く。** 頼んだ直後は画面が何も変わらないので、
-            // 出さないと「効いていない」と読める（01 の「失敗の案内文」と同じ方針）。
-            state.push_notice(
-                NoticeLevel::Info,
-                "中断を頼みました。終わらなければもう一度 Ctrl-C で終了します".to_string(),
-                None,
-            );
-            return Cmd::CancelExec;
-        }
-        return Cmd::Quit;
+    if common == Some(CommonAction::Interrupt) {
+        return common_key(state, CommonAction::Interrupt);
     }
 
     // モーダル表示中はすべてモーダルが受ける。`q` もここでは終了にならない
@@ -227,86 +215,127 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         return modal_key(state, key);
     }
 
-    if key == Key::char('q') {
-        return Cmd::Quit;
+    if let Some(action) = common {
+        return common_key(state, action);
     }
 
-    // **リモート操作は共通キー**（07 のキー表）。ペインの `match` より先に見る。
-    // 後ろに置くと、あとから足したペインで押せなくなる（`Tab` と同じ理由）。
-    //
-    // **`Key` 全体で比べる**（`q` と同じ形）。`key.code()` で見ると `Ctrl-f` や
-    // `Alt-p` まで拾い、しかもこの段は全ペインを覆うので、07 が移動に予約している
-    // `Ctrl-d` / `Ctrl-u` の隣で修飾付きのキーを先に食う。
-    //
-    // **リモートを明示する。** git に決めさせると、**複数あって `origin` も追跡先も
-    // 無いときに何もせず exit 0 で返る**（git 2.55 で実測）。stderr が空なので
-    // 不変ルール 4 の経路も効かず、`f` が無反応になる（01 の「既定リモート」）。
-    //
-    // **`--prune` は付けない。** `f` が黙って remote-tracking ref を消すのは
-    // 「fetch は読むだけ」という期待と食い違う（01）。
-    if key == Key::char('f') {
-        return fetch(state);
+    match keys::pane_action(state.focus, key) {
+        None => Cmd::None,
+        Some(Action::Down) => move_cursor(state, 1),
+        Some(Action::Up) => move_cursor(state, -1),
+        // ペインの表に共通の動作は置かない（`keys` の
+        // `the_tables_hold_only_their_own_actions`）が、置いても意味は変わらない。
+        Some(Action::Common(action)) => common_key(state, action),
+        Some(Action::Graph(action)) => graph_key(state, action),
+        Some(Action::Branches(action)) => branches_key(state, action),
+        Some(Action::Worktree(action)) => worktree_key(state, action),
+        Some(Action::CommitDetail(action)) => commit_detail_key(state, action),
+        Some(Action::Diff(action)) => diff_key(state, action),
+        Some(Action::Prs(action)) => prs_key(state, action),
+        Some(Action::Stash(action)) => stash_key(state, action),
     }
-    // **`--ff-only`。** MVP にコンフリクト解消ビューが無いので、merge / rebase が
-    // 衝突すると mewgit の中では抜けられない。モードを選ばせるのは continue /
-    // abort が揃う M5（01）。
-    if key == Key::char('p') {
-        return Cmd::Exec(GitOp::Pull {
+}
+
+/// どのペインでも効くキー（`keys::COMMON` と `keys::PINNED`）。
+fn common_key(state: &mut AppState, action: CommonAction) -> Cmd {
+    match action {
+        CommonAction::Interrupt => interrupt(state),
+        CommonAction::Quit => Cmd::Quit,
+        // **リモートを明示する。** git に決めさせると、**複数あって `origin` も追跡先も
+        // 無いときに何もせず exit 0 で返る**（git 2.55 で実測）。stderr が空なので
+        // 不変ルール 4 の経路も効かず、`f` が無反応になる（01 の「既定リモート」）。
+        //
+        // **`--prune` は付けない。** `f` が黙って remote-tracking ref を消すのは
+        // 「fetch は読むだけ」という期待と食い違う（01）。
+        CommonAction::Fetch => fetch(state),
+        // **`--ff-only`。** MVP にコンフリクト解消ビューが無いので、merge / rebase が
+        // 衝突すると mewgit の中では抜けられない。モードを選ばせるのは continue /
+        // abort が揃う M5（01）。
+        CommonAction::Pull => Cmd::Exec(GitOp::Pull {
             mode: PullMode::FastForwardOnly,
-        });
+        }),
+        CommonAction::Push => push(state),
+        // **アカウントも共通キー。** リポジトリ単位の話で、どのペインに居るかと関係が無い
+        // （01 の「アカウントの選び直し」）。
+        CommonAction::Account => open_account(state),
+        // **通知の履歴も共通キー。** 失敗はどのペインに居ても積まれる（01 の「通知」）。
+        CommonAction::NoticeLog => open_notice_log(state),
+        // **進行中操作のメニューも共通キー。** 押すのはコンフリクトの解消の途中で、どの
+        // ペインに居るかは決まっていない（01 の「進行中操作のメニュー（`m`）」）。
+        CommonAction::ProgressMenu => open_progress_menu(state),
+        // **読み直しも共通キー。** 外の変更の検知が外れたときの逃げ道で、どのペインに
+        // 居るかと関係が無い（01 の「外部の変更の検知 › `R`」）。
+        CommonAction::Reload => reload_all(state),
+        // **キーの一覧も共通キー**（07 の「Help モーダル」）。
+        CommonAction::Help => {
+            state.modal = Some(Modal::Help {
+                pane: state.focus,
+                cursor: 0,
+            });
+            Cmd::None
+        }
+        // フォーカスの巡回。ペインごとに書くと、あとから足したペインが `Tab` を受けずに
+        // 閉じ込められる。`Shift+Tab` は `BackTab`（修飾なし）に正規化されている
+        // （01 の「キー入力」）。
+        CommonAction::NextPane => focus(state, state.next_focus()),
+        CommonAction::PrevPane => focus(state, state.prev_focus()),
+        // 番号で直接移る。番号は画面の場所に付ける（07 の「ペインとフォーカス」）。
+        // **`5` は右下で、相手はグラフの選択で決まる**（`GraphSelection::right_pane`）。
+        // `Diff` には番号を付けない —— 対象が無いと候補から外れるので、断られる場面が増える。
+        CommonAction::ToGraph => jump(state, Pane::Graph),
+        CommonAction::ToBranches => jump(state, Pane::Branches),
+        CommonAction::ToStash => jump(state, Pane::Stash),
+        CommonAction::ToPrs => jump(state, Pane::Prs),
+        CommonAction::ToRight => jump(state, state.graph.selection().right_pane()),
     }
-    if key == Key::char('P') {
-        return push(state);
-    }
-    // **アカウントも共通キー。** リポジトリ単位の話で、どのペインに居るかと関係が無い
-    // （01 の「アカウントの選び直し」）。
-    if key == Key::char('A') {
-        return open_account(state);
-    }
-    // **通知の履歴も共通キー。** 失敗はどのペインに居ても積まれる（01 の「通知」）。
-    if key == Key::char('L') {
-        return open_notice_log(state);
-    }
-    // **進行中操作のメニューも共通キー。** 押すのはコンフリクトの解消の途中で、どの
-    // ペインに居るかは決まっていない（01 の「進行中操作のメニュー（`m`）」）。
-    if key == Key::char('m') {
-        return open_progress_menu(state);
-    }
-    // **読み直しも共通キー。** 外の変更の検知が外れたときの逃げ道で、どのペインに
-    // 居るかと関係が無い（01 の「外部の変更の検知 › `R`」）。
-    if key == Key::char('R') {
-        return reload_all(state);
-    }
-    // **キーの一覧も共通キー**（07 の「Help モーダル」）。
-    if key == Key::char('?') {
-        state.modal = Some(Modal::Help {
-            pane: state.focus,
-            cursor: 0,
-        });
-        return Cmd::None;
-    }
+}
 
-    // フォーカスの巡回もペインより先に見る。ペインごとに書くと、あとから足した
-    // ペインが `Tab` を受けずに閉じ込められる。`Shift+Tab` は `BackTab`（修飾なし）に
-    // 正規化されている（01 の「キー入力」）。
-    match key.code() {
-        KeyCode::Tab => return focus(state, state.next_focus()),
-        KeyCode::BackTab => return focus(state, state.prev_focus()),
-        _ => {}
+/// `Ctrl-C`。走っている git の中断を頼み、無ければ終了する。
+fn interrupt(state: &mut AppState) -> Cmd {
+    // **中断を優先するのは `Exec` が走っているときだけ。** 「ジョブがあれば」に
+    // すると、スクロール中はほぼ常に `LoadLog` が走っているので終了できない
+    // 瞬間ができる。そもそも中断できるのは `Cmd::Exec` だけで、読み取りの
+    // future は途中で捨てられない（02 の「スレッド」）。
+    //
+    // **しかも「まだ頼んでいない」ときだけ。** 走っているかどうかで決めると、
+    // SIGTERM で死なない git のあいだ `Ctrl-C` が中断を返し続け、モーダルを
+    // 開いていると脱出口が 1 つも無くなる（`q` は入力文字）。`update_key` の先頭が
+    // 「常に効く脱出口が要る」と言っているのは、まさにその形を作らないため。
+    if state.jobs.request_cancel(JobKind::Exec) {
+        // **2 回目が何をするかを書く。** 頼んだ直後は画面が何も変わらないので、
+        // 出さないと「効いていない」と読める（01 の「失敗の案内文」と同じ方針）。
+        state.push_notice(
+            NoticeLevel::Info,
+            "中断を頼みました。終わらなければもう一度 Ctrl-C で終了します".to_string(),
+            None,
+        );
+        return Cmd::CancelExec;
     }
-    // 番号で直接移るのも同じ理由でペインより先に見る（07 の「ペインとフォーカス」）。
-    if let Some(pane) = numbered_pane(state, key) {
-        return jump(state, pane);
-    }
+    Cmd::Quit
+}
 
+/// `j` / `k`。フォーカス中のペインのカーソルを `delta` 行動かす。
+///
+/// **移動はペインの外の動作**（01 の「表が dispatch を兼ねる」）。何のカーソルかは
+/// ここの網羅 `match` が決めるので、ペインを足すと書き忘れがコンパイルで落ちる。
+fn move_cursor(state: &mut AppState, delta: isize) -> Cmd {
     match state.focus {
-        Pane::Graph => graph_key(state, key),
-        Pane::Branches => branches_key(state, key),
-        Pane::Worktree => worktree_key(state, key),
-        Pane::CommitDetail => commit_detail_key(state, key),
-        Pane::Diff => diff_key(state, key),
-        Pane::Prs => prs_key(state, key),
-        Pane::Stash => stash_key(state, key),
+        Pane::Graph => scrolled(state, delta),
+        Pane::Branches => {
+            state.branches.move_cursor(delta);
+            Cmd::None
+        }
+        Pane::Stash => {
+            state.stashes.move_cursor(delta);
+            Cmd::None
+        }
+        Pane::Prs => {
+            state.prs.move_cursor(delta);
+            Cmd::None
+        }
+        Pane::Worktree => worktree_moved(state, delta),
+        Pane::CommitDetail => move_file(state, delta),
+        Pane::Diff => move_hunk(state, delta),
     }
 }
 
@@ -366,29 +395,6 @@ fn paste(state: &mut AppState, text: &str) -> Cmd {
         | None => {}
     }
     Cmd::None
-}
-
-/// `1`〜`5` が指すペイン。番号は画面の場所に付ける（07 の「ペインとフォーカス」）。
-///
-/// **`5` は右下で、相手はグラフの選択で決まる**（[`GraphSelection::right_pane`]）。
-/// `Diff` には番号を付けない —— 対象が無いと候補から外れるので、断られる場面が増える。
-///
-/// [`GraphSelection::right_pane`]: super::GraphSelection::right_pane
-fn numbered_pane(state: &AppState, key: Key) -> Option<Pane> {
-    let pane = if key == Key::char('1') {
-        Pane::Graph
-    } else if key == Key::char('2') {
-        Pane::Branches
-    } else if key == Key::char('3') {
-        Pane::Stash
-    } else if key == Key::char('4') {
-        Pane::Prs
-    } else if key == Key::char('5') {
-        state.graph.selection().right_pane()
-    } else {
-        return None;
-    };
-    Some(pane)
 }
 
 /// 番号で `pane` へ移る。**候補に入っていなければ通知で断り、フォーカスを動かさない**
@@ -693,7 +699,7 @@ mod tests {
         for &pane in Pane::ALL {
             for hint in keys::pane(pane) {
                 for key in hint.keys() {
-                    assert_reacts(pane, *key, hint.label());
+                    assert_reacts(pane, key, hint.label());
                 }
             }
         }
@@ -701,7 +707,7 @@ mod tests {
         // 「ペインとフォーカス」）ので、番号の付いていないペインから押せば特例が要らない。
         for hint in keys::COMMON.iter().chain(keys::PINNED) {
             for key in hint.keys() {
-                assert_reacts(Pane::Diff, *key, hint.label());
+                assert_reacts(Pane::Diff, key, hint.label());
             }
         }
     }

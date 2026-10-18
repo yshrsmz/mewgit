@@ -73,7 +73,7 @@ fn keys_text(hint: &KeyHint) -> String {
 #[cfg(test)]
 mod tests {
     use crate::test_util::{draw, row_is_reversed, state_with_modal};
-    use mewgit_core::app::{AppState, Modal, Pane, TermSize};
+    use mewgit_core::app::{AppState, Keymap, Modal, Pane, TermSize};
 
     const SIZE: TermSize = TermSize {
         width: 80,
@@ -124,12 +124,7 @@ mod tests {
         let top = draw(&state_with_help(Pane::Worktree, 0), short).join("\n");
         assert!(!top.contains("中断 / 終了"), "最初から入っています: {top}");
 
-        let last = state_with_help(Pane::Worktree, 0)
-            .keymap
-            .pane(Pane::Worktree)
-            .help()
-            .len()
-            - 1;
+        let last = Keymap::default().pane(Pane::Worktree).help().len() - 1;
         let state = state_with_help(Pane::Worktree, last);
         let bottom = draw(&state, short).join("\n");
 

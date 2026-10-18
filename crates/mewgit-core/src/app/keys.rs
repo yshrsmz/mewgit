@@ -30,7 +30,8 @@ use super::{AppState, Key, KeyCode, Pane, ParseKeyError};
 pub enum Action {
     Down,
     Up,
-    /// [`COMMON`] と [`PINNED`]。ペインの表より先に引く。
+    /// どこでも効く表（[`COMMON`] と [`PINNED`]）。引くときはペインの表と 1 つにまとめてある
+    /// （[`PaneKeys`]）。
     Common(CommonAction),
     Graph(GraphAction),
     Branches(BranchesAction),
@@ -301,7 +302,7 @@ const QUIT: KeyHint = hint(&[ch('q', Action::Common(CommonAction::Quit))], "quit
 const PINNED: &[KeyHint] = &[HELP, QUIT];
 
 /// どのペインでも効くキーのうち、**フッターには出さないもの**（`Modal::Help` だけが読む。
-/// 07 の「ステータスバー」）。`update_key` がペインの表より先に引く。
+/// 07 の「ステータスバー」）。どのペインの [`PaneKeys`] にも入る。
 const COMMON: &[KeyHint] = &[
     // **1 行に束ねる。** 分けると `R` を足した時点で `?` の一覧が 80x24 に収まらない
     // （07 の「Help モーダル」。Worktree の `z/Z` と同じ理由）。
@@ -568,6 +569,19 @@ pub enum KeymapWarning {
     },
 }
 
+/// 打鍵の出どころ。**宣言の順が強さの順**（別名 < 既定 < 上書き。上書き同士は名前の昇順で
+/// 後ろほど強い —— [`Keymap::new`] が名前で並べてから番号を振る）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Source {
+    Alias,
+    Default,
+    /// 上書きの番号。
+    Override(usize),
+}
+
+/// 上書きを当てた案内の 1 行（[`PaneKeys::build`] の途中の形）。
+type Row = (Vec<(Key, Action, Source)>, &'static str);
+
 /// 読めた上書き 1 つ。
 struct Override<'a> {
     name: &'a str,
@@ -683,74 +697,79 @@ impl PaneKeys {
     /// `pane` の既定の表に `overrides` を当てて組む。衝突は `conflicts` に足す（重複は畳む。
     /// 共通キーの衝突は全部のペインで起きる）。
     fn build(pane: Pane, overrides: &[Override], conflicts: &mut Vec<KeymapWarning>) -> Self {
-        // 強さ: 別名 < 既定 < 上書き（名前の昇順で後ろほど強い）。
-        const ALIAS: usize = 0;
-        const DEFAULT: usize = 1;
-        let apply = |&(key, action): &(Key, Action)| match overrides
-            .iter()
-            .position(|o| o.name == action.name())
-        {
-            Some(i) => (overrides[i].key, action, DEFAULT + 1 + i),
-            None => (key, action, DEFAULT),
+        // 上書きを当てた表。行の束ね方はそのまま持つ（負けた打鍵を外して案内に戻すため）。
+        let apply = |hints: &'static [KeyHint]| -> Vec<Row> {
+            hints
+                .iter()
+                .map(|hint| {
+                    let binds = hint
+                        .binds
+                        .iter()
+                        .map(|&(key, action)| {
+                            match overrides.iter().position(|o| o.name == action.name()) {
+                                Some(i) => (overrides[i].key, action, Source::Override(i)),
+                                None => (key, action, Source::Default),
+                            }
+                        })
+                        .collect();
+                    (binds, hint.label)
+                })
+                .collect()
         };
-        let tables = [table(pane), COMMON, PINNED];
-        let mut ranked: Vec<(Key, Action, usize)> = ALIASES
+        let (here, common, pinned) = (apply(table(pane)), apply(COMMON), apply(PINNED));
+
+        let mut ranked: Vec<(Key, Action, Source)> = ALIASES
             .iter()
-            .map(|&(key, action)| (key, action, ALIAS))
-            .chain(binds(tables.iter().copied().flatten()).map(apply))
+            .map(|&(key, action)| (key, action, Source::Alias))
+            .chain(
+                [&here, &common, &pinned]
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|(binds, _)| binds.iter().copied()),
+            )
             .collect();
-        ranked.sort_by_key(|(_, _, rank)| *rank);
+        ranked.sort_by_key(|(_, _, source)| *source);
 
         let mut actions: HashMap<Key, Action> = HashMap::new();
-        for (key, action, rank) in ranked {
-            if let Some(loser) = actions.insert(key, action).filter(|loser| *loser != action) {
-                let value = match rank.checked_sub(DEFAULT + 1) {
-                    Some(i) => overrides[i].value.to_string(),
-                    // 既定の表どうしは重ならない（`the_default_tables_have_no_conflicts…`）。
-                    None => format!("{key:?}"),
-                };
-                let conflict = KeymapWarning::Conflict {
-                    value,
-                    winner: action.name(),
-                    loser: loser.name(),
-                };
-                if !conflicts.contains(&conflict) {
-                    conflicts.push(conflict);
-                }
+        for (key, action, source) in ranked {
+            let Some(loser) = actions.insert(key, action).filter(|loser| *loser != action) else {
+                continue;
+            };
+            // 勝つのは必ず上書き —— 既定の表と別名は互いに重ならない
+            // （`the_default_tables_have_no_conflicts_but_an_override_can_make_one`）。
+            let Source::Override(i) = source else {
+                continue;
+            };
+            let conflict = KeymapWarning::Conflict {
+                value: overrides[i].value.to_string(),
+                winner: action.name(),
+                loser: loser.name(),
+            };
+            if !conflicts.contains(&conflict) {
+                conflicts.push(conflict);
             }
         }
 
         // 負けた打鍵を外す。打鍵が 1 つも残らない行は落とす。
-        let resolve = |hints: &'static [KeyHint]| -> Vec<KeyHint> {
-            hints
-                .iter()
-                .filter_map(|hint| {
-                    let kept: Vec<(Key, Action)> = hint
-                        .binds
-                        .iter()
-                        .map(|bind| {
-                            let (key, action, _) = apply(bind);
-                            (key, action)
-                        })
+        let resolve = |rows: Vec<Row>| -> Vec<KeyHint> {
+            rows.into_iter()
+                .filter_map(|(binds, label)| {
+                    let kept: Vec<(Key, Action)> = binds
+                        .into_iter()
+                        .map(|(key, action, _)| (key, action))
                         .filter(|(key, action)| actions.get(key) == Some(action))
                         .collect();
-                    if kept.is_empty() {
-                        None
-                    } else if kept[..] == hint.binds[..] {
-                        Some(hint.clone())
-                    } else {
-                        Some(KeyHint {
-                            binds: Cow::Owned(kept),
-                            label: hint.label,
-                        })
-                    }
+                    (!kept.is_empty()).then_some(KeyHint {
+                        binds: Cow::Owned(kept),
+                        label,
+                    })
                 })
                 .collect()
         };
         Self {
-            hints: resolve(table(pane)),
-            common: resolve(COMMON),
-            pinned: resolve(PINNED),
+            hints: resolve(here),
+            common: resolve(common),
+            pinned: resolve(pinned),
             actions,
         }
     }

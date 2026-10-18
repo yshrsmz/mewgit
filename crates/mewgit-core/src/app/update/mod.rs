@@ -198,9 +198,9 @@ fn update_inner(state: &mut AppState, msg: Msg) -> Cmd {
 
 /// キー入力を `modal` → `focus` の順に振り分ける。
 ///
-/// **表（`app::keys`）を引いてから `match` する**（01 の「表が dispatch を兼ねる」）。
-/// 共通キーの表をペインの表より先に引く —— 後ろに置くと、あとから足したペインで
-/// 押せなくなる（`Tab` も番号も同じ理由）。
+/// **表（`AppState.keymap`）を引いてから `match` する**（01 の「表が dispatch を兼ねる」）。
+/// 引くのはフォーカスのペインの表 1 つで、共通キーもそこに入っている。既定の表では
+/// 共通キーとペインのキーが重ならず、上書きが重ねたときは上書きが勝つ（08 の後勝ち）。
 fn update_key(state: &mut AppState, key: Key) -> Cmd {
     // Ctrl-C はモーダルより先に見る。raw mode では SIGINT が届かず、モーダル表示中は
     // `q` が入力文字になる（M2 の CommitMessage）ので、常に効く脱出口が要る。
@@ -216,16 +216,10 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
         return modal_key(state, key);
     }
 
-    if let Some(action) = keys::common_action(key) {
-        return common_key(state, action);
-    }
-
-    match keys::pane_action(state.focus, key) {
+    match state.keymap.pane(state.focus).action(key) {
         None => Cmd::None,
         Some(Action::Down) => move_cursor(state, 1),
         Some(Action::Up) => move_cursor(state, -1),
-        // ペインの表に共通の動作は置かない（`keys` の
-        // `the_tables_hold_only_their_own_actions`）が、置いても意味は変わらない。
         Some(Action::Common(action)) => common_key(state, action),
         Some(Action::Graph(action)) => graph_key(state, action),
         Some(Action::Branches(action)) => branches_key(state, action),
@@ -237,7 +231,7 @@ fn update_key(state: &mut AppState, key: Key) -> Cmd {
     }
 }
 
-/// どのペインでも効くキー（`keys::COMMON` と `keys::PINNED`）。
+/// どのペインでも効くキー（`keys` の `COMMON` と `PINNED`）。
 fn common_key(state: &mut AppState, action: CommonAction) -> Cmd {
     match action {
         // 先頭の `keys::INTERRUPT` が先に受けるので、表から来ることは無い。
@@ -588,7 +582,7 @@ mod tests {
         state_on_stashes, state_with_commits, state_with_page, tab_to, tick, worktree_state, ROWS,
     };
     use super::*;
-    use crate::app::{keys, Modal, RightTab, TermSize};
+    use crate::app::{Keymap, Modal, RightTab, TermSize};
     use crate::git_read::WorktreeSection;
 
     use crate::git_exec::ExecError;
@@ -693,13 +687,14 @@ mod tests {
     /// ヒントはペイン単位なので、カーソル行によっては理由を出して断るのが正しい
     /// （コミットの diff での `s` など。07）。
     ///
-    /// **[`keys::COMMON`] と [`keys::PINNED`] は 1 つの状態でしか回さない。** あれは
-    /// `update_key` が `match state.focus` より手前で受けるので、ペインごとに押しても
-    /// 踏む経路は同じ（`.claude/rules/testing.md` の「通る組み合わせを足しても見張りは増えない」）。
+    /// **どこでも効くキーは 1 つの状態でしか回さない。** あれは `common_key` に渡るので、
+    /// ペインごとに押しても踏む経路は同じ（`.claude/rules/testing.md` の「通る組み合わせを
+    /// 足しても見張りは増えない」）。
     #[test]
     fn every_hinted_key_does_something() {
+        let keymap = Keymap::default();
         for &pane in Pane::ALL {
-            for hint in keys::pane(pane) {
+            for hint in keymap.pane(pane).hints() {
                 for key in hint.keys() {
                     assert_reacts(pane, key, hint.label());
                 }
@@ -707,7 +702,7 @@ mod tests {
         }
         // **Diff から押す。** いま居るペインの番号はフォーカスを動かさない（07 の
         // 「ペインとフォーカス」）ので、番号の付いていないペインから押せば特例が要らない。
-        for hint in keys::anywhere() {
+        for hint in keymap.pane(Pane::Diff).anywhere() {
             for key in hint.keys() {
                 assert_reacts(Pane::Diff, key, hint.label());
             }
@@ -729,7 +724,7 @@ mod tests {
             );
 
             // 窓を動かすためのカーソルは、そのペインの一覧の長さで止まる。
-            let rows = keys::help(pane).len();
+            let rows = state.keymap.pane(pane).help().len();
             for _ in 0..rows + 3 {
                 let _ = update(&mut state, Msg::Key(Key::char('j')));
             }
@@ -761,6 +756,33 @@ mod tests {
         assert!(
             cmd != Cmd::None || format!("{state:?}") != before,
             "{pane:?} の {key:?}（{label}）が無反応です"
+        );
+    }
+
+    /// **dispatch も上書きした表を引く**（08）。新しいキーが既定のキーと同じことをし、
+    /// 既定のキーは何もしなくなる。
+    #[test]
+    fn an_overridden_key_does_what_the_default_did_and_the_default_goes_quiet() {
+        let overrides = [("stage".to_string(), "S".to_string())].into();
+        let fresh = |keymap: Keymap| {
+            let mut state = hinted_state(Pane::Worktree);
+            state.keymap = keymap;
+            state
+        };
+        let mut by_default = fresh(Keymap::default());
+        let expected = update(&mut by_default, Msg::Key(Key::char('s')));
+        assert_ne!(expected, Cmd::None, "既定の `s` が何もしていません");
+
+        let mut overridden = fresh(Keymap::new(&overrides).0);
+        assert_eq!(update(&mut overridden, Msg::Key(Key::char('S'))), expected);
+
+        let mut overridden = fresh(Keymap::new(&overrides).0);
+        let before = format!("{overridden:?}");
+        assert_eq!(update(&mut overridden, Msg::Key(Key::char('s'))), Cmd::None);
+        assert_eq!(
+            format!("{overridden:?}"),
+            before,
+            "既定の `s` が効いています"
         );
     }
 

@@ -16,7 +16,9 @@ use std::ops::Range;
 use std::path::Path;
 
 use crate::{modals, panes};
-use mewgit_core::app::{keys, AppState, GraphSelection, Key, KeyCode, KeyHint, Pane, TermSize};
+use mewgit_core::app::{
+    keys, AppState, GraphSelection, Key, KeyCode, KeyHint, Pane, PaneKeys, TermSize,
+};
 use mewgit_core::auth::{gh, AccountState, DegradedReason};
 use mewgit_core::git_read::{short_oid, FileEntry, FileStatus, InProgressOp, Step};
 use mewgit_core::github::RateLimit;
@@ -1011,24 +1013,32 @@ fn first_line(text: &str) -> &str {
 /// 効かなくなるのは `update_key` の振り分けの話で、ここで `modal.is_some()` を見ると
 /// その知識の写しが `ui` にできる。
 fn hint_line(state: &AppState, width: u16) -> Paragraph<'static> {
-    let Some(pane) = keys::live(state) else {
+    let Some(keys) = keys::live(state) else {
         return Paragraph::new("");
     };
     // **`Line::raw(String)` に渡さない。** あちらは `Cow::Owned` を `Span` に割るときに
     // 中身をもう 1 本作り直す（`ratatui-core` の `cow_to_spans` で確認）。
-    Paragraph::new(Line::from(Span::raw(hint_text(pane, width))))
+    Paragraph::new(Line::from(Span::raw(hint_text(keys, width))))
 }
 
 /// `width` に収まるヒントの並び。`ペインのキー  ?:help q:quit` で、**落とすのはペインの
-/// キーの末尾から**。[`keys::PINNED`] は落とさない（07 の「ステータスバー」）。
+/// キーの末尾から**。[`PaneKeys::pinned`] は落とさない（07 の「ステータスバー」）。
 ///
 /// **収まるかは組んだ字から数える。** 幅だけを別に算術で出すと、組む側と数える側で
 /// 規則が 2 本になる（`.claude/rules/rust-coding.md` の「出力を 1 本にしても入力が 2 本なら結果はずれる」）。
 /// そのぶん幅が足りないときは落とす回数だけ組み直す（描画は 250ms ごと）。
-fn hint_text(pane: &[KeyHint], width: u16) -> String {
-    let pinned = joined(keys::PINNED);
+fn hint_text(keys: &PaneKeys, width: u16) -> String {
+    let pane = keys.hints();
+    let pinned = joined(keys.pinned());
     for keep in (1..=pane.len()).rev() {
-        let text = format!("{}{SEP}{pinned}", joined(&pane[..keep]));
+        let text = joined(&pane[..keep]);
+        // **`?` と `q` が無いこともある** —— `config.keymap` の上書きに負けると表から外れる
+        // （08 の「衝突」）。区切りだけを末尾に残さない。
+        let text = if pinned.is_empty() {
+            text
+        } else {
+            format!("{text}{SEP}{pinned}")
+        };
         if fits(&text, width) {
             return text;
         }
@@ -1128,7 +1138,7 @@ mod tests {
         tab_to, terminal_with, SPLIT_NARROWEST,
     };
     use mewgit_core::app::{
-        keys, update, AppState, Cmd, JobKind, Key, Modal, Msg, NoticeLevel, Pane, TargetState,
+        update, AppState, Cmd, JobKind, Key, Keymap, Modal, Msg, NoticeLevel, Pane, TargetState,
         TermSize,
     };
     use mewgit_core::auth::{AccountState, DegradedReason, RepoTarget};
@@ -2104,10 +2114,24 @@ mod tests {
         // 共通キーは `?` の一覧にだけ出す（07 の「ステータスバー」）。**幅が余っても出さない**
         // ので無限の幅で見る —— 余った幅で出す旧い規則に戻すと、ここが落ちる。
         for &pane in Pane::ALL {
-            let hints = hint_text(keys::pane(pane), u16::MAX);
+            let hints = hint_text(Keymap::default().pane(pane), u16::MAX);
             assert!(hints.ends_with("  ?:help q:quit"), "{pane:?}: {hints:?}");
             assert!(!hints.contains("f:fetch"), "{pane:?}: {hints:?}");
         }
+    }
+
+    #[test]
+    fn the_footer_follows_the_overrides_and_leaves_no_separator_when_help_and_quit_lose() {
+        let overrides = [("stage", "S"), ("fetch", "q"), ("pull", "?")]
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .into();
+        let (keymap, _) = Keymap::new(&overrides);
+        let hints = hint_text(keymap.pane(Pane::Worktree), u16::MAX);
+        assert!(hints.contains("S:stage"), "{hints:?}");
+        assert!(!hints.contains("s:stage"), "{hints:?}");
+        // `?` と `q` は上書きに負けて表から外れた。
+        assert!(!hints.contains("q:quit"), "{hints:?}");
+        assert!(!hints.ends_with(' '), "区切りが残っています: {hints:?}");
     }
 
     #[test]
@@ -2115,8 +2139,9 @@ mod tests {
         // **境目を跨ぐ**（`.claude/rules/testing.md`）。**幅は組んだ字から導く** —— 数を写すと、
         // キーを足すたびに揃える先が増える（07）。Worktree はペインのキーがいちばん長く、
         // 80 桁で末尾が落ちる側の代表（07 の実測）。
-        let full = ratatui::text::Span::raw(hint_text(keys::pane(Pane::Worktree), u16::MAX)).width()
-            as u16;
+        let full =
+            ratatui::text::Span::raw(hint_text(Keymap::default().pane(Pane::Worktree), u16::MAX))
+                .width() as u16;
         assert!(full > 80, "80 桁で落ちる前提が崩れています: {full}");
         let fits = hint_bar_of(Pane::Worktree, full);
         assert!(fits.contains("Esc:戻る"), "hints: {fits:?}");
@@ -2136,8 +2161,8 @@ mod tests {
             .filter(|pane| !matches!(pane, Pane::Worktree | Pane::Graph));
         for &pane in panes {
             assert_eq!(
-                hint_text(keys::pane(pane), 80),
-                hint_text(keys::pane(pane), u16::MAX),
+                hint_text(Keymap::default().pane(pane), 80),
+                hint_text(Keymap::default().pane(pane), u16::MAX),
                 "{pane:?} が 80 桁で落ちています"
             );
         }

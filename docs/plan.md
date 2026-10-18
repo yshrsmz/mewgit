@@ -956,18 +956,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       ことだけで、腕が `Cmd::None` を返す形はこちらでしか拾えない。**キーの動作が丸ごと
       通知に退化した形（`x` が理由を出すだけになる）や誤配線（`x` が stage をする）は
       「無反応でない」で通る**（レビューが変異で確認した。受け入れた穴のまま）
-- [ ] `config.keymap` の上書き（2/2）— `Key::parse`（`app/key.rs`）で値を解き、
-      `AppState::new` が既定の表に上書きを当てた表を組んで持つ。`keys::pane` / `live` /
-      `help` は `AppState` から引く形になり、`KeyHint` は `'static` でなくなる
-      （`KeyHint::keys` が `&'static` を返さないのはこのため）。名前の空間・上書きできない
-      キー・衝突の見方・警告の出し方は 08 の「キーマップの解決」に決めてある。
-      **衝突の判定はここで production に置く** —— 1/2 ではテスト
-      （`no_key_is_bound_twice_on_one_screen`）の中にしか無い（呼び手が他に無いので、
-      置くと使われないコードになった）。起動時の警告はそれを呼び、テストは「既定の表では空」を見る。
-      **名前付けの `match` を書くときに、stage / unstage / discard を共有の enum にするかを
-      数え直す** —— `WorktreeAction` と `DiffAction` が同じ 3 語を持ち、`update/worktree.rs` の
-      `Action` へ 1 対 1 で写し替えている。共有すれば名前が 1 本の `match` から出るが、包むと
-      `all_variants!` の網羅のテストが `missing` の形になる（1/2 の `/simplify` の altitude が拾った）
+- [x] `config.keymap` の上書き（2/2）— `Key::parse`（`app/key.rs`）で値を解き、`AppState::new` が既定の表に上書きを当てた `Keymap`（ペインごとの `PaneKeys`）を組んで `AppState.keymap` に持つ。フッター・`?` の一覧・dispatch・`keys::live_key` は全部そこを引く。名前の一覧・値の書き方・断る上書き・衝突（後勝ち、上書き同士は名前の昇順、負けた打鍵はその画面の表から外す）・警告は 08 の「キーマップの解決」。**衝突の判定は production（`PaneKeys::build`）に移した** —— テストは「既定の表では空」と「重なる上書きで警告が出る」を 1 本で見る。**stage / unstage / discard は共有の enum にしなかった**（数え直した結果。名前の字が 2 箇所に出るだけで、共有するとテストの網羅が `missing` の形になる。共有の組はテストが固定する。08 の「動作の名前」）
 - [ ] 通知や画面の文言に書いたキーの字を上書きに追従させる —— 「`N` で作成」「`A` で内訳」
       「`P` を押して」「push 済みなら `f` で取得」（core の通知）と、ヘッダの
       `[gh: A で選ぶ]`・AccountPicker の「`A` で引き直せます」（ui）。2/2 では既定の字の

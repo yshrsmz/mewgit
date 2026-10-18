@@ -166,7 +166,7 @@ pub enum Modal {
     NoticeLog { selected: u64 },   // 通知の履歴。選んでいる Notice.seq（上の「通知」）
     ProgressMenu { menu: ProgressMenu, cursor: usize },
     MainlinePicker { target: Oid, summary: String, parents: Vec<ParentChoice>, cursor: usize },
-    Help { pane: Pane, cursor: usize }, // キーの一覧（07 の「Help モーダル」）。開いたときのペインを持つ。行は keys::help
+    Help { pane: Pane, cursor: usize }, // キーの一覧（07 の「Help モーダル」）。開いたときのペインを持つ。行は PaneKeys::help
 }
 ```
 
@@ -3022,9 +3022,7 @@ impl JobKind {
 crossterm の `KeyEvent` は core に入れられないので、core 側に等価な型を持つ。
 `crossterm::event::KeyEvent → app::Key` の変換は `mewgit-tui` 側で行う。
 
-フィールドは非公開にし、コンストラクタを唯一の入口にする。同じ打鍵が 1 通りの表現に
-なるよう正規化するため。正規化しないと `Key` の `Eq` / `Hash` が壊れ、`keymap`（08、MVP 後）
-の引き当てが静かに外れる。
+フィールドは非公開にし、コンストラクタを唯一の入口にする。同じ打鍵が 1 通りの表現になるよう正規化するため。正規化しないと `Key` の `Eq` / `Hash` が壊れ、`keymap`（08）の引き当てが静かに外れる。
 
 - `Char` は shift 適用後の値が入るので `shift` を落とす（crossterm は `P` に `SHIFT` を立てて渡す）
 - Shift+Tab は端末が `BackTab` + SHIFT として送る。`Tab` + shift / `BackTab` + shift /
@@ -3057,24 +3055,29 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 
 ### 案内に出すキーの表
 
-**キーとその説明の一覧は `app/keys.rs` の 1 本。** ステータスバーの 2 行目（07 の
-「ステータスバー」）と `Modal::Help`（07 の「Help モーダル」）と、あとから入る
-`config.keymap` の上書き（08）が**同じ表を読む**。2 本に分けると、上書きしたときにヒントだけが既定の字を出す。
+**キーとその説明の一覧は `app/keys.rs` の 1 本。** ステータスバーの 2 行目（07 の「ステータスバー」）と `Modal::Help`（07 の「Help モーダル」）と dispatch が**同じ表を読み**、`config.keymap` の上書き（08）もその表に当たる。2 本に分けると、上書きしたときにヒントだけが既定の字を出す。
+
+**既定の表は `const`、読むのは `AppState.keymap`。** `AppState::new` が既定の表に上書きを当て、ペインごとに組んだ `PaneKeys` を `Keymap` に持つ（衝突に負けた打鍵を外す先がペインごとに違うため。08 の「衝突」）。既定の表（`COMMON` / `PINNED` / ペインごとの表）は `keys` の中に閉じる。
 
 ```rust
-pub struct KeyHint { /* 非公開 */ }
+pub struct KeyHint { /* 非公開。打鍵は `Cow`（既定の表は借り、上書きを当てた行だけが持つ） */ }
 
 impl KeyHint {
-    pub fn keys(&self) -> impl Iterator<Item = Key>; // 案内に出すキー（`j` と `k` のように複数）
-    pub fn label(&self) -> &'static str;             // 何が起きるか
+    pub fn keys(&self) -> impl Iterator<Item = Key> + '_; // 案内に出すキー（`j` と `k` のように複数）
+    pub fn label(&self) -> &'static str;                  // 何が起きるか
 }
 
 /// 表の 1 打鍵が引く動作。ペインごとの enum を包む。
 pub enum Action {
     Down, Up,                     // どのペインにもある移動（下の「移動はペインの外」）
-    Common(CommonAction),         // `COMMON` と `PINNED`
+    Common(CommonAction),         // どこでも効く表（`COMMON` と `PINNED`）
     Graph(GraphAction), Branches(BranchesAction), Stash(StashAction), Prs(PrsAction),
     Worktree(WorktreeAction), CommitDetail(CommitDetailAction), Diff(DiffAction),
+}
+
+impl Action {
+    /// `config.keymap` に書く名前（08 の「動作の名前」）。網羅 `match` 1 本。
+    pub fn name(self) -> &'static str;
 }
 
 /// ペインごとの動作（`GraphAction` など）と、どこでも効く動作。どれも unit 変種だけ。
@@ -3082,18 +3085,29 @@ pub enum CommonAction { Help, Quit, Fetch, /* … */ Interrupt }
 
 /// 中断 / 終了の打鍵。**`update_key` は表を引かずにこれと比べる**（下の「表が dispatch を兼ねる」）。
 pub const INTERRUPT: Key;
-/// `?`（キーの一覧）と `q`。フッターに必ず出し、幅が足りなくても落とさない（07）。
-pub const PINNED: &[KeyHint];
-/// どのペインでも効くキーのうち、**フッターには出さないもの**。`Modal::Help` だけが読む（07）。
-pub const COMMON: &[KeyHint];
-/// `Modal::Help` の行（見出しとキー）。そのペインのキー → どこでも効くキーの順。
-pub fn help(pane: Pane) -> Vec<HelpRow>;
-/// **いま**押せるペインのキー。`None` は「この表のどれも押せない」（モーダル表示中）。
-pub fn live(state: &AppState) -> Option<&'static [KeyHint]>;
+/// 既定の表に `config.keymap` を当て、ペインごとに組んだもの。`AppState.keymap`。
+pub struct Keymap { /* ペインごとの PaneKeys。網羅 `match` で引く */ }
+
+impl Keymap {
+    /// 読めなかった上書きと衝突は警告で返す。`AppState::new` が `Warn` の通知に積む（08）。
+    pub fn new(overrides: &HashMap<String, String>) -> (Self, Vec<KeymapWarning>);
+    pub fn pane(&self, pane: Pane) -> &PaneKeys;
+}
+
+/// 1 つのペインに居るときに効くキー。案内の表と引く表は同じものから組む。
+impl PaneKeys {
+    pub fn hints(&self) -> &[KeyHint];                         // そのペインの表
+    pub fn pinned(&self) -> &[KeyHint];                        // `?` と `q`。フッターで落とさない（07）
+    pub fn anywhere(&self) -> impl Iterator<Item = &KeyHint>;  // どこでも効く表（フッターに出さないものと pinned）
+    pub fn action(&self, key: Key) -> Option<Action>;          // dispatch が引く（別名も入っている）
+    pub fn key_for(&self, action: Action) -> Option<Key>;      // 案内に出す表から逆引き（別名は返さない）
+    pub fn help(&self) -> Vec<HelpRow<'_>>;                    // `Modal::Help` の行。そのペインのキー → どこでも効くキー
+}
+
+/// **いま**押せるキー。`None` は「この表のどれも押せない」（モーダル表示中）。
+pub fn live(state: &AppState) -> Option<&PaneKeys>;
 /// `action` に**いま**効くキー（ペインの表と、どこでも効く表）。`None` は「いまは押せない」。
 pub fn live_key(state: &AppState, action: Action) -> Option<Key>;
-/// そのペインで押せるキー。網羅 `match` なので、`Pane` を足すと実装漏れが落ちる。
-pub fn pane(pane: Pane) -> &'static [KeyHint];
 ```
 
 - **持つのは `Key` で、`j/k` や `Enter` という字は `ui` が `KeyCode` から組む。**
@@ -3102,11 +3116,8 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
 - **同じ動作の別名は入れない。** `j` / `k` の代わりに効く `Down` / `Up` は表に無い
   —— 案内に出すものの一覧なので、出さないものを入れると「表 → 実際に押せる」の
   見張りが通るだけで案内は変わらない。別名は引く側だけが持つ（下の「表が dispatch を兼ねる」）
-- **`m` / `Tab` / `Shift+Tab` / `1`〜`5` / `Ctrl-C` は `COMMON` に入っている**（`Modal::Help` で
-  足した）。読むのは `?` の一覧だけで、フッターには出ない
-- **「いま押せるか」に答えるのは [`live`] のほう。** モーダル表示中はキーを全部モーダルが
-  受けるので（上の「キー入力」）、ペインのキーも `COMMON` も `PINNED` も効かない。
-  **`ui` に `modal.is_some()` を書かせない** —— 書くと振り分けの規則の写しが 2 本になる
+- **`m` / `Tab` / `Shift+Tab` / `1`〜`5` / `Ctrl-C` はどこでも効く表（`COMMON`）に入っている**（`Modal::Help` で足した）。読むのは `?` の一覧だけで、フッターには出ない
+- **「いま押せるか」に答えるのは [`live`] のほう。** モーダル表示中はキーを全部モーダルが受けるので（上の「キー入力」）、ペインのキーもどこでも効くキーも効かない。**`ui` に `modal.is_some()` を書かせない** —— 書くと振り分けの規則の写しが 2 本になる
 
 #### 表が dispatch を兼ねる
 
@@ -3129,6 +3140,7 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
 - **別名は表に出さずに引く**（`Down` / `Up` の矢印 → `Action::Down` / `Up`）。案内に
   出さないものは表の `KeyHint` に入れない（上の「同じ動作の別名は入れない」）ので、
   引く側だけが持つ
+- **引くのはフォーカスのペインの `PaneKeys` 1 つ**（`PaneKeys::action`）。共通キー・ペインのキー・別名を 1 つの引き表に入れ、重なりは組むときに後勝ちで解いてある（08 の「衝突」）。以前は共通キーの表をペインの表より先に引いていたが、既定の表では重ならないので結果は同じ。**上書きが重ねたときは上書きが勝つ** —— 先に引く順で決めると、`stage = "f"` は共通キーの `fetch` に負けて押せない
 - **比べるのは `Key` 全体。** 以前は各ペインの `*_key` と共通キーの `Tab` / `BackTab` が
   `match key.code()` で修飾を見ておらず、修飾付きでも同じ動作が起きていた。表で引く形では
   それが全部効かなくなる —— `Ctrl-j` / `Alt-s` などの文字キー、`Shift+Down` / `Shift+Up`、

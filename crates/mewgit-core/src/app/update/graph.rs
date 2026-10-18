@@ -13,39 +13,33 @@ use super::branches::open_branch_create;
 use super::diff::{load_diff, open_diff};
 use super::rebase::open_rebase_editor;
 use super::{confirm, focus};
+use crate::app::keys::{CommitDetailAction, GraphAction};
 use crate::app::{
-    AppState, Cmd, CommitFiles, GraphLine, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane,
-    ParentChoice,
+    AppState, Cmd, CommitFiles, GraphLine, JobKind, Modal, NoticeLevel, Pane, ParentChoice,
 };
 
-/// グラフペインのキー処理。
-///
-/// いまは上下移動、下端に近づいたときの追加読み込み、`Enter` で右ペインへ移る。
-/// `g` / `G` は別のタスクで足す。
-pub(super) fn graph_key(state: &mut AppState, key: Key) -> Cmd {
-    match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => scrolled(state, 1),
-        KeyCode::Char('k') | KeyCode::Up => scrolled(state, -1),
+/// グラフペインのキー処理。上下移動は `update_key` の `move_cursor` が受ける。
+pub(super) fn graph_key(state: &mut AppState, action: GraphAction) -> Cmd {
+    match action {
         // 右の領域に移る。行き先は選択で決まる（`GraphSelection::right_pane`）。
         // Worktree の `Enter` → Diff と同じ形で、`Esc` で戻る。
-        KeyCode::Enter => focus(state, state.graph.selection().right_pane()),
+        GraphAction::Detail => focus(state, state.graph.selection().right_pane()),
         // **カーソルの指すコミットを起点にブランチを作る**（07 の「Graph ペイン」）。
         // WIP 行なら起点は無し（= HEAD）。**Oid を渡すのは、その行に何のラベルが
         // 乗っていても同じ結果になるから** — タグから作りたい人はそのタグの行を選ぶ。
-        KeyCode::Char('n') => {
+        GraphAction::Branch => {
             let start = state.graph.cursor_commit().map(|commit| commit.oid);
             open_branch_create(state, start)
         }
-        KeyCode::Char(' ') => toggle_mark(state),
+        GraphAction::Mark => toggle_mark(state),
         // 印が無ければ何もしない（`Esc` は Graph のほかの何にも使っていない）。
-        KeyCode::Esc => {
+        GraphAction::Unmark => {
             state.graph.marks.clear();
             Cmd::None
         }
-        KeyCode::Char('y') => cherry_pick(state),
-        KeyCode::Char('v') => revert(state),
-        KeyCode::Char('i') => open_rebase_editor(state),
-        _ => Cmd::None,
+        GraphAction::CherryPick => cherry_pick(state),
+        GraphAction::Revert => revert(state),
+        GraphAction::Rebase => open_rebase_editor(state),
     }
 }
 
@@ -296,26 +290,23 @@ fn head_name(state: &AppState) -> &str {
 
 /// コミット詳細ペインのキー処理。
 ///
-/// カーソルはファイル一覧の行を指す。`Enter` で左を `DiffTarget::Commit` の diff に
-/// 差し替える（07 の「CommitDetail ペイン」）。
-pub(super) fn commit_detail_key(state: &mut AppState, key: Key) -> Cmd {
-    match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => move_file(state, 1),
-        KeyCode::Char('k') | KeyCode::Up => move_file(state, -1),
-        KeyCode::Enter => open_diff(state),
-        KeyCode::Esc => focus(state, Pane::Graph),
-        _ => Cmd::None,
+/// カーソルはファイル一覧の行を指す（動かすのは [`move_file`]）。`Enter` で左を
+/// `DiffTarget::Commit` の diff に差し替える（07 の「CommitDetail ペイン」）。
+pub(super) fn commit_detail_key(state: &mut AppState, action: CommitDetailAction) -> Cmd {
+    match action {
+        CommitDetailAction::Diff => open_diff(state),
+        CommitDetailAction::Back => focus(state, Pane::Graph),
     }
 }
 
 /// ファイル一覧のカーソルを `delta` 行動かす。
 ///
 /// **動かすと diff の対象が変わるので、直前の失敗を落とす**（ワーキングツリーの
-/// `worktree::moved` と同じ形）。移動して戻ってくれば 1 回だけ試し直せる。
+/// `worktree::move_entry` と同じ形）。移動して戻ってくれば 1 回だけ試し直せる。
 ///
 /// **動かすのは出ている一覧だけ。** 別のコミットのものが残っていることがあり
 /// （読み込み中・失敗中）、濾さずに動かすと画面に出ていない一覧のカーソルが黙って動く。
-fn move_file(state: &mut AppState, delta: isize) -> Cmd {
+pub(super) fn move_file(state: &mut AppState, delta: isize) -> Cmd {
     if let Some(files) = state.graph.fresh_files_mut() {
         files.move_cursor(delta);
     }
@@ -328,7 +319,7 @@ fn move_file(state: &mut AppState, delta: isize) -> Cmd {
 /// **カーソルを動かすキーはすべてここを通す**（`g` / `G` や `PageDown` を足すときも）。
 /// 腕ごとに `load_more` を書くと、足したキーが素通りする。下端で `j` を押したときは
 /// カーソルが動かないので、「動いたかどうか」では判定できない。
-fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
+pub(super) fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
     let before = state.graph.cursor;
     state.graph.move_cursor(delta);
     // カーソルを動かすのはユーザーの操作なので、失敗した読み直しはここから始める。
@@ -572,7 +563,7 @@ mod tests {
     use super::super::worktree::COMMIT_DIFF;
     use super::super::{init, update};
     use super::*;
-    use crate::app::{GraphSelection, Msg};
+    use crate::app::{GraphSelection, KeyCode, Msg};
 
     use crate::git_read::{BranchList, DiffTarget, FileStatus, RowlessHead};
     use crate::graph::LaneState;
@@ -861,7 +852,7 @@ mod tests {
     #[test]
     fn moving_the_file_cursor_clears_the_failed_diff() {
         // 対象が変わるので、一度失敗したファイルにも戻ってくれば試し直せる
-        // （ワーキングツリーの `moved` と同じ形）。
+        // （ワーキングツリーの `move_entry` と同じ形）。
         let mut state = on_first_commit(3);
         let _ = press_code(&mut state, KeyCode::Enter);
         state.diff.failed = Some(commit_diff_target(&state, "a.txt"));

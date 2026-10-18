@@ -15,31 +15,26 @@ use super::diff::load_diff;
 use super::diff::open_diff;
 use super::stash::{open_stash_file, open_stash_push};
 use super::{confirm, focus, multiline_input_key, submit_exec, InputKey};
-use crate::app::{
-    AppState, Cmd, DiffOrigin, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, TextBuffer,
-};
+use crate::app::keys::WorktreeAction;
+use crate::app::{AppState, Cmd, DiffOrigin, JobKind, Key, Modal, NoticeLevel, Pane, TextBuffer};
 
-/// ワーキングツリーペインのキー処理。
-///
-/// `j` / `k` は区画をまたいで 1 本のリストのように動く（01 の「ワーキングツリー」）。
-pub(super) fn worktree_key(state: &mut AppState, key: Key) -> Cmd {
-    match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => moved(state, 1),
-        KeyCode::Char('k') | KeyCode::Up => moved(state, -1),
+/// ワーキングツリーペインのキー処理。上下移動は `update_key` の `move_cursor` が受ける
+/// （[`move_entry`]）。
+pub(super) fn worktree_key(state: &mut AppState, action: WorktreeAction) -> Cmd {
+    match action {
         // 左の領域を Diff に差し替える（07）。読むかどうかは `focus` が決める。
-        KeyCode::Enter => open_diff(state),
+        WorktreeAction::Diff => open_diff(state),
         // **グラフの `Enter` で入ってきた先なので、`Esc` で戻れる。** 戻り先を
         // 用意しないと、`Enter` の行き先がコミット詳細か Working tree かで出口が
         // 変わる（片方は `Esc`、もう片方は `Tab` を探す）ことになる。
-        KeyCode::Esc => focus(state, Pane::Graph),
-        KeyCode::Char('s') => act(state, Action::Stage),
-        KeyCode::Char('u') => act(state, Action::Unstage),
-        KeyCode::Char('x') => act(state, Action::Discard),
-        KeyCode::Char('c') => commit(state),
-        KeyCode::Char('C') => amend(state),
-        KeyCode::Char('z') => open_stash_push(state),
-        KeyCode::Char('Z') => open_stash_file(state),
-        _ => Cmd::None,
+        WorktreeAction::Back => focus(state, Pane::Graph),
+        WorktreeAction::Stage => act(state, Action::Stage),
+        WorktreeAction::Unstage => act(state, Action::Unstage),
+        WorktreeAction::Discard => act(state, Action::Discard),
+        WorktreeAction::Commit => commit(state),
+        WorktreeAction::Amend => amend(state),
+        WorktreeAction::Stash => open_stash_push(state),
+        WorktreeAction::StashFile => open_stash_file(state),
     }
 }
 
@@ -199,12 +194,13 @@ pub(super) fn head_message_loaded(
     Cmd::None
 }
 
-/// ワーキングツリーのカーソルを動かす。
+/// ワーキングツリーのカーソルを動かす。区画をまたいで 1 本のリストのように動く
+/// （01 の「ワーキングツリー」）。
 ///
 /// **カーソルを動かすキーはすべてここを通す。** 動かすと diff の対象が変わるので、
 /// 直前の失敗を落として 1 回だけ試し直せるようにする（`GraphState.load_failed` を
 /// `scrolled` で落とすのと同じ形。01 の「diff の遅延取得」）。
-fn moved(state: &mut AppState, delta: isize) -> Cmd {
+pub(super) fn move_entry(state: &mut AppState, delta: isize) -> Cmd {
     state.worktree.move_cursor(delta);
     state.diff.failed = None;
     Cmd::None
@@ -565,7 +561,7 @@ mod tests {
     };
     use super::super::update;
     use super::*;
-    use crate::app::{Modal, Modifiers, Msg, TextBuffer};
+    use crate::app::{KeyCode, Modal, Modifiers, Msg, TextBuffer};
 
     use crate::git_read::RowlessHead;
 

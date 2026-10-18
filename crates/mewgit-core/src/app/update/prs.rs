@@ -10,6 +10,7 @@ use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 
 use super::remote::{conventional_remote, repo_unread, NoRemote};
 use super::{edit_key, focus, multiline_edit_key, submit};
+use crate::app::keys::PrsAction;
 use crate::app::state::current_row;
 use crate::app::{
     AppState, BranchState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHeads,
@@ -18,24 +19,15 @@ use crate::app::{
 use crate::github::CreatePr;
 
 /// PRs ペインのキー処理。
-pub(super) fn prs_key(state: &mut AppState, key: Key) -> Cmd {
-    match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => {
-            state.prs.move_cursor(1);
-            Cmd::None
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            state.prs.move_cursor(-1);
-            Cmd::None
-        }
-        KeyCode::Enter => checkout(state),
-        KeyCode::Char('o') => open_pr(state),
-        KeyCode::Char('r') => refresh(state),
-        KeyCode::Char('N') => open_pr_create(state),
+pub(super) fn prs_key(state: &mut AppState, action: PrsAction) -> Cmd {
+    match action {
+        PrsAction::Checkout => checkout(state),
+        PrsAction::Open => open_pr(state),
+        PrsAction::Refresh => refresh(state),
+        PrsAction::Create => open_pr_create(state),
         // **`Tab` でしか入れないペインにも出口を用意する**（07）。Branches ペインと
         // 同じく、左の選択と無関係なので戻り先は `Graph`。
-        KeyCode::Esc => focus(state, Pane::Graph),
-        _ => Cmd::None,
+        PrsAction::Back => focus(state, Pane::Graph),
     }
 }
 

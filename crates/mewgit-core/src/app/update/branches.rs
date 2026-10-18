@@ -4,31 +4,23 @@ use crate::git_exec::GitOp;
 use crate::git_read::{short_oid, Oid};
 
 use super::{confirm, focus, input};
-use crate::app::{AppState, Cmd, InputIntent, Key, KeyCode, Pane, TextBuffer};
+use crate::app::keys::BranchesAction;
+use crate::app::{AppState, Cmd, InputIntent, Pane, TextBuffer};
 
 /// Branches ペインのキー処理。
-pub(super) fn branches_key(state: &mut AppState, key: Key) -> Cmd {
-    match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => {
-            state.branches.move_cursor(1);
-            Cmd::None
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            state.branches.move_cursor(-1);
-            Cmd::None
-        }
-        KeyCode::Enter => switch_branch(state),
-        KeyCode::Char('d') => delete_branch(state, false),
-        KeyCode::Char('D') => delete_branch(state, true),
+pub(super) fn branches_key(state: &mut AppState, action: BranchesAction) -> Cmd {
+    match action {
+        BranchesAction::Checkout => switch_branch(state),
+        BranchesAction::Delete => delete_branch(state, false),
+        BranchesAction::ForceDelete => delete_branch(state, true),
         // **起点は HEAD。** このペインは起点の情報を持たない（カーソル行を起点に
         // すると、一覧を眺めているだけのつもりで別のブランチから生やすことになる）。
         // 起点を選んで作るのは Graph ペインの `n`（07 の「Branches ペイン」）。
-        KeyCode::Char('n') => open_branch_create(state, None),
-        KeyCode::Char('r') => rename_branch(state),
+        BranchesAction::Branch => open_branch_create(state, None),
+        BranchesAction::Rename => rename_branch(state),
         // **`Tab` でしか入れないペインにも出口を用意する**（07）。戻り先を
         // `right_pane()` にしないのは、このペインが左の選択と無関係だから。
-        KeyCode::Esc => focus(state, Pane::Graph),
-        _ => Cmd::None,
+        BranchesAction::Back => focus(state, Pane::Graph),
     }
 }
 
@@ -130,7 +122,7 @@ mod tests {
         state_with_commits, type_text,
     };
     use super::*;
-    use crate::app::ListLoad;
+    use crate::app::{KeyCode, ListLoad};
 
     #[test]
     fn j_and_k_move_the_branch_cursor_without_touching_the_graph() {

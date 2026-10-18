@@ -1060,18 +1060,18 @@ fn push_hint(out: &mut String, hint: &KeyHint) {
 /// `?` の一覧（`modals::help`）が使う。**モーダルは自前の `HINT` を持っている**
 /// （`modals::*`。あちらは箱の中で予算が違う）ので、綴りが 2 通りある（07）。
 pub(crate) fn push_keys(out: &mut String, hint: &KeyHint) {
-    for (i, key) in hint.keys().iter().enumerate() {
+    for (i, key) in hint.keys().enumerate() {
         if i > 0 {
             out.push('/');
         }
-        push_key(out, key);
+        push_key(out, &key);
     }
 }
 
 /// キー 1 つの字。
 ///
 /// **`Key` 全体を見る**（`KeyCode` だけでは `Ctrl-C` と `c` が同じ字になる）。
-fn push_key(out: &mut String, key: &Key) {
+pub(crate) fn push_key(out: &mut String, key: &Key) {
     let mods = key.mods();
     if mods.ctrl {
         out.push_str("Ctrl-");

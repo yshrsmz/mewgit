@@ -6,29 +6,19 @@ use crate::git_exec::GitOp;
 use crate::git_read::{FileStatus, GitReadError, StashEntry, WorktreeSection};
 
 use super::{confirm, focus, input};
-use crate::app::{
-    AppState, Cmd, DiffSource, InputIntent, JobKind, Key, KeyCode, NoticeLevel, Pane, TextBuffer,
-};
+use crate::app::keys::StashAction;
+use crate::app::{AppState, Cmd, DiffSource, InputIntent, JobKind, NoticeLevel, Pane, TextBuffer};
 
 /// Stash ペインのキー処理。
-pub(super) fn stash_key(state: &mut AppState, key: Key) -> Cmd {
-    match key.code() {
-        KeyCode::Char('j') | KeyCode::Down => {
-            state.stashes.move_cursor(1);
-            Cmd::None
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            state.stashes.move_cursor(-1);
-            Cmd::None
-        }
-        KeyCode::Enter => open_stash_diff(state),
+pub(super) fn stash_key(state: &mut AppState, action: StashAction) -> Cmd {
+    match action {
+        StashAction::Diff => open_stash_diff(state),
         // **`Tab` でしか入れないペインにも出口を用意する**（Branches と同じ。07）。
-        KeyCode::Esc => focus(state, Pane::Graph),
-        KeyCode::Char('z') => open_stash_push(state),
-        KeyCode::Char('a') => on_selected(state, GitOp::StashApply),
-        KeyCode::Char('Z') => on_selected(state, GitOp::StashPop),
-        KeyCode::Char('d') => drop_stash(state),
-        _ => Cmd::None,
+        StashAction::Back => focus(state, Pane::Graph),
+        StashAction::Stash => open_stash_push(state),
+        StashAction::Apply => on_selected(state, GitOp::StashApply),
+        StashAction::Pop => on_selected(state, GitOp::StashPop),
+        StashAction::Drop => drop_stash(state),
     }
 }
 
@@ -286,7 +276,7 @@ mod tests {
     };
     use super::super::worktree::STASH_DIFF;
     use super::*;
-    use crate::app::{update, ListLoad, Modal, Msg, NoticeLevel, Region};
+    use crate::app::{update, KeyCode, ListLoad, Modal, Msg, NoticeLevel, Region};
     use crate::git_exec::{ExecErrorKind, PullMode};
     use crate::git_read::{DiffTarget, FileEntry, WorktreeSnapshot};
     use crate::test_util::{fake_entry, fake_snapshot, fake_stash};

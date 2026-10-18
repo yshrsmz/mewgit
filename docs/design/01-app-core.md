@@ -679,7 +679,7 @@ Msg::LogLoaded { restart: bool, result: Result<LogPage, GitReadError> }
   `status_loaded` が `clamp` のあとに `load_diff` を呼ぶのと同じ形
 - **一覧のカーソルを動かしたら `DiffState.failed` を落とす。** 対象が変わるので、
   一度失敗したファイルにも戻ってくれば 1 回だけ試し直せる（ワーキングツリーの
-  `moved` と同じ形。下の「diff の遅延取得」）
+  `move_entry` と同じ形。下の「diff の遅延取得」）
 - **空の `entries` と「まだ読めていない」を区別する。** `--allow-empty` のコミットは
   変更を 1 つも持たない。`Option<CommitFiles>` の `None` が「届いていない」、
   `Some` で `entries` が空が「変更なし」。`Vec` 1 本にすると、読み込み中と空の
@@ -3065,10 +3065,23 @@ pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
 pub struct KeyHint { /* 非公開 */ }
 
 impl KeyHint {
-    pub fn keys(&self) -> &[Key];        // 案内に出すキー（`j` と `k` のように複数）
-    pub fn label(&self) -> &'static str; // 何が起きるか
+    pub fn keys(&self) -> impl Iterator<Item = Key>; // 案内に出すキー（`j` と `k` のように複数）
+    pub fn label(&self) -> &'static str;             // 何が起きるか
 }
 
+/// 表の 1 打鍵が引く動作。ペインごとの enum を包む。
+pub enum Action {
+    Down, Up,                     // どのペインにもある移動（下の「移動はペインの外」）
+    Common(CommonAction),         // `COMMON` と `PINNED`
+    Graph(GraphAction), Branches(BranchesAction), Stash(StashAction), Prs(PrsAction),
+    Worktree(WorktreeAction), CommitDetail(CommitDetailAction), Diff(DiffAction),
+}
+
+/// ペインごとの動作（`GraphAction` など）と、どこでも効く動作。どれも unit 変種だけ。
+pub enum CommonAction { Help, Quit, Fetch, /* … */ Interrupt }
+
+/// 中断 / 終了の打鍵。**`update_key` は表を引かずにこれと比べる**（下の「表が dispatch を兼ねる」）。
+pub const INTERRUPT: Key;
 /// `?`（キーの一覧）と `q`。フッターに必ず出し、幅が足りなくても落とさない（07）。
 pub const PINNED: &[KeyHint];
 /// どのペインでも効くキーのうち、**フッターには出さないもの**。`Modal::Help` だけが読む（07）。
@@ -3077,6 +3090,8 @@ pub const COMMON: &[KeyHint];
 pub fn help(pane: Pane) -> Vec<HelpRow>;
 /// **いま**押せるペインのキー。`None` は「この表のどれも押せない」（モーダル表示中）。
 pub fn live(state: &AppState) -> Option<&'static [KeyHint]>;
+/// `action` に**いま**効くキー（ペインの表と、どこでも効く表）。`None` は「いまは押せない」。
+pub fn live_key(state: &AppState, action: Action) -> Option<Key>;
 /// そのペインで押せるキー。網羅 `match` なので、`Pane` を足すと実装漏れが落ちる。
 pub fn pane(pane: Pane) -> &'static [KeyHint];
 ```
@@ -3086,23 +3101,57 @@ pub fn pane(pane: Pane) -> &'static [KeyHint];
 - **ラベルは core が持つ。** 通知の文言と同じ扱いで、`ui` は並べるだけ（不変ルール 2）
 - **同じ動作の別名は入れない。** `j` / `k` の代わりに効く `Down` / `Up` は表に無い
   —— 案内に出すものの一覧なので、出さないものを入れると「表 → 実際に押せる」の
-  見張りが通るだけで案内は変わらない。**逆向き（`match` の腕が全部表にあるか）は
-  `match` から導けない**ので、そこは見張れない
+  見張りが通るだけで案内は変わらない。別名は引く側だけが持つ（下の「表が dispatch を兼ねる」）
 - **`m` / `Tab` / `Shift+Tab` / `1`〜`5` / `Ctrl-C` は `COMMON` に入っている**（`Modal::Help` で
   足した）。読むのは `?` の一覧だけで、フッターには出ない
-- **押して無反応なキーを表に入れない見張り**は `every_hinted_key_does_something`
-  （`update` を通して 1 打鍵ずつ叩き、`Cmd` か `AppState` が動くことを見る）。
-  `update_key` の `match` に対する 2 本目の一覧なので、**表だけが古くなる形を塞ぐ**
 - **「いま押せるか」に答えるのは [`live`] のほう。** モーダル表示中はキーを全部モーダルが
   受けるので（上の「キー入力」）、ペインのキーも `COMMON` も `PINNED` も効かない。
   **`ui` に `modal.is_some()` を書かせない** —— 書くと振り分けの規則の写しが 2 本になる
-- **表はまだ「どのキーか」と「何と書くか」しか持っていない。** dispatch と突き合わせる
-  **アクションの同一性が無い**ので、上の見張りが「表 → dispatch」の片側しか見られない。
-  `config.keymap`（08）はアクション名（`fetch = "f"`）で書くので、**`label` は鍵にならない**
-  （`移動` / `切替` / `破棄` はどのアクション名とも一致しない）。**上書きを入れるより先に
-  表へアクションを足す**（`docs/plan.md` の `config.keymap` の行）。足せば
-  `Key → Action` の引きと `match action` の網羅で両方向が見られるようになり、この節の
-  見張りと `hinted_state` は要らなくなる
+
+#### 表が dispatch を兼ねる
+
+**表は 1 打鍵ごとに `Action` を持ち、`update_key` は表を引いてから `match action` する。**
+以前の表は「どのキーか」と「何と書くか」だけを持ち、各ペインの `*_key` が
+`match key.code()` を手で書いていた。表は dispatch の手書きの写しで、見張れたのは
+「表 → dispatch」の片側だけだった。`config.keymap`（08）はアクション名（`fetch = "f"`）で
+書くので、**`label` は鍵にならない**（`移動` / `切替` / `破棄` はどのアクション名とも
+一致しない）—— 上書きより先に同一性を足した（`docs/plan.md` の `config.keymap` の 1/2）。
+
+- **同一性は案内の行ではなく打鍵に付く。** `j/k:移動` は 1 行で 2 つ、`f/p/P` は 1 行で
+  3 つの動作を持つ。行の束ね方は 07 の 80 桁の実測が前提なので変えない
+- **ペインごとの enum を網羅 `match` する**（`graph_key(state, GraphAction)` など）。
+  `*_key` に `_` の腕は無いので、**動作を足して腕を書き忘れるとコンパイルが落ちる**。
+  逆向き（enum の全変種が表に在るか）は `all_variants!` のテストが見る。**表と dispatch
+  が 1 本になったので、両方向とも機械が見る**
+- **移動はペインの外**（`Action::Down` / `Up`）。どのペインにもあり、行き先（何の
+  カーソルか）は `focus` の網羅 `match` が決める。ペインごとの enum に入れると同じ変種が
+  7 つ並び、`config.keymap` の `down` がどれを指すかを 7 回書くことになる
+- **別名は表に出さずに引く**（`Down` / `Up` の矢印 → `Action::Down` / `Up`）。案内に
+  出さないものは表の `KeyHint` に入れない（上の「同じ動作の別名は入れない」）ので、
+  引く側だけが持つ
+- **比べるのは `Key` 全体。** 以前は各ペインの `*_key` と共通キーの `Tab` / `BackTab` が
+  `match key.code()` で修飾を見ておらず、修飾付きでも同じ動作が起きていた。表で引く形では
+  それが全部効かなくなる —— `Ctrl-j` / `Alt-s` などの文字キー、`Shift+Down` / `Shift+Up`、
+  `Shift` / `Alt+Enter`、`Shift+Esc`、`Alt` / `Ctrl+Tab`（`Key::with_mods` が shift を落とすのは
+  `Char` と `Tab` / `BackTab` だけなので、矢印・`Enter`・`Esc` の shift は残って別のキーになる）。
+  共通キーの文字（`f` / `p` / `P` など）は元から `Key` 全体で比べていた（`update_key` の
+  コメントの理由 —— 07 が移動に予約した `Ctrl-d` / `Ctrl-u` の隣で修飾付きのキーを先に食わないため）。
+  **ペインのキーも同じ理由で揃えた**
+- **`Ctrl-C` だけは表を引かない。** `update_key` の先頭で定数（`keys::INTERRUPT`）と
+  比べ、モーダルより先に受ける（上の「キー入力」の脱出口）。表の行は案内に出すためだけに
+  ある。`config.keymap` では上書きさせない（08）が、それを上書きの処理の特例ではなく
+  置き場所で守る —— 表を引く形だと、`quit = "ctrl-c"` のような衝突を後勝ちで解いた瞬間に
+  `Interrupt` が表から消え、モーダル表示中に抜ける手が無くなる。**守れるのは脱出口が
+  消えないことまで** —— 値に `"ctrl-c"` を書いた上書き（`fetch = "ctrl-c"`）は、案内に
+  `Ctrl-C:fetch` を出しながら押すと終了する。値の側も断る（08）
+- **字ではなく動作で聞く**（`keys::live_key(state, Action) -> Option<Key>`）。ペインの本文に
+  キーを書く側（PRs ペインの「（N）」）は、いま効くキーを動作から逆引きして字にする。字で
+  聞くと、上書きした瞬間に押せないキーを案内する。**引くのはペインの表とどこでも効く表の
+  両方**（`A` や `?` を案内に書く側も同じ関数で引ける）
+- **押して無反応なキーを表に入れない見張り**（`every_hinted_key_does_something`）は
+  残す。網羅 `match` が強いるのは腕があることだけで、**腕が `Cmd::None` を返すだけの形は
+  通る** —— それを拾うのはこちら。**キーの動作が丸ごと通知に退化した形や誤配線
+  （`x` が stage をする）は、これでも「無反応でない」で通る**（受け入れた穴。`docs/plan.md`）
 
 ## Msg
 

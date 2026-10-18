@@ -18,7 +18,7 @@ use crate::graph::{GraphRow, LaneState};
 
 use crate::config::Config;
 
-use super::{keys, Cmd, ProgressMenu};
+use super::{Cmd, Keymap, ProgressMenu};
 
 /// アプリ全体の状態。
 ///
@@ -52,6 +52,9 @@ pub struct AppState {
     pub watch: WatchState,
     /// エラー・情報のトースト。積むのは [`AppState::push_notice`]。
     pub notices: VecDeque<Notice>,
+    /// キーの表。既定の表に `config.keymap` を当てたもの（08 の「キーマップの解決」）。
+    /// 案内（フッター・`?` の一覧）も dispatch もここを引く。
+    pub keymap: Keymap,
     pub term: TermSize,
     /// [`Msg::Tick`] が来た回数。スピナーの駒を選ぶのに使う（07 のヘッダ）。
     ///
@@ -158,7 +161,9 @@ impl AppState {
     /// **`now` を取るのは、最初の `Tick` より前にも通知が積まれるから**（`main.rs` の
     /// 設定の警告）。時計の無い状態を作れると、その通知だけが時刻を持たない。
     pub fn new(repo: RepoInfo, config: Config, now: Timestamp) -> Self {
-        Self {
+        // **解くのはここ**（08）。`config` は最下段（00）なので `app::Key` を名指しできない。
+        let (keymap, warnings) = Keymap::new(&config.keymap);
+        let mut state = Self {
             repo,
             // **旗を読む場所はここ 1 つ**（01 の「GitHub 機能を切る」）。以後の読み手は
             // `AccountState` を網羅 `match` するので、腕が増えれば何を出すか選ばされる。
@@ -180,11 +185,16 @@ impl AppState {
             jobs: JobTracker::default(),
             watch: WatchState::starting_at(now, &config),
             notices: VecDeque::new(),
+            keymap,
             term: TermSize::default(),
             tick: 0,
             now,
             config,
+        };
+        for warning in warnings {
+            state.push_notice(NoticeLevel::Warn, warning.to_string(), None);
         }
+        state
     }
 
     /// `update` が返す [`Cmd`] を発行してよい形にする。
@@ -2887,7 +2897,7 @@ pub enum Modal {
     /// **開いたときのペインを持つ。** [`AppState::focus`] を描くたびに読むと、開いている
     /// あいだに届いた status で `reseat_focus`（`update` の出口で毎回通る）がフォーカスを
     /// 移したとき、一覧が別のペインのものに入れ替わる。行は持たず、描く行は
-    /// [`keys::help`](super::keys::help) が `pane` から組む。`cursor` は窓を動かすためだけ。
+    /// [`PaneKeys::help`](super::PaneKeys::help) が `pane` の表から組む。`cursor` は窓を動かすためだけ。
     Help {
         pane: Pane,
         cursor: usize,
@@ -2944,7 +2954,7 @@ impl AppState {
                 *cursor = stepped_index(*cursor, plan.entries.len(), delta);
             }
             Some(Modal::Help { pane, cursor }) => {
-                *cursor = stepped_index(*cursor, keys::help(*pane).len(), delta);
+                *cursor = stepped_index(*cursor, self.keymap.pane(*pane).help().len(), delta);
             }
             // **通知が無ければ動かない**（`notice_log_row` が `None`）。
             Some(Modal::NoticeLog { selected }) => {

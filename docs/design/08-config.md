@@ -234,30 +234,66 @@ notice として表示したうえで既定値で継続する。
 
 ## キーマップの解決
 
-- `config` は `keymap` を `HashMap<String, String>` のまま保持する。解析結果の型は
-  crossterm の `KeyEvent` ではなく core の `app::Key`（01）
-- **パーサは `app` に置く**（`app/key.rs`）。`config` は最下段（00）なので `app::Key` を
-  名指しできない。解いた表は `AppState::new` が組んで `AppState` に持つ
-- `keymap` の値は `app::Key` に変換（`"ctrl-d"`, `"shift-tab"`, `"P"` などを解析）
-- **上書きは `app::keys` の表 1 本に効かせる**（01 の「案内に出すキーの表 › 表が dispatch
-  を兼ねる」）。表が打鍵ごとに `Action` を持ち、dispatch も同じ表を引くので、ヒントだけが
-  既定の字を出す形は作れない
-- **アクション名は平坦**（`[keymap] stage = "S"`。2026-10-18 にユーザーと決めた）。
-  同じ意味の動作は複数のペインで名前を共有し、上書きはその全部に効く（`stage` は
-  Worktree と Diff、`stash` は Worktree と Stash、`down` / `up` は全ペイン）。意味が違う
-  ものは名前を分ける（PRs の `r` と Branches の `r`、Graph の `Esc` と右列の `Esc`）。
-  **ペインごとに別のキーを当てることはできない** —— `[keymap.worktree]` の形は採らなかった
-- **`Ctrl-C` は上書きさせない**（同日に決めた）。モーダル表示中も効く唯一の脱出口で、
-  モーダルが受けるキーに付け替えると抜ける手が無くなる。**守るのは置き場所** ——
-  `update_key` は表を引かずに `keys::INTERRUPT` と比べる（01）ので、上書きの処理に特例は
-  要らない。**断るのは名前と値の両方** —— `interrupt` の名前を受け付けないだけでは足りず、
-  値に `"ctrl-c"` を書いた上書き（`fetch = "ctrl-c"`）も警告して捨てる。捨てないと、
-  `?` の一覧が `Ctrl-C:fetch` と案内し、押すと先頭の `INTERRUPT` が受けて終了する（01）。`q` / `?` / `Tab` / 番号は上書きできる
-- **衝突はペインごとに「共通キー ∪ そのペインのキー」で見る。** 共通キーはペインの
-  `match` より先に引くので、共通キーの上書きがペインのキーと重なると、そのペインのキーが
-  押せなくなる。衝突は起動時に警告し、後勝ちにする
-- 未定義のアクション名・解析できない値も警告のみ。**警告は `AppState::new` が `Warn` の
-  通知として積む** —— `ConfigWarning` は `config` の型なので、`app::Key` の解析の失敗を運べない
-- **通知や画面の文言に書いたキーの字（「`N` で作成」「`A` で内訳」など）は上書きに
-  追従しない**（受け入れた穴。同日に決めた）。キーを字にする関数が `ui` にしか無く、
-  core の通知が引けない。塞ぐタスクは `docs/plan.md` の「MVP 後」
+- `config` は `keymap` を `HashMap<String, String>` のまま保持する。解析結果の型は crossterm の `KeyEvent` ではなく core の `app::Key`（01）
+- **パーサは `app` に置く**（`Key::parse`、`app/key.rs`）。`config` は最下段（00）なので `app::Key` を名指しできない。上書きを当てた表（`app::Keymap`）は `AppState::new` が組んで `AppState.keymap` に持つ
+- **上書きは `app::keys` の表 1 本に効かせる**（01 の「案内に出すキーの表 › 表が dispatch を兼ねる」）。表が打鍵ごとに `Action` を持ち、dispatch も同じ表を引くので、ヒントだけが既定の字を出す形は作れない
+- **上書きはキーの差し替え**で、足すのではない。`stage = "S"` を書くと `s` は効かなくなる。表に出さない別名（矢印の `Down` / `Up`）は残る
+
+### 値の書き方
+
+`Key::parse` が読む形。
+
+- 修飾は `ctrl-` / `alt-` / `shift-` を前に重ねる（大文字小文字を問わない。`Ctrl-d` も読む）
+- 残りは名前か 1 文字。名前は `enter` `esc` `tab` `backtab` `backspace` `delete` `insert` `left` `right` `up` `down` `home` `end` `pageup` `pagedown` `space` `f1`〜（大文字小文字を問わない）
+- **1 文字は書いたまま**。`P` は `Char('P')` で、`p` とは別のキー。`-` もキーになる（`"-"`、`"ctrl--"`）
+- 正規化は `Key::with_mods` に任せる（`shift-tab` は `backtab` と同じ。01 の「キー入力」）
+- **押しても届かない形は断る**（警告して捨てる）。黙って正規化すると、書いたキーと効くキーが割れる
+  - `shift-` + 文字（`shift-a`）—— `with_mods` が shift を落とすので `a` として効いてしまう。大文字で書く
+  - `ctrl-` + 大文字の英字（`ctrl-D`）—— 端末は `Ctrl` + 英字を小文字で送る。crossterm 0.29 の `parse_event` は 0x01〜0x1A を小文字の `Char` に、CSI u（mewgit は `DISAMBIGUATE_ESCAPE_CODES` を押す）は shift を外した字で返す（ソースで確認。実機では叩いていない）。`alt-` + 大文字は断らない —— 古い形式では `ESC P` が `Alt` + `P` で届く
+
+### 動作の名前
+
+**名前は平坦**（`[keymap] stage = "S"`。2026-10-18 にユーザーと決めた）。同じ意味の動作は複数のペインで名前を共有し、上書きはその全部に効く。意味が違うものは名前を分ける（PRs の `r` は `refresh`、Branches の `r` は `rename`、Graph の `Esc` は `unmark`、右列の `Esc` は `back`）。**ペインごとに別のキーを当てることはできない** —— `[keymap.worktree]` の形は採らなかった。名前は `Action::name()` の網羅 `match` 1 本が持ち、snake_case で書く。
+
+| 名前 | 既定 | どこで |
+|---|---|---|
+| `down` / `up` | `j` / `k` | 全ペイン |
+| `help` / `quit` | `?` / `q` | どこでも |
+| `fetch` / `pull` / `push` | `f` / `p` / `P` | どこでも |
+| `account` / `notice_log` / `progress_menu` / `reload` | `A` / `L` / `m` / `R` | どこでも |
+| `next_pane` / `prev_pane` | `Tab` / `Shift+Tab` | どこでも |
+| `focus_graph` / `focus_branches` / `focus_stash` / `focus_prs` / `focus_right` | `1`〜`5` | どこでも |
+| `detail` / `cherry_pick` / `revert` / `rebase` / `mark` / `unmark` | `Enter` / `y` / `v` / `i` / `Space` / `Esc` | Graph |
+| `branch` | `n` | Graph と Branches |
+| `checkout` | `Enter` | Branches と PRs |
+| `rename` / `delete` / `force_delete` | `r` / `d` / `D` | Branches |
+| `diff` | `Enter` | Stash と Worktree とコミット詳細 |
+| `stash` | `z` | Stash と Worktree |
+| `apply` / `pop` / `drop` | `a` / `Z` / `d` | Stash |
+| `browse` / `refresh` / `create_pr` | `o` / `r` / `N` | PRs |
+| `stage` / `unstage` / `discard` | `s` / `u` / `x` | Worktree と Diff |
+| `commit` / `amend` / `stash_file` | `c` / `C` / `Z` | Worktree |
+| `back` | `Esc` | Graph 以外 |
+
+- **同じ画面で 2 つの動作が名前を共有しない**（テストが見る）。共有すると 1 つの上書きが同じ画面に同じキーを 2 本置く
+- **stage / unstage / discard は共有の enum にしない**（`WorktreeAction` と `DiffAction` が別々に持つ）。名前の字が 2 箇所に出るだけで、共有の enum にすると `all_variants!` の網羅のテストが `missing` の形になる。共有の組はテストが固定しているので、字の打ち間違いで割れれば落ちる
+
+### 断る上書き
+
+- **`Ctrl-C` は上書きさせない**（2026-10-18 に決めた）。モーダル表示中も効く唯一の脱出口で、モーダルが受けるキーに付け替えると抜ける手が無くなる。**守るのは置き場所** —— `update_key` は表を引かずに `keys::INTERRUPT` と比べる（01）ので、上書きの処理に特例は要らない。**断るのは名前と値の両方** —— `interrupt` の名前を受け付けないだけでは足りず、値に `"ctrl-c"` を書いた上書き（`fetch = "ctrl-c"`）も警告して捨てる。捨てないと、`?` の一覧が `Ctrl-C:fetch` と案内し、押すと先頭の `INTERRUPT` が受けて終了する（01）。`q` / `?` / `Tab` / 番号は上書きできる
+- 知らない名前・読めない値も警告して捨てる。ほかの上書きは当たる
+
+### 衝突
+
+- **衝突はペインごとに「共通キー ∪ そのペインのキー ∪ 別名」で見る。** 判定は `PaneKeys::build`（production）が持ち、既定の表では空であることをテストが見る
+- **後勝ち。** 上書きは既定の打鍵（と別名）より強い。**上書き同士は名前の昇順で後ろが勝つ** —— `keymap` は `HashMap` で、ファイルに書いた順は残っていない。`fetch = "X"` と `pull = "X"` なら `pull`
+- **負けた打鍵はその画面の表から外す** —— 案内（フッター・`?` の一覧・`keys::live_key`）からも dispatch からも。外さないと、`fetch = "s"` で Worktree の `?` の一覧が `s:stage` と案内しながら `s` で fetch が走る。打鍵が 1 つも残らない行は行ごと落ちる。**外すのは重なった画面だけ** —— 共通キーの `f` を `stage` に当てても、`stage` の無い Graph では `f:fetch` は残る
+- 衝突は警告する。共通キーの衝突は全部のペインで起きるので、同じ組（勝った名前と負けた名前）は 1 つに畳む
+
+### 警告
+
+**`AppState::new` が `Warn` の通知として積む**（`KeymapWarning`）。`ConfigWarning` は `config` の型なので、`app::Key` の解析の失敗を運べない。文言は `[keymap] <名前> = "<値>": <理由>` の形。
+
+### 文言に書いたキーの字
+
+**通知や画面の文言に書いたキーの字（「`N` で作成」「`A` で内訳」など）は上書きに追従しない**（受け入れた穴。2026-10-18 に決めた）。キーを字にする関数が `ui` にしか無く、core の通知が引けない。塞ぐタスクは `docs/plan.md` の「MVP 後」。**PRs ペインの「（N）」だけは追従する** —— `ui` が `keys::live_key` で引いて字にしている（07 の「PRs ペイン」）

@@ -1,12 +1,15 @@
 //! 案内に出すキーとその説明の表。設計は 01 の「案内に出すキーの表」。
 //!
 //! **キーの一覧はここ 1 本。** 読むのはステータスバーの 2 行目（07 の「ステータスバー」）と
-//! `Modal::Help`（07 の「Help モーダル」）で、あとから入る `config.keymap` の上書き（08）も
-//! ここを読む。2 本に分けると、上書きしたときにヒントだけが既定の字を出す。
+//! `Modal::Help`（07 の「Help モーダル」）と dispatch（`update_key`）で、`config.keymap` の
+//! 上書き（08）もここに当たる。2 本に分けると、上書きしたときにヒントだけが既定の字を出す。
 //!
 //! **表が dispatch を兼ねる。** 1 打鍵ごとに [`Action`] を持ち、`update_key` はここを
 //! 引いてから各ペインの `*_key` で網羅 `match` する（01 の「表が dispatch を兼ねる」）。
-//! `config.keymap`（08）はアクション名で書くので、**`label` は鍵にならない**。
+//! `config.keymap`（08）はアクション名（[`Action::name`]）で書くので、**`label` は鍵にならない**。
+//!
+//! **既定の表は `const`、引くのは [`Keymap`]。** `AppState::new` が既定の表に上書きを当てて
+//! 画面（ペイン）ごとに組み、`AppState.keymap` に持つ。
 //!
 //! **表示の字は持たない。** `j/k` や `Enter` という並びは `ui` が [`KeyCode`] から
 //! 組む（導出できる値を離れた場所に置かない。`.claude/rules/rust-coding.md`）。
@@ -14,7 +17,10 @@
 //! **モーダル自身のキーの案内は入っていない** —— あちらは箱の中に自前の `HINT` を
 //! 持っている（`modals::*`。予算が違うので表に寄せない。07 の「ステータスバー」）。
 
-use super::{AppState, Key, KeyCode, Pane};
+use std::borrow::Cow;
+use std::collections::HashMap;
+
+use super::{AppState, Key, KeyCode, Pane, ParseKeyError};
 
 /// 表の 1 打鍵が引く動作。ペインごとの enum を包む。
 ///
@@ -133,13 +139,110 @@ pub enum DiffAction {
     Back,
 }
 
+impl Action {
+    /// `config.keymap` に書く名前（08 の「キーマップの解決」）。
+    ///
+    /// **名前の空間は平坦。** 同じ意味の動作は複数のペインで名前を共有し、上書きはその
+    /// 全部に効く（`stage` は Worktree と Diff、`back` は右列の `Esc`）。意味が違うものは
+    /// 分ける（PRs の `r` は `refresh`、Branches の `r` は `rename`）。**同じ画面で 2 つの
+    /// 動作が名前を共有しない**のは `no_name_is_shared_on_one_screen` が見る —— 共有すると
+    /// 1 つの上書きが同じ画面に同じキーを 2 本置く。
+    ///
+    /// **stage / unstage / discard を共有の enum にはしない**（`docs/plan.md` の 2/2 で
+    /// 数え直した）。名前の字が 2 箇所に出るだけで、共有の enum にすると `all_variants!` の
+    /// 網羅が `missing` の形になる。共有の取り違えは上のテストが落とす。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Down => "down",
+            Self::Up => "up",
+            Self::Common(action) => match action {
+                CommonAction::Help => "help",
+                CommonAction::Quit => "quit",
+                CommonAction::Fetch => "fetch",
+                CommonAction::Pull => "pull",
+                CommonAction::Push => "push",
+                CommonAction::Account => "account",
+                CommonAction::NoticeLog => "notice_log",
+                CommonAction::ProgressMenu => "progress_menu",
+                CommonAction::Reload => "reload",
+                CommonAction::NextPane => "next_pane",
+                CommonAction::PrevPane => "prev_pane",
+                CommonAction::ToGraph => "focus_graph",
+                CommonAction::ToBranches => "focus_branches",
+                CommonAction::ToStash => "focus_stash",
+                CommonAction::ToPrs => "focus_prs",
+                CommonAction::ToRight => "focus_right",
+                CommonAction::Interrupt => INTERRUPT_NAME,
+            },
+            Self::Graph(action) => match action {
+                GraphAction::Detail => "detail",
+                GraphAction::Branch => "branch",
+                GraphAction::CherryPick => "cherry_pick",
+                GraphAction::Revert => "revert",
+                GraphAction::Rebase => "rebase",
+                GraphAction::Mark => "mark",
+                GraphAction::Unmark => "unmark",
+            },
+            Self::Branches(action) => match action {
+                BranchesAction::Checkout => "checkout",
+                BranchesAction::Branch => "branch",
+                BranchesAction::Rename => "rename",
+                BranchesAction::Delete => "delete",
+                BranchesAction::ForceDelete => "force_delete",
+                BranchesAction::Back => "back",
+            },
+            Self::Stash(action) => match action {
+                StashAction::Diff => "diff",
+                StashAction::Stash => "stash",
+                StashAction::Apply => "apply",
+                StashAction::Pop => "pop",
+                StashAction::Drop => "drop",
+                StashAction::Back => "back",
+            },
+            Self::Prs(action) => match action {
+                PrsAction::Checkout => "checkout",
+                PrsAction::Open => "browse",
+                PrsAction::Refresh => "refresh",
+                PrsAction::Create => "create_pr",
+                PrsAction::Back => "back",
+            },
+            Self::Worktree(action) => match action {
+                WorktreeAction::Diff => "diff",
+                WorktreeAction::Stage => "stage",
+                WorktreeAction::Unstage => "unstage",
+                WorktreeAction::Discard => "discard",
+                WorktreeAction::Commit => "commit",
+                WorktreeAction::Amend => "amend",
+                WorktreeAction::Stash => "stash",
+                WorktreeAction::StashFile => "stash_file",
+                WorktreeAction::Back => "back",
+            },
+            Self::CommitDetail(action) => match action {
+                CommitDetailAction::Diff => "diff",
+                CommitDetailAction::Back => "back",
+            },
+            Self::Diff(action) => match action {
+                DiffAction::Stage => "stage",
+                DiffAction::Unstage => "unstage",
+                DiffAction::Discard => "discard",
+                DiffAction::Back => "back",
+            },
+        }
+    }
+}
+
+/// [`CommonAction::Interrupt`] の名前。**上書きを断る**（08。脱出口は [`INTERRUPT`]）。
+const INTERRUPT_NAME: &str = "interrupt";
+
 /// 案内 1 つ —— 押すキーと、押すと何が起きるか。
 ///
 /// **動作は行ではなく打鍵ごとに持つ**（`j/k:移動` は 1 行で 2 つ）。行の束ね方は 07 の
 /// 80 桁の実測が前提なので、同一性のために割らない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// **打鍵は `Cow`。** 既定の表は `const` で借り、上書きを当てた行だけが持つ（[`Keymap`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyHint {
-    binds: &'static [(Key, Action)],
+    binds: Cow<'static, [(Key, Action)]>,
     label: &'static str,
 }
 
@@ -148,10 +251,6 @@ impl KeyHint {
     ///
     /// **別名は入れていない** —— `j` の代わりに効く `Down` は表に無い。ここは案内に
     /// 出すものの一覧で、出さないものを足しても案内は変わらない（01）。
-    ///
-    /// **`'static` を約束しない。** `config.keymap` の上書き（08）で差し替えたキーは
-    /// `'static` では持てない。**先に外したのはここだけ**で、[`pane`] / [`live`] /
-    /// [`help`] の `'static` は上書きを入れるタスク（`docs/plan.md` の 2/2）で外す。
     pub fn keys(&self) -> impl Iterator<Item = Key> + '_ {
         self.binds.iter().map(|(key, _)| *key)
     }
@@ -168,7 +267,10 @@ impl KeyHint {
 
 /// 表に並べるときの短縮。
 const fn hint(binds: &'static [(Key, Action)], label: &'static str) -> KeyHint {
-    KeyHint { binds, label }
+    KeyHint {
+        binds: Cow::Borrowed(binds),
+        label,
+    }
 }
 
 /// 修飾なしの文字キーと動作の組。
@@ -182,7 +284,7 @@ const fn code(code: KeyCode, action: Action) -> (Key, Action) {
 }
 
 /// キーの一覧（`Modal::Help`）を開く。
-pub const HELP: KeyHint = hint(&[ch('?', Action::Common(CommonAction::Help))], "help");
+const HELP: KeyHint = hint(&[ch('?', Action::Common(CommonAction::Help))], "help");
 
 /// 中断 / 終了の打鍵。**表を引かずにこの定数と比べる**（`update_key` の先頭）。
 ///
@@ -192,15 +294,15 @@ pub const HELP: KeyHint = hint(&[ch('?', Action::Common(CommonAction::Help))], "
 pub const INTERRUPT: Key = Key::ctrl('c');
 
 /// 終了。
-pub const QUIT: KeyHint = hint(&[ch('q', Action::Common(CommonAction::Quit))], "quit");
+const QUIT: KeyHint = hint(&[ch('q', Action::Common(CommonAction::Quit))], "quit");
 
 /// **フッターに必ず出し、幅が足りなくても落とさない**キー（07 の「ステータスバー」）。
 /// どのペインでも効く。
-pub const PINNED: &[KeyHint] = &[HELP, QUIT];
+const PINNED: &[KeyHint] = &[HELP, QUIT];
 
 /// どのペインでも効くキーのうち、**フッターには出さないもの**（`Modal::Help` だけが読む。
 /// 07 の「ステータスバー」）。`update_key` がペインの表より先に引く。
-pub const COMMON: &[KeyHint] = &[
+const COMMON: &[KeyHint] = &[
     // **1 行に束ねる。** 分けると `R` を足した時点で `?` の一覧が 80x24 に収まらない
     // （07 の「Help モーダル」。Worktree の `z/Z` と同じ理由）。
     hint(
@@ -406,104 +508,16 @@ const DIFF: &[KeyHint] = &[
     hint(&[code(KeyCode::Esc, Action::Diff(DiffAction::Back))], BACK),
 ];
 
-/// どのペインでも効く表（[`COMMON`] と [`PINNED`]）。
-pub(crate) fn anywhere() -> impl Iterator<Item = &'static KeyHint> {
+/// どのペインでも効く既定の表（[`COMMON`] と [`PINNED`]）。
+fn anywhere() -> impl Iterator<Item = &'static KeyHint> {
     COMMON.iter().chain(PINNED)
 }
 
-/// 表の打鍵を平たく並べる。
-fn binds<'a>(
-    hints: impl IntoIterator<Item = &'a KeyHint>,
-) -> impl Iterator<Item = &'a (Key, Action)> {
-    hints.into_iter().flat_map(|hint| hint.binds)
-}
-
-/// `binds` で `key` を引く。**比べるのは `Key` 全体**（修飾付きのキーを拾わない。01）。
-fn find<'a>(binds: impl IntoIterator<Item = &'a (Key, Action)>, key: Key) -> Option<Action> {
-    binds
-        .into_iter()
-        .find(|(bound, _)| *bound == key)
-        .map(|(_, action)| *action)
-}
-
-/// どのペインでも効く表で `key` を引く。
-pub(crate) fn common_action(key: Key) -> Option<CommonAction> {
-    match find(binds(anywhere()), key)? {
-        Action::Common(action) => Some(action),
-        // 共通の表にペインの動作は置かない（`the_tables_hold_only_their_own_actions`）。
-        _ => None,
-    }
-}
-
-/// `pane` の表で `key` を引き、無ければ別名（[`ALIASES`]）を引く。
-pub(crate) fn pane_action(pane: Pane, key: Key) -> Option<Action> {
-    find(binds(self::pane(pane)).chain(ALIASES), key)
-}
-
-/// [`help`] の段。見出しの字は `ui` が持つ。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HelpSection {
-    /// 開いたときのペインのキー。
-    Pane,
-    /// どのペインでも効くキー（[`COMMON`] と [`PINNED`]）。
-    Anywhere,
-}
-
-/// [`help`] の 1 行。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HelpRow {
-    Heading(HelpSection),
-    Key(&'static KeyHint),
-}
-
-/// `Modal::Help` の行。**そのペインのキー → どこでも効くキー**の 2 段（07 の
-/// 「Help モーダル」）。ほかのペインのキーは出さない —— 押せるのは今いるペインのものだけ。
-///
-/// **キーの無いペインは無い**（Stash がキーを持った時点で最後の 1 つが消えた）ので、
-/// 「空の段を見せない」分岐は置かない —— 踏めない腕はテストで見張れずに腐る。
-pub fn help(pane: Pane) -> Vec<HelpRow> {
-    let here = self::pane(pane);
-    let mut rows = Vec::with_capacity(here.len() + COMMON.len() + PINNED.len() + 2);
-    rows.push(HelpRow::Heading(HelpSection::Pane));
-    rows.extend(here.iter().map(HelpRow::Key));
-    rows.push(HelpRow::Heading(HelpSection::Anywhere));
-    rows.extend(anywhere().map(HelpRow::Key));
-    rows
-}
-
-/// **いま**押せるペインのキー。`None` は「この表のどれも押せない」。
-///
-/// **モーダル表示中が `None`。** そのあいだキーは全部モーダルが受けるので
-/// （`update_key`）、ペインのキーも [`COMMON`] も [`PINNED`] も効かない。
-/// **`ui` に `modal.is_some()` を書かせない**ため、ここが答える —— あちらに書くと
-/// 振り分けの規則の写しが 2 本になる。**モーダル自身のキーの案内は各モーダルが
-/// 持っている**（`modals::*` の `HINT`。表には寄せない。07）。
-pub fn live(state: &AppState) -> Option<&'static [KeyHint]> {
-    if state.modal.is_some() {
-        return None;
-    }
-    Some(pane(state.focus))
-}
-
-/// `action` に**いま**効くキー。`None` は「いまは押せない」。引くのはペインの表
-/// （[`live`]）と、どこでも効く表（[`COMMON`] と [`PINNED`]）の両方。
-///
-/// **ペインの本文にキーを書くときに使う**（PRs ペインの「開いている PR はありません（N）」。
-/// 07 の「PRs ペイン」）。`ui` が `focus` やモーダルを見て自分で決めると、振り分けの規則の
-/// 写しが 2 本になり、モーダル表示中に効かない案内が出る（[`live`] の doc と同じ理由）。
-/// **字ではなく動作で聞く** —— 字で聞くと、`config.keymap`（08）で上書きした瞬間に
-/// 押せないキーを案内する。表に載っていない別名（`Down` など）は返さない。
-pub fn live_key(state: &AppState, action: Action) -> Option<Key> {
-    binds(live(state)?.iter().chain(anywhere()))
-        .find(|(_, bound)| *bound == action)
-        .map(|(key, _)| *key)
-}
-
-/// そのペインで押せるキー。
+/// そのペインの既定の表。
 ///
 /// **網羅 `match`。** `Pane` に変種を足すと実装漏れがコンパイルエラーになる
 /// （キーを受ける先を作ってから巡回に足す、という順序をここでも強いる）。
-pub fn pane(pane: Pane) -> &'static [KeyHint] {
+fn table(pane: Pane) -> &'static [KeyHint] {
     match pane {
         Pane::Graph => GRAPH,
         Pane::Branches => BRANCHES,
@@ -513,6 +527,318 @@ pub fn pane(pane: Pane) -> &'static [KeyHint] {
         Pane::Diff => DIFF,
         Pane::Stash => STASH,
     }
+}
+
+/// 表の打鍵を平たく並べる。
+fn binds<'a>(
+    hints: impl IntoIterator<Item = &'a KeyHint>,
+) -> impl Iterator<Item = &'a (Key, Action)> {
+    hints.into_iter().flat_map(|hint| hint.binds.iter())
+}
+
+/// `config.keymap` を読んで見つかった問題（08 の「キーマップの解決」）。どれも
+/// **その上書きを捨てるか負けさせるだけ**で、起動は止めない。`AppState::new` が `Warn` の
+/// 通知として積む。
+///
+/// **`ConfigWarning` に入れない** —— あちらは `config` の型で、`config` は最下段（00）なので
+/// [`Key::parse`] の失敗を運べない。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum KeymapWarning {
+    #[error("[keymap] {name}: その名前の動作はありません")]
+    UnknownAction { name: String },
+    #[error("[keymap] {name} = \"{value}\": {reason}")]
+    BadKey {
+        name: String,
+        value: String,
+        reason: ParseKeyError,
+    },
+    /// `interrupt` の名前。脱出口は表を引かない（[`INTERRUPT`]）ので、書いても効かない。
+    #[error("[keymap] interrupt は変えられません（Ctrl-C は中断 / 終了の脱出口です）")]
+    ReservedAction,
+    /// 値が `Ctrl-C`。**捨てないと、案内に `Ctrl-C:fetch` と出ながら押すと終了する**（08）。
+    #[error("[keymap] {name} = \"{value}\": Ctrl-C は中断 / 終了に使うので割り当てられません")]
+    ReservedKey { name: String, value: String },
+    /// 同じ画面で 1 つのキーが 2 つの動作に当たった。`winner` が効き、`loser` の打鍵は
+    /// その画面の表から外れる。
+    #[error("[keymap] \"{value}\" が {winner} と {loser} に重なるので {winner} を使います")]
+    Conflict {
+        value: String,
+        winner: &'static str,
+        loser: &'static str,
+    },
+}
+
+/// 読めた上書き 1 つ。
+struct Override<'a> {
+    name: &'a str,
+    value: &'a str,
+    key: Key,
+}
+
+/// 上書きを当てて画面（ペイン）ごとに組んだ表。`AppState.keymap` が持つ（08 の
+/// 「キーマップの解決」）。
+///
+/// **画面ごとに組む。** 衝突は「共通キー ∪ そのペインのキー ∪ 別名」で見るので（08）、
+/// 負けた打鍵を外す先も画面ごとに違う —— 共通キーの `f` が Worktree でだけ `stage` の
+/// 上書きに負けると、Worktree の表からだけ `f:fetch` が消える。**外さないと、案内に出ている
+/// キーを押して別の動作が起きる。**
+#[derive(Debug, Clone)]
+pub struct Keymap {
+    graph: PaneKeys,
+    branches: PaneKeys,
+    stash: PaneKeys,
+    prs: PaneKeys,
+    worktree: PaneKeys,
+    commit_detail: PaneKeys,
+    diff: PaneKeys,
+}
+
+impl Default for Keymap {
+    /// 上書きの無い表。
+    fn default() -> Self {
+        Self::new(&HashMap::new()).0
+    }
+}
+
+impl Keymap {
+    /// 既定の表に `overrides`（`config.keymap`）を当てる。
+    ///
+    /// **衝突は後勝ち。** 上書きは既定の打鍵より強く、上書き同士は**名前の昇順で後ろが
+    /// 勝つ** —— `config.keymap` は `HashMap` で、ファイルに書いた順は残っていない（08）。
+    pub fn new(overrides: &HashMap<String, String>) -> (Self, Vec<KeymapWarning>) {
+        let mut warnings = Vec::new();
+        let mut entries: Vec<(&String, &String)> = overrides.iter().collect();
+        entries.sort();
+        let mut parsed = Vec::new();
+        for (name, value) in entries {
+            if name == INTERRUPT_NAME {
+                warnings.push(KeymapWarning::ReservedAction);
+                continue;
+            }
+            // **名前は既定の表から引く**（全変種が表に在ることは `every_action_is_bound_in_its_table`）。
+            let known = Pane::ALL
+                .iter()
+                .flat_map(|&pane| binds(table(pane)))
+                .chain(binds(anywhere()))
+                .any(|(_, action)| action.name() == name);
+            if !known {
+                warnings.push(KeymapWarning::UnknownAction { name: name.clone() });
+                continue;
+            }
+            match Key::parse(value) {
+                Err(reason) => warnings.push(KeymapWarning::BadKey {
+                    name: name.clone(),
+                    value: value.clone(),
+                    reason,
+                }),
+                Ok(key) if key == INTERRUPT => warnings.push(KeymapWarning::ReservedKey {
+                    name: name.clone(),
+                    value: value.clone(),
+                }),
+                Ok(key) => parsed.push(Override { name, value, key }),
+            }
+        }
+        let mut conflicts = Vec::new();
+        let mut build = |pane| PaneKeys::build(pane, &parsed, &mut conflicts);
+        let keymap = Self {
+            graph: build(Pane::Graph),
+            branches: build(Pane::Branches),
+            stash: build(Pane::Stash),
+            prs: build(Pane::Prs),
+            worktree: build(Pane::Worktree),
+            commit_detail: build(Pane::CommitDetail),
+            diff: build(Pane::Diff),
+        };
+        warnings.extend(conflicts);
+        (keymap, warnings)
+    }
+
+    /// そのペインに居るときの表。
+    pub fn pane(&self, pane: Pane) -> &PaneKeys {
+        match pane {
+            Pane::Graph => &self.graph,
+            Pane::Branches => &self.branches,
+            Pane::Stash => &self.stash,
+            Pane::Prs => &self.prs,
+            Pane::Worktree => &self.worktree,
+            Pane::CommitDetail => &self.commit_detail,
+            Pane::Diff => &self.diff,
+        }
+    }
+}
+
+/// 1 つのペインに居るときに効くキー —— そのペインの表、どこでも効く表、別名。
+///
+/// **案内の表と引く表は同じものから組む**（[`PaneKeys::build`]）。衝突に負けた打鍵は
+/// どちらからも外れている。
+#[derive(Debug, Clone)]
+pub struct PaneKeys {
+    hints: Vec<KeyHint>,
+    common: Vec<KeyHint>,
+    pinned: Vec<KeyHint>,
+    actions: HashMap<Key, Action>,
+}
+
+impl PaneKeys {
+    /// `pane` の既定の表に `overrides` を当てて組む。衝突は `conflicts` に足す（重複は畳む。
+    /// 共通キーの衝突は全部のペインで起きる）。
+    fn build(pane: Pane, overrides: &[Override], conflicts: &mut Vec<KeymapWarning>) -> Self {
+        // 強さ: 別名 < 既定 < 上書き（名前の昇順で後ろほど強い）。
+        const ALIAS: usize = 0;
+        const DEFAULT: usize = 1;
+        let apply = |&(key, action): &(Key, Action)| match overrides
+            .iter()
+            .position(|o| o.name == action.name())
+        {
+            Some(i) => (overrides[i].key, action, DEFAULT + 1 + i),
+            None => (key, action, DEFAULT),
+        };
+        let tables = [table(pane), COMMON, PINNED];
+        let mut ranked: Vec<(Key, Action, usize)> = ALIASES
+            .iter()
+            .map(|&(key, action)| (key, action, ALIAS))
+            .chain(binds(tables.iter().copied().flatten()).map(apply))
+            .collect();
+        ranked.sort_by_key(|(_, _, rank)| *rank);
+
+        let mut actions: HashMap<Key, Action> = HashMap::new();
+        for (key, action, rank) in ranked {
+            if let Some(loser) = actions.insert(key, action).filter(|loser| *loser != action) {
+                let value = match rank.checked_sub(DEFAULT + 1) {
+                    Some(i) => overrides[i].value.to_string(),
+                    // 既定の表どうしは重ならない（`the_default_tables_have_no_conflicts…`）。
+                    None => format!("{key:?}"),
+                };
+                let conflict = KeymapWarning::Conflict {
+                    value,
+                    winner: action.name(),
+                    loser: loser.name(),
+                };
+                if !conflicts.contains(&conflict) {
+                    conflicts.push(conflict);
+                }
+            }
+        }
+
+        // 負けた打鍵を外す。打鍵が 1 つも残らない行は落とす。
+        let resolve = |hints: &'static [KeyHint]| -> Vec<KeyHint> {
+            hints
+                .iter()
+                .filter_map(|hint| {
+                    let kept: Vec<(Key, Action)> = hint
+                        .binds
+                        .iter()
+                        .map(|bind| {
+                            let (key, action, _) = apply(bind);
+                            (key, action)
+                        })
+                        .filter(|(key, action)| actions.get(key) == Some(action))
+                        .collect();
+                    if kept.is_empty() {
+                        None
+                    } else if kept[..] == hint.binds[..] {
+                        Some(hint.clone())
+                    } else {
+                        Some(KeyHint {
+                            binds: Cow::Owned(kept),
+                            label: hint.label,
+                        })
+                    }
+                })
+                .collect()
+        };
+        Self {
+            hints: resolve(table(pane)),
+            common: resolve(COMMON),
+            pinned: resolve(PINNED),
+            actions,
+        }
+    }
+
+    /// そのペインの表。
+    pub fn hints(&self) -> &[KeyHint] {
+        &self.hints
+    }
+
+    /// **フッターに必ず出し、幅が足りなくても落とさない**キー（`?` と `q`。07 の
+    /// 「ステータスバー」）。
+    pub fn pinned(&self) -> &[KeyHint] {
+        &self.pinned
+    }
+
+    /// どのペインでも効く表（フッターに出さないものと [`pinned`](Self::pinned)）。
+    pub fn anywhere(&self) -> impl Iterator<Item = &KeyHint> {
+        self.common.iter().chain(&self.pinned)
+    }
+
+    /// `key` が引く動作。**比べるのは `Key` 全体**（修飾付きのキーを拾わない。01）。
+    pub fn action(&self, key: Key) -> Option<Action> {
+        self.actions.get(&key).copied()
+    }
+
+    /// `action` に効くキー。表に載っていない別名（`Down` など）は返さない。
+    pub fn key_for(&self, action: Action) -> Option<Key> {
+        binds(self.hints.iter().chain(self.anywhere()))
+            .find(|(_, bound)| *bound == action)
+            .map(|(key, _)| *key)
+    }
+
+    /// `Modal::Help` の行。**そのペインのキー → どこでも効くキー**の 2 段（07 の
+    /// 「Help モーダル」）。ほかのペインのキーは出さない —— 押せるのは今いるペインのものだけ。
+    ///
+    /// **キーの無いペインは無い**（Stash がキーを持った時点で最後の 1 つが消えた）ので、
+    /// 「空の段を見せない」分岐は置かない —— 踏めない腕はテストで見張れずに腐る。
+    pub fn help(&self) -> Vec<HelpRow<'_>> {
+        let mut rows =
+            Vec::with_capacity(self.hints.len() + self.common.len() + self.pinned.len() + 2);
+        rows.push(HelpRow::Heading(HelpSection::Pane));
+        rows.extend(self.hints.iter().map(HelpRow::Key));
+        rows.push(HelpRow::Heading(HelpSection::Anywhere));
+        rows.extend(self.anywhere().map(HelpRow::Key));
+        rows
+    }
+}
+
+/// [`PaneKeys::help`] の段。見出しの字は `ui` が持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpSection {
+    /// 開いたときのペインのキー。
+    Pane,
+    /// どのペインでも効くキー。
+    Anywhere,
+}
+
+/// [`PaneKeys::help`] の 1 行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpRow<'a> {
+    Heading(HelpSection),
+    Key(&'a KeyHint),
+}
+
+/// **いま**押せるキー。`None` は「この表のどれも押せない」。
+///
+/// **モーダル表示中が `None`。** そのあいだキーは全部モーダルが受けるので
+/// （`update_key`）、ペインのキーもどこでも効くキーも効かない。
+/// **`ui` に `modal.is_some()` を書かせない**ため、ここが答える —— あちらに書くと
+/// 振り分けの規則の写しが 2 本になる。**モーダル自身のキーの案内は各モーダルが
+/// 持っている**（`modals::*` の `HINT`。表には寄せない。07）。
+pub fn live(state: &AppState) -> Option<&PaneKeys> {
+    if state.modal.is_some() {
+        return None;
+    }
+    Some(state.keymap.pane(state.focus))
+}
+
+/// `action` に**いま**効くキー。`None` は「いまは押せない」。引くのはペインの表
+/// （[`live`]）と、どこでも効く表の両方。
+///
+/// **ペインの本文にキーを書くときに使う**（PRs ペインの「開いている PR はありません（N）」。
+/// 07 の「PRs ペイン」）。`ui` が `focus` やモーダルを見て自分で決めると、振り分けの規則の
+/// 写しが 2 本になり、モーダル表示中に効かない案内が出る（[`live`] の doc と同じ理由）。
+/// **字ではなく動作で聞く** —— 字で聞くと、`config.keymap`（08）で上書きした瞬間に
+/// 押せないキーを案内する。表に載っていない別名（`Down` など）は返さない。
+pub fn live_key(state: &AppState, action: Action) -> Option<Key> {
+    live(state)?.key_for(action)
 }
 
 #[cfg(test)]
@@ -673,7 +999,7 @@ mod tests {
         for &action in &pane_actions {
             let pane = owner(action).unwrap_or_else(|| panic!("{action:?} の持ち主がありません"));
             assert!(
-                bound(self::pane(pane)).contains(&action),
+                bound(table(pane)).contains(&action),
                 "{pane:?} の表に {action:?} がありません"
             );
         }
@@ -687,7 +1013,7 @@ mod tests {
                 "{pane:?} の動作が並んでいません"
             );
             // **移動はどのペインにもある**（別名の矢印もこれを前提にペインを問わず引く）。
-            let table = bound(self::pane(pane));
+            let table = bound(table(pane));
             for action in [Action::Down, Action::Up] {
                 assert!(
                     table.contains(&action),
@@ -705,7 +1031,7 @@ mod tests {
             assert!(matches!(action, Action::Common(_)), "共通の表に {action:?}");
         }
         for &pane in Pane::ALL {
-            for action in bound(self::pane(pane)) {
+            for action in bound(table(pane)) {
                 let own =
                     matches!(action, Action::Down | Action::Up) || owner(action) == Some(pane);
                 assert!(own, "{pane:?} の表に {action:?}");
@@ -713,21 +1039,307 @@ mod tests {
         }
     }
 
-    /// **1 つのキーが同じ画面で 2 つの動作を引かない。** 数えるのは「共通キー ∪ そのペインの
-    /// キー ∪ 別名」—— 共通キーはペインより先に引くので、重なるとペインのキーが押せない（08）。
+    /// **既定の表では、1 つのキーが同じ画面で 2 つの動作を引かない。** 数えるのは
+    /// 「共通キー ∪ そのペインのキー ∪ 別名」—— 判定は production の [`PaneKeys::build`] が
+    /// 持つ（08）。**否定だけだと自明に通る**ので、重なる上書きで警告が出ることも続けて見る。
     #[test]
-    fn no_key_is_bound_twice_on_one_screen() {
+    fn the_default_tables_have_no_conflicts_but_an_override_can_make_one() {
+        assert_eq!(Keymap::new(&HashMap::new()).1, Vec::new());
+
+        let (_, warnings) = Keymap::new(&overrides(&[("fetch", "s")]));
+        assert_eq!(
+            warnings,
+            vec![KeymapWarning::Conflict {
+                value: "s".into(),
+                winner: "fetch",
+                loser: "stage",
+            }],
+            "Worktree と Diff の 2 画面で重なるが、警告は 1 つに畳む"
+        );
+    }
+
+    /// **同じ画面で 2 つの動作が名前を共有しない**（[`Action::name`]）。共有すると、1 つの
+    /// 上書きが同じ画面に同じキーを 2 本置き、片方が必ず負ける。
+    #[test]
+    fn no_name_is_shared_on_one_screen() {
         for &pane in Pane::ALL {
-            let mut seen: Vec<Key> = Vec::new();
-            let on_screen = binds(anywhere().chain(self::pane(pane))).chain(ALIASES);
-            for (key, action) in on_screen {
+            let mut seen: Vec<(&str, Action)> = Vec::new();
+            let on_screen = binds(anywhere().chain(table(pane)));
+            for &(_, action) in on_screen {
+                let name = action.name();
                 assert!(
-                    !seen.contains(key),
-                    "{pane:?} で {key:?} が 2 度（{action:?}）"
+                    !seen.iter().any(|(n, a)| *n == name && *a != action),
+                    "{pane:?} で {name} が 2 つの動作に付いています"
                 );
-                seen.push(*key);
+                seen.push((name, action));
             }
         }
+    }
+
+    /// **名前を共有する動作の組は、意図したものだけ**（08 の「キーマップの解決」）。
+    /// `name` の字の打ち間違いで共有が割れる形と、意図しない共有の両方を落とす。
+    #[test]
+    fn the_names_shared_across_panes_are_the_intended_ones() {
+        let mut by_name: Vec<(&str, Vec<Action>)> = Vec::new();
+        let all = Pane::ALL
+            .iter()
+            .flat_map(|&pane| binds(table(pane)))
+            .chain(binds(anywhere()));
+        for &(_, action) in all {
+            match by_name.iter_mut().find(|(name, _)| *name == action.name()) {
+                Some((_, actions)) if actions.contains(&action) => {}
+                Some((_, actions)) => actions.push(action),
+                None => by_name.push((action.name(), vec![action])),
+            }
+        }
+        let shared: Vec<(&str, Vec<Action>)> = by_name
+            .into_iter()
+            .filter(|(_, actions)| actions.len() > 1)
+            .collect();
+        assert_eq!(
+            shared,
+            vec![
+                (
+                    "branch",
+                    vec![
+                        Action::Graph(GraphAction::Branch),
+                        Action::Branches(BranchesAction::Branch)
+                    ]
+                ),
+                (
+                    "checkout",
+                    vec![
+                        Action::Branches(BranchesAction::Checkout),
+                        Action::Prs(PrsAction::Checkout)
+                    ]
+                ),
+                (
+                    "back",
+                    vec![
+                        Action::Branches(BranchesAction::Back),
+                        Action::Stash(StashAction::Back),
+                        Action::Prs(PrsAction::Back),
+                        Action::Worktree(WorktreeAction::Back),
+                        Action::CommitDetail(CommitDetailAction::Back),
+                        Action::Diff(DiffAction::Back),
+                    ]
+                ),
+                (
+                    "diff",
+                    vec![
+                        Action::Stash(StashAction::Diff),
+                        Action::Worktree(WorktreeAction::Diff),
+                        Action::CommitDetail(CommitDetailAction::Diff),
+                    ]
+                ),
+                (
+                    "stash",
+                    vec![
+                        Action::Stash(StashAction::Stash),
+                        Action::Worktree(WorktreeAction::Stash)
+                    ]
+                ),
+                (
+                    "stage",
+                    vec![
+                        Action::Worktree(WorktreeAction::Stage),
+                        Action::Diff(DiffAction::Stage)
+                    ]
+                ),
+                (
+                    "unstage",
+                    vec![
+                        Action::Worktree(WorktreeAction::Unstage),
+                        Action::Diff(DiffAction::Unstage)
+                    ]
+                ),
+                (
+                    "discard",
+                    vec![
+                        Action::Worktree(WorktreeAction::Discard),
+                        Action::Diff(DiffAction::Discard)
+                    ]
+                ),
+            ]
+        );
+    }
+
+    fn overrides(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// 画面の表の全打鍵。
+    fn screen_binds(keys: &PaneKeys) -> Vec<(Key, Action)> {
+        binds(keys.hints().iter().chain(keys.anywhere()))
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn an_override_moves_the_key_on_every_pane_that_shares_the_name() {
+        let (keymap, warnings) = Keymap::new(&overrides(&[("stage", "S"), ("down", "ctrl-n")]));
+        assert_eq!(warnings, Vec::new());
+        let stage_on = |pane| keymap.pane(pane).action(Key::char('S'));
+        assert_eq!(
+            stage_on(Pane::Worktree),
+            Some(Action::Worktree(WorktreeAction::Stage))
+        );
+        assert_eq!(stage_on(Pane::Diff), Some(Action::Diff(DiffAction::Stage)));
+        for &pane in Pane::ALL {
+            let keys = keymap.pane(pane);
+            // **元のキーは効かなくなる**（足すのではなく差し替える）。
+            assert_eq!(keys.action(Key::char('s')), None, "{pane:?}");
+            assert_eq!(keys.action(Key::char('j')), None, "{pane:?}");
+            assert_eq!(keys.action(Key::ctrl('n')), Some(Action::Down), "{pane:?}");
+            // 表に出さない別名は残る。
+            assert_eq!(
+                keys.action(Key::new(KeyCode::Down)),
+                Some(Action::Down),
+                "{pane:?}"
+            );
+            // **案内も同じ表から出る**（ヒントだけが既定の字を出す形は作れない）。
+            assert_eq!(keys.key_for(Action::Down), Some(Key::ctrl('n')), "{pane:?}");
+        }
+        assert_eq!(
+            keymap
+                .pane(Pane::Diff)
+                .key_for(Action::Diff(DiffAction::Stage)),
+            Some(Key::char('S'))
+        );
+        // 上書きの無い行は既定のまま（`k` は `j` と同じ行だが動かない）。
+        assert_eq!(
+            keymap.pane(Pane::Graph).action(Key::char('k')),
+            Some(Action::Up)
+        );
+    }
+
+    /// **衝突は後勝ちで、負けた打鍵はその画面の表から外れる**（08）。外さないと、`?` の
+    /// 一覧が `s:stage` と案内しながら `s` で fetch が走る。
+    #[test]
+    fn a_conflicting_override_wins_and_the_loser_leaves_that_screen() {
+        let (keymap, _) = Keymap::new(&overrides(&[("fetch", "s")]));
+        let worktree = keymap.pane(Pane::Worktree);
+        let stage = Action::Worktree(WorktreeAction::Stage);
+        let fetch = Action::Common(CommonAction::Fetch);
+        assert_eq!(worktree.action(Key::char('s')), Some(fetch));
+        assert_eq!(worktree.key_for(stage), None);
+        assert!(!screen_binds(worktree).contains(&(Key::char('s'), stage)));
+        // **行ごと落ちる**（打鍵が 1 つも残らない）。
+        assert!(!worktree.hints().iter().any(|hint| hint.label() == "stage"));
+        // 重ならない画面では両方とも残る（Graph に `s` は無い）。
+        let graph = keymap.pane(Pane::Graph);
+        assert_eq!(graph.action(Key::char('s')), Some(fetch));
+        assert_eq!(graph.key_for(fetch), Some(Key::char('s')));
+        // 元の `f` は空く。
+        assert_eq!(worktree.action(Key::char('f')), None);
+    }
+
+    /// **上書き同士は名前の昇順で後ろが勝つ**（`config.keymap` は `HashMap` で順序を持たない。08）。
+    #[test]
+    fn of_two_overrides_on_one_key_the_later_name_wins() {
+        let (keymap, warnings) = Keymap::new(&overrides(&[("pull", "X"), ("fetch", "X")]));
+        assert_eq!(
+            warnings,
+            vec![KeymapWarning::Conflict {
+                value: "X".into(),
+                winner: "pull",
+                loser: "fetch",
+            }]
+        );
+        for &pane in Pane::ALL {
+            assert_eq!(
+                keymap.pane(pane).action(Key::char('X')),
+                Some(Action::Common(CommonAction::Pull)),
+                "{pane:?}"
+            );
+            assert_eq!(
+                keymap
+                    .pane(pane)
+                    .key_for(Action::Common(CommonAction::Fetch)),
+                None,
+                "{pane:?}"
+            );
+        }
+    }
+
+    /// **`Ctrl-C` は名前でも値でも上書きさせない**（08）。値の側は、捨てないと `?` の一覧が
+    /// `Ctrl-C:fetch` と案内し、押すと先頭の [`INTERRUPT`] が受けて終了する。
+    #[test]
+    fn interrupt_can_be_neither_renamed_nor_taken() {
+        let (keymap, warnings) =
+            Keymap::new(&overrides(&[("interrupt", "ctrl-q"), ("fetch", "ctrl-c")]));
+        assert_eq!(
+            warnings,
+            vec![
+                KeymapWarning::ReservedKey {
+                    name: "fetch".into(),
+                    value: "ctrl-c".into(),
+                },
+                KeymapWarning::ReservedAction,
+            ]
+        );
+        let graph = keymap.pane(Pane::Graph);
+        let fetch = Action::Common(CommonAction::Fetch);
+        // 捨てた上書きは当たらない —— `f` は fetch のまま。
+        assert_eq!(graph.key_for(fetch), Some(Key::char('f')));
+        assert_eq!(graph.action(Key::ctrl('q')), None);
+        assert_eq!(
+            graph.key_for(Action::Common(CommonAction::Interrupt)),
+            Some(INTERRUPT)
+        );
+    }
+
+    #[test]
+    fn unknown_names_and_unreadable_values_are_warned_and_dropped() {
+        let (keymap, warnings) = Keymap::new(&overrides(&[("stagee", "S"), ("stage", "ctrl-S")]));
+        assert_eq!(
+            warnings,
+            vec![
+                KeymapWarning::BadKey {
+                    name: "stage".into(),
+                    value: "ctrl-S".into(),
+                    reason: ParseKeyError::CtrlUppercase,
+                },
+                KeymapWarning::UnknownAction {
+                    name: "stagee".into()
+                },
+            ]
+        );
+        assert_eq!(
+            keymap.pane(Pane::Worktree).action(Key::char('s')),
+            Some(Action::Worktree(WorktreeAction::Stage))
+        );
+        assert_eq!(keymap.pane(Pane::Worktree).action(Key::char('S')), None);
+    }
+
+    /// **`AppState::new` が `config.keymap` を当て、警告を通知に積む**（08）。
+    #[test]
+    fn the_state_carries_the_overridden_table_and_the_warnings_as_notices() {
+        let config = Config {
+            keymap: overrides(&[("create_pr", "C"), ("nope", "x")]),
+            ..Config::default()
+        };
+        let mut state = AppState::new(RepoInfo::default(), config, FAKE_NOW);
+        state.focus = Pane::Prs;
+        assert_eq!(
+            live_key(&state, Action::Prs(PrsAction::Create)),
+            Some(Key::char('C'))
+        );
+        let notices: Vec<_> = state
+            .notices
+            .iter()
+            .map(|notice| (notice.level, notice.message.as_str()))
+            .collect();
+        assert_eq!(
+            notices,
+            vec![(
+                crate::app::NoticeLevel::Warn,
+                "[keymap] nope: その名前の動作はありません"
+            )]
+        );
     }
 
     #[test]
@@ -741,38 +1353,39 @@ mod tests {
                 },
             )
         };
-        assert_eq!(pane_action(Pane::Diff, Key::char('j')), Some(Action::Down));
-        assert_eq!(
-            pane_action(Pane::Diff, Key::new(KeyCode::Down)),
-            Some(Action::Down)
-        );
-        assert_eq!(
-            pane_action(Pane::Diff, Key::new(KeyCode::Up)),
-            Some(Action::Up)
-        );
+        let keymap = Keymap::default();
+        let diff = keymap.pane(Pane::Diff);
+        assert_eq!(diff.action(Key::char('j')), Some(Action::Down));
+        assert_eq!(diff.action(Key::new(KeyCode::Down)), Some(Action::Down));
+        assert_eq!(diff.action(Key::new(KeyCode::Up)), Some(Action::Up));
         // **修飾付きは別のキー**（`match key.code()` だったころは `Ctrl-j` も移動した）。
-        assert_eq!(pane_action(Pane::Diff, Key::ctrl('j')), None);
-        assert_eq!(pane_action(Pane::Diff, shift(KeyCode::Down)), None);
+        assert_eq!(diff.action(Key::ctrl('j')), None);
+        assert_eq!(diff.action(shift(KeyCode::Down)), None);
         // 別名は案内に出さない。
-        assert!(!pane(Pane::Diff)
+        assert!(!diff
+            .hints()
             .iter()
             .any(|hint| hint.keys().any(|key| key == Key::new(KeyCode::Down))));
 
-        assert_eq!(common_action(Key::char('f')), Some(CommonAction::Fetch));
-        assert_eq!(common_action(Key::ctrl('f')), None);
-        // ペインのキーは共通の表では引けない。
-        assert_eq!(common_action(Key::char('s')), None);
+        assert_eq!(
+            diff.action(Key::char('f')),
+            Some(Action::Common(CommonAction::Fetch))
+        );
+        assert_eq!(diff.action(Key::ctrl('f')), None);
+        // ペインのキーは別のペインでは引けない。
+        assert_eq!(keymap.pane(Pane::Graph).action(Key::char('s')), None);
     }
 
     #[test]
     fn the_help_has_the_pane_keys_then_the_keys_that_work_anywhere() {
-        let rows = help(Pane::Graph);
+        let keymap = Keymap::default();
+        let rows = keymap.pane(Pane::Graph).help();
         assert_eq!(rows[0], HelpRow::Heading(HelpSection::Pane));
         let anywhere = rows
             .iter()
             .position(|row| *row == HelpRow::Heading(HelpSection::Anywhere))
             .expect("どこでもの見出しがありません");
-        assert_eq!(anywhere, 1 + pane(Pane::Graph).len());
+        assert_eq!(anywhere, 1 + table(Pane::Graph).len());
         assert_eq!(rows.len(), anywhere + 1 + COMMON.len() + PINNED.len());
     }
 }

@@ -14,8 +14,8 @@ mod state;
 mod update;
 
 pub use cmd::Cmd;
-pub use key::{Key, KeyCode, Modifiers};
-pub use keys::{HelpRow, HelpSection, KeyHint};
+pub use key::{Key, KeyCode, Modifiers, ParseKeyError};
+pub use keys::{HelpRow, HelpSection, KeyHint, Keymap, KeymapWarning, PaneKeys};
 pub use msg::{ExecDone, Msg, RepoSnapshot};
 pub use state::{
     AccountListing, AccountView, AppState, BranchState, CommitFiles, DiffCursor, DiffOrigin,

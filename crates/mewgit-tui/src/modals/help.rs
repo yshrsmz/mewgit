@@ -1,8 +1,8 @@
 //! キーの一覧モーダルの描画。設計は `docs/design/07-ui.md` の「Help モーダル」。
 //!
-//! **行は core が組む**（`keys::help`）。ここは字にして `modals::picker` に並べるだけ。
+//! **行は core が組む**（`PaneKeys::help`）。ここは字にして `modals::picker` に並べるだけ。
 
-use mewgit_core::app::{keys, HelpRow, HelpSection, KeyHint, Pane};
+use mewgit_core::app::{HelpRow, HelpSection, KeyHint, PaneKeys};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
@@ -16,9 +16,9 @@ const TITLE: &str = "キー";
 /// キーの案内。`update::picker_key` が受けるキーと揃える（`Enter` は何もしない）。
 const HINT: modals::Hint<'static> = &[&["[j/k] 移動", "[Esc] 閉じる"]];
 
-/// `pane` のキーとどこでも効くキーを並べる。
-pub fn render(frame: &mut Frame, area: Rect, pane: Pane, cursor: usize, charset: ui::Charset) {
-    let rows = keys::help(pane);
+/// 開いたペインのキーとどこでも効くキーを並べる。
+pub fn render(frame: &mut Frame, area: Rect, keys: &PaneKeys, cursor: usize, charset: ui::Charset) {
+    let rows = keys.help();
     // **キーの字の桁は並べる行から導く**（いちばん長いキーに 2 桁足して、説明の頭を揃える）。
     let key_cells = rows
         .iter()
@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, area: Rect, pane: Pane, cursor: usize, charset:
 }
 
 /// 1 行。見出しは淡色（`theme::muted`）、キーは `  j/k          移動`。
-fn line(row: HelpRow, key_cells: usize) -> Line<'static> {
+fn line(row: HelpRow<'_>, key_cells: usize) -> Line<'static> {
     match row {
         HelpRow::Heading(section) => Line::from(Span::styled(heading(section), theme::muted())),
         HelpRow::Key(hint) => Line::from(vec![
@@ -124,7 +124,12 @@ mod tests {
         let top = draw(&state_with_help(Pane::Worktree, 0), short).join("\n");
         assert!(!top.contains("中断 / 終了"), "最初から入っています: {top}");
 
-        let last = mewgit_core::app::keys::help(Pane::Worktree).len() - 1;
+        let last = state_with_help(Pane::Worktree, 0)
+            .keymap
+            .pane(Pane::Worktree)
+            .help()
+            .len()
+            - 1;
         let state = state_with_help(Pane::Worktree, last);
         let bottom = draw(&state, short).join("\n");
 

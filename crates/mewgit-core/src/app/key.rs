@@ -123,6 +123,86 @@ impl Key {
     pub fn mods(&self) -> Modifiers {
         self.mods
     }
+
+    /// `config.keymap` の値（`"ctrl-d"`, `"shift-tab"`, `"P"`）を解く。書き方は 08 の
+    /// 「キーマップの解決」。
+    ///
+    /// 修飾は `ctrl-` / `alt-` / `shift-` を前に重ねる（大文字小文字を問わない）。残りは
+    /// 名前（`enter` / `space` / `f5` など）か 1 文字。**1 文字は書いたまま** —— `P` は
+    /// `Char('P')` で、ここで小文字に寄せると `p` と区別できない。
+    ///
+    /// **押しても届かない形は断る。** 黙って正規化すると、書いたキーと効くキーが割れる。
+    pub fn parse(text: &str) -> Result<Self, ParseKeyError> {
+        let mut mods = Modifiers::NONE;
+        let mut rest = text;
+        // 末尾の `-` はキーそのもの（`"-"` や `"ctrl--"`）なので、`-` の後ろが空なら止める。
+        while let Some((head, tail)) = rest.split_once('-').filter(|(_, tail)| !tail.is_empty()) {
+            match head.to_ascii_lowercase().as_str() {
+                "ctrl" => mods.ctrl = true,
+                "alt" => mods.alt = true,
+                "shift" => mods.shift = true,
+                _ => break,
+            }
+            rest = tail;
+        }
+        let code = match rest.to_ascii_lowercase().as_str() {
+            "enter" => KeyCode::Enter,
+            "esc" => KeyCode::Esc,
+            "tab" => KeyCode::Tab,
+            "backtab" => KeyCode::BackTab,
+            "backspace" => KeyCode::Backspace,
+            "delete" => KeyCode::Delete,
+            "insert" => KeyCode::Insert,
+            "left" => KeyCode::Left,
+            "right" => KeyCode::Right,
+            "up" => KeyCode::Up,
+            "down" => KeyCode::Down,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "pageup" => KeyCode::PageUp,
+            "pagedown" => KeyCode::PageDown,
+            // 空白は字で書くと見えないので名前を持たせる（Graph の `Space`）。
+            "space" => KeyCode::Char(' '),
+            name => match function_key(name) {
+                Some(n) => KeyCode::F(n),
+                None => {
+                    let mut chars = rest.chars();
+                    match (chars.next(), chars.next()) {
+                        (Some(c), None) => KeyCode::Char(c),
+                        _ => return Err(ParseKeyError::Unknown),
+                    }
+                }
+            },
+        };
+        if let KeyCode::Char(c) = code {
+            // `with_mods` が落とすので、`shift-a` は `a` として効く。
+            if mods.shift {
+                return Err(ParseKeyError::ShiftOnChar);
+            }
+            // 端末は `Ctrl` + 英字を小文字で送る（crossterm 0.29 の `parse_event` は
+            // 0x01〜0x1A を小文字に、CSI u は shift を外した字で返す）。
+            if mods.ctrl && c.is_ascii_uppercase() {
+                return Err(ParseKeyError::CtrlUppercase);
+            }
+        }
+        Ok(Self::with_mods(code, mods))
+    }
+}
+
+/// `f1` などの番号。`f` 1 文字は文字キーなので `None`。
+fn function_key(name: &str) -> Option<u8> {
+    name.strip_prefix('f')?.parse().ok().filter(|n| *n > 0)
+}
+
+/// [`Key::parse`] が値を断った理由。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ParseKeyError {
+    #[error("キーとして読めません")]
+    Unknown,
+    #[error("文字キーに shift- は付けられません（大文字で書いてください）")]
+    ShiftOnChar,
+    #[error("ctrl- の後ろの英字は小文字で書いてください（端末は大文字を送りません）")]
+    CtrlUppercase,
 }
 
 #[cfg(test)]
@@ -200,5 +280,58 @@ mod tests {
     #[test]
     fn ctrl_char_differs_from_plain_char() {
         assert_ne!(Key::ctrl('q'), Key::char('q'));
+    }
+
+    #[test]
+    fn parse_reads_modifiers_names_and_single_chars() {
+        let alt = |code| {
+            Key::with_mods(
+                code,
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            )
+        };
+        assert_eq!(Key::parse("P"), Ok(Key::char('P')));
+        assert_eq!(Key::parse("p"), Ok(Key::char('p')));
+        assert_eq!(Key::parse("ctrl-d"), Ok(Key::ctrl('d')));
+        assert_eq!(Key::parse("Ctrl-d"), Ok(Key::ctrl('d')));
+        assert_eq!(Key::parse("alt-enter"), Ok(alt(KeyCode::Enter)));
+        // 正規化は `with_mods` に任せる（Shift+Tab は `BackTab`）。
+        assert_eq!(Key::parse("shift-tab"), Ok(Key::new(KeyCode::BackTab)));
+        assert_eq!(Key::parse("backtab"), Ok(Key::new(KeyCode::BackTab)));
+        assert_eq!(Key::parse("Enter"), Ok(Key::new(KeyCode::Enter)));
+        assert_eq!(Key::parse("space"), Ok(Key::char(' ')));
+        assert_eq!(Key::parse("f5"), Ok(Key::new(KeyCode::F(5))));
+        // `f` 1 文字は F キーではない。
+        assert_eq!(Key::parse("f"), Ok(Key::char('f')));
+        // `-` はキーそのものにもなる。
+        assert_eq!(Key::parse("-"), Ok(Key::char('-')));
+        assert_eq!(Key::parse("ctrl--"), Ok(Key::ctrl('-')));
+        // 矢印の shift は残る（`with_mods` の規則）。
+        assert_eq!(
+            Key::parse("shift-down"),
+            Ok(Key::with_mods(
+                KeyCode::Down,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_refuses_what_cannot_be_typed() {
+        assert_eq!(Key::parse(""), Err(ParseKeyError::Unknown));
+        assert_eq!(Key::parse("ab"), Err(ParseKeyError::Unknown));
+        assert_eq!(Key::parse("hyper-a"), Err(ParseKeyError::Unknown));
+        assert_eq!(Key::parse("f0"), Err(ParseKeyError::Unknown));
+        assert_eq!(Key::parse("ctrl-"), Err(ParseKeyError::Unknown));
+        assert_eq!(Key::parse("shift-a"), Err(ParseKeyError::ShiftOnChar));
+        assert_eq!(Key::parse("ctrl-D"), Err(ParseKeyError::CtrlUppercase));
+        // 大文字が断られるのは ctrl だけ（`alt-P` は端末が `P` を送る形がある）。
+        assert!(Key::parse("alt-P").is_ok());
     }
 }

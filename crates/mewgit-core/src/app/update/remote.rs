@@ -7,6 +7,7 @@ use crate::git_exec::{push_remote_ref, ExecError, ExecErrorKind, ExecOutput, Git
 use crate::git_read::{short_oid, Branch, Inclusion, Remote};
 
 use super::confirm;
+use crate::app::keys::{self, Action, CommonAction};
 use crate::app::state::Tracked;
 use crate::app::{AppState, Cmd, ListLoad, Modal, NoticeLevel, PushRejection};
 
@@ -168,9 +169,13 @@ fn push_plan(state: &AppState) -> PushPlan {
     // 1 箇所に畳む** —— 断りと lease を別々に書くと、片方だけ緩めたときに気付けない。
     let lease = match (rejected, &head.upstream) {
         (true, None) => {
-            return PushPlan::Refused(
-                "追跡 ref が無いので force push できません。f で取得してください".to_string(),
-            )
+            return PushPlan::Refused(keys::focused(state).spell(
+                [Action::Common(CommonAction::Fetch)],
+                |[fetch]| {
+                    format!("追跡 ref が無いので force push できません。{fetch} で取得してください")
+                },
+                "追跡 ref が無いので force push できません",
+            ))
         }
         // **取り込んでいない追跡 ref の先端の上へは force しない。** lease は「リモートが
         // 動いていないこと」しか守らないので、`f` のあとは守りにならない —— `↓n` だけの
@@ -181,14 +186,20 @@ fn push_plan(state: &AppState) -> PushPlan {
         // 勧めない —— 巻き戻した人には巻き戻しを元に戻す案内になる。
         (true, Some(upstream)) if upstream.inclusion != Inclusion::Included => {
             // **`p` を勧めるのは早送りできるときだけ**（[`pull_fast_forwards`]）。
-            return PushPlan::Refused(
-                if pull_fast_forwards(head) {
-                    "リモートに未取り込みのコミット。p で取り込むか、外の git で force push"
-                } else {
-                    "リモートに未取り込みのコミット。外の git で取り込むか force push"
-                }
-                .to_string(),
-            );
+            // `p` が引けない画面でも、引けない側の文言に落とす（08 の「文言に書いたキーの字」）。
+            const OUTSIDE: &str =
+                "リモートに未取り込みのコミット。外の git で取り込むか force push";
+            return PushPlan::Refused(if pull_fast_forwards(head) {
+                keys::focused(state).spell(
+                    [Action::Common(CommonAction::Pull)],
+                    |[pull]| {
+                        format!("リモートに未取り込みのコミット。{pull} で取り込むか、外の git で force push")
+                    },
+                    OUTSIDE,
+                )
+            } else {
+                OUTSIDE.to_string()
+            });
         }
         (true, Some(upstream)) => Some(upstream.oid),
         (false, _) => None,
@@ -627,7 +638,7 @@ mod tests {
     use crate::git_read::{Branch, BranchList, GitReadError, Head};
 
     use crate::test_util::{
-        fake_branch, fake_branch_list, fake_head_list, fake_oid, fake_upstream,
+        fake_branch, fake_branch_list, fake_head_list, fake_oid, fake_upstream, keymap_with,
     };
 
     /// ローカル名と違う行き先への push（argv では `<src>:<dst>`）。
@@ -1056,6 +1067,62 @@ mod tests {
             );
             assert!(cells(&message) <= NOTICE_CELLS, "{message}");
         }
+    }
+
+    #[test]
+    fn the_force_push_refusals_spell_the_keys_from_the_table() {
+        // **案内文のキーは表から引く**（08 の「文言に書いたキーの字」）。引けない画面（衝突に
+        // 負けた）ではキーの句を落とす。**既定の表だけで測ると直書きでも緑。**
+        // `reload` が名前の昇順で後ろなので勝ち、`fetch` / `pull` は表から外れる（08 の「衝突」）。
+        let lost = keymap_with(&[("fetch", "f9"), ("pull", "f9"), ("reload", "f9")]);
+        let moved = keymap_with(&[("fetch", "f7"), ("pull", "f6")]);
+
+        // 追跡 ref が無い（`f`）。
+        let untracked = || {
+            let mut state = state_for_push(
+                &["origin"],
+                tracked_head("main", "origin", HEADS_MAIN, None),
+            );
+            reject_non_fast_forward(&mut state, push_op("origin", "main", false));
+            state
+        };
+        let mut state = untracked();
+        state.keymap = moved.clone();
+        assert_eq!(
+            refused_force(&mut state),
+            "追跡 ref が無いので force push できません。F7 で取得してください"
+        );
+        let mut state = untracked();
+        state.keymap = lost.clone();
+        assert_eq!(
+            refused_force(&mut state),
+            "追跡 ref が無いので force push できません"
+        );
+
+        // 取り込んでいない先端（`p`。早送りできる形だけ）。
+        let behind = || {
+            let mut head = Branch {
+                ahead: 0,
+                behind: 2,
+                ..tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(7)))
+            };
+            head.upstream.as_mut().unwrap().inclusion = Inclusion::NotIncluded;
+            let mut state = state_for_push(&["origin"], head);
+            reject_non_fast_forward(&mut state, push_op("origin", "main", false));
+            state
+        };
+        let mut state = behind();
+        state.keymap = moved;
+        assert_eq!(
+            refused_force(&mut state),
+            "リモートに未取り込みのコミット。F6 で取り込むか、外の git で force push"
+        );
+        let mut state = behind();
+        state.keymap = lost;
+        assert_eq!(
+            refused_force(&mut state),
+            "リモートに未取り込みのコミット。外の git で取り込むか force push"
+        );
     }
 
     #[test]

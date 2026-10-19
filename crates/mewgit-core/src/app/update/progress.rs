@@ -9,7 +9,8 @@ use crate::git_exec::GitOp;
 use crate::git_read::InProgressOp;
 
 use super::{confirm, submit_exec};
-use crate::app::{AppState, Cmd, Modal, NoticeLevel};
+use crate::app::keys::{self, Action, CommonAction};
+use crate::app::{AppState, Cmd, Modal, NoticeLevel, PaneKeys};
 
 impl AppState {
     /// 進行中操作があって `op` を断るなら、理由を通知に積んで真を返す。
@@ -25,7 +26,7 @@ impl AppState {
             .snapshot
             .progress
             .as_ref()
-            .and_then(|progress| refusal(progress, op))
+            .and_then(|progress| refusal(progress, op, keys::focused(self)))
         else {
             return false;
         };
@@ -41,14 +42,14 @@ impl AppState {
 /// ブランチの改名・削除）は通す（03 の表）。
 ///
 /// 網羅 `match` にしているのは、`GitOp` に変種を足したときに断るか通すかを選ばせるため。
-fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<String> {
+fn refusal(progress: &InProgressOp, op: &GitOp, keys: &PaneKeys) -> Option<String> {
     // 改名・削除は下で通すが、**rebase しているブランチだけは git が断る**（`-m` は
     // `is being rebased`、`-D` は `used by worktree`。03 の表）。`r` は入力を開く前に
     // ここで断られるので、打った名前が消えない（01）。
     if let GitOp::BranchDelete { name: target, .. } | GitOp::BranchRename { from: target, .. } = op
     {
         if matches!(progress, InProgressOp::Rebase { branch: Some(b), .. } if b == target) {
-            return Some(REBASING_BRANCH.to_string());
+            return Some(rebasing_branch(keys));
         }
     }
     let passes = match op {
@@ -97,11 +98,20 @@ fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<String> {
         // そこでは断って rebase の abort を案内する。
         GitOp::MergeAbort => matches!(progress, InProgressOp::Merge { .. }),
     };
-    (!passes).then(|| advice(progress))
+    (!passes).then(|| advice(progress, keys))
 }
 
+/// 進行中操作のメニュー（`m`）の動作。案内文が名指しする（08 の「文言に書いたキーの字」）。
+pub(super) const MENU: Action = Action::Common(CommonAction::ProgressMenu);
+
 /// rebase しているブランチを改名・削除しようとしたときの断り文句。
-const REBASING_BRANCH: &str = "rebase 中は改名・削除できません。m から終えて";
+fn rebasing_branch(keys: &PaneKeys) -> String {
+    keys.spell(
+        [MENU],
+        |[menu]| format!("rebase 中は改名・削除できません。{menu} から終えて"),
+        "rebase 中は改名・削除できません",
+    )
+}
 
 /// 何の途中か（git のサブコマンドの字）。
 fn verb(progress: &InProgressOp) -> &'static str {
@@ -118,16 +128,25 @@ fn verb(progress: &InProgressOp) -> &'static str {
 /// 幅に収める（01 の「失敗の案内文」）。
 ///
 /// **`m` を案内するのはここだけ**（フッターには出さない。01 の「進行中操作の
-/// メニュー（`m`）」）。
-fn advice(progress: &InProgressOp) -> String {
+/// メニュー（`m`）」）。`m` が引けなければ「m から」を落とす（08 の「文言に書いたキーの字」）。
+fn advice(progress: &InProgressOp, keys: &PaneKeys) -> String {
     match progress {
         InProgressOp::Rebase { .. }
         | InProgressOp::CherryPick { .. }
         | InProgressOp::Revert { .. } => {
-            format!("{} の途中。m から continue か abort", verb(progress))
+            let verb = verb(progress);
+            keys.spell(
+                [MENU],
+                |[menu]| format!("{verb} の途中。{menu} から continue か abort"),
+                &format!("{verb} の途中。continue か abort"),
+            )
         }
         // merge の continue に当たる `GitOp` は無い。結ぶのは commit（03 の表）。
-        InProgressOp::Merge { .. } => "merge の途中。commit で結ぶか m から abort".to_string(),
+        InProgressOp::Merge { .. } => keys.spell(
+            [MENU],
+            |[menu]| format!("merge の途中。commit で結ぶか {menu} から abort"),
+            "merge の途中。commit で結ぶか abort",
+        ),
         // mewgit から am は始めず、`GitOp` にも無い（02 の「進行中操作の検出」）。
         InProgressOp::Am { .. } => "am の途中。端末で git am --continue か --abort".to_string(),
     }
@@ -292,7 +311,10 @@ pub(super) fn open_progress_menu(state: &mut AppState) -> Cmd {
         return Cmd::None;
     }
     // 無い / am。どちらも外で終えた・始めた直後かもしれないので読み直す。
-    let message = progress.map_or_else(|| "進行中の操作は見つかりませんでした".to_string(), advice);
+    let message = progress.map_or_else(
+        || "進行中の操作は見つかりませんでした".to_string(),
+        |progress| advice(progress, keys::focused(state)),
+    );
     state.push_notice(NoticeLevel::Info, message, None);
     Cmd::LoadStatus
 }
@@ -327,11 +349,11 @@ mod tests {
     };
     use super::super::update;
     use super::*;
-    use crate::app::{Cmd, KeyCode, Modal};
+    use crate::app::{Cmd, KeyCode, Keymap, Modal, Pane};
     use crate::git_exec::{LocalBranch, PrSource, PullMode};
     use crate::git_read::{RefusedReword, Step, WorktreeSection, WorktreeSnapshot};
     use crate::test_util::{
-        deliver_status, fake_oid, fake_pr_checkout, fake_snapshot, status_arrived,
+        deliver_status, fake_oid, fake_pr_checkout, fake_snapshot, keymap_with, status_arrived,
     };
 
     fn rebase() -> InProgressOp {
@@ -389,6 +411,20 @@ mod tests {
     fn shown(state: &AppState) -> &str {
         &state.shown_notice().expect("通知が出ていません").message
     }
+
+    /// 既定の表で引いた断り。**キーの字を見るテストは上書きした表で `super::refusal` を呼ぶ**
+    /// （`the_advice_follows_an_overridden_menu_key`）。
+    fn refusal(progress: &InProgressOp, op: &GitOp) -> Option<String> {
+        super::refusal(progress, op, Keymap::default().pane(Pane::Graph))
+    }
+
+    /// 既定の表で引いた案内。
+    fn advice(progress: &InProgressOp) -> String {
+        super::advice(progress, Keymap::default().pane(Pane::Graph))
+    }
+
+    /// 既定の表での改名・削除の断り。**字で固定する**（既定の `m` が出ることも見る）。
+    const REBASING_BRANCH: &str = "rebase 中は改名・削除できません。m から終えて";
 
     #[test]
     fn resolving_a_conflict_and_concluding_a_merge_pass() {
@@ -542,6 +578,46 @@ mod tests {
         assert_eq!(cmd, Cmd::LoadStatus);
         assert_eq!(state.modal, None);
         assert_eq!(shown(&state), REBASING_BRANCH);
+    }
+
+    #[test]
+    fn the_advice_follows_an_overridden_menu_key() {
+        // **`m` の字は表から引く**（08 の「文言に書いたキーの字」）。引けない画面（衝突に
+        // 負けた）では「m から」を落とす。**既定の表だけで測ると直書きでも緑。**
+        let moved = keymap_with(&[("progress_menu", "f9")]);
+        // `reload` が名前の昇順で後ろなので勝ち、`progress_menu` は表から外れる（08 の「衝突」）。
+        let lost = keymap_with(&[("progress_menu", "f9"), ("reload", "f9")]);
+        for progress in every_progress() {
+            let shipped = advice(&progress);
+            let message = super::advice(&progress, moved.pane(Pane::Graph));
+            let keyless = super::advice(&progress, lost.pane(Pane::Graph));
+            // am は mewgit から打てる手が無く、キーを書かない（`progress_menu` が `None`）。
+            if progress_menu(&progress).is_none() {
+                assert_eq!((&message, &keyless), (&shipped, &shipped), "{progress:?}");
+                continue;
+            }
+            assert!(shipped.contains("m から"), "{progress:?}: {shipped}");
+            assert!(message.contains("F9 から"), "{progress:?}: {message}");
+            assert!(
+                !keyless.contains("F9") && !keyless.contains("m から"),
+                "{progress:?}: {keyless}"
+            );
+            assert!(cells(&keyless) <= BESIDE_BADGE_CELLS, "{keyless}");
+        }
+        assert_eq!(
+            super::rebasing_branch(lost.pane(Pane::Branches)),
+            "rebase 中は改名・削除できません"
+        );
+
+        // **配線も踏む** —— 断る経路（`refuse_in_progress`）が `AppState.keymap` を読むか。
+        let mut state = state_on_branches(&["topic"], Some("topic"));
+        state.keymap = moved;
+        arrive(&mut state, Some(rebase()));
+        let _ = press(&mut state, 'r');
+        assert_eq!(
+            shown(&state),
+            "rebase 中は改名・削除できません。F9 から終えて"
+        );
     }
 
     #[test]

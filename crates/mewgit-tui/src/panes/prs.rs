@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use mewgit_core::app::keys::{self, Action, PrsAction};
+use mewgit_core::app::keys::{self, Action, CommonAction, PrsAction};
 use mewgit_core::app::{AppState, GithubBlock, PrLoad};
 use mewgit_core::auth::AccountState;
 use mewgit_core::config::Theme;
@@ -360,7 +360,13 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
             TARGET_UNAVAILABLE.into()
         }
         AccountState::Resolving => ui::LOADING.into(),
-        AccountState::Degraded(reason) => format!("GitHub: {}（A）", ui::degraded(reason)).into(),
+        // **`A` も `N` と同じく `live_key` で引く**（07 の「PRs ペイン」）。引けなければ括弧ごと出さない。
+        AccountState::Degraded(reason) => {
+            match keys::live_key(state, Action::Common(CommonAction::Account)) {
+                Some(key) => format!("GitHub: {}（{key}）", ui::degraded(reason)).into(),
+                None => format!("GitHub: {}", ui::degraded(reason)).into(),
+            }
+        }
         // **巡回候補にもタブにも出ないのでここへは来ない**（01 の「右上のタブ」）。
         // それでも文言を置くのは、網羅 `match` の腕を `unreachable!()` にすると
         // 描画の途中で落ちるため。
@@ -371,12 +377,7 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
         AccountState::Resolved(_) => match state.prs.load() {
             PrLoad::Pending => ui::LOADING.into(),
             PrLoad::Loaded => match keys::live_key(state, Action::Prs(PrsAction::Create)) {
-                Some(key) => {
-                    let mut text = format!("{EMPTY}（");
-                    ui::push_key(&mut text, &key);
-                    text.push('）');
-                    text.into()
-                }
+                Some(key) => format!("{EMPTY}（{key}）").into(),
                 None => EMPTY.into(),
             },
             PrLoad::Failed(err) => format!("PR を読み込めませんでした: {err}").into(),
@@ -395,7 +396,7 @@ mod tests {
     use mewgit_core::auth::{AccountState, DegradedReason};
     use mewgit_core::github::{CheckSummary, ReviewSummary};
     use mewgit_core::test_util::{
-        deliver_pr_details, fake_pull_request, fake_repo_snapshot, fetch_pr_details,
+        deliver_pr_details, fake_pull_request, fake_repo_snapshot, fetch_pr_details, keymap_with,
         pr_list_loaded, put_on_branch, reply,
     };
     use ratatui::style::Modifier;
@@ -887,6 +888,27 @@ mod tests {
         let text = pane_text(&degraded, SIZE, Pane::Prs);
         assert!(text.contains("GitHub"), "{text}");
         assert!(text.contains("A"), "案内が無い: {text}");
+    }
+
+    #[test]
+    fn the_keys_in_the_placeholder_follow_the_keymap() {
+        // **`（N）` と `（A）` は表から引く**（`keys::live_key`。08 の「文言に書いたキーの字」）。
+        // 引けない画面（衝突に負けた）では括弧ごと出さない。**既定の表だけで測ると直書きでも緑。**
+        let mut empty = with_list(Vec::new());
+        empty.keymap = keymap_with(&[("create_pr", "f9")]);
+        let text = pane_text(&empty, SIZE, Pane::Prs);
+        assert!(text.contains("開いている PR はありません（F9）"), "{text}");
+
+        let mut degraded = on_prs_tab();
+        degraded.account = AccountState::Degraded(DegradedReason::GhMissing);
+        degraded.keymap = keymap_with(&[("account", "f8")]);
+        let text = pane_text(&degraded, SIZE, Pane::Prs);
+        assert!(text.contains("GitHub: ありません（F8）"), "{text}");
+        // `reload` が名前の昇順で後ろなので勝ち、`account` は表から外れる。
+        degraded.keymap = keymap_with(&[("account", "f8"), ("reload", "f8")]);
+        let text = pane_text(&degraded, SIZE, Pane::Prs);
+        assert!(text.contains("GitHub: ありません"), "{text}");
+        assert!(!text.contains("ありません（"), "{text}");
     }
 
     #[test]

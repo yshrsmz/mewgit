@@ -70,6 +70,52 @@ impl Default for Modifiers {
     }
 }
 
+/// 案内に書くキーの字（`Ctrl-D`、`Space`、`Shift+Tab`）。
+///
+/// **core に置くのは、通知の文言もキーを書くから**（08 の「文言に書いたキーの字」）。
+/// フッター・`?` の一覧・通知が同じ字を出す。**`Key` 全体を見る**（`KeyCode` だけでは
+/// `Ctrl-C` と `c` が同じ字になる）。**どの `KeyCode` も綴る** —— `config.keymap` の上書きで
+/// どのキーも表に入りうる。
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mods = self.mods;
+        if mods.ctrl {
+            f.write_str("Ctrl-")?;
+        }
+        if mods.alt {
+            f.write_str("Alt-")?;
+        }
+        // `Char` と `Tab` には立たない（`with_mods` が落とす）。
+        if mods.shift {
+            f.write_str("Shift-")?;
+        }
+        match self.code {
+            // **`Ctrl` と組む文字は大文字で書く**（`Ctrl-C`）。端末の慣習で、小文字だと
+            // `c` のキーと見分けにくい。
+            KeyCode::Char(c) if mods.ctrl => write!(f, "{}", c.to_ascii_uppercase()),
+            // 空白のままだと案内の区切りと見分けられない。
+            KeyCode::Char(' ') => f.write_str("Space"),
+            KeyCode::Char(c) => write!(f, "{c}"),
+            KeyCode::Enter => f.write_str("Enter"),
+            KeyCode::Esc => f.write_str("Esc"),
+            KeyCode::Tab => f.write_str("Tab"),
+            KeyCode::BackTab => f.write_str("Shift+Tab"),
+            KeyCode::Backspace => f.write_str("Backspace"),
+            KeyCode::Delete => f.write_str("Delete"),
+            KeyCode::Insert => f.write_str("Insert"),
+            KeyCode::Left => f.write_str("Left"),
+            KeyCode::Right => f.write_str("Right"),
+            KeyCode::Up => f.write_str("Up"),
+            KeyCode::Down => f.write_str("Down"),
+            KeyCode::Home => f.write_str("Home"),
+            KeyCode::End => f.write_str("End"),
+            KeyCode::PageUp => f.write_str("PageUp"),
+            KeyCode::PageDown => f.write_str("PageDown"),
+            KeyCode::F(n) => write!(f, "F{n}"),
+        }
+    }
+}
+
 impl Key {
     /// 修飾付きのキー。同じ打鍵が 1 通りの表現になるよう正規化する。
     ///
@@ -282,6 +328,48 @@ mod tests {
         assert!(key.mods().ctrl);
         assert!(key.mods().alt);
         assert!(!key.mods().shift);
+    }
+
+    #[test]
+    fn every_key_is_spelled_with_its_modifiers() {
+        // **どの `KeyCode` も綴る**（`config.keymap` の上書きでどのキーも表に入りうる）。
+        // 以前の `ui::push_key` は表の既定のキーしか綴らず、ほかは `Debug` の字（`F(5)`）に、
+        // 矢印の shift は落としていた。
+        let with = |code, ctrl, alt, shift| Key::with_mods(code, Modifiers { ctrl, alt, shift });
+        let cases = [
+            (Key::char('j'), "j"),
+            (Key::char('P'), "P"),
+            (Key::char('?'), "?"),
+            (Key::char(' '), "Space"),
+            (Key::ctrl('c'), "Ctrl-C"),
+            (with(KeyCode::Char('x'), false, true, false), "Alt-x"),
+            (Key::new(KeyCode::Enter), "Enter"),
+            (Key::new(KeyCode::Esc), "Esc"),
+            (Key::new(KeyCode::Tab), "Tab"),
+            (Key::new(KeyCode::BackTab), "Shift+Tab"),
+            (Key::new(KeyCode::Backspace), "Backspace"),
+            (Key::new(KeyCode::Delete), "Delete"),
+            (Key::new(KeyCode::Insert), "Insert"),
+            (Key::new(KeyCode::Left), "Left"),
+            (Key::new(KeyCode::Right), "Right"),
+            (Key::new(KeyCode::Up), "Up"),
+            (Key::new(KeyCode::Down), "Down"),
+            (Key::new(KeyCode::Home), "Home"),
+            (Key::new(KeyCode::End), "End"),
+            (Key::new(KeyCode::PageUp), "PageUp"),
+            (Key::new(KeyCode::PageDown), "PageDown"),
+            (Key::new(KeyCode::F(5)), "F5"),
+            (with(KeyCode::Up, false, false, true), "Shift-Up"),
+            (
+                with(KeyCode::PageDown, true, true, false),
+                "Ctrl-Alt-PageDown",
+            ),
+        ];
+        for (key, text) in cases {
+            assert_eq!(key.to_string(), text, "{key:?}");
+        }
+        // **書いた値がそのまま読める字になる**（`config.keymap` の値と案内の字が対応する）。
+        assert_eq!(Key::parse("shift-up").unwrap().to_string(), "Shift-Up");
     }
 
     #[test]

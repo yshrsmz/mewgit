@@ -11,8 +11,9 @@
 //! **既定の表は `const`、引くのは [`Keymap`]。** `AppState::new` が既定の表に上書きを当てて
 //! 画面（ペイン）ごとに組み、`AppState.keymap` に持つ。
 //!
-//! **表示の字は持たない。** `j/k` や `Enter` という並びは `ui` が [`KeyCode`] から
-//! 組む（導出できる値を離れた場所に置かない。`.claude/rules/rust-coding.md`）。
+//! **表示の字は持たない。** キー 1 つの字は [`Key`] の `Display`、`j/k` という並びは `ui` が
+//! 組む（導出できる値を離れた場所に置かない。`.claude/rules/rust-coding.md`）。文言に
+//! キーを書く側は動作で引いて [`PaneKeys::spell`] で組む（08 の「文言に書いたキーの字」）。
 //!
 //! **モーダル自身のキーの案内は入っていない** —— あちらは箱の中に自前の `HINT` を
 //! 持っている（`modals::*`。予算が違うので表に寄せない。07 の「ステータスバー」）。
@@ -828,6 +829,31 @@ impl PaneKeys {
             .map(|(key, _)| *key)
     }
 
+    /// 文言にキーの字を差し込む。`actions` のキーを [`key_for`](Self::key_for) で引いて
+    /// `text` に渡し、**どれか 1 つでも引けなければ `keyless`** を返す（08 の「文言に書いた
+    /// キーの字」）。
+    ///
+    /// **キーが欠けたときの扱いをここ 1 本に置く。** 呼ぶ側ごとに書くと、キーを 2 つ書く
+    /// 文言で片方だけ欠けた形が割れる。
+    pub fn spell<const N: usize>(
+        &self,
+        actions: [Action; N],
+        text: impl FnOnce([Key; N]) -> String,
+        keyless: &str,
+    ) -> String {
+        let found = || {
+            let mut keys = [INTERRUPT; N];
+            for (slot, action) in keys.iter_mut().zip(actions) {
+                *slot = self.key_for(action)?;
+            }
+            Some(keys)
+        };
+        match found() {
+            Some(keys) => text(keys),
+            None => keyless.to_string(),
+        }
+    }
+
     /// `Modal::Help` の行。**そのペインのキー → どこでも効くキー**の 2 段（07 の
     /// 「Help モーダル」）。ほかのペインのキーは出さない —— 押せるのは今いるペインのものだけ。
     ///
@@ -860,6 +886,15 @@ pub enum HelpRow<'a> {
     Key(&'a KeyHint),
 }
 
+/// フォーカスのペインの表。**モーダルを見ない**（[`live`] との違い）。
+///
+/// **通知とヘッダの文言がキーを引く表**（08 の「文言に書いたキーの字」）。通知は
+/// モーダル表示中にも届いて閉じたあとも残り、ヘッダはキーの有無で段が変わるので、
+/// 「いま押せるか」で引くとモーダルが出ていただけでキーが落ちる。
+pub fn focused(state: &AppState) -> &PaneKeys {
+    state.keymap.pane(state.focus)
+}
+
 /// **いま**押せるキー。`None` は「この表のどれも押せない」。
 ///
 /// **モーダル表示中が `None`。** そのあいだキーは全部モーダルが受けるので
@@ -877,8 +912,8 @@ pub fn live(state: &AppState) -> Option<&PaneKeys> {
 /// `action` に**いま**効くキー。`None` は「いまは押せない」。引くのはペインの表
 /// （[`live`]）と、どこでも効く表の両方。
 ///
-/// **ペインの本文にキーを書くときに使う**（PRs ペインの「開いている PR はありません（N）」。
-/// 07 の「PRs ペイン」）。`ui` が `focus` やモーダルを見て自分で決めると、振り分けの規則の
+/// **ペインの本文にキーを書くときに使う**（PRs ペインの「開いている PR はありません（N）」と
+/// degraded の「（A）」。07 の「PRs ペイン」）。通知とヘッダは [`focused`] から引く。`ui` が `focus` やモーダルを見て自分で決めると、振り分けの規則の
 /// 写しが 2 本になり、モーダル表示中に効かない案内が出る（[`live`] の doc と同じ理由）。
 /// **字ではなく動作で聞く** —— 字で聞くと、`config.keymap`（08）で上書きした瞬間に
 /// 押せないキーを案内する。表に載っていない別名（`Down` など）は返さない。
@@ -921,6 +956,34 @@ mod tests {
             None,
             "モーダルの下で効くと言った"
         );
+        // **通知とヘッダが引く表はモーダルを見ない**（`focused`。08 の「文言に書いたキーの字」）。
+        assert_eq!(focused(&state).key_for(account), Some(Key::char('A')));
+        assert_eq!(focused(&state).key_for(create), Some(Key::char('N')));
+    }
+
+    #[test]
+    fn spell_writes_the_keys_or_falls_back_when_any_is_missing() {
+        // **キーを 2 つ書く文言は、片方でも欠ければキーを書かない形**（08 の「文言に書いた
+        // キーの字」）。`reload` が名前の昇順で後ろなので勝ち、`fetch` は表から外れる。
+        let pull = Action::Common(CommonAction::Pull);
+        let push = Action::Common(CommonAction::Push);
+        let fetch = Action::Common(CommonAction::Fetch);
+        let both = |keys: &PaneKeys, actions| {
+            keys.spell(actions, |[a, b]| format!("{a} と {b}"), "キー無し")
+        };
+        assert_eq!(
+            both(Keymap::default().pane(Pane::Graph), [pull, push]),
+            "p と P"
+        );
+        let (keymap, _) = Keymap::new(&overrides(&[
+            ("push", "ctrl-p"),
+            ("fetch", "f9"),
+            ("reload", "f9"),
+        ]));
+        let keys = keymap.pane(Pane::Graph);
+        assert_eq!(both(keys, [pull, push]), "p と Ctrl-P");
+        assert_eq!(both(keys, [fetch, push]), "キー無し");
+        assert_eq!(both(keys, [push, fetch]), "キー無し");
     }
 
     /// 表の打鍵が引く動作を全部。

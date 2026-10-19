@@ -10,12 +10,16 @@
 //! いるのはこちらで、`GitOp` の隣に置くと git の事実を約束しながら中身は UI の
 //! 方針、という形になる（[`Reload`] の doc）。
 
+use std::borrow::Cow;
+
 use crate::git_exec::{ExecError, ExecErrorKind, ExecOutput, GitOp, PullMode};
 
 use super::account::resolve_again;
 use super::graph::reload_log;
+use super::progress::MENU;
 use super::remote::{plain_push, push_rejection, PlainPush};
-use crate::app::{AppState, Cmd, ExecDone, JobKind, NoticeLevel, Region};
+use crate::app::keys::{self, Action, CommonAction, GraphAction};
+use crate::app::{AppState, Cmd, ExecDone, JobKind, NoticeLevel, PaneKeys, Region};
 
 /// `git` の実行が終わった。
 ///
@@ -32,7 +36,8 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
         // しか描かない（07）ので、そこを argv で埋めると案内が画面に出ない
         // （01 の「失敗の案内文」）。案内が無ければ [`exec_summary`] に落とす。
         let detail = exec_detail(err);
-        let advice = exec_advice(&done.op, err, pushed);
+        let keys = keys::focused(state);
+        let advice = exec_advice(&done.op, err, pushed, keys);
         // **中断は失敗ではない。** 押した本人が止めたものを `Error` で出すと、
         // 頼んでいないことが壊れたように読める。**コンフリクトで止まったのも同じ** ——
         // continue のあとに次のコミットでまた止まるのは想定どおりの結末で、進行中操作は
@@ -56,7 +61,7 @@ pub(super) fn exec_finished(state: &mut AppState, done: ExecDone) -> Cmd {
             } if advice.is_some() => NoticeLevel::Warn,
             ExecError::NoResult { .. } | ExecError::Failed { .. } => NoticeLevel::Error,
         };
-        let message = advice.map_or_else(|| exec_summary(err), str::to_string);
+        let message = advice.map_or_else(|| exec_summary(err, keys), Cow::into_owned);
         state.push_notice(level, message, Some(detail));
     }
 
@@ -343,14 +348,40 @@ fn exec_detail(err: &ExecError) -> String {
     detail
 }
 
+/// 案内文に書くキーの動作（08 の「文言に書いたキーの字」）。`m` は [`MENU`]。
+const REBASE: Action = Action::Graph(GraphAction::Rebase);
+const FETCH: Action = Action::Common(CommonAction::Fetch);
+const PULL: Action = Action::Common(CommonAction::Pull);
+const PUSH: Action = Action::Common(CommonAction::Push);
+
+/// 分かれたブランチの push が断られたときの、キーを書かない案内。**`p` / `P` のどちらかが
+/// 引けなければ、mewgit の中の手を挙げずに外の git へ送る**（08 の「文言に書いたキーの字」）。
+const DIVERGED: &str = "リモートと分かれています。外の git で取り込むか force push";
+
+/// 変更が空で止まったときの案内（出口は `m` の skip）。
+fn empty_stop(keys: &PaneKeys) -> String {
+    keys.spell(
+        [MENU],
+        |[menu]| format!("変更が空で止まった。{menu} から skip"),
+        "変更が空で止まった。skip して",
+    )
+}
+
 /// git の出力はあるのに、理由の行を選べなかった失敗の要約行（01 の「失敗の案内文」）。
 /// hook の文言と ssh の行がここに来る。**`L` はどのペインでも効く**共通キー（07）。
-const UNSHAPED_FAILURE: &str = "git が断りました。理由は L の履歴で";
+/// `L` が引けなければ「通知の履歴」と言う（08 の「文言に書いたキーの字」）。
+fn unshaped_failure(keys: &PaneKeys) -> String {
+    keys.spell(
+        [Action::Common(CommonAction::NoticeLog)],
+        |[log]| format!("git が断りました。理由は {log} の履歴で"),
+        "git が断りました。理由は通知の履歴で",
+    )
+}
 
 /// 案内文の無い失敗の要約行。git の出力から選んだ理由の行（`ExecError::reason`）、
 /// 選べなければ固定の文言、**出力が空なら `Display`（argv）** —— 空のときに `L` を
 /// 案内しても、履歴には argv しか無い。
-fn exec_summary(err: &ExecError) -> String {
+fn exec_summary(err: &ExecError, keys: &PaneKeys) -> String {
     if let Some(reason) = err.reason() {
         return reason.to_string();
     }
@@ -358,7 +389,7 @@ fn exec_summary(err: &ExecError) -> String {
         ExecError::Failed { stdout, stderr, .. }
             if !stdout.trim().is_empty() || !stderr.trim().is_empty() =>
         {
-            UNSHAPED_FAILURE.to_string()
+            unshaped_failure(keys)
         }
         _ => err.to_string(),
     }
@@ -377,7 +408,12 @@ fn exec_summary(err: &ExecError) -> String {
 /// 「失敗の案内文」）。フッターの 1 行目は通知とその時刻だけが使う（キーヒントは 2 行目。
 /// 07）。溢れると末尾が `…` に置き換わるので、「どうすればよいか」の側から消える。
 /// 見張りは `mewgit-tui` 側にも置く（80 桁で描いて確かめる）。
-fn exec_advice(op: &GitOp, err: &ExecError, pushed: Option<PlainPush>) -> Option<&'static str> {
+fn exec_advice(
+    op: &GitOp,
+    err: &ExecError,
+    pushed: Option<PlainPush>,
+    keys: &PaneKeys,
+) -> Option<Cow<'static, str>> {
     // `NoResult` の `reason` は git の stderr ではなく mewgit の文言で、それ自体が
     // 案内になっている（03）。差し替えると説明が消える。`Canceled` も同じで、
     // `Display` の「git の実行を中断しました」以上に言うことが無い。
@@ -386,44 +422,66 @@ fn exec_advice(op: &GitOp, err: &ExecError, pushed: Option<PlainPush>) -> Option
     };
     match kind {
         ExecErrorKind::SamlSsoRequired => {
-            Some("SAML SSO の承認が要ります。GitHub で鍵を Authorize してください")
+            Some("SAML SSO の承認が要ります。GitHub で鍵を Authorize してください".into())
         }
         ExecErrorKind::SshAuthFailed => {
             // **ホストは入れない。** `ssh -T <host>` を出すには「どのリモートで
             // 失敗したか」が要るが、`Pull` はリモート名を運ばず、`RemoteUrl` は
             // `user@` を捨てる（04）。M4 の「既定リモートを決める」へ送った（03）。
-            Some("SSH 鍵で認証できませんでした。ssh-agent と鍵の登録を確認してください")
+            Some("SSH 鍵で認証できませんでした。ssh-agent と鍵の登録を確認してください".into())
         }
         ExecErrorKind::HttpsAuthFailed => {
-            Some("HTTPS 認証に失敗しました。gh auth setup-git を実行してください")
+            Some("HTTPS 認証に失敗しました。gh auth setup-git を実行してください".into())
         }
-        ExecErrorKind::NonFastForward => non_fast_forward_advice(op, pushed),
-        ExecErrorKind::Conflict => conflict_advice(op),
-        ExecErrorKind::Empty => empty_advice(op),
-        ExecErrorKind::NoChanges => no_changes_advice(op),
+        ExecErrorKind::NonFastForward => non_fast_forward_advice(op, pushed, keys),
+        ExecErrorKind::Conflict => conflict_advice(op, keys),
+        ExecErrorKind::Empty => empty_advice(op, keys),
+        ExecErrorKind::NoChanges => no_changes_advice(op, keys),
         // 印を出すのは sequence editor だけで、それを起こすのは `RebaseInteractive` の開始
         // だけ（continue / skip は起こさない。03 の実測）。**打った reword は戻らない**
         // —— 開き直すと plan は読み直したグラフから組み直される（01 の「失敗の案内文」）。
         // もう 1 つの入口は断られた reword を持つ continue の照合で、失敗のあとの status が
         // 見分け直すので、開き直したメニューはいまの HEAD で組まれる。
         ExecErrorKind::HeadMoved => match op {
-            GitOp::RebaseInteractive { .. } => Some("組んだあとに履歴が動いた。i から開き直して"),
-            GitOp::RebaseContinue { reword: Some(_) } => {
-                Some("止まったあとに HEAD が動いた。m から開き直して")
-            }
+            GitOp::RebaseInteractive { .. } => Some(
+                keys.spell(
+                    [REBASE],
+                    |[rebase]| format!("組んだあとに履歴が動いた。{rebase} から開き直して"),
+                    "組んだあとに履歴が動いた。開き直して",
+                )
+                .into(),
+            ),
+            GitOp::RebaseContinue { reword: Some(_) } => Some(
+                keys.spell(
+                    [MENU],
+                    |[menu]| format!("止まったあとに HEAD が動いた。{menu} から開き直して"),
+                    "止まったあとに HEAD が動いた。開き直して",
+                )
+                .into(),
+            ),
             _ => None,
         },
-        ExecErrorKind::Unmerged => unmerged_advice(op),
+        ExecErrorKind::Unmerged => unmerged_advice(op, keys),
         // 起動中に mewgit のバイナリが消えた（03 の「消えた自バイナリ」）。起動し直せば
         // `current_exe()` を読み直すので続けられる。**押すキーで 3 つに分ける** —— 開始は
         // 始まっておらず、continue / skip は rebase が止まったまま（バッジと並ぶので 48
         // セルに収める）。ほかの op は git がエディタを起こさないはずで、キーを名指ししない。
         ExecErrorKind::EditorGone => Some(match op {
-            GitOp::RebaseInteractive { .. } => "mewgit が消えた。起動し直して i から開き直して",
-            GitOp::RebaseContinue { .. } | GitOp::RebaseSkip => {
-                "mewgit が消えた。起動し直して m から続けて"
-            }
-            _ => "mewgit が消えた。起動し直してから押し直して",
+            GitOp::RebaseInteractive { .. } => keys
+                .spell(
+                    [REBASE],
+                    |[rebase]| format!("mewgit が消えた。起動し直して {rebase} から開き直して"),
+                    "mewgit が消えた。起動し直して開き直して",
+                )
+                .into(),
+            GitOp::RebaseContinue { .. } | GitOp::RebaseSkip => keys
+                .spell(
+                    [MENU],
+                    |[menu]| format!("mewgit が消えた。起動し直して {menu} から続けて"),
+                    "mewgit が消えた。起動し直して続けて",
+                )
+                .into(),
+            _ => "mewgit が消えた。起動し直してから押し直して".into(),
         }),
         ExecErrorKind::Other => None,
     }
@@ -436,17 +494,22 @@ fn exec_advice(op: &GitOp, err: &ExecError, pushed: Option<PlainPush>) -> Option
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由 —— 書き込みを足したときに、
 /// 未解消のファイルで git が断る操作かを選ばせる。**git が別の文言で断る op**（`switch` の
 /// `you need to resolve your current index first` など）は `Unmerged` にならないので `None`。
-fn unmerged_advice(op: &GitOp) -> Option<&'static str> {
+fn unmerged_advice(op: &GitOp, keys: &PaneKeys) -> Option<Cow<'static, str>> {
     match op {
-        GitOp::RebaseContinue { .. } | GitOp::CherryPickContinue | GitOp::RevertContinue => {
-            Some("未解消のまま。git add したら m から continue")
-        }
-        GitOp::Commit { .. } => Some("未解消のまま。git add してから commit"),
+        GitOp::RebaseContinue { .. } | GitOp::CherryPickContinue | GitOp::RevertContinue => Some(
+            keys.spell(
+                [MENU],
+                |[menu]| format!("未解消のまま。git add したら {menu} から continue"),
+                "未解消のまま。git add したら continue",
+            )
+            .into(),
+        ),
+        GitOp::Commit { .. } => Some("未解消のまま。git add してから commit".into()),
         // 鮮度のある snapshot なら手前で断る（`refuse_by_held_values`）。ここに来るのは
         // 外で作った unmerged を読む前だけなので、同じ文で断る。
-        GitOp::StashPush { .. } => Some(super::stash::UNMERGED),
+        GitOp::StashPush { .. } => Some(super::stash::UNMERGED.into()),
         GitOp::StashApply(_) | GitOp::StashPop(_) => {
-            Some("コンフリクトを解消してから stash を戻して")
+            Some("コンフリクトを解消してから stash を戻して".into())
         }
         GitOp::Stage(_)
         | GitOp::Unstage(_)
@@ -490,7 +553,7 @@ fn unmerged_advice(op: &GitOp) -> Option<&'static str> {
 /// 網羅 `match` にしているのは、`GitOp` に変種を足したときに「コンフリクトで止まった
 /// あと continue で結ぶ操作か」を選ばせるため（`pull --rebase` を受け皿に落として
 /// いた）。
-fn conflict_advice(op: &GitOp) -> Option<&'static str> {
+fn conflict_advice(op: &GitOp, keys: &PaneKeys) -> Option<Cow<'static, str>> {
     match op {
         GitOp::RebaseInteractive { .. }
         | GitOp::RebaseContinue { .. }
@@ -503,12 +566,19 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
         | GitOp::CherryPickSkip
         | GitOp::Revert { .. }
         | GitOp::RevertContinue
-        | GitOp::RevertSkip => Some("コンフリクト。git add したら m から continue"),
+        | GitOp::RevertSkip => Some(
+            keys.spell(
+                [MENU],
+                |[menu]| format!("コンフリクト。git add したら {menu} から continue"),
+                "コンフリクト。git add したら continue",
+            )
+            .into(),
+        ),
         // **進行中操作にはならない**（continue が無い）ので `m` は案内しない。pop は
         // コンフリクトすると stash を残す（git の `The stash entry is kept`。01 の
         // 「stash の書き込み」）。
-        GitOp::StashApply(_) => Some("コンフリクト。解消して git add"),
-        GitOp::StashPop(_) => Some("コンフリクト。stash は残してある。解消して git add"),
+        GitOp::StashApply(_) => Some("コンフリクト。解消して git add".into()),
+        GitOp::StashPop(_) => Some("コンフリクト。stash は残してある。解消して git add".into()),
         // merge のコンフリクトを結ぶのは commit。
         GitOp::Pull {
             mode: PullMode::Merge,
@@ -553,10 +623,10 @@ fn conflict_advice(op: &GitOp) -> Option<&'static str> {
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由 —— revert の skip などを
 /// 足したときに、空で止まったあと skip で抜ける操作かを選ばせる。
-fn empty_advice(op: &GitOp) -> Option<&'static str> {
+fn empty_advice(op: &GitOp, keys: &PaneKeys) -> Option<Cow<'static, str>> {
     match op {
         GitOp::CherryPick(_) | GitOp::CherryPickContinue | GitOp::CherryPickSkip => {
-            Some("変更が空で止まった。m から skip")
+            Some(empty_stop(keys).into())
         }
         GitOp::Stage(_)
         | GitOp::Unstage(_)
@@ -604,15 +674,15 @@ fn empty_advice(op: &GitOp) -> Option<&'static str> {
 /// 案内は付けない（stderr が空なので、要約行に stdout の結びがそのまま出る。[`exec_summary`]）。
 ///
 /// 網羅 `match` にしているのは [`conflict_advice`] と同じ理由。
-fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
+fn no_changes_advice(op: &GitOp, keys: &PaneKeys) -> Option<Cow<'static, str>> {
     match op {
         GitOp::Revert { oids, .. } if oids.len() == 1 => {
-            Some("取り消す変更がありません（取り消し済み）")
+            Some("取り消す変更がありません（取り消し済み）".into())
         }
         // 解消した結果が空で continue が断られた（`REVERT_HEAD` は残る）か、複数の途中が
         // 空で止まった（`sequencer/` だけが残る）。
         GitOp::Revert { .. } | GitOp::RevertContinue | GitOp::RevertSkip => {
-            Some("変更が空で止まった。m から skip")
+            Some(empty_stop(keys).into())
         }
         GitOp::Stage(_)
         | GitOp::Unstage(_)
@@ -652,16 +722,27 @@ fn no_changes_advice(op: &GitOp) -> Option<&'static str> {
 
 /// 非 FF で断られたときの案内。**押すキーが op で違う**（01 の「失敗の案内文」）。
 /// 素の push は op だけでは決まらず、押したブランチの行から解いた `pushed` で分ける。
-fn non_fast_forward_advice(op: &GitOp, pushed: Option<PlainPush>) -> Option<&'static str> {
+fn non_fast_forward_advice(
+    op: &GitOp,
+    pushed: Option<PlainPush>,
+    keys: &PaneKeys,
+) -> Option<Cow<'static, str>> {
     match op {
         // force push が lease に断られた形（`stale info`）。**これは守りが効いている** ——
         // 他人が push した印で、`f` で取ってもその先端はこのブランチの reflog から辿り
         // 着けないので、取り込むまで `P` は force に上がらない（01 の「force push」）。
         // `p` は `--ff-only` で分かれた履歴を取り込めないので、外の git へ送る。元は
         // 「`f` のあと `P` を 2 回」と案内していたが、それは他人の push を消す手順だった。
-        GitOp::Push { lease: Some(_), .. } => {
-            Some("リモートが動いています。f で取得し、外の git で取り込んでから P")
-        }
+        GitOp::Push { lease: Some(_), .. } => Some(
+            keys.spell(
+                [FETCH, PUSH],
+                |[fetch, push]| {
+                    format!("リモートが動いています。{fetch} で取得し、外の git で取り込んでから {push}")
+                },
+                "リモートが動いています。外の git で取り込んでから push",
+            )
+            .into(),
+        ),
         // `-u` の提案から入った形。force に上げられるのは `PushPlan::Tracked` だけ
         // （lease の値が無い）で、`p` も追跡設定が無いと git がどのブランチを取るか
         // 決められない。**mewgit に残る出口は改名だけ。**
@@ -671,7 +752,7 @@ fn non_fast_forward_advice(op: &GitOp, pushed: Option<PlainPush>) -> Option<&'st
         // 起きない。しかも `r` はカーソル行を改名するので、HEAD とは限らない。
         GitOp::Push {
             set_upstream: true, ..
-        } => Some("追跡先が無いため force push できません。Branches で改名してください"),
+        } => Some("追跡先が無いため force push できません。Branches で改名してください".into()),
         // 追跡設定に沿った push。**次の `P` が force の確認を出すかは書かない** ——
         // それを決めるのは `push_plan`（追跡 ref の先端を取り込んでいないときと、追跡 ref が
         // 無いときに断る）で、ここで先読みすると同じ判定が 2 箇所に割れる。断られても
@@ -679,35 +760,45 @@ fn non_fast_forward_advice(op: &GitOp, pushed: Option<PlainPush>) -> Option<&'st
         // **「リモートが進んでいます」とは言わない** —— 巻き戻したブランチの 1 回目の
         // `P` もここに来る（断られる前は force にしない）。リモートは進んでおらず、`p` を
         // 押すと捨てたコミットが戻る（01 の「失敗の案内文」）。
-        GitOp::Push { .. } => Some(match pushed {
+        GitOp::Push { .. } => Some(Cow::Owned(match pushed {
             // **追跡先ではない push 先が進んでいた形。mewgit に出口が無い。** `p` は
             // 追跡先から取り込み（push 先の分岐は解けない）、force は lease が追跡先に
             // 対する値なので撃たない（01 の「push の行き先」の 2）。
-            Some(PlainPush::Elsewhere) => {
-                "push 先が進んでいます。外の git で取り込んでから P を押してください"
-            }
+            Some(PlainPush::Elsewhere) => keys.spell(
+                [PUSH],
+                |[push]| format!("push 先が進んでいます。外の git で取り込んでから {push} を押してください"),
+                "push 先が進んでいます。外の git で取り込んでから push してください",
+            ),
             // **送るコミットがある（分かれた）ブランチには `p` を挙げない** ——
             // `pull --ff-only` が断る。追跡 ref が無くて比べられない行も同じ側
             // （`remote::pull_fast_forwards`）。
             Some(PlainPush::Upstream {
                 fast_forwards: false,
-            }) => "リモートと分かれています。外の git で取り込むか、上書きは P をもう一度",
+            }) => keys.spell(
+                [PUSH],
+                |[push]| format!("リモートと分かれています。外の git で取り込むか、上書きは {push} をもう一度"),
+                DIVERGED,
+            ),
             // lease も `-u` も無い push なので `None` は来ない（`remote::plain_push`）。
             Some(PlainPush::Upstream {
                 fast_forwards: true,
             })
             | Some(PlainPush::Unlisted)
-            | None => "リモートと分かれています。p で取り込むか、上書きは P をもう一度",
-        }),
+            | None => keys.spell(
+                [PULL, PUSH],
+                |[pull, push]| format!("リモートと分かれています。{pull} で取り込むか、上書きは {push} をもう一度"),
+                DIVERGED,
+            ),
+        })),
         // `pull --ff-only` が履歴の分かれたブランチを断った形。merge / rebase は
         // M5 なので、mewgit の中に踏める手が無いことをそのまま言う。
-        GitOp::Pull { .. } => Some("履歴が分かれています。merge / rebase はまだ実装していません"),
+        GitOp::Pull { .. } => Some("履歴が分かれています。merge / rebase はまだ実装していません".into()),
         // PR の取り出しで、**ローカルに在った同名のブランチが PR と分かれていた**形。
         // 切り替えたあとの `merge --ff-only` が断る（05）ので、**そのブランチには
         // 居る** —— 「取り出せません」と書くと切り替わっていないように読める。
         // **mewgit の中に踏める手は無い** —— 上書きを選ばせる経路は作っていない
         // （ローカルにしか無いコミットを消す操作になる）。
-        GitOp::CheckoutPr(_) => Some("ローカルのブランチが PR と分かれているため早送りできません"),
+        GitOp::CheckoutPr(_) => Some("ローカルのブランチが PR と分かれているため早送りできません".into()),
         // fetch は remote-tracking ref を `+` 付きで更新するので非 FF で断らない
         // （git 2.55 で確認）。ほかの op も非 FF を出す経路が無い。
         _ => None,
@@ -724,13 +815,13 @@ mod tests {
     };
     use super::super::update;
     use super::*;
-    use crate::app::Msg;
+    use crate::app::{Keymap, Msg, Pane};
 
     use crate::git_exec::{ExecErrorKind, HunkApply, LocalBranch, PrSource, PullMode, RebasePlan};
     use crate::git_read::{Branch, GitReadError, LogPage, WorktreeSection};
     use crate::test_util::{
         fake_detail, fake_oid, fake_pr_checkout, fake_repo_snapshot, fake_snapshot, fake_stamp,
-        status_arrived,
+        keymap_with, status_arrived,
     };
 
     #[test]
@@ -867,6 +958,172 @@ mod tests {
                 notice.message
             );
         }
+    }
+
+    #[test]
+    fn the_advice_spells_the_keys_from_the_table() {
+        // **案内文のキーは表から引く**（08 の「文言に書いたキーの字」）。字を直書きした
+        // ままだと、上書きした人に押しても何も起きないキーを案内する。**既定の表だけで
+        // 測ると直書きでも緑**なので、上書きした表とキーの引けない表でも回す。
+        let reword = crate::git_read::RefusedReword { head: fake_oid(7) };
+        let rebase = GitOp::RebaseInteractive {
+            onto: fake_oid(1).to_string(),
+            head: fake_oid(7),
+            plan: RebasePlan::default(),
+        };
+        let push = push_op("origin", "main", false);
+        let upstream = |fast_forwards| Some(PlainPush::Upstream { fast_forwards });
+        // (op, 種別, 押したブランチ, 既定の表での句, 上書きした表での句)
+        let cases = [
+            (
+                rebase.clone(),
+                ExecErrorKind::HeadMoved,
+                None,
+                "i から開き直して",
+                "F8 から開き直して",
+            ),
+            (
+                GitOp::RebaseContinue {
+                    reword: Some(reword),
+                },
+                ExecErrorKind::HeadMoved,
+                None,
+                "m から開き直して",
+                "F9 から開き直して",
+            ),
+            (
+                rebase,
+                ExecErrorKind::EditorGone,
+                None,
+                "i から開き直して",
+                "F8 から開き直して",
+            ),
+            (
+                GitOp::RebaseSkip,
+                ExecErrorKind::EditorGone,
+                None,
+                "m から続けて",
+                "F9 から続けて",
+            ),
+            (
+                GitOp::RebaseContinue { reword: None },
+                ExecErrorKind::Unmerged,
+                None,
+                "m から continue",
+                "F9 から continue",
+            ),
+            (
+                GitOp::CherryPick(vec![fake_oid(1)]),
+                ExecErrorKind::Conflict,
+                None,
+                "m から continue",
+                "F9 から continue",
+            ),
+            (
+                GitOp::CherryPick(vec![fake_oid(1)]),
+                ExecErrorKind::Empty,
+                None,
+                "m から skip",
+                "F9 から skip",
+            ),
+            (
+                GitOp::RevertContinue,
+                ExecErrorKind::NoChanges,
+                None,
+                "m から skip",
+                "F9 から skip",
+            ),
+            (
+                forced_push_op(fake_oid(9)),
+                ExecErrorKind::NonFastForward,
+                None,
+                "f で取得し、外の git で取り込んでから P",
+                "F7 で取得し、外の git で取り込んでから F5",
+            ),
+            (
+                push.clone(),
+                ExecErrorKind::NonFastForward,
+                Some(PlainPush::Elsewhere),
+                "取り込んでから P を押して",
+                "取り込んでから F5 を押して",
+            ),
+            (
+                push.clone(),
+                ExecErrorKind::NonFastForward,
+                upstream(false),
+                "上書きは P をもう一度",
+                "上書きは F5 をもう一度",
+            ),
+            (
+                push,
+                ExecErrorKind::NonFastForward,
+                upstream(true),
+                "p で取り込むか、上書きは P をもう一度",
+                "F6 で取り込むか、上書きは F5 をもう一度",
+            ),
+        ];
+        let defaults = Keymap::default();
+        let moved = keymap_with(&[
+            ("progress_menu", "f9"),
+            ("rebase", "f8"),
+            ("fetch", "f7"),
+            ("pull", "f6"),
+            ("push", "f5"),
+            ("notice_log", "f4"),
+        ]);
+        // **全部を 1 つのキーに重ね、`reload` に勝たせる**（上書き同士は名前の昇順で後ろが
+        // 勝つ。08 の「衝突」）。負けた動作は Graph の表から外れ、キーが引けない。
+        let lost = keymap_with(&[
+            ("progress_menu", "f9"),
+            ("rebase", "f9"),
+            ("fetch", "f9"),
+            ("pull", "f9"),
+            ("push", "f9"),
+            ("notice_log", "f9"),
+            ("reload", "f9"),
+        ]);
+        for (op, kind, pushed, default, overridden) in cases {
+            let err = failed_with(kind);
+            let advise = |keymap: &Keymap| {
+                exec_advice(&op, &err, pushed, keymap.pane(Pane::Graph))
+                    .expect("案内がありません")
+                    .into_owned()
+            };
+            let label = format!("{op:?} / {kind:?}");
+            let shipped = advise(&defaults);
+            assert!(shipped.contains(default), "{label}: {shipped}");
+            let message = advise(&moved);
+            assert!(message.contains(overridden), "{label}: {message}");
+            // **キーを書かない形はキーの句を持たず、既定の形より長くならない**（予算は
+            // 既定の形が見ている）。
+            let keyless = advise(&lost);
+            assert!(
+                !keyless.contains("F9") && !keyless.contains(default),
+                "{label}: {keyless}"
+            );
+            assert!(cells(&keyless) <= cells(&shipped), "{label}: {keyless}");
+        }
+
+        assert_eq!(
+            unshaped_failure(moved.pane(Pane::Graph)),
+            "git が断りました。理由は F4 の履歴で"
+        );
+        assert_eq!(
+            unshaped_failure(lost.pane(Pane::Graph)),
+            "git が断りました。理由は通知の履歴で"
+        );
+
+        // **配線も踏む** —— `exec_finished` が `AppState.keymap` から引くか。
+        let head = tracked_head("main", "origin", HEADS_MAIN, Some(fake_oid(9)));
+        let mut state = state_for_push(&["origin"], head);
+        state.keymap = moved;
+        reject_non_fast_forward(&mut state, push_op("origin", "main", false));
+        let notice = state.notices.back().expect("通知がありません");
+        assert!(
+            notice.message.contains("上書きは F5 をもう一度"),
+            "{}",
+            notice.message
+        );
     }
 
     #[test]
@@ -1204,7 +1461,7 @@ mod tests {
         // **stderr があれば stdout は見ない。** 選べる行が無ければ固定の文言で `L` を案内する。
         finish_exec(&mut state, commit.clone(), Err(failed("hint: 何か\n")));
         let notice = state.notices.back().expect("通知がありません");
-        assert_eq!(notice.message, UNSHAPED_FAILURE);
+        assert_eq!(notice.message, "git が断りました。理由は L の履歴で");
 
         // 出力が両方とも空なら、`L` にも理由は無いので `Display`（argv）に落ちる。
         let mut empty = failed("");

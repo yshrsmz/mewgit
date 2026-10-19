@@ -16,9 +16,8 @@ use std::ops::Range;
 use std::path::Path;
 
 use crate::{modals, panes};
-use mewgit_core::app::{
-    keys, AppState, GraphSelection, Key, KeyCode, KeyHint, Pane, PaneKeys, TermSize,
-};
+use mewgit_core::app::keys::{Action, CommonAction};
+use mewgit_core::app::{keys, AppState, GraphSelection, KeyHint, Pane, PaneKeys, TermSize};
 use mewgit_core::auth::{gh, AccountState, DegradedReason};
 use mewgit_core::git_read::{short_oid, FileEntry, FileStatus, InProgressOp, Step};
 use mewgit_core::github::RateLimit;
@@ -630,7 +629,7 @@ fn header_line(state: &AppState, width: u16) -> Paragraph<'static> {
         let mut spans = vec![Span::styled(repo.clone(), header_repo_style())];
         let parts = [
             target.clone().filter(|_| with_target),
-            account_span(&state.account, form),
+            account_span(state, form),
             quota.clone().filter(|_| with_quota),
         ];
         for part in parts.into_iter().flatten() {
@@ -711,8 +710,8 @@ fn rate_limit_span(limit: RateLimit) -> Span<'static> {
 /// （`account`）が出しているので、左にも「解決中」を出すと同じことを 2 箇所で言う。
 /// 既定リモートが無いなどで一度も頼まないリポジトリ（`TargetState::Unavailable`）も
 /// ここに来るので、GitHub と関係のないリポジトリには何も出ない（01）。
-fn account_span(account: &AccountState, form: GhForm) -> Option<Span<'static>> {
-    match account {
+fn account_span(state: &AppState, form: GhForm) -> Option<Span<'static>> {
+    match &state.account {
         // **`Disabled` でも何も出さない**（07 の「ヘッダ」）。自分で切った設定を毎
         // フレーム言い返すことになるうえ、1 行しかないヘッダで `owner/repo` と
         // スピナーの予算を食う。`A` を押せば理由が通知に出る。
@@ -726,9 +725,12 @@ fn account_span(account: &AccountState, form: GhForm) -> Option<Span<'static>> {
             GhForm::Key => None,
         },
         AccountState::Degraded(reason) => {
-            let text = match form {
-                GhForm::Full | GhForm::Short => degraded_label(reason),
-                GhForm::Key => format!("[gh: {}]", degraded_key(reason)),
+            let key = degraded_key(state, reason);
+            let text = match (form, key) {
+                (GhForm::Full | GhForm::Short, key) => degraded_label(reason, key.as_deref()),
+                (GhForm::Key, Some(key)) => format!("[gh: {key}]"),
+                // **キーが引けなければ、残すものが無い**（07 の「幅が足りないとき」の 5）。
+                (GhForm::Key, None) => return None,
             };
             Some(Span::styled(text, theme::warn()))
         }
@@ -751,19 +753,27 @@ fn account_span(account: &AccountState, form: GhForm) -> Option<Span<'static>> {
 ///
 /// **`[gh: …]` ごと組むのは、長さの見張り（`every_degraded_reason_fits_the_header`）に
 /// 出荷される形をそのまま渡すため。** `degraded` だけを渡すと、キーのぶんが
-/// 見張りから外れる。
-fn degraded_label(reason: &DegradedReason) -> String {
-    format!("[gh: {}。{}]", degraded(reason), degraded_key(reason))
+/// 見張りから外れる。**`key` が `None`**（`account` が衝突に負けた画面）**なら理由だけ**。
+fn degraded_label(reason: &DegradedReason, key: Option<&str>) -> String {
+    match key {
+        Some(key) => format!("[gh: {}。{key}]", degraded(reason)),
+        None => format!("[gh: {}]", degraded(reason)),
+    }
 }
 
 /// degraded のとき押すキーの案内。幅が足りなければ理由を落としてこれだけ残す
 /// （07 の「ヘッダ › 幅が足りないとき」）。
-fn degraded_key(reason: &DegradedReason) -> &'static str {
-    if reason.candidates().is_empty() {
-        "A で詳細"
+///
+/// **キーは [`keys::focused`] から引く**（モーダルを見ない）。ヘッダはキーの有無で段が
+/// 変わるので、モーダルの開閉でキーが出入りすると段が入れ替わる（08 の「文言に書いた
+/// キーの字」）。`None` は「この画面では `account` のキーが引けない」。
+fn degraded_key(state: &AppState, reason: &DegradedReason) -> Option<String> {
+    let key = keys::focused(state).key_for(Action::Common(CommonAction::Account))?;
+    Some(if reason.candidates().is_empty() {
+        format!("{key} で詳細")
     } else {
-        "A で選ぶ"
-    }
+        format!("{key} で選ぶ")
+    })
 }
 
 /// degraded の理由を 1 行にする。
@@ -1066,45 +1076,15 @@ fn push_hint(out: &mut String, hint: &KeyHint) {
 
 /// 案内のキーの字（`j/k`）を `out` に足す。
 ///
-/// **表（`app::keys`）はキーしか持たない**ので、字にするのはここ（01）。フッターの 2 行目と
-/// `?` の一覧（`modals::help`）が使う。**モーダルは自前の `HINT` を持っている**
+/// **表（`app::keys`）はキーしか持たない**ので、束ねるのはここ。キー 1 つの字は core の
+/// `Key` の `Display`（01）。フッターの 2 行目と `?` の一覧（`modals::help`）が使う。**モーダルは自前の `HINT` を持っている**
 /// （`modals::*`。あちらは箱の中で予算が違う）ので、綴りが 2 通りある（07）。
 pub(crate) fn push_keys(out: &mut String, hint: &KeyHint) {
     for (i, key) in hint.keys().enumerate() {
         if i > 0 {
             out.push('/');
         }
-        push_key(out, &key);
-    }
-}
-
-/// キー 1 つの字。
-///
-/// **`Key` 全体を見る**（`KeyCode` だけでは `Ctrl-C` と `c` が同じ字になる）。
-pub(crate) fn push_key(out: &mut String, key: &Key) {
-    let mods = key.mods();
-    if mods.ctrl {
-        out.push_str("Ctrl-");
-    }
-    if mods.alt {
-        out.push_str("Alt-");
-    }
-    match key.code() {
-        // **`Ctrl` と組む文字は大文字で書く**（`Ctrl-C`）。端末の慣習で、小文字だと
-        // `c` のキーと見分けにくい。
-        KeyCode::Char(c) if mods.ctrl => out.push(c.to_ascii_uppercase()),
-        // 空白のままだと案内の区切りと見分けられない。
-        KeyCode::Char(' ') => out.push_str("Space"),
-        KeyCode::Char(c) => out.push(c),
-        KeyCode::Enter => out.push_str("Enter"),
-        KeyCode::Esc => out.push_str("Esc"),
-        KeyCode::Tab => out.push_str("Tab"),
-        KeyCode::BackTab => out.push_str("Shift+Tab"),
-        // **表に入っているのは上の字だけ**（`app::keys`）。ほかを足したら字もここに足す
-        // —— 書き忘れると `Debug` の字が出るので、画面で気付ける。
-        other => {
-            let _ = write!(out, "{other:?}");
-        }
+        let _ = write!(out, "{key}");
     }
 }
 
@@ -1130,8 +1110,8 @@ fn repo_label(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        degraded_label, ellipsize, ellipsize_left, file_row, hint_text, pane_area, progress_label,
-        push_expanded, render_rows, window, wrapped, SPLIT_MIN_WIDTH,
+        degraded_key, degraded_label, ellipsize, ellipsize_left, file_row, hint_text, pane_area,
+        progress_label, push_expanded, render_rows, window, wrapped, SPLIT_MIN_WIDTH,
     };
     use crate::test_util::{
         draw, footer_area, hint_bar, notice_bar, state_at, state_showing_diff, state_with_status,
@@ -1147,7 +1127,7 @@ mod tests {
     use mewgit_core::github::GithubError;
     use mewgit_core::test_util::{
         every_degraded_reason, fake_account, fake_ambiguous, fake_no_access, fake_oid,
-        fake_rate_limit, fake_snapshot, fetch_pr_details,
+        fake_rate_limit, fake_snapshot, fetch_pr_details, keymap_with,
     };
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -1705,8 +1685,12 @@ mod tests {
             // **`owner/repo` ごと見る。** 理由が伸びても `owner/repo` から落ちる
             // （`the_header_drops_parts_in_the_agreed_order`）ので、理由だけを見ると
             // 伸びたことに気付けない。隣の席とのあいだは区切りの領域が空けている。
-            let want = format!("anthropics/claude-code  {}", degraded_label(&reason));
             let mut state = shipping_header_state();
+            let key = degraded_key(&state, &reason);
+            let want = format!(
+                "anthropics/claude-code  {}",
+                degraded_label(&reason, key.as_deref())
+            );
             state.account = AccountState::Degraded(reason);
             let line = header(&state, size);
             assert!(line.contains(&want), "はみ出している: {line:?} / {want}");
@@ -1731,6 +1715,50 @@ mod tests {
         state.account = AccountState::Degraded(fake_no_access(Vec::new()));
         let shown = header(&state, size);
         assert!(shown.contains("A で詳細"), "header: {shown:?}");
+    }
+
+    #[test]
+    fn the_degraded_key_follows_the_keymap() {
+        // **ヘッダの `A` は表から引く**（`keys::focused`。08 の「文言に書いたキーの字」）。
+        // 引けない画面（衝突に負けた）ではキーの句ごと出さず、キーだけの段も出さない。
+        // **既定の表だけで測ると直書きでも緑。**
+        let wide = TermSize {
+            width: 100,
+            height: 24,
+        };
+        // キーだけの段（07 の「幅が足りないとき」の 5）まで畳まれる幅。左群の予算は
+        // 50 − 15 = 35 で、`claude-code  [gh: F9 で選ぶ]` は入り、キーの無い理由だけの段
+        // （43 セル）は入らない。
+        let narrow = TermSize {
+            width: 50,
+            height: 24,
+        };
+        let mut state = shipping_header_state();
+        state.account = AccountState::Degraded(fake_ambiguous(&["taro", "taro_acme"]));
+        state.keymap = keymap_with(&[("account", "f9")]);
+        let shown = header(&state, wide);
+        assert!(shown.contains("（2 件）。F9 で選ぶ]"), "header: {shown:?}");
+        let shown = header(&state, narrow);
+        assert!(shown.contains("[gh: F9 で選ぶ]"), "header: {shown:?}");
+        // **モーダルの下でも出す** —— 開閉のたびに段が入れ替わらないように（08）。描いた
+        // 画面ではヘッダの行にモーダルの枠が重なるので、組む関数を直に見る。
+        state.modal = Some(Modal::Help {
+            pane: state.focus,
+            cursor: 0,
+        });
+        let reason = fake_ambiguous(&["taro", "taro_acme"]);
+        assert_eq!(degraded_key(&state, &reason).as_deref(), Some("F9 で選ぶ"));
+
+        // `reload` が名前の昇順で後ろなので勝ち、`account` は表から外れる。
+        state.modal = None;
+        state.keymap = keymap_with(&[("account", "f9"), ("reload", "f9")]);
+        let shown = header(&state, wide);
+        assert!(
+            shown.contains("[gh: 1 つに絞れません（2 件）]"),
+            "header: {shown:?}"
+        );
+        let shown = header(&state, narrow);
+        assert!(!shown.contains("[gh:"), "header: {shown:?}");
     }
 
     /// 実際に `[gh: …]` が出るときのヘッダの状態。

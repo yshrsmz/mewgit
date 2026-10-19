@@ -70,7 +70,7 @@ pub const FAKE_NOW: Timestamp = Timestamp {
     offset_minutes: 540,
 };
 
-use crate::app::{update, AppState, Cmd, Msg, RepoSnapshot, TargetState};
+use crate::app::{update, AppState, Cmd, Keymap, Msg, RepoSnapshot, TargetState};
 use crate::auth::ssh::SshCommand;
 use crate::auth::{
     Account, AccountSource, AccountState, AttemptFailure, AuthError, Backend, DegradedReason,
@@ -716,6 +716,18 @@ pub fn fake_login(login: &str) -> GhLogin {
         scopes: vec!["repo".to_string()],
         state: LoginState::Success,
     }
+}
+
+/// `config.keymap` に `pairs`（`("fetch", "F")` のような名前と値）を書いたときの表。
+///
+/// **文言に書いたキーの字の見張りが使う**（08 の「文言に書いたキーの字」）。既定の表だけで
+/// 測ると、字を直書きしたままの文言も緑になる。警告は捨てる。
+pub fn keymap_with(pairs: &[(&str, &str)]) -> Keymap {
+    let overrides = pairs
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    Keymap::new(&overrides).0
 }
 
 /// 候補が複数ある `Ambiguous`。

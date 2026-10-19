@@ -934,7 +934,11 @@ mod tests {
         assert_eq!(state.focus, Pane::Branches, "フォーカスが動きました");
         assert_eq!(
             shown(&state),
-            Some(crate::app::GithubBlock::AccountDisabled.notice().as_str())
+            Some(
+                crate::app::GithubBlock::AccountDisabled
+                    .notice(crate::app::keys::focused(&state))
+                    .as_str()
+            )
         );
     }
 

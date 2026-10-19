@@ -90,11 +90,12 @@ impl std::fmt::Display for Key {
             f.write_str("Shift-")?;
         }
         match self.code {
+            // 空白のままだと案内の区切りと見分けられない。**修飾より先に見る**（`Ctrl-Space`
+            // が `Ctrl- ` にならないように）。
+            KeyCode::Char(' ') => f.write_str("Space"),
             // **`Ctrl` と組む文字は大文字で書く**（`Ctrl-C`）。端末の慣習で、小文字だと
             // `c` のキーと見分けにくい。
             KeyCode::Char(c) if mods.ctrl => write!(f, "{}", c.to_ascii_uppercase()),
-            // 空白のままだと案内の区切りと見分けられない。
-            KeyCode::Char(' ') => f.write_str("Space"),
             KeyCode::Char(c) => write!(f, "{c}"),
             KeyCode::Enter => f.write_str("Enter"),
             KeyCode::Esc => f.write_str("Esc"),
@@ -370,6 +371,7 @@ mod tests {
         }
         // **書いた値がそのまま読める字になる**（`config.keymap` の値と案内の字が対応する）。
         assert_eq!(Key::parse("shift-up").unwrap().to_string(), "Shift-Up");
+        assert_eq!(Key::parse("ctrl-space").unwrap().to_string(), "Ctrl-Space");
     }
 
     #[test]

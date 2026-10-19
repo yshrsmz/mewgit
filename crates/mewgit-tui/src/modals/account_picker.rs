@@ -389,7 +389,7 @@ mod tests {
     };
     use mewgit_core::test_util::{
         every_degraded_reason, fake_attempt, fake_configured_unavailable, fake_denied, fake_login,
-        fake_no_access, keymap_with,
+        fake_no_access, keymap_with, keymap_without,
     };
 
     const SIZE: TermSize = TermSize {
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn the_key_to_list_again_follows_the_keymap() {
-        // **`A` は閉じたあとに戻るペインの表から引く**（`keys::focused`。08 の「文言に書いた
+        // **`A` は閉じたあとに戻るペインの表から引く**（`keys::key`。08 の「文言に書いた
         // キーの字」）。モーダル表示中なので `live_key` では引けない。引けない画面（衝突に
         // 負けた）では行ごと出さない。**既定の表だけで測ると直書きでも緑。**
         let mut state = state_with_repick(
@@ -663,8 +663,7 @@ mod tests {
             "{text}"
         );
 
-        // `reload` が名前の昇順で後ろなので勝ち、`account` は表から外れる。
-        state.keymap = keymap_with(&[("account", "f9"), ("reload", "f9")]);
+        state.keymap = keymap_without(&["account"]);
         let text = draw(&state, SIZE).join("\n");
         assert!(text.contains("候補を読み込めませんでした"), "{text}");
         assert!(!text.contains("引き直せます"), "{text}");

@@ -13,7 +13,7 @@
 //!
 //! **表示の字は持たない。** キー 1 つの字は [`Key`] の `Display`、`j/k` という並びは `ui` が
 //! 組む（導出できる値を離れた場所に置かない。`.claude/rules/rust-coding.md`）。文言に
-//! キーを書く側は動作で引いて [`PaneKeys::spell`] で組む（08 の「文言に書いたキーの字」）。
+//! キーを書く側は動作で引いて [`spell`] で組む（08 の「文言に書いたキーの字」）。
 //!
 //! **モーダル自身のキーの案内は入っていない** —— あちらは箱の中に自前の `HINT` を
 //! 持っている（`modals::*`。予算が違うので表に寄せない。07 の「ステータスバー」）。
@@ -142,6 +142,24 @@ pub enum DiffAction {
 }
 
 impl Action {
+    /// 動作の持ち主のペイン。移動と共通の動作は `None`（どのペインのものでもない）。
+    ///
+    /// **文言に書くキーを引く表を決める**（[`key`]）。**網羅 `match`** —— `Action` に
+    /// ペインを足すと、ここで書き忘れが落ちる。表のテストもこの対応を引く（ペインと動作の
+    /// enum の対応を 2 箇所に書かない）。
+    pub fn pane(self) -> Option<Pane> {
+        match self {
+            Self::Down | Self::Up | Self::Common(_) => None,
+            Self::Graph(_) => Some(Pane::Graph),
+            Self::Branches(_) => Some(Pane::Branches),
+            Self::Stash(_) => Some(Pane::Stash),
+            Self::Prs(_) => Some(Pane::Prs),
+            Self::Worktree(_) => Some(Pane::Worktree),
+            Self::CommitDetail(_) => Some(Pane::CommitDetail),
+            Self::Diff(_) => Some(Pane::Diff),
+        }
+    }
+
     /// `config.keymap` に書く名前（08 の「キーマップの解決」）。
     ///
     /// **名前の空間は平坦。** 同じ意味の動作は複数のペインで名前を共有し、上書きはその
@@ -829,31 +847,6 @@ impl PaneKeys {
             .map(|(key, _)| *key)
     }
 
-    /// 文言にキーの字を差し込む。`actions` のキーを [`key_for`](Self::key_for) で引いて
-    /// `text` に渡し、**どれか 1 つでも引けなければ `keyless`** を返す（08 の「文言に書いた
-    /// キーの字」）。
-    ///
-    /// **キーが欠けたときの扱いをここ 1 本に置く。** 呼ぶ側ごとに書くと、キーを 2 つ書く
-    /// 文言で片方だけ欠けた形が割れる。
-    pub fn spell<const N: usize>(
-        &self,
-        actions: [Action; N],
-        text: impl FnOnce([Key; N]) -> String,
-        keyless: &str,
-    ) -> String {
-        let found = || {
-            let mut keys = [INTERRUPT; N];
-            for (slot, action) in keys.iter_mut().zip(actions) {
-                *slot = self.key_for(action)?;
-            }
-            Some(keys)
-        };
-        match found() {
-            Some(keys) => text(keys),
-            None => keyless.to_string(),
-        }
-    }
-
     /// `Modal::Help` の行。**そのペインのキー → どこでも効くキー**の 2 段（07 の
     /// 「Help モーダル」）。ほかのペインのキーは出さない —— 押せるのは今いるペインのものだけ。
     ///
@@ -886,13 +879,37 @@ pub enum HelpRow<'a> {
     Key(&'a KeyHint),
 }
 
-/// フォーカスのペインの表。**モーダルを見ない**（[`live`] との違い）。
+/// 文言に書く `action` のキー（08 の「文言に書いたキーの字」）。`None` は「その表で衝突に
+/// 負けて外れた」。
 ///
-/// **通知とヘッダの文言がキーを引く表**（08 の「文言に書いたキーの字」）。通知は
-/// モーダル表示中にも届いて閉じたあとも残り、ヘッダはキーの有無で段が変わるので、
-/// 「いま押せるか」で引くとモーダルが出ていただけでキーが落ちる。
-pub fn focused(state: &AppState) -> &PaneKeys {
-    state.keymap.pane(state.focus)
+/// **引く表は動作が決める。** ペインの動作（`i` の rebase、`N` の PR 作成）は**そのペインの
+/// 表**、どこでも効く動作はフォーカスのペインの表。通知は非同期に届くので、`i` を押して
+/// 別のペインへ移ったあとの失敗でも、フォーカスの表で引くと `i` が見つからない。
+/// **モーダルを見ない**（[`live_key`] との違い）—— 通知はモーダル表示中にも届いて閉じた
+/// あとも残り、ヘッダはキーの有無で段が変わる。
+pub fn key(state: &AppState, action: Action) -> Option<Key> {
+    state
+        .keymap
+        .pane(action.pane().unwrap_or(state.focus))
+        .key_for(action)
+}
+
+/// 文言にキーの字を差し込む。`actions` のキーを [`key`] で引いて `text` に渡し、**どれか
+/// 1 つでも引けなければ `keyless`** を返す（08 の「文言に書いたキーの字」）。
+///
+/// **キーが欠けたときの扱いをここ 1 本に置く。** 呼ぶ側ごとに書くと、キーを 2 つ書く
+/// 文言で片方だけ欠けた形が割れる。
+pub fn spell<const N: usize>(
+    state: &AppState,
+    actions: [Action; N],
+    text: impl FnOnce([Key; N]) -> String,
+    keyless: &str,
+) -> String {
+    let found = actions.map(|action| key(state, action));
+    if found.iter().any(Option::is_none) {
+        return keyless.to_string();
+    }
+    text(found.map(|key| key.expect("上で確かめた")))
 }
 
 /// **いま**押せるキー。`None` は「この表のどれも押せない」。
@@ -912,8 +929,8 @@ pub fn live(state: &AppState) -> Option<&PaneKeys> {
 /// `action` に**いま**効くキー。`None` は「いまは押せない」。引くのはペインの表
 /// （[`live`]）と、どこでも効く表の両方。
 ///
-/// **ペインの本文にキーを書くときに使う**（PRs ペインの「開いている PR はありません（N）」と
-/// degraded の「（A）」。07 の「PRs ペイン」）。通知とヘッダは [`focused`] から引く。`ui` が `focus` やモーダルを見て自分で決めると、振り分けの規則の
+/// **「いま押せるときだけ書く」文言に使う**（PRs ペインの「開いている PR はありません（N）」。
+/// 07 の「PRs ペイン」）。ほかの文言は [`key`] から引く（モーダルを見ない）。`ui` が `focus` やモーダルを見て自分で決めると、振り分けの規則の
 /// 写しが 2 本になり、モーダル表示中に効かない案内が出る（[`live`] の doc と同じ理由）。
 /// **字ではなく動作で聞く** —— 字で聞くと、`config.keymap`（08）で上書きした瞬間に
 /// 押せないキーを案内する。表に載っていない別名（`Down` など）は返さない。
@@ -926,7 +943,7 @@ mod tests {
     use super::*;
     use crate::app::{Modal, RepoInfo};
     use crate::config::Config;
-    use crate::test_util::FAKE_NOW;
+    use crate::test_util::{keymap_with, keymap_without, FAKE_NOW};
 
     #[test]
     fn an_action_has_a_live_key_only_in_its_pane_and_never_under_a_modal() {
@@ -956,56 +973,39 @@ mod tests {
             None,
             "モーダルの下で効くと言った"
         );
-        // **通知とヘッダが引く表はモーダルを見ない**（`focused`。08 の「文言に書いたキーの字」）。
-        assert_eq!(focused(&state).key_for(account), Some(Key::char('A')));
-        assert_eq!(focused(&state).key_for(create), Some(Key::char('N')));
+        // **文言に書くキーはモーダルを見ず、ペインの動作はそのペインの表から引く**（`key`。
+        // 08 の「文言に書いたキーの字」）。
+        assert_eq!(key(&state, account), Some(Key::char('A')));
+        state.focus = Pane::Graph;
+        assert_eq!(
+            key(&state, create),
+            Some(Key::char('N')),
+            "PRs の表から引いていない"
+        );
     }
 
     #[test]
     fn spell_writes_the_keys_or_falls_back_when_any_is_missing() {
         // **キーを 2 つ書く文言は、片方でも欠ければキーを書かない形**（08 の「文言に書いた
-        // キーの字」）。`reload` が名前の昇順で後ろなので勝ち、`fetch` は表から外れる。
+        // キーの字」）。
         let pull = Action::Common(CommonAction::Pull);
         let push = Action::Common(CommonAction::Push);
         let fetch = Action::Common(CommonAction::Fetch);
-        let both = |keys: &PaneKeys, actions| {
-            keys.spell(actions, |[a, b]| format!("{a} と {b}"), "キー無し")
+        let both = |state: &AppState, actions| {
+            spell(state, actions, |[a, b]| format!("{a} と {b}"), "キー無し")
         };
-        assert_eq!(
-            both(Keymap::default().pane(Pane::Graph), [pull, push]),
-            "p と P"
-        );
-        let (keymap, _) = Keymap::new(&overrides(&[
-            ("push", "ctrl-p"),
-            ("fetch", "f9"),
-            ("reload", "f9"),
-        ]));
-        let keys = keymap.pane(Pane::Graph);
-        assert_eq!(both(keys, [pull, push]), "p と Ctrl-P");
-        assert_eq!(both(keys, [fetch, push]), "キー無し");
-        assert_eq!(both(keys, [push, fetch]), "キー無し");
+        let mut state = AppState::new(RepoInfo::default(), Config::default(), FAKE_NOW);
+        assert_eq!(both(&state, [pull, push]), "p と P");
+        state.keymap = keymap_with(&[("push", "ctrl-p")]);
+        assert_eq!(both(&state, [pull, push]), "p と Ctrl-P");
+        state.keymap = keymap_without(&["fetch"]);
+        assert_eq!(both(&state, [fetch, push]), "キー無し");
+        assert_eq!(both(&state, [push, fetch]), "キー無し");
     }
 
     /// 表の打鍵が引く動作を全部。
     fn bound<'a>(hints: impl IntoIterator<Item = &'a KeyHint>) -> Vec<Action> {
         binds(hints).map(|(_, action)| *action).collect()
-    }
-
-    /// 動作の持ち主のペイン。移動と共通の動作は `None`（どのペインのものでもない）。
-    ///
-    /// **網羅 `match`** —— `Action` にペインを足すと、ここで書き忘れが落ちる。下の 2 本の
-    /// テストはどちらもこの対応を引く（ペインと動作の enum の対応を 2 箇所に書かない）。
-    fn owner(action: Action) -> Option<Pane> {
-        match action {
-            Action::Down | Action::Up | Action::Common(_) => None,
-            Action::Graph(_) => Some(Pane::Graph),
-            Action::Branches(_) => Some(Pane::Branches),
-            Action::Stash(_) => Some(Pane::Stash),
-            Action::Prs(_) => Some(Pane::Prs),
-            Action::Worktree(_) => Some(Pane::Worktree),
-            Action::CommitDetail(_) => Some(Pane::CommitDetail),
-            Action::Diff(_) => Some(Pane::Diff),
-        }
     }
 
     /// **動作の enum の全変種が表に在る**（01 の「表が dispatch を兼ねる」）。dispatch の
@@ -1105,7 +1105,9 @@ mod tests {
         ]
         .concat();
         for &action in &pane_actions {
-            let pane = owner(action).unwrap_or_else(|| panic!("{action:?} の持ち主がありません"));
+            let pane = action
+                .pane()
+                .unwrap_or_else(|| panic!("{action:?} の持ち主がありません"));
             assert!(
                 bound(table(pane)).contains(&action),
                 "{pane:?} の表に {action:?} がありません"
@@ -1117,7 +1119,7 @@ mod tests {
             assert!(
                 pane_actions
                     .iter()
-                    .any(|action| owner(*action) == Some(pane)),
+                    .any(|action| action.pane() == Some(pane)),
                 "{pane:?} の動作が並んでいません"
             );
             // **移動はどのペインにもある**（別名の矢印もこれを前提にペインを問わず引く）。
@@ -1141,7 +1143,7 @@ mod tests {
         for &pane in Pane::ALL {
             for action in bound(table(pane)) {
                 let own =
-                    matches!(action, Action::Down | Action::Up) || owner(action) == Some(pane);
+                    matches!(action, Action::Down | Action::Up) || action.pane() == Some(pane);
                 assert!(own, "{pane:?} の表に {action:?}");
             }
         }

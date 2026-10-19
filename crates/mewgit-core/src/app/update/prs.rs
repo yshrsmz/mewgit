@@ -52,7 +52,8 @@ fn open_pr(state: &mut AppState) -> Cmd {
 /// 一覧が空のときの案内（「`<verb>` PR がありません（N で作成）」）。`N` が引けなければ
 /// 括弧ごと出さない（08 の「文言に書いたキーの字」）。
 fn no_pr(state: &AppState, verb: &str) -> String {
-    keys::focused(state).spell(
+    keys::spell(
+        state,
         [Action::Prs(PrsAction::Create)],
         |[create]| format!("{verb} PR がありません（{create} で作成）"),
         &format!("{verb} PR がありません"),
@@ -367,7 +368,7 @@ fn github_ready(state: &mut AppState) -> Option<RepoTarget> {
     match state.github_target() {
         Ok(target) => Some(target.clone()),
         Err(block) => {
-            let notice = block.notice(keys::focused(state));
+            let notice = block.notice(state);
             state.push_notice(NoticeLevel::Info, notice, None);
             None
         }
@@ -480,7 +481,8 @@ fn on_branch(branches: &BranchState) -> bool {
 /// push しただけのブランチは取得するまで候補に出ない（01 の「head の組み立て」の代償）。
 /// `f` が引けなければ括弧ごと出さない（08 の「文言に書いたキーの字」）。
 fn not_pushed(state: &AppState) -> String {
-    keys::focused(state).spell(
+    keys::spell(
+        state,
         [Action::Common(CommonAction::Fetch)],
         |[fetch]| {
             format!("どのリモートにもこのブランチがありません（push 済みなら {fetch} で取得）")
@@ -768,8 +770,8 @@ mod tests {
     use crate::test_util::{
         deliver_pr_details, fake_account, fake_branch, fake_branch_list, fake_branch_list_or,
         fake_head_list, fake_logins, fake_oid, fake_pull_request, fake_rate_limit,
-        fake_repo_snapshot, fake_target, fetch_pr_details, keymap_with, pr_list_loaded as list_msg,
-        put_on_branch, reply, start_pr_details,
+        fake_repo_snapshot, fake_target, fetch_pr_details, keymap_with, keymap_without,
+        pr_list_loaded as list_msg, put_on_branch, reply, start_pr_details,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -1041,7 +1043,7 @@ mod tests {
         assert!(state.modal.is_none(), "degraded で開いた");
         assert_eq!(
             last_notice(&state),
-            GithubBlock::AccountDegraded.notice(keys::focused(&state))
+            GithubBlock::AccountDegraded.notice(&state)
         );
     }
 
@@ -1057,8 +1059,7 @@ mod tests {
             last_notice(&state),
             "取り出せる PR がありません（F9 で作成）"
         );
-        // `reload` が名前の昇順で後ろなので勝ち、`create_pr` は PRs の表から外れる。
-        state.keymap = keymap_with(&[("create_pr", "f9"), ("reload", "f9")]);
+        state.keymap = keymap_without(&["create_pr"]);
         let _ = press_code(&mut state, KeyCode::Enter);
         assert_eq!(last_notice(&state), "取り出せる PR がありません");
 
@@ -1081,7 +1082,7 @@ mod tests {
             last_notice(&state),
             "GitHub に接続できません（F6 で内訳を見られます）"
         );
-        state.keymap = keymap_with(&[("account", "f6"), ("reload", "f6")]);
+        state.keymap = keymap_without(&["account"]);
         let _ = press(&mut state, 'N');
         assert_eq!(last_notice(&state), "GitHub に接続できません");
     }
@@ -1532,7 +1533,7 @@ mod tests {
         assert!(state.modal.is_none(), "書き込みのあいだに箱が開いた");
         assert_eq!(
             last_notice(&state),
-            GithubBlock::AccountResolving.notice(keys::focused(&state))
+            GithubBlock::AccountResolving.notice(&state)
         );
     }
 
@@ -3230,10 +3231,8 @@ mod tests {
             }
         }
         // **`A` の通知と同じ字**（予算が同じ 1 行なので分けない。01）。
-        let keys = crate::app::Keymap::default();
-        let keys = keys.pane(Pane::Prs);
-        assert_eq!(unavailable, GithubBlock::TargetUnavailable.notice(keys));
-        assert_eq!(resolving, GithubBlock::AccountResolving.notice(keys));
+        assert_eq!(unavailable, GithubBlock::TargetUnavailable.notice(&state));
+        assert_eq!(resolving, GithubBlock::AccountResolving.notice(&state));
         // **`A` を案内してよいのは degraded だけ** —— そこにだけ内訳がある。
         assert!(
             degraded.contains('A'),

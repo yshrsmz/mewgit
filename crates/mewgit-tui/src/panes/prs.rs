@@ -360,9 +360,10 @@ fn placeholder(state: &AppState) -> Cow<'static, str> {
             TARGET_UNAVAILABLE.into()
         }
         AccountState::Resolving => ui::LOADING.into(),
-        // **`A` も `N` と同じく `live_key` で引く**（07 の「PRs ペイン」）。引けなければ括弧ごと出さない。
+        // **`A` はヘッダと同じく `keys::key` で引く**（モーダルを見ない。08 の「文言に書いた
+        // キーの字」）。`（N）` と違い、どのペインからでも押せる。引けなければ括弧ごと出さない。
         AccountState::Degraded(reason) => {
-            match keys::live_key(state, Action::Common(CommonAction::Account)) {
+            match keys::key(state, Action::Common(CommonAction::Account)) {
                 Some(key) => format!("GitHub: {}（{key}）", ui::degraded(reason)).into(),
                 None => format!("GitHub: {}", ui::degraded(reason)).into(),
             }
@@ -397,7 +398,7 @@ mod tests {
     use mewgit_core::github::{CheckSummary, ReviewSummary};
     use mewgit_core::test_util::{
         deliver_pr_details, fake_pull_request, fake_repo_snapshot, fetch_pr_details, keymap_with,
-        pr_list_loaded, put_on_branch, reply,
+        keymap_without, pr_list_loaded, put_on_branch, reply,
     };
     use ratatui::style::Modifier;
 
@@ -892,7 +893,7 @@ mod tests {
 
     #[test]
     fn the_keys_in_the_placeholder_follow_the_keymap() {
-        // **`（N）` と `（A）` は表から引く**（`keys::live_key`。08 の「文言に書いたキーの字」）。
+        // **`（N）` と `（A）` は表から引く**（`keys::live_key` と `keys::key`。08 の「文言に書いたキーの字」）。
         // 引けない画面（衝突に負けた）では括弧ごと出さない。**既定の表だけで測ると直書きでも緑。**
         let mut empty = with_list(Vec::new());
         empty.keymap = keymap_with(&[("create_pr", "f9")]);
@@ -904,8 +905,7 @@ mod tests {
         degraded.keymap = keymap_with(&[("account", "f8")]);
         let text = pane_text(&degraded, SIZE, Pane::Prs);
         assert!(text.contains("GitHub: ありません（F8）"), "{text}");
-        // `reload` が名前の昇順で後ろなので勝ち、`account` は表から外れる。
-        degraded.keymap = keymap_with(&[("account", "f8"), ("reload", "f8")]);
+        degraded.keymap = keymap_without(&["account"]);
         let text = pane_text(&degraded, SIZE, Pane::Prs);
         assert!(text.contains("GitHub: ありません"), "{text}");
         assert!(!text.contains("ありません（"), "{text}");

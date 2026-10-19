@@ -615,6 +615,11 @@ fn header_line(state: &AppState, width: u16) -> Paragraph<'static> {
         .resolved()
         .map(|target| Span::raw(format!("{}/{}", target.owner, target.repo)));
     let quota = state.prs.rate_limit().map(rate_limit_span);
+    // degraded のときに押すキーの案内。段によらず同じなので 1 回だけ組む。
+    let account_key = match &state.account {
+        AccountState::Degraded(reason) => degraded_key(state, reason),
+        _ => None,
+    };
 
     // 段ごとに (owner/repo を出すか, `[gh: …]` の形, 残量を出すか)。
     // 解決済みの `[gh: login]` は `Key` の段で落ちる（`account_span`）。
@@ -629,7 +634,7 @@ fn header_line(state: &AppState, width: u16) -> Paragraph<'static> {
         let mut spans = vec![Span::styled(repo.clone(), header_repo_style())];
         let parts = [
             target.clone().filter(|_| with_target),
-            account_span(state, form),
+            account_span(&state.account, account_key.as_deref(), form),
             quota.clone().filter(|_| with_quota),
         ];
         for part in parts.into_iter().flatten() {
@@ -710,8 +715,10 @@ fn rate_limit_span(limit: RateLimit) -> Span<'static> {
 /// （`account`）が出しているので、左にも「解決中」を出すと同じことを 2 箇所で言う。
 /// 既定リモートが無いなどで一度も頼まないリポジトリ（`TargetState::Unavailable`）も
 /// ここに来るので、GitHub と関係のないリポジトリには何も出ない（01）。
-fn account_span(state: &AppState, form: GhForm) -> Option<Span<'static>> {
-    match &state.account {
+///
+/// `key` は degraded のときに押すキーの案内（[`degraded_key`]）。`None` なら理由だけを出す。
+fn account_span(account: &AccountState, key: Option<&str>, form: GhForm) -> Option<Span<'static>> {
+    match account {
         // **`Disabled` でも何も出さない**（07 の「ヘッダ」）。自分で切った設定を毎
         // フレーム言い返すことになるうえ、1 行しかないヘッダで `owner/repo` と
         // スピナーの予算を食う。`A` を押せば理由が通知に出る。
@@ -725,9 +732,8 @@ fn account_span(state: &AppState, form: GhForm) -> Option<Span<'static>> {
             GhForm::Key => None,
         },
         AccountState::Degraded(reason) => {
-            let key = degraded_key(state, reason);
             let text = match (form, key) {
-                (GhForm::Full | GhForm::Short, key) => degraded_label(reason, key.as_deref()),
+                (GhForm::Full | GhForm::Short, key) => degraded_label(reason, key),
                 (GhForm::Key, Some(key)) => format!("[gh: {key}]"),
                 // **キーが引けなければ、残すものが無い**（07 の「幅が足りないとき」の 5）。
                 (GhForm::Key, None) => return None,
@@ -764,11 +770,11 @@ fn degraded_label(reason: &DegradedReason, key: Option<&str>) -> String {
 /// degraded のとき押すキーの案内。幅が足りなければ理由を落としてこれだけ残す
 /// （07 の「ヘッダ › 幅が足りないとき」）。
 ///
-/// **キーは [`keys::focused`] から引く**（モーダルを見ない）。ヘッダはキーの有無で段が
+/// **キーは [`keys::key`] から引く**（モーダルを見ない）。ヘッダはキーの有無で段が
 /// 変わるので、モーダルの開閉でキーが出入りすると段が入れ替わる（08 の「文言に書いた
 /// キーの字」）。`None` は「この画面では `account` のキーが引けない」。
 fn degraded_key(state: &AppState, reason: &DegradedReason) -> Option<String> {
-    let key = keys::focused(state).key_for(Action::Common(CommonAction::Account))?;
+    let key = keys::key(state, Action::Common(CommonAction::Account))?;
     Some(if reason.candidates().is_empty() {
         format!("{key} で詳細")
     } else {
@@ -1127,7 +1133,7 @@ mod tests {
     use mewgit_core::github::GithubError;
     use mewgit_core::test_util::{
         every_degraded_reason, fake_account, fake_ambiguous, fake_no_access, fake_oid,
-        fake_rate_limit, fake_snapshot, fetch_pr_details, keymap_with,
+        fake_rate_limit, fake_snapshot, fetch_pr_details, keymap_with, keymap_without,
     };
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -1719,7 +1725,7 @@ mod tests {
 
     #[test]
     fn the_degraded_key_follows_the_keymap() {
-        // **ヘッダの `A` は表から引く**（`keys::focused`。08 の「文言に書いたキーの字」）。
+        // **ヘッダの `A` は表から引く**（`keys::key`。08 の「文言に書いたキーの字」）。
         // 引けない画面（衝突に負けた）ではキーの句ごと出さず、キーだけの段も出さない。
         // **既定の表だけで測ると直書きでも緑。**
         let wide = TermSize {
@@ -1749,9 +1755,8 @@ mod tests {
         let reason = fake_ambiguous(&["taro", "taro_acme"]);
         assert_eq!(degraded_key(&state, &reason).as_deref(), Some("F9 で選ぶ"));
 
-        // `reload` が名前の昇順で後ろなので勝ち、`account` は表から外れる。
         state.modal = None;
-        state.keymap = keymap_with(&[("account", "f9"), ("reload", "f9")]);
+        state.keymap = keymap_without(&["account"]);
         let shown = header(&state, wide);
         assert!(
             shown.contains("[gh: 1 つに絞れません（2 件）]"),

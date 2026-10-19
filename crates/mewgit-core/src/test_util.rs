@@ -730,6 +730,17 @@ pub fn keymap_with(pairs: &[(&str, &str)]) -> Keymap {
     Keymap::new(&overrides).0
 }
 
+/// `names` の動作のキーが**どの画面でも引けない**表（衝突に負けて外れた形。08 の「衝突」）。
+///
+/// **`names` を全部 1 つのキーに重ね、`up` に勝たせる。** 上書き同士は名前の昇順で後ろが
+/// 勝ち、`up` は動作の名前でいちばん後ろで、どの画面の表にもある（移動）。衝突の規則を
+/// 知っているのをここ 1 本にする。
+pub fn keymap_without(names: &[&str]) -> Keymap {
+    let mut pairs: Vec<(&str, &str)> = names.iter().map(|name| (*name, "f12")).collect();
+    pairs.push(("up", "f12"));
+    keymap_with(&pairs)
+}
+
 /// 候補が複数ある `Ambiguous`。
 ///
 /// **候補を空にしない形をここで持つ。** ヘッダの長さの見張り

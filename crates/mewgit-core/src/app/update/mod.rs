@@ -936,7 +936,7 @@ mod tests {
             shown(&state),
             Some(
                 crate::app::GithubBlock::AccountDisabled
-                    .notice(crate::app::keys::focused(&state))
+                    .notice(&state)
                     .as_str()
             )
         );

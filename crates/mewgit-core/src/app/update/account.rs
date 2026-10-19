@@ -13,8 +13,8 @@ use super::prs;
 use super::remote::conventional_remote;
 use super::submit_exec;
 use crate::app::{
-    keys, AccountListing, AccountView, AppState, Cmd, GithubBlock, JobKind, Modal, NoticeLevel,
-    PaneKeys, Repick, RepoSnapshot, TargetState,
+    AccountListing, AccountView, AppState, Cmd, GithubBlock, JobKind, Modal, NoticeLevel, Repick,
+    RepoSnapshot, TargetState,
 };
 
 /// `A`。アカウント解決の結果を出す（01 の「アカウントの選び直し」）。
@@ -22,7 +22,7 @@ use crate::app::{
 /// **モーダルを開くのは `Degraded` と `Resolved` の 2 つ。** 通知に落ちるのは
 /// `Resolving` だけで、あれは待てば変わるので出す中身が 1 行しかない。
 pub(super) fn open_account(state: &mut AppState) -> Cmd {
-    match account_view(&state.account, &state.repo.target, keys::focused(state)) {
+    match account_view(&state.account, &state.repo.target) {
         Ok(view) => {
             // **一覧の取り直しはモーダルを開いてから。** `gh auth status` は 0.95 秒
             // かかる（#61 の実測）ので、返事を待ってから開くと `A` が 1 秒無反応になる。
@@ -33,24 +33,21 @@ pub(super) fn open_account(state: &mut AppState) -> Cmd {
             state.modal = Some(Modal::AccountPicker { view, cursor: 0 });
             list
         }
-        Err(message) => {
+        Err(block) => {
+            let message = block.notice(state);
             state.push_notice(NoticeLevel::Info, message, None);
             Cmd::None
         }
     }
 }
 
-/// `A` が出すもの。`Ok` がモーダルの中身、`Err` が通知の文言（01 の表）。
+/// `A` が出すもの。`Ok` がモーダルの中身、`Err` が通知の理由（01 の表）。
 ///
 /// **`AccountState::Resolving` を割らずに `target` を一緒に読む**（04 の
 /// 「内訳を出すのは `Modal::AccountPicker`」）。`Resolving` が兼ねている
 /// 「走っている最中」と「永久に頼まれない」を見分けるのは [`TargetState`] のほうで、
 /// あれは**まさにその理由で 3 値**にしてある。割ると同じ事実が 2 箇所に出る。
-fn account_view(
-    account: &AccountState,
-    target: &TargetState,
-    keys: &PaneKeys,
-) -> Result<AccountView, String> {
+fn account_view(account: &AccountState, target: &TargetState) -> Result<AccountView, GithubBlock> {
     match account {
         AccountState::Degraded(reason) => Ok(AccountView::Degraded(reason.clone())),
         // **出どころで腕を割らない。** `Config` 由来のときだけ開く形にすると、
@@ -73,12 +70,10 @@ fn account_view(
         // `Resolved` はここでは `Ok` に落ちるので、`AppState::github_block` の
         // `Option` とは境目が違う。
         AccountState::Resolving => Err(match target {
-            TargetState::Unavailable => GithubBlock::TargetUnavailable.notice(keys),
-            TargetState::Unasked | TargetState::Resolved(_) => {
-                GithubBlock::AccountResolving.notice(keys)
-            }
+            TargetState::Unavailable => GithubBlock::TargetUnavailable,
+            TargetState::Unasked | TargetState::Resolved(_) => GithubBlock::AccountResolving,
         }),
-        AccountState::Disabled => Err(GithubBlock::AccountDisabled.notice(keys)),
+        AccountState::Disabled => Err(GithubBlock::AccountDisabled),
     }
 }
 
@@ -670,8 +665,7 @@ mod tests {
         // **回すのは通知に落ちる腕を並べたもの。** `Resolved` と `Degraded` は
         // モーダルを開くので出てこない。**範囲を実装側の集合から導かずに並べている**
         // のは #54 の裏返しで、腕を足したらここにも足す。
-        let keymap = crate::app::Keymap::default();
-        let keys = keymap.pane(crate::app::Pane::Graph);
+        let state = state();
         let cases = [
             (AccountState::Resolving, TargetState::Unavailable),
             (
@@ -684,12 +678,14 @@ mod tests {
         // 生えるので、ここで押さえる。
         let resolved = AccountState::Resolved(fake_account("yamada_taro_acme"));
         assert!(
-            account_view(&resolved, &TargetState::Unasked, keys).is_ok(),
+            account_view(&resolved, &TargetState::Unasked).is_ok(),
             "Resolved が通知に落ちている"
         );
 
         for (account, target) in cases {
-            let message = account_view(&account, &target, keys).expect_err("モーダルを開いている");
+            let message = account_view(&account, &target)
+                .expect_err("モーダルを開いている")
+                .notice(&state);
             assert!(
                 cells(&message) <= NOTICE_CELLS,
                 "{} セル: {message}",
@@ -912,7 +908,7 @@ mod tests {
             assert!(state.modal.is_none(), "{op:?}: 書き込み前の写しが開いた");
             assert_eq!(
                 state.notices.back().map(|n| n.message.clone()),
-                Some(GithubBlock::AccountResolving.notice(keys::focused(&state))),
+                Some(GithubBlock::AccountResolving.notice(&state)),
                 "{op:?}"
             );
 

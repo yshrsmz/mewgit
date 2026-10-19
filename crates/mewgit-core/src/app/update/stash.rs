@@ -1,6 +1,5 @@
 //! Stash ペインのキー処理と一覧の受け取り（01 の「Stash ペイン」）。
 
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::git_exec::GitOp;
@@ -8,9 +7,7 @@ use crate::git_read::{FileStatus, GitReadError, StashEntry, WorktreeSection};
 
 use super::{confirm, focus, input};
 use crate::app::keys::{self, Action, StashAction, WorktreeAction};
-use crate::app::{
-    AppState, Cmd, DiffSource, InputIntent, JobKind, NoticeLevel, Pane, PaneKeys, TextBuffer,
-};
+use crate::app::{AppState, Cmd, DiffSource, InputIntent, JobKind, NoticeLevel, Pane, TextBuffer};
 
 /// Stash ペインのキー処理。
 pub(super) fn stash_key(state: &mut AppState, action: StashAction) -> Cmd {
@@ -110,7 +107,7 @@ impl AppState {
     /// 網羅 `match` にしているのは、`GitOp` に変種を足したときに、持っている値の鮮度に
     /// 頼る書き込みかを選ばせるため。
     pub(crate) fn refuse_by_held_values(&mut self, op: &GitOp) -> Option<Cmd> {
-        let (message, instead): (Cow<'static, str>, Cmd) = match op {
+        let (message, instead): (String, Cmd) = match op {
             GitOp::StashPush { .. } | GitOp::RebaseInteractive { .. }
                 if !self.worktree_is_current() =>
             {
@@ -136,9 +133,7 @@ impl AppState {
             // **git が 1 ファイルでは割ってしまう形は断る**（[`AppState::splits_alone`]）。
             GitOp::StashPush {
                 paths: Some(paths), ..
-            } if paths.iter().any(|path| self.splits_alone(path)) => {
-                (splits(keys::focused(self)).into(), Cmd::None)
-            }
+            } if paths.iter().any(|path| self.splits_alone(path)) => (splits(self), Cmd::None),
             GitOp::StashApply(_) | GitOp::StashPop(_) | GitOp::StashDrop(_)
                 if !self.stashes_are_current() =>
             {
@@ -185,7 +180,7 @@ impl AppState {
             | GitOp::UnsetAccount
             | GitOp::CheckoutPr(_) => return None,
         };
-        self.push_notice(NoticeLevel::Warn, message.into_owned(), None);
+        self.push_notice(NoticeLevel::Warn, message, None);
         Some(instead)
     }
 }
@@ -195,8 +190,9 @@ pub(super) const UNMERGED: &str = "コンフリクトを解消してから stash
 
 /// 1 ファイルでは git が割ってしまう変更の push の断り。`z`（全体の stash）が引けなければ
 /// 断るだけ（08 の「文言に書いたキーの字」）。
-fn splits(keys: &PaneKeys) -> String {
-    keys.spell(
+fn splits(state: &AppState) -> String {
+    keys::spell(
+        state,
         [Action::Worktree(WorktreeAction::Stash)],
         |[stash]| format!("この変更は 1 ファイルでは stash できません。{stash} で全体を"),
         "この変更は 1 ファイルでは stash できません",
@@ -295,7 +291,7 @@ mod tests {
     use crate::app::{update, KeyCode, ListLoad, Modal, Msg, NoticeLevel, Region};
     use crate::git_exec::{ExecErrorKind, PullMode};
     use crate::git_read::{DiffTarget, FileEntry, WorktreeSnapshot};
-    use crate::test_util::{fake_entry, fake_snapshot, fake_stash, keymap_with};
+    use crate::test_util::{fake_entry, fake_snapshot, fake_stash, keymap_with, keymap_without};
 
     #[test]
     fn stashes_loaded_fills_in_the_list_and_ends_the_job() {
@@ -783,9 +779,8 @@ mod tests {
             refused(keymap_with(&[("stash", "f9")])).as_deref(),
             Some("この変更は 1 ファイルでは stash できません。F9 で全体を")
         );
-        // `unstage` が名前の昇順で後ろなので勝ち、`stash` は Worktree の表から外れる。
         assert_eq!(
-            refused(keymap_with(&[("stash", "f9"), ("unstage", "f9")])).as_deref(),
+            refused(keymap_without(&["stash"])).as_deref(),
             Some("この変更は 1 ファイルでは stash できません")
         );
     }

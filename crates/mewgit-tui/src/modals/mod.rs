@@ -52,7 +52,7 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
         Modal::AccountPicker { view, cursor } => {
             // 「閉じてから `A`」の `A` は、閉じたあとに戻るペインの表から引く（08 の
             // 「文言に書いたキーの字」）。
-            let account = keys::focused(state).key_for(Action::Common(CommonAction::Account));
+            let account = keys::key(state, Action::Common(CommonAction::Account));
             account_picker::render(frame, area, view, *cursor, account, charset);
         }
         Modal::PrCreate {

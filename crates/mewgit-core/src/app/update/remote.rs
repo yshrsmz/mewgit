@@ -169,7 +169,8 @@ fn push_plan(state: &AppState) -> PushPlan {
     // 1 箇所に畳む** —— 断りと lease を別々に書くと、片方だけ緩めたときに気付けない。
     let lease = match (rejected, &head.upstream) {
         (true, None) => {
-            return PushPlan::Refused(keys::focused(state).spell(
+            return PushPlan::Refused(keys::spell(
+                state,
                 [Action::Common(CommonAction::Fetch)],
                 |[fetch]| {
                     format!("追跡 ref が無いので force push できません。{fetch} で取得してください")
@@ -190,7 +191,8 @@ fn push_plan(state: &AppState) -> PushPlan {
             const OUTSIDE: &str =
                 "リモートに未取り込みのコミット。外の git で取り込むか force push";
             return PushPlan::Refused(if pull_fast_forwards(head) {
-                keys::focused(state).spell(
+                keys::spell(
+                    state,
                     [Action::Common(CommonAction::Pull)],
                     |[pull]| {
                         format!("リモートに未取り込みのコミット。{pull} で取り込むか、外の git で force push")
@@ -639,6 +641,7 @@ mod tests {
 
     use crate::test_util::{
         fake_branch, fake_branch_list, fake_head_list, fake_oid, fake_upstream, keymap_with,
+        keymap_without,
     };
 
     /// ローカル名と違う行き先への push（argv では `<src>:<dst>`）。
@@ -1073,8 +1076,7 @@ mod tests {
     fn the_force_push_refusals_spell_the_keys_from_the_table() {
         // **案内文のキーは表から引く**（08 の「文言に書いたキーの字」）。引けない画面（衝突に
         // 負けた）ではキーの句を落とす。**既定の表だけで測ると直書きでも緑。**
-        // `reload` が名前の昇順で後ろなので勝ち、`fetch` / `pull` は表から外れる（08 の「衝突」）。
-        let lost = keymap_with(&[("fetch", "f9"), ("pull", "f9"), ("reload", "f9")]);
+        let lost = keymap_without(&["fetch", "pull"]);
         let moved = keymap_with(&[("fetch", "f7"), ("pull", "f6")]);
 
         // 追跡 ref が無い（`f`）。

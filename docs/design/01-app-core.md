@@ -3078,6 +3078,8 @@ pub enum Action {
 impl Action {
     /// `config.keymap` に書く名前（08 の「動作の名前」）。網羅 `match` 1 本。
     pub fn name(self) -> &'static str;
+    /// 持ち主のペイン（移動と共通の動作は `None`）。文言に書くキーを引く表を決める。
+    pub fn pane(self) -> Option<Pane>;
 }
 
 /// ペインごとの動作（`GraphAction` など）と、どこでも効く動作。どれも unit 変種だけ。
@@ -3102,12 +3104,12 @@ impl PaneKeys {
     pub fn action(&self, key: Key) -> Option<Action>;          // dispatch が引く（別名も入っている）
     pub fn key_for(&self, action: Action) -> Option<Key>;      // 案内に出す表から逆引き（別名は返さない）
     pub fn help(&self) -> Vec<HelpRow<'_>>;                    // `Modal::Help` の行。そのペインのキー → どこでも効くキー
-    /// 文言にキーの字を差し込む。`actions` のどれか 1 つでも引けなければ `keyless`（08 の「文言に書いたキーの字」）。
-    pub fn spell<const N: usize>(&self, actions: [Action; N], text: impl FnOnce([Key; N]) -> String, keyless: &str) -> String;
 }
 
-/// フォーカスのペインの表。**モーダルを見ない**（通知とヘッダが引く。08）。
-pub fn focused(state: &AppState) -> &PaneKeys;
+/// 文言に書くキー。ペインの動作はそのペインの表、どこでも効く動作はフォーカスの表から引く。**モーダルを見ない**（08 の「文言に書いたキーの字」）。
+pub fn key(state: &AppState, action: Action) -> Option<Key>;
+/// 文言にキーの字を差し込む。`actions` のどれか 1 つでも引けなければ `keyless`。
+pub fn spell<const N: usize>(state: &AppState, actions: [Action; N], text: impl FnOnce([Key; N]) -> String, keyless: &str) -> String;
 /// **いま**押せるキー。`None` は「この表のどれも押せない」（モーダル表示中）。
 pub fn live(state: &AppState) -> Option<&PaneKeys>;
 /// `action` に**いま**効くキー（ペインの表と、どこでも効く表）。`None` は「いまは押せない」。
@@ -3164,9 +3166,9 @@ pub fn live_key(state: &AppState, action: Action) -> Option<Key>;
   `Ctrl-C:fetch` を出しながら押すと終了する。値の側も断る（08）
 - **字ではなく動作で聞く。** 文言にキーを書く側は、効くキーを動作から逆引きして字にする。字で
   聞くと、上書きした瞬間に押せないキーを案内する。**引くのはペインの表とどこでも効く表の
-  両方**（`A` や `?` を案内に書く側も同じ関数で引ける）。**どの表から引くか**（`keys::live_key` か
-  `keys::focused` か）は文言の出る場所で決まり、一覧は 08 の「文言に書いたキーの字」にある。
-  通知は `keys::focused` の `PaneKeys::spell` で組む
+  両方**（`A` や `?` を案内に書く側も同じ関数で引ける）。文言は `keys::spell`（キーは `keys::key`）で
+  組み、**引く表は動作が決める**（08 の「文言に書いたキーの字」）。例外は「いま押せるときだけ」書く
+  PRs ペインの「（N）」で、`keys::live_key`
 - **押して無反応なキーを表に入れない見張り**（`every_hinted_key_does_something`）は
   残す。網羅 `match` が強いるのは腕があることだけで、**腕が `Cmd::None` を返すだけの形は
   通る** —— それを拾うのはこちら。**キーの動作が丸ごと通知に退化した形や誤配線

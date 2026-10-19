@@ -15,6 +15,7 @@ pub mod progress_menu;
 pub mod rebase_editor;
 pub mod remote_picker;
 
+use mewgit_core::app::keys::{self, Action, CommonAction};
 use mewgit_core::app::{AppState, Modal, RewordInput, TextBuffer};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -49,7 +50,10 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal, state: &AppState) {
             cursor,
         } => remote_picker::render(frame, area, reason, remotes, *cursor, charset),
         Modal::AccountPicker { view, cursor } => {
-            account_picker::render(frame, area, view, *cursor, charset);
+            // 「閉じてから `A`」の `A` は、閉じたあとに戻るペインの表から引く（08 の
+            // 「文言に書いたキーの字」）。
+            let account = keys::key(state, Action::Common(CommonAction::Account));
+            account_picker::render(frame, area, view, *cursor, account, charset);
         }
         Modal::PrCreate {
             title,

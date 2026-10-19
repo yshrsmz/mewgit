@@ -6,7 +6,7 @@ use crate::git_exec::GitOp;
 use crate::git_read::{FileStatus, GitReadError, StashEntry, WorktreeSection};
 
 use super::{confirm, focus, input};
-use crate::app::keys::StashAction;
+use crate::app::keys::{self, Action, StashAction, WorktreeAction};
 use crate::app::{AppState, Cmd, DiffSource, InputIntent, JobKind, NoticeLevel, Pane, TextBuffer};
 
 /// Stash ペインのキー処理。
@@ -107,35 +107,39 @@ impl AppState {
     /// 網羅 `match` にしているのは、`GitOp` に変種を足したときに、持っている値の鮮度に
     /// 頼る書き込みかを選ばせるため。
     pub(crate) fn refuse_by_held_values(&mut self, op: &GitOp) -> Option<Cmd> {
-        let (message, instead) = match op {
+        let (message, instead): (String, Cmd) = match op {
             GitOp::StashPush { .. } | GitOp::RebaseInteractive { .. }
                 if !self.worktree_is_current() =>
             {
                 // 続きを頼む: 古い snapshot で断った書き込みの代わりの status の読み直し。
-                ("状態を読み直しています。もう一度押して", Cmd::LoadStatus)
+                (
+                    "状態を読み直しています。もう一度押して".into(),
+                    Cmd::LoadStatus,
+                )
             }
-            GitOp::RebaseInteractive { .. } if self.worktree.has_tracked_changes() => {
-                ("変更を commit か stash してから rebase して", Cmd::None)
-            }
+            GitOp::RebaseInteractive { .. } if self.worktree.has_tracked_changes() => (
+                "変更を commit か stash してから rebase して".into(),
+                Cmd::None,
+            ),
             // unmerged のパスが 1 つでもあると、全体でも別のファイルだけでも git は
             // `could not write index` で断る（理由は stdout の `needs merge` にしか出ない）。
             GitOp::StashPush { .. } if !self.worktree.snapshot.conflicted.is_empty() => {
-                (UNMERGED, Cmd::None)
+                (UNMERGED.into(), Cmd::None)
             }
             // `-u` を付けるので untracked も数える。
             GitOp::StashPush { paths, .. } if self.nothing_to_stash(paths.as_deref()) => {
-                ("退避する変更がありません", Cmd::None)
+                ("退避する変更がありません".into(), Cmd::None)
             }
             // **git が 1 ファイルでは割ってしまう形は断る**（[`AppState::splits_alone`]）。
             GitOp::StashPush {
                 paths: Some(paths), ..
-            } if paths.iter().any(|path| self.splits_alone(path)) => (SPLITS, Cmd::None),
+            } if paths.iter().any(|path| self.splits_alone(path)) => (splits(self), Cmd::None),
             GitOp::StashApply(_) | GitOp::StashPop(_) | GitOp::StashDrop(_)
                 if !self.stashes_are_current() =>
             {
                 // 続きを頼む: 古い一覧で断った書き込みの代わりの stash 一覧の読み直し。
                 (
-                    "stash の一覧を読み直しています。もう一度押して",
+                    "stash の一覧を読み直しています。もう一度押して".into(),
                     Cmd::LoadStashes,
                 )
             }
@@ -176,7 +180,7 @@ impl AppState {
             | GitOp::UnsetAccount
             | GitOp::CheckoutPr(_) => return None,
         };
-        self.push_notice(NoticeLevel::Warn, message.to_string(), None);
+        self.push_notice(NoticeLevel::Warn, message, None);
         Some(instead)
     }
 }
@@ -184,8 +188,16 @@ impl AppState {
 /// unmerged があるときの push の断り。
 pub(super) const UNMERGED: &str = "コンフリクトを解消してから stash して";
 
-/// 1 ファイルでは git が割ってしまう変更の push の断り。
-pub(super) const SPLITS: &str = "この変更は 1 ファイルでは stash できません。z で全体を";
+/// 1 ファイルでは git が割ってしまう変更の push の断り。`z`（全体の stash）が引けなければ
+/// 断るだけ（08 の「文言に書いたキーの字」）。
+fn splits(state: &AppState) -> String {
+    keys::spell(
+        state,
+        [Action::Worktree(WorktreeAction::Stash)],
+        |[stash]| format!("この変更は 1 ファイルでは stash できません。{stash} で全体を"),
+        "この変更は 1 ファイルでは stash できません",
+    )
+}
 
 impl AppState {
     /// 退避する変更が無いか。`paths` が `None` なら作業ツリー全体、`Some` ならそのパスの
@@ -279,7 +291,7 @@ mod tests {
     use crate::app::{update, KeyCode, ListLoad, Modal, Msg, NoticeLevel, Region};
     use crate::git_exec::{ExecErrorKind, PullMode};
     use crate::git_read::{DiffTarget, FileEntry, WorktreeSnapshot};
-    use crate::test_util::{fake_entry, fake_snapshot, fake_stash};
+    use crate::test_util::{fake_entry, fake_snapshot, fake_stash, keymap_with, keymap_without};
 
     #[test]
     fn stashes_loaded_fills_in_the_list_and_ends_the_job() {
@@ -740,8 +752,37 @@ mod tests {
 
             assert_eq!(cmd, Cmd::None, "{name}");
             assert_eq!(state.modal, None, "{name}");
-            assert_eq!(message(&state), Some(SPLITS), "{name}");
+            assert_eq!(
+                message(&state),
+                Some("この変更は 1 ファイルでは stash できません。z で全体を"),
+                "{name}"
+            );
         }
+    }
+
+    #[test]
+    fn the_split_refusal_spells_the_whole_stash_key_from_the_table() {
+        // **案内文のキーは表から引く**（08 の「文言に書いたキーの字」）。引けない画面（衝突に
+        // 負けた）では断るだけ。**既定の表だけで測ると直書きでも緑。**
+        let refused = |keymap| {
+            let snapshot = WorktreeSnapshot {
+                staged: vec![fake_entry("a", FileStatus::Added)],
+                unstaged: vec![fake_entry("a", FileStatus::Deleted)],
+                ..WorktreeSnapshot::default()
+            };
+            let mut state = worktree_state(snapshot, WorktreeSection::Unstaged);
+            state.keymap = keymap;
+            let _ = press(&mut state, 'Z');
+            message(&state).map(str::to_string)
+        };
+        assert_eq!(
+            refused(keymap_with(&[("stash", "f9")])).as_deref(),
+            Some("この変更は 1 ファイルでは stash できません。F9 で全体を")
+        );
+        assert_eq!(
+            refused(keymap_without(&["stash"])).as_deref(),
+            Some("この変更は 1 ファイルでは stash できません")
+        );
     }
 
     #[test]

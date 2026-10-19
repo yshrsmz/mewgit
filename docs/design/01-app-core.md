@@ -3078,6 +3078,8 @@ pub enum Action {
 impl Action {
     /// `config.keymap` に書く名前（08 の「動作の名前」）。網羅 `match` 1 本。
     pub fn name(self) -> &'static str;
+    /// 持ち主のペイン（移動と共通の動作は `None`）。文言に書くキーを引く表を決める。
+    pub fn pane(self) -> Option<Pane>;
 }
 
 /// ペインごとの動作（`GraphAction` など）と、どこでも効く動作。どれも unit 変種だけ。
@@ -3104,14 +3106,20 @@ impl PaneKeys {
     pub fn help(&self) -> Vec<HelpRow<'_>>;                    // `Modal::Help` の行。そのペインのキー → どこでも効くキー
 }
 
+/// 文言に書くキー。ペインの動作はそのペインの表、どこでも効く動作はフォーカスの表から引く。**モーダルを見ない**（08 の「文言に書いたキーの字」）。
+pub fn key(state: &AppState, action: Action) -> Option<Key>;
+/// 文言にキーの字を差し込む。`actions` のどれか 1 つでも引けなければ `keyless`。
+pub fn spell<const N: usize>(state: &AppState, actions: [Action; N], text: impl FnOnce([Key; N]) -> String, keyless: &str) -> String;
 /// **いま**押せるキー。`None` は「この表のどれも押せない」（モーダル表示中）。
 pub fn live(state: &AppState) -> Option<&PaneKeys>;
 /// `action` に**いま**効くキー（ペインの表と、どこでも効く表）。`None` は「いまは押せない」。
 pub fn live_key(state: &AppState, action: Action) -> Option<Key>;
 ```
 
-- **持つのは `Key` で、`j/k` や `Enter` という字は `ui` が `KeyCode` から組む。**
-  表示の字を表にも書くと、導出できる値のコピーになる（`.claude/rules/rust-coding.md`）
+- **持つのは `Key` で、`j/k` や `Enter` という字は `Key` の `Display`（`app/key.rs`）が組む。**
+  表示の字を表にも書くと、導出できる値のコピーになる（`.claude/rules/rust-coding.md`）。
+  **字にするのが core なのは、通知の文言もキーを書くから**（08 の「文言に書いたキーの字」）。
+  以前は `ui` が組んでいて、core の通知は既定の字を直書きするしかなかった
 - **ラベルは core が持つ。** 通知の文言と同じ扱いで、`ui` は並べるだけ（不変ルール 2）
 - **同じ動作の別名は入れない。** `j` / `k` の代わりに効く `Down` / `Up` は表に無い
   —— 案内に出すものの一覧なので、出さないものを入れると「表 → 実際に押せる」の
@@ -3156,10 +3164,11 @@ pub fn live_key(state: &AppState, action: Action) -> Option<Key>;
   `Interrupt` が表から消え、モーダル表示中に抜ける手が無くなる。**守れるのは脱出口が
   消えないことまで** —— 値に `"ctrl-c"` を書いた上書き（`fetch = "ctrl-c"`）は、案内に
   `Ctrl-C:fetch` を出しながら押すと終了する。値の側も断る（08）
-- **字ではなく動作で聞く**（`keys::live_key(state, Action) -> Option<Key>`）。ペインの本文に
-  キーを書く側（PRs ペインの「（N）」）は、いま効くキーを動作から逆引きして字にする。字で
+- **字ではなく動作で聞く。** 文言にキーを書く側は、効くキーを動作から逆引きして字にする。字で
   聞くと、上書きした瞬間に押せないキーを案内する。**引くのはペインの表とどこでも効く表の
-  両方**（`A` や `?` を案内に書く側も同じ関数で引ける）
+  両方**（`A` や `?` を案内に書く側も同じ関数で引ける）。文言は `keys::spell`（キーは `keys::key`）で
+  組み、**引く表は動作が決める**（08 の「文言に書いたキーの字」）。例外は「いま押せるときだけ」書く
+  PRs ペインの「（N）」で、`keys::live_key`
 - **押して無反応なキーを表に入れない見張り**（`every_hinted_key_does_something`）は
   残す。網羅 `match` が強いるのは腕があることだけで、**腕が `Cmd::None` を返すだけの形は
   通る** —— それを拾うのはこちら。**キーの動作が丸ごと通知に退化した形や誤配線

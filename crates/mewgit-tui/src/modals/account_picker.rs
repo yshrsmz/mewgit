@@ -4,7 +4,7 @@
 //! **箱の中の割り方は `modals::picker` と共有する**（`RemotePicker` と 2 人）。
 //! ここに残るのはタイトル・キーの案内・本文・行の組み立て。
 
-use mewgit_core::app::{AccountListing, AccountView, Repick};
+use mewgit_core::app::{AccountListing, AccountView, Key, Repick};
 use mewgit_core::auth::{
     gh, AccountSource, AttemptFailure, DegradedReason, GhLogin, LoginState, ProbeAttempt,
     MEWGIT_USER,
@@ -57,7 +57,16 @@ fn saves_to() -> String {
 }
 
 /// アカウント解決の内訳を出し、選べるなら選ばせる。
-pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize, charset: Charset) {
+///
+/// `account` は閉じたあとに `A`（アカウント）を引くキー。`None` ならキーを案内しない。
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    view: &AccountView,
+    cursor: usize,
+    account: Option<Key>,
+    charset: Charset,
+) {
     let candidates = view.candidates();
     let hint = hint(view);
 
@@ -67,7 +76,7 @@ pub fn render(frame: &mut Frame, area: Rect, view: &AccountView, cursor: usize, 
         Picker {
             title: title(view),
             width: modals::WIDTH,
-            body: body(view),
+            body: body(view, account),
             rows: candidates.iter().map(candidate_line).collect(),
             cursor,
             hint: &[&hint],
@@ -126,10 +135,10 @@ fn hint(view: &AccountView) -> Vec<&'static str> {
 }
 
 /// 本文。[`AccountView`] の 2 つで分かれる。
-fn body(view: &AccountView) -> Text<'static> {
+fn body(view: &AccountView, account: Option<Key>) -> Text<'static> {
     match view {
         AccountView::Degraded(reason) => degraded_body(reason),
-        AccountView::Repick(repick) => repick_body(repick),
+        AccountView::Repick(repick) => repick_body(repick, account),
     }
     .into_iter()
     .collect()
@@ -139,7 +148,7 @@ fn body(view: &AccountView) -> Text<'static> {
 ///
 /// **ヘッダの `[gh: login @ host]` は「なぜ」を落としている**（04 の表）ので、
 /// `A` を押した人が最初に知りたいものがここにしか無い。
-fn repick_body(repick: &Repick) -> Vec<String> {
+fn repick_body(repick: &Repick, account: Option<Key>) -> Vec<String> {
     let Repick {
         login,
         host,
@@ -177,7 +186,10 @@ fn repick_body(repick: &Repick) -> Vec<String> {
         AccountListing::Failed(message) => {
             lines.push("候補を読み込めませんでした".to_string());
             lines.push(message.clone());
-            lines.push("Esc で閉じてから A で引き直せます".to_string());
+            // `A` が引けない画面（衝突に負けた）なら案内しない（08 の「文言に書いたキーの字」）。
+            if let Some(key) = account {
+                lines.push(format!("Esc で閉じてから {key} で引き直せます"));
+            }
         }
     }
     // **外せない側にだけ外での直し方を書く**（#65 の「指示を足すのは、その操作を
@@ -377,7 +389,7 @@ mod tests {
     };
     use mewgit_core::test_util::{
         every_degraded_reason, fake_attempt, fake_configured_unavailable, fake_denied, fake_login,
-        fake_no_access,
+        fake_no_access, keymap_with, keymap_without,
     };
 
     const SIZE: TermSize = TermSize {
@@ -633,6 +645,28 @@ mod tests {
         // 行き止まりにしない（#65）。`A` はモーダル表示中には効かないので、
         // 閉じてから、と書く（#53）。
         assert!(text.contains("Esc で閉じてから A で引き直せます"), "{text}");
+    }
+
+    #[test]
+    fn the_key_to_list_again_follows_the_keymap() {
+        // **`A` は閉じたあとに戻るペインの表から引く**（`keys::key`。08 の「文言に書いた
+        // キーの字」）。モーダル表示中なので `live_key` では引けない。引けない画面（衝突に
+        // 負けた）では行ごと出さない。**既定の表だけで測ると直書きでも緑。**
+        let mut state = state_with_repick(
+            AccountSource::Probe,
+            AccountListing::Failed("gh が見つかりませんでした".to_string()),
+        );
+        state.keymap = keymap_with(&[("account", "f9")]);
+        let text = draw(&state, SIZE).join("\n");
+        assert!(
+            text.contains("Esc で閉じてから F9 で引き直せます"),
+            "{text}"
+        );
+
+        state.keymap = keymap_without(&["account"]);
+        let text = draw(&state, SIZE).join("\n");
+        assert!(text.contains("候補を読み込めませんでした"), "{text}");
+        assert!(!text.contains("引き直せます"), "{text}");
     }
 
     #[test]

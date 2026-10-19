@@ -70,7 +70,7 @@ pub const FAKE_NOW: Timestamp = Timestamp {
     offset_minutes: 540,
 };
 
-use crate::app::{update, AppState, Cmd, Msg, RepoSnapshot, TargetState};
+use crate::app::{update, AppState, Cmd, Keymap, Msg, RepoSnapshot, TargetState};
 use crate::auth::ssh::SshCommand;
 use crate::auth::{
     Account, AccountSource, AccountState, AttemptFailure, AuthError, Backend, DegradedReason,
@@ -716,6 +716,29 @@ pub fn fake_login(login: &str) -> GhLogin {
         scopes: vec!["repo".to_string()],
         state: LoginState::Success,
     }
+}
+
+/// `config.keymap` に `pairs`（`("fetch", "F")` のような名前と値）を書いたときの表。
+///
+/// **文言に書いたキーの字の見張りが使う**（08 の「文言に書いたキーの字」）。既定の表だけで
+/// 測ると、字を直書きしたままの文言も緑になる。警告は捨てる。
+pub fn keymap_with(pairs: &[(&str, &str)]) -> Keymap {
+    let overrides = pairs
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    Keymap::new(&overrides).0
+}
+
+/// `names` の動作のキーが**どの画面でも引けない**表（衝突に負けて外れた形。08 の「衝突」）。
+///
+/// **`names` を全部 1 つのキーに重ね、`up` に勝たせる。** 上書き同士は名前の昇順で後ろが
+/// 勝ち、`up` は動作の名前でいちばん後ろで、どの画面の表にもある（移動）。衝突の規則を
+/// 知っているのをここ 1 本にする。
+pub fn keymap_without(names: &[&str]) -> Keymap {
+    let mut pairs: Vec<(&str, &str)> = names.iter().map(|name| (*name, "f12")).collect();
+    pairs.push(("up", "f12"));
+    keymap_with(&pairs)
 }
 
 /// 候補が複数ある `Ambiguous`。

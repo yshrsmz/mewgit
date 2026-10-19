@@ -10,7 +10,7 @@ use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
 
 use super::remote::{conventional_remote, repo_unread, NoRemote};
 use super::{edit_key, focus, multiline_edit_key, submit};
-use crate::app::keys::PrsAction;
+use crate::app::keys::{self, Action, CommonAction, PrsAction};
 use crate::app::state::current_row;
 use crate::app::{
     AppState, BranchState, Cmd, JobKind, Key, KeyCode, Modal, NoticeLevel, Pane, PrField, PrHeads,
@@ -42,14 +42,22 @@ fn open_pr(state: &mut AppState) -> Cmd {
     match state.prs.selected() {
         Some(pr) => Cmd::OpenPr { number: pr.number },
         None => {
-            state.push_notice(
-                NoticeLevel::Info,
-                "開ける PR がありません（N で作成）".to_string(),
-                None,
-            );
+            let notice = no_pr(state, "開ける");
+            state.push_notice(NoticeLevel::Info, notice, None);
             Cmd::None
         }
     }
+}
+
+/// 一覧が空のときの案内（「`<verb>` PR がありません（N で作成）」）。`N` が引けなければ
+/// 括弧ごと出さない（08 の「文言に書いたキーの字」）。
+fn no_pr(state: &AppState, verb: &str) -> String {
+    keys::spell(
+        state,
+        [Action::Prs(PrsAction::Create)],
+        |[create]| format!("{verb} PR がありません（{create} で作成）"),
+        &format!("{verb} PR がありません"),
+    )
 }
 
 /// `Enter`。カーソル行の PR をローカルのブランチに取り出す（01 の
@@ -63,11 +71,8 @@ fn open_pr(state: &mut AppState) -> Cmd {
 /// 破壊的操作に当たらない。
 fn checkout(state: &mut AppState) -> Cmd {
     let Some(pr) = state.prs.selected() else {
-        state.push_notice(
-            NoticeLevel::Info,
-            "取り出せる PR がありません（N で作成）".to_string(),
-            None,
-        );
+        let notice = no_pr(state, "取り出せる");
+        state.push_notice(NoticeLevel::Info, notice, None);
         return Cmd::None;
     };
     let refusal = match (conventional_remote(state), state.repo.target.resolved()) {
@@ -211,7 +216,8 @@ fn open_pr_create(state: &mut AppState) -> Cmd {
     }
     let heads = state.head_candidates();
     if heads.is_empty() {
-        state.push_notice(NoticeLevel::Warn, NOT_PUSHED.to_string(), None);
+        let notice = not_pushed(state);
+        state.push_notice(NoticeLevel::Warn, notice, None);
         return Cmd::None;
     }
 
@@ -362,7 +368,8 @@ fn github_ready(state: &mut AppState) -> Option<RepoTarget> {
     match state.github_target() {
         Ok(target) => Some(target.clone()),
         Err(block) => {
-            state.push_notice(NoticeLevel::Info, block.notice(), None);
+            let notice = block.notice(state);
+            state.push_notice(NoticeLevel::Info, notice, None);
             None
         }
     }
@@ -433,15 +440,15 @@ fn pr_create_submit(state: &mut AppState) -> Cmd {
         // 開いたあとに候補が変わった形（`f` / 外の checkout で `RepoInfo` が読み直された）。
         // **閉じずに欄を入れ替え、そこへ移す** —— 選び直すのは人。
         let notice = if fresh.is_empty() {
-            NOT_PUSHED
+            not_pushed(state)
         } else {
-            HEADS_CHANGED
+            HEADS_CHANGED.to_string()
         };
         if let Some(Modal::PrCreate { heads, field, .. }) = state.modal.as_mut() {
             *heads = PrHeads::new(fresh);
             *field = PrField::Head;
         }
-        state.push_notice(NoticeLevel::Warn, notice.to_string(), None);
+        state.push_notice(NoticeLevel::Warn, notice, None);
         return Cmd::None;
     };
     let head = chosen.api_value(&target.owner);
@@ -472,7 +479,17 @@ fn on_branch(branches: &BranchState) -> bool {
 ///
 /// **`f` を案内する** —— 候補は remote-tracking ref から組むので、別の端末から
 /// push しただけのブランチは取得するまで候補に出ない（01 の「head の組み立て」の代償）。
-const NOT_PUSHED: &str = "どのリモートにもこのブランチがありません（push 済みなら f で取得）";
+/// `f` が引けなければ括弧ごと出さない（08 の「文言に書いたキーの字」）。
+fn not_pushed(state: &AppState) -> String {
+    keys::spell(
+        state,
+        [Action::Common(CommonAction::Fetch)],
+        |[fetch]| {
+            format!("どのリモートにもこのブランチがありません（push 済みなら {fetch} で取得）")
+        },
+        "どのリモートにもこのブランチがありません",
+    )
+}
 
 /// 開いているあいだに候補が変わったときの案内。
 const HEADS_CHANGED: &str = "head の候補が変わりました。確かめてから確定してください";
@@ -753,8 +770,8 @@ mod tests {
     use crate::test_util::{
         deliver_pr_details, fake_account, fake_branch, fake_branch_list, fake_branch_list_or,
         fake_head_list, fake_logins, fake_oid, fake_pull_request, fake_rate_limit,
-        fake_repo_snapshot, fake_target, fetch_pr_details, pr_list_loaded as list_msg,
-        put_on_branch, reply, start_pr_details,
+        fake_repo_snapshot, fake_target, fetch_pr_details, keymap_with, keymap_without,
+        pr_list_loaded as list_msg, put_on_branch, reply, start_pr_details,
     };
 
     /// アカウントと対象が決まり、HEAD が `branch` に居る状態。一覧はまだ引いていない。
@@ -1024,7 +1041,50 @@ mod tests {
         state.account = AccountState::Degraded(DegradedReason::GhMissing);
         let _ = press(&mut state, 'N');
         assert!(state.modal.is_none(), "degraded で開いた");
-        assert_eq!(last_notice(&state), GithubBlock::AccountDegraded.notice());
+        assert_eq!(
+            last_notice(&state),
+            GithubBlock::AccountDegraded.notice(&state)
+        );
+    }
+
+    #[test]
+    fn the_notices_spell_the_keys_from_the_table() {
+        // **案内文のキーは表から引く**（08 の「文言に書いたキーの字」）。引けない画面（衝突に
+        // 負けた）では括弧ごと落とす。**既定の表だけで測ると直書きでも緑。**
+        // 一覧が空の `Enter`（`N`）。
+        let mut state = state_for_checkout(&["main"]);
+        state.keymap = keymap_with(&[("create_pr", "f9")]);
+        let _ = press_code(&mut state, KeyCode::Enter);
+        assert_eq!(
+            last_notice(&state),
+            "取り出せる PR がありません（F9 で作成）"
+        );
+        state.keymap = keymap_without(&["create_pr"]);
+        let _ = press_code(&mut state, KeyCode::Enter);
+        assert_eq!(last_notice(&state), "取り出せる PR がありません");
+
+        // どのリモートにも無いブランチの `N`（`f`）。
+        let mut state = state_for_create("feat/x");
+        set_copies(&mut state, &[]);
+        state.keymap = keymap_with(&[("fetch", "f7")]);
+        let _ = press(&mut state, 'N');
+        assert_eq!(
+            last_notice(&state),
+            "どのリモートにもこのブランチがありません（push 済みなら F7 で取得）"
+        );
+
+        // degraded の `N`（`A`）。
+        let mut state = state_for_create("feat/x");
+        state.account = AccountState::Degraded(DegradedReason::GhMissing);
+        state.keymap = keymap_with(&[("account", "f6")]);
+        let _ = press(&mut state, 'N');
+        assert_eq!(
+            last_notice(&state),
+            "GitHub に接続できません（F6 で内訳を見られます）"
+        );
+        state.keymap = keymap_without(&["account"]);
+        let _ = press(&mut state, 'N');
+        assert_eq!(last_notice(&state), "GitHub に接続できません");
     }
 
     #[test]
@@ -1240,8 +1300,9 @@ mod tests {
 
         assert_eq!(cmd, Cmd::None);
         assert!(state.modal.is_none(), "候補が無いのに開いた");
-        assert_eq!(last_notice(&state), NOT_PUSHED);
-        assert!(cells(NOT_PUSHED) <= NOTICE_CELLS, "{NOT_PUSHED}");
+        let notice = not_pushed(&state);
+        assert_eq!(last_notice(&state), notice);
+        assert!(cells(&notice) <= NOTICE_CELLS, "{notice}");
 
         // **肯定まで 1 本で見る** —— 否定だけだと、何を置いても開かない実装で通る。
         // `f` で ref が届けば開く（案内のとおり）。
@@ -1420,7 +1481,7 @@ mod tests {
         let cmd = press_code(&mut state, KeyCode::Enter);
         assert_eq!(cmd, Cmd::None);
         assert_eq!(heads_of(&state).0, Vec::<String>::new());
-        assert_eq!(last_notice(&state), NOT_PUSHED);
+        assert_eq!(last_notice(&state), not_pushed(&state));
     }
 
     #[test]
@@ -1470,7 +1531,10 @@ mod tests {
 
         assert_eq!(cmd, Cmd::None);
         assert!(state.modal.is_none(), "書き込みのあいだに箱が開いた");
-        assert_eq!(last_notice(&state), GithubBlock::AccountResolving.notice());
+        assert_eq!(
+            last_notice(&state),
+            GithubBlock::AccountResolving.notice(&state)
+        );
     }
 
     #[test]
@@ -3167,8 +3231,8 @@ mod tests {
             }
         }
         // **`A` の通知と同じ字**（予算が同じ 1 行なので分けない。01）。
-        assert_eq!(unavailable, GithubBlock::TargetUnavailable.notice());
-        assert_eq!(resolving, GithubBlock::AccountResolving.notice());
+        assert_eq!(unavailable, GithubBlock::TargetUnavailable.notice(&state));
+        assert_eq!(resolving, GithubBlock::AccountResolving.notice(&state));
         // **`A` を案内してよいのは degraded だけ** —— そこにだけ内訳がある。
         assert!(
             degraded.contains('A'),

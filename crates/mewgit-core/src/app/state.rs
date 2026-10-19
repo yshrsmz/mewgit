@@ -18,6 +18,7 @@ use crate::graph::{GraphRow, LaneState};
 
 use crate::config::Config;
 
+use super::keys::{self, Action, CommonAction};
 use super::{Cmd, Keymap, ProgressMenu};
 
 /// アプリ全体の状態。
@@ -436,7 +437,7 @@ impl AppState {
         }
         Some(match pane {
             // `pick` が `Prs` を落とすのは GitHub 機能を切ったときだけ。
-            Pane::Prs => GithubBlock::AccountDisabled.notice(),
+            Pane::Prs => GithubBlock::AccountDisabled.notice(self),
             // 選択に合わない右下と、対象の無い `Diff`。どちらも番号では選べない
             // （`5` は `right_pane` が候補と同じ選択から決め、`Diff` に番号は無い）。
             _ => "そのペインはいま出ていません".to_string(),
@@ -917,8 +918,9 @@ pub enum GithubBlock {
 }
 
 impl GithubBlock {
-    /// 通知 1 行ぶんの文言。
-    pub fn notice(self) -> String {
+    /// 通知 1 行ぶんの文言。`state` は文言に書くキーを引くため（[`keys::spell`]。08 の
+    /// 「文言に書いたキーの字」）。
+    pub fn notice(self, state: &AppState) -> String {
         match self {
             Self::TargetUnavailable => {
                 "既定リモートから GitHub のリポジトリを特定できません".to_string()
@@ -926,7 +928,12 @@ impl GithubBlock {
             Self::AccountResolving => "アカウントを解決しています".to_string(),
             // **直し方を書いてよい。** `A` は mewgit が持っている操作で、内訳もそこに
             // 出る（#63 の「指示を足すのはその操作を持たない側」の素直な側）。
-            Self::AccountDegraded => "GitHub に接続できません（A で内訳を見られます）".to_string(),
+            Self::AccountDegraded => keys::spell(
+                state,
+                [Action::Common(CommonAction::Account)],
+                |[account]| format!("GitHub に接続できません（{account} で内訳を見られます）"),
+                "GitHub に接続できません",
+            ),
             // **直す先は設定ファイルなので、外でやってくださいと書いてよい。**
             // **再起動が要ることも書く** —— 実行中に設定は読み直さない（08）。
             Self::AccountDisabled => {
@@ -3788,7 +3795,7 @@ mod tests {
         let reason = state
             .focus_refusal(Pane::Worktree)
             .expect("候補に入っています");
-        assert_ne!(reason, GithubBlock::AccountDisabled.notice());
+        assert_ne!(reason, GithubBlock::AccountDisabled.notice(&state));
     }
 
     #[test]

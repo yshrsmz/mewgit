@@ -463,6 +463,19 @@ impl TestRepo {
         logs
     }
 
+    /// `branch` が `remote` の `merge` を追跡する設定（`branch.<branch>.remote` と
+    /// `.merge`）を書く。`merge` はリモート側のブランチ名で、ローカル名と違ってよい
+    /// （取り出しが `bob/main` に `refs/heads/main` を書く形。05）。**リモートは
+    /// 登録しない** —— 設定だけを読むテストは登録の無い形もそのまま踏める。
+    pub fn set_upstream_config(&self, branch: &str, remote: &str, merge: &str) {
+        self.git(&["config", &format!("branch.{branch}.remote"), remote]);
+        self.git(&[
+            "config",
+            &format!("branch.{branch}.merge"),
+            &format!("refs/heads/{merge}"),
+        ]);
+    }
+
     /// `.git/` の下のファイルを生バイト列で書く。git CLI では作れない ref 名
     /// （非 UTF-8）を仕込むのに使う。
     pub fn write_git_file(&self, name: &str, content: &[u8]) {

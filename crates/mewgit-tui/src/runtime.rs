@@ -1380,7 +1380,7 @@ mod tests {
         let msg = msgs.recv().await.expect("Msg が返りませんでした");
         let _ = update(&mut state, msg);
         // 表示行 0 は WIP 行。1 件目のコミットはその 1 つ下。
-        state.graph.cursor = 1;
+        state.graph.set_cursor(1);
 
         let cmd = state.issue(Cmd::LoadCommitDetail(oid));
         assert!(runtime.dispatch(&mut state, cmd).is_continue());
@@ -1417,7 +1417,7 @@ mod tests {
         let mut state = crate::test_util::state_with_commits(&["first"]);
         let on_wip = state.graph.viewport();
 
-        state.graph.cursor = 1;
+        state.graph.set_cursor(1);
 
         assert_eq!(layout(&mut state), Cmd::None);
         assert_eq!(state.graph.viewport(), on_wip);

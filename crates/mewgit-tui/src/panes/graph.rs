@@ -54,7 +54,7 @@ pub fn render(frame: &mut Frame, outer: Rect, state: &AppState) {
     let graph = &state.graph;
     // 見えている表示行の範囲。**添字を `lines` に読み替えるのは `GraphState::row`**
     // で、ここには `- 1` を書かない（01 の「グラフの行」）。
-    let start = graph.scroll.min(graph.rows());
+    let start = graph.scroll().min(graph.rows());
     let end = (start + rows.height as usize).min(graph.rows());
     let shown = || (start..end).filter_map(|index| Some((index, graph.row(index)?)));
 
@@ -132,7 +132,7 @@ impl<'a> View<'a> {
             GraphSelection::Wip => self.wip_line(),
             GraphSelection::Commit(line) => self.commit_line(line),
         };
-        if index == self.state.graph.cursor {
+        if index == self.state.graph.cursor() {
             line.style(theme::selected())
         } else {
             line
@@ -498,7 +498,7 @@ mod tests {
         assert!(!reversed(&state, FIRST_ROW));
 
         // `cursor` は表示行の添字。`1` は WIP 行の 1 つ下、つまり 1 件目のコミット。
-        state.graph.cursor = 1;
+        state.graph.set_cursor(1);
 
         assert!(!reversed(&state, WIP_ROW));
         assert!(reversed(&state, FIRST_ROW));
@@ -551,7 +551,10 @@ mod tests {
         let summaries: Vec<String> = (0..5).map(|i| format!("commit {i}")).collect();
         let refs: Vec<&str> = summaries.iter().map(String::as_str).collect();
         let mut state = state_with_commits(&refs);
-        state.graph.scroll = 2;
+        // `scroll` は直に書けないので、4 行の窓で最終行（表示行 5）へ跳ばして 2 行送る。
+        state.graph.set_viewport(4);
+        state.graph.set_cursor(5);
+        assert_eq!(state.graph.scroll(), 2);
 
         let lines = draw(&state, TermSize::default());
 

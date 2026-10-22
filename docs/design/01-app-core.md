@@ -441,8 +441,8 @@ pub struct GraphState {
     pub lines: Vec<GraphLine>,
     pub lanes: LaneState,       // 末尾行の直後の状態。追加ページはここから再開（06）
     pub refs: RefIndex,         // 行の右に並べるリモートとタグのラベル。ローカルはブランチ一覧から（02）
-    pub cursor: usize,          // 表示行の添字。0 は WIP 行、1.. が `lines`
-    pub scroll: usize,          // 画面最上部に出す行
+    cursor: usize,              // 表示行の添字。0 は WIP 行、1.. が `lines`。private で、書くのは `set_cursor` / `move_cursor` / `restart` だけ（下）
+    scroll: usize,              // 画面最上部に出す行。private で、書くのは `scroll_into_view` / `restart` だけ（下）
     viewport: usize,            // グラフに使える行数。private で、書くのは `set_viewport` だけ（下）
     pub detail: Option<CommitDetail>,  // 遅延取得した選択コミットの詳細（02）
     pub files: Option<CommitFiles>,    // 同じく遅延取得したファイル一覧（下）
@@ -482,7 +482,7 @@ pub enum GraphSelection<'a> { Wip, Commit(&'a GraphLine) }
 「パスとリモートの入れ物」に描画専用の索引が混ざる。起動時に `remotes` とブランチ一覧
 （HEAD の状態を含む）と一緒に読む。fetch 後の読み直しは M3 で決める。
 
-`scroll` は状態として持つ。`cursor` と `viewport` から毎回導くと、下端から上へ戻るときにカーソルが最下行に貼り付いたまま中身だけが流れる。更新は `GraphState::move_cursor(delta)`（カーソルを動かす）と `GraphState::set_viewport(rows)`（窓を変える）の 2 つで、どちらも中で private な `scroll_into_view()` を呼ぶ。**`viewport` は private で、書けるのは `set_viewport` だけ**（読むのは `viewport()`）。窓を変えたら詰め直す必要があり（下）、直書きを許すと、窓を変える経路を足したときにそこだけ詰め直しが抜けて、下の「下に空白が残る」形がその経路で再発する。**型で塞いであるのは `viewport` だけ** —— `cursor` / `scroll` / `lines` は `pub` のままで、本番のコードが `move_cursor` / `restart` / ページの追加の外から書かないのは取り決めにすぎない（`cursor` を直に書くと `scroll` が追わず、カーソルが窓の外に出る。塞ぐのは M6 の行に送った）。`scroll_into_view()` は毎回、カーソルを追う寄せの前に `scroll` を詰める —— 上限 `rows - viewport`（表示行（WIP 行を含む）が窓以下なら 0）を超えていればそこまで下げ、超えていなければ動かさない。行数が減る経路は `GraphState::restart` だけで、そこで `scroll` を 0 に戻す。なので、窓が縮んでも上限は上がるだけで**詰めは何も起こさない**（窓が縮んだときに `scroll` を動かすのは、カーソルを追う寄せのほう）。詰めが実際に効くのは窓が広がったとき —— 広げる前に窓の中にいたカーソルは、広げた後も窓の中に残るので、カーソルを追う寄せは動かず、詰めなければ上に行があるのに下に空白が残る（たとえば、カーソルが末尾近くの最下行にいるまま端末を大きくした形）。
+`scroll` は状態として持つ。`cursor` と `viewport` から毎回導くと、下端から上へ戻るときにカーソルが最下行に貼り付いたまま中身だけが流れる。更新は `GraphState::set_cursor(row)`（カーソルを跳ばす。`rows()` の外は最終行に丸める）、`GraphState::move_cursor(delta)`（`set_cursor` の上に組んだ相対移動）、`GraphState::set_viewport(rows)`（窓を変える）で、どれも中で private な `scroll_into_view()` を呼ぶ。**`viewport` / `cursor` / `scroll` は private で**（読むのは同名の getter）、`viewport` を書けるのは `set_viewport` だけ、`cursor` と `scroll` を書けるのは上の 3 つと `restart`（行を捨てて 0 に戻す）だけ。窓を変えたら詰め直す必要があり（下）、直書きを許すと、窓を変える経路を足したときにそこだけ詰め直しが抜けて、下の「下に空白が残る」形がその経路で再発する。`cursor` も同じで、直に書くと `scroll` が追わずにカーソルが窓の外に出る —— カーソルを跳ばす経路（HEAD へ移る、oid で座り直す等）は `set_cursor` を通す。**`lines` は `pub` のまま**で、本番のコードが `restart` / ページの追加の外から書かないのは取り決めにすぎない。`scroll_into_view()` は毎回、カーソルを追う寄せの前に `scroll` を詰める —— 上限 `rows - viewport`（表示行（WIP 行を含む）が窓以下なら 0）を超えていればそこまで下げ、超えていなければ動かさない。行数が減る経路は `GraphState::restart` だけで、そこで `scroll` を 0 に戻す。なので、窓が縮んでも上限は上がるだけで**詰めは何も起こさない**（窓が縮んだときに `scroll` を動かすのは、カーソルを追う寄せのほう）。詰めが実際に効くのは窓が広がったとき —— 広げる前に窓の中にいたカーソルは、広げた後も窓の中に残るので、カーソルを追う寄せは動かず、詰めなければ上に行があるのに下に空白が残る（たとえば、カーソルが末尾近くの最下行にいるまま端末を大きくした形）。
 
 `viewport` は `ui` がレイアウトから出して `Msg::Layout` で運んでくる（07 の
 `ui::graph_rows`）。core にヘッダや枠の高さを持たせない。持たせると 07 のレイアウトを

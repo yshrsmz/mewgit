@@ -849,8 +849,7 @@ fn branches_read_the_tracking_config_of_where_a_symbolic_head_points() {
     repo.git(&["switch", "-q", "alias"]);
     // `git push -u origin alias` は `alias -> main` として送り、`branch.main.*` を書く
     // （git 2.56.0 で確認）。HEAD の行がそれを読む。
-    repo.git(&["config", "branch.main.remote", "origin"]);
-    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    repo.set_upstream_config("main", "origin");
     let reader = RepoReader::open(repo.path()).unwrap();
 
     let list = reader.branches().unwrap();
@@ -912,13 +911,9 @@ fn branches_follow_a_head_on_a_symbolic_branch_to_where_it_points() {
 fn branches_reports_the_upstream_and_how_far_it_diverged() {
     let repo = TestRepo::init();
     repo.commit("first");
-    // リモートを実際に持たせる。libgit2 の `upstream()` は `branch.<name>.remote` が
-    // 指すリモートが `.git/config` に無いと `NotFound` になる。
-    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+    repo.track_origin_main();
     let base = repo.head_oid().to_string();
     repo.git(&["update-ref", "refs/remotes/origin/main", &base]);
-    repo.git(&["config", "branch.main.remote", "origin"]);
-    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
     // ローカルだけを 2 つ進める。
     repo.commit("second");
     repo.commit("third");
@@ -966,9 +961,7 @@ fn inclusion_of(repo: &TestRepo, name: &str) -> (usize, usize, Option<Inclusion>
 fn pushed_main() -> (TestRepo, Oid) {
     let repo = TestRepo::init();
     repo.commit("first");
-    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
-    repo.git(&["config", "branch.main.remote", "origin"]);
-    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    repo.track_origin_main();
     let pushed = repo.commit("second");
     repo.git(&[
         "update-ref",
@@ -1122,9 +1115,7 @@ fn branches_keeps_a_branch_whose_upstream_ref_is_gone() {
     // 未設定と同じ `NotFound` を返すので、どちらも「比べる相手がいない」に畳む（02）。
     let repo = TestRepo::init();
     repo.commit("first");
-    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
-    repo.git(&["config", "branch.main.remote", "origin"]);
-    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    repo.track_origin_main();
 
     let reader = RepoReader::open(repo.path()).unwrap();
     let list = reader.branches().unwrap();
@@ -1177,8 +1168,7 @@ fn branches_has_no_push_remote_when_neither_is_configured() {
     // 追跡設定はあっても、push 先の設定が無ければ `None`（fetch の規則は畳まない。02）。
     let repo = TestRepo::init();
     repo.commit("first");
-    repo.git(&["config", "branch.main.remote", "origin"]);
-    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    repo.set_upstream_config("main", "origin");
 
     let reader = RepoReader::open(repo.path()).unwrap();
     let list = reader.branches().unwrap();
@@ -1195,9 +1185,7 @@ fn branches_survives_a_broken_tracking_ref() {
     let repo = TestRepo::init();
     repo.commit("first");
     repo.git(&["branch", "topic"]);
-    repo.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
-    repo.git(&["config", "branch.main.remote", "origin"]);
-    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    repo.track_origin_main();
     // まず正しい追跡 ref を作り（ディレクトリもここでできる）、中身をどのオブジェクトも
     // 指さない oid に書き換える。`update-ref` は存在を検査するのでファイルを直に書く。
     let oid = repo.head_oid().to_string();

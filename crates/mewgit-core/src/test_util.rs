@@ -463,25 +463,17 @@ impl TestRepo {
         logs
     }
 
-    /// `branch` の追跡設定（`branch.<branch>.remote` と `.merge`）を書く。merge は
-    /// リモートの同名ブランチ。**リモートは登録しない** —— 設定だけを読むテストは
-    /// 登録の無い形もそのまま踏める。
-    pub fn set_upstream_config(&self, branch: &str, remote: &str) {
+    /// `branch` が `remote` の `merge` を追跡する設定（`branch.<branch>.remote` と
+    /// `.merge`）を書く。`merge` はリモート側のブランチ名で、ローカル名と違ってよい
+    /// （取り出しが `bob/main` に `refs/heads/main` を書く形。05）。**リモートは
+    /// 登録しない** —— 設定だけを読むテストは登録の無い形もそのまま踏める。
+    pub fn set_upstream_config(&self, branch: &str, remote: &str, merge: &str) {
         self.git(&["config", &format!("branch.{branch}.remote"), remote]);
         self.git(&[
             "config",
             &format!("branch.{branch}.merge"),
-            &format!("refs/heads/{branch}"),
+            &format!("refs/heads/{merge}"),
         ]);
-    }
-
-    /// `origin` を登録し、`main` がそれを追跡する設定を書く。追跡 ref は作らない。
-    ///
-    /// libgit2 の `upstream()` は `branch.<name>.remote` が指すリモートが `.git/config`
-    /// に無いと `NotFound` になるので、追跡先を読むテストは登録まで要る。
-    pub fn track_origin_main(&self) {
-        self.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
-        self.set_upstream_config("main", "origin");
     }
 
     /// `.git/` の下のファイルを生バイト列で書く。git CLI では作れない ref 名

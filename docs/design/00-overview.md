@@ -56,7 +56,8 @@
 ```
 crates/
   mewgit-core/src/
-    app/        state.rs  msg.rs  cmd.rs  key.rs  keys.rs
+    app/        msg.rs  cmd.rs  key.rs  keys.rs
+      state/    mod.rs  graph.rs  branches.rs  stash.rs  prs.rs  jobs.rs
       update/   mod.rs  graph.rs  worktree.rs  diff.rs  branches.rs
                 remote.rs  account.rs  modal.rs  exec.rs  prs.rs  progress.rs  stash.rs
                 test_support.rs（`#[cfg(test)]`）
@@ -97,9 +98,7 @@ Diff ペインのキーが `worktree::act` を通る以上、断りの文言は 
 見張りは Diff 側に要る。**`mod.rs` の項目には付けない** ——
 あそこの `super` は `app` なので、`pub(super)` は「`app` から呼べる」という別のことを
 言ってしまう（子モジュールは private のままでも見える）。
-`state.rs` を割っていないのは、**`update.rs` を割った時点で workspace 最長になった
-（2269 行）あとも**中身が `AppState` とその部品という 1 つの関心事だから（`docs/plan.md` の M6 に、割る
-引き金つきで送ってある）。
+`state` を割ったのも行数ではなく privacy 境界のため。**部品の不変条件を private なフィールドで守る形**（`GraphState` の `cursor` / `scroll` / `viewport`、`PrState` / `JobTracker` / `BranchState` / `StashState` の読み込みの段階や刻印）は、**守りが効くのがモジュールの外からだけ**なので、`AppState` の impl が同じファイルに居るあいだは `AppState` に対して取り決めにすぎなかった。private なフィールドを持つ部品を子モジュールへ出し、`AppState` と `pub` なフィールドだけの型（`WorktreeState` / `DiffState` / `Modal` など）は `state/mod.rs` に残した。2 つの部品が使う `ListLoad` も親に置く（兄弟依存を作らない）。**子モジュールで `update` から名指しされる項目は `pub(in crate::app)`** —— `state.rs` のときの `pub(super)`（「`app` から呼べる」）と同じ範囲で、子に置いたまま `pub(super)` と書くと「`state` から呼べる」に狭まる。逆に `AppState` からだけ呼ばせたいもの（`PrState::wanted_details`）は子の `pub(super)` がちょうどその範囲になる。外のパスは `state/mod.rs` の `pub use` で変わらない。
 
 **テストは対象と同じモジュールに置く。** private を叩くテストが多く、1 本に残すと
 そのために `pub(super)` を増やすことになる。2 つ以上のモジュールが呼ぶヘルパだけ

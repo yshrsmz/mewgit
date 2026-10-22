@@ -733,7 +733,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `ascii = false` と書いたのを書いていないのと見分けるため、ファイル側だけ
       `Option<bool>` にした（08）。`LANG` を渡さない SSH 先や Docker では既定が ASCII に変わる
 - [x] `graph.ascii` を枠線・`…`・スピナーにも効かせる。ロケールで ASCII に倒れても、ペインとモーダルの枠（`Borders::ALL` の罫線）、省略の `…`、ヘッダのスピナー（点字）が非 ASCII のまま残っていた（pty で `LC_ALL=C` を確かめた。ロケールの判定を入れた PR の `/simplify` が拾った）。**やると決めた**（2026-10-16）—— `ascii = true` は曖昧幅を全角に描く端末の逃げ道でもあり（06）、そこでは枠の罫線と `…` もグラフの罫線と同じくずれる。枠は `ui::Charset::border` が細線 `+-|` / 太線 `#=#` に倒し（ratatui に ASCII の組は無い）、`…` は `...`（3 セル）、スピナーは `|/-\` を 2 周。**日本語の文言の中の記号は倒さない**（06 の「ASCII フォールバック」、07 の「ペインとフォーカス」「ステータスバー」「ヘッダ」）。見張りは `ascii = true` で全画面と NoticeLog を描き、ASCII と全角以外の字が無いことを見る 1 本
-- [ ] `app/state.rs` を割るかを決める。**`update.rs` を割ったので workspace で
+- [x] `app/state.rs` を割るかを決める。**`update.rs` を割ったので workspace で
       いちばん長いファイルになった（2269 行。次は `update/graph.rs` の 1155 行）が、
       割る根拠は `update.rs` より弱い** —— 中身は `AppState` とその部品という 1 つの関心事で、
       大半が `pub` な型定義なので、割っても `pub(super)` として見えるものが増えない
@@ -744,7 +744,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       増えたのは変種のフィールド 1 つと `move_modal_cursor` の腕 1 つ。**通知履歴では数え直して割らなかった** —— 増えたのは
       `Modal::NoticeLog` の変種 1 つと、`Modal::move_cursor` を `AppState::move_modal_cursor`
       へ移したことだけで（一覧の長さを `AppState.notices` が持つため）、`Modal` が
-      独立して育ったとは言えない
+      独立して育ったとは言えない。**割った**（2026-10-23 にユーザーと決めた）—— 数え直すと本体は 3487 行（#116 の時点で 2796 行）で、`AppState` 589 → 738、`Modal` 86 → 133、`GraphState` 204 → 276、`WorktreeState` 122 → 154、`JobTracker` 112 → 112 行と、上の引き金（4 つが独立して育ったか）は満たしていなかった。割った理由は別の引き金で、`GraphState::cursor` / `scroll` を private にした PR の `/code-review` が「private が効くのは `app::state` の外からだけ」と拾った privacy の穴（00 の「ディレクトリ構成」）。private なフィールドを持つ部品（`GraphState` / `BranchState` / `StashState` / `PrState` と `PrHeads` / `JobTracker` と `Job`）を `state/` の子モジュールへ出し、`WorktreeState` と `Modal` は private を持たないので動かしていない。分けたことで見えた `AppState` からの private への手出しは 2 つで、どちらも読むだけ（`PrState::wanted_details` を `pub(super)` に、`StashState::epoch` に `pub(super)` の getter）。書き込みは無かった
 - [x] `git_exec::argv` の `VARIANT_COUNT` を消す。**`variant()` の網羅 `match` から
       離れた場所に変種の本数のコピーが置いてあった**（`.claude/rules/rust-coding.md` の「離れた場所に、
       コードの『いま N ある』を書かない」）。**ただの削除では済まない** ——

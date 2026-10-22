@@ -1166,10 +1166,18 @@ pub struct GraphState {
     ///
     /// 解くのは [`GraphState::selection`] の 1 つ。各所で `lines.get(cursor - 1)` と
     /// 書くと、`- 1` の書き忘れが 1 行ずれとして静かに通る（01 の「グラフの行」）。
-    pub cursor: usize,
+    ///
+    /// **private にして、書くのは [`set_cursor`](Self::set_cursor) と
+    /// [`restart`](Self::restart) だけにする**（`move_cursor` は `set_cursor` の上に組んである）。
+    /// `viewport` と同じ理由で、直書きを許すと `scroll` が追わずにカーソルが窓の外に
+    /// 出る（01 の「グラフの行」）。カーソルを跳ばす経路（HEAD へ移る、oid で座り直す
+    /// 等）は `set_cursor` を通す。
+    cursor: usize,
     /// 画面最上部に出す行の添字。カーソルだけからは決まらない（カーソルを上に
     /// 動かしたとき、見えているうちは view を動かさない）ので状態として持つ。
-    pub scroll: usize,
+    ///
+    /// private なのは `cursor` と同じ理由。書くのは [`scroll_into_view`](Self::scroll_into_view) と [`restart`](Self::restart) だけ。
+    scroll: usize,
     /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Layout`] で運んでくる
     /// （`crate::app::Msg::Layout`）。core はヘッダや枠の高さを知らない。
     ///
@@ -1287,7 +1295,7 @@ impl GraphState {
 
     /// カーソルが指しているもの。
     ///
-    /// カーソルは常に表示行の中にいる（[`move_cursor`](Self::move_cursor) が丸める）ので
+    /// カーソルは常に表示行の中にいる（[`set_cursor`](Self::set_cursor) が丸める）ので
     /// `Wip` に落ちるのは本当に WIP 行を指しているときだけ。
     pub fn selection(&self) -> GraphSelection<'_> {
         self.row(self.cursor).unwrap_or(GraphSelection::Wip)
@@ -1360,11 +1368,27 @@ impl GraphState {
         files.entries.get(files.cursor)
     }
 
+    /// カーソルが指す表示行の添字。
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// 画面最上部に出す行の添字。
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
     /// カーソルを `delta` 行動かす。端では止まる。
     pub fn move_cursor(&mut self, delta: isize) {
+        self.set_cursor(self.cursor.saturating_add_signed(delta));
+    }
+
+    /// カーソルを表示行 `row` へ跳ばす。[`rows`](Self::rows) の外なら最終行に丸め、
+    /// 窓の外へ出たならスクロールが追う。
+    pub fn set_cursor(&mut self, row: usize) {
         // 行が 1 つも積まれていなくても WIP 行はあるので、`rows()` は 1 以上。
         let last = self.rows() - 1;
-        self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+        self.cursor = row.min(last);
         self.scroll_into_view();
     }
 
@@ -3775,7 +3799,7 @@ mod tests {
         // 食い違うと、画面に出ているペインへ `Tab` で行けない（またはその逆）。
         let mut state = state_with_a_commit();
         for cursor in [0, 1] {
-            state.graph.cursor = cursor;
+            state.graph.set_cursor(cursor);
             let right = state.graph.selection().right_pane();
             assert!(
                 state.focus_candidates().contains(&right),
@@ -3790,7 +3814,7 @@ mod tests {
         // `Prs` 以外の理由で落ちたペインに「GitHub 機能が無効」と言わない
         // （`focus_refusal` の doc）。コミットを選んでいるあいだ Working tree は候補の外。
         let mut state = state_with_a_commit();
-        state.graph.cursor = 1;
+        state.graph.set_cursor(1);
         assert_eq!(state.focus_refusal(Pane::CommitDetail), None);
         let reason = state
             .focus_refusal(Pane::Worktree)
@@ -3804,7 +3828,7 @@ mod tests {
         // 候補から外れると、画面に出ているペインへ `Tab` で行けない。
         let mut state = state_with_a_commit();
         for cursor in [0, 1] {
-            state.graph.cursor = cursor;
+            state.graph.set_cursor(cursor);
             assert!(
                 state.focus_candidates().contains(&Pane::Branches),
                 "cursor={cursor} candidates={:?}",
@@ -3958,7 +3982,7 @@ mod tests {
         let mut state = state_with_a_commit();
         assert!(state.focus_candidates().contains(&Pane::Worktree));
 
-        state.graph.cursor = 1;
+        state.graph.set_cursor(1);
 
         assert!(!state.focus_candidates().contains(&Pane::Worktree));
         assert!(state.focus_candidates().contains(&Pane::CommitDetail));
@@ -3987,7 +4011,7 @@ mod tests {
         let mut state = state_with_a_commit();
         state.focus = Pane::Worktree;
 
-        state.graph.cursor = 1;
+        state.graph.set_cursor(1);
         state.reseat_focus();
 
         assert_eq!(state.focus, Pane::Graph);
@@ -4001,7 +4025,7 @@ mod tests {
         assert_eq!(state.graph.selection(), GraphSelection::Wip);
         assert!(state.graph.cursor_commit().is_none());
 
-        state.graph.cursor = 1;
+        state.graph.set_cursor(1);
 
         let commit = state
             .graph
@@ -4015,10 +4039,10 @@ mod tests {
         let mut state = state_with_a_commit();
 
         state.graph.move_cursor(-1);
-        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.cursor(), 0);
 
         state.graph.move_cursor(5);
-        assert_eq!(state.graph.cursor, 1);
+        assert_eq!(state.graph.cursor(), 1);
     }
 
     #[test]
@@ -4029,7 +4053,7 @@ mod tests {
 
         state.graph.move_cursor(3);
 
-        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.cursor(), 0);
         assert_eq!(state.graph.selection(), GraphSelection::Wip);
     }
 

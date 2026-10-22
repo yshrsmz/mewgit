@@ -1901,7 +1901,7 @@ mod tests {
     #[test]
     fn a_reloaded_page_replaces_the_rows_and_seats_the_cursor_at_the_top() {
         let mut state = state_with_commits(3);
-        state.graph.cursor = 2;
+        state.graph.set_cursor(2);
         state.graph.detail = Some(fake_detail(2, "old"));
         let _ = state.issue(Cmd::Exec(commit_op()));
         let _ = update(&mut state, exec_done_of(commit_op(), Ok(fake_output())));
@@ -1920,7 +1920,7 @@ mod tests {
 
         assert_eq!(state.graph.lines.len(), 1);
         assert_eq!(state.graph.lines[0].commit.oid, commit(7).oid);
-        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.cursor(), 0);
         // `lines` に無いコミットの詳細を残さない。
         assert!(state.graph.detail.is_none());
     }

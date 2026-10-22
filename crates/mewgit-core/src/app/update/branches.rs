@@ -134,7 +134,7 @@ mod tests {
 
         assert_eq!(state.branches.cursor, 0);
         // 同じ `j` / `k` がグラフに漏れない。
-        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.cursor(), 0);
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
     fn n_on_the_wip_row_starts_the_branch_at_head() {
         // WIP 行にはコミットが無い。**「グラフに居るから起点がある」ではない。**
         let mut state = state_with_commits(2);
-        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.cursor(), 0);
 
         let _ = press(&mut state, 'n');
 

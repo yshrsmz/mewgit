@@ -320,7 +320,7 @@ pub(super) fn move_file(state: &mut AppState, delta: isize) -> Cmd {
 /// 腕ごとに `load_more` を書くと、足したキーが素通りする。下端で `j` を押したときは
 /// カーソルが動かないので、「動いたかどうか」では判定できない。
 pub(super) fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
-    let before = state.graph.cursor;
+    let before = state.graph.cursor();
     state.graph.move_cursor(delta);
     // カーソルを動かすのはユーザーの操作なので、失敗した読み直しはここから始める。
     // 自動では出さない（`load_more`）。**ログの印は無条件に落とす** — 失敗すると
@@ -330,7 +330,7 @@ pub(super) fn scrolled(state: &mut AppState, delta: isize) -> Cmd {
     // コミットに紐づくので、端で押しても対象は変わらず、試し直す根拠が無い。
     // 無条件に落とすと、末尾の行で `j` を押し続けるあいだ「失敗 → 再読込 → 失敗」を
     // 打鍵のたびに回して通知を積む（01 の「失敗の記憶」）。
-    if state.graph.cursor != before {
+    if state.graph.cursor() != before {
         state.graph.detail_failed = None;
         state.graph.files_failed = None;
     }
@@ -465,7 +465,7 @@ pub(super) fn commit_files_loaded(
 /// ため。`log_loaded` の出口でも必ず出し直す）ので、ここで続きを出しても `issue` が
 /// 落とす。見る形にすると、テストで踏めない分岐が残る。
 pub(super) fn load_more(state: &AppState) -> Cmd {
-    let remaining = state.graph.rows().saturating_sub(state.graph.cursor);
+    let remaining = state.graph.rows().saturating_sub(state.graph.cursor());
     // 失敗したあとは行が空なので「残りが 1 画面以下」が必ず真になる。見ないと、
     // 以後のレイアウト変化のたびに読み直しを出す（失敗自体がレイアウトを変える。
     // 行が消えると詳細の領域も消えるため）。
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(cmd, Cmd::None);
         assert!(state.graph.lines.is_empty());
         assert_eq!(state.graph.lanes, LaneState::default());
-        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.cursor(), 0);
         assert!(!state.graph.loaded_all);
         assert!(!state.jobs.is_running(JobKind::LoadLog));
         assert_eq!(state.notices.back().unwrap().level, NoticeLevel::Error);
@@ -669,16 +669,16 @@ mod tests {
         let mut state = state_with_commits(3);
 
         let _ = press(&mut state, 'j');
-        assert_eq!(state.graph.cursor, 1);
+        assert_eq!(state.graph.cursor(), 1);
 
         let _ = press_code(&mut state, KeyCode::Down);
-        assert_eq!(state.graph.cursor, 2);
+        assert_eq!(state.graph.cursor(), 2);
 
         let _ = press(&mut state, 'k');
-        assert_eq!(state.graph.cursor, 1);
+        assert_eq!(state.graph.cursor(), 1);
 
         let _ = press_code(&mut state, KeyCode::Up);
-        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.cursor(), 0);
     }
 
     #[test]
@@ -687,14 +687,14 @@ mod tests {
         // 末尾近くの最下行にいるまま端末を大きくした形を踏む。カーソル 29 は末尾の
         // 添字 30 の 1 つ手前で、窓が 5 行なら末尾の 1 行は窓の下に隠れている。
         let mut state = state_with_commits(30);
-        state.graph.cursor = 29;
+        state.graph.set_cursor(29);
         let _ = update(&mut state, Msg::Layout { graph_rows: 5 });
-        assert_eq!(state.graph.scroll, 25);
+        assert_eq!(state.graph.scroll(), 25);
 
         let _ = update(&mut state, Msg::Layout { graph_rows: 25 });
 
         // 表示行は WIP 行を含めて 31。窓が 25 行なら先頭は 6 行目まで下がれる。
-        assert_eq!(state.graph.scroll, 6);
+        assert_eq!(state.graph.scroll(), 6);
     }
 
     #[test]
@@ -704,11 +704,29 @@ mod tests {
         let mut state = state_with_commits(30);
         state.graph.set_viewport(5);
         state.graph.move_cursor(29);
-        assert_eq!(state.graph.scroll, 25);
+        assert_eq!(state.graph.scroll(), 25);
 
         state.graph.set_viewport(25);
 
-        assert_eq!(state.graph.scroll, 6);
+        assert_eq!(state.graph.scroll(), 6);
+    }
+
+    #[test]
+    fn set_cursor_jumps_out_of_the_window_and_the_view_follows() {
+        // 跳ばす経路（HEAD へ移る、oid で座り直す等）は `set_cursor` を通す
+        // （`GraphState::cursor` の doc）。窓の下へ跳べば最下行に、上へ跳べば最上行に来る。
+        let mut state = state_with_commits(30);
+        state.graph.set_viewport(5);
+
+        state.graph.set_cursor(20);
+        assert_eq!((state.graph.cursor(), state.graph.scroll()), (20, 16));
+
+        state.graph.set_cursor(3);
+        assert_eq!((state.graph.cursor(), state.graph.scroll()), (3, 3));
+
+        // 表示行（WIP 行を含めて 31）の外は最終行に丸める。
+        state.graph.set_cursor(100);
+        assert_eq!((state.graph.cursor(), state.graph.scroll()), (30, 26));
     }
 
     #[test]
@@ -716,13 +734,13 @@ mod tests {
         // 履歴が窓より短くなると詰め先は 0（詰める理由は `scroll_into_view` の doc）。
         // ここでは、詰めなければ上 2 行が隠れたまま残る。
         let mut state = state_with_commits(3);
-        state.graph.cursor = 3;
+        state.graph.set_cursor(3);
         let _ = update(&mut state, Msg::Layout { graph_rows: 2 });
-        assert_eq!(state.graph.scroll, 2);
+        assert_eq!(state.graph.scroll(), 2);
 
         let _ = update(&mut state, Msg::Layout { graph_rows: 20 });
 
-        assert_eq!(state.graph.scroll, 0);
+        assert_eq!(state.graph.scroll(), 0);
     }
 
     #[test]
@@ -732,14 +750,14 @@ mod tests {
             let _ = press(&mut state, 'j');
         }
         // カーソル `ROWS + 5` が窓（`ROWS` 行）の最下行に来るので、先頭は 6。
-        assert_eq!(state.graph.scroll, 6);
+        assert_eq!(state.graph.scroll(), 6);
 
         for _ in 0..ROWS {
             let _ = press(&mut state, 'k');
         }
 
-        assert_eq!(state.graph.cursor, 5);
-        assert_eq!(state.graph.scroll, 5);
+        assert_eq!(state.graph.cursor(), 5);
+        assert_eq!(state.graph.scroll(), 5);
     }
 
     #[test]
@@ -751,12 +769,12 @@ mod tests {
             let _ = press(&mut state, 'j');
         }
         // カーソル `ROWS` が窓（`ROWS` 行）の最下行に来るので、先頭は 1。
-        assert_eq!(state.graph.scroll, 1);
+        assert_eq!(state.graph.scroll(), 1);
 
         let _ = press(&mut state, 'k');
 
-        assert_eq!(state.graph.cursor, ROWS - 1);
-        assert_eq!(state.graph.scroll, 1);
+        assert_eq!(state.graph.cursor(), ROWS - 1);
+        assert_eq!(state.graph.scroll(), 1);
     }
 
     /// 索引 `index` のコミットのファイル一覧が届いた [`Msg`]。中身は `a.txt` 1 件。
@@ -1519,7 +1537,7 @@ mod tests {
 
     /// 表示行 `row`（1 始まりのコミット行）へカーソルを移して印を付ける。
     fn mark_row(state: &mut AppState, row: usize) -> Oid {
-        state.graph.cursor = row;
+        state.graph.set_cursor(row);
         assert_eq!(press(state, ' '), Cmd::None);
         cursor(state)
     }
@@ -1573,7 +1591,7 @@ mod tests {
         let newest = mark_row(&mut state, 1);
         let oldest = mark_row(&mut state, 3);
         // カーソルの行（commit 1）は印が無いので入らない。
-        state.graph.cursor = 2;
+        state.graph.set_cursor(2);
 
         assert_eq!(press(&mut state, 'y'), Cmd::None);
 
@@ -1646,7 +1664,7 @@ mod tests {
         let mut state = state_with_commits(3);
         state.graph.lines[2].commit.parents = vec![fake_oid(1), fake_oid(2)];
         let marked = mark_row(&mut state, 3);
-        state.graph.cursor = 0;
+        state.graph.set_cursor(0);
 
         assert_eq!(press(&mut state, 'v'), Cmd::None);
 

@@ -855,7 +855,7 @@ mod tests {
         let mut state = state_with_commits(3);
         state.worktree.snapshot = fake_snapshot(&[], &["a.txt", "b.txt"], &[]);
         let _ = press(&mut state, 'j');
-        assert_eq!(state.graph.cursor, 1);
+        assert_eq!(state.graph.cursor(), 1);
         // WIP 行に戻す。コミットを選んでいるあいだ Worktree は巡回に入らない（01）。
         let _ = press(&mut state, 'k');
 
@@ -877,7 +877,7 @@ mod tests {
 
         // 同じ `j` が worktree のカーソルに効く。グラフは動かない。
         let _ = press(&mut state, 'j');
-        assert_eq!(state.graph.cursor, 0);
+        assert_eq!(state.graph.cursor(), 0);
         assert_eq!(state.worktree.cursor, 1);
 
         for _ in 0..4 {
@@ -1220,7 +1220,7 @@ mod tests {
     #[test]
     fn the_next_page_is_not_asked_for_twice_while_it_is_loading() {
         let mut state = state_with_page(ROWS + 2, false);
-        state.graph.cursor = ROWS;
+        state.graph.set_cursor(ROWS);
         // 1 ページ目の続きを頼んだ直後の状態を作る。
         let _ = state.issue(Cmd::LoadLog {
             count: 1,
@@ -1240,7 +1240,7 @@ mod tests {
         let mut state = state_with_commits(3);
         // 最終行（3 件目のコミット）に置き、その詳細も届けておく。頼み直しが
         // 混ざると、出なかったのが続きなのか詳細なのか判らなくなる。
-        state.graph.cursor = 3;
+        state.graph.set_cursor(3);
         let _ = update(&mut state, detail_ok(2));
 
         assert!(state.graph.loaded_all);
@@ -1254,10 +1254,10 @@ mod tests {
         for _ in 0..25 {
             let _ = update(&mut state, Msg::Key(Key::char('j')));
         }
-        assert_eq!(state.graph.cursor, 25);
+        assert_eq!(state.graph.cursor(), 25);
 
         let _ = update(&mut state, Msg::Layout { graph_rows: 5 });
 
-        assert_eq!(state.graph.scroll, 21);
+        assert_eq!(state.graph.scroll(), 21);
     }
 }

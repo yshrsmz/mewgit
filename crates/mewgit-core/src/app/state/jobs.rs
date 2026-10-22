@@ -320,3 +320,80 @@ impl GithubJob {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(kind: JobKind) -> Job {
+        Job::new(kind, "test", 0)
+    }
+
+    #[test]
+    fn job_tracker_rejects_a_second_job_of_the_same_kind() {
+        let mut jobs = JobTracker::default();
+        assert!(jobs.is_empty());
+
+        assert!(jobs.start(job(JobKind::LoadStatus)));
+        assert!(jobs.is_running(JobKind::LoadStatus));
+        // 同種の Cmd を二重に投げないための判定。
+        assert!(!jobs.start(job(JobKind::LoadStatus)));
+        assert_eq!(jobs.iter().count(), 1);
+    }
+
+    #[test]
+    fn job_tracker_allows_different_kinds() {
+        let mut jobs = JobTracker::default();
+        assert!(jobs.start(job(JobKind::LoadStatus)));
+        assert!(jobs.start(job(JobKind::FetchPrList)));
+        assert_eq!(jobs.iter().count(), 2);
+    }
+
+    #[test]
+    fn job_tracker_finish_makes_room_again() {
+        let mut jobs = JobTracker::default();
+        jobs.start(job(JobKind::LoadLog));
+
+        jobs.finish(JobKind::LoadLog);
+        assert!(!jobs.is_running(JobKind::LoadLog));
+        assert!(jobs.is_empty());
+        assert!(jobs.start(job(JobKind::LoadLog)));
+    }
+
+    #[test]
+    fn every_region_has_its_own_epoch() {
+        // **`JobTracker` は `region as usize` でカウンタを引き、幅は `Region::ALL` の長さ。**
+        // 全部載っていることは `all_variants!` がコンパイル時に強いる。ここで見るのは、
+        // `advance` / `epoch` が領域ごとのカウンタを引いていること（`region` を無視して
+        // 1 つのカウンタを進める形では 1 を超える）と、明示した判別子が幅を超えて
+        // 添字が範囲外にならないこと。
+        let mut jobs = JobTracker::default();
+        for &region in Region::ALL {
+            jobs.advance(region);
+        }
+        for &region in Region::ALL {
+            assert_eq!(jobs.epoch(region), 1, "{region:?}");
+        }
+    }
+
+    #[test]
+    fn a_kind_without_a_region_is_always_fresh() {
+        // `Exec` やコミット詳細は書き込みで古くならない（詳細は Oid で追いつく）。
+        // ここが偽だと、追いつきを持たない種別に頼み直しを回させる腕ができる。
+        let mut jobs = JobTracker::default();
+        assert!(jobs.is_fresh(JobKind::Exec, None));
+        jobs.advance(Region::Worktree);
+        assert!(jobs.is_fresh(JobKind::LoadCommitDetail, None));
+        // 領域を持つ種別は、刻印が無ければ「古い」。
+        assert!(!jobs.is_fresh(JobKind::LoadStatus, None));
+    }
+
+    #[test]
+    fn finishing_an_idle_kind_is_a_no_op() {
+        let mut jobs = JobTracker::default();
+        jobs.start(job(JobKind::LoadLog));
+
+        jobs.finish(JobKind::FetchPrList);
+        assert!(jobs.is_running(JobKind::LoadLog));
+    }
+}

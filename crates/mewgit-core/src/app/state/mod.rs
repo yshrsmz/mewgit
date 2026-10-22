@@ -12,7 +12,7 @@ use crate::git_read::{
     Branch, DiffTarget, FileDiff, FileEntry, Oid, PathStamp, Remote, RepoFingerprint, Timestamp,
     WorktreeSection, WorktreeSnapshot,
 };
-use crate::github::PullRequest;
+use crate::github::{PullRequest, RepoRef};
 
 use crate::config::Config;
 
@@ -28,7 +28,6 @@ mod stash;
 pub use branches::BranchState;
 pub use graph::{CommitFiles, GraphLine, GraphSelection, GraphState};
 pub use jobs::{GithubJob, Job, JobKind, JobTracker, Region};
-pub(super) use prs::current_row;
 pub use prs::{PrHead, PrHeads, PrLoad, PrState};
 pub use stash::StashState;
 
@@ -637,7 +636,7 @@ impl AppState {
     /// PR 作成の `head` の候補（01 の「head の組み立て」）。ブランチ一覧に HEAD の行が
     /// 無ければ（detached / unborn / まだ届いていない）空。
     ///
-    /// **`prs::head_homes` とは読み手が違う。** あちらは「PR の head が**在りうる**
+    /// **[`head_homes`] とは読み手が違う。** あちらは「PR の head が**在りうる**
     /// リポジトリ」を返す寛容な照合（座り直し）で、追跡先（何を基にしたか）も入れる。
     /// こちらは**送る値の候補**なので、「そこに在る」と言える材料だけを使う（#101）。
     ///
@@ -660,7 +659,7 @@ impl AppState {
     /// 証拠）、残りはリモート名の順、URL は最後。**送る値（owner とブランチ名）で
     /// 1 つに畳む** —— `<owner>:<branch>` までしか運べないので、同じ owner の 2 つの
     /// リポジトリは区別できない（[`PrHead`]）。**GitHub の形として読めない
-    /// リモートは入れない**。host は比べない（`prs::head_homes` と同じ理由）。
+    /// リモートは入れない**。host は比べない（[`head_homes`] と同じ理由）。
     pub(super) fn head_candidates(&self) -> Vec<PrHead> {
         let Some(Branch { name, oid, .. }) = self.branches.head_branch() else {
             return Vec::new();
@@ -790,7 +789,7 @@ impl RepoInfo {
     /// 名前で引いたリモート。無ければ `None`（`.`（ローカル追跡）もここに落ちる）。
     ///
     /// **引き方を 1 本にする。** `update::default_remote`（`branch.<HEAD>.remote` で
-    /// 引く）と `prs::head_homes` が同じ走査を書いていた。
+    /// 引く）と [`head_homes`] が同じ走査を書いていた。
     pub(super) fn remote(&self, name: &str) -> Option<&Remote> {
         self.remotes.iter().find(|remote| remote.name == name)
     }
@@ -798,7 +797,7 @@ impl RepoInfo {
     /// `branch.<name>.remote` の値をどう読むか。**git の仕様で値は名前でも URL でも
     /// よい**（`gh pr checkout` と PR の取り出しは fork の URL を書く。05）。
     ///
-    /// **読み方を 1 本にする。** `prs::head_homes` と `update::default_remote` が別々に
+    /// **読み方を 1 本にする。** [`head_homes`] と `update::default_remote` が別々に
     /// 「名前で引けなければ URL」を書いていた。
     ///
     /// **URL かは GitHub の形かで決めない。** git の値として URL（`:` を含む /
@@ -826,7 +825,7 @@ impl RepoInfo {
     /// `gh pr checkout`）と `git push -u <URL> <local>:<remote>` で、どれもローカルと
     /// 違う名前を `merge` に書きうる（取り出しは衝突を避けてローカルを `bob/main` に
     /// する。01 の「現ブランチの PR」の「比べる名前」）。**読み方を 1 本にする** ——
-    /// 座り直し（`prs::head_homes`）と送る側（[`AppState::head_candidates`]）が別々に
+    /// 座り直し（[`head_homes`]）と送る側（[`AppState::head_candidates`]）が別々に
     /// 書くと、片方だけ直ったときに「取り出した PR に座らない」と「fork に無い
     /// ブランチを送る」が片側だけで起きる。`refs/heads/` の下に無い `merge` は
     /// ブランチではないので `None`（取り出しは URL と一緒には書かない。05）。
@@ -840,6 +839,115 @@ impl RepoInfo {
         };
         Some((url, upstream.merge.strip_prefix("refs/heads/")?))
     }
+}
+
+/// 一覧のうち、いま居るブランチの PR（01 の「現ブランチの PR」）。
+///
+/// **[`AppState::current_pr`] と [`PrState::loaded`] の両方がここを通る。** 座り直す
+/// 先を決める側と描く側で照合の規則が割れると、カーソルが座っていない行を
+/// 「現ブランチの PR」として扱える。
+///
+/// **fork のブランチも当てる。** 照合する相手（リポジトリと、そこでのブランチ名）は
+/// [`head_homes`] が確からしい順に出す（`branch.<HEAD>.remote` の URL → `target`）。
+///
+/// **到着順に依らない。** 材料の HEAD の行（`branches`）と `remotes` はどちらも
+/// [`Msg::RepoInfoLoaded`](super::Msg::RepoInfoLoaded) に乗って**同時に**届き、
+/// `target` はその返信から始まる鎖（`Cmd::ResolveTarget` → `Cmd::ResolveAccount` →
+/// 一覧）の途中なので、**一覧が届いた時点でどれも揃っている**（経緯は 02 の「head」）。
+/// **順序を回すテストは要らない**。
+pub(super) fn current_row<'a>(
+    repo: &RepoInfo,
+    branches: &BranchState,
+    list: &'a [PullRequest],
+) -> Option<&'a PullRequest> {
+    // **リポジトリ名まで見る**（`RepoRef` 丸ごとの比較）。owner だけだと、同じ owner の
+    // 下に作った fork（`acme/app` → `acme/app-fork`）から出た他人の PR が
+    // 「現ブランチの PR」に当たる。
+    head_homes(repo, branches)
+        .into_iter()
+        .find_map(|(home, branch)| {
+            list.iter().find(|pr| {
+                pr.head.branch == branch
+                    && pr
+                        .head
+                        .repo
+                        .as_ref()
+                        .is_some_and(|repo| repo.same_as(&home))
+            })
+        })
+}
+
+/// HEAD のブランチから出した PR の head が在りうるリポジトリと、そこでのブランチ名を、
+/// **確からしい順**に返す（01 の「現ブランチの PR」）。ブランチ一覧に HEAD の行が
+/// 無ければ空（detached にも unborn にも PR は無い）。
+///
+/// **名前は、追跡先が URL の腕だけ `merge` から取る**（[`RepoInfo::url_tracked`]）。
+/// 名前の追跡先と `target` の腕はローカルの名前のまま —— 理由は 01 の「比べる名前」。
+///
+/// **候補が 1 つに決まらないのは、git が「どこへ push したか」を憶えていないから。**
+/// `branch.<name>.remote` が答えるのは**何を基にしたか**で、実測（git 2.55、
+/// 一時リポジトリ。表は 01）では `git checkout -b fix bob/fix` のあと origin へ
+/// push しても `bob` のまま。だから**追跡先で当たらなければ `target` でも当てる** ——
+/// 追跡先を先に見るのは、fork 運用で upstream 側の同名ブランチから出た**他人の PR**
+/// より、自分の fork の PR を優先するため。
+///
+/// **`branch.<name>.remote` はリモート名でも URL でもよい**（git の仕様）。
+/// **`gh pr checkout` が書くのは URL のほう**（実測 2026-09-20、gh 2.101.0:
+/// `branch.<b>.remote=https://github.com/<fork>/<repo>.git`）なので、名前で引けない
+/// 値はそのまま URL として読む。ここを落とすと、**fork の PR をローカルに出す
+/// いちばんふつうの経路**が当たらない。
+///
+/// **HEAD の行は引数に取らない。** 名前も追跡設定も `branches` の HEAD の行
+/// （[`BranchState::head_branch`]）から導けるので、呼ぶ側に選ばせると対応の取れない組
+/// （HEAD でない行）が型で組める（`.claude/rules/rust-coding.md` の「導出できる値を
+/// 引数に取らせない」）。
+///
+/// **読めない追跡設定は候補にしない**（設定が無い / `.`（ローカル追跡）/ リモートが
+/// 消えている / URL が GitHub の形でない / URL の `merge` がブランチでない）。
+/// **理由は分けない**：呼び出し側の扱いは
+/// どれも同じで、**出す先も無い**（座る行が変わるだけで通知は出さない）。
+///
+/// **host は見ない。** [`RepoTarget::host`] は `ssh -G` で正規化済みだが、こちらは
+/// URL に書かれたままなので、生のまま比べると **fork だけ別のエイリアスを使う
+/// 多アカウント運用**（04）で逆に落ちる。残る穴は、別ホストの同名 `owner/repo` に
+/// 同名のブランチがあり、その PR が一覧に居るとき（01）。
+fn head_homes<'a>(repo: &'a RepoInfo, branches: &'a BranchState) -> Vec<(RepoRef, &'a str)> {
+    let Some(Branch {
+        name,
+        upstream_config,
+        ..
+    }) = branches.head_branch()
+    else {
+        return Vec::new();
+    };
+    // 名前で引ければその URL、URL ならそのもの。
+    let tracked = match upstream_config
+        .as_ref()
+        .map(|upstream| repo.tracked(&upstream.remote))
+    {
+        Some(Tracked::Named(remote)) => Some((remote.url.as_str(), name.as_str())),
+        _ => repo.url_tracked(branches),
+    };
+    let tracked = tracked.and_then(|(url, branch)| {
+        let url = RemoteUrl::parse(url).ok()?;
+        Some((
+            RepoRef {
+                owner: url.owner,
+                repo: url.repo,
+            },
+            branch,
+        ))
+    });
+    let target = repo.target.resolved().map(|target| {
+        (
+            RepoRef {
+                owner: target.owner.clone(),
+                repo: target.repo.clone(),
+            },
+            name.as_str(),
+        )
+    });
+    tracked.into_iter().chain(target).collect()
 }
 
 /// [`RepoInfo::tracked`] の答え。
@@ -2132,10 +2240,8 @@ mod tests {
     use super::*;
 
     use crate::app::Msg;
-    use crate::git_read::{Head, LogPage};
-    use crate::test_util::{
-        fake_branch, fake_branch_list, fake_head_list, fake_snapshot, FAKE_NOW,
-    };
+    use crate::git_read::LogPage;
+    use crate::test_util::{fake_snapshot, FAKE_NOW};
 
     /// 指定した区画にファイルを並べ、staged の先頭を選んだ状態。
     fn worktree(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> WorktreeState {
@@ -2479,131 +2585,6 @@ mod tests {
         }
     }
 
-    /// カーソルの指すブランチ名。
-    fn cursor_name(branches: &BranchState) -> Option<&str> {
-        branches.selected().map(|branch| branch.name.as_str())
-    }
-
-    #[test]
-    fn a_loaded_branch_list_seats_the_cursor_on_the_head() {
-        let mut branches = BranchState::default();
-
-        branches.loaded(fake_branch_list(
-            vec![
-                fake_branch("another"),
-                fake_branch("main"),
-                fake_branch("topic"),
-            ],
-            Some("main"),
-        ));
-
-        assert_eq!(cursor_name(&branches), Some("main"));
-        assert_eq!(branches.load(), ListLoad::Loaded);
-    }
-
-    #[test]
-    fn a_detached_head_seats_the_branch_cursor_on_the_first_row() {
-        // detached / unborn では HEAD の行が無い（02 の「head」）。
-        let mut branches = BranchState::default();
-
-        branches.loaded(fake_branch_list(
-            vec![fake_branch("another"), fake_branch("main")],
-            None,
-        ));
-
-        assert_eq!(cursor_name(&branches), Some("another"));
-    }
-
-    #[test]
-    fn a_reload_keeps_the_cursor_on_the_branch_by_name() {
-        // 読み直しは commit のたびに来る（01 の `update::Reload`）。HEAD へ戻すだけだと、
-        // 別のブランチを見ながら commit した人のカーソルが毎回飛ぶ。
-        let mut branches = BranchState::default();
-        branches.loaded(fake_branch_list(
-            vec![fake_branch("main"), fake_branch("topic")],
-            Some("main"),
-        ));
-        branches.move_cursor(1);
-        assert_eq!(cursor_name(&branches), Some("topic"));
-
-        // ブランチが 1 本増えて添字がずれる（一覧は名前順）。
-        branches.loaded(fake_branch_list(
-            vec![
-                fake_branch("alpha"),
-                fake_branch("main"),
-                fake_branch("topic"),
-            ],
-            Some("main"),
-        ));
-
-        assert_eq!(cursor_name(&branches), Some("topic"));
-    }
-
-    #[test]
-    fn a_reload_that_loses_the_selected_branch_falls_back_to_the_head() {
-        // 消えた（削除 / リネーム）ときの行き先。
-        let mut branches = BranchState::default();
-        branches.loaded(fake_branch_list(
-            vec![fake_branch("main"), fake_branch("topic")],
-            Some("main"),
-        ));
-        branches.move_cursor(1);
-
-        branches.loaded(fake_head_list(fake_branch("main")));
-
-        assert_eq!(cursor_name(&branches), Some("main"));
-    }
-
-    #[test]
-    fn the_branch_cursor_stops_at_both_ends() {
-        let mut branches = BranchState::default();
-        branches.loaded(fake_branch_list(
-            vec![fake_branch("a"), fake_branch("b")],
-            None,
-        ));
-
-        branches.move_cursor(-1);
-        assert_eq!(branches.cursor, 0);
-        branches.move_cursor(1);
-        branches.move_cursor(1);
-        assert_eq!(branches.cursor, 1);
-    }
-
-    #[test]
-    fn an_empty_branch_list_leaves_the_cursor_where_it_is() {
-        // 選べるものが無い。`CommitFiles::move_cursor` と同じ。
-        let mut branches = BranchState::default();
-
-        branches.move_cursor(1);
-
-        assert_eq!(branches.cursor, 0);
-        assert_eq!(cursor_name(&branches), None);
-    }
-
-    #[test]
-    fn the_head_is_none_only_until_the_branch_list_arrives() {
-        // `None` は「まだ届いていない」だけを言う。detached / unborn は `Some`（02 の「head」）。
-        let mut branches = BranchState::default();
-        assert_eq!(branches.head(), None);
-
-        branches.loaded(fake_branch_list(vec![fake_branch("main")], None));
-
-        assert!(matches!(branches.head(), Some(Head::Detached(_))));
-        assert_eq!(branches.head_branch(), None);
-    }
-
-    #[test]
-    fn a_failed_branch_list_keeps_what_was_already_there() {
-        // 読めていた一覧は捨てない（`status_loaded` と同じ理由）。
-        let mut branches = BranchState::default();
-        branches.loaded(fake_head_list(fake_branch("main")));
-
-        branches.failed();
-
-        assert_eq!(branches.load(), ListLoad::Failed);
-        assert_eq!(branches.branches().len(), 1);
-    }
-
     #[test]
     fn a_display_row_past_the_end_is_none() {
         // 窓の切り出し（`panes::graph`）が末尾を跨ぐので、範囲外は `None` で返す。
@@ -2728,77 +2709,5 @@ mod tests {
         assert_eq!(buf.lines, ["first", "second"]);
         assert_eq!(buf.cursor, (1, 6));
         assert_eq!(buf.text(), "first\nsecond");
-    }
-
-    fn job(kind: JobKind) -> Job {
-        Job::new(kind, "test", 0)
-    }
-
-    #[test]
-    fn job_tracker_rejects_a_second_job_of_the_same_kind() {
-        let mut jobs = JobTracker::default();
-        assert!(jobs.is_empty());
-
-        assert!(jobs.start(job(JobKind::LoadStatus)));
-        assert!(jobs.is_running(JobKind::LoadStatus));
-        // 同種の Cmd を二重に投げないための判定。
-        assert!(!jobs.start(job(JobKind::LoadStatus)));
-        assert_eq!(jobs.iter().count(), 1);
-    }
-
-    #[test]
-    fn job_tracker_allows_different_kinds() {
-        let mut jobs = JobTracker::default();
-        assert!(jobs.start(job(JobKind::LoadStatus)));
-        assert!(jobs.start(job(JobKind::FetchPrList)));
-        assert_eq!(jobs.iter().count(), 2);
-    }
-
-    #[test]
-    fn job_tracker_finish_makes_room_again() {
-        let mut jobs = JobTracker::default();
-        jobs.start(job(JobKind::LoadLog));
-
-        jobs.finish(JobKind::LoadLog);
-        assert!(!jobs.is_running(JobKind::LoadLog));
-        assert!(jobs.is_empty());
-        assert!(jobs.start(job(JobKind::LoadLog)));
-    }
-
-    #[test]
-    fn every_region_has_its_own_epoch() {
-        // **`JobTracker` は `region as usize` でカウンタを引き、幅は `Region::ALL` の長さ。**
-        // 全部載っていることは `all_variants!` がコンパイル時に強いる。ここで見るのは、
-        // `advance` / `epoch` が領域ごとのカウンタを引いていること（`region` を無視して
-        // 1 つのカウンタを進める形では 1 を超える）と、明示した判別子が幅を超えて
-        // 添字が範囲外にならないこと。
-        let mut jobs = JobTracker::default();
-        for &region in Region::ALL {
-            jobs.advance(region);
-        }
-        for &region in Region::ALL {
-            assert_eq!(jobs.epoch(region), 1, "{region:?}");
-        }
-    }
-
-    #[test]
-    fn a_kind_without_a_region_is_always_fresh() {
-        // `Exec` やコミット詳細は書き込みで古くならない（詳細は Oid で追いつく）。
-        // ここが偽だと、追いつきを持たない種別に頼み直しを回させる腕ができる。
-        let mut jobs = JobTracker::default();
-        assert!(jobs.is_fresh(JobKind::Exec, None));
-        jobs.advance(Region::Worktree);
-        assert!(jobs.is_fresh(JobKind::LoadCommitDetail, None));
-        // 領域を持つ種別は、刻印が無ければ「古い」。
-        assert!(!jobs.is_fresh(JobKind::LoadStatus, None));
-    }
-
-    #[test]
-    fn finishing_an_idle_kind_is_a_no_op() {
-        let mut jobs = JobTracker::default();
-        jobs.start(job(JobKind::LoadLog));
-
-        jobs.finish(JobKind::FetchPrList);
-        assert!(jobs.is_running(JobKind::LoadLog));
     }
 }

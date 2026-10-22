@@ -1,119 +1,8 @@
 use std::collections::HashMap;
 
-use crate::auth::url::RemoteUrl;
-use crate::git_read::Branch;
-use crate::github::{GithubError, PrDetail, PullRequest, RateLimit, RepoRef};
+use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 
-use super::{stepped_index, BranchState, RepoInfo, Tracked};
-
-/// 一覧のうち、いま居るブランチの PR（01 の「現ブランチの PR」）。
-///
-/// **[`AppState::current_pr`](super::AppState::current_pr) と [`PrState::loaded`] の両方がここを通る。** 座り直す
-/// 先を決める側と描く側で照合の規則が割れると、カーソルが座っていない行を
-/// 「現ブランチの PR」として扱える。
-///
-/// **fork のブランチも当てる。** 照合する相手（リポジトリと、そこでのブランチ名）は
-/// [`head_homes`] が確からしい順に出す（`branch.<HEAD>.remote` の URL → `target`）。
-///
-/// **到着順に依らない。** 材料の HEAD の行（`branches`）と `remotes` はどちらも
-/// [`Msg::RepoInfoLoaded`](crate::app::Msg::RepoInfoLoaded) に乗って**同時に**届き、
-/// `target` はその返信から始まる鎖（`Cmd::ResolveTarget` → `Cmd::ResolveAccount` →
-/// 一覧）の途中なので、**一覧が届いた時点でどれも揃っている**（経緯は 02 の「head」）。
-/// **順序を回すテストは要らない**。
-pub(in crate::app) fn current_row<'a>(
-    repo: &RepoInfo,
-    branches: &BranchState,
-    list: &'a [PullRequest],
-) -> Option<&'a PullRequest> {
-    // **リポジトリ名まで見る**（`RepoRef` 丸ごとの比較）。owner だけだと、同じ owner の
-    // 下に作った fork（`acme/app` → `acme/app-fork`）から出た他人の PR が
-    // 「現ブランチの PR」に当たる。
-    head_homes(repo, branches)
-        .into_iter()
-        .find_map(|(home, branch)| {
-            list.iter().find(|pr| {
-                pr.head.branch == branch
-                    && pr
-                        .head
-                        .repo
-                        .as_ref()
-                        .is_some_and(|repo| repo.same_as(&home))
-            })
-        })
-}
-
-/// HEAD のブランチから出した PR の head が在りうるリポジトリと、そこでのブランチ名を、
-/// **確からしい順**に返す（01 の「現ブランチの PR」）。ブランチ一覧に HEAD の行が
-/// 無ければ空（detached にも unborn にも PR は無い）。
-///
-/// **名前は、追跡先が URL の腕だけ `merge` から取る**（[`RepoInfo::url_tracked`]）。
-/// 名前の追跡先と `target` の腕はローカルの名前のまま —— 理由は 01 の「比べる名前」。
-///
-/// **候補が 1 つに決まらないのは、git が「どこへ push したか」を憶えていないから。**
-/// `branch.<name>.remote` が答えるのは**何を基にしたか**で、実測（git 2.55、
-/// 一時リポジトリ。表は 01）では `git checkout -b fix bob/fix` のあと origin へ
-/// push しても `bob` のまま。だから**追跡先で当たらなければ `target` でも当てる** ——
-/// 追跡先を先に見るのは、fork 運用で upstream 側の同名ブランチから出た**他人の PR**
-/// より、自分の fork の PR を優先するため。
-///
-/// **`branch.<name>.remote` はリモート名でも URL でもよい**（git の仕様）。
-/// **`gh pr checkout` が書くのは URL のほう**（実測 2026-09-20、gh 2.101.0:
-/// `branch.<b>.remote=https://github.com/<fork>/<repo>.git`）なので、名前で引けない
-/// 値はそのまま URL として読む。ここを落とすと、**fork の PR をローカルに出す
-/// いちばんふつうの経路**が当たらない。
-///
-/// **HEAD の行は引数に取らない。** 名前も追跡設定も `branches` の HEAD の行
-/// （[`BranchState::head_branch`]）から導けるので、呼ぶ側に選ばせると対応の取れない組
-/// （HEAD でない行）が型で組める（`.claude/rules/rust-coding.md` の「導出できる値を
-/// 引数に取らせない」）。
-///
-/// **読めない追跡設定は候補にしない**（設定が無い / `.`（ローカル追跡）/ リモートが
-/// 消えている / URL が GitHub の形でない / URL の `merge` がブランチでない）。
-/// **理由は分けない**：呼び出し側の扱いは
-/// どれも同じで、**出す先も無い**（座る行が変わるだけで通知は出さない）。
-///
-/// **host は見ない。** [`RepoTarget::host`](crate::auth::RepoTarget::host) は `ssh -G` で正規化済みだが、こちらは
-/// URL に書かれたままなので、生のまま比べると **fork だけ別のエイリアスを使う
-/// 多アカウント運用**（04）で逆に落ちる。残る穴は、別ホストの同名 `owner/repo` に
-/// 同名のブランチがあり、その PR が一覧に居るとき（01）。
-fn head_homes<'a>(repo: &'a RepoInfo, branches: &'a BranchState) -> Vec<(RepoRef, &'a str)> {
-    let Some(Branch {
-        name,
-        upstream_config,
-        ..
-    }) = branches.head_branch()
-    else {
-        return Vec::new();
-    };
-    // 名前で引ければその URL、URL ならそのもの。
-    let tracked = match upstream_config
-        .as_ref()
-        .map(|upstream| repo.tracked(&upstream.remote))
-    {
-        Some(Tracked::Named(remote)) => Some((remote.url.as_str(), name.as_str())),
-        _ => repo.url_tracked(branches),
-    };
-    let tracked = tracked.and_then(|(url, branch)| {
-        let url = RemoteUrl::parse(url).ok()?;
-        Some((
-            RepoRef {
-                owner: url.owner,
-                repo: url.repo,
-            },
-            branch,
-        ))
-    });
-    let target = repo.target.resolved().map(|target| {
-        (
-            RepoRef {
-                owner: target.owner.clone(),
-                repo: target.repo.clone(),
-            },
-            name.as_str(),
-        )
-    });
-    tracked.into_iter().chain(target).collect()
-}
+use super::stepped_index;
 
 /// PR ペインの状態（01 の「PR ペイン」）。
 ///
@@ -122,7 +11,7 @@ fn head_homes<'a>(repo: &'a RepoInfo, branches: &'a BranchState) -> Vec<(RepoRef
 /// 一覧には対応する問いが無い。追いつきは世代（[`JobKind::FetchPrList`](super::JobKind::FetchPrList) の
 /// `region()`）だけで足りる。
 ///
-/// **形は [`BranchState`] に揃えてある**（値 + 段階）。引けた値そのものを 3 状態の
+/// **形は [`BranchState`](super::BranchState) に揃えてある**（値 + 段階）。引けた値そのものを 3 状態の
 /// enum に入れると、**読み直しが 1 回転けただけで読めていた一覧が画面から消える**
 /// （`BranchState::failed` の doc が言う「捨てると画面から消えるだけになる」）。
 /// 一覧を引き直すのは ref を動かす書き込みのたびなので、この差は毎コミット効く。
@@ -254,7 +143,7 @@ impl PrState {
     /// （07 の「PRs ペイン」）。
     ///
     /// **`ui` が見るのは一覧が空のときだけ。** 中身があるならそれを描く ——
-    /// 読み直しが失敗しても読めていた一覧は捨てない（[`BranchState::load`] と同じ）。
+    /// 読み直しが失敗しても読めていた一覧は捨てない（[`BranchState::load`](super::BranchState::load) と同じ）。
     pub fn load(&self) -> &PrLoad {
         &self.load
     }

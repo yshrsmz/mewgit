@@ -96,3 +96,134 @@ impl BranchState {
         self.cursor = stepped_index(self.cursor, self.branches().len(), delta);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::{fake_branch, fake_branch_list, fake_head_list};
+
+    /// カーソルの指すブランチ名。
+    fn cursor_name(branches: &BranchState) -> Option<&str> {
+        branches.selected().map(|branch| branch.name.as_str())
+    }
+
+    #[test]
+    fn a_loaded_branch_list_seats_the_cursor_on_the_head() {
+        let mut branches = BranchState::default();
+
+        branches.loaded(fake_branch_list(
+            vec![
+                fake_branch("another"),
+                fake_branch("main"),
+                fake_branch("topic"),
+            ],
+            Some("main"),
+        ));
+
+        assert_eq!(cursor_name(&branches), Some("main"));
+        assert_eq!(branches.load(), ListLoad::Loaded);
+    }
+
+    #[test]
+    fn a_detached_head_seats_the_branch_cursor_on_the_first_row() {
+        // detached / unborn では HEAD の行が無い（02 の「head」）。
+        let mut branches = BranchState::default();
+
+        branches.loaded(fake_branch_list(
+            vec![fake_branch("another"), fake_branch("main")],
+            None,
+        ));
+
+        assert_eq!(cursor_name(&branches), Some("another"));
+    }
+
+    #[test]
+    fn a_reload_keeps_the_cursor_on_the_branch_by_name() {
+        // 読み直しは commit のたびに来る（01 の `update::Reload`）。HEAD へ戻すだけだと、
+        // 別のブランチを見ながら commit した人のカーソルが毎回飛ぶ。
+        let mut branches = BranchState::default();
+        branches.loaded(fake_branch_list(
+            vec![fake_branch("main"), fake_branch("topic")],
+            Some("main"),
+        ));
+        branches.move_cursor(1);
+        assert_eq!(cursor_name(&branches), Some("topic"));
+
+        // ブランチが 1 本増えて添字がずれる（一覧は名前順）。
+        branches.loaded(fake_branch_list(
+            vec![
+                fake_branch("alpha"),
+                fake_branch("main"),
+                fake_branch("topic"),
+            ],
+            Some("main"),
+        ));
+
+        assert_eq!(cursor_name(&branches), Some("topic"));
+    }
+
+    #[test]
+    fn a_reload_that_loses_the_selected_branch_falls_back_to_the_head() {
+        // 消えた（削除 / リネーム）ときの行き先。
+        let mut branches = BranchState::default();
+        branches.loaded(fake_branch_list(
+            vec![fake_branch("main"), fake_branch("topic")],
+            Some("main"),
+        ));
+        branches.move_cursor(1);
+
+        branches.loaded(fake_head_list(fake_branch("main")));
+
+        assert_eq!(cursor_name(&branches), Some("main"));
+    }
+
+    #[test]
+    fn the_branch_cursor_stops_at_both_ends() {
+        let mut branches = BranchState::default();
+        branches.loaded(fake_branch_list(
+            vec![fake_branch("a"), fake_branch("b")],
+            None,
+        ));
+
+        branches.move_cursor(-1);
+        assert_eq!(branches.cursor, 0);
+        branches.move_cursor(1);
+        branches.move_cursor(1);
+        assert_eq!(branches.cursor, 1);
+    }
+
+    #[test]
+    fn an_empty_branch_list_leaves_the_cursor_where_it_is() {
+        // 選べるものが無い。`CommitFiles::move_cursor` と同じ。
+        let mut branches = BranchState::default();
+
+        branches.move_cursor(1);
+
+        assert_eq!(branches.cursor, 0);
+        assert_eq!(cursor_name(&branches), None);
+    }
+
+    #[test]
+    fn the_head_is_none_only_until_the_branch_list_arrives() {
+        // `None` は「まだ届いていない」だけを言う。detached / unborn は `Some`（02 の「head」）。
+        let mut branches = BranchState::default();
+        assert_eq!(branches.head(), None);
+
+        branches.loaded(fake_branch_list(vec![fake_branch("main")], None));
+
+        assert!(matches!(branches.head(), Some(Head::Detached(_))));
+        assert_eq!(branches.head_branch(), None);
+    }
+
+    #[test]
+    fn a_failed_branch_list_keeps_what_was_already_there() {
+        // 読めていた一覧は捨てない（`status_loaded` と同じ理由）。
+        let mut branches = BranchState::default();
+        branches.loaded(fake_head_list(fake_branch("main")));
+
+        branches.failed();
+
+        assert_eq!(branches.load(), ListLoad::Failed);
+        assert_eq!(branches.branches().len(), 1);
+    }
+}

@@ -60,7 +60,7 @@ pub struct GraphState {
     ///
     /// private なのは `cursor` と同じ理由。書くのは [`scroll_into_view`](Self::scroll_into_view) と [`restart`](Self::restart) だけ。
     scroll: usize,
-    /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Layout`] で運んでくる
+    /// グラフに使える行数。`ui` がレイアウトから出して [`Msg::Layout`](crate::app::Msg::Layout) で運んでくる
     /// （`crate::app::Msg::Layout`）。core はヘッダや枠の高さを知らない。
     ///
     /// **private にして、書くのは [`set_viewport`](Self::set_viewport) だけにする。**

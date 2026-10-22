@@ -84,21 +84,7 @@ crates/
 いて（#59）、**割る理由になる関心事が増えていない**。`ui::panes::prs` で増えるのは
 描く側で、そちらは `mewgit-tui/src/panes/prs.rs`。
 
-**`update` を割ってあるのは関心事の数のほうで、行数ではない**（Rust に行数の目安は
-無く、`clippy::too_many_lines` は `allow` 既定の**関数**単位）。1 ファイル = 1 つの
-privacy 境界なので、割ると「どれが本当に他から呼ばれているか」が `pub(super)` として
-可視になる —— 平坦なままだと全部が private で、共有の意図が読めない。
-**`pub(super)` は、他のモジュールが実際に名指ししているものだけに付ける。**
-例外は 1 つだけで、`remote::NoRemote` は `pub(super)` な関数の返り値型なので狭めると
-`private_interfaces` が `-D warnings` で落ちる（**数はここに書かない**。数えるなら
-`test_support.rs` を除く —— あれは `#[cfg(test)]` の共有土台で、下の段落が別扱いに
-している）。**名指ししているのが他モジュールの
-テストだけ、というものもある**（`worktree::COMMIT_DIFF` と `NOT_LATEST`）——
-Diff ペインのキーが `worktree::act` を通る以上、断りの文言は worktree が持ち主で、
-見張りは Diff 側に要る。**`mod.rs` の項目には付けない** ——
-あそこの `super` は `app` なので、`pub(super)` は「`app` から呼べる」という別のことを
-言ってしまう（子モジュールは private のままでも見える）。
-`state` を割ったのも行数ではなく privacy 境界のため。**部品の不変条件を private なフィールドで守る形**（`GraphState` の `cursor` / `scroll` / `viewport`、`PrState` / `JobTracker` / `BranchState` / `StashState` の読み込みの段階や刻印）は、**守りが効くのがモジュールの外からだけ**なので、`AppState` の impl が同じファイルに居るあいだは `AppState` に対して取り決めにすぎなかった。private なフィールドを持つ部品を子モジュールへ出し、`AppState` と `pub` なフィールドだけの型（`WorktreeState` / `DiffState` / `Modal` など）は `state/mod.rs` に残した。2 つの部品が使う `ListLoad` も親に置く（兄弟依存を作らない）。**子モジュールで `update` から名指しされる項目は `pub(in crate::app)`** —— `state.rs` のときの `pub(super)`（「`app` から呼べる」）と同じ範囲で、子に置いたまま `pub(super)` と書くと「`state` から呼べる」に狭まる。逆に `AppState` からだけ呼ばせたいもの（`PrState::wanted_details`）は子の `pub(super)` がちょうどその範囲になる。外のパスは `state/mod.rs` の `pub use` で変わらない。
+**`update` を割ってあるのは関心事の数のほうで、行数ではない**（Rust に行数の目安は無く、`clippy::too_many_lines` は `allow` 既定の**関数**単位）。1 ファイル = 1 つの privacy 境界なので、割ると「どれが本当に他から呼ばれているか」が `pub(super)` として可視になる —— 平坦なままだと全部が private で、共有の意図が読めない。 **`pub(super)` は、他のモジュールが実際に名指ししているものだけに付ける。** 例外は 1 つだけで、`remote::NoRemote` は `pub(super)` な関数の返り値型なので狭めると `private_interfaces` が `-D warnings` で落ちる（**数はここに書かない**。数えるなら `test_support.rs` を除く —— あれは `#[cfg(test)]` の共有土台で、下の段落が別扱いにしている）。**名指ししているのが他モジュールのテストだけ、というものもある**（`worktree::COMMIT_DIFF` と `NOT_LATEST`）—— Diff ペインのキーが `worktree::act` を通る以上、断りの文言は worktree が持ち主で、見張りは Diff 側に要る。**`mod.rs` の項目には付けない** ——あそこの `super` は `app` なので、`pub(super)` は「`app` から呼べる」という別のことを言ってしまう（子モジュールは private のままでも見える）。 `state` を割ったのも行数ではなく privacy 境界のため。**部品の不変条件を private なフィールドで守る形**（`GraphState` の `cursor` / `scroll` / `viewport`、`PrState` / `JobTracker` / `BranchState` / `StashState` の読み込みの段階や刻印）は、**守りが効くのがモジュールの外からだけ**なので、`AppState` の impl が同じファイルに居るあいだは `AppState` に対して取り決めにすぎなかった。private なフィールドを持つ部品を、その部品だけが使う型（`GraphLine` / `CommitFiles` / `PrHead` / `PrLoad` / `JobKind` / `Region` など）と一緒に子モジュールへ出し、`AppState` と private を持たない型（`WorktreeState` / `DiffState` / `Modal` など）と、部品の private に触らない関数（`current_row` / `head_homes`。材料は `RepoInfo` とブランチ一覧で、対になる `AppState::head_candidates` の隣に置く）は `state/mod.rs` に残した。2 つの子が共有する `ListLoad` も親に置き、子どうしは名指ししない。**子モジュールで `update` から名指しされる項目は `pub(in crate::app)`** —— `state.rs` のときの `pub(super)`（「`app` から呼べる」）と同じ範囲で、子に置いたまま `pub(super)` と書くと「`state` から呼べる」に狭まる。逆に `AppState` からだけ呼ばせたいもの（`PrState::wanted_details`）は子の `pub(super)` がちょうどその範囲になる。外のパスは `state/mod.rs` の `pub use` で変わらない。
 
 **テストは対象と同じモジュールに置く。** private を叩くテストが多く、1 本に残すと
 そのために `pub(super)` を増やすことになる。2 つ以上のモジュールが呼ぶヘルパだけ

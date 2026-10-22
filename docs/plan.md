@@ -394,9 +394,7 @@ hook が reword を断ったあとの continue → stderr が空の失敗の理�
 規則に揃える → アカウント書き込み中の `A` を断る → 消えたバイナリのエディタ（まず実測）→
 git の最低版。(2) README とリリースワークフローで 0.1 を切る。(3) そのあと端末幅 < 100 の
 レイアウト、`1`〜`5`、ロケールと `graph.ascii`、意図的な巻き戻しの force push。
-**内部の掃除**（追跡設定の 1 本化、`state.rs`、`screen.py`、テストの
-status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、近くを触るタスクに相乗りさせる**。下の並びは
-書いた順のままで、この順序ではない
+**内部の掃除**（追跡設定の 1 本化、`state.rs`、`screen.py`、テストの status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、近くを触るタスクに相乗りさせる**。下の並びは書いた順のままで、この順序ではない（追跡設定のテストのヘルパ、`GraphState::cursor` / `scroll` の private 化、`state.rs` の分割は、2026-10-23 にユーザーと決めて単独の PR で片付けた）
 
 - [x] **git の最低版を決める。** **床は 2.38.0 の 1 つで、下回れば端末に入る前に起動を断る**
       （`rebase --no-update-refs` が落ちる。その下は叩いていない。03 の「git の最低版」）。
@@ -733,18 +731,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       `ascii = false` と書いたのを書いていないのと見分けるため、ファイル側だけ
       `Option<bool>` にした（08）。`LANG` を渡さない SSH 先や Docker では既定が ASCII に変わる
 - [x] `graph.ascii` を枠線・`…`・スピナーにも効かせる。ロケールで ASCII に倒れても、ペインとモーダルの枠（`Borders::ALL` の罫線）、省略の `…`、ヘッダのスピナー（点字）が非 ASCII のまま残っていた（pty で `LC_ALL=C` を確かめた。ロケールの判定を入れた PR の `/simplify` が拾った）。**やると決めた**（2026-10-16）—— `ascii = true` は曖昧幅を全角に描く端末の逃げ道でもあり（06）、そこでは枠の罫線と `…` もグラフの罫線と同じくずれる。枠は `ui::Charset::border` が細線 `+-|` / 太線 `#=#` に倒し（ratatui に ASCII の組は無い）、`…` は `...`（3 セル）、スピナーは `|/-\` を 2 周。**日本語の文言の中の記号は倒さない**（06 の「ASCII フォールバック」、07 の「ペインとフォーカス」「ステータスバー」「ヘッダ」）。見張りは `ascii = true` で全画面と NoticeLog を描き、ASCII と全角以外の字が無いことを見る 1 本
-- [ ] `app/state.rs` を割るかを決める。**`update.rs` を割ったので workspace で
-      いちばん長いファイルになった（2269 行。次は `update/graph.rs` の 1155 行）が、
-      割る根拠は `update.rs` より弱い** —— 中身は `AppState` とその部品という 1 つの関心事で、
-      大半が `pub` な型定義なので、割っても `pub(super)` として見えるものが増えない
-      （00 の「ディレクトリ構成」）。**引き金は行数ではなく、`Modal` / `GraphState` /
-      `WorktreeState` / `JobTracker` が独立して育ったかどうか。** M6 は `Modal::Help` と
-      `RebaseEditor`、ステータスバーの通知履歴で `Modal` と `Notice` に手が入るので、
-      そこで数え直す。**`Modal::Help`（M5 に前倒し）でも数え直して割らなかった** ——
-      増えたのは変種のフィールド 1 つと `move_modal_cursor` の腕 1 つ。**通知履歴では数え直して割らなかった** —— 増えたのは
-      `Modal::NoticeLog` の変種 1 つと、`Modal::move_cursor` を `AppState::move_modal_cursor`
-      へ移したことだけで（一覧の長さを `AppState.notices` が持つため）、`Modal` が
-      独立して育ったとは言えない
+- [x] `app/state.rs` を割るかを決める。**`update.rs` を割ったので workspace でいちばん長いファイルになった（2269 行。次は `update/graph.rs` の 1155 行）が、割る根拠は `update.rs` より弱い** —— 中身は `AppState` とその部品という 1 つの関心事で、大半が `pub` な型定義なので、割っても `pub(super)` として見えるものが増えない（00 の「ディレクトリ構成」）。**引き金は行数ではなく、`Modal` / `GraphState` / `WorktreeState` / `JobTracker` が独立して育ったかどうか。** M6 は `Modal::Help` と `RebaseEditor`、ステータスバーの通知履歴で `Modal` と `Notice` に手が入るので、そこで数え直す。**`Modal::Help`（M5 に前倒し）でも数え直して割らなかった** ——増えたのは変種のフィールド 1 つと `move_modal_cursor` の腕 1 つ。**通知履歴では数え直して割らなかった** —— 増えたのは `Modal::NoticeLog` の変種 1 つと、`Modal::move_cursor` を `AppState::move_modal_cursor` へ移したことだけで（一覧の長さを `AppState.notices` が持つため）、`Modal` が独立して育ったとは言えない。**割った**（2026-10-23 にユーザーと決めた）—— 数え直すと本体は 3487 行（#116 の時点で 2796 行）で、`AppState` 589 → 738、`Modal` 86 → 133、`GraphState` 204 → 276、`WorktreeState` 122 → 154、`JobTracker` 112 → 112 行と、上の引き金（4 つが独立して育ったか）は満たしていなかった。割った理由は別の引き金で、`GraphState::cursor` / `scroll` を private にした PR の `/code-review` が「private が効くのは `app::state` の外からだけ」と拾った privacy の穴（00 の「ディレクトリ構成」）。private なフィールドを持つ部品（`GraphState` / `BranchState` / `StashState` / `PrState` と `PrHeads` / `JobTracker` と `Job`）を、その部品だけが使う型と一緒に `state/` の子モジュールへ出した。`WorktreeState` と `Modal` は private を持たないので動かしていない。分けたことで見えた `AppState` からの private への手出しは 2 つで、どちらも読むだけ（`PrState::wanted_details` を `pub(super)` に、`StashState::epoch` に `pub(super)` の getter）。書き込みは無かった
 - [x] `git_exec::argv` の `VARIANT_COUNT` を消す。**`variant()` の網羅 `match` から
       離れた場所に変種の本数のコピーが置いてあった**（`.claude/rules/rust-coding.md` の「離れた場所に、
       コードの『いま N ある』を書かない」）。**ただの削除では済まない** ——
@@ -875,6 +862,7 @@ status ヘルパ、enum の手書きの一覧）**は単独の PR にせず、�
       02 に理由を書いた（2026-10-11 にユーザーと決めた）
 - [x] `GraphState::viewport` を private にし、`set_viewport(rows)` の中で `scroll_into_view` を呼ぶ。いまは「窓を変えたら詰め直す」を `Msg::Layout` の腕が手書きしているだけで、窓を変える経路が増えると、広げたのに下に空白が残る形（01 の「グラフの行」）がその経路で再発する。#191 のレビューで拾った（2026-10-12 にユーザーと決めて送った）。書き換える先は `Msg::Layout`、core の `update/test_support.rs`、tui の `test_util.rs`、`update/mod.rs` のテストの `viewport` への直書き。見張りは `set_viewport` で窓を広げたときに詰まることを見る 1 本。読む側は `viewport()` を通す。`scroll_into_view` も呼ぶのが `move_cursor` と `set_viewport` だけになったので private にした（01 の「グラフの行」）
 - [x] `GraphState::cursor` / `scroll` も private にし、書くのは `set_cursor(row)`（`rows()` に丸めてから `scroll_into_view` を呼ぶ）と既存のメソッドだけにする。`viewport` と同じ形の穴で、`cursor` を直に書くと `scroll` が追わずにカーソルが窓の外に出る。しかも `scroll_into_view` を private にしたので、外から書いた側はもう自分で詰め直せない。**いまは本番のコードに直書きが無く、直書きはテストだけ**なので送った（`viewport` を private にした PR の `/simplify` の altitude が拾った。2026-10-15 にユーザーと決めた）。**引き金はカーソルを跳ばす経路（HEAD へ移る、oid で座り直す等）を足すとき** —— その PR で一緒にやる。書き換える先は `update/graph.rs`・`update/mod.rs`・`update/exec.rs`・`state.rs` のテストと、tui の `runtime.rs`・`panes/graph.rs` のテストの直書き。見張りは `set_cursor` で窓の外へ跳ばすと `scroll` が追うことを見る 1 本。**引き金を待たずに単独でやった**（2026-10-23 にユーザーと決めた。M6 の相乗り待ちを片付けるため）—— 本番のコードの直書きは無く、読むだけの箇所（`update/graph.rs` の `scrolled` / `load_more`、tui の `panes/graph.rs` の描画）を getter に替えた。tui の `scrolling_moves_the_first_visible_line` は `scroll` を直に書いていたので、4 行の窓で最終行へ跳ばして 2 行送る形にした
+- [ ] `BranchState` / `StashState` / `PrState` の `cursor` と、`StashState::entries` / `PrState::list` も private にする。`state` を子モジュールに割った PR の `/simplify` の altitude が拾った —— `loaded()` が名前・oid・番号でカーソルを座り直し、`move_cursor` が `stepped_index` で丸める不変条件を `list` / `load` / `epoch` を private にして守っているのに、`cursor` が `pub` なので直に書くと両方を素通りする（`move_cursor` を `pub(in crate::app)` に絞った意味も消える）。`entries` / `list` を直に書き換えると、`loaded()` が揃える `load` / `epoch` / `details` が古いまま残る（`StashState::epoch` は apply / pop / drop に渡す index を信じてよいかの根拠）。**いまは本番のコードに書き込みが無く、書き込みはテストだけ**（`cursor` の直書きは core の `update/graph.rs`・`update/rebase.rs`・`update/prs.rs` と tui の `panes/graph.rs`・`panes/branches.rs`・`panes/prs.rs` のテスト）なので、移動だけの PR に混ぜずに送った。塞ぎ方は `GraphState` と同じで、`cursor()` / `entries()` / `list()` の getter と、カーソルを書く `set_cursor(row)`（`stepped_index` と同じ丸め）を足し、テストの直書きを替える。`BranchState` は `list` が既に private（`branches()`）なので `cursor` だけ。読む側は tui の描画（`panes/branches.rs`・`panes/stash.rs`・`panes/prs.rs`）
 - [x] 外部変更検知（1/2）— 検知と読み直し。**2 本に割った**（2026-10-01 にユーザーと決めた。
       理由は 01 の「外部の変更の検知 › 定期の status」—— 2 本目の守りは diff のキャッシュに
       手を入れる別の関心事で、比べる `(mtime, len)` はこちらが載せる）。**決めた形**（理由と

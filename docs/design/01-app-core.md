@@ -20,8 +20,8 @@ ratatui / crossterm には依存しない（不変ルール 6）。`ui` は下�
 | 「`RepoInfo.target` を埋める」「アカウントの選び直し」（+ 04） | `update/account.rs` |
 | 「Pane と Modal」とその `###`（コミットメッセージの編集 / 1 行入力） | `update/modal.rs`（骨格）と、確定して何をするかは各モジュール |
 | 「ログの読み直し」の**適用側**、「失敗の案内文」 | `update/exec.rs` |
-| 「進行中操作があるときの書き込み」とその `###`（メニュー） | `update/progress.rs`（落とす場所は `state.rs` の `AppState::issue`） |
-| 「外部の変更の検知」 | `update/watch.rs`（指紋の差から何を読むかは `Changed::between`、読み直しの適用は `update/exec.rs` の `reload`、diff の stamp の比較は `state.rs` の `diff_is_current`。「古いハンクの守り」の照合は `git_exec` の `Runner`、指紋を `GitOp` に写すのは `update/worktree.rs`） |
+| 「進行中操作があるときの書き込み」とその `###`（メニュー） | `update/progress.rs`（落とす場所は `state/mod.rs` の `AppState::issue`） |
+| 「外部の変更の検知」 | `update/watch.rs`（指紋の差から何を読むかは `Changed::between`、読み直しの適用は `update/exec.rs` の `reload`、diff の stamp の比較は `state/mod.rs` の `diff_is_current`。「古いハンクの守り」の照合は `git_exec` の `Runner`、指紋を `GitOp` に写すのは `update/worktree.rs`） |
 | 「キー入力」「起動時の読み込み」「update の原則」 | `update/mod.rs` |
 
 **「ログの読み直し」だけ 2 つに割れている。** 頼む側（どこまで積んだか、追いつき）は

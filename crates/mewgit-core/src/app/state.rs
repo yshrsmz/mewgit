@@ -1167,8 +1167,8 @@ pub struct GraphState {
     /// 解くのは [`GraphState::selection`] の 1 つ。各所で `lines.get(cursor - 1)` と
     /// 書くと、`- 1` の書き忘れが 1 行ずれとして静かに通る（01 の「グラフの行」）。
     ///
-    /// **private にして、書くのは [`set_cursor`](Self::set_cursor)・
-    /// [`move_cursor`](Self::move_cursor)・[`restart`](Self::restart) だけにする。**
+    /// **private にして、書くのは [`set_cursor`](Self::set_cursor) と
+    /// [`restart`](Self::restart) だけにする**（`move_cursor` は `set_cursor` の上に組んである）。
     /// `viewport` と同じ理由で、直書きを許すと `scroll` が追わずにカーソルが窓の外に
     /// 出る（01 の「グラフの行」）。カーソルを跳ばす経路（HEAD へ移る、oid で座り直す
     /// 等）は `set_cursor` を通す。
@@ -1295,7 +1295,7 @@ impl GraphState {
 
     /// カーソルが指しているもの。
     ///
-    /// カーソルは常に表示行の中にいる（[`move_cursor`](Self::move_cursor) が丸める）ので
+    /// カーソルは常に表示行の中にいる（[`set_cursor`](Self::set_cursor) が丸める）ので
     /// `Wip` に落ちるのは本当に WIP 行を指しているときだけ。
     pub fn selection(&self) -> GraphSelection<'_> {
         self.row(self.cursor).unwrap_or(GraphSelection::Wip)

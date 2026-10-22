@@ -548,19 +548,20 @@ mod tests {
 
     #[test]
     fn scrolling_moves_the_first_visible_line() {
-        let summaries: Vec<String> = (0..5).map(|i| format!("commit {i}")).collect();
+        let summaries: Vec<String> = (0..30).map(|i| format!("commit {i:02}")).collect();
         let refs: Vec<&str> = summaries.iter().map(String::as_str).collect();
         let mut state = state_with_commits(&refs);
-        // `scroll` は直に書けないので、4 行の窓で最終行（表示行 5）へ跳ばして 2 行送る。
-        state.graph.set_viewport(4);
-        state.graph.set_cursor(5);
+        // `scroll` は直に書けないので、描く窓（`graph_rows`）の 2 行下へ跳ばして 2 行送る。
+        // 窓を描画と揃えておかないと、本番の `Msg::Layout` なら詰め戻される形になる。
+        assert_eq!(state.graph.viewport(), graph_rows(&state));
+        state.graph.set_cursor(graph_rows(&state) + 1);
         assert_eq!(state.graph.scroll(), 2);
 
         let lines = draw(&state, TermSize::default());
 
         // 表示行 0 は WIP 行なので、2 行スクロールすると `lines[1]` が先頭に来る。
-        assert!(lines[WIP_ROW].contains("commit 1"), "{:?}", lines[WIP_ROW]);
-        assert!(!lines.iter().any(|line| line.contains("commit 0 ")));
+        assert!(lines[WIP_ROW].contains("commit 01"), "{:?}", lines[WIP_ROW]);
+        assert!(!lines.iter().any(|line| line.contains("commit 00")));
         assert!(!lines.iter().any(|line| line.contains("WIP")));
     }
 

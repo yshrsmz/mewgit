@@ -49,7 +49,7 @@ jobs:
     steps:
       # GITHUB_TOKEN で作った PR には pull_request の CI が走らない。release PR は
       # Cargo.toml / Cargo.lock の版を書き換えるので、CI を通してからマージしたい。
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app-token
         with:
           client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
@@ -307,7 +307,7 @@ jobs:
       # tap へ知らせるトークンは homebrew-tap の Contents の書き込みだけに絞る（dispatch に要る）。
       # App は homebrew-tap にも install してある（.claude/rules/release.md）
       - id: tap-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

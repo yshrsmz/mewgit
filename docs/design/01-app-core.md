@@ -1171,7 +1171,8 @@ pub struct BranchState {
 impl BranchState {
     pub fn branches(&self) -> &[Branch];        // 名前順。届く前は空
     pub fn cursor(&self) -> usize;
-    pub fn set_cursor(&mut self, row: usize);   // 外は最終行に丸め、空なら据え置く
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_cursor(&mut self, row: usize);   // 外は最終行に丸め、空なら据え置く。テストでだけ組む
     pub fn head(&self) -> Option<Head<'_>>;     // None はまだ一度も読めていない（02 の「head」）
     pub fn head_branch(&self) -> Option<&Branch>;  // HEAD の行。detached / unborn では None
     pub fn head_row(&self) -> Option<usize>;    // HEAD の行の添字。座り直しと行ごとの印のため
@@ -1200,14 +1201,14 @@ impl BranchState {
   同じ添字が別のブランチを指す。**読み直しは commit のたびに来る**ので
   （上の `update::Reload`）、カーソルを HEAD に戻すだけだと、別のブランチを見ながら
   commit した人のカーソルが毎回飛ぶ
-- **`cursor` は private で、書けるのは `loaded`（名前で座り直す）と `move_cursor` / `set_cursor`（端で丸める）だけ。** 直書きを許すと、どちらの不変条件も素通りした値（一覧の外を指す添字）が組める。端の扱いは `state` の `stepped_index` / `seated_index` の 1 箇所で、`set_cursor` は `GraphState::set_cursor` と同じく「外なら最終行」に丸め、行が 1 つも無ければ `move_cursor` と同じく据え置く。本番で跳ばす経路は無く、`pub` なのは tui のテストが状態を組むため。Stash と PRs も同じ形にしてある
+- **`cursor` は private で、書けるのは `loaded`（名前で座り直す）と `move_cursor` / `set_cursor`（端で丸める）だけ。** 直書きを許すと、どちらの不変条件も素通りした値（一覧の外を指す添字）が組める。端の扱いは `state` の `seated_index` の 1 箇所（`stepped_index` と `GraphState::set_cursor` もこれを通る）で、`set_cursor` は「外なら最終行」に丸め、行が 1 つも無ければ `move_cursor` と同じく据え置く。**本番に跳ばす経路は無いので、`set_cursor` は `#[cfg(any(test, feature = "test-util"))]` に置く** —— tui のテストが状態を組むので `pub` だが、本番のビルドの公開 API には出ない。跳ばす経路を本番に足すときに、この属性を外す判断が要る形になる。PRs も同じ形で、Stash は跳ばすテストが無いので `set_cursor` を持たない
 
 ## Stash ペイン
 
 ```rust
 pub struct StashState {
     entries: Vec<StashEntry>,      // stash@{0} から順。02 の stashes() の戻り値そのまま。読むのは entries()
-    cursor: usize,                 // BranchState と同じく private（cursor() / set_cursor()）
+    cursor: usize,                 // BranchState と同じく private（cursor()）。書くのは loaded / move_cursor だけ
     load: ListLoad,                // Pending | Loaded | Failed（BranchState と共有）
 }
 

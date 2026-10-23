@@ -24,7 +24,7 @@ pub struct PrState {
     /// 古いまま残る。
     list: Vec<PullRequest>,
     /// 一覧のカーソル。書くのは `loaded`（番号で座り直す）・`forget` と
-    /// `move_cursor` / [`PrState::set_cursor`]（端で丸める）だけ。
+    /// `move_cursor` / `set_cursor`（端で丸める）だけ。
     cursor: usize,
     /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分けるのに要る。
     load: PrLoad,
@@ -149,7 +149,8 @@ impl PrState {
         self.cursor = stepped_index(self.cursor, self.list.len(), delta);
     }
 
-    /// カーソルを `row` 行目へ跳ばす（[`BranchState::set_cursor`](super::BranchState::set_cursor) と同じ）。
+    /// カーソルを `row` 行目へ跳ばす（`BranchState::set_cursor` と同じく、テストでだけ組む）。
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_cursor(&mut self, row: usize) {
         self.cursor = seated_index(self.cursor, self.list.len(), row);
     }

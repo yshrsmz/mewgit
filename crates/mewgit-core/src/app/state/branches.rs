@@ -13,7 +13,7 @@ pub struct BranchState {
     /// 作れない（02 の「head」）。
     list: Option<BranchList>,
     /// [`BranchState::branches`] の添字。書くのは [`BranchState::loaded`]（名前で座り直す）と
-    /// `move_cursor` / [`BranchState::set_cursor`]（端で丸める）だけ。
+    /// `move_cursor` / `set_cursor`（端で丸める）だけ。
     cursor: usize,
     /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分けるのに要る。
     load: ListLoad,
@@ -105,6 +105,10 @@ impl BranchState {
 
     /// カーソルを `row` 行目へ跳ばす。外なら最終行に丸め、行が 1 つも無ければ据え置く
     /// （`seated_index`）。
+    ///
+    /// **テストでだけ組む。** 本番に跳ばす経路は無く、カーソルは `loaded` が名前で座らせ、
+    /// `move_cursor` が端で丸める。tui のテストが状態を組むので `test-util` でも出す。
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_cursor(&mut self, row: usize) {
         self.cursor = seated_index(self.cursor, self.branches().len(), row);
     }
@@ -211,6 +215,7 @@ mod tests {
         let mut branches = BranchState::default();
 
         branches.move_cursor(1);
+        branches.set_cursor(3);
 
         assert_eq!(branches.cursor(), 0);
         assert_eq!(cursor_name(&branches), None);
@@ -228,16 +233,6 @@ mod tests {
         assert_eq!(cursor_name(&branches), Some("b"));
         branches.set_cursor(9);
         assert_eq!(cursor_name(&branches), Some("c"));
-    }
-
-    #[test]
-    fn setting_the_cursor_on_an_empty_branch_list_leaves_it_where_it_is() {
-        // `move_cursor` と同じ端の扱い（`seated_index`）。
-        let mut branches = BranchState::default();
-
-        branches.set_cursor(3);
-
-        assert_eq!(branches.cursor(), 0);
     }
 
     #[test]

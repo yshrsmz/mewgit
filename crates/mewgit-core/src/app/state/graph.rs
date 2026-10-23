@@ -1,7 +1,7 @@
 use crate::git_read::{Commit, CommitDetail, FileEntry, Oid, RefIndex};
 use crate::graph::{GraphRow, LaneState};
 
-use super::{stepped_index, Pane};
+use super::{seated_index, stepped_index, Pane};
 
 /// グラフの表示行が指しているもの。
 ///
@@ -268,9 +268,8 @@ impl GraphState {
     /// カーソルを表示行 `row` へ跳ばす。[`rows`](Self::rows) の外なら最終行に丸め、
     /// 窓の外へ出たならスクロールが追う。
     pub fn set_cursor(&mut self, row: usize) {
-        // 行が 1 つも積まれていなくても WIP 行はあるので、`rows()` は 1 以上。
-        let last = self.rows() - 1;
-        self.cursor = row.min(last);
+        // 行が 1 つも積まれていなくても WIP 行はあるので、`rows()` は 1 以上（据え置く腕には入らない）。
+        self.cursor = seated_index(self.cursor, self.rows(), row);
         self.scroll_into_view();
     }
 

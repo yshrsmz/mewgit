@@ -1572,8 +1572,8 @@ pub(crate) fn stepped_index(cursor: usize, len: usize, delta: isize) -> usize {
 /// `0..len` の添字を `row` へ跳ばした位置。外なら最後の要素に丸め、要素が無ければ
 /// `cursor` のまま据え置く（[`stepped_index`] と同じ端の扱い）。
 ///
-/// **呼ぶのは所有する型の `set_cursor` と [`stepped_index`] だけ**（[`stepped_index`] と
-/// 同じ理由）。
+/// **呼ぶのは所有する型（`set_cursor` と、`StashState::loaded` の「消えたら同じ位置」）と
+/// [`stepped_index`] だけ**（[`stepped_index`] と同じ理由）。
 pub(crate) fn seated_index(cursor: usize, len: usize, row: usize) -> usize {
     let Some(last) = len.checked_sub(1) else {
         return cursor;

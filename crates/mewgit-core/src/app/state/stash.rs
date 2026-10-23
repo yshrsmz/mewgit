@@ -11,7 +11,7 @@ pub struct StashState {
     /// 古いまま残り、apply / pop / drop に渡す index を信じてよいかの根拠が崩れる。
     entries: Vec<StashEntry>,
     /// [`StashState::entries`] の添字。書くのは `loaded`（oid で座り直す）と
-    /// `move_cursor` / [`StashState::set_cursor`]（端で丸める）だけ。
+    /// `move_cursor`（端で丸める）だけ。
     cursor: usize,
     /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分ける（[`BranchState`](super::BranchState) と
     /// 同じ理由）。
@@ -34,7 +34,7 @@ impl StashState {
         let selected = self.selected().map(|stash| stash.oid);
         self.cursor = selected
             .and_then(|oid| entries.iter().position(|stash| stash.oid == oid))
-            .unwrap_or_else(|| self.cursor.min(entries.len().saturating_sub(1)));
+            .unwrap_or_else(|| seated_index(self.cursor, entries.len(), self.cursor));
         self.entries = entries;
         self.load = ListLoad::Loaded;
         self.epoch = epoch;
@@ -80,10 +80,5 @@ impl StashState {
     /// カーソルを `delta` 行動かす。端では止まる（[`BranchState::move_cursor`](super::BranchState::move_cursor) と同じ）。
     pub(in crate::app) fn move_cursor(&mut self, delta: isize) {
         self.cursor = stepped_index(self.cursor, self.entries.len(), delta);
-    }
-
-    /// カーソルを `row` 行目へ跳ばす（[`BranchState::set_cursor`](super::BranchState::set_cursor) と同じ）。
-    pub fn set_cursor(&mut self, row: usize) {
-        self.cursor = seated_index(self.cursor, self.entries.len(), row);
     }
 }

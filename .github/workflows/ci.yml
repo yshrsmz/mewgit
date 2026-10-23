@@ -80,4 +80,12 @@ jobs:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # 上の `--all-targets` では tui の dev-dependency が core の `test-util` を有効にし、
+      # feature の統合で core の lib もそれ付きでビルドされる。出荷する形（release.yml の
+      # `cargo build --release -p mewgit`）は test-util を持たないので、そこでだけ出る警告
+      # （`cfg(feature = "test-util")` の中でしか使わない import など）はここで拾う。
+      # v0.1.2 のビルドがこれで落ちた（#216 の `seated_index`）。拾えるのは feature の軸だけで、
+      # ターゲットの軸は拾えない —— このジョブは x86_64 Linux なので、`cfg(not(target_os = "linux"))`
+      # の側（`mewgit-tui` の `runtime.rs`）を test-util なしで見るのは release.yml の macOS ビルドだけ
+      - run: cargo clippy -p mewgit --locked -- -D warnings
       - run: cargo test --workspace --locked

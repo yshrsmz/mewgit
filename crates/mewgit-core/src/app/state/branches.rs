@@ -1,6 +1,6 @@
 use crate::git_read::{Branch, BranchList, Head};
 
-use super::{seated_index, stepped_index, ListLoad};
+use super::{stepped_index, ListLoad};
 
 /// ブランチペインの状態（01 の「ブランチ一覧」）。HEAD の状態もここが持つ（02 の「head」）。
 #[derive(Debug, Default)]
@@ -110,7 +110,7 @@ impl BranchState {
     /// `move_cursor` が端で丸める。tui のテストが状態を組むので `test-util` でも出す。
     #[cfg(any(test, feature = "test-util"))]
     pub fn set_cursor(&mut self, row: usize) {
-        self.cursor = seated_index(self.cursor, self.branches().len(), row);
+        self.cursor = super::seated_index(self.cursor, self.branches().len(), row);
     }
 }
 

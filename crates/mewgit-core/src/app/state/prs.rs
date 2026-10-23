@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 
-use super::{seated_index, stepped_index};
+use super::stepped_index;
 
 /// PR ペインの状態（01 の「PR ペイン」）。
 ///
@@ -152,7 +152,7 @@ impl PrState {
     /// カーソルを `row` 行目へ跳ばす（`BranchState::set_cursor` と同じく、テストでだけ組む）。
     #[cfg(any(test, feature = "test-util"))]
     pub fn set_cursor(&mut self, row: usize) {
-        self.cursor = seated_index(self.cursor, self.list.len(), row);
+        self.cursor = super::seated_index(self.cursor, self.list.len(), row);
     }
 
     /// いまカーソルが指している PR。

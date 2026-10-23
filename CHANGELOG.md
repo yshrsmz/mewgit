@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.2](https://github.com/yshrsmz/mewgit/compare/v0.1.1...v0.1.2) (2026-10-23)
+## [0.1.3](https://github.com/yshrsmz/mewgit/compare/v0.1.1...v0.1.3) (2026-10-23)
 
 
 ### Features
@@ -13,6 +13,7 @@
 
 ### Bug Fixes
 
+* **app:** test-util なしのビルドで seated_index が未使用になるのを直す ([#217](https://github.com/yshrsmz/mewgit/issues/217)) ([188d071](https://github.com/yshrsmz/mewgit/commit/188d0715e926e77281e8eb0b70e5305df5dfe52c))
 * **exec:** 分かれたブランチの push が断られたときの案内から p を外す ([#203](https://github.com/yshrsmz/mewgit/issues/203)) ([fd73d0a](https://github.com/yshrsmz/mewgit/commit/fd73d0a9af85269429615766da0ccdfbd49d2dcc))
 * **git_read:** reflog の読み取りが無いファイルを作らないようにする ([#202](https://github.com/yshrsmz/mewgit/issues/202)) ([fa5d6d6](https://github.com/yshrsmz/mewgit/commit/fa5d6d6a5578f21fbf16a31c9efa96031ffc6b9c))
 

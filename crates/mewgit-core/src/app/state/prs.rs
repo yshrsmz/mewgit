@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::github::{GithubError, PrDetail, PullRequest, RateLimit};
 
-use super::stepped_index;
+use super::{seated_index, stepped_index};
 
 /// PR ペインの状態（01 の「PR ペイン」）。
 ///
@@ -18,9 +18,14 @@ use super::stepped_index;
 #[derive(Debug, Default)]
 pub struct PrState {
     /// 開いている PR。API が返した順（更新の新しい順）そのまま。
-    pub list: Vec<PullRequest>,
-    /// 一覧のカーソル。
-    pub cursor: usize,
+    ///
+    /// **書くのは [`PrState::loaded`] と [`PrState::forget`] だけ。** 外から差し替えると、
+    /// `loaded` が揃える `load` と `details`（`(番号, head sha)` で一覧と突き合わせる）が
+    /// 古いまま残る。
+    list: Vec<PullRequest>,
+    /// 一覧のカーソル。書くのは `loaded`（番号で座り直す）・`forget` と
+    /// `move_cursor` / [`PrState::set_cursor`]（端で丸める）だけ。
+    cursor: usize,
     /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分けるのに要る。
     load: PrLoad,
     /// PR ごとの集計。鍵は番号（01 の「PR ペイン › 集計」）。
@@ -129,9 +134,24 @@ pub enum PrLoad {
 }
 
 impl PrState {
+    /// 開いている PR。API が返した順（更新の新しい順）そのまま。まだ届いていなければ空。
+    pub fn list(&self) -> &[PullRequest] {
+        &self.list
+    }
+
+    /// カーソルの行（[`PrState::list`] の添字）。
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     /// カーソルを動かす。行が 1 つも無ければ据え置く。
     pub(in crate::app) fn move_cursor(&mut self, delta: isize) {
         self.cursor = stepped_index(self.cursor, self.list.len(), delta);
+    }
+
+    /// カーソルを `row` 行目へ跳ばす（[`BranchState::set_cursor`](super::BranchState::set_cursor) と同じ）。
+    pub fn set_cursor(&mut self, row: usize) {
+        self.cursor = seated_index(self.cursor, self.list.len(), row);
     }
 
     /// いまカーソルが指している PR。

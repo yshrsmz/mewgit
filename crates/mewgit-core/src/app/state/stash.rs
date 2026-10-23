@@ -1,13 +1,18 @@
 use crate::git_read::{Oid, StashEntry};
 
-use super::{stepped_index, ListLoad};
+use super::{seated_index, stepped_index, ListLoad};
 
 /// Stash ペインの状態（01 の「Stash ペイン」）。
 #[derive(Debug, Default)]
 pub struct StashState {
     /// `stash@{0}` から順。`git_read::stashes` の戻り値そのまま。
-    pub entries: Vec<StashEntry>,
-    pub cursor: usize,
+    ///
+    /// **書くのは [`StashState::loaded`] だけ。** 外から差し替えると `load` / `epoch` が
+    /// 古いまま残り、apply / pop / drop に渡す index を信じてよいかの根拠が崩れる。
+    entries: Vec<StashEntry>,
+    /// [`StashState::entries`] の添字。書くのは `loaded`（oid で座り直す）と
+    /// `move_cursor` / [`StashState::set_cursor`]（端で丸める）だけ。
+    cursor: usize,
     /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分ける（[`BranchState`](super::BranchState) と
     /// 同じ理由）。
     load: ListLoad,
@@ -51,6 +56,16 @@ impl StashState {
         self.load
     }
 
+    /// `stash@{0}` から順の一覧。
+    pub fn entries(&self) -> &[StashEntry] {
+        &self.entries
+    }
+
+    /// カーソルの行（[`StashState::entries`] の添字）。
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     /// カーソルの指す stash。一覧が空なら `None`。
     pub fn selected(&self) -> Option<&StashEntry> {
         self.entries.get(self.cursor)
@@ -65,5 +80,10 @@ impl StashState {
     /// カーソルを `delta` 行動かす。端では止まる（[`BranchState::move_cursor`](super::BranchState::move_cursor) と同じ）。
     pub(in crate::app) fn move_cursor(&mut self, delta: isize) {
         self.cursor = stepped_index(self.cursor, self.entries.len(), delta);
+    }
+
+    /// カーソルを `row` 行目へ跳ばす（[`BranchState::set_cursor`](super::BranchState::set_cursor) と同じ）。
+    pub fn set_cursor(&mut self, row: usize) {
+        self.cursor = seated_index(self.cursor, self.entries.len(), row);
     }
 }

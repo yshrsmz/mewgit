@@ -301,7 +301,7 @@ mod tests {
 
         assert_eq!(cmd, Cmd::None);
         assert!(!state.jobs.is_running(JobKind::LoadStashes));
-        assert_eq!(state.stashes.entries, [fake_stash(0), fake_stash(1)]);
+        assert_eq!(state.stashes.entries(), [fake_stash(0), fake_stash(1)]);
         assert_eq!(state.stashes.load(), ListLoad::Loaded);
     }
 
@@ -326,7 +326,7 @@ mod tests {
         // 同じものを頼み直さない（「失敗 → 再読込 → 失敗」を回さない）。
         assert_eq!(cmd, Cmd::None);
         assert!(!state.jobs.is_running(JobKind::LoadStashes));
-        assert_eq!(state.stashes.entries, [fake_stash(0)]);
+        assert_eq!(state.stashes.entries(), [fake_stash(0)]);
         assert_eq!(state.stashes.load(), ListLoad::Failed);
         assert!(state.shown_notice().is_some());
     }
@@ -365,7 +365,7 @@ mod tests {
             &mut state,
             Msg::StashesLoaded(Box::new(Ok(vec![fake_stash(0)]))),
         );
-        assert_eq!(state.stashes.entries, [fake_stash(0)]);
+        assert_eq!(state.stashes.entries(), [fake_stash(0)]);
     }
 
     #[test]
@@ -386,7 +386,7 @@ mod tests {
         );
 
         assert_eq!(state.stashes.selected().unwrap().oid, selected);
-        assert_eq!(state.stashes.cursor, 2);
+        assert_eq!(state.stashes.cursor(), 2);
     }
 
     #[test]
@@ -396,12 +396,12 @@ mod tests {
         let _ = press(&mut state, 'j');
 
         let _ = with_stashes(&mut state, Ok(vec![fake_stash(0), fake_stash(2)]));
-        assert_eq!(state.stashes.cursor, 1);
+        assert_eq!(state.stashes.cursor(), 1);
         assert_eq!(state.stashes.selected(), Some(&fake_stash(2)));
 
         // 末尾が消えたら、新しい末尾へ。
         let _ = with_stashes(&mut state, Ok(vec![fake_stash(0)]));
-        assert_eq!(state.stashes.cursor, 0);
+        assert_eq!(state.stashes.cursor(), 0);
     }
 
     #[test]
@@ -409,10 +409,10 @@ mod tests {
         let mut state = state_on_stashes(2);
 
         let _ = press(&mut state, 'k');
-        assert_eq!(state.stashes.cursor, 0);
+        assert_eq!(state.stashes.cursor(), 0);
         let _ = press(&mut state, 'j');
         let _ = press(&mut state, 'j');
-        assert_eq!(state.stashes.cursor, 1);
+        assert_eq!(state.stashes.cursor(), 1);
     }
 
     #[test]

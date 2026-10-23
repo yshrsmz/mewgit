@@ -42,7 +42,7 @@ pub(super) fn lines(state: &AppState, width: u16) -> Rows {
     let AccountState::Resolved(account) = &state.account else {
         return placeholder();
     };
-    if state.prs.list.is_empty() {
+    if state.prs.list().is_empty() {
         return placeholder();
     }
 
@@ -52,7 +52,7 @@ pub(super) fn lines(state: &AppState, width: u16) -> Rows {
     // 語はすべて ASCII なので `len()` がそのまま表示幅。
     let width_of_status = state
         .prs
-        .list
+        .list()
         .iter()
         .map(|pr| status_label(pr).len())
         .max()
@@ -67,14 +67,14 @@ pub(super) fn lines(state: &AppState, width: u16) -> Rows {
     let cells = column(
         state
             .prs
-            .list
+            .list()
             .iter()
             .map(|pr| summary_cell(state.prs.detail(pr.number), charset, budget)),
     );
     Rows {
         lines: state
             .prs
-            .list
+            .list()
             .iter()
             .zip(&cells)
             .map(|(pr, cell)| pr_row(pr, theme, &account.login, width_of_status, cell))
@@ -82,7 +82,7 @@ pub(super) fn lines(state: &AppState, width: u16) -> Rows {
         // **カーソルをここで丸めない。** 範囲に収めるのは `PrState::move_cursor` と
         // `PrState::loaded` の側（同じ判定を 2 箇所に書かない）。**反転を当てるのも
         // ここではない** —— `super::TopPane::render` が 1 箇所で当てる。
-        cursor: Some(state.prs.cursor),
+        cursor: Some(state.prs.cursor()),
     }
 }
 
@@ -244,7 +244,7 @@ fn counts(items: &[(usize, &str)], budget: usize) -> String {
 fn summary_budget(state: &AppState, login: &str, width: usize, status: usize) -> usize {
     let lead = state
         .prs
-        .list
+        .list()
         .iter()
         .map(|pr| lead(pr, login).iter().map(Span::width).sum::<usize>())
         .max()
@@ -761,7 +761,7 @@ mod tests {
         // 左のグラフのカーソル行と同じ端末行に来るので、反転していなくても真になる
         // （`pane_row_is_reversed` の doc）。
         let state = with_list(open_and_draft());
-        assert_eq!(state.prs.cursor, 0, "現ブランチの PR に座っている");
+        assert_eq!(state.prs.cursor(), 0, "現ブランチの PR に座っている");
         assert!(
             pane_row_is_reversed(&state, SIZE, Pane::Prs, "#82"),
             "カーソル行が反転していない"
@@ -772,7 +772,7 @@ mod tests {
         );
 
         let mut moved = with_list(open_and_draft());
-        moved.prs.cursor = 1;
+        moved.prs.set_cursor(1);
         assert!(
             pane_row_is_reversed(&moved, SIZE, Pane::Prs, "#90"),
             "カーソルを動かしても反転が付いてこない"

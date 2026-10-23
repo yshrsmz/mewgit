@@ -1201,7 +1201,7 @@ impl BranchState {
   同じ添字が別のブランチを指す。**読み直しは commit のたびに来る**ので
   （上の `update::Reload`）、カーソルを HEAD に戻すだけだと、別のブランチを見ながら
   commit した人のカーソルが毎回飛ぶ
-- **`cursor` は private で、書けるのは `loaded`（名前で座り直す）と `move_cursor` / `set_cursor`（端で丸める）だけ。** 直書きを許すと、どちらの不変条件も素通りした値（一覧の外を指す添字）が組める。端の扱いは `state` の `seated_index` の 1 箇所（`stepped_index` と `GraphState::set_cursor` もこれを通る）で、`set_cursor` は「外なら最終行」に丸め、行が 1 つも無ければ `move_cursor` と同じく据え置く。**本番に跳ばす経路は無いので、`set_cursor` は `#[cfg(any(test, feature = "test-util"))]` に置く** —— tui のテストが状態を組むので `pub` だが、本番のビルドの公開 API には出ない。跳ばす経路を本番に足すときに、この属性を外す判断が要る形になる。PRs も同じ形で、Stash は跳ばすテストが無いので `set_cursor` を持たない
+- **`cursor` は private で、書けるのは `loaded`（名前で座り直す）と `move_cursor` / `set_cursor`（端で丸める）だけ。** 直書きを許すと、どちらの不変条件も素通りした値（一覧の外を指す添字）が組める。`set_cursor` は「外なら最終行」に丸め、行が 1 つも無ければ `move_cursor` と同じく据え置く（`state` の `seated_index`。`stepped_index` もこれを通る）。**一覧を差し替えたあとの座り直し（`loaded`）はこの規則を使わない** —— 座り直す先が見つからなければ新しい範囲に収め、空なら 0 に戻す。据え置くと、外で `git stash clear` されて空が届いたあとに古い添字が残り、次にまとめて届いた一覧で先頭ではなく古い位置に座る。**本番に跳ばす経路は無いので、`set_cursor` は `#[cfg(any(test, feature = "test-util"))]` に置く** —— tui のテストが状態を組むので `pub` だが、本番のビルドの公開 API には出ない。跳ばす経路を本番に足すときに、この属性を外す判断が要る形になる。PRs も同じ形。Stash には `set_cursor` を置いていない
 
 ## Stash ペイン
 

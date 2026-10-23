@@ -1,6 +1,6 @@
 use crate::git_read::{Oid, StashEntry};
 
-use super::{seated_index, stepped_index, ListLoad};
+use super::{stepped_index, ListLoad};
 
 /// Stash ペインの状態（01 の「Stash ペイン」）。
 #[derive(Debug, Default)]
@@ -34,7 +34,10 @@ impl StashState {
         let selected = self.selected().map(|stash| stash.oid);
         self.cursor = selected
             .and_then(|oid| entries.iter().position(|stash| stash.oid == oid))
-            .unwrap_or_else(|| seated_index(self.cursor, entries.len(), self.cursor));
+            // **`seated_index` に寄せない。** あちらは空なら据え置くが、一覧を差し替えたあとは
+            // 新しい範囲に収める —— 外で `git stash clear` されて空が届いたあとに古い添字を
+            // 残すと、次にまとめて届いた一覧で `stash@{0}` ではなく古い位置に座る。
+            .unwrap_or_else(|| self.cursor.min(entries.len().saturating_sub(1)));
         self.entries = entries;
         self.load = ListLoad::Loaded;
         self.epoch = epoch;

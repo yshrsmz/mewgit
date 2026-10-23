@@ -405,6 +405,25 @@ mod tests {
     }
 
     #[test]
+    fn a_list_emptied_outside_puts_the_cursor_back_to_the_top() {
+        // 外で `git stash clear` された。空のあいだに古い添字を残すと、次にまとめて届いた
+        // 一覧で `stash@{0}` ではなく古い位置に座る。
+        let mut state = state_on_stashes(3);
+        let _ = press(&mut state, 'j');
+        let _ = press(&mut state, 'j');
+        assert_eq!(state.stashes.cursor(), 2);
+
+        let _ = with_stashes(&mut state, Ok(vec![]));
+        assert_eq!(state.stashes.cursor(), 0);
+
+        let _ = with_stashes(
+            &mut state,
+            Ok(vec![fake_stash(3), fake_stash(4), fake_stash(5)]),
+        );
+        assert_eq!(state.stashes.selected(), Some(&fake_stash(3)));
+    }
+
+    #[test]
     fn j_and_k_move_the_cursor_and_stop_at_the_ends() {
         let mut state = state_on_stashes(2);
 

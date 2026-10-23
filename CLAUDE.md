@@ -52,7 +52,9 @@ cargo run -p mewgit -- <repo-path>
 
 `crates/mewgit-tui` のパッケージ名は `mewgit`（`-p mewgit-tui` は `did not match any packages` で落ちる）。core は `-p mewgit-core`。
 
-CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
+CI 相当のチェック: `cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy -p mewgit --locked -- -D warnings && cargo test --workspace --locked`
+
+2 本目の clippy は出荷する形（`test-util` なし）を見る。`--all-targets` では tui の dev-dependency が core の `test-util` を有効にするので、`cfg(feature = "test-util")` の中でしか使わない import はそこでは未使用にならず、Release のビルドで初めて落ちる（v0.1.2）。
 
 **TUI を pty で動かして画面を確かめるときは `pty-check` スキル**（報告の前に実物を動かす。`.claude/rules/reporting.md`）。
 

@@ -6,8 +6,13 @@ use super::{stepped_index, ListLoad};
 #[derive(Debug, Default)]
 pub struct StashState {
     /// `stash@{0}` から順。`git_read::stashes` の戻り値そのまま。
-    pub entries: Vec<StashEntry>,
-    pub cursor: usize,
+    ///
+    /// **書くのは [`StashState::loaded`] だけ。** 外から差し替えると `load` / `epoch` が
+    /// 古いまま残り、apply / pop / drop に渡す index を信じてよいかの根拠が崩れる。
+    entries: Vec<StashEntry>,
+    /// [`StashState::entries`] の添字。書くのは `loaded`（oid で座り直す）と
+    /// `move_cursor`（端で丸める）だけ。
+    cursor: usize,
     /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分ける（[`BranchState`](super::BranchState) と
     /// 同じ理由）。
     load: ListLoad,
@@ -29,6 +34,9 @@ impl StashState {
         let selected = self.selected().map(|stash| stash.oid);
         self.cursor = selected
             .and_then(|oid| entries.iter().position(|stash| stash.oid == oid))
+            // **`seated_index` に寄せない。** あちらは空なら据え置くが、一覧を差し替えたあとは
+            // 新しい範囲に収める —— 外で `git stash clear` されて空が届いたあとに古い添字を
+            // 残すと、次にまとめて届いた一覧で `stash@{0}` ではなく古い位置に座る。
             .unwrap_or_else(|| self.cursor.min(entries.len().saturating_sub(1)));
         self.entries = entries;
         self.load = ListLoad::Loaded;
@@ -49,6 +57,16 @@ impl StashState {
     /// 読み込みの段階（[`BranchState::load`](super::BranchState::load) と同じ）。
     pub fn load(&self) -> ListLoad {
         self.load
+    }
+
+    /// `stash@{0}` から順の一覧。
+    pub fn entries(&self) -> &[StashEntry] {
+        &self.entries
+    }
+
+    /// カーソルの行（[`StashState::entries`] の添字）。
+    pub fn cursor(&self) -> usize {
+        self.cursor
     }
 
     /// カーソルの指す stash。一覧が空なら `None`。

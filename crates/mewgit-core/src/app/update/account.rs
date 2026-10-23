@@ -1018,7 +1018,7 @@ mod tests {
             pr_list_loaded(vec![fake_pull_request(1, "feat", "aaa")]),
         );
 
-        assert!(state.prs.list.is_empty(), "前のアカウントの一覧が戻った");
+        assert!(state.prs.list().is_empty(), "前のアカウントの一覧が戻った");
         // 頼み直しは決まったときの `reload` に任せる（`Resolving` では何も出さない）。
         assert_eq!(cmd, Cmd::None);
         let cmd = update(&mut state, Msg::AccountResolved(Ok(fake_account("hanako"))));
@@ -1038,7 +1038,7 @@ mod tests {
             pr_list_loaded(vec![fake_pull_request(1, "feat", "aaa")]),
         );
 
-        assert!(state.prs.list.is_empty(), "前のトークンの一覧が残った");
+        assert!(state.prs.list().is_empty(), "前のトークンの一覧が残った");
         assert_eq!(cmd, Cmd::FetchPrList);
         assert!(state.jobs.is_running(JobKind::FetchPrList));
 
@@ -1047,7 +1047,7 @@ mod tests {
             &mut state,
             pr_list_loaded(vec![fake_pull_request(2, "fix", "bbb")]),
         );
-        assert_eq!(state.prs.list.len(), 1);
+        assert_eq!(state.prs.list().len(), 1);
     }
 
     #[test]

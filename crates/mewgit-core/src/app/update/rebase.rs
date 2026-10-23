@@ -412,7 +412,7 @@ mod tests {
         let head_with = |list: BranchList| {
             let mut state = linear(4);
             state.branches.loaded(list);
-            state.branches.cursor = 0;
+            state.branches.set_cursor(0);
             let _ = press_i_on(&mut state, 2);
             let Some(Modal::RebaseEditor { head, .. }) = &state.modal else {
                 panic!("RebaseEditor が開いていません: {:?}", state.modal);

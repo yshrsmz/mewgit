@@ -128,11 +128,11 @@ mod tests {
     fn j_and_k_move_the_branch_cursor_without_touching_the_graph() {
         let mut state = state_on_branches(&["another", "main"], Some("main"));
         // カーソルは HEAD の行に座っている。
-        assert_eq!(state.branches.cursor, 1);
+        assert_eq!(state.branches.cursor(), 1);
 
         let _ = press(&mut state, 'k');
 
-        assert_eq!(state.branches.cursor, 0);
+        assert_eq!(state.branches.cursor(), 0);
         // 同じ `j` / `k` がグラフに漏れない。
         assert_eq!(state.graph.cursor(), 0);
     }
@@ -167,7 +167,7 @@ mod tests {
         // 値でしかないので、これで「切り替えなくてよい」と決めると、別の端末で
         // 切り替えられていたときに `Enter` が何も起こさなくなる（07 の「Branches ペイン」）。
         let mut state = state_on_branches(&["another", "main"], Some("main"));
-        assert_eq!(state.branches.head_row(), Some(state.branches.cursor));
+        assert_eq!(state.branches.head_row(), Some(state.branches.cursor()));
 
         let cmd = press_code(&mut state, KeyCode::Enter);
 

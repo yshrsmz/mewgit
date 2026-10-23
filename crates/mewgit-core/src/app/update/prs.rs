@@ -1822,7 +1822,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(state.prs.cursor, 1);
+        assert_eq!(state.prs.cursor(), 1);
         assert_eq!(state.prs.selected().map(|pr| pr.number), Some(82));
         assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
     }
@@ -1873,7 +1873,7 @@ mod tests {
         let _ = press(&mut state, 'j');
 
         deliver(&mut state, vec![fake_pull_request(82, "feat/x", "headsha")]);
-        assert_eq!(state.prs.cursor, 0);
+        assert_eq!(state.prs.cursor(), 0);
         assert_eq!(state.prs.selected().map(|pr| pr.number), Some(82));
     }
 
@@ -1901,7 +1901,7 @@ mod tests {
         );
 
         assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
-        assert_eq!(state.prs.cursor, 1);
+        assert_eq!(state.prs.cursor(), 1);
     }
 
     #[test]
@@ -1926,7 +1926,7 @@ mod tests {
         );
 
         assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
-        assert_eq!(state.prs.cursor, 1);
+        assert_eq!(state.prs.cursor(), 1);
     }
 
     #[test]
@@ -1947,7 +1947,7 @@ mod tests {
         );
 
         assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
-        assert_eq!(state.prs.cursor, 1);
+        assert_eq!(state.prs.cursor(), 1);
     }
 
     #[test]
@@ -1970,7 +1970,7 @@ mod tests {
         );
 
         assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
-        assert_eq!(state.prs.cursor, 1);
+        assert_eq!(state.prs.cursor(), 1);
 
         let cmd = press(&mut state, 'N');
         assert_eq!(cmd, Cmd::None);
@@ -2003,7 +2003,7 @@ mod tests {
             "refs/heads/main",
         );
         edit_rows(&mut state, |rows| rows.insert(0, other));
-        state.branches.cursor = 0;
+        state.branches.set_cursor(0);
 
         deliver(
             &mut state,
@@ -2031,7 +2031,7 @@ mod tests {
         );
         set_copies(&mut state, &[("fork", true)]);
         edit_rows(&mut state, |rows| rows.insert(0, fake_branch("alpha")));
-        state.branches.cursor = 0;
+        state.branches.set_cursor(0);
 
         deliver(&mut state, vec![pr_from(82, "feat", "bob")]);
         assert_eq!(state.current_pr().map(|pr| pr.number), Some(82));
@@ -2088,8 +2088,8 @@ mod tests {
         );
 
         assert_eq!(state.current_pr(), None, "fork の PR に合致している");
-        assert_eq!(state.prs.cursor, 0);
-        assert_eq!(state.prs.list.len(), 2, "消えている");
+        assert_eq!(state.prs.cursor(), 0);
+        assert_eq!(state.prs.list().len(), 2, "消えている");
     }
 
     #[test]
@@ -2133,11 +2133,11 @@ mod tests {
         // **`Fetch` の 3 状態**（01）。空の `Vec` は「開いている PR が 1 件も無い」。
         let mut state = state_on_branch("feat/x");
         assert_eq!(state.prs.load(), &PrLoad::Pending);
-        assert!(state.prs.list.is_empty());
+        assert!(state.prs.list().is_empty());
 
         deliver(&mut state, Vec::new());
         assert_eq!(state.prs.load(), &PrLoad::Loaded);
-        assert!(state.prs.list.is_empty());
+        assert!(state.prs.list().is_empty());
     }
 
     #[test]
@@ -2158,7 +2158,7 @@ mod tests {
         assert!(matches!(state.prs.load(), PrLoad::Failed(_)));
         // **読めていた一覧は捨てない**（`PrState::failed`）。捨てると、commit 直後の
         // 引き直しが 1 回転けただけでペインがエラー 1 行になる。
-        assert_eq!(state.prs.list.len(), 1, "読めていた一覧を捨てている");
+        assert_eq!(state.prs.list().len(), 1, "読めていた一覧を捨てている");
 
         // **出口は材料が変わったとき。** `f`（ref）でも `A`（アカウント）でも
         // 引き直せる（`reload` の doc）。
@@ -2866,7 +2866,7 @@ mod tests {
         // **`Degraded` では `reload` が `Cmd::None` を返す**ので、落とす経路は
         // `account_resolved` の `Err` しか無い。
         let mut state = state_with_one_summary("feat/x");
-        assert_eq!(state.prs.list.len(), 1);
+        assert_eq!(state.prs.list().len(), 1);
         assert!(state.prs.detail(82).is_some());
 
         let cmd = update(
@@ -2875,11 +2875,11 @@ mod tests {
         );
         assert_eq!(cmd, Cmd::None, "degraded なのに頼んでいる");
         assert!(
-            state.prs.list.is_empty(),
+            state.prs.list().is_empty(),
             "前のアカウントの一覧が残っている"
         );
         assert_eq!(state.prs.load(), &PrLoad::Pending);
-        assert_eq!(state.prs.cursor, 0);
+        assert_eq!(state.prs.cursor(), 0);
         // **集計もアカウントに紐づく。** 残すと、次のトークンで引き直した一覧に
         // 前のトークンで見えた集計が番号だけで当たる。
         assert!(
@@ -2897,7 +2897,7 @@ mod tests {
 
         let cmd = super::super::account::resolve_again(&mut state);
         assert!(matches!(cmd, Cmd::ResolveAccount(_)));
-        assert!(state.prs.list.is_empty(), "解決し直しの最中に残っている");
+        assert!(state.prs.list().is_empty(), "解決し直しの最中に残っている");
 
         let again = update(&mut state, Msg::AccountResolved(Ok(fake_account("taro"))));
         assert!(
@@ -2925,7 +2925,7 @@ mod tests {
             matches!(cmd, Cmd::Exec(GitOp::SetAccount { .. })),
             "{cmd:?}"
         );
-        assert!(state.prs.list.is_empty(), "書き込みの最中に残っている");
+        assert!(state.prs.list().is_empty(), "書き込みの最中に残っている");
     }
 
     #[test]
@@ -2987,15 +2987,15 @@ mod tests {
             ],
         );
         state.focus = Pane::Prs;
-        assert_eq!(state.prs.cursor, 0, "現ブランチの PR に座っている");
+        assert_eq!(state.prs.cursor(), 0, "現ブランチの PR に座っている");
 
         let _ = press(&mut state, 'j');
-        assert_eq!(state.prs.cursor, 1);
+        assert_eq!(state.prs.cursor(), 1);
         // 末尾より先へは進まない。
         let _ = press(&mut state, 'j');
-        assert_eq!(state.prs.cursor, 1);
+        assert_eq!(state.prs.cursor(), 1);
         let _ = press(&mut state, 'k');
-        assert_eq!(state.prs.cursor, 0);
+        assert_eq!(state.prs.cursor(), 0);
     }
 
     #[test]

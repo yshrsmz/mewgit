@@ -1,6 +1,6 @@
 use crate::git_read::{Branch, BranchList, Head};
 
-use super::{stepped_index, ListLoad};
+use super::{seated_index, stepped_index, ListLoad};
 
 /// ブランチペインの状態（01 の「ブランチ一覧」）。HEAD の状態もここが持つ（02 の「head」）。
 #[derive(Debug, Default)]
@@ -12,7 +12,9 @@ pub struct BranchState {
     /// 無ければ `RepoInfo.head`」と書いていた。[`BranchList`] のまま持てば、組は型で
     /// 作れない（02 の「head」）。
     list: Option<BranchList>,
-    pub cursor: usize,
+    /// [`BranchState::branches`] の添字。書くのは [`BranchState::loaded`]（名前で座り直す）と
+    /// `move_cursor` / `set_cursor`（端で丸める）だけ。
+    cursor: usize,
     /// 読み込みの段階。空の一覧と「まだ届いていない」を出し分けるのに要る。
     load: ListLoad,
 }
@@ -89,11 +91,26 @@ impl BranchState {
         self.head().and_then(Head::branch)
     }
 
+    /// カーソルの行（[`BranchState::branches`] の添字）。
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     /// カーソルを `delta` 行動かす。端では止まる。
     ///
     /// 行が 1 つも無ければ据え置く（[`stepped_index`]）。
     pub(in crate::app) fn move_cursor(&mut self, delta: isize) {
         self.cursor = stepped_index(self.cursor, self.branches().len(), delta);
+    }
+
+    /// カーソルを `row` 行目へ跳ばす。外なら最終行に丸め、行が 1 つも無ければ据え置く
+    /// （`seated_index`）。
+    ///
+    /// **テストでだけ組む。** 本番に跳ばす経路は無く、カーソルは `loaded` が名前で座らせ、
+    /// `move_cursor` が端で丸める。tui のテストが状態を組むので `test-util` でも出す。
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_cursor(&mut self, row: usize) {
+        self.cursor = seated_index(self.cursor, self.branches().len(), row);
     }
 }
 
@@ -186,10 +203,10 @@ mod tests {
         ));
 
         branches.move_cursor(-1);
-        assert_eq!(branches.cursor, 0);
+        assert_eq!(branches.cursor(), 0);
         branches.move_cursor(1);
         branches.move_cursor(1);
-        assert_eq!(branches.cursor, 1);
+        assert_eq!(branches.cursor(), 1);
     }
 
     #[test]
@@ -198,9 +215,24 @@ mod tests {
         let mut branches = BranchState::default();
 
         branches.move_cursor(1);
+        branches.set_cursor(3);
 
-        assert_eq!(branches.cursor, 0);
+        assert_eq!(branches.cursor(), 0);
         assert_eq!(cursor_name(&branches), None);
+    }
+
+    #[test]
+    fn setting_the_branch_cursor_past_the_end_lands_on_the_last_row() {
+        let mut branches = BranchState::default();
+        branches.loaded(fake_branch_list(
+            vec![fake_branch("a"), fake_branch("b"), fake_branch("c")],
+            Some("a"),
+        ));
+
+        branches.set_cursor(1);
+        assert_eq!(cursor_name(&branches), Some("b"));
+        branches.set_cursor(9);
+        assert_eq!(cursor_name(&branches), Some("c"));
     }
 
     #[test]

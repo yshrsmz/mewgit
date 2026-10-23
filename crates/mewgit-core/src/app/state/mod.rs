@@ -626,11 +626,11 @@ impl AppState {
 
     /// 一覧のうち、いま居るブランチの PR（01 の「現ブランチの PR」）。
     ///
-    /// **状態に持たない。** `prs.list` と `repo`、ブランチ一覧の HEAD の行から毎回導く ——
+    /// **状態に持たない。** `prs.list()` と `repo`、ブランチ一覧の HEAD の行から毎回導く ——
     /// 写しを置くと、
     /// どちらかが更新されたときに片方だけ古くなる。
     pub fn current_pr(&self) -> Option<&PullRequest> {
-        current_row(&self.repo, &self.branches, &self.prs.list)
+        current_row(&self.repo, &self.branches, self.prs.list())
     }
 
     /// PR 作成の `head` の候補（01 の「head の組み立て」）。ブランチ一覧に HEAD の行が
@@ -1566,10 +1566,22 @@ fn stepped<T: Copy + PartialEq>(positions: &[T], current: T, delta: isize) -> Op
 /// [`GraphState::move_cursor`] は通らない。WIP 行があるので行数が 0 にならず、
 /// カーソルを動かしたらスクロールも寄せる必要があるため。
 pub(crate) fn stepped_index(cursor: usize, len: usize, delta: isize) -> usize {
+    seated_index(cursor, len, cursor.saturating_add_signed(delta))
+}
+
+/// `0..len` の添字を `row` へ跳ばした位置。外なら最後の要素に丸め、要素が無ければ
+/// `cursor` のまま据え置く（[`stepped_index`] と同じ端の扱い）。
+///
+/// **呼ぶのはカーソルを所有する型のメソッドだけ**（[`stepped_index`] と同じ理由）。
+///
+/// **一覧を差し替えたあとの座り直しには使わない。** そこでは空なら 0 に戻す —— 据え置くと、
+/// 空が届いたあとに古い添字が残り、次にまとめて届いた一覧でその位置に座る
+/// （`StashState::loaded`）。
+pub(crate) fn seated_index(cursor: usize, len: usize, row: usize) -> usize {
     let Some(last) = len.checked_sub(1) else {
         return cursor;
     };
-    cursor.saturating_add_signed(delta).min(last)
+    row.min(last)
 }
 
 /// diff ペインのカーソル。ファイルとその中のハンクを指す。

@@ -17,12 +17,12 @@ use crate::ui::{self, theme};
 /// 並べると `PRs` が切れた。いまの右列は幅 100 でも見出しに 38 セル使え、
 /// `Branches (1234)` / `Stash (123)` / `PRs` でも 37 セルで入る（07 の「右上のタブ」）。
 pub(super) fn title(state: &AppState) -> Cow<'static, str> {
-    super::counted("Stash", state.stashes.entries.len())
+    super::counted("Stash", state.stashes.entries().len())
 }
 
 /// 一覧の行と、カーソルが何行目か。一覧が出せないときは文言 1 行（Branches と同じ）。
 pub(super) fn lines(state: &AppState) -> Rows {
-    let entries = &state.stashes.entries;
+    let entries = state.stashes.entries();
     if entries.is_empty() {
         return Rows {
             lines: vec![Line::raw(placeholder(state))],
@@ -34,7 +34,7 @@ pub(super) fn lines(state: &AppState) -> Rows {
     // **カーソル行の反転はここで当てない**（[`super::TopPane::render`] が 1 箇所で当てる）。
     Rows {
         lines: entries.iter().map(row).collect(),
-        cursor: Some(state.stashes.cursor),
+        cursor: Some(state.stashes.cursor()),
     }
 }
 

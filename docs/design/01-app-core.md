@@ -1164,12 +1164,15 @@ untracked の中身を出すようにしてあるので、これで新規ファ�
 ```rust
 pub struct BranchState {
     list: Option<BranchList>,  // 02 の branches() の戻り値そのまま。None はまだ一度も読めていない
-    pub cursor: usize,
+    cursor: usize,             // private。書くのは loaded / move_cursor / set_cursor だけ（下）
     load: ListLoad,            // Pending | Loaded | Failed
 }
 
 impl BranchState {
     pub fn branches(&self) -> &[Branch];        // 名前順。届く前は空
+    pub fn cursor(&self) -> usize;
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_cursor(&mut self, row: usize);   // 外は最終行に丸め、空なら据え置く。テストでだけ組む
     pub fn head(&self) -> Option<Head<'_>>;     // None はまだ一度も読めていない（02 の「head」）
     pub fn head_branch(&self) -> Option<&Branch>;  // HEAD の行。detached / unborn では None
     pub fn head_row(&self) -> Option<usize>;    // HEAD の行の添字。座り直しと行ごとの印のため
@@ -1198,13 +1201,14 @@ impl BranchState {
   同じ添字が別のブランチを指す。**読み直しは commit のたびに来る**ので
   （上の `update::Reload`）、カーソルを HEAD に戻すだけだと、別のブランチを見ながら
   commit した人のカーソルが毎回飛ぶ
+- **`cursor` は private で、書けるのは `loaded`（名前で座り直す）と `move_cursor` / `set_cursor`（端で丸める）だけ。** 直書きを許すと、どちらの不変条件も素通りした値（一覧の外を指す添字）が組める。`set_cursor` は「外なら最終行」に丸め、行が 1 つも無ければ `move_cursor` と同じく据え置く（`state` の `seated_index`。`stepped_index` もこれを通る）。**一覧を差し替えたあとの座り直し（`loaded`）はこの規則を使わない** —— 座り直す先が見つからなければ新しい範囲に収め、空なら 0 に戻す。据え置くと、外で `git stash clear` されて空が届いたあとに古い添字が残り、次にまとめて届いた一覧で先頭ではなく古い位置に座る。**本番に跳ばす経路は無いので、`set_cursor` は `#[cfg(any(test, feature = "test-util"))]` に置く** —— tui のテストが状態を組むので `pub` だが、本番のビルドの公開 API には出ない。跳ばす経路を本番に足すときに、この属性を外す判断が要る形になる。PRs も同じ形。Stash には `set_cursor` を置いていない
 
 ## Stash ペイン
 
 ```rust
 pub struct StashState {
-    pub entries: Vec<StashEntry>,  // stash@{0} から順。02 の stashes() の戻り値そのまま
-    pub cursor: usize,
+    entries: Vec<StashEntry>,      // stash@{0} から順。02 の stashes() の戻り値そのまま。読むのは entries()
+    cursor: usize,                 // BranchState と同じく private（cursor()）。書くのは loaded / move_cursor だけ
     load: ListLoad,                // Pending | Loaded | Failed（BranchState と共有）
 }
 
@@ -1380,8 +1384,8 @@ pub enum DiffOrigin { Worktree, Commit(Oid), Stash(Oid) }  // AppState::diff_ori
 
 ```rust
 pub struct PrState {
-    pub list: Vec<PullRequest>,
-    pub cursor: usize,
+    list: Vec<PullRequest>,                 // 読むのは list()。書くのは loaded / forget だけ
+    cursor: usize,                          // BranchState と同じく private（cursor() / set_cursor()）
     load: PrLoad,
     details: HashMap<u64, PrDetailEntry>,   // 下の「集計」
 }

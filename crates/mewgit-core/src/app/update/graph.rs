@@ -1362,7 +1362,7 @@ mod tests {
             let mut state = state_with_commits(3);
             if let Some(list) = list {
                 state.branches.loaded(list);
-                state.branches.cursor = 0;
+                state.branches.set_cursor(0);
             }
             let _ = press(&mut state, 'j');
             let _ = press(&mut state, 'y');

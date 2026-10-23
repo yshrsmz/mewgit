@@ -391,7 +391,7 @@ mod tests {
         let branches = fake_branch_list(vec![at("a-first"), at("main")], head);
         let _ = deliver_branches(&mut state, Ok(branches));
         // 読み込みはカーソルを HEAD の行へ座らせるので、先頭へ戻して HEAD でない行を選ぶ。
-        state.branches.cursor = 0;
+        state.branches.set_cursor(0);
         state
     }
 

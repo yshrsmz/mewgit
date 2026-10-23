@@ -43,7 +43,7 @@ pub(super) fn lines(state: &AppState) -> Rows {
         .collect();
     Rows {
         lines,
-        cursor: Some(state.branches.cursor),
+        cursor: Some(state.branches.cursor()),
     }
 }
 
@@ -127,7 +127,7 @@ mod tests {
             ],
             Some("main"),
         );
-        state.branches.cursor = 2;
+        state.branches.set_cursor(2);
 
         let lines = draw(&state, SIZE);
         let text = lines.join("\n");

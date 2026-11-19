@@ -17,7 +17,6 @@ mewgit-core = { path = "../mewgit-core" }
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 # `unstable-rendered-line-info` は `Paragraph::line_count`（折り返し後の行数）を
 # 開ける。理由は 07 の「モーダル」。
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
